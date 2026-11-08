@@ -434,6 +434,167 @@ test('suspended is recorded as skipped_suspended and NEVER applied, even with --
   assert.ok(!applyLeg.result.stdout.includes(SENTINEL_KIND), 'the kinds map never reaches the output')
 })
 
+// Batch-refresh step 5 PR-9 (register R-77 ⑧): a governed project whose WRITTEN content change awaits its review previews
+// `review_pending` (no token) — a RECORDED SKIP of the skipped_suspended class, never applied, never a failure. Two legs:
+// the preview answers `review_pending`; and the preview answered `ready` but a review became pending before the apply,
+// which the server refuses 409 STOCK_PREP_REFRESH_REVIEW_PENDING with `partial: false`. Values-free: only the integer
+// `pendingReviews` is copied, never `blocksMint` or anything else in the stanza.
+test('review_pending is recorded as skipped_review_pending and NEVER applied, even with --apply', async () => {
+  const SENTINEL = 'syn_review_sentinel_never_printed'
+  const pending = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'review_pending', canApply: false, dryRunToken: null, counts: {}, refreshReview: { pending: true, pendingReviews: 1, blocksMint: true, [SENTINEL]: SENTINEL } } } }
+      }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(pending.result.code, 0, `${pending.result.stdout}\n${pending.result.stderr}`)
+  assert.equal(pending.requests.length, 1, 'a review-pending pull is never applied')
+  const lines = jsonLines(pending.result.stdout)
+  assert.equal(lines[0].action, 'skipped_review_pending')
+  assert.equal(lines[0].pendingReviews, 1)
+  assert.equal(lines[0].failed, undefined)
+  assert.equal(lines[0].blocksMint, undefined)
+  assert.match(lines[0].note, /拉取待确认/)
+  assert.equal(lines[1].summary.skippedReviewPending, 1)
+  assert.equal(lines[1].summary.failed, 0)
+  assert.ok(!pending.result.stdout.includes(SENTINEL), 'nothing but the count leaves the review stanza')
+  assert.ok(!pending.result.stdout.includes('blocksMint'), 'blocksMint never reaches the output')
+
+  // The apply leg: ready at the preview, review-pending by the time of the apply.
+  const applyLeg = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) {
+        return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_review_apply', revision: 'rev_1', counts: {} } } }
+      }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_REFRESH_REVIEW_PENDING', message: 'a written change awaits its review; nothing was written', details: { state: 'change_pending_review', pendingReviews: 2, partial: false, [SENTINEL]: SENTINEL } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(applyLeg.result.code, 0, `${applyLeg.result.stdout}\n${applyLeg.result.stderr}`)
+  assert.equal(applyLeg.requests.length, 2, 'the apply was attempted once and refused')
+  const applyLines = jsonLines(applyLeg.result.stdout)
+  assert.equal(applyLines[0].action, 'skipped_review_pending')
+  assert.equal(applyLines[0].phase, 'apply')
+  assert.equal(applyLines[0].pendingReviews, 2)
+  assert.equal(applyLines[0].failed, undefined)
+  assert.equal(applyLines[1].summary.skippedReviewPending, 1)
+  assert.equal(applyLines[1].summary.failed, 0)
+  assert.ok(!applyLeg.result.stdout.includes(SENTINEL), 'nothing but the count leaves the refusal details')
+})
+
+// 批次标识 BI-2 (register R-65; P2-8): a project sheet whose batch columns are being installed (an owner-approved window) is
+// a SKIP, never an error and never applied: the dry-run precheck's WRITE_LOCKED held by the install, the preview stanza
+// `installing` (a lease-less install), and the apply's 409 INSTALL_IN_PROGRESS / install-held WRITE_LOCKED. Only the closed
+// holder purpose and the stanza's reason are read.
+test('SP-1 (M-2B-6) a sheet being installed is recorded skipped_pull_batch_installing — at the preview (WRITE_LOCKED held by the install, or the stanza) and at the apply — never applied, exit 0, counted', async () => {
+  const SENTINEL = 'syn_install_sentinel_never_printed'
+  const held = await withMockFetch(
+    () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', details: { holderPurpose: 'pull_batch_install', retryAfterMs: 1000, [SENTINEL]: SENTINEL } } } }),
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(held.result.code, 0, `${held.result.stdout}\n${held.result.stderr}`)
+  assert.equal(held.requests.length, 1)
+  const heldLines = jsonLines(held.result.stdout)
+  assert.deepEqual([heldLines[0].action, heldLines[0].phase, heldLines[0].failed], ['skipped_pull_batch_installing', 'preview', undefined])
+  assert.equal(heldLines[1].summary.skippedPullBatchInstalling, 1)
+  assert.equal(heldLines[1].summary.failed, 0)
+  assert.ok(!held.result.stdout.includes(SENTINEL))
+  const stanza = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {}, pullBatch: { preview: true, wouldStamp: false, reason: 'installing', [SENTINEL]: SENTINEL } } } }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(stanza.result.code, 0)
+  assert.equal(stanza.requests.length, 1, 'never applied')
+  assert.equal(jsonLines(stanza.result.stdout)[0].action, 'skipped_pull_batch_installing')
+  assert.ok(!stanza.result.stdout.includes(SENTINEL))
+  for (const refusal of [
+    { code: 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', details: { partial: false } },
+    { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', details: { holderPurpose: 'pull_batch_install' } },
+  ]) {
+    const applyLeg = await withMockFetch(
+      (record) => {
+        if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {} } } }
+        return { status: 409, json: { ok: false, error: { code: refusal.code, message: 'refused', details: refusal.details } } }
+      },
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.equal(applyLeg.result.code, 0, refusal.code)
+    const lines = jsonLines(applyLeg.result.stdout)
+    assert.deepEqual([lines[0].action, lines[0].phase], ['skipped_pull_batch_installing', 'apply'], refusal.code)
+    assert.equal(lines[1].summary.skippedPullBatchInstalling, 1)
+  }
+})
+
+test('SP-2 (M-2B-7) any OTHER WRITE_LOCKED stays an error (a small apply holding the sheet is not an install window)', async () => {
+  for (const details of [{ holderPurpose: 'small_apply' }, {}, null]) {
+    const other = await withMockFetch(
+      () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', ...(details ? { details } : {}) } } }),
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.notEqual(other.result.code, 0, JSON.stringify(details))
+    const lines = jsonLines(other.result.stdout)
+    assert.deepEqual([lines[0].action, lines[0].failed], ['error', true])
+    assert.equal(lines[1].summary.skippedPullBatchInstalling, 0)
+  }
+})
+
+// PR-9 (R-77 ⑧): every dry-run status the server can answer has a NAMED branch here. The literals are scanned out of the
+// plugin source (they are not exported) — every literal `dryRunStatus` and `withReviewStatus` return, plus the preview
+// answer's `recovery_pending` — so a new server status reds HERE by construction, instead of reaching the generic
+// `unexpected dry-run status` failure on a deployment.
+test('every dry-run status the server can answer has a named branch', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(path.join(ROOT_DIR, 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-table-actions.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const bodyOf = (name) => {
+    const start = source.indexOf(`function ${name}(`)
+    assert.ok(start > 0, `${name} in the table-actions source`)
+    const end = source.indexOf('\nfunction ', start + 1)
+    return source.slice(start, end > start ? end : undefined)
+  }
+  const live = new Set()
+  for (const name of ['dryRunStatus', 'withReviewStatus']) {
+    for (const match of bodyOf(name).matchAll(/return (?:[^\n]*\? )?'([a-z_]+)'(?: : '([a-z_]+)')?/g)) {
+      live.add(match[1])
+      if (match[2]) live.add(match[2])
+    }
+  }
+  const recovery = source.match(/\bstatus: recovery \? '([a-z_]+)'/)
+  assert.ok(recovery, 'the preview answer\'s recovery status')
+  live.add(recovery[1])
+  const expected = {
+    ready: 'applied',
+    manual_confirm_required: 'skipped_manual_confirm_required',
+    not_found: 'skipped_not_found',
+    large_bom_bounded: 'skipped_large_bom_bounded',
+    failed: 'error',
+    suspended: 'skipped_suspended',
+    recovery_pending: 'error',
+    review_pending: 'skipped_review_pending',
+  }
+  assert.deepEqual([...live].sort(), Object.keys(expected).sort(), 'the server statuses and this table are the same set')
+  const { pullOneProject } = await import(pathToFileURL(SCRIPT_PATH).href)
+  for (const [status, action] of Object.entries(expected)) {
+    const { result } = await withMockFetch(
+      (record) => {
+        if (record.url.includes('/dry-run')) {
+          return { json: { ok: true, data: { status, canApply: status === 'ready', dryRunToken: status === 'ready' ? 'tok_status' : null, revision: 'rev_1', counts: {} } } }
+        }
+        return { json: { ok: true, data: { counts: {} } } }
+      },
+      () => pullOneProject({ apiBase: 'http://metasheet.invalid', token: TENANT_TOKEN, tenantId: 'tenant-a', projectNo: 'SYN-PROJ-0001', applyFlag: true, timeoutMs: 5000 }),
+    )
+    assert.equal(result.action, action, status)
+    // A status this script names is never the generic "unexpected" failure.
+    assert.ok(!String(result.error || '').startsWith('unexpected dry-run status'), status)
+  }
+})
+
 test('large_bom_bounded is recorded as skipped and NEVER applied', async () => {
   const { requests, result } = await withMockFetch(
     (record) => {

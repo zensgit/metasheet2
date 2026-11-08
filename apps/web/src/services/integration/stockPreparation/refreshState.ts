@@ -54,6 +54,22 @@ export const STOCK_PREP_REFRESH_STATUS_LABELS_ZH: Readonly<Record<StockPrepRefre
   complete: '已完成',
 })
 
+/**
+ * PR-9 (closes the #6579 version-skew residual): the en words for each status, so an English sentence never carries
+ * the raw token. RS-LABEL-EN pins the keys against `STOCK_PREP_REFRESH_STATUS_TOKENS`.
+ */
+export const STOCK_PREP_REFRESH_STATUS_LABELS_EN: Readonly<Record<StockPrepRefreshStatus, string>> = Object.freeze({
+  unreadable: 'state unreadable',
+  not_governed: 'not enabled',
+  executing: 'writing',
+  failed_pending_recovery: 'failed, awaiting recovery',
+  pending_confirmation: 'awaiting confirmation',
+  change_pending_review: 'change awaiting review',
+  confirmed_pending_execution: 'confirmed, awaiting the write',
+  executed_pending_settlement: 'written, awaiting check',
+  complete: 'complete',
+})
+
 export type StockPrepRefreshGoverned = 'pilot' | 'protected' | 'none' | 'unknown'
 
 const GOVERNED_TOKENS: readonly StockPrepRefreshGoverned[] = Object.freeze(['pilot', 'protected', 'none', 'unknown'])
@@ -170,11 +186,13 @@ export function stockPrepRefreshIsQuiet(stanza: StockPrepRefreshStanza | null): 
   return stanza.readable === true && stockPrepFormalSurfaceVerdict(stanza).allowed
 }
 
-export type StockPrepRefreshRendering = 'absent' | 'not_governed' | 'unreadable' | 'none_pending' | 'pending'
+export type StockPrepRefreshRendering = 'absent' | 'not_governed' | 'unreadable' | 'none_pending' | 'review_pending' | 'pending'
 
 /**
  * Plan §8's three renderings plus the two web states. `pendingHolds` is the open-hold count the caller saw (the
- * holds page's own list, or the stanza's `counts.pendingConfirm`); `null` defers to the stanza.
+ * holds page's own list, or the stanza's `counts.pendingConfirm`); `null` defers to the stanza. PR-9 (R-77 ①): no hold
+ * but a written change awaiting its review (`counts.pendingReviews > 0` or the status) is `review_pending` — a fourth
+ * distinct rendering, never 「无待处理」.
  */
 export function stockPrepRefreshRendering(
   stanza: StockPrepRefreshStanza | null,
@@ -185,7 +203,9 @@ export function stockPrepRefreshRendering(
   if (stanza.status === 'not_governed') return 'not_governed'
   const fromCaller = countOf(options.pendingHolds)
   const pending = fromCaller !== null ? fromCaller : (stanza.counts?.pendingConfirm ?? 0)
-  return pending > 0 ? 'pending' : 'none_pending'
+  if (pending > 0) return 'pending'
+  const reviews = stanza.counts?.pendingReviews ?? 0
+  return reviews > 0 || stanza.status === 'change_pending_review' ? 'review_pending' : 'none_pending'
 }
 
 export interface StockPrepRefreshBanner {
@@ -198,7 +218,10 @@ export interface StockPrepRefreshBanner {
   enNext: string
   /** The open-hold count folded into the sentence (pending_confirmation only), else null. */
   count: number | null
-  /** True only for a puller (`canOpenQueue`) AND a project with holds to decide: the banner links to 拉取待确认. */
+  /**
+   * True only for a puller (`canOpenQueue`) AND a project with work on 拉取待确认: holds to decide, or (PR-9, R-77 ⑥) a
+   * written change awaiting its review (变更复核 is a section of that page).
+   */
   link: boolean
 }
 
@@ -231,7 +254,7 @@ export function stockPrepRefreshBanner(
     zhNext: entry.zhNext ?? '',
     enNext: entry.enNext ?? '',
     count,
-    link: options.canOpenQueue === true && key === 'pending_confirmation',
+    link: options.canOpenQueue === true && (key === 'pending_confirmation' || key === 'change_pending_review'),
   }
 }
 
@@ -250,9 +273,14 @@ export function stockPrepPendingSplit(board: { pendingDecisionCount?: unknown } 
   return { ledger: Math.max(0, union - holds), holds }
 }
 
-/** The rail badge of 拉取待确认 for the OPEN project (R-62 ④): a positive open-hold count, else null. */
+/**
+ * The rail badge of 拉取待确认 for the OPEN project (R-62 ④): its open holds PLUS its written changes awaiting review
+ * (PR-9, R-77 ⑤ — both are the puller's work on that page), when positive; else null.
+ */
 export function stockPrepRefreshRailCount(stanza: StockPrepRefreshStanza | null): number | null {
   if (!stanza || stanza.readable !== true) return null
   const pending = stanza.counts?.pendingConfirm
-  return typeof pending === 'number' && pending > 0 ? pending : null
+  const reviews = stanza.counts?.pendingReviews
+  const total = (typeof pending === 'number' ? pending : 0) + (typeof reviews === 'number' ? reviews : 0)
+  return total > 0 ? total : null
 }

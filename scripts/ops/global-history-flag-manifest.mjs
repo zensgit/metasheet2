@@ -694,6 +694,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
+    key: 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Directory integration capability surface: GET /api/admin/directory/integration-capabilities/:integrationId and the capability service behind it. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: the route answers 404 after the administrator check and the service issues no statement. On: the two capability tables are read after a non-throwing existence probe, and the route shows each capability's stored state, governance and reason. Apply the migration before turning it on; every replica must carry the same value. danger=low: no existing path reads the capability tables, so the switch changes what an administrator can see and nothing else; it is not an authorization input.",
+    source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  },
+  {
+    key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Approval-routing source requirement for organisations that have two or more active pull-type directory sources (provider other than 'local', status 'active', de-duplicated by provider and corp id; the local directory is never counted) and no approval_routing policy. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: routing resolution and the legacy integration write paths are byte-identical to before the switch existed. On: for a requester with a linked directory account in such an organisation the routing resolution does not pick a source and fails closed with a typed, values-free error instead of choosing one, and the legacy integration write paths (creating a second pull source, setting a non-active pull source active) refuse until the organisation has a policy. danger=high: ON changes the outcome of approval creation for organisations that are already in the multi-source, no-policy state; run the read-only census for such organisations and set their policies before turning it on.",
+    source: 'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
@@ -846,6 +868,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled',
   },
   {
+    key: 'STOCK_PREP_PULL_BATCH_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "批次标识 (pull batch; register R-65; design §7.1): the switch that lets stock-prep pulls stamp the two machine columns 首次批次 / 本次拉取 on a project sheet's NEW rows. Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the plugin routes through the lanes helper (plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled), never by the libraries. OFF: zero ledger IO (migration 105's four tables are never read or written), no pull answer carries a pullBatch key (dry-run, apply, large plan / approve / chunk, board), rows created while off land blank and are labelled later by an owner-approved gap pass, the reader still strips both band cells onto a Symbol (hash-neutral: a token minted before an install and an apply after it hash the same rows), and the ADMIN status read …/projects/:projectNo/target/pull-batch still answers from host reads only. ON: on a project sheet whose two band columns are proven present in db mode and whose pull-batch ledger row is resolved (born_empty / backfilled) with no gap rows, the small apply and every large chunk open or join ONE batch per logical pull lazily at the first create and write both cells on created rows only (an ADD that finds its row, an UPDATE, an INACTIVE never write them); a sheet being installed refuses every pull lane 409 STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS; a ledger failure is 503 STOCK_PREP_PULL_BATCH_STORE_FAILED before the first create (a run stop); previews, the board stanza and pilot readiness v3 report the state. ON also admits the owner-gated per-sheet install POST …/projects/:projectNo/target/pull-batch (BI-2; modes install / abort; the typed project number, the plan digest, the attested pull count and an approvalRef; the plan persisted before the first cell write; fill-blank only; a sheet being installed refuses every pull lane; every real run is owner gate O-BI-1 per sheet) and makes NEW project sheets born ready at create (band + landing + a born_empty ledger row, only while the sheet is still empty). OFF: install / abort answer 409 STOCK_PREP_PULL_BATCH_DISABLED before any IO, the install dry_run answers from host reads only, and new sheets are created in the legacy shape (the create answer carries no pullBatchBand key). BI-7 (landed): the three stock-prep:admin settings routes (GET / POST …/pull-batch/settings, the tenant default; POST …/projects/:projectNo/target/pull-batch/settings, one captured sheet's rule / format) answer 404 STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED after their gate and before any IO unless this switch AND MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED are both exactly 'true' (ruling C6: off, the 数据来源与体检 settings panel is invisible); on, they write only the plugin ledger's settings rows, each with its project_fields_update audit row in the same transaction. The host's 人工补充 stamp on manual rows does NOT read it (ruling C10). Danger=high: ON writes two machine columns on customer production sheets; flipping it on a customer host is owner gate O-BI-7.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled',
+  },
+  {
     key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -960,6 +993,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "TTL of the automation scheduler's Redis leader lock. Read only when ENABLE_SCHEDULER_LEADER_LOCK is 'true' and Redis is reachable. Parsed with Number(raw): a positive result is used as-is (no upper bound, fractions accepted), unset / '' / non-numeric / zero / negative uses the default 30000. The attendance scheduler has its own ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS and does not read this.",
     source: 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions',
+  },
+  {
+    key: 'SECURITY_ACTION_PROOF_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; exact literal 'true' only, byte-identical (no trim, no case folding; unset, '', false, TRUE, ' true', 'true ', 1 and yes stay OFF). While OFF the router factory returns null, so POST /api/auth/security-actions/verify is not mounted, and every action-proof service entry point refuses before any SQL statement. Turn it on only after `migrate.js --confirm zzzz20261106120000_create_security_action_challenges` exits 0. While ON, the route issues a 300-second single-use proof only for a purpose whose own prerequisites are delivered; in this revision no purpose is, so every verify request is refused before any data is read and the table receives no row. Not a grant: it enables no binding, login grant or session change. Deploying and enabling are separate owner decisions.",
+    source: 'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
   },
 ])
 

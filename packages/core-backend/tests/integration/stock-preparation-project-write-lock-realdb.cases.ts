@@ -1578,6 +1578,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const projectSheetHarness = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
     // Pre-enable hardening (H-series): the readiness evaluator (version 2) and the pack-install ledger store.
     const readinessModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pilot-readiness.cjs')) as any
+    // 批次标识 BI-1b (readiness v3): the band descriptors and the pull-batch ledger store D20 prepares the sheet with.
+    const templatesModule = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+    const pullBatchStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
 
     function routeResponse() {
@@ -1667,14 +1670,28 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       const admin = { id: `u_d20_admin_${TOKEN}`, tenantId, permissions: ['stock-prep:admin'] }
       const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
+      // 批次标识 BI-1b (readiness v3; register R-65; critic M3): the pull-batch switch for this case only, restored below.
+      const pullBatchSwitchBefore = process.env.STOCK_PREP_PULL_BATCH_ENABLED
       const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
       const createdStubs: string[] = []
       process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+      process.env.STOCK_PREP_PULL_BATCH_ENABLED = 'true'
       continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+      const pullBatchStore = pullBatchStoreModule.createStockPreparationPullBatchStore({ db })
       try {
         await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
         const plmLock = await projectTargetsModule.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
         expect(plmLock.missing).toBe(0)
+        // Readiness v3: the band, installed the way the plugin installs it — ONE plugin-scoped ensureMissingObjectFields
+        // over the template descriptors (the lock and the marker together) — and the sheet's ledger row, born empty (the
+        // ledger store's own capture primitive). The band stays out of the plugin views' hidden lists.
+        const bandAdded = await multitable.provisioning.ensureMissingObjectFields({
+          projectId,
+          objectId,
+          fields: templatesModule.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+        })
+        expect(bandAdded.addedFieldIds).toHaveLength(2)
+        await db.transaction((trx: any) => pullBatchStore.createSheetRowWithin(trx, { tenantId, sheetId, projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
         await store.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
         // STUBS of the step-4 stores (PR-2 creates the real ones): what the readiness probe waits for. Created
         // ONLY where absent and dropped ONLY when this test created them — the real-DB step shares one database,
@@ -1717,6 +1734,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           // Readiness version 2 (O-8): the pack-install ledger is read strictly — the real store, an empty ledger for this tenant.
           stockPreparationPackInstallStore: packInstallStoreModule.createStockPreparationPackInstallStore({ db }),
           tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+          // Readiness v3 (批次标识 BI-1b): the real pull-batch ledger store (migration 105).
+          stockPreparationPullBatchStore: pullBatchStore,
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
@@ -1782,6 +1801,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       } finally {
         if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
+        if (pullBatchSwitchBefore === undefined) delete process.env.STOCK_PREP_PULL_BATCH_ENABLED
+        else process.env.STOCK_PREP_PULL_BATCH_ENABLED = pullBatchSwitchBefore
+        await q('DELETE FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [tenantId]).catch(() => {})
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
         for (const table of createdStubs) await q(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
         await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [tenantId]).catch(() => {})
@@ -3728,6 +3750,456 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect(await st.stepFourRows()).toBe(0)
           expect((await st.refresh.governance.consult(st.scope)).governed).toBe(false)
         }, 180000)
+
+        // 批次标识 BI-1b (register R-65; design §6.1-§6.3, §13.2) — the small lane's stamping on the REAL stack: the real host,
+        // the real lock (its holder assert runs INSIDE the ledger's transactions on the same database), the real ledger store
+        // over migration 105, a not-governed project sheet. Added to THIS stack (P-11 recorded): it already drives the real
+        // routes over a real project sheet, so no second route harness is built. Values-free: synthetic, per-run ids.
+        //   BI-R1  OWN-1: batch 1 (S-001 + its subtree) then batch 2 (P-001 ⊃ S-001, plus N-001): exactly the owner's rows —
+        //          the batch-1 rows keep 第1批 / 第1批 (swept inactive, never re-stamped), the copies carry 首次 第1批 / 本次
+        //          第2批, P-001 and N-001 第2批 / 第2批; two closed batches, the link counts set by value (4 and 6)
+        //   BI-R2  A03: a third identical pull opens no batch and no link; the band cells of every row are unchanged
+        //   BI-R5  U05: the status route before and after the install; a ledger whose statements fail ⇒ the apply is 503
+        //          STORE_FAILED with zero created rows on an installed sheet; a not-installed sheet's pull is unaffected
+        //   BI-R-C4 a creator-NULL row the automation / form way (a non-JSON key, no RUN stamp) neither pauses stamping nor
+        //          is labelled
+        describe('BI-1b pull-batch stamping (real Postgres, real lock, real ledger, real host)', () => {
+          const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+          const LABEL1 = /^第1批（\d{4}-\d{2}-\d{2}）$/
+          const LABEL2 = /^第2批（\d{4}-\d{2}-\d{2}）$/
+          const tenants: string[] = []
+          afterAll(async () => {
+            for (const tenantId of tenants) {
+              for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet']) {
+                await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
+              }
+            }
+          })
+          async function withPullSwitch<T>(fn: () => Promise<T>): Promise<T> {
+            const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
+            process.env[PULL_SWITCH] = 'true'
+            process.env[SWITCH] = 'true'
+            try {
+              return await fn()
+            } finally {
+              if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+              if (before.sheets === undefined) delete process.env[SWITCH]; else process.env[SWITCH] = before.sheets
+            }
+          }
+          async function stampingStack(label: string, { band = true, failingLedger = false }: { band?: boolean; failingLedger?: boolean } = {}) {
+            const ledgerDb = createDb({ database: createProductionPluginContext().api.database })
+            // A ledger whose statements fail (the 105 tables behind a refusing handle) — never a DROP on the shared database (P-10).
+            const refusing = failingLedger
+              ? { ...ledgerDb, select: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) }, selectOne: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) } }
+              : ledgerDb
+            const store = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: refusing })
+            const st: any = await s3aStack(label, { pilot: false, serviceExtras: { stockPreparationPullBatchStore: store } })
+            tenants.push(st.tenantId)
+            const physical = (fieldId: string) => st.multitable.provisioning.getFieldId(st.projectId, st.objectId, fieldId)
+            if (band) {
+              const added = await st.multitable.provisioning.ensureMissingObjectFields({
+                projectId: st.projectId,
+                objectId: st.objectId,
+                fields: templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+              })
+              expect(added.addedFieldIds).toEqual([physical('firstPullBatch'), physical('pullBatch')])
+              const seed = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: ledgerDb })
+              await ledgerDb.transaction((trx: any) => seed.createSheetRowWithin(trx, { tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
+            }
+            const cells = async () => {
+              const rows = await st.rows()
+              return rows.map((row: any) => ({
+                part: row.data[physical('componentSourceId')],
+                path: row.data[physical('path')],
+                active: row.data[physical('active')],
+                first: row.data[physical('firstPullBatch')] ?? null,
+                current: row.data[physical('pullBatch')] ?? null,
+              }))
+            }
+            const ledger = async () => ({
+              batches: (await q('SELECT batch_no, status, closed_reason, label FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [st.tenantId])).rows,
+              links: (await q('SELECT execution_ref, lane, writer_status, created_row_count FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1 ORDER BY joined_at, id', [st.tenantId])).rows,
+            })
+            const pull = async () => {
+              const dry = await st.dryRun()
+              expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+              const applied = await st.apply(st.users.puller, dry.body.data.dryRunToken)
+              return { dry, applied }
+            }
+            return { st, physical, cells, ledger, pull }
+          }
+
+          test('BI-R1 / BI-R2 OWN-1 on the real stack: batch 1, then batch 2 (P-001 ⊃ S-001) — exactly the owner\'s rows; a third identical pull opens nothing', async () => {
+            const k = await stampingStack('bir1')
+            await withPullSwitch(async () => {
+              k.st.state.data = CF.firstPullSource()
+              const first = await k.pull()
+              expect(first.dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: true, reason: null })
+              expect(first.applied.statusCode, JSON.stringify(first.applied.body)).toBe(200)
+              expect(first.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1, joined: false, createdRowCount: 4 })
+              const afterOne = await k.cells()
+              expect(afterOne).toHaveLength(4)
+              for (const row of afterOne) {
+                expect(row.first, JSON.stringify(row)).toMatch(LABEL1)
+                expect(row.current, JSON.stringify(row)).toMatch(LABEL1)
+              }
+              k.st.state.data = CF.secondPullSource()
+              const second = await k.pull()
+              expect(second.applied.statusCode, JSON.stringify(second.applied.body)).toBe(200)
+              expect(second.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 2, joined: false, createdRowCount: 6 })
+              const afterTwo = await k.cells()
+              const old = afterTwo.filter((row: any) => row.active === false)
+              const fresh = afterTwo.filter((row: any) => row.active !== false)
+              expect(old.map((row: any) => row.part).sort()).toEqual(['PART-A', 'PART-B', 'PART-C', 'S-001'])
+              for (const row of old) expect([row.first, row.current].every((label: string) => LABEL1.test(label)), JSON.stringify(row)).toBe(true)
+              const byPart = new Map(fresh.map((row: any) => [row.part, row]))
+              expect([...byPart.keys()].sort()).toEqual(['N-001', 'P-001', 'PART-A', 'PART-B', 'PART-C', 'S-001'])
+              for (const part of ['P-001', 'N-001']) {
+                expect(byPart.get(part).first, part).toMatch(LABEL2)
+                expect(byPart.get(part).current, part).toMatch(LABEL2)
+              }
+              for (const part of ['S-001', 'PART-A', 'PART-B', 'PART-C']) {
+                expect(byPart.get(part).first, `${part}: 首次 = the batch it first appeared in`).toMatch(LABEL1)
+                expect(byPart.get(part).current, `${part}: 本次 = the batch that created this row`).toMatch(LABEL2)
+              }
+              const ledgerTwo = await k.ledger()
+              expect(ledgerTwo.batches.map((row: any) => [row.batch_no, row.status, row.closed_reason])).toEqual([[1, 'closed', 'execution_succeeded'], [2, 'closed', 'execution_succeeded']])
+              expect(ledgerTwo.links.map((row: any) => [row.lane, row.writer_status, row.created_row_count])).toEqual([['small_apply', 'succeeded', 4], ['small_apply', 'succeeded', 6]])
+              for (const link of ledgerTwo.links) expect(link.execution_ref).toMatch(/^small:table-action-apply:/)
+              // BI-R2 (A03): the same pull again — nothing to create, so no batch and no link; every band cell unchanged.
+              const third = await k.pull()
+              expect(third.applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'no_creates' })
+              expect(await k.ledger()).toEqual(ledgerTwo)
+              expect(await k.cells()).toEqual(afterTwo)
+            })
+          }, 180000)
+
+          test('BI-R5 / BI-R-C4 U05 status before and after the band; a failing ledger is 503 STORE_FAILED with nothing created; a not-installed sheet is unaffected; a creator-NULL automation-like row never pauses stamping', async () => {
+            // Not installed: the status names it, the pull runs unstamped (no ledger IO at all on this lane).
+            const bare = await stampingStack('bir5a', { band: false })
+            await withPullSwitch(async () => {
+              const status = await callRoute(bare.st.routes, 'GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', { user: bare.st.users.admin, params: { projectNo: bare.st.projectNo }, query: {} })
+              expect(status.statusCode, JSON.stringify(status.body)).toBe(200)
+              expect(status.body.data.columns).toMatchObject({ mode: 'db', pullBatch: false, firstPullBatch: false })
+              expect(status.body.data.reasons).toContain('not_installed')
+              expect(JSON.stringify(status.body)).not.toContain('fld_')
+              bare.st.state.data = CF.firstPullSource()
+              const { applied } = await bare.pull()
+              expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+              expect(applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'not_installed' })
+            })
+            // Installed, but the ledger's statements fail: 503 before the first create, zero rows on the sheet.
+            const failing = await stampingStack('bir5b', { failingLedger: true })
+            await withPullSwitch(async () => {
+              failing.st.state.data = CF.firstPullSource()
+              const dry = await failing.st.dryRun()
+              expect(dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: false, reason: 'ledger_unreadable' })
+              const refused = await failing.st.apply(failing.st.users.puller, dry.body.data.dryRunToken)
+              expect(refused.statusCode, JSON.stringify(refused.body)).toBe(503)
+              expect(refused.body.error.code).toBe('STOCK_PREP_PULL_BATCH_STORE_FAILED')
+              expect(await failing.st.rows()).toHaveLength(0)
+            })
+            // C4: a creator-NULL row with a non-JSON key and no RUN stamp (what an automation / public form inserts).
+            const c4 = await stampingStack('bir5c')
+            await c4.st.multitable.records.createRecord({ sheetId: c4.st.sheetId, data: { [c4.physical('projectNo')]: c4.st.projectNo, [c4.physical('idempotencyKey')]: `auto-${TOKEN}`, [c4.physical('componentSourceId')]: 'AUTO-1', [c4.physical('active')]: true } })
+            await withPullSwitch(async () => {
+              const status = await callRoute(c4.st.routes, 'GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', { user: c4.st.users.admin, params: { projectNo: c4.st.projectNo }, query: {} })
+              expect(status.body.data.ready, JSON.stringify(status.body.data)).toBe(true)
+              expect(status.body.data.rows).toMatchObject({ gap: 0, nonPlugin: 1, machine: 0 })
+              c4.st.state.data = CF.firstPullSource()
+              const { applied } = await c4.pull()
+              expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+              expect(applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1 })
+              const auto = (await c4.cells()).find((row: any) => row.part === 'AUTO-1')
+              expect(auto, 'the automation-like row is still there').toBeTruthy()
+              expect([auto.first, auto.current]).toEqual([null, null])
+            })
+          }, 180000)
+        })
+
+        // 批次标识 BI-2 (register R-65; design §8.2-§8.6, §9, §13) — the per-sheet INSTALL on the REAL stack: the real host (its
+        // repair transaction, BI-5's landing and layout primitives), the real lock (the install's lease, its holder assert inside
+        // every ledger transaction, the host write fence on every patch), the real ledger over migration 105 and the real route.
+        // Added to THIS stack beside the BI-1b block (P2-20). Values-free: synthetic, per-run ids; per-tenant DELETEs only.
+        //   BI-R6  U06 (C09 shape, R3): two pulls with the switch OFF (batch 1, then batch 2 ⊃ batch 1), then the install =>
+        //          首次 / 本次 with 推定 exactly as §8.3's customer shape, a person-created row untouched and counted, two
+        //          inferred ledger rows closed / backfill, the sheet backfilled with count 2, and the next live pull is batch 3
+        //   BI-R8  additivity: every pre-existing field row byte-identical; the host default view row untouched
+        //   BI-R10 every non-band cell of every row byte-identical across the install (the archive / run stamps included)
+        //   BI-R12 the landing: the sheet's first view is prep-fill after the install
+        //   BI-R9  crash continuation: a host that fails after two real patches, then a re-run with the persisted digest =>
+        //          labels byte-identical to an uninterrupted control sheet
+        //   BI-R13 a gap pass after a switch-off period: the live batch's rows untouched, an appended inferred batch for the
+        //          rows created while off (the GAP-C09 carry), the count after both
+        //   BI-R-WL while an install holds the sheet, the real dry-run answers 409 WRITE_LOCKED naming pull_batch_install (the
+        //          shape the scheduled pull skips)
+        //   BI-R11 born ready over an unreadable ledger: the create answers the legacy shape (ledger_unreadable), a pull
+        //          afterwards is unaffected
+        //   BI-R18 (P2-18) an extension re-run in another history mode than the persisted run: 409 history_mode_changed
+        //          before any cell write; the persisted mode resolves (BI-R14 is the pull-batch file's zombie allocate)
+        describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
+          const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+          const INSTALL_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch'
+          const inferred = (n: number) => new RegExp(`^(第${n}批（推定，\\d{4}-\\d{2}-\\d{2}）|Batch ${n} \\(inferred, \\d{4}-\\d{2}-\\d{2}\\))$`)
+          const live = (n: number) => new RegExp(`^(第${n}批（\\d{4}-\\d{2}-\\d{2}）|Batch ${n} \\(\\d{4}-\\d{2}-\\d{2}\\))$`)
+          const tenants: string[] = []
+          afterAll(async () => {
+            for (const tenantId of tenants) {
+              for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_pull_batch_settings', 'integration_stock_prep_audit']) {
+                await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
+              }
+            }
+          })
+          // The pull-batch switch on / off; the project-sheets switch on throughout (the install route answers 404 without it).
+          async function withPull<T>(on: boolean, fn: () => Promise<T>): Promise<T> {
+            const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
+            if (on) process.env[PULL_SWITCH] = 'true'
+            else delete process.env[PULL_SWITCH]
+            process.env[SWITCH] = 'true'
+            try {
+              return await fn()
+            } finally {
+              if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+              if (before.sheets === undefined) delete process.env[SWITCH]; else process.env[SWITCH] = before.sheets
+            }
+          }
+          async function installStack(label: string, { born = false, failingLedger = false, register = true }: { born?: boolean; failingLedger?: boolean; register?: boolean } = {}) {
+            const ledgerDb = createDb({ database: createProductionPluginContext().api.database })
+            const refusing = failingLedger
+              ? { ...ledgerDb, select: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) }, selectOne: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) } }
+              : ledgerDb
+            const store = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: refusing })
+            const st: any = await s3aStack(label, { pilot: false, register, serviceExtras: { stockPreparationPullBatchStore: store } })
+            tenants.push(st.tenantId)
+            const physical = (fieldId: string) => st.multitable.provisioning.getFieldId(st.projectId, st.objectId, fieldId)
+            if (born) {
+              await st.multitable.provisioning.ensureMissingObjectFields({
+                projectId: st.projectId,
+                objectId: st.objectId,
+                fields: templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+              })
+              const seed = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: ledgerDb })
+              await ledgerDb.transaction((trx: any) => seed.createSheetRowWithin(trx, { tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
+            }
+            const band = [physical('pullBatch'), physical('firstPullBatch')]
+            const cells = async () => (await st.rows()).map((row: any) => ({
+              id: row.id,
+              part: row.data[physical('componentSourceId')],
+              path: row.data[physical('path')],
+              active: row.data[physical('active')],
+              first: row.data[physical('firstPullBatch')] ?? null,
+              current: row.data[physical('pullBatch')] ?? null,
+            }))
+            const shape = async () => (await cells()).map(({ id: _id, ...rest }: any) => rest).sort((a: any, b: any) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+            const nonBand = async () => (await st.rows()).map((row: any) => {
+              const data = { ...row.data }
+              for (const id of band) delete data[id]
+              return [row.id, data]
+            })
+            const pull = async () => {
+              const dry = await st.dryRun()
+              expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+              const applied = await st.apply(st.users.puller, dry.body.data.dryRunToken)
+              expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+              return applied
+            }
+            const post = (body: any) => withPull(true, () => callRoute(st.routes, 'POST', INSTALL_PATH, { user: st.users.admin, params: { projectNo: st.projectNo }, body: { confirmProjectNo: st.projectNo, ...body }, query: {} }))
+            const install = async (extra: any = {}) => {
+              const dry = await post({ mode: 'dry_run' })
+              expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+              const answer = await post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: dry.body.data.requires.confirmHistoricalBatchCount.inferred, ...extra })
+              return { dry, answer }
+            }
+            const sheetRow = async () => (await q('SELECT history_status, history_batch_count, history_mode, band_placement, landing_mode FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [st.tenantId])).rows[0] || null
+            const batches = async () => (await q('SELECT batch_no, origin, status, closed_reason, evidence FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [st.tenantId])).rows
+            return { st, physical, cells, shape, nonBand, pull, post, install, sheetRow, batches, store }
+          }
+          // Batch 1, then batch 2 (P-001 ⊃ S-001, plus N-001), both with the switch OFF: rows land blank.
+          async function twoOffPulls(k: any) {
+            await withPull(false, async () => {
+              k.st.state.data = CF.firstPullSource()
+              await k.pull()
+              k.st.state.data = CF.secondPullSource()
+              await k.pull()
+            })
+          }
+
+          test('BI-R6 / BI-R8 / BI-R10 / BI-R12 U06 on the real stack: two switch-off pulls, then the install — 首次 / 本次 with 推定, a person row untouched, two inferred batches, every other cell and field byte-identical, prep-fill first, the next live pull is batch 3', async () => {
+            const k = await installStack('bi2r6')
+            await twoOffPulls(k)
+            // A person-created row (a right-click copy of an S-001 row): never evidence, never labelled.
+            const source = (await k.st.rows()).find((row: any) => row.data[k.physical('componentSourceId')] === 'S-001')
+            const person = await k.st.multitable.records.createRecord({ sheetId: k.st.sheetId, data: { ...source.data, [k.physical('idempotencyKey')]: `person-copy-${TOKEN}` } })
+            await q('UPDATE meta_records SET created_by = $2 WHERE id = $1', [person.id, 'u_person_syn'])
+            const fieldsBefore = (await q('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY id', [k.st.sheetId])).rows
+            const defaultViewId = k.st.multitable.provisioning.getObjectViewId(k.st.projectId, k.st.objectId, 'default')
+            const viewBefore = (await q('SELECT * FROM meta_views WHERE id = $1', [defaultViewId])).rows
+            const cellsBefore = await k.nonBand()
+            const { dry, answer } = await k.install()
+            expect(dry.body.data.plan.K, JSON.stringify(dry.body.data.plan)).toBe(2)
+            expect(dry.body.data.classes.person).toBe(1)
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect(answer.body.data).toMatchObject({ resolved: true, historyStatus: 'backfilled', historyBatchCount: 2, firstLiveBatchNo: 3, generationBumped: true })
+            expect(JSON.stringify(answer.body).includes(k.st.projectNo)).toBe(false)
+            const rows = await k.cells()
+            const old = rows.filter((row: any) => row.active === false && row.id !== person.id)
+            const fresh = rows.filter((row: any) => row.active !== false && row.id !== person.id)
+            expect(old.length).toBe(4)
+            for (const row of old) {
+              expect(row.current, JSON.stringify(row)).toMatch(inferred(1))
+              expect(row.first, JSON.stringify(row)).toMatch(inferred(1))
+            }
+            for (const row of fresh) {
+              expect(row.current, JSON.stringify(row)).toMatch(inferred(2))
+              expect(row.first, JSON.stringify(row)).toMatch(['P-001', 'N-001'].includes(row.part) ? inferred(2) : inferred(1))
+            }
+            const personAfter = rows.find((row: any) => row.id === person.id)
+            expect([personAfter.first, personAfter.current]).toEqual([null, null])
+            expect((await k.batches()).map((row: any) => [row.batch_no, row.origin, row.status, row.closed_reason])).toEqual([[1, 'backfill_inferred', 'closed', 'backfill'], [2, 'backfill_inferred', 'closed', 'backfill']])
+            expect(await k.sheetRow()).toMatchObject({ history_status: 'backfilled', history_batch_count: 2, history_mode: 'inferred', band_placement: 'left', landing_mode: 'promote_prep_fill' })
+            // BI-R8 / BI-R10: additive only.
+            const fieldsAfter = (await q('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY id', [k.st.sheetId])).rows
+            const bandIds = [k.physical('pullBatch'), k.physical('firstPullBatch')]
+            expect(fieldsAfter.filter((row: any) => !bandIds.includes(row.id))).toEqual(fieldsBefore)
+            expect(fieldsAfter.filter((row: any) => bandIds.includes(row.id))).toHaveLength(2)
+            expect((await q('SELECT * FROM meta_views WHERE id = $1', [defaultViewId])).rows).toEqual(viewBefore)
+            expect(await k.nonBand()).toEqual(cellsBefore)
+            // BI-R12: the landing.
+            const first = (await q('SELECT id FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 1', [k.st.sheetId])).rows[0]
+            expect(first.id).toBe(k.st.multitable.provisioning.getObjectViewId(k.st.projectId, k.st.objectId, 'prep-fill'))
+            // The audit rows: started + installed, under project_target_create, the project number in project_id only.
+            const audits = (await q('SELECT action, mode, detail::text AS detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND mode LIKE $2 ORDER BY created_at, id', [k.st.tenantId, 'pull_batch_%'])).rows
+            expect(audits.map((row: any) => [row.action, row.mode])).toEqual([['project_target_create', 'pull_batch_install_started'], ['project_target_create', 'pull_batch_installed']])
+            for (const row of audits) expect(row.detail.includes(k.st.projectNo)).toBe(false)
+            // The next live pull (switch ON, a new material) is batch 3.
+            await withPull(true, async () => {
+              k.st.state.data = CF.secondPullSource({ extraOrders: [{ part: 'X-NEW', qty: 1 }], parts: [...CF.PARTS, CF.part('X-NEW', 'F400-1', 'Fresh')] })
+              const applied = await k.pull()
+              expect(applied.body.data.pullBatch, JSON.stringify(applied.body.data.pullBatch)).toMatchObject({ stamped: true, batchNo: 3 })
+            })
+          }, 300000)
+
+          test('BI-R9 crash continuation on real PG: a host that fails after two real patches, then a re-run with the persisted digest => labels byte-identical to an uninterrupted control sheet', async () => {
+            const control = await installStack('bi2r9c')
+            await twoOffPulls(control)
+            const done = await control.install()
+            expect(done.answer.body.data.resolved, JSON.stringify(done.answer.body)).toBe(true)
+            const k = await installStack('bi2r9')
+            await twoOffPulls(k)
+            const dry = await k.post({ mode: 'dry_run' })
+            const records = k.st.multitable.records
+            const patch = records.patchRecord
+            let patched = 0
+            records.patchRecord = async (input: any) => {
+              if (patched >= 2) throw Object.assign(new Error('synthetic host failure'), { code: 'SYNTHETIC_HOST_DOWN' })
+              patched += 1
+              return patch.call(records, input)
+            }
+            let crashed: any
+            try {
+              crashed = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: 2 })
+            } finally {
+              records.patchRecord = patch
+            }
+            expect(crashed.statusCode, JSON.stringify(crashed.body)).toBeGreaterThanOrEqual(500)
+            expect((await k.sheetRow()).history_status).toBe('installing')
+            const again = await k.post({ mode: 'dry_run' })
+            expect(again.body.data).toMatchObject({ run: 'continue', planDigest: dry.body.data.planDigest })
+            const resumed = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: again.body.data.planDigest, confirmHistoricalBatchCount: 2 })
+            expect(resumed.statusCode, JSON.stringify(resumed.body)).toBe(200)
+            expect(resumed.body.data).toMatchObject({ run: 'continue', resolved: true })
+            expect(await k.shape()).toEqual(await control.shape())
+          }, 300000)
+
+          test('BI-R13 a gap pass after a switch-off period: the live batch untouched, an appended inferred batch for the off-period rows (GAP-C09 carry), the count after both; BI-R-WL the dry-run under an install-held lease answers WRITE_LOCKED pull_batch_install', async () => {
+            const k = await installStack('bi2r13', { born: true })
+            await withPull(true, async () => {
+              k.st.state.data = CF.firstPullSource()
+              const applied = await k.pull()
+              expect(applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1 })
+            })
+            await withPull(false, async () => {
+              k.st.state.data = CF.secondPullSource()
+              await k.pull()
+            })
+            // The live batch's rows as the off-period pull left them (swept inactive, never re-stamped).
+            const liveBefore = (await k.cells()).filter((row: any) => row.current !== null)
+            expect(liveBefore).toHaveLength(4)
+            // BI-R-WL: while an install holds the sheet, the real dry-run precheck names the holder's purpose.
+            await k.st.lock.withProjectWriteLease(k.st.key, { purpose: 'pull_batch_install', runId: `pull-batch-install:wl-${TOKEN}`, tenantId: k.st.tenantId }, async () => {
+              const held = await k.st.dryRun()
+              expect(held.statusCode, JSON.stringify(held.body)).toBe(409)
+              expect(held.body.error.code).toBe('STOCK_PREP_PROJECT_WRITE_LOCKED')
+              expect(held.body.error.details.holderPurpose).toBe('pull_batch_install')
+            })
+            const { dry, answer } = await k.install()
+            expect(dry.body.data).toMatchObject({ run: 'gap_pass' })
+            expect(dry.body.data.plan).toMatchObject({ base: 1, K: 1 })
+            expect(dry.body.data.fixedPoints.conflicting).toBe(0)
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect(answer.body.data).toMatchObject({ resolved: true, historyBatchCount: 2, firstLiveBatchNo: 3 })
+            const after = await k.cells()
+            for (const row of liveBefore) expect(after.find((entry: any) => entry.id === row.id)).toEqual(row)
+            const gapRows = after.filter((row: any) => !liveBefore.some((entry: any) => entry.id === row.id))
+            expect(gapRows).toHaveLength(6)
+            for (const row of gapRows) {
+              expect(row.current, JSON.stringify(row)).toMatch(inferred(2))
+              expect(row.first, JSON.stringify(row)).toMatch(['P-001', 'N-001'].includes(row.part) ? inferred(2) : live(1))
+            }
+            expect((await k.batches()).map((row: any) => [row.batch_no, row.origin, row.status])).toEqual([[1, 'live', 'closed'], [2, 'backfill_inferred', 'closed']])
+            expect(await k.sheetRow()).toMatchObject({ history_status: 'backfilled', history_batch_count: 2 })
+          }, 300000)
+
+          test('BI-R11 born ready over an unreadable ledger: the create answers the legacy shape (ledger_unreadable), no ledger row, and a pull afterwards is unaffected', async () => {
+            const k = await installStack('bi2r11', { failingLedger: true, register: false })
+            const created = await withPull(true, () => callRoute(k.st.routes, 'POST', '/api/integration/stock-preparation/projects/:projectNo/target', { user: k.st.users.puller, params: { projectNo: k.st.projectNo }, body: {}, query: {} }))
+            expect([200, 201]).toContain(created.statusCode)
+            expect(created.body.data.pullBatchBand, JSON.stringify(created.body.data)).toEqual({ installed: false, landingPromoted: false, reason: 'ledger_unreadable' })
+            expect(await k.sheetRow()).toBeNull()
+            const off = await withPull(false, async () => {
+              k.st.state.data = CF.firstPullSource()
+              return k.pull()
+            })
+            expect(off.statusCode).toBe(200)
+          }, 300000)
+
+          // Review fix round 1 (P2-18; the verifier's VR4): an unknown-mode install killed at its first patch, rows created
+          // while the switch is off, then an INFERRED re-run carrying the extension digest. The real route refuses the mode
+          // change 409 PLAN_CHANGED history_mode_changed BEFORE any cell write (as the plain continue path does); the dry-run
+          // names the persisted mode, and the re-run in that mode installs the extension and resolves.
+          test('BI-R18 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
+            const k = await installStack('bi2r18')
+            await withPull(false, async () => { k.st.state.data = CF.firstPullSource(); await k.pull() })
+            const dry = await k.post({ mode: 'dry_run', historyMode: 'unknown' })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            const records = k.st.multitable.records
+            const patch = records.patchRecord
+            records.patchRecord = async () => { throw Object.assign(new Error('synthetic kill'), { code: 'SYNTHETIC_KILL' }) }
+            try { await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: 0, historyMode: 'unknown' }) } finally { records.patchRecord = patch }
+            expect((await k.sheetRow()).history_status).toBe('installing')
+            await withPull(false, async () => { k.st.state.data = CF.secondPullSource(); await k.pull() })
+            const next = await k.post({ mode: 'dry_run' })
+            expect(next.statusCode, JSON.stringify(next.body)).toBe(200)
+            expect(next.body.data.run).toBe('continue')
+            expect(next.body.data.extension).not.toBeNull()
+            expect(next.body.data.requires.historyMode).toBe('unknown')
+            const labelled = async () => (await k.cells()).filter((c: any) => c.current !== null || c.first !== null).length
+            const refused = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: next.body.data.extension.planDigest, confirmHistoricalBatchCount: next.body.data.extension.K })
+            expect(refused.statusCode, JSON.stringify(refused.body)).toBe(409)
+            expect(refused.body.error).toMatchObject({ code: 'STOCK_PREP_PULL_BATCH_PLAN_CHANGED', details: { reason: 'history_mode_changed' } })
+            expect(await labelled(), 'a refused history-mode change writes nothing').toBe(0)
+            expect((await k.sheetRow()).history_status).toBe('installing')
+            const resumed = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: next.body.data.extension.planDigest, confirmHistoricalBatchCount: 0, historyMode: 'unknown' })
+            expect(resumed.statusCode, JSON.stringify(resumed.body)).toBe(200)
+            expect(resumed.body.data).toMatchObject({ run: 'continue', resolved: true })
+            expect((await k.sheetRow()).history_mode).toBe('unknown')
+            expect(await labelled()).toBeGreaterThan(0)
+          }, 300000)
+        })
 
         test('S3A-22 (R-7) the carry on a governed project: an ordinary open hold => carried (only the human cell of the target moves); a runbook-only hold => 409 runbook_only_hold; a failed execution => 409 RECOVERY_PENDING; the step-4 store unreadable => 503 — none of the refusals patch', async () => {
           const observed: Record<string, unknown> = {}
@@ -5762,7 +6234,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               clean: {
                 status: 200, headers: 'export_columns', lastHeader: '沿用说明', notedRows: 4, note: `由 D100-01 沿用（父边用量 2，关系 ${handle}）`,
                 sRootRows: 1, sRootQty: 10, duplicatedCodes: 0, consults: ['complete', 'complete'], routeGenerationReads: 2,
-                delivered: 1, deliveredDetail: { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 6, columnCount: 31, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 },
+                delivered: 1, deliveredDetail: { operation: 'prep_line_export', totalRowCount: 6, activeRowCount: 6, columnCount: 32, refreshState: 'complete', continuationCount: 1, continuedRowCount: 4 },
                 refusedBefore: 1,
               },
               leaseAfterG0: { answer: `409:${BLOCKED}:state:executing`, streamed: false },
@@ -5911,7 +6383,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             }
             console.log(`[S5-06] ${JSON.stringify(observed)}`)
             expect(observed).toEqual({
-              status: 200, headers: 'export_columns_exactly', rows: 4, detailKeys: ['activeRowCount', 'columnCount', 'operation', 'totalRowCount'], columnCount: 30, refused: 0, stepFourRows: 0, governed: false,
+              status: 200, headers: 'export_columns_exactly', rows: 4, detailKeys: ['activeRowCount', 'columnCount', 'operation', 'totalRowCount'], columnCount: 31, refused: 0, stepFourRows: 0, governed: false,
               derivedUnderLease: 'not_governed',
               underLease: { answer: `409:${BLOCKED}:lease_in_flight:not_governed`, streamed: false },
               afterRelease: 200,

@@ -209,6 +209,19 @@ describe('MetaCommentComposer', () => {
       app.unmount()
     })
 
+    it('with only the type-to-search hint showing, plain arrows and Tab keep their native job', async () => {
+      const { app } = mountWithSearch('@', fakeSearch())
+      await settle()
+      expect(container!.querySelector('[data-test="comment-mention-search-required"]')).not.toBeNull()
+      const textarea = container!.querySelector('textarea') as HTMLTextAreaElement
+      for (const init of [{ key: 'ArrowDown' }, { key: 'ArrowUp' }, { key: 'Tab' }, { key: 'Tab', shiftKey: true }]) {
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+        textarea.dispatchEvent(event)
+        expect(event.defaultPrevented, JSON.stringify(init)).toBe(false)
+      }
+      app.unmount()
+    })
+
     it('a real term shows the server answer (even an email-only match) and selecting it still mentions', async () => {
       const search = fakeSearch()
       const { app, submitSpy } = mountWithSearch('ping @', search)
@@ -970,6 +983,22 @@ describe('MetaCommentComposer', () => {
       expect(key({ key: 'Tab' }).defaultPrevented).toBe(true)
       await nextTick()
       expect(textarea().value).toContain('@Jamie')
+      app.unmount()
+    })
+
+    it('with no suggestion list, plain arrows, Shift+arrows, Tab and Shift+Tab keep their native job (caret, focus); Escape is still held; a Tab during a composition is held', async () => {
+      const { app, key } = mountComposer('first line\nsecond line')
+      await nextTick()
+      expect(container!.querySelector('.meta-comment-composer__suggestions')).toBeNull()
+      for (const init of [
+        { key: 'ArrowDown' }, { key: 'ArrowUp' }, { key: 'ArrowDown', shiftKey: true }, { key: 'ArrowUp', shiftKey: true },
+        { key: 'Tab' }, { key: 'Tab', shiftKey: true },
+      ]) {
+        expect(key(init).defaultPrevented, JSON.stringify(init)).toBe(false)
+      }
+      expect(key({ key: 'Escape' }).defaultPrevented).toBe(true)
+      expect(key({ key: 'Tab', isComposing: true }).defaultPrevented).toBe(true)
+      expect(key({ key: 'Tab', keyCode: 229 }).defaultPrevented).toBe(false)
       app.unmount()
     })
 

@@ -4,6 +4,7 @@ import canonical from './gip-canonical-json.cjs'
 import deliveryStore from './yida-delivery-store.cjs'
 import executionDigest from './yida-execution-digest.cjs'
 import formProtocol from './yida-form-transport.cjs'
+import sendBudget from './yida-send-budget.cjs'
 import { buildYidaStaticPlan } from './yida-static-plan.mjs'
 
 // Internal mechanism only. The injected resolver is a future trusted authority
@@ -12,6 +13,7 @@ const { deepCloneFrozenCanonical, stableCanonicalStringify } = canonical
 const { createYidaDeliveryStore } = deliveryStore
 const { buildYidaExecutionPayloadDigest } = executionDigest
 const { YidaFormTransportError } = formProtocol
+const { boundYidaExecutionSnapshot, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH, YIDA_SEND_USER_ID_MAX_LENGTH } = sendBudget
 const CONTEXT_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'actorId']
 const SNAPSHOT_KEYS = [
   ...CONTEXT_KEYS, 'operationId', 'rowKey', 'grantRef', 'expiresAt', 'targetRef',
@@ -24,7 +26,6 @@ const ERROR_CODES = new Set([
   'TOKEN_FAILED', 'CLAIM_UNCONFIRMED',
 ].map((code) => `YIDA_RUN_${code}`))
 const ID_RE = /^[^\u0000-\u001f\u007f]+$/u
-const MAX_BYTES = 256 * 1024
 const abortedGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get
 const addListener = EventTarget.prototype.addEventListener
 const removeListener = EventTarget.prototype.removeEventListener
@@ -88,49 +89,10 @@ function callerSignal(options) {
   return signal
 }
 
-// Bound the raw strict domain BEFORE canonical cloning (which normalizes -0).
+// Gate 4 (R-71 ⑦.2): the snapshot budget is defined once in yida-send-budget.cjs and shared with the
+// pre-admission assessment. Every failure there is SNAPSHOT_INVALID here, exactly as before.
 function boundedSnapshot(value) {
-  let nodes = 0
-  let bytes = 0
-  const ancestors = new Set()
-  function visit(entry, depth) {
-    if (++nodes > 4096 || depth > 12) fail('SNAPSHOT_INVALID')
-    if (entry === null || typeof entry === 'boolean') return
-    if (typeof entry === 'number') {
-      if (!Number.isFinite(entry) || Object.is(entry, -0)) fail('SNAPSHOT_INVALID')
-      return
-    }
-    if (typeof entry === 'string') {
-      bytes += Buffer.byteLength(entry, 'utf8')
-      if (bytes > MAX_BYTES) fail('SNAPSHOT_INVALID')
-      return
-    }
-    if (!entry || typeof entry !== 'object' || types.isProxy(entry) || ancestors.has(entry)) fail('SNAPSHOT_INVALID')
-    const array = Array.isArray(entry)
-    const proto = Object.getPrototypeOf(entry)
-    if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) fail('SNAPSHOT_INVALID')
-    const descriptors = Object.getOwnPropertyDescriptors(entry)
-    const keys = Reflect.ownKeys(descriptors)
-    if (keys.length > 4097) fail('SNAPSHOT_INVALID')
-    if (array && (keys.length !== entry.length + 1 || entry.length > 4096)) fail('SNAPSHOT_INVALID')
-    ancestors.add(entry)
-    for (const key of keys) {
-      if (array && key === 'length') continue
-      const property = descriptors[key]
-      if (typeof key !== 'string' || !property.enumerable || !('value' in property)
-        || (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= entry.length))) fail('SNAPSHOT_INVALID')
-      bytes += Buffer.byteLength(key, 'utf8')
-      if (bytes > MAX_BYTES) fail('SNAPSHOT_INVALID')
-      visit(property.value, depth + 1)
-    }
-    ancestors.delete(entry)
-  }
-  visit(value, 0)
-  try {
-    const serialized = stableCanonicalStringify(value)
-    if (Buffer.byteLength(serialized, 'utf8') > MAX_BYTES) fail('SNAPSHOT_INVALID')
-    return { snapshot: deepCloneFrozenCanonical(value), serialized }
-  } catch { fail('SNAPSHOT_INVALID') }
+  try { return boundYidaExecutionSnapshot(value) } catch { fail('SNAPSHOT_INVALID') }
 }
 
 function compileSnapshot(raw, identity) {
@@ -148,8 +110,8 @@ function compileSnapshot(raw, identity) {
   if (!Number.isSafeInteger(snapshot.expiresAt) || snapshot.expiresAt < 1
     || !Number.isSafeInteger(snapshot.credentialGeneration) || snapshot.credentialGeneration < 1
     || snapshot.credentialGeneration > 2147483647) fail('SNAPSHOT_INVALID')
-  privateText(snapshot.systemToken, 4096)
-  privateText(snapshot.userId, 128)
+  privateText(snapshot.systemToken, YIDA_SEND_SYSTEM_TOKEN_MAX_LENGTH)
+  privateText(snapshot.userId, YIDA_SEND_USER_ID_MAX_LENGTH)
   if (!snapshot.config || snapshot.config.version !== 2) fail('SNAPSHOT_INVALID')
   let plan
   try { plan = buildYidaStaticPlan({ config: snapshot.config, rows: [snapshot.row] }) } catch { fail('SNAPSHOT_INVALID') }

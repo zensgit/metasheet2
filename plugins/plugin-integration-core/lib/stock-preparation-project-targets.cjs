@@ -820,6 +820,8 @@ module.exports = {
   reconcileProjectSheetTemplateColumns,
   markProjectSheetPlmSystemColumns,
   readProjectSheetPlmSystemColumnLock,
+  // 批次标识 BI-2 (R-65): the install route refuses any object but a project sheet before any IO (the same predicate).
+  isPlmLockTargetObjectId,
   PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
   HUMAN_WRITE_LOCK_PROPERTY_KEY,
   HUMAN_WRITE_LOCK_PLM_SYSTEM,
