@@ -54,6 +54,14 @@ const GOLDEN_BASE_SHA = '1638ab91cc89e04b839dc78ed55a7b49bb40ff4f'
 const GOLDEN_RECAPTURE_SHA = 'cde8e17e21b93384154eca6aa9c4679621e1a15b'
 const CAPTURE = process.env.SCC_CAPTURE === '1'
 const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+// 批次标识 BI-1b (design §4.4, §6.3 (a); register R-65): the POISONED leg seeds the SAME sheet with both band cells
+// (under the server-held physical ids AND the logical ids) and hands every lib the band; every GOLDEN literal must still
+// hold and every reader row must carry the pull-batch Symbol (non-vacuity). Mutants M-BI-2 (no strip) / M-1B-1 (strip
+// the logical ids only) turn this red.
+const PULL_BATCH_SYMBOL = Symbol.for('metasheet.stock-preparation.existingRow.pullBatch')
+const GOLDEN_BAND = Object.freeze({ fieldIds: Object.freeze({ pullBatch: 'fld_scc_pullBatch', firstPullBatch: 'fld_scc_firstPullBatch' }) })
+const BAND_SENTINEL = '第7批（2026-10-01）'
+const BAND_KEYS = Object.freeze([...Object.values(GOLDEN_BAND.fieldIds), 'pullBatch', 'firstPullBatch'])
 
 const LIB = path.join(__dirname, '..', 'lib')
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -202,8 +210,9 @@ function foreignKeylessScenario() {
 
 const SCENARIOS = Object.freeze([secondPullScenario, foreignKeylessScenario])
 
-function seededRecordsApi(scenario) {
-  const api = createRecordsApi(scenario.existingRows.map((entry) => ({ id: entry.id, sheetId: SHEET_ID, data: entry.data })))
+function seededRecordsApi(scenario, band = 'none') {
+  const cells = band === 'poisoned' ? Object.fromEntries(BAND_KEYS.map((key) => [key, BAND_SENTINEL])) : {}
+  const api = createRecordsApi(scenario.existingRows.map((entry) => ({ id: entry.id, sheetId: SHEET_ID, data: { ...entry.data, ...cells } })))
   // The harness pins every version to 1 and drops createdBy; restore both so the envelope carries
   // what a host record carries.
   scenario.existingRows.forEach((entry, index) => {
@@ -226,11 +235,25 @@ function withoutTimes(value) {
   return value
 }
 
+// 批次标识 BI-1b: the written rows' digest of the poisoned leg leaves the SEEDED band cells out (they are pinned unchanged
+// separately), so it can be compared with the golden.
+function withoutBandCells(data) {
+  if (!data || typeof data !== 'object') return data
+  const out = { ...data }
+  for (const key of BAND_KEYS) delete out[key]
+  return out
+}
+
 function recordRefsOf(rows) {
   return rows.map((row) => (row && row[RECORD_REF] ? { id: row[RECORD_REF].id, version: row[RECORD_REF].version } : null))
 }
 
-async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
+async function observeScenario(harness, scenario, { handle = 'wired', band = 'none' } = {}) {
+  // 批次标识 BI-1b: the poisoned leg's server-held lane input (switch off: the strip only) and reader option.
+  const lane = band === 'poisoned' ? { pullBatch: { band: GOLDEN_BAND, enabled: false } } : {}
+  const readerOptions = band === 'poisoned' ? [{ pullBatchBand: GOLDEN_BAND }] : []
+  const seeded = (s) => seededRecordsApi(s, band)
+
   const { tableActions, largeBomJobs } = harness
   // The lanes the way the routes drive them since #6501 (the same wrapping the #6502 golden harness's
   // `laneCalls` applies): the dry-run through the generation binder, the apply inside the project write
@@ -266,8 +289,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   // 1. Small dry-run against the seeded sheet.
   const tokenStore = createTokenStore()
   const dryRun = await dryRunStockPreparationAction({
-    action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
+    action, parameters, sourceAdapter, recordsApi: seeded(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
     ...governance,
+    ...lane,
   })
   const dryRunExpansion = harness.calls[harness.calls.length - 1].result
   observed.dryRun = {
@@ -297,8 +321,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
 
   // 3. Ledger: reconcile's input revision, the three families, and the PLAN the reconcile derives from.
   const prepared = await prepareStockPreparationConfirmationDecisions({
-    action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+    action, parameters, sourceAdapter, recordsApi: seeded(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
     ...governance,
+    ...lane,
   })
   const derived = deriveDecisionCandidates({ projectNo: scenario.projectNo, plan: prepared.plan, sourceRevision: prepared.revision })
   const identities = (list) => list.map((entry) => ({ decisionId: entry.decisionId, stableDecisionKey: entry.stableDecisionKey, inputFingerprint: entry.inputFingerprint }))
@@ -313,8 +338,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   }
 
   // 4. The planner called directly over the rows the project-scoped reader returns.
-  const readerRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), normalizedAction.target, scenario.projectNo)
+  const readerRows = await tableActionInternals.readExistingStockPreparationRows(seeded(scenario), normalizedAction.target, scenario.projectNo, ...readerOptions)
   refs.reader = recordRefsOf(readerRows)
+  refs.band = readerRows.map((row) => (row && row[PULL_BATCH_SYMBOL] ? row[PULL_BATCH_SYMBOL].pullBatch : null))
   const directPlan = planStockPreparationConflicts({
     template: normalizedAction.template,
     expandedRows: dryRunExpansion.rows,
@@ -332,8 +358,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
     // 5. Archive over the SEEDED sheet (people-owned columns are present, so archiveRevision differs
     //    from the dry-run revision here — unlike the #6502 golden's empty-sheet archive).
     const archived = await prepareStockPreparationMvpSnapshot({
-      action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+      action, parameters, sourceAdapter, recordsApi: seeded(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
       ...governance,
+      ...lane,
     })
     const stableScope = `${TENANT_ID}\n${action.actionId}\n${archived.parameters.projectNo}`
     const batchDigest = crypto.createHash('sha256').update(`${stableScope}\n${archived.archiveRevision}`).digest('hex').slice(0, 32)
@@ -357,16 +384,17 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
 
     // 6. Apply onto the SEEDED sheet: the written rows include the patched (UPDATE / INACTIVE) ones.
     const applyStore = createTokenStore()
-    const applyRecords = seededRecordsApi(scenario)
+    const applyRecords = seeded(scenario)
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
       ...governance,
+      ...lane,
     })
     if (handle === 'absent') {
       const writesBefore = applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(',')
       await assert.rejects(applyStockPreparationAction({
         sandboxPolicy: SANDBOX_POLICY, action, parameters, dryRunToken: applyDryRun.dryRunToken, sourceAdapter, recordsApi: applyRecords,
-        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: undefined,
+        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: undefined, ...lane,
       }), (error) => error.status === 501 && error.code === 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED' && error.details.reason === 'governance_absent')
       assert.equal(applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(','), writesBefore, 'a handle-absent apply writes nothing')
       observed.apply = 'refused_governance_absent'
@@ -382,13 +410,16 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       permission: 'write',
       plannedAt: PLANNED_AT,
       runId: RUN_ID,
+      ...lane,
     })
+    // 批次标识 BI-1b (E10 / INACTIVE): no patch ever names a band cell — the seeded cells are exactly as they were.
+    if (applied && band === 'poisoned') refs.writtenBand = applyRecords.rows.filter((row) => scenario.existingRows.some((entry) => entry.id === row.id)).map((row) => BAND_KEYS.map((key) => row.data[key]))
     if (applied) observed.apply = {
       status: applied.status,
       dryRunRevision: applied.dryRunRevision,
       sourceContentRevision: applied.sourceContentRevision,
       responseDigest: digest(withoutTimes(applied)),
-      writtenRowsDigest: digest(withoutTimes(applyRecords.rows.map((row) => ({ id: row.id, version: row.version, data: row.data })))),
+      writtenRowsDigest: digest(withoutTimes(applyRecords.rows.map((row) => ({ id: row.id, version: row.version, data: withoutBandCells(row.data) })))),
     }
   }
 
@@ -411,7 +442,7 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
       now,
     })
-    const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), runAction.target, scenario.projectNo)
+    const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seeded(scenario), runAction.target, scenario.projectNo, ...readerOptions)
     refs.large = recordRefsOf(largeExistingRows)
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_scc_golden', existingRows: largeExistingRows, plannedAt: PLANNED_AT, now,
@@ -554,11 +585,12 @@ async function main() {
   const harness = installExpansionCaptureSwitch()
   const captured = {}
 
-  for (const handle of ['wired', 'absent']) for (const mode of ['off', 'on']) {
+  for (const [handle, band] of [['wired', 'none'], ['absent', 'none'], ['wired', 'poisoned']]) for (const mode of ['off', 'on']) {
     for (const build of SCENARIOS) {
       const scenario = build()
       harness.setMode(mode)
-      const { observed, refs } = await observeScenario(harness, scenario, { handle })
+      const { observed, refs } = await observeScenario(harness, scenario, { handle, band })
+      if (CAPTURE && band === 'poisoned') continue
       if (CAPTURE && handle === 'absent') continue
       if (mode === 'off') delete observed.demandEvidenceFingerprint
       if (CAPTURE) {
@@ -570,9 +602,15 @@ async function main() {
       // A handle-absent apply is refused by the writer (asserted inside observeScenario): the one section that leg
       // cannot reproduce. Every other section is the golden, byte for byte.
       if (handle === 'absent' && expected.apply) expected.apply = 'refused_governance_absent'
-      await run(`[${handle}][${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
+      await run(`[${handle}][${band}][${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
         assert.deepEqual(observed, expected)
       })
+      if (band === 'poisoned') {
+        await run(`[${handle}][${band}][${mode}] ${scenario.name}: every reader row carries the pull-batch Symbol with the seeded label; no patch touched a band cell`, () => {
+          assert.deepEqual(refs.band, scenario.existingRows.map(() => BAND_SENTINEL))
+          if (refs.writtenBand) for (const cells of refs.writtenBand) assert.deepEqual(cells, BAND_KEYS.map(() => BAND_SENTINEL))
+        })
+      }
       await run(`[${handle}][${mode}] ${scenario.name}: the reader attached a record reference to every existing row (the identity is not vacuous)`, () => {
         const expectedRefs = scenario.existingRows.map((entry) => ({ id: entry.id, version: entry.version }))
         assert.deepEqual(refs.reader, expectedRefs)

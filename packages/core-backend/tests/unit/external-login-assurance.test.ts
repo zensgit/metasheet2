@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
 import {
@@ -25,9 +25,17 @@ import {
   PRIVILEGE_WITNESS_DOMAIN,
 } from '../../src/auth/security-action-privilege'
 import { privilegeRow, readInputs } from '../helpers/security-action-privilege-harness'
+import { collectImportEdges, importEdgeViolations, importSpecifiers, listSourceFiles } from '../helpers/import-edge-allowlist'
+import type { ImportEdge } from '../helpers/import-edge-allowlist'
 
 const SRC = path.resolve(__dirname, '..', '..', 'src')
 const MODULE_PATH = path.join(SRC, 'auth', 'external-login-assurance.ts')
+/** The only files in `src` that may import the policy module, as exact edges relative to `src`. */
+const POLICY_IMPORTER_ALLOWLIST: ReadonlyArray<ImportEdge> = [
+  ['auth/security-action-privilege.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+  ['auth/security-action-proof.ts', './external-login-assurance'],
+]
 const PROTOTYPE_KEYS = ['constructor', 'toString', '__proto__', 'hasOwnProperty'] as const
 const UNKNOWN_PURPOSES = ['', 'bind', 'EXTERNAL_IDENTITY_BIND', undefined, null, 0, {}, ...PROTOTYPE_KEYS] as const
 
@@ -49,19 +57,13 @@ function canonical(value: unknown): string {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(',')}}`
 }
 
-function listSourceFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const full = path.join(dir, entry)
-    if (statSync(full).isDirectory()) return listSourceFiles(full)
-    return full.endsWith('.ts') ? [full] : []
-  })
-}
-
 function prerequisites(overrides: Partial<SecurityActionPrerequisites> = {}): SecurityActionPrerequisites {
   return {
     proofService: true,
     localCredentialProvenanceConstraint: true,
     authorizationInputSerialization: true,
+    browserBinding: true,
+    verificationAttemptLimits: true,
     externalReauthMethod: true,
     purposeTargets: {
       external_identity_bind: true, external_identity_unbind: true, login_grant_enable: true, login_grant_disable: true,
@@ -245,12 +247,14 @@ describe('security action purpose registry', () => {
     expect(SECURITY_ACTION_PREREQUISITES.proofService).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.localCredentialProvenanceConstraint).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.authorizationInputSerialization).toBe(false)
+    expect(SECURITY_ACTION_PREREQUISITES.browserBinding).toBe(false)
+    expect(SECURITY_ACTION_PREREQUISITES.verificationAttemptLimits).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.externalReauthMethod).toBe(false)
     expect(SECURITY_ACTION_PREREQUISITES.purposeTargets).toEqual({
       external_identity_bind: false, external_identity_unbind: false, login_grant_enable: false, login_grant_disable: false,
     })
     expect(Object.keys(SECURITY_ACTION_PREREQUISITES).sort()).toEqual(
-      ['authorizationInputSerialization', 'externalReauthMethod', 'localCredentialProvenanceConstraint', 'proofService', 'purposeTargets'],
+      ['authorizationInputSerialization', 'browserBinding', 'externalReauthMethod', 'localCredentialProvenanceConstraint', 'proofService', 'purposeTargets', 'verificationAttemptLimits'],
     )
     expect(Object.isFrozen(SECURITY_ACTION_PREREQUISITES)).toBe(true)
     expect(Object.isFrozen(SECURITY_ACTION_PREREQUISITES.purposeTargets)).toBe(true)
@@ -270,6 +274,9 @@ describe('security action purpose registry', () => {
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites())).toBe(true)
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ proofService: false }))).toBe(false)
       expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ localCredentialProvenanceConstraint: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ authorizationInputSerialization: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ browserBinding: false }))).toBe(false)
+      expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ verificationAttemptLimits: false }))).toBe(false)
     }
     for (const missing of SECURITY_ACTION_PURPOSES) {
       const targets = { ...prerequisites().purposeTargets, [missing]: false }
@@ -277,14 +284,12 @@ describe('security action purpose registry', () => {
         expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ purposeTargets: targets }))).toBe(purpose !== missing)
       }
     }
-    const unserialized = prerequisites({ authorizationInputSerialization: false, externalReauthMethod: false })
-    expect(evaluateSecurityActionPurposeAvailability('external_identity_bind', unserialized)).toBe(false)
-    expect(evaluateSecurityActionPurposeAvailability('login_grant_enable', unserialized)).toBe(false)
-    expect(evaluateSecurityActionPurposeAvailability('external_identity_unbind', unserialized)).toBe(true)
-    expect(evaluateSecurityActionPurposeAvailability('login_grant_disable', unserialized)).toBe(true)
-    const unserializedWithExternal = prerequisites({ authorizationInputSerialization: false, externalReauthMethod: true })
-    for (const purpose of SECURITY_ACTION_PURPOSES) {
-      expect(evaluateSecurityActionPurposeAvailability(purpose, unserializedWithExternal)).toBe(false)
+    // Serialization is required for every purpose, whether or not its outcome depends on the privilege class.
+    for (const externalReauthMethod of [false, true]) {
+      const unserialized = prerequisites({ authorizationInputSerialization: false, externalReauthMethod })
+      for (const purpose of SECURITY_ACTION_PURPOSES) {
+        expect(evaluateSecurityActionPurposeAvailability(purpose, unserialized)).toBe(false)
+      }
     }
   })
 
@@ -299,7 +304,7 @@ describe('security action purpose registry', () => {
   })
 
   it.each(['true', 1, {}, [], 'yes', () => true])('treats a non-boolean prerequisite value as unmet: case %#', (value) => {
-    const fields = ['proofService', 'localCredentialProvenanceConstraint', 'authorizationInputSerialization'] as const
+    const fields = ['proofService', 'localCredentialProvenanceConstraint', 'authorizationInputSerialization', 'browserBinding', 'verificationAttemptLimits'] as const
     for (const field of fields) {
       for (const purpose of SECURITY_ACTION_PURPOSES) {
         expect(evaluateSecurityActionPurposeAvailability(purpose, prerequisites({ [field]: value } as never))).toBe(false)
@@ -343,5 +348,29 @@ describe('security action purpose registry', () => {
     const imports = source.split('\n').filter((line) => /^\s*import\b/.test(line))
     expect(imports.filter((line) => !/^\s*import\s+type\b/.test(line))).toEqual([])
     expect(source).not.toMatch(/\brequire\s*\(/)
+  })
+
+  it('is imported by exactly the allowlisted files: the classifier and the action proof service', () => {
+    const edges = collectImportEdges(SRC, /external-login-assurance/, (file) => readFileSync(file, 'utf8'))
+    expect(importEdgeViolations(edges, POLICY_IMPORTER_ALLOWLIST)).toEqual([])
+    for (const file of listSourceFiles(SRC)) {
+      expect(readFileSync(file, 'utf8')).not.toMatch(/(?:require|import)\(\s*['"`][^'"`]*external-login-assurance/)
+    }
+  })
+
+  it('reports any importer the allowlist does not name, in the same directory or elsewhere, by import or by re-export', () => {
+    const allowed = POLICY_IMPORTER_ALLOWLIST
+    expect(importEdgeViolations(allowed, allowed)).toEqual([])
+    expect(importEdgeViolations([...allowed, ['auth/scratch-importer.ts', './external-login-assurance']], allowed))
+      .toEqual(['unexpected: auth/scratch-importer.ts -> ./external-login-assurance'])
+    expect(importEdgeViolations([...allowed, ['services/scratch.ts', '../auth/external-login-assurance']], allowed))
+      .toEqual(['unexpected: services/scratch.ts -> ../auth/external-login-assurance'])
+    const reExport = importSpecifiers("export { SECURITY_ACTION_PURPOSES } from './external-login-assurance'\n")
+      .map((specifier): ImportEdge => ['auth/scratch-reexport.ts', specifier])
+    expect(importEdgeViolations([...allowed, ...reExport], allowed)).toEqual(['unexpected: auth/scratch-reexport.ts -> ./external-login-assurance'])
+    const loaded = importSpecifiers("module.exports = () => [require(`./external-login-assurance`), import(`./external-login-assurance`)]\n", 'scratch.js')
+      .map((specifier): ImportEdge => ['scratch.js', specifier])
+    expect(importEdgeViolations([...allowed, ...loaded], allowed)).toEqual(['unexpected: scratch.js -> ./external-login-assurance', 'unexpected: scratch.js -> ./external-login-assurance'])
+    expect(importEdgeViolations(allowed.slice(0, -1), allowed)).toEqual(['missing: auth/security-action-proof.ts -> ./external-login-assurance'])
   })
 })
