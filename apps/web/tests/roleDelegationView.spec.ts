@@ -535,6 +535,57 @@ describe('RoleDelegationView', () => {
     expect(window.location.hash).toBe('#scope')
   })
 
+  it.each([false, true])('refresh keeps an outside-list linked member even when its read fails (%s)', async (failRefresh) => {
+    const location = '/admin/role-delegation?userId=user-41&source=members#scope'
+    window.history.replaceState({}, '', location)
+    const baseApi = createApiImplementation(callLog)
+    let targetReads = 0
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const path = String(input)
+      if (path === '/api/admin/role-delegation/users/user-41/access') {
+        callLog.push(path)
+        targetReads += 1
+        if (failRefresh && targetReads === 2) {
+          return createJsonResponse({ ok: false, error: { message: 'Target unavailable' } }, 403)
+        }
+        return createJsonResponse({ ok: true, data: {
+          user: { id: 'user-41', name: 'Linked member', email: 'linked@example.invalid', role: 'user', is_active: true },
+          roles: [], memberGroups: [], delegableRoles: [], roleCatalog: [], namespaceAdmissions: [],
+        } })
+      }
+      if (path === '/api/admin/role-delegation/users/user-41/scopes') {
+        callLog.push(path)
+        return createJsonResponse({ ok: true, data: {
+          user: { id: 'user-41' }, adminNamespaces: [], scopeAssignments: [], groupAssignments: [],
+        } })
+      }
+      return baseApi(input)
+    })
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => callLog.includes('/api/admin/role-delegation/users/user-41/scopes'))
+    await flushUi()
+    expect(container!.querySelector('.delegation-page__detail-head')?.textContent).toContain('Linked member')
+    expect(container!.querySelector('.delegation-page__user')?.textContent).toContain('Alpha')
+
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => targetReads === 2)
+    await flushUi()
+    expect(callLog).not.toContain('/api/admin/role-delegation/users/user-1/access')
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(location)
+    if (failRefresh) {
+      expect(container!.querySelector('.delegation-page__detail-head')).toBeNull()
+      expect(container!.querySelector('[data-testid="delegation-assign-role"]')).toBeNull()
+      expect(container!.textContent).toContain('Target unavailable')
+      findButtonByText(container!, '查询').click()
+      await waitForCondition(() => targetReads === 3)
+      await flushUi()
+    }
+    expect(container!.querySelector('.delegation-page__detail-head')?.textContent).toContain('Linked member')
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+  })
+
   it('clears the previous member and blocks assignment while the next access read is delayed', async () => {
     let releaseBravo: (() => void) | undefined
     const bravoGate = new Promise<void>((resolve) => {

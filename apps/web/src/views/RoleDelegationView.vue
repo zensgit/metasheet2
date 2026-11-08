@@ -954,6 +954,12 @@ async function loadUsers(): Promise<void> {
       await selectUser(pinned)
       return
     }
+    // An explicitly linked member is independent of the paginated search results.
+    // Refresh its access instead of silently replacing it with the first listed user.
+    if (selectedUserId.value && selectedUserId.value === initialPinnedUserId) {
+      await selectUser(selectedUserId.value)
+      return
+    }
     const selectedStillExists = users.value.some((user) => user.id === selectedUserId.value)
     if (selectedUserId.value && !selectedStillExists) {
       selectedUserId.value = ''
