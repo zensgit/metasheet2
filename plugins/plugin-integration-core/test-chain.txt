@@ -81,6 +81,7 @@ node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
 node __tests__/stock-preparation-sheet-census.test.cjs
+node __tests__/stock-preparation-pull-batch-site-probe.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
@@ -149,6 +150,12 @@ node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs
 node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
+node __tests__/stock-preparation-pull-batch.test.cjs
+node __tests__/stock-preparation-pull-batch-store.test.cjs
+node __tests__/stock-preparation-pull-batch-portability.test.cjs
+node __tests__/stock-preparation-pull-batch-band.test.cjs
+node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
+node __tests__/stock-preparation-project-write-lock-holder-within.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs

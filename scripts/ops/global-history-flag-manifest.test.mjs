@@ -279,6 +279,9 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_BASE_ADOPTION_REFUSED',
   'MULTITABLE_BASE_SCOPE_FORBIDDEN',
   'MULTITABLE_SYSTEM_BASE_INPUT_INVALID',
+  // 批次标识 BI-5: the input refusal code of the view landing primitives (multitable/view-landing.ts) — an error
+  // code, not a flag; nobody reads it from process.env.
+  'MULTITABLE_VIEW_LANDING_INPUT_INVALID',
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
   // 自定义模板表名常量(#5617)，不是环境开关：它是 migration 与 custom-template-store 共用的表名字面量，
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
