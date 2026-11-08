@@ -1578,6 +1578,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const projectSheetHarness = require(path.join(REPO_ROOT, 'plugins/plugin-integration-core/__tests__/support/stock-preparation-project-sheet-harness.cjs')) as any
     // Pre-enable hardening (H-series): the readiness evaluator (version 2) and the pack-install ledger store.
     const readinessModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pilot-readiness.cjs')) as any
+    // 批次标识 BI-1b (readiness v3): the band descriptors and the pull-batch ledger store D20 prepares the sheet with.
+    const templatesModule = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+    const pullBatchStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
 
     function routeResponse() {
@@ -1667,14 +1670,28 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       const admin = { id: `u_d20_admin_${TOKEN}`, tenantId, permissions: ['stock-prep:admin'] }
       const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
+      // 批次标识 BI-1b (readiness v3; register R-65; critic M3): the pull-batch switch for this case only, restored below.
+      const pullBatchSwitchBefore = process.env.STOCK_PREP_PULL_BATCH_ENABLED
       const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
       const createdStubs: string[] = []
       process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+      process.env.STOCK_PREP_PULL_BATCH_ENABLED = 'true'
       continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+      const pullBatchStore = pullBatchStoreModule.createStockPreparationPullBatchStore({ db })
       try {
         await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
         const plmLock = await projectTargetsModule.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
         expect(plmLock.missing).toBe(0)
+        // Readiness v3: the band, installed the way the plugin installs it — ONE plugin-scoped ensureMissingObjectFields
+        // over the template descriptors (the lock and the marker together) — and the sheet's ledger row, born empty (the
+        // ledger store's own capture primitive). The band stays out of the plugin views' hidden lists.
+        const bandAdded = await multitable.provisioning.ensureMissingObjectFields({
+          projectId,
+          objectId,
+          fields: templatesModule.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+        })
+        expect(bandAdded.addedFieldIds).toHaveLength(2)
+        await db.transaction((trx: any) => pullBatchStore.createSheetRowWithin(trx, { tenantId, sheetId, projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
         await store.create({ tenantId, projectNo, sheetId, objectId, createdBy: 'syn' })
         // STUBS of the step-4 stores (PR-2 creates the real ones): what the readiness probe waits for. Created
         // ONLY where absent and dropped ONLY when this test created them — the real-DB step shares one database,
@@ -1717,6 +1734,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           // Readiness version 2 (O-8): the pack-install ledger is read strictly — the real store, an empty ledger for this tenant.
           stockPreparationPackInstallStore: packInstallStoreModule.createStockPreparationPackInstallStore({ db }),
           tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+          // Readiness v3 (批次标识 BI-1b): the real pull-batch ledger store (migration 105).
+          stockPreparationPullBatchStore: pullBatchStore,
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
@@ -1782,6 +1801,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       } finally {
         if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
+        if (pullBatchSwitchBefore === undefined) delete process.env.STOCK_PREP_PULL_BATCH_ENABLED
+        else process.env.STOCK_PREP_PULL_BATCH_ENABLED = pullBatchSwitchBefore
+        await q('DELETE FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [tenantId]).catch(() => {})
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
         for (const table of createdStubs) await q(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
         await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [tenantId]).catch(() => {})
