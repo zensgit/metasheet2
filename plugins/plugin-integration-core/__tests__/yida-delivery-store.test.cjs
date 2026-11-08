@@ -23,7 +23,9 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
     'tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',
     'tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts',
     'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
-    'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts']
+    'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
+    // Slice Y9: the issue-confirm write-back wiring proof (same step, whole file, excluded from the no-DB run).
+    'tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts']
   // The step's whole file list: a dropped file, or an unexpected positional filter, is red.
   const lane = ['tests/integration/external-system-delete-bind-lock-protocol.db.test.ts', ...specs,
     'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
@@ -64,7 +66,7 @@ test('the YiDa real-PG suites are registered in their real execution lane withou
   // The check reads the same report (vitest resolves outputFile against packages/core-backend; the
   // step's own shell runs at the repository root) and the step's whole file count.
   assert.equal(lines[2], `node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json ${lane.length}`)
-  assert.equal(lane.length, 14)
+  assert.equal(lane.length, 15)
   // A local run's report is gitignored, so a committed stale clean report cannot stand in for this run's.
   assert.equal(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('artifacts/yida-realdb/'), true)
   // The checker's behaviour is tested only in this plugin chain, so a checker-only change must make the
@@ -605,4 +607,46 @@ test('missing transactional capabilities fail closed before any mutation', async
     db: { transaction() {}, async selectOne() { throw new Error('synthetic-private-read-error') } },
   })
   await rejectsCode(() => read.get(identity()), 'UNAVAILABLE')
+})
+
+// ---- Source binding and the creation-identity fence (design baseline v2.3 §3.3, D16; migration zzzz20261106110300) ----
+const UNIQUE_CREATE_IDENTITY = 'uniq_integration_yida_delivery_create_identity'
+const bound = (patch = {}) => preparation({ sourceRecordDigest: 'c'.repeat(64), creationIdentityDigest: 'd'.repeat(64), ...patch })
+
+test('bound rows persist both digests in the snapshot; unbound rows persist null; a half binding is INPUT', async () => {
+  const db = memoryDb()
+  const store = createYidaDeliveryStore({ db })
+  await store.prepare(bound())
+  assert.equal(db.rows()[0].source_record_digest, 'c'.repeat(64))
+  assert.equal(db.rows()[0].creation_identity_digest, 'd'.repeat(64))
+  assert.equal((await store.prepare(bound())).reused, true)
+  // The binding is part of the row snapshot: the same operation row with another binding is CONFLICT.
+  await rejectsCode(() => store.prepare(bound({ creationIdentityDigest: 'e'.repeat(64) })), 'CONFLICT')
+  await rejectsCode(() => store.prepare(preparation()), 'CONFLICT')
+  await store.prepare(preparation({ rowKey: 'row-unbound', businessKeyDigest: 'f'.repeat(64) }))
+  assert.deepEqual([db.rows()[1].source_record_digest, db.rows()[1].creation_identity_digest], [null, null])
+  assert.equal((await store.prepare(preparation({ rowKey: 'row-unbound', businessKeyDigest: 'f'.repeat(64), sourceRecordDigest: null, creationIdentityDigest: null }))).reused, true)
+  for (const half of [{ sourceRecordDigest: 'c'.repeat(64) }, { creationIdentityDigest: 'd'.repeat(64) },
+    { sourceRecordDigest: 'c'.repeat(64), creationIdentityDigest: null }, { sourceRecordDigest: 'C'.repeat(64), creationIdentityDigest: 'd'.repeat(64) },
+    { sourceRecordDigest: 'c'.repeat(63), creationIdentityDigest: 'd'.repeat(64) }]) {
+    await rejectsCode(() => store.prepare(preparation({ rowKey: 'row-half', ...half })), 'INPUT')
+  }
+  assert.equal(db.rows().length, 2)
+})
+
+test('identity fence race: the same identity under another operation is a fixed IDENTITY_CONFLICT; an identical operation replays', async () => {
+  const db = memoryDb()
+  const store = createYidaDeliveryStore({ db })
+  await store.prepare(bound())
+  // Another operation, another seven-key digest (the name changed), the SAME identity: PG reports the identity index.
+  db.faults.insert = Object.assign(new Error('synthetic-private-identity-values'), { code: '23505', constraint: UNIQUE_CREATE_IDENTITY })
+  await rejectsCode(() => store.prepare(bound({ operationId: 'operation-b', rowKey: 'row-b', businessKeyDigest: 'f'.repeat(64) })), 'IDENTITY_CONFLICT')
+  assert.equal(db.rows().length, 1)
+  assert.equal(db.events.filter((event) => event.type === 'rollback').length >= 1, true)
+  // The same operation row racing itself hits the identity index too: after rollback the committed row is replayed.
+  db.faults.insert = Object.assign(new Error('synthetic-private-identity-values'), { code: '23505', constraint: UNIQUE_CREATE_IDENTITY })
+  db.faults.competitor = {}
+  const replay = await store.prepare(bound({ operationId: 'operation-c', rowKey: 'row-c' }))
+  assert.equal(replay.reused, true)
+  assert.doesNotMatch(JSON.stringify(replay), /synthetic-private|claim_token/)
 })

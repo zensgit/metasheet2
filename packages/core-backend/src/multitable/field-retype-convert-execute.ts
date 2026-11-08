@@ -7,7 +7,9 @@
  *
  * ── 失败的两种形态 ─────────────────────────────────────────────────────────────────────────────────────
  *   - **拒绝**：函数返回 `{ ok: false, failure }`。所有判定都排在第一条写语句之前，所以拒绝时事务里只有锁与读，
- *     提交与回滚等价——「任一不过 ⇒ 零写入」靠的是这个次序，不是靠调用方记得回滚。
+ *     提交与回滚等价——「任一不过 ⇒ 零写入」靠的是这个次序，不是靠调用方记得回滚。唯一的例外是 D21 的表版本行递增
+ *     （门 ③ ④ ⑤ 之后、第一把行锁之前，无条件；见下方 D21 field-row writer rule）：拒绝时它随事务提交，版本号多前进一次。
+ *     版本号单调而非计数（authz-version-protocol.ts），没有任何读者比较它的值，所以对数据与判定都与回滚等价。
  *   - **异常**：任何 throw（栅栏被恢复占用、前镜像超上限、改写行数对不上、任何 SQL 错误）都原样向外抛，由
  *     `pool.transaction` 回滚整个事务。写到一半的状态不可能提交。
  *
@@ -17,6 +19,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
+import { bumpSheetPermissionVersions } from './authz-version-protocol'
 import {
   acquireCanonicalSheetFence,
   assertNoActiveWriterBlock,
@@ -324,7 +327,7 @@ export type ExecuteFieldRetypeConvertOutcome =
 
 /**
  * 一次转换，一个事务。次序锁定（ADR §3.4-3.7）：
- *   栅栏 → 字段行 FOR UPDATE → 范围复核 → 规模 → live 行与本表回收站行 FOR UPDATE → **重算 planHash** 并整体校验凭证
+ *   栅栏 → 门 ③ ④ ⑤ → 表版本行（D21，无条件递增）→ 字段行 FOR UPDATE → 范围复核 → 规模 → live 行与本表回收站行 FOR UPDATE → **重算 planHash** 并整体校验凭证
  *   → 预铸 convertRevisionId、mintOperation → **写前镜像（每条 live 行）** → 改字段 → 一条批量改写 → 每个被碰行一条
  *   记录修订 → 配置修订 → 作业行 → 审计行 → sealOperation。
  */
@@ -340,6 +343,13 @@ export async function executeFieldRetypeConvert(
   // 门 ③ ④ ⑤，从数据库重新解析（增补 B）：栅栏之后、第一把行锁之前。
   const gate = await input.authorize(query)
   if (gate) return { ok: false, gate }
+
+  // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（下面的字段行 FOR UPDATE）之前取，
+  // 无条件。旧式 jsonb 字符串 property 会被 normalizeProperty 解析成对象，下面改字段的 UPDATE 因此会翻转可见性触发器的
+  // 标志位（字符串读作 false，对象读作 true）；若等触发器在字段行与每个 live 行的 FOR UPDATE 之后才取版本行，就与持有该行
+  // FOR SHARE、再要被绑定记录 FOR SHARE 的准入事务成环（核验 r1 F2：40P01）。放在门之后，被门拒绝的调用方不碰版本行。
+  // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
+  await bumpSheetPermissionVersions(query, [sheetId])
 
   const fieldRes = await query(
     'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE',
@@ -571,8 +581,9 @@ function undoPrecondition(reason: FieldRetypeUndoPreconditionReason, extra: Reco
 }
 
 /**
- * 整列撤销，一个事务。**判定顺序锁定，任一不过 ⇒ 零写入**（ADR §3 撤销判定表）：
- *   0  栅栏 → 作业行 `FOR UPDATE`（绑 convertRevisionId + fieldId + sheetId），无行 ⇒ 404（与不存在同码）
+ * 整列撤销，一个事务。**判定顺序锁定，任一不过 ⇒ 零写入**（D21 版本号递增除外，见文件头；ADR §3 撤销判定表）：
+ *   0  栅栏 → 门 ③ ④ ⑤ 与表级两条先行 → 表版本行（D21，无条件递增）→ 作业行 `FOR UPDATE`（绑 convertRevisionId + fieldId
+ *      + sheetId），无行 ⇒ 404（与不存在同码）
  *   1  已撤销 ⇒ 409 ALREADY_UNDONE
  *   2  前镜像 `FOR UPDATE`，行数 < record_count ⇒ 409 PRE_IMAGE_EXPIRED（先于 ①②③：整组被清后 ② 会把每条记录都报成「新增」）
  *   ①  字段行 `FOR UPDATE`，当前 {type, property} 与作业行目标端 jsonb 相等
@@ -604,6 +615,12 @@ export async function undoFieldRetypeConvert(
   const cap = resolveSheetRevertMaxRecords(env)
   const counted = await countScanRows(query, sheetId)
   if (counted.live + counted.trash > cap) return { ok: false, failure: fieldRetypeConvertTooLarge(counted.live + counted.trash, cap) }
+
+  // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（作业行 FOR UPDATE，其后是前镜像、
+  // 字段行与每个 live 行的 FOR UPDATE）之前取，无条件。撤销把作业行里原样存的 source_property 写回字段——旧式 jsonb 字符串
+  // 会盖掉转换写进去的对象，翻转可见性触发器的标志位；若等触发器在这些行锁之后才取版本行，就与准入事务成环（核验 r1 F2）。
+  // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
+  await bumpSheetPermissionVersions(query, [sheetId])
 
   // 0 —— 作业行。三个条件都在 WHERE 里：拿 B 表 / B 列的 id 来，读到的就是「没有」。
   const jobRes = await query(

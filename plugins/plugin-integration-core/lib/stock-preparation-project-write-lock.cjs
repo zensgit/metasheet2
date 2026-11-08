@@ -154,8 +154,12 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //   * `change_plan_confirm` (batch-refresh step 5 PR-8, design §9.4 / §10.3 (1)): the change-plan confirm bumps the
 //     same way, inside its own transaction — every token planned before the confirm is superseded when it commits;
 //     the controlled update then runs under an ordinary `small_preview` token minted after it.
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm'])
+//   * `issue_confirm_writeback` (both lists; YiDa 发料确认日期回写, design baseline v2.3 §7.3, slice Y9a): the
+//     write-back holds the lease (purpose) around its one version-conditional, host-fenced patch of the
+//     machine column `issueConfirmDate`, and after release bumps the generation (reason) when it wrote — the
+//     carry-confirm shape (yida-issue-confirm-writeback.cjs). Not wired to a route yet (slice Y9).
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'issue_confirm_writeback'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'issue_confirm_writeback'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

@@ -15,7 +15,8 @@ import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
-import { Logger, setLogContext } from './core/logger'
+import { Logger, runWithLogContext, runWithRootTraceContext, setLogContext } from './core/logger'
+import { getRequestContextStorage } from './context/request-context'
 import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
 import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
@@ -476,6 +477,7 @@ import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
 import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
+import { createYidaSourceBindingReauthorizer } from './integration/yida-source-reauthorization-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -590,6 +592,14 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
   })
 }
 
+// Y9 (D5 a): the owner runtime reports a failed post-ACK write-back run as one fixed code. Written outside the request,
+// log and trace contexts the detached run inherited (the owner HTTP observation surface would rewrite the text).
+let yidaOwnerRuntimeLogger: Logger | undefined
+function yidaOwnerRuntimeWarn(code: string): void {
+  const write = () => (yidaOwnerRuntimeLogger ??= new Logger('YidaOwnerRuntime')).warn(code)
+  getRequestContextStorage().exit(() => runWithLogContext({}, () => runWithRootTraceContext(write)))
+}
+
 // Host-owned RC transaction; never the plugin's row-only wrapper or request ALS.
 const yidaOwnerTransaction: YidaOwnerRuntimeDependencies['database']['transaction'] = work =>
   poolManager.get().transaction(async ({ query }) => {
@@ -661,6 +671,13 @@ export class MetaSheetServer {
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
     // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
     readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
+    // D20 (design baseline v2.3): the exact list of target refs that may still take unbound rows besides slot 1.
+    // Default empty: every target other than slot 1 requires a source binding.
+    readUnboundTestTargetRefs: () => process.env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
+    // D21 (design baseline v2.3 §7.2): a bound row is re-authorized inside the approval and admission transactions
+    // from the rows the protocol locked there, never from the request or the RBAC cache.
+    reauthorizeSourceBinding: createYidaSourceBindingReauthorizer(),
+    warn: yidaOwnerRuntimeWarn,
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL

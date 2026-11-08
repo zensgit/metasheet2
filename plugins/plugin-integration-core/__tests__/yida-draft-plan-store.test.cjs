@@ -538,8 +538,8 @@ test('actual in-memory guard downgrades make their direct error/factory/race ass
     security, context: scope,
   }), { code: 'YIDA_DRAFT_UNAVAILABLE' }))
 
-  mutant = await memoryMutant('      const compiled = compileYidaDraft(input)\n      try { return await createDraftInTransaction(trx, input, compiled) }',
-    '      try { const compiled = compileYidaDraft(input); return await createDraftInTransaction(trx, input, compiled) }')
+  mutant = await memoryMutant('      const compiled = compileYidaSendDraft(input)\n      try { return await createDraftInTransaction(trx, input, compiled) }',
+    '      try { const compiled = compileYidaSendDraft(input); return await createDraftInTransaction(trx, input, compiled) }')
   const write = mutant.createInternalYidaDraftTransactionWriter({ security: f.security, context: scope })
   await mutationRed('actual-compiler-before-persistence-closure', () => assert.rejects(write({}, {}), error => {
     assert.equal(error.name, 'YidaDraftPlanError'); assert.equal(error.code, 'YIDA_DRAFT_INPUT'); return true
@@ -564,4 +564,45 @@ test('in-memory removal of private writer capability guard makes the incomplete-
     return rejected(mutant.createInternalYidaDraftTransactionWriter({ security: f.security, context: scope })(trx, input), 'UNAVAILABLE')
   }), error => error instanceof assert.AssertionError && /Missing expected rejection/.test(error.message))
   console.log('MUTATION private-writer-structured-transaction: RED (Missing expected rejection)')
+})
+
+// R-71 ⑦.3: the protocol example restated as v3 (same locator and key definition) plus derived targets.
+async function exampleV3() {
+  const v2 = await example()
+  const target = source => v2.config.fieldMap.find(entry => entry.source === source).target
+  return { ...v2, config: { ...v2.config, version: 3, businessKey: v2.config.businessKey.map(target),
+    emptyKeyFields: v2.config.emptyKeyFields.map(target),
+    fieldCatalog: [...v2.config.fieldCatalog, { id: 'nameCopy', control: 'text', required: false },
+      { id: 'rule', control: 'text', required: true }],
+    fieldMap: [...v2.config.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+      { transform: 'copy', copyOf: 'componentName', target: 'nameCopy', type: 'string', required: false },
+      { transform: 'constant', value: 'SYN-RULE', target: 'rule', type: 'string', required: true }] } }
+}
+
+test('R-71 ⑦.3: a v3 draft persists, reuses and replays; the same layout in v2 and v3 is two operations with shared row identities', async () => {
+  const f = await fixture(), v2 = await f.store.createDraft(await example()), v3 = await f.store.createDraft(await exampleV3())
+  assert.equal(v3.reused, false); assert.equal(v3.targetRef, v2.targetRef); assert.notEqual(v3.operationId, v2.operationId)
+  const again = await f.store.createDraft(await exampleV3())
+  assert.equal(again.reused, true); assert.equal(again.operationId, v3.operationId); assert.deepEqual(again.rows, v3.rows)
+  const replayed = await f.store.replay({ operationId: v3.operationId })
+  assert.equal(replayed.replayVerified, true); assert.equal(replayed.rowCount, 2)
+  const state = f.snapshot()
+  assert.equal(state[TARGET].length, 1); assert.equal(state[OP].length, 2); assert.equal(state[AUDIT].length, 2)
+  assert.notEqual(state[OP][0].plan_digest, state[OP][1].plan_digest)
+  const digests = id => state[ROW].filter(row => row.operation_id === id).sort((a, b) => a.ordinal - b.ordinal).map(row => row.business_key_digest)
+  assert.deepEqual(digests(v3.operationId), digests(v2.operationId))
+  assert.equal(f.readCipher(state[OP][1].snapshot_encrypted).source.config.version, 3)
+})
+
+test('R-71 ⑦.3: changing the sealed mapping version fails the recompile check (UNAVAILABLE) in both directions', async () => {
+  for (const [build, to] of [[exampleV3, 2], [exampleV3, 4], [exampleV3, '3'], [example, 3]]) {
+    const f = await fixture(), made = await f.store.createDraft(await build())
+    f.edit(state => {
+      const envelope = f.readCipher(state[OP][0].snapshot_encrypted)
+      envelope.source.config.version = to
+      state[OP][0].snapshot_encrypted = f.writeCipher(envelope)
+    })
+    await rejected(f.store.replay({ operationId: made.operationId }), 'UNAVAILABLE')
+    await rejected(f.store.inspect({ operationId: made.operationId }), 'UNAVAILABLE')
+  }
 })

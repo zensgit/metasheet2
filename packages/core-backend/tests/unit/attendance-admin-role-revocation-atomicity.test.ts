@@ -146,6 +146,12 @@ function installTransaction(options: {
       call.lockKeys.push(String(params?.[0] ?? ''))
       return { rows: [], rowCount: 1 }
     }
+    // D21 (Y5a): unassignUserRoles bumps the targets' subject authorization version rows (sorted,
+    // one statement) immediately before the membership DELETE, on the same transaction client.
+    if (/INSERT INTO subject_authorization_versions/.test(text)) {
+      call.events.push('authz-version')
+      return { rows: [], rowCount: 1 }
+    }
     if (/DELETE FROM user_roles/.test(text)) {
       call.events.push('delete')
       if (options.failOn === 'delete') throw options.failError ?? markerError()
@@ -224,7 +230,7 @@ function installTransaction(options: {
   })
   pgMocks.query.mockImplementation(async (sql: string) => {
     call.poolSql.push(sql)
-    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed/.test(sql)) {
+    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed|INSERT INTO subject_authorization_versions/.test(sql)) {
       throw new Error('transaction statement reached the pool')
     }
     return { rows: [], rowCount: 0 }
@@ -377,6 +383,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'begin',
       'resolve-targets',
       'lock',
+      'authz-version',
       'delete',
       'list-namespaces',
       'remaining-role',
@@ -423,6 +430,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'lock',
       'lock',
       'lock',
+      'authz-version',
       'delete',
       'list-namespaces',
       'remaining-role',

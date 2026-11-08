@@ -359,21 +359,28 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
     // POSITIVE CONTROL — an in-scope role id does reach the executor, so "no statements"
     // above is a refusal and not a broken harness. Under the delegated arm each write is
     // preceded by the role-row lock and the code read, on the same executor.
+    // D21 (Y5a): each membership write is preceded by the canonical subject version bump, which sits
+    // AFTER the role-row lock + code read (so the role editor's `roles FOR UPDATE → unassign` order and
+    // this `roles FOR SHARE → bump` order cannot cycle) and immediately BEFORE the write.
     await assignUserRoles({ userIds: ['u1'], roleId: 'attendance_employee', scope, executor })
     await unassignUserRoles({ userIds: ['u1'], roleId: 'attendance_employee', scope, executor })
-    expect(statements).toHaveLength(6)
+    expect(statements).toHaveLength(8)
     expect(statements[0]).toMatch(/SELECT id FROM roles WHERE id = \$1 FOR SHARE/)
     expect(statements[1]).toMatch(/SELECT permission_code FROM role_permissions/)
-    expect(statements[2]).toMatch(/INSERT INTO user_roles/)
-    expect(statements[3]).toMatch(/SELECT id FROM roles WHERE id = \$1 FOR SHARE/)
-    expect(statements[4]).toMatch(/SELECT permission_code FROM role_permissions/)
-    expect(statements[5]).toMatch(/DELETE FROM user_roles/)
+    expect(statements[2]).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements[3]).toMatch(/INSERT INTO user_roles/)
+    expect(statements[4]).toMatch(/SELECT id FROM roles WHERE id = \$1 FOR SHARE/)
+    expect(statements[5]).toMatch(/SELECT permission_code FROM role_permissions/)
+    expect(statements[6]).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements[7]).toMatch(/DELETE FROM user_roles/)
 
-    // The platform arms issue the write alone: the code review is confined to the delegated arm.
+    // The platform arms issue the bump and the write alone: the code review is confined to the
+    // delegated arm.
     statements.length = 0
     await assignUserRoles({ userIds: ['u1'], roleId: 'attendance_admin', scope: { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] }, executor })
-    expect(statements).toHaveLength(1)
-    expect(statements[0]).toMatch(/INSERT INTO user_roles/)
+    expect(statements).toHaveLength(2)
+    expect(statements[0]).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements[1]).toMatch(/INSERT INTO user_roles/)
   })
 })
 

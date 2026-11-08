@@ -618,9 +618,31 @@ module.exports = {
         throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
       }
       const { createYidaOwnerRuntimeBinding } = await import('./lib/yida-owner-runtime-factory.mjs')
-      const binding = createYidaOwnerRuntimeBinding({ db, security: Object.freeze({
+      const ownerSecurity = Object.freeze({
         encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
-      }) })
+      })
+      // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, slice Y9): one more frozen capability, assembled from what this
+      // plugin already owns — its db (ledger / audit / trace reads, the trace insert), the project-sheet registry, the
+      // sheet write lease and its own multitable records + provisioning. The host supplies the live re-check per call.
+      // Default OFF: every run reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED (exact 'true') first.
+      // Fails SOFT: a capability that cannot be assembled leaves only the write-back inactive (the send binding is the
+      // original two-member one, the recovery route answers its generic 404) and never takes the owner runtime down.
+      let issueConfirmWriteback = null
+      try {
+        const { createIssueConfirmWritebackCapability } = await import('./lib/yida-issue-confirm-writeback-ports.mjs')
+        issueConfirmWriteback = createIssueConfirmWritebackCapability({
+          db,
+          security: ownerSecurity,
+          projectTargetStore: stockPreparationProjectTargetStore,
+          projectWriteLock: stockPreparationProjectWriteLock,
+          multitable: () => (context.api && context.api.multitable) || null,
+          logger,
+        })
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_ISSUE_CONFIRM_WRITEBACK_INACTIVE`)
+      }
+      const binding = createYidaOwnerRuntimeBinding({ db, security: ownerSecurity,
+        ...(issueConfirmWriteback ? { issueConfirmWriteback } : {}) })
       const handle = await yidaOwnerRuntime.activate(binding)
       if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_OWNER_RUNTIME_UNAVAILABLE')
       stopYidaOwnerRuntime = handle.stop.bind(handle)

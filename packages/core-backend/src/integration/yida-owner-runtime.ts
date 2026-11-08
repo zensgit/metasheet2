@@ -4,7 +4,9 @@ import {
   createInternalYidaSendExecutionAuthority,
   yidaSendApprovalErrorCode,
   type YidaSendExecutionPrimitives,
+  type YidaSourceBindingReauthorizer,
 } from './yida-send-approval-service'
+import { yidaIssueConfirmLiveRecheck, type YidaIssueConfirmRecheck } from './yida-issue-confirm-writeback-authority'
 
 // Host private: authentication supplies actor, and the actual core authority
 // independently proves live ACL and the permanent target owner in PostgreSQL.
@@ -12,12 +14,16 @@ import {
 export type YidaOwnerActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
 type Authority = ReturnType<typeof createInternalYidaSendExecutionAuthority>
 type Send = (input: unknown, options?: { signal?: AbortSignal }) => Promise<unknown>
+type IssueConfirmRecheckPort = (input: unknown) => Promise<boolean>
 export type YidaOwnerRuntimeBinding = Readonly<{
   createPrimitives(context: YidaOwnerActor): YidaSendExecutionPrimitives
   createSendPort(options: Readonly<{
     context: YidaOwnerActor; authority: Authority; fetch: typeof fetch
     readEnablement: () => unknown; timeoutMs: number
   }>): { submit: Send; inspect?(input: unknown): Promise<unknown> }
+  // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, slice Y9): optional, both or neither.
+  createIssueConfirmWriteback?(options: Readonly<{ context: YidaOwnerActor; recheck: IssueConfirmRecheckPort }>): { run(input: unknown): Promise<unknown> }
+  issueConfirmWritebackEnabled?(): boolean
 }>
 export type YidaOwnerRuntimeDependencies = {
   database: { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
@@ -28,8 +34,23 @@ export type YidaOwnerRuntimeDependencies = {
   // Y2: INTEGRATION_YIDA_MULTI_TARGET_ENABLED, read per call (exact 'true'). Absent or anything else =
   // the original single-target authority: no targetRef accepted, slot 1 only. Never send authority.
   readMultiTargetEnablement?: () => unknown
+  // D20 (design baseline v2.3 §3.3/§7.2): INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS, an exact comma-separated
+  // list of target refs that, like slot 1 (the material TEST copy, R-71 decision 1), may still take unbound
+  // rows. Read per call; absent, empty or malformed = no such target. Every other target requires binding.
+  readUnboundTestTargetRefs?: () => unknown
+  // D21 (design baseline v2.3 §7.2): the host's in-transaction re-authorization of a bound row, run by the core
+  // service inside its approval and admission transactions (yida-source-reauthorization-host.ts). Captured once;
+  // absent = the service refuses every bound row (fail closed). Never authority for an unbound (pasted) row.
+  reauthorizeSourceBinding?: YidaSourceBindingReauthorizer
+  // Y9 (design baseline v2.3 §7.3, D13 a): the write-back's live re-check, run on the run-scoped database. Defaults to the
+  // real host check (yida-issue-confirm-writeback-authority.ts); a unit suite may substitute it. Never a request input.
+  issueConfirmRecheck?: YidaIssueConfirmRecheck
+  // Y9: where a failed post-ACK write-back run is reported — one fixed, values-free code, never an id or a message.
+  // index.ts hands the server log (outside any request context); absent = silent. A throwing sink is ignored.
+  warn?: (code: string) => void
 }
-export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string }>
+export type YidaOwnerIssueConfirmWritebackInput = Readonly<{ ledgerIds?: readonly string[]; limit?: number }>
+export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string; sourceBinding?: unknown }>
 export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
 export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string; targetRef?: string }>
 export type YidaOwnerApproveInput = YidaOwnerPreviewInput & Readonly<{ confirmationId: string; ttlMs?: number }>
@@ -39,6 +60,7 @@ type Code = 'INPUT' | 'DISABLED' | 'INACTIVE' | 'UNAVAILABLE' | 'CANCELLED'
 const CODES = new Set<unknown>(['INPUT', 'DISABLED', 'INACTIVE', 'UNAVAILABLE', 'CANCELLED'])
 const ownErrors = new WeakMap<object, Code>()
 const MAX_RUNS = 32
+const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const META = ['grantId', 'operationId', 'rowKey', 'targetRef', 'approvedAt', 'expiresAt',
   'maxAttempts', 'remainingAttempts', 'status', 'revoked', 'admissionId', 'ledgerId', 'canSend', 'externalWriteAttempted']
 const DELIVERY_STATES = new Set(['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'])
@@ -51,8 +73,17 @@ type Registration = {
   closed: boolean; runs: Set<Run>
   createPrimitives: YidaOwnerRuntimeBinding['createPrimitives']
   createSendPort: YidaOwnerRuntimeBinding['createSendPort']
+  createIssueConfirmWriteback?: NonNullable<YidaOwnerRuntimeBinding['createIssueConfirmWriteback']>
+  issueConfirmWritebackEnabled?: NonNullable<YidaOwnerRuntimeBinding['issueConfirmWritebackEnabled']>
   draining?: Promise<void>
 }
+type RunDatabase = { transaction<R>(callback: (trx: Queryable) => Promise<R>): Promise<R> }
+const WRITEBACK_RESULT_KINDS = new Set(['skip', 'retryable', 'outcome'])
+const WRITEBACK_MAX_BATCH = 100
+const CODE = /^[A-Z][A-Z0-9_]{0,95}$/
+const DAY = /^\d{4}-\d{2}-\d{2}$/
+// Y9 (D5 a): the only text a failed post-ACK write-back run ever logs.
+export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
 
 export class YidaOwnerRuntimeError extends Error {
   readonly code: string
@@ -149,6 +180,63 @@ function submitView(value: unknown, grantId: string): Readonly<Row> {
   // material or additional dependency field cannot escape this boundary.
   return Object.freeze({ ...raw, approval: metadata(raw.approval, grantId, false), delivery })
 }
+// Y9 (D5 a): the ledger row a closed submit view arms the post-ACK write-back for — only a durable acknowledged CREATE of
+// THIS grant's ledger row by a runner of THIS call; never prepared / dispatching / not_sent / outcome_unknown /
+// state_unconfirmed, never a reused submit (history only). Anything else: undefined.
+function acknowledgedLedgerId(view: Readonly<Row>): string | undefined {
+  const delivery = view.delivery as Readonly<Row> | null, approval = view.approval as Readonly<Row>
+  if (view.reused !== false || view.status !== 'acknowledged' || view.durable !== true || delivery === null
+    || delivery.status !== 'acknowledged' || typeof delivery.id !== 'string' || delivery.id !== approval.ledgerId) return undefined
+  return delivery.id
+}
+// Y9: the write-back run's values-free projection — ledger ids, closed kinds, fixed codes / reasons / outcomes, the
+// written day and its zone. Anything else (a project number, a key, a message) cannot cross this boundary.
+function writebackView(value: unknown): Readonly<Row> {
+  const raw = record(value, ['enabled', 'results', 'stopped'], ['enabled', 'results'])
+  if (typeof raw.enabled !== 'boolean' || !Array.isArray(raw.results) || raw.results.length > WRITEBACK_MAX_BATCH
+    || (raw.enabled === false && raw.results.length !== 0)
+    || (Object.hasOwn(raw, 'stopped') && raw.stopped !== 'SWITCH_OFF')) fail('UNAVAILABLE')
+  const results = raw.results.map(item => {
+    const kind = record(item, ['ledgerId', 'kind', 'reason', 'code', 'outcome', 'recorded', 'date', 'timeZone'], ['ledgerId', 'kind'])
+    if (!WRITEBACK_RESULT_KINDS.has(kind.kind as string)) fail('UNAVAILABLE')
+    const ledgerId = id(kind.ledgerId)
+    if (kind.kind === 'skip') {
+      const row = record(item, ['ledgerId', 'kind', 'reason'])
+      if (typeof row.reason !== 'string' || !/^[a-z_]{1,64}$/.test(row.reason)) fail('UNAVAILABLE')
+      return Object.freeze({ ledgerId, kind: 'skip', reason: row.reason })
+    }
+    if (kind.kind === 'retryable') {
+      const row = record(item, ['ledgerId', 'kind', 'code'])
+      if (typeof row.code !== 'string' || !CODE.test(row.code)) fail('UNAVAILABLE')
+      return Object.freeze({ ledgerId, kind: 'retryable', code: row.code })
+    }
+    const dated = Object.hasOwn(item as object, 'date')
+    const row = record(item, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone'] : ['ledgerId', 'kind', 'outcome', 'recorded'])
+    if (typeof row.outcome !== 'string' || !/^[a-z_]{1,64}$/.test(row.outcome) || typeof row.recorded !== 'boolean'
+      || (dated && (typeof row.date !== 'string' || !DAY.test(row.date) || typeof row.timeZone !== 'string' || !row.timeZone
+        || row.timeZone.length > 64))) fail('UNAVAILABLE')
+    return Object.freeze({ ledgerId, kind: 'outcome', outcome: row.outcome, recorded: row.recorded,
+      ...(dated ? { date: row.date, timeZone: row.timeZone } : {}) })
+  })
+  return Object.freeze({ enabled: raw.enabled, results: Object.freeze(results),
+    ...(Object.hasOwn(raw, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) })
+}
+function writebackInput(value: unknown): Readonly<Row> {
+  const parsed = record(value, ['ledgerIds', 'limit'], [])
+  const result: Row = {}
+  if (Object.hasOwn(parsed, 'ledgerIds')) {
+    const ids = parsed.ledgerIds
+    if (!Array.isArray(ids) || types.isProxy(ids) || ids.length < 1 || ids.length > WRITEBACK_MAX_BATCH) fail('INPUT')
+    const seen = new Set<string>()
+    for (const value of ids) { const key = id(value); if (seen.has(key)) fail('INPUT'); seen.add(key) }
+    result.ledgerIds = Object.freeze([...seen])
+  }
+  if (Object.hasOwn(parsed, 'limit')) {
+    if (!Number.isSafeInteger(parsed.limit) || Number(parsed.limit) < 1 || Number(parsed.limit) > WRITEBACK_MAX_BATCH) fail('INPUT')
+    result.limit = parsed.limit
+  }
+  return Object.freeze(result)
+}
 
 export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencies) {
   // These are trusted host dependencies, captured once with their native owner.
@@ -158,8 +246,16 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const fetcher = dependencies.fetch
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
   const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
+  const readUnboundTestTargetRefs = dependencies.readUnboundTestTargetRefs ?? (() => undefined)
+  const reauthorizeSourceBinding = dependencies.reauthorizeSourceBinding
+  const issueConfirmRecheck = dependencies.issueConfirmRecheck ?? yidaIssueConfirmLiveRecheck
+  const warnSink = dependencies.warn ?? (() => {})
+  const warn = (code: string) => { try { warnSink(code) } catch { /* reporting never fails anything */ } }
   const timeoutMs = dependencies.timeoutMs ?? 10000
   if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
+    || typeof readUnboundTestTargetRefs !== 'function' || typeof issueConfirmRecheck !== 'function' || types.isProxy(issueConfirmRecheck)
+    || typeof warnSink !== 'function'
+    || (reauthorizeSourceBinding !== undefined && (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)))
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
   // Exact literal, never coerced; a throwing or async switch is OFF.
   function multiTargetOn(): boolean {
@@ -168,6 +264,18 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     const on = flag === 'true'
     if (!on) consumeRejection(flag)
     return on
+  }
+  // D20 allowlist, exact list: comma-separated target refs (UUIDs), each byte-exact (no trim, no case folding).
+  // Anything else (a throwing or async reader, an empty entry, a non-UUID entry) is the empty list, so a
+  // malformed value can only make formal targets stricter, never admit an unbound row.
+  function unboundTestTargetRefs(): ReadonlySet<string> {
+    let value: unknown
+    try { value = readUnboundTestTargetRefs() } catch { return new Set() }
+    if (typeof value !== 'string') { consumeRejection(value); return new Set() }
+    if (value === '') return new Set()
+    const entries = value.split(',')
+    if (entries.some(entry => !TARGET_REF.test(entry))) return new Set()
+    return new Set(entries)
   }
   let active: Registration | undefined, capabilityGeneration = 0, terminal = false
   let terminalDrain: Promise<void> | undefined
@@ -192,7 +300,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     return state.draining
   }
   function execute<T>(inputActor: unknown, options: unknown, requiresEnablement: boolean,
-    work: (authority: Authority, state: Registration, context: YidaOwnerActor, checkpoint: () => void, signal: AbortSignal, tracked: Tracked) => Promise<T>): Promise<T> {
+    work: (authority: Authority, state: Registration, context: YidaOwnerActor, checkpoint: () => void, signal: AbortSignal, tracked: Tracked,
+      database: RunDatabase) => Promise<T>): Promise<T> {
     try {
       const context = actor(inputActor), caller = signalOf(options), state = active
       if (terminal || !state || state.closed) fail('INACTIVE')
@@ -249,9 +358,10 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           checkpoint()
           // Captured once per run: a switch flip mid-run cannot widen this authority.
           const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
-            ...(multiTargetOn() ? { multiTarget: true } : {}) })
+            ...(multiTargetOn() ? { multiTarget: true } : {}), unboundTestTargetRefs: unboundTestTargetRefs(),
+            ...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })
           checkpoint()
-          return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked))
+          return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked, database))
         } catch (error) {
           // A private core/plugin boundary may already have closed a host
           // cancellation to UNAVAILABLE. Local lifetime/control takes priority
@@ -276,6 +386,21 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       try { closeError(error) } catch (closed) { return rejected<T>(closed) }
     }
   }
+  // Y9 (D5 a): the post-ACK write-back of ONE acknowledged ledger row, a tracked run of the active registration. It needs
+  // neither the send switch nor the send authority: like the recovery entry it creates the plugin's bound write-back with
+  // the host live re-check on ITS OWN run database (so a stop() checkpoint cancels it and drain waits for it), and the
+  // plugin core reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED first. Its outcome is the module's trace / no-trace;
+  // a rejection is logged as one fixed values-free code and never reaches anyone.
+  function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {
+    const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
+      if (!state.createIssueConfirmWriteback) return undefined
+      const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
+        recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) })), ['run'])
+      if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
+      return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)({ ledgerIds: [ledgerId] }))
+    })
+    Promise.prototype.then.call(pending, undefined, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
+  }
   function input<T>(capture: () => T, invoke: (captured: T) => Promise<unknown>): Promise<unknown> {
     try { return invoke(capture()) }
     catch (error) {
@@ -292,15 +417,23 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           try {
             if (terminal || used || generation !== capabilityGeneration || active) fail('INACTIVE')
             used = true
-            const closed = record(binding, ['createPrimitives', 'createSendPort'])
-            for (const key of ['createPrimitives', 'createSendPort']) {
+            const closed = record(binding, ['createPrimitives', 'createSendPort', 'createIssueConfirmWriteback', 'issueConfirmWritebackEnabled'],
+              ['createPrimitives', 'createSendPort'])
+            // Y9: the write-back members come together or not at all.
+            const writeback = Object.hasOwn(closed, 'createIssueConfirmWriteback')
+            if (writeback !== Object.hasOwn(closed, 'issueConfirmWritebackEnabled')) fail('INPUT')
+            for (const key of ['createPrimitives', 'createSendPort', ...(writeback ? ['createIssueConfirmWriteback', 'issueConfirmWritebackEnabled'] : [])]) {
               if (typeof closed[key] !== 'function' || types.isProxy(closed[key])) fail('INPUT')
             }
             // Registration only captures functions; it does no DB, grant,
             // material, token or network work and is allowed while OFF.
             const state: Registration = { closed: false, runs: new Set(),
               createPrimitives: closed.createPrimitives as YidaOwnerRuntimeBinding['createPrimitives'],
-              createSendPort: closed.createSendPort as YidaOwnerRuntimeBinding['createSendPort'] }
+              createSendPort: closed.createSendPort as YidaOwnerRuntimeBinding['createSendPort'],
+              ...(writeback ? {
+                createIssueConfirmWriteback: closed.createIssueConfirmWriteback as NonNullable<YidaOwnerRuntimeBinding['createIssueConfirmWriteback']>,
+                issueConfirmWritebackEnabled: closed.issueConfirmWritebackEnabled as NonNullable<YidaOwnerRuntimeBinding['issueConfirmWritebackEnabled']>,
+              } : {}) }
             active = state
             return Promise.resolve(Object.freeze({ stop: () => {
               if (active === state && !state.closed) ++capabilityGeneration
@@ -314,9 +447,12 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     },
     prepareDraft(context: YidaOwnerActor, supplied: YidaOwnerPrepareDraftInput) {
       return input(() => {
-        const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef'], ['config', 'rowsText'])
+        const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding'], ['config', 'rowsText'])
         if (typeof parsed.rowsText !== 'string' || Buffer.byteLength(parsed.rowsText, 'utf8') > 16 * 1024 * 1024) fail('INPUT')
         if (Object.hasOwn(parsed, 'targetRef')) { if (!multiTargetOn()) fail('INPUT'); id(parsed.targetRef) }
+        // A source binding exists only on the multi-target sheet-source path (D17 a); the route produces it, a
+        // request body cannot. The plugin compiler owns its closed shape.
+        if (Object.hasOwn(parsed, 'sourceBinding') && !multiTargetOn()) fail('INPUT')
         return parsed
       }, parsed => execute(context, {}, true, authority => authority.prepareDraft(parsed)))
     },
@@ -357,22 +493,42 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       return input(() => {
         const parsed = record(supplied, ['grantId', 'submissionId'])
         return { grantId: id(parsed.grantId), submissionId: id(parsed.submissionId) }
-      }, parsed => execute(context, options, true, async (authority, state, fixed, checkpoint, signal, tracked) => {
-        // Gate 6 (R-71 ⑦.1, c4): checkpoint BEFORE the request only. A Response that has already
-        // been received is a fact about the remote system; re-checking after it resolved would turn
-        // a received 2xx into outcome_unknown when the switch flipped or the host closed mid-flight.
-        // The dependency is still tracked so drain waits for it, and the pre-output checkpoint
-        // below still refuses to expose the result while OFF/closed (the ledger is the record).
-        const boundFetch: typeof fetch = async (request, init) => { checkpoint(); return tracked(fetcher(request, init)) }
-        const port = record(state.createSendPort(Object.freeze({ context: fixed, authority, fetch: boundFetch, readEnablement, timeoutMs })),
-          ['submit', 'inspect'], ['submit'])
-        if (typeof port.submit !== 'function' || types.isProxy(port.submit)) fail('UNAVAILABLE')
-        const submit = port.submit as Send
-        checkpoint()
-        const response = await submit(parsed, { signal })
-        checkpoint()
-        return submitView(response, parsed.grantId)
-      }))
+      }, parsed => {
+        let received: { actor: YidaOwnerActor; response: unknown } | undefined
+        const sent = execute(context, options, true, async (authority, state, fixed, checkpoint, signal, tracked) => {
+          // Gate 6 (R-71 ⑦.1, c4): checkpoint BEFORE the request only. A Response that has already
+          // been received is a fact about the remote system; re-checking after it resolved would turn
+          // a received 2xx into outcome_unknown when the switch flipped or the host closed mid-flight.
+          // The dependency is still tracked so drain waits for it, and the pre-output checkpoint
+          // below still refuses to expose the result while OFF/closed (the ledger is the record).
+          const boundFetch: typeof fetch = async (request, init) => { checkpoint(); return tracked(fetcher(request, init)) }
+          const port = record(state.createSendPort(Object.freeze({ context: fixed, authority, fetch: boundFetch, readEnablement, timeoutMs })),
+            ['submit', 'inspect'], ['submit'])
+          if (typeof port.submit !== 'function' || types.isProxy(port.submit)) fail('UNAVAILABLE')
+          const submit = port.submit as Send
+          checkpoint()
+          const response = await submit(parsed, { signal })
+          // Y9: kept for the after-submit step only (a binding with the write-back capability); read nowhere else.
+          if (state.createIssueConfirmWriteback) received = { actor: fixed, response }
+          checkpoint()
+          return submitView(response, parsed.grantId)
+        })
+        // Y9 — design baseline v2.3 D5 a / §7.3: the post-ACK write-back runs AFTER submit has returned its result. It is
+        // scheduled only once the send's own run has settled (its result is final and its dependencies drained), as a
+        // run of its own in this registration, so deactivate / stop drain it like any run; the send result never waits
+        // for it and never reflects its outcome. A refused schedule (host closing, run cap) or a failed run leaves the
+        // date to the owner recovery entry (POST /issue-confirm-writeback), whose day is the acknowledgement audit's.
+        // Scheduled on either settlement: the acknowledgement is durable even when the send run's own exit refuses to
+        // expose it (the send switch flipped OFF after the receipt); a closed host refuses the schedule by itself.
+        const afterSubmit = () => {
+          if (received === undefined) return
+          let ledgerId: string | undefined
+          try { ledgerId = acknowledgedLedgerId(submitView(received.response, parsed.grantId)) } catch { return }
+          if (ledgerId !== undefined) issueConfirmAfterAcknowledged(received.actor, ledgerId)
+        }
+        Promise.prototype.then.call(sent, afterSubmit, afterSubmit)
+        return sent
+      })
     },
     // Values-free display bit for a response the caller already authorized
     // (owner + live admin). Same exact-literal source as enabled(); never
@@ -387,6 +543,37 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     // Y2 display/shape bit for the owner route (target picker, sheet source). Never authority:
     // the run's authority re-reads the same exact literal and refuses a targetRef while OFF.
     multiTargetEnabled(): boolean { return multiTargetOn() },
+    // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, slice Y9): the route's 404-while-OFF bit. It is the plugin core's
+    // own exact-literal predicate of INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED (no second reader of the
+    // variable in the host); false without an active binding that carries the capability. Never authority: every run
+    // reads the switch again before any dependency is touched.
+    issueConfirmWritebackEnabled(): boolean {
+      const state = active
+      if (terminal || !state || state.closed || !state.issueConfirmWritebackEnabled) return false
+      try { return state.issueConfirmWritebackEnabled() === true } catch { return false }
+    },
+    // The owner recovery entry (D5 b / D9): one bounded, idempotent write-back run for THIS owner's acknowledged
+    // issue-confirm CREATEs — named ledger rows or the next untraced batch. It never needs the send switch, never
+    // builds a send port, a runner, a transport or a token client, and writes no ledger, audit, grant or admission:
+    // the only rows it can add are trace rows, the only cell it can change is issueConfirmDate.
+    issueConfirmWriteback(context: YidaOwnerActor, supplied: YidaOwnerIssueConfirmWritebackInput) {
+      return input(() => writebackInput(supplied),
+        parsed => execute(context, {}, false, async (authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
+          if (!state.createIssueConfirmWriteback || !state.issueConfirmWritebackEnabled) fail('UNAVAILABLE')
+          // Switch OFF (a flip after the route's 404 check): refused before any proof, read or write.
+          let on = false
+          try { on = state.issueConfirmWritebackEnabled() === true } catch { on = false }
+          if (!on) fail('DISABLED')
+          // The owner routes' own live proof first (live integration admin + the permanent slot-1 owner, i.e. the anchor
+          // owner of every target), so a refused caller learns nothing and nothing is read; the per-row re-check under
+          // the sheet lease follows inside the run.
+          await authority.proveDraftTarget({})
+          const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
+            recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) })), ['run'])
+          if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
+          return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed))
+        }))
+    },
     deactivate(): Promise<void> {
       ++capabilityGeneration
       return active ? drain(active) : Promise.resolve()

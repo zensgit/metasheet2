@@ -28,6 +28,7 @@
  * Transactions: `transaction(handler)` snapshots every table, runs the handler, and RESTORES the snapshot when the
  * handler throws — a rollback exactly as strong as the assertion that uses it.
  */
+import { SHEET_PERMISSION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 
 export type FakeRow = Record<string, unknown>
 export interface FakeStatement { sql: string; params: unknown[]; inTransaction: boolean }
@@ -83,6 +84,13 @@ export interface FakeWorld {
   /** database-side authority, keyed by user id; a user absent here does not exist in the database */
   dbUsers: Record<string, FakeDbUser>
   fieldPermissions: FakeFieldPermission[]
+  /**
+   * D21 `sheet_permission_versions`, keyed by sheet id: how many times the explicit bump ran (authz-version-protocol.ts
+   * SHEET_PERMISSION_VERSIONS_BUMP_SQL). Not one of the tables a "zero writes" assertion compares: the module header
+   * of field-retype-convert-execute.ts lets a refused conversion / undo commit this one increment. Optional so a
+   * hand-built world needs no entry.
+   */
+  sheetVersions?: Record<string, number>
 }
 
 export interface FakePgOptions {
@@ -100,6 +108,7 @@ export function emptyWorld(): FakeWorld {
     conversionsTable: true,
     dbUsers: {},
     fieldPermissions: [],
+    sheetVersions: {},
   }
 }
 
@@ -109,6 +118,15 @@ export function dbUser(permissions: string[], over: Partial<FakeDbUser> = {}): F
 }
 
 const normalize = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
+
+/** The D21 explicit sheet bump, as the product issues it (whitespace-normalised): the only statement the fake models on
+ * `sheet_permission_versions`. Matched by EXACT text, so a reworded bump is unhandled in a transaction (throws). */
+const D21_SHEET_VERSION_BUMP = normalize(SHEET_PERMISSION_VERSIONS_BUMP_SQL)
+
+/** Whether a statement (raw or normalised) is the D21 sheet version bump. */
+export function isFakeSheetVersionBump(sql: string): boolean {
+  return normalize(sql) === D21_SHEET_VERSION_BUMP
+}
 const hasOwn = (data: object, key: string): boolean => Object.prototype.hasOwnProperty.call(data, key)
 
 const isJsonObject = (data: unknown): data is Record<string, unknown> => data !== null && typeof data === 'object' && !Array.isArray(data)
@@ -153,6 +171,7 @@ function snapshotWorld(world: FakeWorld): FakeWorld {
     conversionsTable: world.conversionsTable,
     dbUsers: clone(world.dbUsers),
     fieldPermissions: clone(world.fieldPermissions),
+    sheetVersions: clone(world.sheetVersions ?? {}),
   }
 }
 
@@ -236,6 +255,13 @@ export class FieldRetypeConvertFakePg {
       return w.sheets.filter((s) => s.id === p[0]).map((s) => ({ recovery_writer_state: s.recovery_writer_state }))
     }
     if (sql.includes("to_regclass('meta_field_retype_conversions')")) return [{ present: w.conversionsTable }]
+
+    // ── D21 sheet version bump: one increment per listed sheet id (an upsert: absent → 1) ──────────────────
+    if (sql === D21_SHEET_VERSION_BUMP) {
+      const versions = (w.sheetVersions ??= {})
+      for (const id of Array.isArray(p[0]) ? (p[0] as unknown[]) : []) versions[String(id)] = (versions[String(id)] ?? 0) + 1
+      return []
+    }
 
     // ── database-side authority (recovery-authorization-stability.ts loadDatabaseFreshRecoveryAccess) ────
     if (sql.startsWith('SELECT role, permissions, COALESCE(is_active, TRUE) AS is_active') && sql.includes('FROM users WHERE id = $1')) {
@@ -485,7 +511,10 @@ export class FieldRetypeConvertFakePg {
 
 /**
  * Statements that write or lock. Used to assert "zero writes" and "nothing locked". The write pattern is anchored at
- * the statement start: `SELECT … FOR UPDATE` is a lock, not a write.
+ * the statement start: `SELECT … FOR UPDATE` is a lock, not a write. It does NOT count the D21 sheet version bump
+ * (`INSERT INTO sheet_permission_versions …`, the protocol module is that table's only writer): a refused conversion /
+ * undo may commit that one increment (field-retype-convert-execute.ts header). Where the bump runs is pinned on its
+ * own with {@link isFakeSheetVersionBump}.
  */
-export const FAKE_WRITE_RE = /^\s*(INSERT|UPDATE|DELETE|TRUNCATE)\b/i
+export const FAKE_WRITE_RE = /^\s*(?!INSERT\s+INTO\s+sheet_permission_versions\b)(INSERT|UPDATE|DELETE|TRUNCATE)\b/i
 export const FAKE_LOCK_RE = /\b(FOR\s+UPDATE|FOR\s+SHARE|pg_advisory\w*|LOCK\s+TABLE)\b/i

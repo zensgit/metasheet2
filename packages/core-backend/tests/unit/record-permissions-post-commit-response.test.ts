@@ -37,6 +37,9 @@ function createSqlHandler(opts: { dbAdmin: boolean }): (sql: string, params?: un
       return { rows: [] }
     }
 
+    // D21 (Y5a): the sheet permission version bump is the route's FIRST statement, ahead of the locks.
+    if (q.startsWith('INSERT INTO sheet_permission_versions')) return { rows: [], rowCount: 1 }
+
     // Shared sheet + actor + sheet-grant authority locks precede the row-auth advisory.
     if (q.includes('SELECT id FROM meta_sheets') && q.includes('FOR SHARE')) {
       return { rows: [{ id: params[0] }] }

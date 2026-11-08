@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
+import { isAuthorizationVersionConflict, lockSubjectAuthorizationVersionForAdmission } from '../multitable/authz-version-protocol'
 import { assertAutomationIntegrationActor } from './automation-live-authority'
 
 // Internal host service only. Trusted authentication must supply context; this
@@ -10,8 +11,16 @@ type Context = { actorId: string; tenantId: string; workspaceId: null }
 type Row = Record<string, unknown>
 // LIMIT (gate 4, R-71 ⑦.2): the selected row would exceed the shared YiDa send budget (runner snapshot
 // or form request body). Fixed and values-free: no byte count, field name or value.
-type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE' | 'LIMIT'
-const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT'])
+// IDENTITY_RESERVED (design baseline v2.3 §3.3, D16 a): the row's logical creation identity (key value +
+// project number, the material code's inputs) already has a ledger row under this target; refused at approval,
+// before any grant, so the operator sees it early. The partial unique index on the ledger is the final guarantee.
+// GENERATED_LAYOUT_CONFLICT (external review P1, 2026-11-08; migration zzzz20261108120000): the target's generated layout
+// was sealed by an earlier approval / admission and this selection's layout signature differs (another template shape on
+// the same target could give another identity the same code). Refused at approval and at admission, before any write.
+type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE' | 'LIMIT' | 'IDENTITY_RESERVED'
+  | 'GENERATED_LAYOUT_CONFLICT'
+const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT', 'IDENTITY_RESERVED',
+  'GENERATED_LAYOUT_CONFLICT'])
 const ownErrors = new WeakMap<object, ErrorCode>()
 const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
@@ -20,14 +29,18 @@ const DIGEST = /^[0-9a-f]{64}$/
 // Y2 multi-target: additional owner-attested targets live in slots 2..16 (migration zzzz20261103130000).
 const MAX_SLOT = 16
 const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+// Source binding (§7.2): a selection names its two row digests (null for an unbound row) and its per-row binding.
 const SELECTION_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
   'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest',
-  'rowPayloadDigest', 'planDigest', 'config', 'selectedRow', 'source', 'plan'] as const
+  'rowPayloadDigest', 'planDigest', 'sourceRecordDigest', 'creationIdentityDigest', 'sourceBinding',
+  'config', 'selectedRow', 'source', 'plan'] as const
+const ROW_BINDING_KEYS = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', 'projectNo', 'fieldBindings', 'fieldDependencies'] as const
 const BINDING_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'credentialRef', 'credentialGeneration'] as const
 const IDENTITY_KEYS = ['tenantId', 'workspaceId', 'ownerId', 'actorId', 'operationId', 'rowKey'] as const
 const GRANT_ANCHOR_KEYS = ['grant_id', 'confirmation_id', 'tenant_id', 'workspace_id', 'owner_id', 'target_ref',
   'operation_id', 'row_key', 'target_revision', 'plan_revision', 'plan_digest', 'credential_ref',
   'credential_generation', 'business_key_digest', 'row_payload_digest', 'execution_payload_digest',
+  'source_record_digest', 'creation_identity_digest',
   'ttl_ms', 'approved_at_ms', 'expires_at_ms', 'max_attempts', 'snapshot_encrypted'] as const
 const abortedGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!
 type Checkpoint = () => void
@@ -94,6 +107,10 @@ function digest(value: unknown): string {
   if (typeof value !== 'string' || !DIGEST.test(value)) fail('UNAVAILABLE')
   return value
 }
+// A binding digest: null for an unbound row, otherwise a 64-hex sha256.
+function optionalDigest(value: unknown): string | null {
+  return value === null ? null : digest(value)
+}
 function millis(value: unknown): number {
   if (typeof value !== 'number' && (typeof value !== 'string' || !/^[0-9]{1,16}$/.test(value))) fail('UNAVAILABLE')
   const parsed = Number(value)
@@ -146,21 +163,41 @@ function canonical(value: unknown): string {
   return text
 }
 
+/** The per-row source binding of a bound selection (design baseline v2.3 §7.2); null for a pasted row. */
+export type YidaSourceRowBinding = Readonly<{
+  sheetId: string; recordId: string; keyFieldId: string; keyValue: string; projectNo: string
+  fieldBindings: Readonly<Record<string, string>>; fieldDependencies: Readonly<Record<string, readonly string[]>>
+}>
+/**
+ * D21 (design baseline v2.3 §7.2 「分界是准入提交」): the host's in-transaction re-authorization of ONE bound row
+ * (`yida-sheet-source.ts reauthorizeYidaSourceBinding`, wired through the runtime). Called by approve() and
+ * persistAdmission() on their own `trx`, after the actor's subject version row and the live-authority rows are
+ * held. Answers a frozen plain verdict (`{ authorized: true }` or `{ authorized: false, code }`); this service
+ * maps it to its own fixed codes and never inspects anything else about it.
+ */
+export type YidaSourceBindingReauthorizer = (trx: Queryable, actor: Readonly<Context>, binding: YidaSourceRowBinding) => Promise<unknown>
 export type YidaSendAuthoritySelection = Readonly<{
   tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
   targetRef: string; targetRevision: 'evidence-1'; planRevision: string
   credentialRef: string; credentialGeneration: number; businessKeyDigest: string
-  rowPayloadDigest: string; planDigest: string; config: unknown; selectedRow: unknown; source: unknown; plan: unknown
+  rowPayloadDigest: string; planDigest: string
+  sourceRecordDigest: string | null; creationIdentityDigest: string | null; sourceBinding: YidaSourceRowBinding | null
+  config: unknown; selectedRow: unknown; source: unknown; plan: unknown
 }>
 export type YidaSendAuthorityPrimitives = {
   resolveSelectionInTransaction(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<YidaSendAuthoritySelection>
   executionPayloadDigest(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): string | Promise<string>
   // Gate 4: synchronous, one frozen boolean. Anything else (a promise, a Proxy, an accessor) is refused.
   sendBudget(selection: YidaSendAuthoritySelection, input: { grantRef: string; expiresAt: number; actorId: string }): Readonly<{ withinBudget: boolean }>
+  // P1 (2026-11-08): seal-or-match the target's generated layout on this trx, inside approve() / persistAdmission(), after
+  // the host's own checks and before its first write. A frozen plain verdict: { admissible: true, sealed } or
+  // { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }; this service maps it to its own fixed codes.
+  sealGeneratedLayoutInTransaction(trx: Queryable, selection: YidaSendAuthoritySelection, input: { event: 'approve' | 'admit' }): Promise<unknown>
   prepareInTransaction(trx: Queryable, input: {
     tenantId: string; workspaceId: null; ownerId: string; operationId: string; rowKey: string
     targetRef: string; targetRevision: string; planRevision: string; credentialRef: string
     credentialGeneration: number; businessKeyDigest: string; payloadDigest: string; intent: 'create'
+    sourceRecordDigest?: string | null; creationIdentityDigest?: string | null; sourceBinding?: YidaSourceRowBinding | null
   }): Promise<{ record: Row; reused: boolean }>
 }
 export type YidaSendApprovalMetadata = Readonly<{
@@ -179,6 +216,13 @@ type Dependencies = {
   // Y2: true only while the host multi-target switch reads exact 'true' for this run. False/absent =
   // the original permanent slot-1 authority, byte for byte (no targetRef accepted or forwarded).
   multiTarget?: boolean
+  // D20 (design baseline v2.3 §3.3/§7.2): target refs that may take UNBOUND rows besides slot 1 (the material
+  // TEST copy, R-71 decision 1). Every other target refuses an unbound row at approval and at admission. The
+  // runtime parses INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS once per run; absent = empty.
+  unboundTestTargetRefs?: ReadonlySet<string>
+  // D21 (§7.2): re-authorizes a BOUND row inside approve() / persistAdmission(); never consulted for an unbound row.
+  // Absent = every bound row is refused (fail closed); the host runtime always wires it (yida-owner-runtime.ts).
+  reauthorizeSourceBinding?: YidaSourceBindingReauthorizer
 }
 // A multi-target transaction names its target: explicitly (draft/preview/approve) or through the
 // immutable grant row (inspect/revoke/admit/observe/execution). Never chosen from a request scope.
@@ -192,6 +236,8 @@ export type YidaSendExecutionPrimitives = YidaSendAuthorityPrimitives & {
   loadExecutionMaterialInTransaction(trx: Queryable, input: { credentialRef: string; credentialGeneration: number }):
     Promise<YidaExecutionCredentialBinding & { appKey: string; appSecret: string; systemToken: string; userId: string }>
   prepareDraftInTransaction?(trx: Queryable, input: unknown): Promise<Readonly<Row>>
+  // R-71 ⑦.3 decision C1: pure and synchronous, one frozen boolean, checked before a draft is written.
+  draftSendBudget?(input: unknown): Readonly<{ withinBudget: boolean }>
   previewInTransaction?(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<Readonly<Row>>
 }
 export type YidaSendExecutionDependencies = Omit<Dependencies, 'primitives'> & { primitives: YidaSendExecutionPrimitives }
@@ -208,24 +254,39 @@ export type YidaSendExecutionHandle = Readonly<{
   close(): void
 }>
 
-function createApprovalInternals({ database, security, context, primitives, multiTarget }: Dependencies,
+function createApprovalInternals({ database, security, context, primitives, multiTarget, unboundTestTargetRefs, reauthorizeSourceBinding }: Dependencies,
   executionPrimitives?: YidaSendExecutionPrimitives) {
   const multi = multiTarget === true
+  // Captured once: a Set of exact target refs, or empty. Never widened after construction.
+  const unboundTargets: ReadonlySet<string> = new Set(unboundTestTargetRefs instanceof Set
+    ? [...unboundTestTargetRefs].filter((value): value is string => typeof value === 'string' && TARGET_REF.test(value)) : [])
   const rawContext = record(context, ['actorId', 'tenantId', 'workspaceId'])
   const fixed: Context = Object.freeze({ actorId: id(rawContext.actorId), tenantId: id(rawContext.tenantId), workspaceId: null })
   if (rawContext.workspaceId !== null) fail('INPUT')
   if (!database || typeof database.transaction !== 'function' || !security || typeof security.encrypt !== 'function'
     || typeof security.decrypt !== 'function' || !primitives
-    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'prepareInTransaction']
+    || ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'sealGeneratedLayoutInTransaction', 'prepareInTransaction']
       .some(key => typeof primitives[key as keyof YidaSendAuthorityPrimitives] !== 'function')) fail('UNAVAILABLE')
 
-  async function transaction<T>(callback: (trx: Queryable, targetRef: string, bound: TargetBinding) => Promise<T>,
-    checkpoint = noCheckpoint, selector?: TargetSelector): Promise<T> {
+  // D21 phase 1 (approve / admit only): the actor's subject authorization version row FOR SHARE BEFORE the
+  // live-actor rows, so this holder's order on the subject layer is the writer rule's (subject row → users): an
+  // access-graph writer that bumped the subject row first waits here until the commit instead of forming a cycle
+  // with the `users FOR SHARE` the live-actor check takes next. The sheet version rows and the bound record follow
+  // inside the re-authorization. A lock conflict (40P01 / 40001 / 55P03) is CONFLICT, never a pass.
+  async function lockSubjectVersion(trx: Queryable) {
+    try { await lockSubjectAuthorizationVersionForAdmission(trx, fixed.actorId) }
+    catch (error) { fail(isAuthorizationVersionConflict(error) ? 'CONFLICT' : 'UNAVAILABLE') }
+  }
+  // The callback also learns the locked target's slot: slot 1 is the material TEST copy (R-71 decision 1), the
+  // one target that may take unbound rows without being listed (D20).
+  async function transaction<T>(callback: (trx: Queryable, targetRef: string, bound: TargetBinding, slot: number) => Promise<T>,
+    checkpoint = noCheckpoint, selector?: TargetSelector, subjectLock = false): Promise<T> {
     try {
       if (selector !== undefined && !multi) fail('INPUT')
       return await checked(checkpoint, () => database.transaction(async trx => {
         // The provider has BEGIN already. This must precede even the xid probe.
         await checked(checkpoint, () => trx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED'))
+        if (subjectLock) await checked(checkpoint, () => lockSubjectVersion(trx))
         await checked(checkpoint, () => assertAutomationIntegrationActor(trx, fixed))
         if (selector === undefined) {
           const result = await checked(checkpoint, () => trx.query('SELECT slot, target_ref, tenant_id, workspace_id, owner_id, evidence_version, status FROM integration_yida_approved_target WHERE slot = 1 FOR UPDATE'))
@@ -233,7 +294,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
           if (result.rows.length !== 1 || slot.tenant_id !== fixed.tenantId || slot.workspace_id !== null
             || slot.owner_id !== fixed.actorId) fail('NOT_FOUND')
           if (slot.slot !== 1 || slot.status !== 'manually_confirmed' || slot.evidence_version !== 1) fail('UNAVAILABLE')
-          return checked(checkpoint, () => callback(trx, id(slot.target_ref), null))
+          return checked(checkpoint, () => callback(trx, id(slot.target_ref), null, 1))
         }
         // Y2: a grant names its target for good (append-only row); read that binding, then lock the
         // target row exactly as the slot-1 path does. A grant of another owner/tenant is NOT_FOUND.
@@ -252,9 +313,80 @@ function createApprovalInternals({ database, security, context, primitives, mult
         if (!Number.isInteger(slot.slot) || Number(slot.slot) < 1 || Number(slot.slot) > MAX_SLOT || slot.status !== 'manually_confirmed'
           || slot.evidence_version !== 1) fail('UNAVAILABLE')
         const binding: TargetBinding = Object.freeze({ draftTargetRef: id(slot.draft_target_ref) })
-        return checked(checkpoint, () => callback(trx, id(slot.target_ref), binding))
+        return checked(checkpoint, () => callback(trx, id(slot.target_ref), binding, Number(slot.slot)))
       }))
     } catch (error) { closeError(error) }
+  }
+  // D20 (design baseline v2.3 §3.3, §7.2): a formal target takes bound rows only. Slot 1 (the material TEST
+  // copy) and the exact-listed test targets may still take an unbound row, which is then fenced by the
+  // seven-key reservation alone. Checked at approval and again at admission, each inside its transaction.
+  function assertBindingRequired(selected: YidaSendAuthoritySelection, targetRef: string, slot: number) {
+    if (selected.creationIdentityDigest !== null) return
+    if (slot === 1 || unboundTargets.has(targetRef)) return
+    fail('CONFLICT')
+  }
+  // Early identity rejection (§3.3): a read-only look at the ledger before a grant is written. The partial
+  // unique index on the ledger decides the race at admission; this only moves the answer forward.
+  async function assertIdentityFree(trx: Queryable, selected: YidaSendAuthoritySelection, targetRef: string) {
+    if (selected.creationIdentityDigest === null) return
+    const reserved = await trx.query('SELECT 1 FROM integration_yida_delivery_ledger WHERE tenant_id = $1 AND workspace_id IS NULL AND target_ref = $2 AND intent = $3 AND creation_identity_digest = $4 LIMIT 1',
+      [fixed.tenantId, targetRef, 'create', selected.creationIdentityDigest])
+    if (reserved.rows.length !== 0) fail('IDENTITY_RESERVED')
+  }
+  // D21 (§7.2): a bound row is re-authorized INSIDE this transaction, on this trx, by the host's in-transaction re-check
+  // (every check of the draft-time read, from locked rows). Only a frozen plain verdict passes. A refused check or a
+  // lock conflict is CONFLICT (nothing written: the enclosing transaction rolls back, the grant keeps its attempt);
+  // a protocol gap, a malformed verdict, a thrown error or an absent re-authorizer is UNAVAILABLE. An unbound row
+  // (pasted rowsText) has nothing to re-authorize: D20 decides whether its target may take it.
+  async function reauthorize(trx: Queryable, selected: YidaSendAuthoritySelection) {
+    if (selected.sourceBinding === null) return
+    if (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)) fail('UNAVAILABLE')
+    let verdict: unknown
+    try { verdict = await reauthorizeSourceBinding(trx, fixed, selected.sourceBinding) } catch { fail('UNAVAILABLE') }
+    assertReauthorizationVerdict(verdict)
+  }
+  function assertReauthorizationVerdict(verdict: unknown) {
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.some(key => typeof key !== 'string') || !Object.hasOwn(descriptors, 'authorized') || !Object.hasOwn(descriptors.authorized, 'value')) fail('UNAVAILABLE')
+    if (descriptors.authorized.value === true) {
+      if (keys.length !== 1) fail('UNAVAILABLE')
+      return
+    }
+    if (descriptors.authorized.value !== false || keys.length !== 2 || !Object.hasOwn(descriptors, 'code')
+      || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
+    // The check that refused (registry, table, field, record) or a lock conflict: the operator re-checks and retries.
+    if (['REGISTRY', 'SHEET', 'FIELD', 'RECORD', 'CONFLICT'].includes(descriptors.code.value as string)) fail('CONFLICT')
+    fail('UNAVAILABLE')
+  }
+  // P1 (external review 2026-11-08): the target's generated layout is sealed once, by the first approval or admission
+  // that uses a generated entry, and every later selection with another layout signature is refused — on this trx, after
+  // the D20 / identity / D21 checks and before the first write (the grant row, the ledger row). A selection without a
+  // generated entry (v2, or v3 with none) has the null signature: refused on a sealed target, admissible and sealing
+  // nothing on an unsealed one (verifier r1 of the P1 fix). Every selection here is intent 'create' (the primitives
+  // refuse any other intent before this point), so no 'update' draft is ever judged. The primitive answers a frozen
+  // plain verdict; only its exact conflict code becomes GENERATED_LAYOUT_CONFLICT, anything else is UNAVAILABLE.
+  async function sealGeneratedLayout(trx: Queryable, selected: YidaSendAuthoritySelection, event: 'approve' | 'admit') {
+    let verdict: unknown
+    try { verdict = await primitives.sealGeneratedLayoutInTransaction(trx, selected, { event }) } catch { fail('UNAVAILABLE') }
+    assertGeneratedLayoutVerdict(verdict)
+  }
+  function assertGeneratedLayoutVerdict(verdict: unknown) {
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.some(key => typeof key !== 'string') || keys.length !== 2 || !Object.hasOwn(descriptors, 'admissible')
+      || !Object.hasOwn(descriptors.admissible, 'value')) fail('UNAVAILABLE')
+    if (descriptors.admissible.value === true) {
+      if (!Object.hasOwn(descriptors, 'sealed') || !Object.hasOwn(descriptors.sealed, 'value') || typeof descriptors.sealed.value !== 'boolean') fail('UNAVAILABLE')
+      return
+    }
+    if (descriptors.admissible.value !== false || !Object.hasOwn(descriptors, 'code') || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
+    if (descriptors.code.value === 'GENERATED_LAYOUT_CONFLICT') fail('GENERATED_LAYOUT_CONFLICT')
+    fail('UNAVAILABLE')
   }
   // Y2: an operation (draft) is compiled for exactly one target's app/form. Under a named target it
   // must belong to that target's draft locator, or the request is a cross-target attempt: CONFLICT.
@@ -283,6 +415,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
       || Number(row.credential_generation) > 2147483647) fail('UNAVAILABLE')
     for (const key of ['plan_revision', 'plan_digest', 'business_key_digest', 'row_payload_digest', 'execution_payload_digest']) digest(row[key])
     if (row.plan_revision !== row.plan_digest) fail('UNAVAILABLE')
+    // The two binding digests travel together: both null (unbound) or both 64-hex.
+    if ((optionalDigest(row.source_record_digest) === null) !== (optionalDigest(row.creation_identity_digest) === null)) fail('UNAVAILABLE')
     cipher(row.snapshot_encrypted)
     return row
   }
@@ -325,6 +459,14 @@ function createApprovalInternals({ database, security, context, primitives, mult
     if (!Number.isInteger(checked.credentialGeneration) || Number(checked.credentialGeneration) < 1
       || Number(checked.credentialGeneration) > 2147483647 || checked.planRevision !== checked.planDigest) fail('UNAVAILABLE')
     for (const key of ['planRevision', 'planDigest', 'businessKeyDigest', 'rowPayloadDigest']) digest(checked[key])
+    // Binding (§7.2): both digests and the per-row binding are present together, or all three are null.
+    const isBound = optionalDigest(checked.sourceRecordDigest) !== null
+    if (isBound !== (optionalDigest(checked.creationIdentityDigest) !== null) || isBound !== (checked.sourceBinding !== null)) fail('UNAVAILABLE')
+    if (isBound) {
+      const rowBinding = record(checked.sourceBinding, ROW_BINDING_KEYS)
+      for (const key of ['sheetId', 'recordId', 'keyFieldId', 'projectNo']) id(rowBinding[key])
+      if (typeof rowBinding.keyValue !== 'string' || !rowBinding.keyValue) fail('UNAVAILABLE')
+    }
     canonical(selected)
     // Preserve the original object's private port brand for the digest call.
     return selected
@@ -353,7 +495,10 @@ function createApprovalInternals({ database, security, context, primitives, mult
   // passes; false is LIMIT, and any other shape (or a thrown error) is UNAVAILABLE. Either way the
   // enclosing transaction rolls back.
   function assertSendBudget(selected: YidaSendAuthoritySelection, grant: { grantRef: string; expiresAt: number; actorId: string }) {
-    const verdict: unknown = primitives.sendBudget(selected, grant)
+    assertBudgetVerdict(primitives.sendBudget(selected, grant))
+  }
+  // One verdict rule for the gate-4 budget at approval/admission and the R-71 ⑦.3 draft-time budget.
+  function assertBudgetVerdict(verdict: unknown) {
     if (types.isPromise(verdict)) {
       // Observe an ordinary local rejection only; never consult a dependency-owned constructor.
       try {
@@ -383,7 +528,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
     const ttlMs = Object.hasOwn(parsed, 'ttlMs') ? parsed.ttlMs : MAX_TTL
     if (!Number.isInteger(ttlMs) || Number(ttlMs) < 1 || Number(ttlMs) > MAX_TTL) fail('INPUT')
     const selector = Object.hasOwn(parsed, 'targetRef') ? Object.freeze({ targetRef: id(parsed.targetRef) }) : undefined
-    return transaction(async (trx, targetRef, bound) => {
+    return transaction(async (trx, targetRef, bound, slot) => {
       const previous = await trx.query('SELECT * FROM integration_yida_send_approvals WHERE tenant_id = $1 AND owner_id = $2 AND confirmation_id = $3 FOR UPDATE',
         [fixed.tenantId, fixed.actorId, confirmationId])
       if (previous.rows.length > 1) fail('UNAVAILABLE')
@@ -405,25 +550,33 @@ function createApprovalInternals({ database, security, context, primitives, mult
       const executionDigest = digest(await primitives.executionPayloadDigest(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId }))
       // Gate 4: refuse before the grant row (and its sealed snapshot) exists.
       assertSendBudget(selected, { grantRef: grantId, expiresAt, actorId: fixed.actorId })
+      // D20, then the early identity rejection (§3.3), then the D21 re-authorization: all before any grant row exists.
+      assertBindingRequired(selected, targetRef, slot)
+      await assertIdentityFree(trx, selected, targetRef)
+      await reauthorize(trx, selected)
+      // P1: the first approval with a generated entry seals the target's generated layout; another layout is refused here.
+      await sealGeneratedLayout(trx, selected, 'approve')
       const row: Row = { grant_id: grantId, confirmation_id: confirmationId, tenant_id: fixed.tenantId, workspace_id: null,
         owner_id: fixed.actorId, target_ref: targetRef, operation_id: operationId, row_key: rowKey, target_revision: selected.targetRevision,
         plan_revision: selected.planRevision, plan_digest: selected.planDigest, credential_ref: selected.credentialRef,
         credential_generation: selected.credentialGeneration, business_key_digest: selected.businessKeyDigest,
         row_payload_digest: selected.rowPayloadDigest, execution_payload_digest: executionDigest,
+        source_record_digest: selected.sourceRecordDigest, creation_identity_digest: selected.creationIdentityDigest,
         ttl_ms: ttlMs, approved_at_ms: approvedAt, expires_at_ms: expiresAt, max_attempts: 1 }
       row.snapshot_encrypted = cipher(await security.encrypt(canonical(envelope(row, selected))))
       const result = await trx.query(`INSERT INTO integration_yida_send_approvals
         (grant_id, confirmation_id, tenant_id, workspace_id, owner_id, target_ref, operation_id, row_key,
          target_revision, plan_revision, plan_digest, credential_ref, credential_generation, business_key_digest,
-         row_payload_digest, execution_payload_digest, ttl_ms, approved_at_ms, expires_at_ms, max_attempts, snapshot_encrypted)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`, Object.values(row))
+         row_payload_digest, execution_payload_digest, source_record_digest, creation_identity_digest,
+         ttl_ms, approved_at_ms, expires_at_ms, max_attempts, snapshot_encrypted)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`, Object.values(row))
       if (result.rows.length !== 1) fail('UNAVAILABLE')
       const inserted = checkGrant(result.rows[0], targetRef)
       if (Object.entries(row).some(([key, value]) => ['approved_at_ms', 'expires_at_ms'].includes(key)
         ? millis(inserted[key]) !== value : inserted[key] !== value)) fail('UNAVAILABLE')
       await audit(trx, grantId, 'approve')
       return Object.freeze({ ...await metadata(trx, inserted), reused: false })
-    }, noCheckpoint, selector)
+    }, noCheckpoint, selector, true)
   }
   async function inspect(input: unknown) {
     const grantId = id(record(input, ['grantId']).grantId)
@@ -448,7 +601,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
   }
   async function persistAdmission(input: unknown): Promise<{ approval: ApprovalResult; anchor: ExecutionAnchor | null }> {
     const parsed = record(input, ['grantId', 'submissionId']), grantId = id(parsed.grantId), submissionId = id(parsed.submissionId)
-    return transaction(async (trx, targetRef, bound) => {
+    return transaction(async (trx, targetRef, bound, slot) => {
       const row = await grant(trx, targetRef, grantId), state = await facts(trx, row)
       if (state.admission) {
         if (state.admission.submission_id !== submissionId) fail('CONFLICT')
@@ -461,11 +614,22 @@ function createApprovalInternals({ database, security, context, primitives, mult
       // Gate 4: refuse before the ledger row (the permanent business-key fence) is prepared. The grant
       // stays approved with its one attempt; nothing is revoked or consumed (owner choice h1).
       assertSendBudget(selected, { grantRef: id(row.grant_id), expiresAt: millis(row.expires_at_ms), actorId: fixed.actorId })
+      // D20 again at admission: the grant's target still requires a binding, and the sealed selection's digests
+      // must be the grant row's own (both covered by the execution digest compared above).
+      assertBindingRequired(selected, targetRef, slot)
+      if (selected.sourceRecordDigest !== optionalDigest(row.source_record_digest)
+        || selected.creationIdentityDigest !== optionalDigest(row.creation_identity_digest)) fail('CONFLICT')
+      // D21: the four checks, inside THIS transaction, before the ledger row (the admission's first write).
+      await reauthorize(trx, selected)
+      // P1: the sealed generated layout again at admission (sealed here if no approval sealed it yet).
+      await sealGeneratedLayout(trx, selected, 'admit')
       const prepared = await primitives.prepareInTransaction(trx, { tenantId: fixed.tenantId, workspaceId: null,
         ownerId: fixed.actorId, operationId: selected.operationId, rowKey: selected.rowKey, targetRef,
         targetRevision: selected.targetRevision, planRevision: selected.planRevision, credentialRef: selected.credentialRef,
         credentialGeneration: selected.credentialGeneration, businessKeyDigest: selected.businessKeyDigest,
-        payloadDigest: executionDigest, intent: 'create' })
+        payloadDigest: executionDigest, intent: 'create',
+        sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest,
+        sourceBinding: selected.sourceBinding })
       if (prepared.reused !== false) fail('CONFLICT')
       const ledger = prepared.record
       if (!ledger || ledger.tenantId !== fixed.tenantId || ledger.workspaceId !== null || ledger.ownerId !== fixed.actorId
@@ -485,7 +649,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
       const admissionId = id(result.rows[0].id), ledgerId = id(ledger.id)
       if (approval.status !== 'admitted' || approval.admissionId !== admissionId || approval.ledgerId !== ledgerId) fail('UNAVAILABLE')
       return { approval, anchor: Object.freeze({ grantId, admissionId, submissionId, ledgerId, grant: grantAnchor(row) }) }
-    }, noCheckpoint, grantSelector(grantId))
+    }, noCheckpoint, grantSelector(grantId), true)
   }
   async function admit(input: unknown): Promise<ApprovalResult> {
     // A public admission never inserts anything into the execution-permit map.
@@ -499,7 +663,8 @@ function createApprovalInternals({ database, security, context, primitives, mult
       operation_id: row.operation_id, row_key: row.row_key, target_ref: row.target_ref,
       target_revision: row.target_revision, plan_revision: row.plan_revision, credential_ref: row.credential_ref,
       credential_generation: row.credential_generation, business_key_digest: row.business_key_digest,
-      payload_digest: row.execution_payload_digest, intent: 'create', instance_id: null }
+      payload_digest: row.execution_payload_digest, intent: 'create', instance_id: null,
+      source_record_digest: row.source_record_digest ?? null, creation_identity_digest: row.creation_identity_digest ?? null }
     if (Object.entries(expected).some(([key, value]) => ledger[key] !== value)) fail('CONFLICT')
     if (typeof ledger.status !== 'string'
       || !['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'].includes(ledger.status)) fail('UNAVAILABLE')
@@ -520,16 +685,23 @@ function createApprovalInternals({ database, security, context, primitives, mult
     }, noCheckpoint, grantSelector(grantId))
   }
   async function prepareDraft(input: unknown): Promise<Readonly<Row>> {
-    const supplied = record(input, multi ? ['config', 'rowsText', 'allocation', 'targetRef'] : ['config', 'rowsText', 'allocation'],
+    // A source binding rides only on the multi-target sheet-source path (D17 a); its closed shape is the plugin
+    // compiler's. Under the original single-target authority the key itself is refused.
+    const supplied = record(input, multi ? ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding'] : ['config', 'rowsText', 'allocation'],
       ['config', 'rowsText', 'allocation'])
     const selector = Object.hasOwn(supplied, 'targetRef') ? Object.freeze({ targetRef: id(supplied.targetRef) }) : undefined
-    const parsed = record({ config: supplied.config, rowsText: supplied.rowsText, allocation: supplied.allocation },
-      ['config', 'rowsText', 'allocation'])
+    const withBinding = Object.hasOwn(supplied, 'sourceBinding')
+    const parsed = record({ config: supplied.config, rowsText: supplied.rowsText, allocation: supplied.allocation,
+      ...(withBinding ? { sourceBinding: supplied.sourceBinding } : {}) },
+    withBinding ? ['config', 'rowsText', 'allocation', 'sourceBinding'] : ['config', 'rowsText', 'allocation'])
     // Literal data only, never a source/Connection reference or a query port.
     // The actual plugin compiler applies its tighter input/row budgets too.
     canonical(parsed)
-    if (!executionPrimitives?.prepareDraftInTransaction) fail('UNAVAILABLE')
+    if (!executionPrimitives?.prepareDraftInTransaction || typeof executionPrimitives.draftSendBudget !== 'function') fail('UNAVAILABLE')
     return transaction(async (trx, targetRef, bound) => {
+      // R-71 ⑦.3 decision C1: a draft the shared send budget would refuse at approval is refused
+      // here (LIMIT, 422), before any draft row is written; the transaction rolls back.
+      assertBudgetVerdict(executionPrimitives.draftSendBudget!(parsed))
       const result = await executionPrimitives.prepareDraftInTransaction!(trx, targeted(parsed, targetRef, bound))
       const view = record(result, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply',
         'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])
@@ -653,6 +825,7 @@ function createApprovalInternals({ database, security, context, primitives, mult
         return Object.freeze({ ...identity, grantRef: anchor.grantId, expiresAt: millis(row.expires_at_ms),
           targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
           credentialRef: selected.credentialRef, credentialGeneration: selected.credentialGeneration,
+          sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest,
           config: selected.config, row: selected.selectedRow, systemToken: material.systemToken, userId: material.userId })
       } catch (error) { closed = true; return closeError(error) }
       finally { if (ownsBusy) busy = false }

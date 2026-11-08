@@ -1224,6 +1224,128 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// R-71 ⑦.4 PR-3 — THE FROZEN TEMPLATE'S MISSING COLUMNS, ON ONE NAMED OBJECT (report-first).
+//
+// WHY. The pull's DB-backed existence probe refuses a target that lacks any frozen template column
+// (422 TARGET_SCHEMA_INCOMPLETE, stock-preparation-table-actions.cjs `assertTargetFieldsExist`). So the
+// moment a template column is merged and installed, every project sheet created before it stops
+// pulling until the column exists there too. The canonical repair verb above heals ONLY the
+// deployment's own main object and has no production entry (the pin above stays `false`); the ops
+// script heals a deployment table by hand. A project sheet needs its own additive path — this one,
+// called by the project-sheet repair leg of `POST …/options/sync` with the REGISTRY ROW's objectId.
+//
+// THE SAME DISCIPLINE AS THE CANONICAL VERB, not a looser copy:
+//   * the column set is the FROZEN main template's, never a caller's (no `template` input at all);
+//   * only the MISSING set is written, through the host's additive ON-CONFLICT-DO-NOTHING primitive;
+//   * every missing column passes `assertRepairableFieldOwnership` (plm_system, or a human column the
+//     template AND the human whitelist agree on) BEFORE any write;
+//   * read → write → re-read → before/after byte compare all run in ONE host transaction, so a
+//     mutated existing column, a column still missing after the write, or a column a concurrent
+//     writer inserted (skipped-existing) ROLLS THE WRITE BACK;
+//   * nothing missing ⇒ no write call at all (a second run adds 0 and says so).
+//
+// REPORT FIRST. `apply: false` (the default) only READS — the non-transactional existence read — and
+// answers what an apply would add, which missing columns an apply would refuse, and how many are
+// already present. It never calls a write method. `apply: true` is the owner-gated field-creating
+// write; there is no UI undo, so the caller decides when to send it.
+//
+// VALUES-FREE: logical template ids and counts only — never a physical id, a name or a row value.
+async function reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId, apply = false, locale } = {}) {
+  const project = requiredString(projectId, 'projectId')
+  const object = requiredString(objectId, 'objectId')
+  const template = normalizeStockPreparationTemplate({ ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, objectId: object })
+  const fieldIds = templateFieldIds(template)
+  const ownershipById = new Map(template.fields.map((field) => [field.id, field.ownership]))
+  const humanSet = new Set(HUMAN_PRESERVED_FIELD_IDS)
+  const ownershipCheck = (id) => assertRepairableFieldOwnership({
+    fieldId: id,
+    ownership: ownershipById.get(id),
+    isWhitelisted: humanSet.has(id),
+    templateFieldIds: fieldIds,
+    objectId: object,
+  })
+  const summarize = ({ checked, missingIds, addedIds = [], refusedIds = [] }) => ({
+    checked,
+    applied: apply === true,
+    templateFieldCount: fieldIds.length,
+    alreadyPresent: checked ? fieldIds.length - missingIds.length : null,
+    missingFieldIds: [...missingIds],
+    addedFieldIds: [...addedIds],
+    added: addedIds.length,
+    refusedFieldIds: [...refusedIds],
+  })
+
+  if (apply !== true) {
+    if (!provisioning || typeof provisioning.resolveExistingObjectFieldIds !== 'function') {
+      return summarize({ checked: false, missingIds: [] })
+    }
+    const resolved = await provisioning.resolveExistingObjectFieldIds({ projectId: project, objectId: object, fieldIds })
+    const missingIds = missingLogicalFields(template, resolved || {})
+    const refusedIds = []
+    for (const id of missingIds) {
+      try {
+        ownershipCheck(id)
+      } catch (error) {
+        if (!(error instanceof StockPreparationTargetProvisioningError)) throw error
+        refusedIds.push(id)
+      }
+    }
+    return summarize({ checked: true, missingIds, refusedIds })
+  }
+
+  if (!provisioning || typeof provisioning.runObjectFieldsRepairTransaction !== 'function') {
+    throw new StockPreparationTargetProvisioningError(
+      503,
+      'TEMPLATE_COLUMN_REPAIR_API_UNAVAILABLE',
+      'adding the missing template columns requires multitable.provisioning.runObjectFieldsRepairTransaction (atomic repair)',
+      { requiredMethods: ['runObjectFieldsRepairTransaction'] },
+    )
+  }
+  const descriptor = buildStockPreparationTargetDescriptor({ template, locale })
+  return provisioning.runObjectFieldsRepairTransaction(async (tx) => {
+    const sheet = await tx.findObjectSheet({ projectId: project, objectId: object })
+    if (!sheet) {
+      throw new StockPreparationTargetProvisioningError(409, 'TEMPLATE_COLUMN_REPAIR_TARGET_ABSENT', 'the named sheet does not exist; nothing was added', { objectId: object })
+    }
+    const expected = optionalString(expectedSheetId)
+    if (expected && String(sheet.id) !== expected) {
+      throw new StockPreparationTargetProvisioningError(409, 'TEMPLATE_COLUMN_REPAIR_SHEET_MISMATCH', 'the object resolves to a different sheet than the one registered; nothing was added', { objectId: object })
+    }
+    const resolved = await tx.resolveExistingObjectFieldIds({ projectId: project, objectId: object, fieldIds })
+    const missingIds = missingLogicalFields(template, resolved || {})
+    // Every refusal BEFORE any write: one human column the two authorities disagree on fails the
+    // whole call, nothing is half-added.
+    for (const id of missingIds) ownershipCheck(id)
+    if (missingIds.length === 0) return summarize({ checked: true, missingIds })
+    const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
+    const beforeContent = await tx.readObjectFieldsContent({ projectId: project, objectId: object, fieldIds: existingIds })
+    const missingDescriptors = descriptor.fields.filter((field) => missingIds.includes(field.id))
+    const writeResult = await tx.ensureMissingObjectFields({ projectId: project, objectId: object, fields: missingDescriptors })
+    const skipped = writeResult && Array.isArray(writeResult.skippedExistingFieldIds) ? writeResult.skippedExistingFieldIds : []
+    if (skipped.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'REPAIR_CONCURRENT_FIELD_APPEARED',
+        'a missing field was inserted by a concurrent writer during repair; retry after it settles',
+        { objectId: object, skippedExistingFieldCount: skipped.length },
+      )
+    }
+    const resolvedAfter = await tx.resolveExistingObjectFieldIds({ projectId: project, objectId: object, fieldIds })
+    const stillMissing = missingLogicalFields(template, resolvedAfter || {})
+    if (stillMissing.length) {
+      throw new StockPreparationTargetProvisioningError(
+        409,
+        'TEMPLATE_COLUMN_REPAIR_INCOMPLETE',
+        'a template column is still missing after the additive write; nothing was kept',
+        { objectId: object, missingFieldCount: stillMissing.length },
+      )
+    }
+    assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId: project, objectId: object, fieldIds: existingIds }), object)
+    return summarize({ checked: true, missingIds, addedIds: missingIds })
+  })
+}
+
+// ---------------------------------------------------------------------------
 // CARRY TARGET OWNERSHIP — the ONE decision, so the runtime wall and the deploy-time preflight
 // cannot disagree about the same binding.
 //
@@ -1323,6 +1445,8 @@ module.exports = {
   // The reachability fact about the verb above, exported so a test can pin it against the actual
   // wiring instead of against a sentence in a PR body (see its doc comment).
   CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
+  // R-71 ⑦.4 PR-3: the frozen template's missing columns on ONE named object (report-first; see above).
+  reconcileFrozenTemplateColumnsOnObject,
   // Exported for its own direct witnesses: the ownership rule that decides whether the
   // additive heal path may create a given column (see the doc comment above it).
   assertRepairableFieldOwnership,

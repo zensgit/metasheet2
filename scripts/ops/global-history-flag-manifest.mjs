@@ -81,6 +81,41 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
+    key: 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS',
+    type: 'list',
+    activationValue:
+      'comma-separated YiDa target refs (UUIDs, byte-exact, no trim); UNSET/EMPTY/malformed ⇒ no listed target, only slot 1 takes unbound rows',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'D20 of the YiDa standardization design baseline v2.3 (§3.3, §7.2; R-71 decision 1): a FORMAL YiDa target takes only rows that carry a server-read source binding (sheet, record, key column, key value, project, field map; their two digests travel with the draft row, the grant and the ledger row, and the creation-identity fence keys on one of them). Slot 1 is the material TEST copy and may still take unbound pasted rows, fenced by the seven-key reservation alone; this list names the OTHER test-copy targets (slots 2..16) allowed the same. Every target not slot 1 and not listed refuses an unbound row at approval and at admission (409 CONFLICT, no grant, no ledger row, no send). Read per run by the owner runtime; a malformed value is the empty list, so a typo can only make formal targets stricter. Danger=high because a listed target ref admits rows that no identity fence covers: listing a production form is exactly what D20 forbids. Values-free: refusals never echo the list or the target.',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts#unboundTestTargetRefs; packages/core-backend/src/integration/yida-send-approval-service.ts#assertBindingRequired',
+  },
+  {
+    key: 'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "YiDa 发料确认日期回写 (design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2, slice Y9a). Default OFF; exact literal 'true' only (no trim, no case folding), read on EVERY call before any dependency is touched. On: after a YiDa issue-confirm CREATE is acknowledged (2xx + instance id; never outcome_unknown, prepared, dispatching or not_sent), the write-back fills the registered project sheet's machine column issueConfirmDate with the acknowledgement audit's calendar day in MULTITABLE_BUSINESS_TIMEZONE, only for rows whose target_ref is listed in INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS and whose source_record_digest is bound; an existing date is never overwritten; decision D14: it writes only registered project sheets and also reads MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED (exact 'true', per row and again right before the patch) — off, every selected row is skipped and counted as project_sheets_disabled with no registry read and no trace row, so it is decided again once that switch is on (not modeled as dependsOn: the project-sheets switch is the 備料 line's own, and this skip is the D14 behaviour, not a requires rule); one version-conditional, host-fenced patch under the sheet write lease (purpose issue_confirm_writeback); one append-only trace row per ledger row (migration zzzz20261106093100). It never constructs a runner, transport or token client, so it can never cause a second form submission. WRITES THE CUSTOMER'S PRODUCTION SHEET: an O-level owner decision. Turning it on on a deployed machine, filling the target list and running the backfill are each separately approved. Wired in slice Y9: the owner send port calls it best-effort once after an acknowledged CREATE (never in the send transaction), and the owner recovery entry POST /api/integration/yida-owner-send/issue-confirm-writeback runs it on demand; that route answers the generic 404 while this switch is off, through this same predicate (no second reader of the variable).",
+    source: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#issueConfirmWritebackEnabled',
+  },
+  {
+    key: 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS',
+    type: 'list',
+    activationValue:
+      'comma-separated issue-confirm target_ref UUIDs (trimmed, exact lowercase match, de-duplicated); UNSET/EMPTY => nothing is selected (zero reads, zero writes)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "YiDa 发料确认日期回写 target list (decision D7, slice Y9a): the formal issue-confirm targets whose acknowledged CREATEs may write the local issueConfirmDate. A test copy is never listed, so its confirmations never reach a production row. Only read while INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED is on, but NOT modeled as dependsOn: isActivated() is false for every non-boolean spec, so a requires rule keyed off this list would never fire. Danger=high: listing a target authorises machine writes to the customer's production sheets (O-level, owner-approved per target).",
+    source: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#parseIssueConfirmTargetRefs',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
