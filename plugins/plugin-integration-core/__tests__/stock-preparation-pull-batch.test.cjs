@@ -1302,6 +1302,8 @@ test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pu
     'lib/stock-preparation-apply-writer.cjs',
     'lib/stock-preparation-large-bom-jobs.cjs',
     'lib/stock-preparation-pilot-readiness.cjs',
+    // BI-2 (R-65): the per-sheet install library (portable; it reaches the ledger only through its injected deps).
+    'lib/stock-preparation-pull-batch-install.cjs',
     'lib/stock-preparation-pull-batch-lanes.cjs',
     'lib/stock-preparation-pull-batch-status.cjs',
     'lib/stock-preparation-pull-batch-store.cjs',

@@ -34,6 +34,19 @@ test('PT-2 the ledger store requires node:crypto and the pure module only (no lo
   assert.deepEqual(requiresOf('stock-preparation-pull-batch-store.cjs').sort(), ["'./stock-preparation-pull-batch.cjs'", "'node:crypto'"].sort())
 })
 
+// BI-2 (R-65; P2-21): the per-sheet install library is portable too — the pure module only, and its TEXT (comments
+// included) names neither the ledger store's file nor the pull-batch switch (both reach it through injected deps).
+test('PT-4 the install library requires the pure module only', () => {
+  assert.deepEqual(requiresOf('stock-preparation-pull-batch-install.cjs'), ["'./stock-preparation-pull-batch.cjs'"])
+})
+
+test('PT-5 the install library text names neither the store file nor the switch env key', () => {
+  const text = fs.readFileSync(path.join(LIB, 'stock-preparation-pull-batch-install.cjs'), 'utf8')
+  assert.equal(text.includes('stock-preparation-pull-batch-store'), false)
+  assert.equal(text.includes('STOCK_PREP_PULL_BATCH_ENABLED'), false)
+  assert.equal(text.includes('process.env'), false)
+})
+
 test('PT-3 the scan is witnessed: a lazy require inside a function body is found', () => {
   const sample = "function f() { return require('./stock-preparation-project-write-lock.cjs') }\n// require('./commented-out.cjs')\n"
   const found = Array.from(sample.split('\n').map((line) => line.replace(/(^|[^:'"`])\/\/.*$/, '$1')).join('\n').matchAll(/\brequire\s*\(\s*([^)]*)\)/g)).map((m) => m[1])

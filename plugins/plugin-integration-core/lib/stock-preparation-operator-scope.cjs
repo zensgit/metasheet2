@@ -222,6 +222,12 @@
 //           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
 //           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
 //           sheet state.
+//       35. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
+//           批次标识 BI-2 (design §8.1-§8.6; register R-65), ADMIN. The per-sheet install (dry_run / install / abort): a
+//           WRITE of the proven tenant's project sheet — the band columns, the plugin views, the landing, the persisted
+//           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope
+//           with no request projectId. Every real run is owner gate ② per sheet. A header-fillable tenant here would
+//           install onto another tenant's sheet.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
