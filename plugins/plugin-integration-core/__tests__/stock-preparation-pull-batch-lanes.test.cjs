@@ -33,6 +33,15 @@
 //   LN-16  cross-lane join: a large job's open batch is JOINED by a small apply of the same content (one digest)
 //   LN-17  source order: P-1 (before beginExecution), the stamp after the execution exists, the chunk gate before running
 //   LN-18  vocabularies and the stored-plan / execution-ref validation (critic M6)
+//   LN-21  S6 C-6 (review MF-1): a takeover right before the allocation ⇒ 409 LEASE_LOST, nothing created, NO batch and
+//          NO link — on the small apply and on a large chunk; the finish under the refused holder is a no-op
+//   LN-22  (MF-1) the finish runs inside the guard's host-write bracket (open, finish, close) with the holder assert
+//   LN-23  (MF-2) the §6.4 chunk-gate rows: no plan on a resolved sheet / band no longer proven / unresolved sheet ⇒
+//          409 REPLAN with the job untouched; switch OFF after an ON plan ⇒ the chunk runs UNSTAMPED, zero ledger IO
+//   LN-24  (MF-3) the small writer's catch finishes the link failed (count NULL); the batch stays open
+//   LN-25  (MF-3) lib level, two chunks: the link is finished ONCE, at the terminal status, with the JOB total
+//   LN-26  (MF-5) the defensive guards: a probed id that is not the derived physical id, a not_found preview, a later
+//          chunk that allocates nothing, the reader-only lane, a holder assert that is not a function
 //
 // Every value is synthetic.
 
@@ -110,7 +119,7 @@ function mount({ ledger = 'real', band = true, sheet = 'born_empty', bandless = 
   let n = 0
   const untouchable = ledger === 'untouchable' ? untouchableStore() : null
   const realStore = ledger === 'real' ? createStockPreparationPullBatchStore({ db: bridged, now: clock.now, idGenerator: (kind) => `${kind}_syn_${(n += 1)}` }) : null
-  const store = realStore ? (wrapStore ? wrapStore(realStore, ledgerDb) : realStore) : (untouchable ? untouchable.store : null)
+  const store = realStore ? (wrapStore ? wrapStore(realStore, ledgerDb, lockEnv) : realStore) : (untouchable ? untouchable.store : null)
   const h = harness.mountProjectSheetRoutes({
     tenantId: TENANT,
     projectNo: PROJECT,
@@ -720,6 +729,351 @@ test('LN-20 the strip runs BEFORE the prefix classification (M-1B-3): a parked m
   assert.equal(bare[0][SYMBOL], undefined, 'no band ⇒ no Symbol (byte-identical rows)')
   assert.equal(bare[0].fld_syn_pb, '第1批（2026-11-08）')
   await assert.rejects(readExistingStockPreparationRows(api, { ...target, fieldIdMap: { notes: 'fld_syn_pb' } }, PROJECT, { pullBatchBand: band }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID)
+})
+
+// ── review fixes (verify round 1: MF-1, MF-2, MF-3, MF-5) ─────────────────────────────────────────────────────────
+
+const LEASE_LOST = swl.PROJECT_WRITE_ERROR_CODES.LEASE_LOST
+const CHUNK = `${JOBS}/:jobId/apply-jobs/:applyJobId/run`
+
+/** THE TAKEOVER: another holder's lease lands on every lock row (a new lease id and a later fencing epoch). */
+function takeOver(lockEnv) {
+  const table = lockEnv.db.tables.get(LOCK_TABLE)
+  let moved = 0
+  for (const [key, row] of table ? table.entries() : []) {
+    table.set(key, { ...row, lease_id: 'lease-syn-other-holder', fencing_epoch: Number(row.fencing_epoch || 0) + 1 })
+    moved += 1
+  }
+  return moved
+}
+
+/** A store wrapper that lands the takeover right before the allocation and records what the store was handed. */
+function takeoverBeforeAllocate() {
+  const seen = { allocateHolder: [], finish: [] }
+  const wrapStore = (store, _db, lockEnv) => ({
+    ...store,
+    async allocate(input) {
+      seen.allocateHolder.push(typeof input.holderWithin === 'function')
+      assert.ok(takeOver(lockEnv) > 0, 'non-vacuous: a lease row was taken over')
+      return store.allocate(input)
+    },
+    async finish(input) {
+      const outcome = await store.finish(input)
+      seen.finish.push({ writerStatus: input.writerStatus, holder: typeof input.holderWithin === 'function', outcome: outcome && outcome.outcome })
+      return outcome
+    },
+  })
+  return { seen, wrapStore }
+}
+
+async function storedJobText(h, applyJobId) {
+  const key = [...h.context.storage.keys()].find((entry) => entry.includes(applyJobId))
+  assert.ok(key, 'the apply job is stored')
+  return JSON.stringify(await h.context.storage.get(key))
+}
+
+test('LN-21 S6 C-6 (MF-1): a takeover right before the allocation ⇒ 409 LEASE_LOST with nothing created and NO batch or link opened by the non-holder — small apply and large chunk; the finish under the refused holder is a no-op (holder_refused)', async () => {
+  // The small apply (the lane's holder is bound to THIS apply's lease: http-routes apply context { guard }).
+  const small = takeoverBeforeAllocate()
+  const h = mount({ wrapStore: small.wrapStore })
+  try {
+    await withSwitch('true', async () => {
+      const dry = await dryRun(h)
+      assert.deepEqual(dry.body.data.pullBatch, { preview: true, wouldStamp: true, reason: null })
+      const applied = await apply(h, dry.body.data.dryRunToken)
+      assert.equal(applied.statusCode, 409, JSON.stringify(applied.body))
+      assert.equal(applied.body.error.code, LEASE_LOST)
+    })
+    assert.deepEqual(small.seen.allocateHolder, [true], 'the allocation was handed the holder assert')
+    assert.equal(hostWrites(h).length, 0, 'nothing created')
+    assert.equal((await sheetRows(h)).length, 0)
+    assert.equal(h.ledgerDb.rows(pbKit.T.batch).length, 0, 'no batch opened by a non-holder')
+    assert.equal(h.ledgerDb.rows(pbKit.T.execution).length, 0, 'no execution link opened by a non-holder')
+    assert.deepEqual(small.seen.finish, [{ writerStatus: 'aborted', holder: true, outcome: 'holder_refused' }], 'the finish ran under the holder assert and was refused (a logged no-op)')
+  } finally { h.restore() }
+  // The large chunk (the lane is re-bound INSIDE the chunk's lease: pullBatchLaneInLease).
+  const large = takeoverBeforeAllocate()
+  const k = mount({ wrapStore: large.wrapStore })
+  try {
+    await withSwitch('true', async () => {
+      const flow = await largeFlow(k, { run: false })
+      assert.equal(flow.approved.statusCode, 202, JSON.stringify(flow.approved.body))
+      const chunk = await call(k, 'POST', CHUNK, { params: { jobId: flow.jobId, applyJobId: flow.approved.body.data.jobId } })
+      assert.equal(chunk.statusCode, 409, JSON.stringify(chunk.body))
+      assert.equal(chunk.body.error.code, LEASE_LOST)
+    })
+    assert.deepEqual(large.seen.allocateHolder, [true], 'the chunk allocation was handed the holder assert of the chunk lease')
+    assert.equal(hostWrites(k).length, 0, 'nothing created')
+    assert.equal(k.ledgerDb.rows(pbKit.T.batch).length, 0, 'no batch opened by a non-holder')
+    assert.equal(k.ledgerDb.rows(pbKit.T.execution).length, 0, 'no execution link opened by a non-holder')
+  } finally { k.restore() }
+})
+
+test('LN-22 (MF-1) the finish runs INSIDE the guard host-write bracket (open, finish, close — as AW-8 pins for the allocation) and hands the store the lane holder assert; the catch-path finish too', async () => {
+  const order = []
+  const holderWithin = async () => {}
+  const store = {
+    async readSheetState() {
+      return { sheet: { historyStatus: 'born_empty', firstPullBatchRule: 'material', labelFormat: 'ordinal_date', labelLocale: 'zh-CN' }, batches: [] }
+    },
+    async allocate() { throw new Error('LN-22: no allocation is asked here') },
+    async finish(input) {
+      order.push('finish', input.holderWithin === holderWithin ? 'holder' : 'no_holder')
+      return { outcome: 'closed' }
+    },
+  }
+  const band = { fieldIds: { pullBatch: 'fld_syn_ln22_pb', firstPullBatch: 'fld_syn_ln22_fpb' } }
+  const lane = lanes.normalizePullBatchLaneInput({ enabled: true, band, store, tenantId: TENANT, holderWithin })
+  const writeFence = { async withHostWrite(fn) { order.push('bracket:open'); try { return await fn() } finally { order.push('bracket:close') } } }
+  const run = await lanes.prepareSmallApplyPullBatch({
+    lane,
+    dryRun: { pullBatch: { fieldIds: band.fieldIds, mode: 'db', present: { pullBatch: true, firstPullBatch: true } }, existingRows: [], plan: { decisions: [] }, expansion: { rows: [] } },
+    action: { actionId: ACTION, target: { sheetId: 'sheet_syn_ln22', keyField: 'idempotencyKey' } },
+    parameters: { projectNo: PROJECT },
+    runId: 'table-action-apply:syn-ln22',
+    canonicalRows: (rows) => rows,
+    writeFence,
+  })
+  assert.equal(run.evaluation.ready, true, 'calibration: a ready run')
+  await run.finish({ status: 'succeeded', pullBatch: { allocated: true, stampedRowCount: 1 } })
+  assert.deepEqual(order, ['bracket:open', 'finish', 'holder', 'bracket:close'], 'finish is bracketed and carries the holder assert')
+  order.length = 0
+  await run.finishFailed()
+  assert.deepEqual(order, ['bracket:open', 'finish', 'holder', 'bracket:close'], 'the catch-path finish is bracketed too')
+})
+
+test('LN-23 (MF-2) the §6.4 chunk-gate rows: no plan on a resolved sheet / band no longer proven / unresolved sheet ⇒ 409 REPLAN, job untouched; switch OFF after an ON plan ⇒ the chunk runs UNSTAMPED with zero ledger IO (the kill switch)', async () => {
+  const chunkOf = (h, flow) => call(h, 'POST', CHUNK, { params: { jobId: flow.jobId, applyJobId: flow.approved.body.data.jobId } })
+  async function refusedUntouched(h, flow, reason) {
+    const applyJobId = flow.approved.body.data.jobId
+    const before = await storedJobText(h, applyJobId)
+    h.ledgerDb.log.length = 0
+    const chunk = await withSwitch('true', () => chunkOf(h, flow))
+    assert.equal(chunk.statusCode, 409, `${reason}: ${JSON.stringify(chunk.body)}`)
+    assert.equal(chunk.body.error.code, PULL_BATCH_ERROR_CODES.JOB_REPLAN_REQUIRED, reason)
+    assert.equal(chunk.body.error.details.reason, reason)
+    assert.equal(await storedJobText(h, applyJobId), before, `${reason}: the job is exactly as it was (status, checkpoint, counts)`)
+    assert.equal(hostWrites(h).length, 0, `${reason}: nothing written`)
+    assert.deepEqual(ledgerWrites(h), [], `${reason}: no ledger write`)
+  }
+  // (1) planned and approved while OFF; the chunk runs after the switch is ON, on a RESOLVED sheet.
+  {
+    const h = mount()
+    try {
+      const flow = await withSwitch(undefined, () => largeFlow(h, { run: false }))
+      assert.equal(flow.approved.statusCode, 202, JSON.stringify(flow.approved.body))
+      await refusedUntouched(h, flow, 'planned_before_install')
+    } finally { h.restore() }
+  }
+  // (2) planned and approved while ON (a ready plan); the band is no longer db-proven at the chunk.
+  for (const [label, unprove] of [
+    ['a computed-only probe', (h) => { delete h.provisioning.resolveExistingObjectFieldIds }],
+    ['one band column left', (h) => { h.provisioning.objects.get(`${h.staging}/${h.objectId}`).fields.delete('firstPullBatch') }],
+  ]) {
+    const h = mount()
+    try {
+      const flow = await withSwitch('true', () => largeFlow(h, { run: false }))
+      assert.equal(flow.approved.statusCode, 202, `${label}: ${JSON.stringify(flow.approved.body)}`)
+      unprove(h)
+      await refusedUntouched(h, flow, 'band_unproven')
+    } finally { h.restore() }
+  }
+  // (3) a ready plan whose _sheet row went back to pending.
+  {
+    const h = mount()
+    try {
+      const flow = await withSwitch('true', () => largeFlow(h, { run: false }))
+      assert.equal(flow.approved.statusCode, 202, JSON.stringify(flow.approved.body))
+      await h.ledgerDb.updateRow(pbKit.T.sheet, { history_status: 'pending', resolved_at: null, resolved_by: null, history_mode: null, history_batch_count: null }, { sheet_id: h.sheetId })
+      await refusedUntouched(h, flow, 'history_unresolved')
+    } finally { h.restore() }
+  }
+  // (4) THE KILL SWITCH: planned and approved while ON, the chunk runs after the switch is turned OFF.
+  {
+    const h = mount()
+    try {
+      const flow = await withSwitch('true', () => largeFlow(h, { run: false }))
+      assert.equal(flow.approved.statusCode, 202, JSON.stringify(flow.approved.body))
+      assert.deepEqual(flow.planned.body.data.pullBatch, { preview: true, wouldStamp: true, reason: null }, 'calibration: a ready plan')
+      h.ledgerDb.log.length = 0
+      const chunk = await withSwitch(undefined, () => chunkOf(h, flow))
+      assert.equal(chunk.statusCode, 200, JSON.stringify(chunk.body))
+      assert.equal(chunk.body.data.status, 'succeeded')
+      assert.equal(hasKeyDeep(chunk.body, 'pullBatch'), false, 'no pullBatch key while OFF')
+      const rows = await sheetRows(h)
+      assert.ok(rows.length > 0, 'non-vacuous: the chunk created rows')
+      for (const row of rows) {
+        assert.equal(row.data[h.physical('pullBatch')], undefined, 'unstamped 本次拉取')
+        assert.equal(row.data[h.physical('firstPullBatch')], undefined, 'unstamped 首次批次')
+      }
+      assert.deepEqual(h.ledgerDb.log, [], 'zero ledger IO while OFF')
+    } finally { h.restore() }
+  }
+})
+
+test('LN-24 (MF-3) design §6.3: the small writer throws AFTER its decisions ran ⇒ the catch finishes the link failed (finished, count NULL), the batch stays open, the apply is refused', async () => {
+  const h = mount()
+  try {
+    await withSwitch('true', async () => {
+      const dry = await dryRun(h)
+      assert.equal(dry.body.data.pullBatch.wouldStamp, true, 'calibration: a ready run')
+      // The host metadata scope runs the decisions, then fails on exit (a post-run fault the writer does not catch).
+      h.context.api.multitable.records.withMetadataCache = async (fn) => {
+        await fn()
+        throw Object.assign(new Error('synthetic metadata scope failure after the run'), { code: 'SYNTHETIC_SCOPE_EXIT' })
+      }
+      const applied = await apply(h, dry.body.data.dryRunToken)
+      assert.ok(applied.statusCode >= 400, `the apply is refused: ${JSON.stringify(applied.body)}`)
+    })
+    const links = h.ledgerDb.rows(pbKit.T.execution)
+    assert.equal(links.length, 1, 'calibration: the allocation ran (a link exists)')
+    assert.deepEqual([links[0].writer_status, Boolean(links[0].finished_at), links[0].created_row_count], ['failed', true, null])
+    const batches = h.ledgerDb.rows(pbKit.T.batch)
+    assert.deepEqual(batches.map((batch) => batch.status), ['open'], 'a failed run never closes its batch')
+  } finally { h.restore() }
+})
+
+test('LN-25 (MF-3) large lane, lib level: over two chunks (maxDecisionsPerChunk 1) the link is finished ONCE, at the terminal status, with the JOB total of stamped creates — not the last chunk count', async () => {
+  const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
+  const SCOPE = Object.freeze({ tenantId: 'tenant-syn-pbl-lb', workspaceId: 'workspace-syn-pbl-lb' })
+  const lockHarness = lockKit.createLibWriteLockHarness()
+  const storage = lockKit.createConsumableStorage()
+  storage.durable = true
+  const action = lockKit.goldenAction()
+  const source = lockKit.createSourceAdapter(lockKit.goldenPlmData())
+  await lockHarness.wrapLargeExpansionStart(largeBomJobs.createLargeBomBackgroundExpansionJob)({ storage, ...SCOPE, action, parameters: { projectNo: lockKit.GOLDEN_PROJECT_NO }, principal: 'ln25-principal', createJobId: () => 'ln25-job-1', now: () => '2026-11-08T01:00:00.000Z' })
+  await largeBomJobs.runLargeBomBackgroundExpansionJob({ storage, ...SCOPE, actionId: action.actionId, jobId: 'ln25-job-1', sourceAdapter: source.adapter, now: () => '2026-11-08T01:01:00.000Z' })
+  await lockHarness.wrapLargePlan(largeBomJobs.planLargeBomBackgroundExpansionJob)({ storage, ...SCOPE, actionId: action.actionId, jobId: 'ln25-job-1', existingRows: [], plannedAt: lockKit.GOLDEN_PLANNED_AT, runId: lockKit.GOLDEN_RUN_ID, now: () => '2026-11-08T01:02:00.000Z' })
+  await lockHarness.wrapLargeApprove(largeBomJobs.createLargeBomCheckpointApplyJob)({ storage, ...SCOPE, actionId: action.actionId, jobId: 'ln25-job-1', principal: 'ln25-principal', permission: 'write', createApplyJobId: () => 'ln25-apply-1', now: () => '2026-11-08T01:03:00.000Z' })
+  const env = lockHarness.refresh()
+  const key = largeBomJobs.__internals.checkpointApplyJobKey({ ...SCOPE, actionId: action.actionId, applyJobId: 'ln25-apply-1' })
+  const approved = await storage.get(key)
+  const adds = lanes.__internals.decisionsForCarry(approved.plan.decisions, approved.target && approved.target.keyField).filter((decision) => decision.decision === 'add')
+  assert.ok(adds.length >= 2, `calibration: at least two ADDs (got ${adds.length})`)
+  const carry = new Map(adds.map((decision) => [decision.idempotencyKey, null]))
+  const finishes = []
+  let allocations = 0
+  const pullBatchGate = async () => ({
+    stamp: {
+      fieldIds: { pullBatch: 'fld_syn_ln25_pb', firstPullBatch: 'fld_syn_ln25_fpb' },
+      firstPullBatchByKey: carry,
+      allocate: async () => {
+        allocations += 1
+        return { batchId: 'batch_syn_ln25', batchNo: 1, label: '第1批（2026-11-08）', joined: allocations > 1 }
+      },
+    },
+    finish: async (input) => { finishes.push({ ...input }) },
+  })
+  const rows = []
+  const recordsApi = {
+    async queryRecords(input = {}) {
+      return rows.filter((row) => row.sheetId === input.sheetId)
+        .filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row.data[field] === expected))
+        .slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000)).map((row) => JSON.parse(JSON.stringify(row)))
+    },
+    async createRecord(input = {}) {
+      const row = { id: `ln25_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
+      rows.push(row)
+      return JSON.parse(JSON.stringify(row))
+    },
+    async patchRecord() { throw new Error('LN-25: no patch is planned') },
+  }
+  const scopeKey = swl.sheetWriteScopeKey(action.target.sheetId)
+  const statuses = []
+  for (let i = 0; i < adds.length + 2; i += 1) {
+    const job = await lockHarness.lock.withProjectWriteLease(scopeKey, { purpose: 'large_apply_chunk', runId: `ln25-chunk-${i}`, tenantId: SCOPE.tenantId }, (guard) => largeBomJobs.runLargeBomCheckpointApplyJobChunk({
+      storage,
+      ...SCOPE,
+      actionId: action.actionId,
+      applyJobId: 'ln25-apply-1',
+      recordsApi: lockKit.withFakeHostWriteFence(recordsApi),
+      projectWriteGuard: guard,
+      refreshGovernanceGate: env.chunkGateFor(SCOPE.tenantId, lockKit.GOLDEN_PROJECT_NO),
+      maxDecisionsPerChunk: 1,
+      pullBatchGate,
+    }))
+    statuses.push(job.status)
+    if (job.status !== 'paused') break
+    assert.deepEqual(finishes, [], `chunk ${i + 1} paused: the link is not finished before the terminal status`)
+  }
+  assert.ok(statuses.filter((status) => status === 'paused').length >= 1, `calibration: the job paused between chunks (${statuses.join(',')})`)
+  assert.equal(statuses[statuses.length - 1], 'succeeded')
+  assert.equal(rows.length, adds.length, 'calibration: every ADD landed, one per chunk')
+  assert.deepEqual(finishes, [{ writerStatus: 'succeeded', createdRowCount: adds.length }], 'finished ONCE, with the job total')
+  assert.equal((await storage.get(key)).pullBatchStampedRowCount, adds.length, 'the running total across chunks')
+})
+
+test('LN-26 (MF-5) the defensive guards: a probed id that is not the derived physical id is not present; a not_found preview answers no stanza; a later chunk never forgets an allocation; the reader-only lane; a holder assert that is not a function', async () => {
+  // (a) LN:173 — the probe resolves the logical band ids to OTHER physical ids than the derivation: nothing is present,
+  // so the lane does not stamp and reads no ledger. (Brief §5.4 named `columns_unproven`; the lane answers
+  // `not_installed` because neither derived column is proven present — recorded as a deviation in the PR body.)
+  {
+    const h = mount()
+    try {
+      const resolve = h.provisioning.resolveExistingObjectFieldIds
+      h.provisioning.resolveExistingObjectFieldIds = async (input) => {
+        const out = await resolve.call(h.provisioning, input)
+        for (const id of ['pullBatch', 'firstPullBatch']) if (typeof out[id] === 'string') out[id] = `fld_syn_elsewhere_${id}`
+        return out
+      }
+      await withSwitch('true', async () => {
+        const { dry, applied } = await pull(h)
+        assert.deepEqual(dry.body.data.pullBatch, { preview: true, wouldStamp: false, reason: 'not_installed' })
+        assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+        assert.deepEqual(applied.body.data.pullBatch, { stamped: false, reason: 'not_installed' })
+      })
+      assert.deepEqual(h.ledgerDb.log, [], 'no ledger IO')
+      const [row] = await sheetRows(h)
+      assert.equal(row.data[h.physical('pullBatch')], undefined)
+      assert.equal(row.data[h.physical('firstPullBatch')], undefined)
+    } finally { h.restore() }
+  }
+  // (b) LN:445 (critic M11) — a project the source does not know: the dry-run answers NO pullBatch key while ON.
+  {
+    const h = mount()
+    try {
+      const read = h.source.adapter.read
+      h.source.adapter.read = async (input = {}) => {
+        const answer = await read(input)
+        if (input.object === 'DN_PDM_PathExAttrInfo') answer.records = []
+        return answer
+      }
+      await withSwitch('true', async () => {
+        const dry = await dryRun(h)
+        assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+        assert.equal(dry.body.data.status, 'not_found', 'calibration: the source does not know the project')
+        assert.equal(hasKeyDeep(dry.body, 'pullBatch'), false, 'no stanza for a project the source does not have')
+      })
+      assert.deepEqual(h.ledgerDb.log, [], 'no ledger IO')
+    } finally { h.restore() }
+  }
+  // (c) LN:619 — a two-chunk job whose second chunk creates nothing keeps the first chunk's allocation.
+  const allocated = { allocated: true, batchNo: 3, label: '第3批（2026-11-08）', joined: false }
+  const stampedGate = { stamp: { fieldIds: {} } }
+  assert.deepEqual(lanes.mergeLargePullBatchRun(allocated, stampedGate, { pullBatch: { allocated: false, stampedRowCount: 0 } }), allocated, 'a stamped chunk with no create keeps the allocation')
+  assert.deepEqual(lanes.mergeLargePullBatchRun(allocated, { stamp: null, reason: 'history_gap', gapRows: 1 }, { pullBatch: null }), allocated, 'an unstamped later chunk keeps it too')
+  assert.deepEqual(lanes.mergeLargePullBatchRun(null, stampedGate, { pullBatch: { allocated: false } }), { allocated: false, reason: 'no_creates' }, 'calibration: no earlier allocation ⇒ no_creates')
+  assert.deepEqual(
+    lanes.largeChunkAnswerOf({ enabled: true }, { pullBatchRun: lanes.mergeLargePullBatchRun(allocated, stampedGate, { pullBatch: { allocated: false } }), pullBatchStampedRowCount: 2 }),
+    { stamped: true, label: '第3批（2026-11-08）', batchNo: 3, joined: false, createdRowCount: 2 },
+    'the stanza still says stamped',
+  )
+  // (d) LN:151 — the reconcile / mvp-persist lane is the band ONLY: switch reading dropped, no store, no holder, no fold.
+  const band = { fieldIds: { pullBatch: 'fld_syn_ln26_pb', firstPullBatch: 'fld_syn_ln26_fpb' } }
+  const readerOnly = lanes.readerOnlyLaneOf({ enabled: true, band, store: { readSheetState() {} }, tenantId: TENANT, holderWithin: async () => {} })
+  assert.deepEqual({ ...readerOnly, band: { ...readerOnly.band, fieldIds: { ...readerOnly.band.fieldIds } } }, { band, enabled: false, store: null, tenantId: TENANT, holderWithin: null })
+  assert.equal(lanes.pullBatchProbeOptions(readerOnly), undefined, 'no probe fold on the reader-only lanes while ON')
+  assert.deepEqual(lanes.pullBatchProbeOptions(lanes.normalizePullBatchLaneInput({ enabled: true, band, tenantId: TENANT })), { optionalFieldIds: lanes.PULL_BATCH_PROBE_FIELD_IDS }, 'calibration: the full lane folds')
+  assert.equal(lanes.readerOnlyLaneOf(undefined), null)
+  // (e) LN:132 — a holder assert that is not a function is a route defect: 500 STAMP_INVALID before any IO.
+  for (const holderWithin of ['x', 1, {}, true]) {
+    assert.throws(
+      () => lanes.normalizePullBatchLaneInput({ enabled: true, band, tenantId: TENANT, holderWithin }),
+      (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.status === 500 && error.details.field === 'pullBatch.holderWithin',
+      JSON.stringify(holderWithin),
+    )
+    assert.throws(() => lanes.readerOnlyLaneOf({ enabled: true, band, tenantId: TENANT, holderWithin }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-lanes.test.cjs', tests)
