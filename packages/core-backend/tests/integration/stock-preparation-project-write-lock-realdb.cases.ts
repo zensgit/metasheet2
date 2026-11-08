@@ -3748,6 +3748,174 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           expect((await st.refresh.governance.consult(st.scope)).governed).toBe(false)
         }, 180000)
 
+        // 批次标识 BI-1b (register R-65; design §6.1-§6.3, §13.2) — the small lane's stamping on the REAL stack: the real host,
+        // the real lock (its holder assert runs INSIDE the ledger's transactions on the same database), the real ledger store
+        // over migration 105, a not-governed project sheet. Added to THIS stack (P-11 recorded): it already drives the real
+        // routes over a real project sheet, so no second route harness is built. Values-free: synthetic, per-run ids.
+        //   BI-R1  OWN-1: batch 1 (S-001 + its subtree) then batch 2 (P-001 ⊃ S-001, plus N-001): exactly the owner's rows —
+        //          the batch-1 rows keep 第1批 / 第1批 (swept inactive, never re-stamped), the copies carry 首次 第1批 / 本次
+        //          第2批, P-001 and N-001 第2批 / 第2批; two closed batches, the link counts set by value (4 and 6)
+        //   BI-R2  A03: a third identical pull opens no batch and no link; the band cells of every row are unchanged
+        //   BI-R5  U05: the status route before and after the install; a ledger whose statements fail ⇒ the apply is 503
+        //          STORE_FAILED with zero created rows on an installed sheet; a not-installed sheet's pull is unaffected
+        //   BI-R-C4 a creator-NULL row the automation / form way (a non-JSON key, no RUN stamp) neither pauses stamping nor
+        //          is labelled
+        describe('BI-1b pull-batch stamping (real Postgres, real lock, real ledger, real host)', () => {
+          const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+          const LABEL1 = /^第1批（\d{4}-\d{2}-\d{2}）$/
+          const LABEL2 = /^第2批（\d{4}-\d{2}-\d{2}）$/
+          const tenants: string[] = []
+          afterAll(async () => {
+            for (const tenantId of tenants) {
+              for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet']) {
+                await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
+              }
+            }
+          })
+          async function withPullSwitch<T>(fn: () => Promise<T>): Promise<T> {
+            const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
+            process.env[PULL_SWITCH] = 'true'
+            process.env[SWITCH] = 'true'
+            try {
+              return await fn()
+            } finally {
+              if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+              if (before.sheets === undefined) delete process.env[SWITCH]; else process.env[SWITCH] = before.sheets
+            }
+          }
+          async function stampingStack(label: string, { band = true, failingLedger = false }: { band?: boolean; failingLedger?: boolean } = {}) {
+            const ledgerDb = createDb({ database: createProductionPluginContext().api.database })
+            // A ledger whose statements fail (the 105 tables behind a refusing handle) — never a DROP on the shared database (P-10).
+            const refusing = failingLedger
+              ? { ...ledgerDb, select: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) }, selectOne: async () => { throw Object.assign(new Error('refused'), { code: '42501' }) } }
+              : ledgerDb
+            const store = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: refusing })
+            const st: any = await s3aStack(label, { pilot: false, serviceExtras: { stockPreparationPullBatchStore: store } })
+            tenants.push(st.tenantId)
+            const physical = (fieldId: string) => st.multitable.provisioning.getFieldId(st.projectId, st.objectId, fieldId)
+            if (band) {
+              const added = await st.multitable.provisioning.ensureMissingObjectFields({
+                projectId: st.projectId,
+                objectId: st.objectId,
+                fields: templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+              })
+              expect(added.addedFieldIds).toEqual([physical('firstPullBatch'), physical('pullBatch')])
+              const seed = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: ledgerDb })
+              await ledgerDb.transaction((trx: any) => seed.createSheetRowWithin(trx, { tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
+            }
+            const cells = async () => {
+              const rows = await st.rows()
+              return rows.map((row: any) => ({
+                part: row.data[physical('componentSourceId')],
+                path: row.data[physical('path')],
+                active: row.data[physical('active')],
+                first: row.data[physical('firstPullBatch')] ?? null,
+                current: row.data[physical('pullBatch')] ?? null,
+              }))
+            }
+            const ledger = async () => ({
+              batches: (await q('SELECT batch_no, status, closed_reason, label FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [st.tenantId])).rows,
+              links: (await q('SELECT execution_ref, lane, writer_status, created_row_count FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1 ORDER BY joined_at, id', [st.tenantId])).rows,
+            })
+            const pull = async () => {
+              const dry = await st.dryRun()
+              expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+              const applied = await st.apply(st.users.puller, dry.body.data.dryRunToken)
+              return { dry, applied }
+            }
+            return { st, physical, cells, ledger, pull }
+          }
+
+          test('BI-R1 / BI-R2 OWN-1 on the real stack: batch 1, then batch 2 (P-001 ⊃ S-001) — exactly the owner\'s rows; a third identical pull opens nothing', async () => {
+            const k = await stampingStack('bir1')
+            await withPullSwitch(async () => {
+              k.st.state.data = CF.firstPullSource()
+              const first = await k.pull()
+              expect(first.dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: true, reason: null })
+              expect(first.applied.statusCode, JSON.stringify(first.applied.body)).toBe(200)
+              expect(first.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1, joined: false, createdRowCount: 4 })
+              const afterOne = await k.cells()
+              expect(afterOne).toHaveLength(4)
+              for (const row of afterOne) {
+                expect(row.first, JSON.stringify(row)).toMatch(LABEL1)
+                expect(row.current, JSON.stringify(row)).toMatch(LABEL1)
+              }
+              k.st.state.data = CF.secondPullSource()
+              const second = await k.pull()
+              expect(second.applied.statusCode, JSON.stringify(second.applied.body)).toBe(200)
+              expect(second.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 2, joined: false, createdRowCount: 6 })
+              const afterTwo = await k.cells()
+              const old = afterTwo.filter((row: any) => row.active === false)
+              const fresh = afterTwo.filter((row: any) => row.active !== false)
+              expect(old.map((row: any) => row.part).sort()).toEqual(['PART-A', 'PART-B', 'PART-C', 'S-001'])
+              for (const row of old) expect([row.first, row.current].every((label: string) => LABEL1.test(label)), JSON.stringify(row)).toBe(true)
+              const byPart = new Map(fresh.map((row: any) => [row.part, row]))
+              expect([...byPart.keys()].sort()).toEqual(['N-001', 'P-001', 'PART-A', 'PART-B', 'PART-C', 'S-001'])
+              for (const part of ['P-001', 'N-001']) {
+                expect(byPart.get(part).first, part).toMatch(LABEL2)
+                expect(byPart.get(part).current, part).toMatch(LABEL2)
+              }
+              for (const part of ['S-001', 'PART-A', 'PART-B', 'PART-C']) {
+                expect(byPart.get(part).first, `${part}: 首次 = the batch it first appeared in`).toMatch(LABEL1)
+                expect(byPart.get(part).current, `${part}: 本次 = the batch that created this row`).toMatch(LABEL2)
+              }
+              const ledgerTwo = await k.ledger()
+              expect(ledgerTwo.batches.map((row: any) => [row.batch_no, row.status, row.closed_reason])).toEqual([[1, 'closed', 'execution_succeeded'], [2, 'closed', 'execution_succeeded']])
+              expect(ledgerTwo.links.map((row: any) => [row.lane, row.writer_status, row.created_row_count])).toEqual([['small_apply', 'succeeded', 4], ['small_apply', 'succeeded', 6]])
+              for (const link of ledgerTwo.links) expect(link.execution_ref).toMatch(/^small:table-action-apply:/)
+              // BI-R2 (A03): the same pull again — nothing to create, so no batch and no link; every band cell unchanged.
+              const third = await k.pull()
+              expect(third.applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'no_creates' })
+              expect(await k.ledger()).toEqual(ledgerTwo)
+              expect(await k.cells()).toEqual(afterTwo)
+            })
+          }, 180000)
+
+          test('BI-R5 / BI-R-C4 U05 status before and after the band; a failing ledger is 503 STORE_FAILED with nothing created; a not-installed sheet is unaffected; a creator-NULL automation-like row never pauses stamping', async () => {
+            // Not installed: the status names it, the pull runs unstamped (no ledger IO at all on this lane).
+            const bare = await stampingStack('bir5a', { band: false })
+            await withPullSwitch(async () => {
+              const status = await callRoute(bare.st.routes, 'GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', { user: bare.st.users.admin, params: { projectNo: bare.st.projectNo }, query: {} })
+              expect(status.statusCode, JSON.stringify(status.body)).toBe(200)
+              expect(status.body.data.columns).toMatchObject({ mode: 'db', pullBatch: false, firstPullBatch: false })
+              expect(status.body.data.reasons).toContain('not_installed')
+              expect(JSON.stringify(status.body)).not.toContain('fld_')
+              bare.st.state.data = CF.firstPullSource()
+              const { applied } = await bare.pull()
+              expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+              expect(applied.body.data.pullBatch).toEqual({ stamped: false, reason: 'not_installed' })
+            })
+            // Installed, but the ledger's statements fail: 503 before the first create, zero rows on the sheet.
+            const failing = await stampingStack('bir5b', { failingLedger: true })
+            await withPullSwitch(async () => {
+              failing.st.state.data = CF.firstPullSource()
+              const dry = await failing.st.dryRun()
+              expect(dry.body.data.pullBatch).toEqual({ preview: true, wouldStamp: false, reason: 'ledger_unreadable' })
+              const refused = await failing.st.apply(failing.st.users.puller, dry.body.data.dryRunToken)
+              expect(refused.statusCode, JSON.stringify(refused.body)).toBe(503)
+              expect(refused.body.error.code).toBe('STOCK_PREP_PULL_BATCH_STORE_FAILED')
+              expect(await failing.st.rows()).toHaveLength(0)
+            })
+            // C4: a creator-NULL row with a non-JSON key and no RUN stamp (what an automation / public form inserts).
+            const c4 = await stampingStack('bir5c')
+            await c4.st.multitable.records.createRecord({ sheetId: c4.st.sheetId, data: { [c4.physical('projectNo')]: c4.st.projectNo, [c4.physical('idempotencyKey')]: `auto-${TOKEN}`, [c4.physical('componentSourceId')]: 'AUTO-1', [c4.physical('active')]: true } })
+            await withPullSwitch(async () => {
+              const status = await callRoute(c4.st.routes, 'GET', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', { user: c4.st.users.admin, params: { projectNo: c4.st.projectNo }, query: {} })
+              expect(status.body.data.ready, JSON.stringify(status.body.data)).toBe(true)
+              expect(status.body.data.rows).toMatchObject({ gap: 0, nonPlugin: 1, machine: 0 })
+              c4.st.state.data = CF.firstPullSource()
+              const { applied } = await c4.pull()
+              expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+              expect(applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1 })
+              const auto = (await c4.cells()).find((row: any) => row.part === 'AUTO-1')
+              expect(auto, 'the automation-like row is still there').toBeTruthy()
+              expect([auto.first, auto.current]).toEqual([null, null])
+            })
+          }, 180000)
+        })
+
         test('S3A-22 (R-7) the carry on a governed project: an ordinary open hold => carried (only the human cell of the target moves); a runbook-only hold => 409 runbook_only_hold; a failed execution => 409 RECOVERY_PENDING; the step-4 store unreadable => 503 — none of the refusals patch', async () => {
           const observed: Record<string, unknown> = {}
           // Ordinary open hold (a pilot second pull suspended by its candidate): the carry goes through.
