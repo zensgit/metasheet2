@@ -230,8 +230,8 @@ test('SC-6 (PR-3b) each large non-write route calls consultLargeLane( once, on o
   const ROUTES = {
     tableActionLargeBomExpansionJobStart: { lane: 'large_expansion_start', io: ['createLargeBomBackgroundExpansionJob(', 'observeGeneration('] },
     tableActionLargeBomExpansionJobRun: { lane: 'large_expansion_run', io: ['assertB2aReadAuthorization(', 'b2aTableActionSourceObjects(', 'loadTableActionSourceAdapter(', 'runLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', io: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'loadTableScopeConflictPolicies(', 'planLargeBomBackgroundExpansionJob(', 'resolveInstalledFieldProperties('] },
-    tableActionLargeBomApplyJobStart: { lane: 'large_approve', io: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'resolveInstalledFieldProperties(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration('] },
+    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', io: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'loadTableScopeConflictPolicies(', 'planLargeBomBackgroundExpansionJob(', 'resolveInstalledFieldProperties(', 'prepareLargePlanPullBatch('] },
+    tableActionLargeBomApplyJobStart: { lane: 'large_approve', io: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'resolveInstalledFieldProperties(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration(', 'assertLargeApprovePullBatch('] },
   }
   const rawRoutes = raw['http-routes.cjs']
   for (const [handler, spec] of Object.entries(ROUTES)) {

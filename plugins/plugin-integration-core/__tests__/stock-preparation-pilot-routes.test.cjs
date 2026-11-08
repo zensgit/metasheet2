@@ -118,8 +118,12 @@ async function withPullBatchSwitch(h, fn) {
   process.env[PULL_BATCH_SWITCH] = 'true'
   try { return await fn() } finally { if (original === undefined) delete process.env[PULL_BATCH_SWITCH]; else process.env[PULL_BATCH_SWITCH] = original }
 }
-const getPilot = (h, user, projectNo = PROJECT, query = {}) => withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'GET', PILOT_PATH, { user, params: { projectNo }, query }))
-const enablePilot = (h, user, projectNo = PROJECT, body = confirm(projectNo)) => withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'POST', PILOT_PATH, { user, params: { projectNo }, body }))
+function getPilot(h, user, projectNo = PROJECT, query = {}) {
+  return withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'GET', PILOT_PATH, { user, params: { projectNo }, query }))
+}
+function enablePilot(h, user, projectNo = PROJECT, body = confirm(projectNo)) {
+  return withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'POST', PILOT_PATH, { user, params: { projectNo }, body }))
+}
 const dryRun = (h, user = PLATFORM_ADMIN, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', DRY_RUN_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
 const jobParams = (jobId, applyJobId) => ({ actionId: ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
 const expansionStart = (h, projectNo = PROJECT, user = PLATFORM_ADMIN) => projectSheet.call(h.routes, 'POST', JOBS_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
@@ -1028,8 +1032,8 @@ test('L-05 source order: the gate follows the staleness check and precedes every
   const ROUTES = {
     tableActionLargeBomExpansionJobStart: { lane: 'large_expansion_start', after: ['assertResolvedProjectTargetTenancy('], before: ['createLargeBomBackgroundExpansionJob(', 'observeGeneration('] },
     tableActionLargeBomExpansionJobRun: { lane: 'large_expansion_run', after: ['assertLargeBomJobActor('], before: ['assertB2aReadAuthorization(', 'loadTableActionSourceAdapter(', 'runLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'planLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomApplyJobStart: { lane: 'large_approve', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration('] },
+    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'planLargeBomBackgroundExpansionJob(', 'prepareLargePlanPullBatch('] },
+    tableActionLargeBomApplyJobStart: { lane: 'large_approve', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration(', 'assertLargeApprovePullBatch('] },
     tableActionLargeBomApplyJobRun: { lane: 'large_apply_chunk', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'assertStockPrepApplyAllowed(', 'withProjectWriteLease(', 'runLargeBomCheckpointApplyJobChunk('] },
   }
   for (const [handler, spec] of Object.entries(ROUTES)) {

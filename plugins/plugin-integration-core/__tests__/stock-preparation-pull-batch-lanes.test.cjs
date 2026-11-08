@@ -146,7 +146,9 @@ async function pull(h) {
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   return { dry, applied: await apply(h, dry.body.data.dryRunToken) }
 }
-const sheetRows = async (h) => (await h.records.queryRecords({ sheetId: h.sheetId, filters: {} })).filter((row) => row.sheetId === h.sheetId)
+async function sheetRows(h) {
+  return (await h.records.queryRecords({ sheetId: h.sheetId, filters: {} })).filter((row) => row.sheetId === h.sheetId)
+}
 const ledgerWrites = (h) => h.ledgerDb.log.filter(([method]) => /insertOne|updateRow/.test(method))
 const hostWrites = (h) => h.records.calls.filter(([verb]) => verb === 'createRecord' || verb === 'patchRecord')
 
@@ -641,6 +643,54 @@ test('LN-18 vocabularies; the stored-plan states; the execution ref is validated
   // A malformed route lane input is refused before any IO.
   assert.throws(() => lanes.normalizePullBatchLaneInput({ enabled: 'yes' }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID)
   assert.equal(lanes.normalizePullBatchLaneInput(undefined), null)
+})
+
+test('LN-19 the probe fold (M-1B-4): optional ids are appended ONLY when asked, never refuse, and answer the verdict; without them the probe input is byte-identical', async () => {
+  const { __internals: { assertTargetFieldsExist } } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+  const h = mount({ band: false })
+  try {
+    const action = { target: { sheetId: h.sheetId, objectId: h.objectId, fieldIdMap: {} }, template: undefined, extensionFieldIds: [] }
+    const { assertStockPreparationTargetReady } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+    const ready = assertStockPreparationTargetReady({ actionId: ACTION, source: { externalSystemId: 'plm_sql_source_synthetic', kind: 'data-source:sql-readonly' }, target: action.target })
+    const input = { provisioning: h.provisioning, projectId: h.staging }
+    h.provisioning.calls.length = 0
+    const plain = await assertTargetFieldsExist(ready, input)
+    const plainCall = h.provisioning.calls.find(([verb]) => verb === 'resolveExistingObjectFieldIds')
+    h.provisioning.calls.length = 0
+    const folded = await assertTargetFieldsExist(ready, input, { optionalFieldIds: lanes.PULL_BATCH_PROBE_FIELD_IDS })
+    const foldedCall = h.provisioning.calls.find(([verb]) => verb === 'resolveExistingObjectFieldIds')
+    assert.deepEqual(foldedCall[2].slice(0, plainCall[2].length), plainCall[2], 'the template / ext ids are probed exactly as before')
+    assert.deepEqual(foldedCall[2].slice(plainCall[2].length), ['pullBatch', 'firstPullBatch'], 'the optional ids are appended')
+    assert.deepEqual({ ...plain.optional }, {}, 'no optional ids, no optional answers')
+    assert.equal(folded.fieldExistenceMode, 'db')
+    assert.deepEqual({ ...folded.optional }, { pullBatch: null, firstPullBatch: null }, 'missing band ids never refuse (no 422 on a band-less sheet)')
+    assert.equal(await assertTargetFieldsExist(ready, undefined), null, 'an early return answers null')
+  } finally { h.restore() }
+})
+
+test('LN-20 the strip runs BEFORE the prefix classification (M-1B-3): a parked manual row carries the Symbol too; absent band ⇒ no Symbol at all', async () => {
+  const { __internals: { readExistingStockPreparationRows } } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+  const { manualPrefixRowsOf } = require(path.join(LIB, 'stock-preparation-manual-rows.cjs'))
+  const band = { fieldIds: { pullBatch: 'fld_syn_pb', firstPullBatch: 'fld_syn_fpb' } }
+  const records = [
+    { id: 'rec_1', version: 1, createdAt: '2026-11-08T01:00:00.000Z', locked: true, data: { projectNo: PROJECT, idempotencyKey: '{"k":1}', fld_syn_pb: '第1批（2026-11-08）', fld_syn_fpb: '第1批（2026-11-08）' } },
+    { id: 'rec_2', version: 1, createdBy: 'u_person', data: { projectNo: PROJECT, idempotencyKey: 'manual:v1:rec_2', fld_syn_pb: '人工补充', firstPullBatch: '人工补充' } },
+  ]
+  const api = { async queryRecords() { return records.map((record) => JSON.parse(JSON.stringify(record))) } }
+  const target = { sheetId: 'sheet_syn', objectId: `plm_stock_preparation_sandbox_p_${'0'.repeat(24)}`, fieldIdMap: {} }
+  const rows = await readExistingStockPreparationRows(api, target, PROJECT, { pullBatchBand: band })
+  const SYMBOL = Symbol.for('metasheet.stock-preparation.existingRow.pullBatch')
+  assert.deepEqual({ ...rows[0][SYMBOL] }, { pullBatch: '第1批（2026-11-08）', firstPullBatch: '第1批（2026-11-08）', createdAt: '2026-11-08T01:00:00.000Z', locked: true })
+  assert.equal(Object.keys(rows[0]).some((key) => key === 'fld_syn_pb' || key === 'fld_syn_fpb'), false, 'both cells left the string keys')
+  const parked = manualPrefixRowsOf(rows)
+  assert.equal(rows.length, 1, 'the manual row left the planner array')
+  assert.equal(parked.manualRows.length, 1, 'it was parked as a manual row (M′)')
+  assert.equal(parked.manualRows[0].row[SYMBOL].pullBatch, '人工补充', 'the parked manual row carries the Symbol')
+  assert.equal(parked.manualRows[0].row[SYMBOL].firstPullBatch, '人工补充', 'the logical id is stripped too (defensive)')
+  const bare = await readExistingStockPreparationRows(api, target, PROJECT)
+  assert.equal(bare[0][SYMBOL], undefined, 'no band ⇒ no Symbol (byte-identical rows)')
+  assert.equal(bare[0].fld_syn_pb, '第1批（2026-11-08）')
+  await assert.rejects(readExistingStockPreparationRows(api, { ...target, fieldIdMap: { notes: 'fld_syn_pb' } }, PROJECT, { pullBatchBand: band }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-lanes.test.cjs', tests)
