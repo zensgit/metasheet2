@@ -4161,6 +4161,39 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
             expect(off.statusCode).toBe(200)
           }, 300000)
+
+          // Review fix round 1 (P2-18; the verifier's VR4): an unknown-mode install killed at its first patch, rows created
+          // while the switch is off, then an INFERRED re-run carrying the extension digest. The real route refuses the mode
+          // change 409 PLAN_CHANGED history_mode_changed BEFORE any cell write (as the plain continue path does); the dry-run
+          // names the persisted mode, and the re-run in that mode installs the extension and resolves.
+          test('BI-R14 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
+            const k = await installStack('bi2r14')
+            await withPull(false, async () => { k.st.state.data = CF.firstPullSource(); await k.pull() })
+            const dry = await k.post({ mode: 'dry_run', historyMode: 'unknown' })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            const records = k.st.multitable.records
+            const patch = records.patchRecord
+            records.patchRecord = async () => { throw Object.assign(new Error('synthetic kill'), { code: 'SYNTHETIC_KILL' }) }
+            try { await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: 0, historyMode: 'unknown' }) } finally { records.patchRecord = patch }
+            expect((await k.sheetRow()).history_status).toBe('installing')
+            await withPull(false, async () => { k.st.state.data = CF.secondPullSource(); await k.pull() })
+            const next = await k.post({ mode: 'dry_run' })
+            expect(next.statusCode, JSON.stringify(next.body)).toBe(200)
+            expect(next.body.data.run).toBe('continue')
+            expect(next.body.data.extension).not.toBeNull()
+            expect(next.body.data.requires.historyMode).toBe('unknown')
+            const labelled = async () => (await k.cells()).filter((c: any) => c.current !== null || c.first !== null).length
+            const refused = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: next.body.data.extension.planDigest, confirmHistoricalBatchCount: next.body.data.extension.K })
+            expect(refused.statusCode, JSON.stringify(refused.body)).toBe(409)
+            expect(refused.body.error).toMatchObject({ code: 'STOCK_PREP_PULL_BATCH_PLAN_CHANGED', details: { reason: 'history_mode_changed' } })
+            expect(await labelled(), 'a refused history-mode change writes nothing').toBe(0)
+            expect((await k.sheetRow()).history_status).toBe('installing')
+            const resumed = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: next.body.data.extension.planDigest, confirmHistoricalBatchCount: 0, historyMode: 'unknown' })
+            expect(resumed.statusCode, JSON.stringify(resumed.body)).toBe(200)
+            expect(resumed.body.data).toMatchObject({ run: 'continue', resolved: true })
+            expect((await k.sheetRow()).history_mode).toBe('unknown')
+            expect(await labelled()).toBeGreaterThan(0)
+          }, 300000)
         })
 
         test('S3A-22 (R-7) the carry on a governed project: an ordinary open hold => carried (only the human cell of the target moves); a runbook-only hold => 409 runbook_only_hold; a failed execution => 409 RECOVERY_PENDING; the step-4 store unreadable => 503 — none of the refusals patch', async () => {

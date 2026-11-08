@@ -751,7 +751,8 @@ function dryRunAnswerOf(state, request) {
       approvalRef: true,
       planDigest: state.envelope ? state.envelope.digest : null,
       confirmHistoricalBatchCount: { inferred: K, unknownMin: 0 },
-      historyMode: request.historyMode,
+      // A continue names the PERSISTED run's mode (P2-18): another mode is refused on every re-run path.
+      historyMode: state.run === 'continue' && state.envelope && state.envelope.historyMode ? state.envelope.historyMode : request.historyMode,
       placement: state.placementRequirement,
       landing: state.appliedLanding ? 'fixed' : 'optional',
     },
@@ -1055,6 +1056,9 @@ async function runInstall(deps, request) {
     return { mode: 'install', run: 'noop', resolved: true, reason: null, historyStatus: preview.sheet ? preview.sheet.historyStatus : null, planDigest: null, K: 0, written: { rows: 0, cells: 0, manualRows: 0 }, skipped: { fixedPoint: 0, locked: preview.model.classes.locked, person: preview.model.classes.person, nonPlugin: preview.model.classes.nonPlugin, unboundPrefix: preview.model.classes.unboundPrefix }, raced: 0, host: null, generationBumped: false }
   }
   assertPlanChecks(selectedOf(preview, request), request)
+  // P2-18 (review fix): a re-run keeps the persisted run's history mode on EVERY continue path — the plain continue and
+  // the extension alike — refused here, before the lease and any IO (the store re-checks both under the holder).
+  if (preview.run === 'continue' && preview.envelope && preview.envelope.historyMode !== request.historyMode) throw planChanged('history_mode_changed')
   const audit = countingAudit(deps.auditWithin)
   const budget = Number.isSafeInteger(deps.writeBudget) && deps.writeBudget > 0 ? deps.writeBudget : PULL_BATCH_INSTALL_WRITE_BUDGET
   let persistedAny = false
@@ -1073,7 +1077,7 @@ async function runInstall(deps, request) {
     const capture = state.capture
     if (state.run === 'continue') {
       if (selected.extending) {
-        await inHostWrite(guard, () => deps.store.extendInstall({ ...deps.scope, fromDigest: state.envelope.digest, plan: selected.envelope, planDigest: selected.envelope.digest, approvalRef: request.approvalRef, holderWithin }))
+        await inHostWrite(guard, () => deps.store.extendInstall({ ...deps.scope, fromDigest: state.envelope.digest, plan: selected.envelope, planDigest: selected.envelope.digest, historyMode: request.historyMode, approvalRef: request.approvalRef, holderWithin }))
       } else {
         await inHostWrite(guard, () => deps.store.continueInstall({ ...deps.scope, planDigest: selected.envelope.digest, historyMode: request.historyMode, approvalRef: request.approvalRef, holderWithin }))
       }

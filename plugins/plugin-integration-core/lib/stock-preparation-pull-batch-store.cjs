@@ -1351,12 +1351,14 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
 
   /**
    * The extension of an `installing` sheet's plan (design §8.2 I5; P2-10): CAS `fromDigest` against the persisted digest,
-   * then replace the plan and its digest (the run facts — historyMode, previousHistoryStatus — are carried over).
+   * then replace the plan and its digest (the run facts — historyMode, previousHistoryStatus — are carried over). The run's
+   * history mode must be the persisted one (P2-18, as continueInstall: `history_mode_changed`), checked before the write.
    */
   async function extendInstall(input = {}) {
     const scope = normalizeScope(input)
     const fromDigest = assertPlanDigest(input.fromDigest, 'fromDigest')
     const planDigest = assertPlanDigest(input.planDigest)
+    const historyMode = assertHistoryMode(input.historyMode)
     if (!isPlainObject(input.plan) || input.plan.digest !== planDigest) throw inputInvalid('plan')
     if (!nonBlankString(input.approvalRef)) throw inputInvalid('approvalRef')
     try {
@@ -1366,6 +1368,7 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
         const sheet = await lockInstallingRow(trx, scope, fromDigest)
         const persisted = jsonOrNull(sheet.history_plan)
         if (!isPlainObject(persisted)) throw planChanged('persisted_plan_differs')
+        if (persisted.historyMode !== historyMode) throw planChanged('history_mode_changed')
         const plan = { ...input.plan, historyMode: persisted.historyMode }
         delete plan.aborted
         if (persisted.previousHistoryStatus !== undefined) plan.previousHistoryStatus = persisted.previousHistoryStatus

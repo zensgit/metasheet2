@@ -775,7 +775,7 @@ test('ST-I3 (M-BI-22 shape) holder FIRST in every install transaction: a refusal
   await begin(absent.store)
   for (const call of [
     () => absent.store.continueInstall({ ...SCOPE, planDigest: ENVELOPE.digest, historyMode: 'inferred', approvalRef: 'R-65', holderWithin: refuse }),
-    () => absent.store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: ENVELOPE, planDigest: ENVELOPE.digest, approvalRef: 'R-65', holderWithin: refuse }),
+    () => absent.store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: ENVELOPE, planDigest: ENVELOPE.digest, historyMode: 'inferred', approvalRef: 'R-65', holderWithin: refuse }),
     () => absent.store.resolveInstall({ ...SCOPE, planDigest: ENVELOPE.digest, inferredBatches: [], historyMode: 'inferred', historyBatchCount: 2, nextStatus: 'backfilled', holderWithin: refuse }),
   ]) {
     const mid = snapshot(absent.db)
@@ -784,7 +784,7 @@ test('ST-I3 (M-BI-22 shape) holder FIRST in every install transaction: a refusal
   }
 })
 
-test('ST-I4 continueInstall / extendInstall CAS the persisted digest; a re-run in another history mode => PLAN_CHANGED history_mode_changed; the extension carries the run facts over', async () => {
+test('ST-I4 continueInstall / extendInstall CAS the persisted digest; a re-run in another history mode => PLAN_CHANGED history_mode_changed on BOTH (review fix P2-18: the extension too); the extension carries the run facts over', async () => {
   const { db, store } = setup({ status: null })
   await begin(store, { historyMode: 'unknown' })
   const other = 'f'.repeat(64)
@@ -793,8 +793,13 @@ test('ST-I4 continueInstall / extendInstall CAS the persisted digest; a re-run i
   const continued = await store.continueInstall({ ...SCOPE, planDigest: ENVELOPE.digest, historyMode: 'unknown', approvalRef: 'O-BI-1.S-01' })
   assert.deepEqual([continued.approvalRef, continued.version], ['O-BI-1.S-01', 2])
   const extended = { ...ENVELOPE, K: 3, digest: 'e'.repeat(64) }
-  await rejects(store.extendInstall({ ...SCOPE, fromDigest: other, plan: extended, planDigest: extended.digest, approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'from digest')
-  const row = await store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: extended, planDigest: extended.digest, approvalRef: 'R-65' })
+  await rejects(store.extendInstall({ ...SCOPE, fromDigest: other, plan: extended, planDigest: extended.digest, historyMode: 'unknown', approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'from digest')
+  // Review fix (P2-18): the extension names the run's mode and is refused when it is not the persisted one — nothing moves.
+  assert.equal((await rejects(store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: extended, planDigest: extended.digest, approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'mode missing')).details.field, 'historyMode')
+  const beforeMode = snapshot(db)
+  assert.equal((await rejects(store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: extended, planDigest: extended.digest, historyMode: 'inferred', approvalRef: 'R-65' }), PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'extension mode')).details.reason, 'history_mode_changed')
+  assert.equal(snapshot(db), beforeMode, 'a refused extension writes nothing')
+  const row = await store.extendInstall({ ...SCOPE, fromDigest: ENVELOPE.digest, plan: extended, planDigest: extended.digest, historyMode: 'unknown', approvalRef: 'R-65' })
   assert.deepEqual([row.historyPlanDigest, row.historyPlan.K, row.historyPlan.historyMode], [extended.digest, 3, 'unknown'])
   assert.equal(sheet(db).history_status, 'installing')
 })

@@ -20,7 +20,8 @@
 //   IN-11  a covered row whose set cell differs => 409 PLAN_CONFLICT before the first patch
 //   IN-12  VERSION_CONFLICT => one re-read, one retry; a row still blank at I5 => rows_unlabelled, never resolved
 //   IN-13  FORBIDDEN (locked meanwhile) => skipped and counted
-//   IN-14  rows after the plan => rows_after_plan; the extension digest installs and resolves with K = K + ext K
+//   IN-14  rows after the plan => rows_after_plan; the extension digest installs and resolves with K = K + ext K;
+//          IN-14b an extension re-run in another history mode is refused before the lease and any write (P2-18)
 //   IN-15  the write budget (3 over 7 rows: remaining 4, then 1, then resolved)
 //   IN-16  gap pass: exact join, appended clusters, base after the ledger; IN-16b live-labelled rows byte-identical
 //   IN-17  abort: the C7 lock rule over every row's cells; a labelled gap pass cannot be aborted; abort under the lease
@@ -32,6 +33,8 @@
 //   IN-23  born ready (OFF null, ledger unreadable, rows present, band unverified, tenant right + keep_current, a row
 //          arriving between the two reads)
 //   IN-24  the band cannot be derived (critic C3): dry_run band_unavailable, install 503, birth provisioning_unavailable
+//
+//   Review round 1 killing tests: IN-4b (X7), IN-10c (H2d), IN-12b (H3h), IN-17b (H5b), IN-18b (X4), IN-23b (X2), IN-28 (X3)
 //
 // Synthetic values only (rec_*, S-01, P-07, X).
 
@@ -625,6 +628,40 @@ test('IN-14 rows created after the plan (the switch off meanwhile) => rows_after
   assert.match(world.cells('rec_late')[0], /^第3批（推定，/)
 })
 
+// Review fix (BI-2 verify round 1, P2-18): the extension path must refuse a history-mode change exactly as the plain
+// continue path does — before the lease, before any host IO and before any cell write. A crashed `unknown` run whose
+// re-run is offered an extension (rows created while the switch was off) and attempted in `inferred` mode is refused
+// 409 PLAN_CHANGED history_mode_changed with zero cells written; the dry-run's `requires.historyMode` names the
+// PERSISTED mode on a continue, and a re-run in that mode installs the extension and resolves.
+test('IN-14b (P2-18) an extension re-run in another history mode than the persisted run is refused before the lease and any write; the dry-run names the persisted mode, whose re-run resolves', async () => {
+  const world = createWorld({ records: c09() })
+  const preview = await dryRun(world, { historyMode: 'unknown' })
+  world.state.patchFault = () => {
+    if (!world.host.has('rec_late')) world.host.set('rec_late', record('rec_late', { createdAt: '2026-10-26T03:00:01.000Z', part: 'N', plannedAt: '2026-10-26T03:00:00.000Z' }))
+    return Object.assign(new Error('crash'), { code: 'HOST_DOWN' })
+  }
+  await assert.rejects(install(world, { planDigest: preview.planDigest, count: 0, historyMode: 'unknown' }), /crash/)
+  world.state.patchFault = null
+  assert.equal(world.sheet().history_status, 'installing')
+  const blankCells = () => Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== '')
+  assert.deepEqual(blankCells(), [], 'the crash came at the first patch')
+  const next = await dryRun(world)
+  assert.equal(next.run, 'continue')
+  assert.ok(next.extension && next.extension.K === 3, JSON.stringify(next.extension))
+  assert.equal(next.requires.historyMode, 'unknown', 'a continue names the persisted run mode, never the request default')
+  const versionBefore = world.sheet().version
+  world.log.length = 0
+  const refused = await rejects(install(world, { planDigest: next.extension.planDigest, count: next.extension.K }), PB.PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'mode changed on the extension path')
+  assert.equal(refused.details.reason, 'history_mode_changed')
+  assert.equal(world.log.includes('lease.acquire'), false, 'refused before the lease')
+  assert.equal(world.log.includes('host.patchRecord'), false, 'no cell written')
+  assert.deepEqual(blankCells(), [], 'no row carries a label of a mode the persisted run does not carry')
+  assert.deepEqual([world.sheet().history_status, world.sheet().version], ['installing', versionBefore], 'the ledger row is untouched')
+  const done = await install(world, { planDigest: next.extension.planDigest, count: 0, historyMode: 'unknown' })
+  assert.deepEqual([done.resolved, done.K], [true, 3])
+  assert.deepEqual(world.cells('rec_late'), [UNKNOWN, UNKNOWN])
+})
+
 test('IN-15 (M-2B-21) the write budget: 3 over 7 rows answers write_budget remaining 4, then remaining 1, then resolved', async () => {
   const records = [...c09(), record('rec_06', { createdAt: '2026-10-20T02:30:04.000Z', part: 'Q1', plannedAt: P2 }), record('rec_07', { createdAt: '2026-10-20T02:30:05.000Z', part: 'Q2', plannedAt: P2 })]
   const world = createWorld({ records })
@@ -806,6 +843,140 @@ test('IN-27 a gap pass whose only work is a blank manual row on a born_empty she
   const done = await install(world)
   assert.deepEqual([done.resolved, done.historyStatus, done.written.manualRows], [true, 'born_empty', 1])
   assert.deepEqual(world.cells('rec_m1'), [MANUAL, MANUAL])
+})
+
+// ── review round 1 (BI-2 verification): the killing tests for eight guards whose mutants survived the suite ─────────
+// Each passes on the shipped code and goes red under its mutant (H3h / H5b / H2d / X2 / X3 / X4 / X7; H4d lives in
+// stock-preparation-pull-batch.test.cjs PB-I5b).
+
+// H3h (hunt 3, fill-blank only): a VERSION_CONFLICT whose fresh read shows a band cell SET meanwhile to another
+// label: the retry must not overwrite it — the row is raced, the cell keeps its value, and the run refuses
+// PLAN_CONFLICT instead of resolving.
+test('IN-12b (review H3h) a band cell set between the read and the patch is never overwritten by the VERSION_CONFLICT retry', async () => {
+  const world = createWorld({ records: c09() })
+  const preview = await dryRun(world)
+  const OTHER = '第9批（2026-10-01）'
+  let fired = false
+  world.state.patchFault = (recordId) => {
+    if (fired || recordId !== 'rec_03') return null
+    fired = true
+    const entry = world.host.get('rec_03')
+    entry.data[P_PB] = OTHER
+    entry.version += 1
+    return null // the host's own version check now answers VERSION_CONFLICT
+  }
+  let outcome
+  try { outcome = await install(world, { planDigest: preview.planDigest, count: 2 }) } catch (error) { outcome = { thrown: error.code } }
+  assert.equal(fired, true)
+  assert.equal(world.cells('rec_03')[0], OTHER, 'the cell set meanwhile keeps its value')
+  assert.equal(outcome.thrown, PB.PULL_BATCH_ERROR_CODES.PLAN_CONFLICT, JSON.stringify(outcome))
+  assert.equal(world.sheet().history_status, 'installing')
+})
+
+// H5b (hunt 5, C7): an unbound prefix row is counted, never read — its cells may carry a plan label, so an abort of
+// a first install with no label on any READ row still keeps the lock while such a row exists (deviation 4).
+test('IN-17b (review H5b) abort of a first install keeps the lock while an unbound prefix row exists', async () => {
+  const records = [...c09(), record('rec_ub', { createdAt: '2026-10-20T02:30:09.000Z', part: 'M2', key: 'manual:v1:rec_other', createdBy: 'u_person' })]
+  const world = createWorld({ records })
+  const preview = await dryRun(world)
+  assert.equal(preview.classes.unboundPrefix, 1)
+  world.state.patchFault = () => Object.assign(new Error('crash'), { code: 'HOST_DOWN' })
+  await assert.rejects(install(world, { planDigest: preview.planDigest, count: 2 }), /crash/)
+  world.state.patchFault = null
+  const aborted = await IN.runPullBatchInstallRequest(world.deps(), { mode: 'abort', confirmProjectNo: PROJECT, approvalRef: 'R-65' })
+  assert.deepEqual(aborted, { mode: 'abort', historyStatus: 'pending', firstInstall: true, settingsReleased: false })
+})
+
+// H2d (hunt 2): a persisted plan whose CONTENT no longer matches its digest is a corrupt row — 500, never a silent
+// continue with other labels.
+test('IN-10c (review H2d) a tampered persisted plan (content changed, digest column kept) is refused, never continued', async () => {
+  const world = createWorld({ records: c09() })
+  const preview = await dryRun(world)
+  world.state.patchFault = () => Object.assign(new Error('crash'), { code: 'HOST_DOWN' })
+  await assert.rejects(install(world, { planDigest: preview.planDigest, count: 2 }), /crash/)
+  world.state.patchFault = null
+  const table = world.db.tables.get(kit.T.sheet)
+  const live = Array.from(table.values()).find((row) => row.sheet_id === SHEET)
+  const plan = typeof live.history_plan === 'string' ? JSON.parse(live.history_plan) : structuredClone(live.history_plan)
+  plan.clusters[0].label = '第1批（推定，2026-01-01）'
+  live.history_plan = typeof live.history_plan === 'string' ? JSON.stringify(plan) : plan
+  await rejects(dryRun(world), PB.PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'tampered plan, dry-run')
+  await rejects(install(world, { planDigest: preview.planDigest, count: 2 }), PB.PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'tampered plan, install')
+  assert.deepEqual(Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== ''), [])
+})
+
+// A provisioning wrapper over the world's own: `onTx(tx)` may wrap the repair transaction's surface.
+function wrapRepair(world, onTx) {
+  const base = world.deps().provisioning
+  return { ...base, runObjectFieldsRepairTransaction: (fn) => base.runObjectFieldsRepairTransaction((tx) => fn(onTx(tx))) }
+}
+
+// X2: the host creates the band but resolves a band id to a physical id other than the derived one => never verified.
+test('IN-23b (review X2) a band id that resolves to another physical id after the repair is never verified: no born_empty, install 409 CONFLICT, ledger untouched', async () => {
+  const misresolve = (tx) => {
+    let ensured = false
+    return {
+      ...tx,
+      async ensureMissingObjectFields(input) { ensured = true; return tx.ensureMissingObjectFields(input) },
+      async resolveExistingObjectFieldIds(input) {
+        const out = await tx.resolveExistingObjectFieldIds(input)
+        if (ensured && out.pullBatch) out.pullBatch = 'fld_not_the_derived_id'
+        return out
+      },
+    }
+  }
+  const birth = createWorld()
+  const answer = await IN.bornReadyBestEffort(birth.deps({ provisioning: wrapRepair(birth, misresolve) }))
+  assert.deepEqual([answer.installed, answer.reason], [false, 'band_unverified'])
+  assert.equal(birth.sheet(), null)
+  const world = createWorld({ records: c09() })
+  const prov = wrapRepair(world, misresolve)
+  const preview = await dryRun(world, {}, { provisioning: prov })
+  await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { provisioning: prov }), PB.PULL_BATCH_ERROR_CODES.CONFLICT, 'misresolved band')
+  assert.equal(world.sheet(), null, 'the ledger is untouched')
+})
+
+// X3: a repair transaction that changes an EXISTING column's content is rolled back (additive only, BI-R8).
+test('IN-28 (review X3) a repair that changes an existing column is refused (CONFLICT band_mutated_existing) and rolled back; nothing is persisted', async () => {
+  const world = createWorld({ records: c09() })
+  const mutate = (tx) => ({
+    ...tx,
+    async ensureMissingObjectFields(input) {
+      const out = await tx.ensureMissingObjectFields(input)
+      world.fields.get('componentSourceId').property = { humanWriteLock: 'plm_system', changedByRepair: true }
+      return out
+    },
+  })
+  const prov = wrapRepair(world, mutate)
+  const preview = await dryRun(world, {}, { provisioning: prov })
+  const error = await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { provisioning: prov }), PB.PULL_BATCH_ERROR_CODES.CONFLICT, 'mutating repair')
+  assert.equal(error.details.reason, 'band_mutated_existing')
+  assert.equal(world.fields.get('componentSourceId').property.changedByRepair, undefined, 'rolled back')
+  assert.equal(world.sheet(), null)
+})
+
+// X4: the registry lock hands back another sheet (the registry moved meanwhile) => the resolve never runs.
+test('IN-18b (review X4) the registry lock answering another sheet refuses the resolve (CONFLICT registry_moved); the sheet stays installing', async () => {
+  const world = createWorld({ records: c09() })
+  const moved = async (fn) => fn({ sheetId: 'sheet_syn_other', objectId: OBJECT_ID })
+  const preview = await dryRun(world)
+  const error = await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { withRegistryLock: moved }), PB.PULL_BATCH_ERROR_CODES.CONFLICT, 'registry moved')
+  assert.equal(error.details.reason, 'registry_moved')
+  assert.equal(world.sheet().history_status, 'installing')
+})
+
+// X7: the PLM lock read complete at the preview but no longer complete under the lease => refused before Txn A.
+test('IN-4b (review X7) a PLM column unlocked between the preview and the lease => 409 PLM_LOCK_REQUIRED, nothing persisted, no cell written', async () => {
+  const world = createWorld({ records: c09() })
+  const preview = await dryRun(world)
+  let reads = 0
+  const flaky = async () => {
+    reads += 1
+    return reads <= 1 ? { fieldCount: 20, marked: 20, unmarked: 0, missing: 0, readBeforeWrite: true } : { fieldCount: 20, marked: 19, unmarked: 1, missing: 0, readBeforeWrite: true }
+  }
+  await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { readPlmLock: flaky }), PB.PULL_BATCH_ERROR_CODES.PLM_LOCK_REQUIRED, 'plm lock moved')
+  assert.equal(world.sheet(), null)
+  assert.deepEqual(Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== ''), [])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-install.test.cjs', tests)

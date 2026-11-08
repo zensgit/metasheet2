@@ -1201,6 +1201,23 @@ test('PB-I5 the gap pass (design §8.6): exact join on an EQUAL plan time to ONE
   assert.equal(gapPass({ gapRows: [], priorRows: prior, historyBatchCount: 7 }).base, 7, 'base = max(batch_no, history_batch_count)')
 })
 
+// Review round 1 (BI-2 verification, H4d): the exact join counts only `add` prior rows. A prior row stamped at the SAME
+// plan time with a live 本次 but decision 'update' was created by an EARLIER batch (本次 = its creation batch); a gap row
+// added at that plan time must not join that label.
+test('PB-I5b (review H4d) no exact join onto the live label of a non-add (update) prior row at the same plan time', () => {
+  const p = '2026-10-22T01:00:00.000Z'
+  const envelope = PB.planPullBatchGapPass({
+    gapRows: [{ recordId: 'rec_gap', createdAt: '2026-10-22T01:00:05.000Z', decision: 'add', plannedAt: p, active: true, partId: 'N-01', path: ['N-01'] }],
+    priorRows: [{ recordId: 'rec_upd', createdAt: '2026-10-20T01:00:01.000Z', decision: 'update', plannedAt: p, active: true, partId: 'S-01', path: ['S-01'], pullBatch: L(1), firstPullBatch: L(1) }],
+    ledgerBatches: [{ batchNo: 1, label: L(1), status: 'closed', openedAt: '2026-10-20T01:00:00.000Z' }],
+    historyBatchCount: 0,
+    coveredUntil: '2026-10-22T01:00:05.000Z',
+    locale: 'zh-CN',
+    config: PB.DEFAULT_PULL_BATCH_CONFIG,
+  })
+  assert.deepEqual(envelope.gapPass.joins, [], JSON.stringify(envelope.gapPass))
+})
+
 test('PB-I6 critic C1: a gap pass labels R only — a labelled prior row inside a gap-cluster interval is never in R and never gets an assignment; its cells feed 首次', () => {
   const prior = [priorRow('X_live', '2026-10-25T02:00:01.500Z', { pullBatch: L(2, '2026-10-23'), firstPullBatch: L(2, '2026-10-23') })]
   const gapRows = [
