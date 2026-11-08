@@ -181,6 +181,7 @@ import { adminDirectoryRouter } from '../../src/routes/admin-directory'
 import { adminDirectoryDepartmentBindingsRouter } from '../../src/routes/admin-directory-department-bindings'
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
+import { adminDirectoryCapabilitiesRouter } from '../../src/routes/admin-directory-capabilities'
 import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-directory-routing-policy'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { canaryRoutes } from '../../src/routes/canary-routes'
@@ -235,6 +236,7 @@ type MountKey =
   | 'admin-directory-local'
   | 'admin-directory-department-bindings'
   | 'admin-directory-routing-policy'
+  | 'admin-directory-integration-capabilities'
   | 'canary'
   | 'permissions'
 
@@ -298,6 +300,13 @@ const MOUNTS: Record<MountKey, MountSpec> = {
     factory: adminDirectoryRoutingPolicyRouter,
     routeFile: 'routes/admin-directory-routing-policy.ts',
     build: () => adminDirectoryRoutingPolicyRouter(),
+  },
+  'admin-directory-integration-capabilities': {
+    mountPath: '/api/admin/directory/integration-capabilities',
+    source: "this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())",
+    factory: adminDirectoryCapabilitiesRouter,
+    routeFile: 'routes/admin-directory-capabilities.ts',
+    build: () => adminDirectoryCapabilitiesRouter(),
   },
   canary: {
     mountPath: '/api/admin/canary',
