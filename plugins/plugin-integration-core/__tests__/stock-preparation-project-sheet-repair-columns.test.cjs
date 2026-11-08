@@ -54,6 +54,9 @@
 //         existing order moves; a second run adds nothing and moves nothing.
 //   RC-15 LEFT-SIDE BAND (Y7 review MEDIUM-2): band at −2 / −1 keeps its place, the re-added columns go after the
 //         current max.
+//   RC-17 THE GATE IS THE PLATFORM/INTEGRATION ADMIN TIER: the route's requireAccess(req, 'admin') admits role:admin or
+//         integration:admin only; a holder of the whole stock-prep vocabulary (stock-prep:admin included) is 403 in
+//         every mode with zero host calls.
 //   RC-16 OLDER HOST / BAD READ (Y7 review MEDIUM-2): a repair transaction without readObjectMaxFieldOrder → 503 with
 //         nothing written and no audit row (a nothing-missing run still answers 200); a non-integer max → 500,
 //         nothing written.
@@ -913,6 +916,26 @@ test('RC-16 a repair transaction without readObjectMaxFieldOrder is 503 with not
       assert.equal(snapshotObject(objectOf(h, objectId)), before)
     } finally { h.restore() }
   }
+})
+
+test('RC-17 stock-prep:admin is not the repair gate: 403 FORBIDDEN in every mode with zero host calls; integration:admin alone passes', async () => {
+  const STOCK_PREP_ADMIN_ONLY = Object.freeze({ id: 'u_rc_sp_admin', tenantId: TENANT, permissions: ['stock-prep:admin', STOCK_PREP_OPERATE, STOCK_PREP_READ, STOCK_PREP_PULL] })
+  const INTEGRATION_ADMIN_ONLY = Object.freeze({ id: 'u_rc_int_admin', tenantId: TENANT, permissions: ['integration:admin'] })
+  const h = mount()
+  try {
+    const { objectId, object } = await agedSheet(h)
+    const before = snapshotObject(object)
+    for (const body of [{ projectNo: PROJECT }, { projectNo: PROJECT, dryRun: true }, { projectNo: PROJECT, addMissingColumns: true }]) {
+      h.provisioning.calls.length = 0
+      const res = await repair(h, body, { user: STOCK_PREP_ADMIN_ONLY })
+      assert.equal(res.statusCode, 403, `${JSON.stringify(body)}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'FORBIDDEN')
+      assert.deepEqual(h.provisioning.calls, [], 'zero host calls')
+    }
+    assert.equal(snapshotObject(objectOf(h, objectId)), before)
+    const ok = await repair(h, { projectNo: PROJECT, dryRun: true }, { user: INTEGRATION_ADMIN_ONLY })
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+  } finally { h.restore() }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)
