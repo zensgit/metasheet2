@@ -229,9 +229,16 @@ function compile(input, versions, persistent = false) {
     const allocation = owned.allocation
     if (allocation?.mode === 'original') exactRecord(allocation, ['mode'])
     else {
-      exactRecord(allocation, ['mode', 'projects', 'projectField', 'quantityField'])
+      // Q4 (R-88): quantityRounding is optional; the allocation module owns its values and mode pairing.
+      exactRecord(allocation, Object.hasOwn(allocation ?? {}, 'quantityRounding')
+        ? ['mode', 'projects', 'projectField', 'quantityField', 'quantityRounding']
+        : ['mode', 'projects', 'projectField', 'quantityField'])
       if (!['equal_integer', 'equal_decimal_exact'].includes(allocation.mode)) fail('INPUT')
     }
+    // Only the non-default rounding enters the plan digest: absent and 'exact' are the same rule, so every
+    // stored plan_digest and golden stays byte-identical, while a legacy-1dp plan can never share a digest with
+    // an exact one even when the rounded shares happen to be exact.
+    const legacyRounding = allocation.mode !== 'original' && allocation.quantityRounding === 'legacy-1dp'
     const { plan, sourceRows, origins } = compilePlan(config, owned.rowsText, allocation)
     assertValidPlan(plan, config.intent)
     const binding = hasBinding ? parseSourceBinding(owned.sourceBinding, sourceRows) : null
@@ -258,6 +265,11 @@ function compile(input, versions, persistent = false) {
           : config.fieldMap.find(field => field.source === keyField)
         return { target: entry.target, type: entry.type, empty: config.emptyKeyFields.includes(keyField) }
       }).sort((left, right) => compareCodePoints(left.target, right.target)),
+      // D2 (R-88): a 'uuid-32' material-code form is part of the key definition, so it is sealed with the slot
+      // at initialization and a later draft declaring another form is KEY_DEFINITION_CONFLICT: one identity
+      // never gets two codes. The default 'uuid-36' (declared or not) adds nothing, so every stored
+      // key_definition_digest and golden is unchanged.
+      ...(config.materialCodeForm === 'uuid-32' ? { materialCodeForm: 'uuid-32' } : {}),
     }
     const keyDefinitionDigest = hashCanonical(keyDefinition)
     // A bound row adds its two digests and its per-row binding (§7.2); an unbound row's spec is byte-identical
@@ -299,6 +311,7 @@ function compile(input, versions, persistent = false) {
     const planDigest = hashCanonical({
       version: 1, kind: 'yida-local-plan', locator, keyDefinition, intent: config.intent,
       ...(config.version === 3 ? { mapping: 3 } : {}),
+      ...(legacyRounding ? { quantityRounding: 'legacy-1dp' } : {}),
       rows: rowSpecs.map(({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }) => ({
         businessKeyDigest, payloadDigest,
         ...(sourceRecordDigest === undefined ? {} : { sourceRecordDigest, creationIdentityDigest }),

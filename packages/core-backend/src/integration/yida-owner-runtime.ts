@@ -29,6 +29,10 @@ export type YidaOwnerRuntimeDependencies = {
   // Y2: INTEGRATION_YIDA_MULTI_TARGET_ENABLED, read per call (exact 'true'). Absent or anything else =
   // the original single-target authority: no targetRef accepted, slot 1 only. Never send authority.
   readMultiTargetEnablement?: () => unknown
+  // D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED, read per call (exact 'true'). ON = the
+  // sheet/view source (and so a source binding) is available without multi-target, on slot 1 only (never a
+  // targetRef). Absent or anything else = today's coupling (D17 a): the sheet source needs multi-target.
+  readSheetSourceEnablement?: () => unknown
   // D20 (design baseline v2.3 §3.3/§7.2): INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS, an exact comma-separated
   // list of target refs that, like slot 1 (the material TEST copy, R-71 decision 1), may still take unbound
   // rows. Read per call; absent, empty or malformed = no such target. Every other target requires binding.
@@ -168,10 +172,12 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   const fetcher = dependencies.fetch
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
   const readMultiTarget = dependencies.readMultiTargetEnablement ?? (() => 'false')
+  const readSheetSource = dependencies.readSheetSourceEnablement ?? (() => 'false')
   const readUnboundTestTargetRefs = dependencies.readUnboundTestTargetRefs ?? (() => undefined)
   const reauthorizeSourceBinding = dependencies.reauthorizeSourceBinding
   const timeoutMs = dependencies.timeoutMs ?? 10000
   if (typeof fetcher !== 'function' || typeof readEnablement !== 'function' || typeof readMultiTarget !== 'function'
+    || typeof readSheetSource !== 'function'
     || typeof readUnboundTestTargetRefs !== 'function'
     || (reauthorizeSourceBinding !== undefined && (typeof reauthorizeSourceBinding !== 'function' || types.isProxy(reauthorizeSourceBinding)))
     || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000) fail('INPUT')
@@ -183,6 +189,17 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     if (!on) consumeRejection(flag)
     return on
   }
+  // D17 b: the same exact-literal read for the sheet-source switch. ON while multi-target is OFF admits only the
+  // sheet source on slot 1; with multi-target ON this switch changes nothing.
+  function sheetSourceOn(): boolean {
+    let flag: unknown
+    try { flag = readSheetSource() } catch { return false }
+    const on = flag === 'true'
+    if (!on) consumeRejection(flag)
+    return on
+  }
+  // A source binding (and the sheet read that produces it) is available on either switch.
+  const sourceBindingOn = (): boolean => multiTargetOn() || sheetSourceOn()
   // D20 allowlist, exact list: comma-separated target refs (UUIDs), each byte-exact (no trim, no case folding).
   // Anything else (a throwing or async reader, an empty entry, a non-UUID entry) is the empty list, so a
   // malformed value can only make formal targets stricter, never admit an unbound row.
@@ -275,7 +292,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           checkpoint()
           // Captured once per run: a switch flip mid-run cannot widen this authority.
           const authority = createInternalYidaSendExecutionAuthority({ database, security, context, primitives,
-            ...(multiTargetOn() ? { multiTarget: true } : {}), unboundTestTargetRefs: unboundTestTargetRefs(),
+            ...(multiTargetOn() ? { multiTarget: true } : {}), ...(sheetSourceOn() ? { sheetSource: true } : {}),
+            unboundTestTargetRefs: unboundTestTargetRefs(),
             ...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })
           checkpoint()
           return await checked(() => work(authority, state, context, checkpoint, controller.signal, tracked))
@@ -344,18 +362,19 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
         const parsed = record(supplied, ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding'], ['config', 'rowsText'])
         if (typeof parsed.rowsText !== 'string' || Buffer.byteLength(parsed.rowsText, 'utf8') > 16 * 1024 * 1024) fail('INPUT')
         if (Object.hasOwn(parsed, 'targetRef')) { if (!multiTargetOn()) fail('INPUT'); id(parsed.targetRef) }
-        // A source binding exists only on the multi-target sheet-source path (D17 a); the route produces it, a
-        // request body cannot. The plugin compiler owns its closed shape.
-        if (Object.hasOwn(parsed, 'sourceBinding') && !multiTargetOn()) fail('INPUT')
+        // A source binding exists only on a sheet-source path (multi-target, D17 a; or the sheet-source switch,
+        // D17 b); the route produces it, a request body cannot. The plugin compiler owns its closed shape.
+        if (Object.hasOwn(parsed, 'sourceBinding') && !sourceBindingOn()) fail('INPUT')
         return parsed
       }, parsed => execute(context, {}, true, authority => authority.prepareDraft(parsed)))
     },
     // Y2 sheet source: prove the live owner (and the named target) with prepareDraft's own refusals before
-    // the route reads any sheet row. Switch ON only; no data out, nothing written.
+    // the route reads any sheet row. Either switch ON only (a targetRef needs multi-target); no data out, nothing written.
     proveDraftOwner(context: YidaOwnerActor, supplied: YidaOwnerProveDraftOwnerInput) {
       return input(() => {
-        if (!multiTargetOn()) fail('INPUT')
+        if (!sourceBindingOn()) fail('INPUT')
         const parsed = record(supplied, ['targetRef'], [])
+        if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')
         return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}
       }, parsed => execute(context, {}, true, authority => authority.proveDraftTarget(parsed)))
     },
@@ -417,6 +436,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     // Y2 display/shape bit for the owner route (target picker, sheet source). Never authority:
     // the run's authority re-reads the same exact literal and refuses a targetRef while OFF.
     multiTargetEnabled(): boolean { return multiTargetOn() },
+    // D17 b shape bit for the owner route (sheet source without multi-target). Never authority: prepareDraft and
+    // the run's authority re-read the same exact literals.
+    sheetSourceEnabled(): boolean { return sheetSourceOn() },
     deactivate(): Promise<void> {
       ++capabilityGeneration
       return active ? drain(active) : Promise.resolve()

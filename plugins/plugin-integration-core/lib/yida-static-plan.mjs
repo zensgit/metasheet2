@@ -1,7 +1,7 @@
 // Local YiDa form planning only. No transport, clock, persistence, or sender. The one import is the
 // pure, import-free material-code leaf (pinned by __tests__/yida-static-plan.test.cjs).
 // Target IDs and target field names are fictional/local metadata, not verified remote schema.
-import { generateYidaMaterialCode, yidaMaterialCodeUuidV5 } from './yida-material-code.mjs'
+import { YIDA_MATERIAL_CODE_PREFIX, generateYidaMaterialCode, yidaMaterialCodeUuidV5 } from './yida-material-code.mjs'
 
 const MAX_TEXT_BYTES = 128 * 1024
 const MAX_ROWS = 100
@@ -10,7 +10,8 @@ const MAX_VALUE_LENGTH = 4096
 const IDENTIFIER = /^[\p{L}\p{N}_-]{1,128}$/u
 const FORBIDDEN_IDENTIFIER = /(?:__proto__|prototype|constructor|password|token|appkey|appsecret|systemtoken|authoritycode|credential|secret)/i
 const CONFIG_KEYS = new Set(['version', 'kind', 'target', 'intent', 'businessKey', 'instanceIdField', 'fieldMap'])
-const PROTOCOL_CONFIG_KEYS = new Set([...CONFIG_KEYS, 'fieldCatalog', 'emptyKeyFields'])
+// materialCodeForm (D2, R-88) is optional: see materialCodeFormOf below.
+const PROTOCOL_CONFIG_KEYS = new Set([...CONFIG_KEYS, 'fieldCatalog', 'emptyKeyFields', 'materialCodeForm'])
 const TARGET_KEYS = new Set(['appType', 'formUuid'])
 const MAP_KEYS = new Set(['source', 'target', 'type', 'required'])
 const CATALOG_KEYS = new Set(['id', 'control', 'required', 'options'])
@@ -232,13 +233,14 @@ function validateProtocolConfig(root) {
         && !entry.required && !catalog.find((item) => item.id === entry.target)?.required))) {
     issues.push(configIssue('CONFIG_EMPTY_KEY_FIELDS_INVALID', 'emptyKeyFields'))
   }
+  const form = materialCodeFormOf(root, [], issues)
   if (issues.length > 0) return { valid: false, issues }
   return { valid: true, normalized: {
     version: 2, kind: 'yida-form-protocol-static',
     target: { appType: target.appType.value.trim(), formUuid: target.formUuid.value.trim() },
     intent, businessKey: [...rawKeys], emptyKeyFields: [...rawEmptyKeys],
     ...(intent === 'update' ? { instanceIdField: root.instanceIdField.value } : {}),
-    fieldMap: map, fieldCatalog: catalog,
+    fieldMap: map, fieldCatalog: catalog, ...form,
   } }
 }
 
@@ -338,12 +340,37 @@ function generatedTemplate(value) {
       if (!members || members.length < 1 || new Set(members).size !== members.length
         || !members.every((member) => validIdentifier(member))) return null
       parts.push({ hash: [...members], form: part.form.value })
-    } else if (part && exactKeys(part, ['preset', 'rowIdOf', 'projectOf']) && part.preset.value === GENERATED_PRESET
+    } else if (part && (exactKeys(part, ['preset', 'rowIdOf', 'projectOf'])
+        || (exactKeys(part, ['preset', 'rowIdOf', 'projectOf', 'form']) && HASH_FORMS.has(part.form.value)))
+      && part.preset.value === GENERATED_PRESET
       && validIdentifier(part.rowIdOf.value) && validIdentifier(part.projectOf.value)) {
-      parts.push({ preset: GENERATED_PRESET, rowIdOf: part.rowIdOf.value, projectOf: part.projectOf.value })
+      parts.push({ preset: GENERATED_PRESET, rowIdOf: part.rowIdOf.value, projectOf: part.projectOf.value,
+        ...(hasPart(part, 'form') ? { form: part.form.value } : {}) })
     } else return null
   }
   return parts.some((part) => !hasPart(part, 'literal')) ? parts : null
+}
+
+// D2 (owner 2026-11-07, R-88: an open question gets a configurable default). The material-code form of one config:
+// 'uuid-36' (default: Y2's 41-character WLBH- code, byte for byte) or 'uuid-32' (the same code with the UUID's four
+// hyphens removed after the WLBH- prefix, 37 characters). It may be declared at the root (`materialCodeForm`, the only
+// place a v2 initialization draft can declare it) and on each preset part (`form`); every declaration must name the
+// same form (CONFIG_MATERIAL_CODE_FORM_INVALID), so one config never mints two codes for one identity. The agreed
+// form is normalized onto the root; with no declaration the root key stays absent (every default output unchanged).
+// The draft compiler seals a 'uuid-32' form into the target's key definition, so a slot keeps one form for life.
+function materialCodeFormOf(root, map, issues) {
+  const declared = []
+  if (Object.prototype.hasOwnProperty.call(root, 'materialCodeForm')) declared.push(root.materialCodeForm.value)
+  for (const entry of map) {
+    if (entry.transform !== 'generated') continue
+    for (const part of entry.template) if (hasPart(part, 'preset') && hasPart(part, 'form')) declared.push(part.form)
+  }
+  if (declared.length === 0) return {}
+  if (!declared.every((form) => HASH_FORMS.has(form) && form === declared[0])) {
+    issues.push(configIssue('CONFIG_MATERIAL_CODE_FORM_INVALID', 'materialCodeForm'))
+    return {}
+  }
+  return { materialCodeForm: declared[0] }
 }
 
 // The direct targets a generated template reads, in part order (duplicates kept).
@@ -466,13 +493,14 @@ function validateTransformConfig(root) {
     && !generatedTemplateValid(entry, primaries, rawKeys))) {
     issues.push(configIssue('CONFIG_FIELD_MAP_INVALID', 'fieldMap'))
   }
+  const form = materialCodeFormOf(root, map, issues)
   if (issues.length > 0) return { valid: false, issues }
   return { valid: true, normalized: {
     version: 3, kind: 'yida-form-protocol-static',
     target: { appType: target.appType.value.trim(), formUuid: target.formUuid.value.trim() },
     intent, businessKey: [...rawKeys], emptyKeyFields: [...rawEmptyKeys],
     ...(intent === 'update' ? { instanceIdField: root.instanceIdField.value } : {}),
-    fieldMap: map, fieldCatalog: catalog,
+    fieldMap: map, fieldCatalog: catalog, ...form,
   } }
 }
 
@@ -797,7 +825,10 @@ function generatedValue(config, entry, row) {
     if (missing(keyValue) || missing(projectNo)) return { code: 'FIELD_PART_MISSING' }
     if (!identityText(keyValue) || !identityText(projectNo)) return { code: 'FIELD_TYPE' }
     try {
-      pieces.push(generateYidaMaterialCode({ keyValue, projectNo }))
+      const code = generateYidaMaterialCode({ keyValue, projectNo })
+      // D2 'uuid-32': strip the UUID's hyphens only; the WLBH- prefix and Y2's bytes stay as they are.
+      pieces.push(config.materialCodeForm === 'uuid-32'
+        ? YIDA_MATERIAL_CODE_PREFIX + code.slice(YIDA_MATERIAL_CODE_PREFIX.length).replaceAll('-', '') : code)
     } catch (error) {
       if (error?.name === 'YidaMaterialCodeError') return { code: 'FIELD_TYPE' }
       throw error

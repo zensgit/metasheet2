@@ -33,7 +33,11 @@ export interface YidaProtocolBaseConfig {
   emptyKeyFields: string[]
   fieldMap: YidaStaticFieldMapEntry[]
   fieldCatalog: YidaProtocolCatalogEntry[]
+  /** D2 (R-88): the slot's material-code form, sealed into the key definition when 'uuid-32'. Absent = 'uuid-36'. */
+  materialCodeForm?: YidaMaterialCodeForm
 }
+/** 'uuid-36' (default): WLBH- + hyphenated UUIDv5, 41 characters; 'uuid-32': the UUID's hyphens removed, 37. */
+export type YidaMaterialCodeForm = 'uuid-36' | 'uuid-32'
 export type YidaProtocolConfig =
   | (YidaProtocolBaseConfig & { intent: 'create'; instanceIdField?: never })
   | (YidaProtocolBaseConfig & { intent: 'update'; instanceIdField: string })
@@ -45,7 +49,7 @@ export type YidaGeneratedTemplatePart =
   /** 1..16 string-typed direct targets covering every business-key target (rule G1); hashed as (target, value) pairs sorted by target, so the listed order is not part of the code. */
   | { hash: string[]; form: 'uuid-36' | 'uuid-32' }
   /** The frozen material-code-v1 generator; projectOf is a business-key target. */
-  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string }
+  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string; /** D2: must agree with every other declaration of the config. */ form?: YidaMaterialCodeForm }
 /** v3: one direct entry per source column; copy/constant/concat/generated are derived and never key parts. */
 export type YidaTransformFieldMapEntry =
   | { transform: 'direct'; source: string; target: string; type: 'string' | 'number'; required: boolean }
@@ -77,6 +81,8 @@ export interface YidaTransformBaseConfig {
   businessKey: string[]
   /** Subset of businessKey (target ids) whose blank values share one identity. */
   emptyKeyFields: string[]
+  /** D2 (R-88): the agreed material-code form of the root and every preset part; absent = 'uuid-36'. */
+  materialCodeForm?: YidaMaterialCodeForm
   fieldMap: YidaTransformFieldMapEntry[]
   fieldCatalog: YidaProtocolCatalogEntry[]
 }
@@ -96,6 +102,7 @@ export type YidaStaticConfigIssueCode =
   | 'CONFIG_KEY_INVALID'
   | 'CONFIG_FIELD_CATALOG_INVALID'
   | 'CONFIG_EMPTY_KEY_FIELDS_INVALID'
+  | 'CONFIG_MATERIAL_CODE_FORM_INVALID'
 export interface YidaStaticConfigIssue {
   code: YidaStaticConfigIssueCode
   field: string

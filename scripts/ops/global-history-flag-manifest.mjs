@@ -81,6 +81,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
+    key: 'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'D17 b of the YiDa standardization design baseline v2.3 (owner 2026-11-07, R-88: an open question gets a configurable default). Default OFF = D17 a, today\'s coupling: a draft can come from a multitable sheet or view (and so carry a server-read source binding) only while INTEGRATION_YIDA_MULTI_TARGET_ENABLED is ON. Byte-exact true makes the same owner-run sheet/view source available on the single-target path too, for slot 1 only: no targetRef, no second target, no slot registration. The read keeps every existing rule (the owner\'s own read and export permissions, 2000 scanned records, 100 rows, 128 KiB; plain stored scalar columns only), the D21 re-authorization at approval and admission, and the creation-identity fence. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED and the unchanged owner/live-admin/one-attempt rules; with multi-target ON this switch changes nothing. Danger=high because ON lets customer sheet rows enter a YiDa draft without the multi-target decision: enabling it on any deployed machine is a separate owner decision (AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts#sheetSourceOn; packages/core-backend/src/integration/yida-send-approval-service.ts#sheetSource; packages/core-backend/src/routes/integration-yida-owner.ts',
+  },
+  {
     key: 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS',
     type: 'list',
     activationValue:

@@ -925,6 +925,27 @@ test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger h
     /if \(slot === 1 \|\| unboundTargets\.has\(targetRef\)\) return/)
 })
 
+test('YiDa sheet-source switch (design baseline v2.3 D17 b, R-88): boolean, exact true, danger high, no dependsOn, every cited file real, the host index reads this exact env name', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const near of ['TRUE', ' true', 'true ', '1', 'yes', '']) assert.equal(isActivated(spec, near), false, JSON.stringify(near))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'),
+    /readSheetSourceEnablement: \(\) => process\.env\.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED,/)
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-owner-runtime.ts'), 'utf8')
+  assert.match(runtime, /function sheetSourceOn\(\): boolean \{/)
+  assert.match(runtime, /const on = flag === 'true'/)
+})
+
 test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_MEMBERS_PAGE_ENABLED
   assert.ok(spec)

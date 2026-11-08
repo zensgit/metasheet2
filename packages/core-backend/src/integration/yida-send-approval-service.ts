@@ -207,6 +207,10 @@ type Dependencies = {
   // Y2: true only while the host multi-target switch reads exact 'true' for this run. False/absent =
   // the original permanent slot-1 authority, byte for byte (no targetRef accepted or forwarded).
   multiTarget?: boolean
+  // D17 b (R-88): true only while INTEGRATION_YIDA_SHEET_SOURCE_ENABLED reads exact 'true' for this run. It admits the
+  // host's sheet-source binding on a draft without multi-target (slot 1); it never admits a targetRef. Absent =
+  // today's coupling (D17 a): a binding rides only with multiTarget.
+  sheetSource?: boolean
   // D20 (design baseline v2.3 §3.3/§7.2): target refs that may take UNBOUND rows besides slot 1 (the material
   // TEST copy, R-71 decision 1). Every other target refuses an unbound row at approval and at admission. The
   // runtime parses INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS once per run; absent = empty.
@@ -245,9 +249,10 @@ export type YidaSendExecutionHandle = Readonly<{
   close(): void
 }>
 
-function createApprovalInternals({ database, security, context, primitives, multiTarget, unboundTestTargetRefs, reauthorizeSourceBinding }: Dependencies,
+function createApprovalInternals({ database, security, context, primitives, multiTarget, sheetSource, unboundTestTargetRefs, reauthorizeSourceBinding }: Dependencies,
   executionPrimitives?: YidaSendExecutionPrimitives) {
   const multi = multiTarget === true
+  const sheetSourceOnly = !multi && sheetSource === true
   // Captured once: a Set of exact target refs, or empty. Never widened after construction.
   const unboundTargets: ReadonlySet<string> = new Set(unboundTestTargetRefs instanceof Set
     ? [...unboundTestTargetRefs].filter((value): value is string => typeof value === 'string' && TARGET_REF.test(value)) : [])
@@ -645,10 +650,12 @@ function createApprovalInternals({ database, security, context, primitives, mult
     }, noCheckpoint, grantSelector(grantId))
   }
   async function prepareDraft(input: unknown): Promise<Readonly<Row>> {
-    // A source binding rides only on the multi-target sheet-source path (D17 a); its closed shape is the plugin
-    // compiler's. Under the original single-target authority the key itself is refused.
-    const supplied = record(input, multi ? ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding'] : ['config', 'rowsText', 'allocation'],
-      ['config', 'rowsText', 'allocation'])
+    // A source binding rides only on a sheet-source path: multi-target (D17 a) or, with the sheet-source switch, the
+    // single-target slot 1 (D17 b, never a targetRef). Its closed shape is the plugin compiler's. Under the original
+    // single-target authority with the sheet-source switch off the key itself is refused.
+    const supplied = record(input, multi ? ['config', 'rowsText', 'allocation', 'targetRef', 'sourceBinding']
+      : sheetSourceOnly ? ['config', 'rowsText', 'allocation', 'sourceBinding'] : ['config', 'rowsText', 'allocation'],
+    ['config', 'rowsText', 'allocation'])
     const selector = Object.hasOwn(supplied, 'targetRef') ? Object.freeze({ targetRef: id(supplied.targetRef) }) : undefined
     const withBinding = Object.hasOwn(supplied, 'sourceBinding')
     const parsed = record({ config: supplied.config, rowsText: supplied.rowsText, allocation: supplied.allocation,

@@ -662,6 +662,8 @@ export class MetaSheetServer {
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
     // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
     readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
+    // D17 b (R-88): the sheet/view source on slot 1 without multi-target; its own default-OFF switch (exact 'true').
+    readSheetSourceEnablement: () => process.env.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED,
     // D20 (design baseline v2.3): the exact list of target refs that may still take unbound rows besides slot 1.
     // Default empty: every target other than slot 1 requires a source binding.
     readUnboundTestTargetRefs: () => process.env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
