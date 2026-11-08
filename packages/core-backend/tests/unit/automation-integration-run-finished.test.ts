@@ -48,7 +48,7 @@ import {
 } from '../../src/core/integration-run-events'
 import { buildAutomationRunFinishedEvents, runFinishedCountsFrom } from '../../src/multitable/automation-run-finished-events'
 // Gate ③ (baseline v2.3 §10.2.2): the OS task's own per-project record, and the plugin's real port.
-import { pullOneProject } from '../../../../scripts/ops/stock-preparation-scheduled-pull.mjs'
+import { pullOneProject, summarize } from '../../../../scripts/ops/stock-preparation-scheduled-pull.mjs'
 import { deriveActionKey } from '../../src/multitable/automation-action-idempotency'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
 import { buildDurableConsumerHandlers } from '../../src/multitable/automation-durable-consumer-handlers'
@@ -103,7 +103,8 @@ describe('integration.run_finished — trigger vocabulary (pure)', () => {
     }
     // + not_found (skipped) and review_pending (held): the I5 ruling N4 mappings of the dry run's own statuses.
     expect([...INTEGRATION_RUN_FINISHED_SKIPPED_REASONS]).toEqual(['principal_unauthorized', 'busy', 'pipeline_changed', 'stale_plan', 'action_disabled', 'not_found'])
-    expect([...INTEGRATION_RUN_FINISHED_HELD_REASONS]).toEqual(['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'project_absent', 'project_archived'])
+    // + pull_batch_installing (held): 批次标识 BI-2's install window (I5 follow-up at the main merge).
+    expect([...INTEGRATION_RUN_FINISHED_HELD_REASONS]).toEqual(['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'pull_batch_installing', 'project_absent', 'project_archived'])
   })
 
   it('the reason set is byte-identical to I4\'s step-result label table (+ the two ADR skipped reasons I3 does not write yet)', () => {
@@ -1068,11 +1069,18 @@ const { createIntegrationRunPort } = requireFromTest('../../../../plugins/plugin
  *   - `manual_confirm_required` WITH canApply:true (a held duplicate batch still mints a token — the plugin's own
  *     stock-preparation-table-actions.test.cjs "a held duplicate batch still mints a token");
  *   - `suspended`, `review_pending`, `recovery_pending` with canApply:false AND the plan counts;
- *   - `not_found` with the empty plan's zero counts (`emptyPlan()`).
- * Synthetic values only; the token, revision and the hold / review stanzas never reach the summary. Both sides
- * consume the SAME object: the script through its own HTTP client (fetch stubbed), the event through the plugin's
- * real IntegrationRunPort → core sanitize → the real run_integration_job step → buildAutomationRunFinishedEvents →
- * the publish port's validator.
+ *   - `not_found` with the empty plan's zero counts (`emptyPlan()`);
+ *   - 批次标识 BI-2 (#6818; I5 follow-up at the main merge, T-level default-forward): the two preview-phase signals
+ *     the script reads as skipped_pull_batch_installing. `P-INSTALLING` is BI-1b's preview stanza on a READY answer
+ *     (a crashed install past its lease, or a host without a lease — the lanes suite's LN-06 and I2's G-08): a token,
+ *     canApply:true, the plan counts and `pullBatch: { preview: true, wouldStamp: false, reason: 'installing' }`.
+ *     `P-INSTALL-LOCKED` is the dry-run precheck's 409 WRITE_LOCKED while the install HOLDS the sheet's write lease:
+ *     an error envelope whose `details` name the holder's purpose (stock-preparation-project-write-lock.cjs
+ *     `writeLocked`) — no `data` at all.
+ * Synthetic values only; the token, revision, the hold / review / pull-batch stanzas and the lock details never reach
+ * the summary. Both sides consume the SAME object: the script through its own HTTP client (fetch stubbed), the event
+ * through the plugin's real IntegrationRunPort → core sanitize → the real run_integration_job step →
+ * buildAutomationRunFinishedEvents → the publish port's validator.
  */
 const GATE3_DRY_RUNS: Record<string, Record<string, unknown>> = {
   'P-READY': { status: 'ready', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic', revision: 'rev_synthetic', counts: { add: 3, update: 1, skip: 5, inactive: 2, manual_confirm: 0 } },
@@ -1083,7 +1091,12 @@ const GATE3_DRY_RUNS: Record<string, Record<string, unknown>> = {
   'P-REVIEW': { status: 'review_pending', canApply: false, largeBom: false, refreshReview: { pendingReviews: 1, blocksMint: true }, counts: { add: 0, update: 3, skip: 4, inactive: 0, manual_confirm: 0 } },
   'P-NOT-FOUND': { status: 'not_found', canApply: false, largeBom: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } },
   'P-RECOVERY': { status: 'recovery_pending', canApply: false, largeBom: false, counts: { add: 2, update: 1, skip: 3, inactive: 0, manual_confirm: 0 } },
+  'P-INSTALLING': { status: 'ready', canApply: true, largeBom: false, dryRunToken: 'tok_synthetic_4', revision: 'rev_synthetic_4', pullBatch: { preview: true, wouldStamp: false, reason: 'installing' }, counts: { add: 4, update: 0, skip: 2, inactive: 0, manual_confirm: 0 } },
+  'P-INSTALL-LOCKED': { refusal: { status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', details: { holderPurpose: 'pull_batch_install', heldSince: '2026-11-08T01:00:00.000Z', interrupted: false } } },
 }
+/** The one fixture shape that is a REFUSAL (an HTTP error envelope on the script side, a thrown lock error on the port side). */
+type Gate3Refusal = { status: number; code: string; details: Record<string, unknown> }
+const gate3Refusal = (projectNo: string): Gate3Refusal | null => (GATE3_DRY_RUNS[projectNo].refusal as Gate3Refusal | undefined) ?? null
 
 /**
  * The comparison contract for STATUS (every project): the script logs the dry run's own status verbatim; the summary
@@ -1091,6 +1104,11 @@ const GATE3_DRY_RUNS: Record<string, Record<string, unknown>> = {
  * error class as errorClass (recovery_pending, the same code the script logs as `error`). I5 ruling N4: not_found →
  * skipped (reason not_found; the script's skipped_not_found) and review_pending → held (reason review_pending; the
  * script's skipped_review_pending, #6791) — both mapped in the plugin port (lib/integration-run-port.cjs).
+ * BI-2 follow-up: a READY answer whose pull-batch stanza says `installing`, and the 409 WRITE_LOCKED held by the
+ * install, are both held (reason pull_batch_installing; the script's skipped_pull_batch_installing) — exactly the two
+ * signals the script reads (scheduled-pull.mjs: `data.pullBatch.reason === 'installing'` after `status === 'ready'`,
+ * and `isPullBatchInstallHolder(errorDetailsOf(dryRun))` on a refused preview). The expectation is keyed per PROJECT
+ * (`gate3Expectation`), because a dry-run status alone cannot tell `ready` from `ready + installing`.
  */
 const GATE3_CLOSED_STATUS: Record<string, string> = {
   ready: 'succeeded',
@@ -1111,20 +1129,44 @@ const GATE3_SCRIPT_ACTION: Record<string, string> = {
   not_found: 'skipped_not_found',
   recovery_pending: 'error',
 }
+type Gate3Expectation = { action: string; status: string; reason?: string; errorClass?: string }
+/** Per project: what the script logs as `action`, the event's closed status, and its reason (or error class when failed). */
+function gate3Expectation(projectNo: string): Gate3Expectation {
+  if (gate3Refusal(projectNo)) return { action: 'skipped_pull_batch_installing', status: 'held', reason: 'pull_batch_installing' }
+  const answer = GATE3_DRY_RUNS[projectNo]
+  const dryRunStatus = answer.status as string
+  const stanza = answer.pullBatch as { reason?: unknown } | undefined
+  if (dryRunStatus === 'ready' && stanza !== undefined && stanza.reason === 'installing') return { action: 'skipped_pull_batch_installing', status: 'held', reason: 'pull_batch_installing' }
+  if (dryRunStatus === 'recovery_pending') return { action: 'error', status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING' }
+  return { action: GATE3_SCRIPT_ACTION[dryRunStatus], status: GATE3_CLOSED_STATUS[dryRunStatus], reason: dryRunStatus }
+}
 /**
  * The comparison contract for canApply (I5 ruling N1, option (a) — baseline v2.3 §10.2.2 ③ as written: "脚本
  * skipped_dry_run_only 对应新路径 succeeded（试算成功、未套用），摘要里带布尔 canApply"): canApply is compared ONLY on
- * that pair (dry-run status `ready`). DECLARED EXCEPTION 1: every other summary carries canApply:false (the pinned
- * 1b-ii port contract "a held preview is never applicable"), whatever the script logs — a manual_confirm_required
- * preview logs canApply:true.
+ * that pair (event `succeeded`). DECLARED EXCEPTION 1: every other summary carries canApply:false (the pinned 1b-ii
+ * port contract "a held preview is never applicable"), whatever the script logs — a manual_confirm_required preview
+ * logs canApply:true, and so does the installing READY preview (the script copies `data.canApply` before it decides
+ * the skip; the port holds it because the apply would be refused 409 INSTALL_IN_PROGRESS).
  */
-const GATE3_CANAPPLY_COMPARED: ReadonlySet<string> = new Set(['ready'])
+const GATE3_CANAPPLY_COMPARED = (eventStatus: string): boolean => eventStatus === 'succeeded'
 /**
  * The comparison contract for the five decision counts: compared for every project whose summary is not `failed`.
  * DECLARED EXCEPTION 2: a failed summary carries no decision counts (all 0; the 1b-ii port answers none for
- * recovery_pending), whatever the script logs — a recovery_pending preview logs the plan counts.
+ * recovery_pending), whatever the script logs — a recovery_pending preview logs the plan counts. A refused preview
+ * (P-INSTALL-LOCKED) logs no counts and its held summary carries none: 0 = 0, not an exception.
  */
 const GATE3_COUNTS_COMPARED = (eventStatus: string): boolean => eventStatus !== 'failed'
+/** The script's summary counters (scheduled-pull.mjs `summarize`) ↔ the events' (status, reason) — the per-day roll-up. */
+const GATE3_SUMMARY_COUNTERS: ReadonlyArray<[counter: string, status: string, reason: string | null]> = [
+  ['skippedManualConfirmRequired', 'held', 'manual_confirm_required'],
+  ['skippedSuspended', 'held', 'suspended'],
+  ['skippedReviewPending', 'held', 'review_pending'],
+  ['skippedPullBatchInstalling', 'held', 'pull_batch_installing'],
+  ['skippedLargeBomBounded', 'held', 'large_bom_bounded'],
+  ['skippedNotFound', 'skipped', 'not_found'],
+  ['skippedDryRunOnly', 'succeeded', null],
+  ['failed', 'failed', null],
+]
 
 describe('F7 gate ③ — per project, the summary event equals what the scheduled-pull script logs (status; canApply on the ready pair; counts unless failed)', () => {
   beforeEach(() => {
@@ -1137,13 +1179,21 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
     clearIntegrationRunFinishedSinkForTest()
   })
 
-  it('the same realistic decision set ⇒ equal per-project status, canApply (ready pair) and decision counts (non-failed), and exactly the two declared exceptions', async () => {
+  it('the same realistic decision set ⇒ equal per-project status, canApply (ready pair) and decision counts (non-failed), the summary counters (skippedPullBatchInstalling included), and exactly the declared exceptions', async () => {
     const projectNos = Object.keys(GATE3_DRY_RUNS)
-    // Anti-vacuous: the fixture covers every mapped status.
-    expect([...new Set(projectNos.map((p) => GATE3_DRY_RUNS[p].status as string))].sort()).toEqual(Object.keys(GATE3_CLOSED_STATUS).sort())
-    // (a) The script's per-project records (dry-run only, the scheduled task's default mode).
+    // Anti-vacuous: the fixture covers every mapped status, and BOTH pull-batch-installing signals (BI-2).
+    const statusBearing = projectNos.filter((p) => gate3Refusal(p) === null)
+    expect([...new Set(statusBearing.map((p) => GATE3_DRY_RUNS[p].status as string))].sort()).toEqual(Object.keys(GATE3_CLOSED_STATUS).sort())
+    expect(projectNos.filter((p) => gate3Expectation(p).reason === 'pull_batch_installing')).toEqual(['P-INSTALLING', 'P-INSTALL-LOCKED'])
+    expect(gate3Refusal('P-INSTALL-LOCKED')).not.toBeNull()
+    // (a) The script's per-project records (dry-run only, the scheduled task's default mode). A refusal answers the
+    // server's error envelope (`ok: false`, the typed code, the lock's details) exactly as `postJson` sees it.
     vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
       const projectNo = (JSON.parse(init.body) as { parameters: { projectNo: string } }).parameters.projectNo
+      const refusal = gate3Refusal(projectNo)
+      if (refusal) {
+        return { ok: false, status: refusal.status, json: async () => ({ ok: false, error: { code: refusal.code, message: 'another run is writing this stock-prep sheet; retry after it finishes', details: refusal.details } }) }
+      }
       return { ok: true, status: 200, json: async () => ({ ok: true, data: GATE3_DRY_RUNS[projectNo] }) }
     })
     const records = new Map<string, Record<string, unknown>>()
@@ -1153,13 +1203,21 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
     vi.unstubAllGlobals()
 
     // (b) The summary events of ONE run_integration_job step over the same projects, through the plugin's real port.
+    // The refused project's governed entry throws the lock's own refusal class (status, code, details — the shape
+    // stock-preparation-project-write-lock.cjs `writeLocked` builds; the port classifies it, never rethrows it).
     const events = captureSink()
     const port: IntegrationRunPort = {
       run: async (input) => {
         const projectNo = (input.job as { projectNo: string }).projectNo
         const pluginPort = createIntegrationRunPort({
           governedEntries: {
-            runGovernedStockPrepPull: async () => GATE3_DRY_RUNS[projectNo],
+            runGovernedStockPrepPull: async () => {
+              const refusal = gate3Refusal(projectNo)
+              if (refusal) {
+                throw Object.assign(new Error('another run is writing this stock-prep sheet; retry after it finishes'), { name: 'StockPreparationProjectWriteLockError', status: refusal.status, code: refusal.code, details: refusal.details })
+              }
+              return GATE3_DRY_RUNS[projectNo]
+            },
             runGovernedPipeline: async () => { throw new Error('not used') },
           },
         })
@@ -1175,18 +1233,20 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
       const record = records.get(projectNo)!
       const { event } = events.find((e) => e.event.job.projectNo === projectNo)!
       const label = `project ${projectNo}`
-      const dryRunStatus = record.status as string
-      // status — compared for every project
-      expect(typeof dryRunStatus, label).toBe('string')
-      expect(record.action, label).toBe(GATE3_SCRIPT_ACTION[dryRunStatus])
-      expect(event.status, label).toBe(GATE3_CLOSED_STATUS[dryRunStatus])
+      const expected = gate3Expectation(projectNo)
+      // status — compared for every project (a refused preview logs no dry-run status: the action is the comparison)
+      if (gate3Refusal(projectNo) === null) expect(record.status, label).toBe(GATE3_DRY_RUNS[projectNo].status)
+      else expect(record.status, label).toBeUndefined()
+      expect(record.action, label).toBe(expected.action)
+      expect(event.status, label).toBe(expected.status)
       if (event.status === 'failed') {
         expect(event.errorClass, label).toBe(record.error)
+        expect(event.errorClass, label).toBe(expected.errorClass)
       } else {
-        expect(event.reason, label).toBe(dryRunStatus)
+        expect(event.reason, label).toBe(expected.reason)
       }
       // canApply — compared on the ready ↔ skipped_dry_run_only / succeeded pair only (the script logs data.canApply === true)
-      if (GATE3_CANAPPLY_COMPARED.has(dryRunStatus)) {
+      if (GATE3_CANAPPLY_COMPARED(event.status)) {
         expect(event.canApply, label).toBe(record.canApply === true)
       } else {
         expect(event.canApply, `${label} (declared exception 1)`).toBe(false)
@@ -1203,15 +1263,24 @@ describe('F7 gate ③ — per project, the summary event equals what the schedul
         for (const key of INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS) expect(event.counts[key], `${label} counts.${key} (declared exception 2)`).toBe(0)
         if (INTEGRATION_RUN_FINISHED_DECISION_COUNT_KEYS.some((key) => typeof logged[key] === 'number' && logged[key] !== 0)) exceptions.push(`${projectNo}:counts`)
       }
-      // values-free: nothing of the token, revision or the hold / review stanzas rides the event
+      // values-free: nothing of the token, revision, the hold / review / pull-batch stanzas or the lock details rides the event
       const serialized = JSON.stringify(event)
-      for (const leak of ['tok_synthetic', 'rev_synthetic', 'pendingReviews', 'blocksMint', 'holdCount']) expect(serialized.includes(leak), `${label} ${leak}`).toBe(false)
+      for (const leak of ['tok_synthetic', 'rev_synthetic', 'pendingReviews', 'blocksMint', 'holdCount', 'wouldStamp', '"installing"', 'holderPurpose', 'heldSince', 'retry after']) expect(serialized.includes(leak), `${label} ${leak}`).toBe(false)
     }
-    // The realistic fixture EXERCISES both declared exceptions (they are real divergences, not vacuous) — and
-    // nothing else diverges.
-    expect(exceptions.sort()).toEqual(['P-MANUAL:canApply', 'P-RECOVERY:counts'])
+    // The realistic fixture EXERCISES the declared exceptions (they are real divergences, not vacuous) — and nothing
+    // else diverges. P-INSTALLING is exception 1 too: the script copies canApply:true off the READY answer before it
+    // decides skipped_pull_batch_installing; the held summary says false.
+    expect(exceptions.sort()).toEqual(['P-INSTALLING:canApply', 'P-MANUAL:canApply', 'P-RECOVERY:counts'])
     // Per-status totals match too (the per-day roll-up a reader compares).
     const tally = (statuses: string[]) => statuses.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {})
-    expect(tally(events.map((e) => e.event.status))).toEqual(tally(projectNos.map((p) => GATE3_CLOSED_STATUS[records.get(p)!.status as string])))
+    expect(tally(events.map((e) => e.event.status))).toEqual(tally(projectNos.map((p) => gate3Expectation(p).status)))
+    // …and so do the script's own summary counters, skippedPullBatchInstalling included (both signals, counted once each).
+    const summary = summarize([...records.values()], false) as Record<string, number>
+    expect(summary.projectCount).toBe(events.length)
+    expect(summary.skippedPullBatchInstalling).toBe(2)
+    for (const [counter, status, reason] of GATE3_SUMMARY_COUNTERS) {
+      const matching = events.filter((e) => e.event.status === status && (reason === null || e.event.reason === reason)).length
+      expect(summary[counter], counter).toBe(matching)
+    }
   })
 })

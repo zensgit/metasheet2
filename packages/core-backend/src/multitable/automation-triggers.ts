@@ -114,9 +114,12 @@ export const INTEGRATION_RUN_FINISHED_DEFAULT_STATUSES = Object.freeze([
 /**
  * `held` reasons — human work, not a fault (ADR §3.2, §4.1; the plugin port's HELD set + its two held refusals).
  * `review_pending` (I5 ruling N4, T-level default-forward): the scheduled pull logs it skipped_review_pending (#6791).
+ * `pull_batch_installing` (批次标识 BI-2 #6818; the I5 follow-up at the main merge, T-level default-forward): the project
+ * sheet's batch columns are being installed in an owner-approved window — the dry run's `ready` + `pullBatch.reason
+ * 'installing'`, or its 409 WRITE_LOCKED held by the install; the scheduled pull logs it skipped_pull_batch_installing.
  */
 export const INTEGRATION_RUN_FINISHED_HELD_REASONS = Object.freeze([
-  'manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'project_absent', 'project_archived',
+  'manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending', 'pull_batch_installing', 'project_absent', 'project_archived',
 ] as const)
 /**
  * `skipped` reasons — the system did not run what it should have (ADR §4.1). `not_found` (I5 ruling N4, T-level

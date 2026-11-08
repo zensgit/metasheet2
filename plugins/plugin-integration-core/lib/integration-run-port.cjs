@@ -16,10 +16,14 @@
  *
  * STATUS MAPPING (the OS task's own classification, scripts/ops/stock-preparation-scheduled-pull.mjs):
  *   ready → succeeded (canApply carried as a boolean; nothing is applied — dry run only)
+ *   ready whose pull-batch stanza says `installing` (批次标识 BI-2: the sheet's batch columns are being installed; the
+ *     apply would be refused 409) → held (reason pull_batch_installing; the script's skipped_pull_batch_installing)
  *   manual_confirm_required | suspended | large_bom_bounded | review_pending → held (human work, not a fault)
  *   not_found → skipped (reason not_found; the script's skipped_not_found)
  *   recovery_pending → failed (errorClass STOCK_PREP_REFRESH_RECOVERY_PENDING)
  *   refusal 404/409 STOCK_PREPARATION_PROJECT_ABSENT / _ARCHIVED → held (reason project_absent / project_archived)
+ *   refusal 409 STOCK_PREP_PROJECT_WRITE_LOCKED whose lease holder is the pull-batch install (details.holderPurpose
+ *     'pull_batch_install') → held (reason pull_batch_installing); any other WRITE_LOCKED stays failed
  *   refusal 401/403 → skipped (reason principal_unauthorized)
  *   any other HttpRouteError → failed (errorClass = its code); any other error → failed (errorClass = code | name)
  *   an abort (the host's signal, the checkpoint's lease-lost rejection, or the governed entry's own
@@ -33,6 +37,23 @@ const HELD_REFUSAL_CODES = new Map([
   ['STOCK_PREPARATION_PROJECT_ABSENT', 'project_absent'],
   ['STOCK_PREPARATION_PROJECT_ARCHIVED', 'project_archived'],
 ])
+// 批次标识 BI-2 (#6818; the I5 follow-up at the main merge, T-level default-forward): the two preview-phase signals the
+// scheduled pull reads as skipped_pull_batch_installing (scripts/ops/stock-preparation-scheduled-pull.mjs) — a `ready`
+// answer whose pull-batch stanza says `installing` (BI-1b's preview: the apply would be refused 409 INSTALL_IN_PROGRESS),
+// and the dry-run precheck's 409 WRITE_LOCKED when the lease holder's purpose is the install (the lock's own error class,
+// or an HttpRouteError carrying the same code). An owner-approved window, not a fault: held, never applicable. Only the
+// closed tokens are compared; nothing of the stanza or of the lock details is copied.
+const PULL_BATCH_INSTALL_HOLDER_PURPOSE = 'pull_batch_install'
+const PROJECT_WRITE_LOCKED_CODE = 'STOCK_PREP_PROJECT_WRITE_LOCKED'
+
+function isPullBatchInstallingStanza(pullBatch) {
+  return Boolean(pullBatch) && typeof pullBatch === 'object' && !Array.isArray(pullBatch) && pullBatch.reason === 'installing'
+}
+
+function isPullBatchInstallHolderRefusal(error) {
+  return Boolean(error) && typeof error === 'object' && error.code === PROJECT_WRITE_LOCKED_CODE
+    && Boolean(error.details) && typeof error.details === 'object' && error.details.holderPurpose === PULL_BATCH_INSTALL_HOLDER_PURPOSE
+}
 const DEFAULT_STOCK_PREP_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const CLASS_SHAPE = /^[A-Za-z0-9_:.-]{1,80}$/
 
@@ -64,6 +85,12 @@ function summarizeStockPrepDryRun(data, startedAt) {
   const durationMs = Date.now() - startedAt
   const status = data && typeof data.status === 'string' ? data.status : null
   const counts = integerCounts(data && data.counts)
+  // 批次标识 BI-2: a READY preview over a sheet whose batch columns are being installed — the script's
+  // skipped_pull_batch_installing; held with its counts, never applicable (the apply would be refused). Read on a ready
+  // preview only, exactly where the script reads it (after `status === 'ready'`).
+  if (status === 'ready' && isPullBatchInstallingStanza(data.pullBatch)) {
+    return { status: 'held', reason: 'pull_batch_installing', canApply: false, ...(counts ? { counts } : {}), durationMs }
+  }
   if (status === 'ready') {
     return { status: 'succeeded', reason: 'ready', canApply: data.canApply === true, ...(counts ? { counts } : {}), durationMs }
   }
@@ -100,6 +127,11 @@ function summarizePipelineRun(result, startedAt) {
 
 function classifyRefusal(error, startedAt) {
   const durationMs = Date.now() - startedAt
+  // 批次标识 BI-2: the dry-run precheck refused 409 WRITE_LOCKED because the pull-batch install holds the sheet's write
+  // lease — the script's skipped_pull_batch_installing (preview phase). Checked before the HttpRouteError branch, so the
+  // lock's own error class and an HttpRouteError with the same code map alike; any other WRITE_LOCKED (another run
+  // writing, contention) stays failed below.
+  if (isPullBatchInstallHolderRefusal(error)) return { status: 'held', reason: 'pull_batch_installing', durationMs }
   if (error && error.name === 'HttpRouteError') {
     if (error.status === 401 || error.status === 403) {
       return { status: 'skipped', reason: 'principal_unauthorized', errorClass: boundedClass(error.code, 'FORBIDDEN'), durationMs }

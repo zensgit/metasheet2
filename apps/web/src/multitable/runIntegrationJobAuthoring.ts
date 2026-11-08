@@ -302,6 +302,7 @@ export const RUN_INTEGRATION_JOB_REASON_LABELS: Readonly<Record<string, { zh: st
   suspended: { zh: '已暂停', en: 'suspended' },
   large_bom_bounded: { zh: 'BOM 过大，已限量', en: 'BOM too large, bounded' },
   review_pending: { zh: '变更待复核', en: 'a written change awaits review' },
+  pull_batch_installing: { zh: '批次列安装中', en: 'batch columns are being installed' },
   not_found: { zh: '源系统中未找到该项目', en: 'project not found in the source' },
   project_absent: { zh: '项目不存在', en: 'project absent' },
   project_archived: { zh: '项目已归档', en: 'project archived' },
