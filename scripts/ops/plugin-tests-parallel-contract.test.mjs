@@ -48,6 +48,28 @@ const permissionStep = {
 const lockProtocolStepId = 'external-system-delete-bind-lock-protocol-real-db'
 const lockProtocolJsonReporter = ' --reporter=json --outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json'
 const lockProtocolZeroSkipLine = 'node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14\n'
+// Explicit additive runtime-db step. Spliced out before the frozen step-hash comparison.
+const permissionLifecycleStep = {
+  name: 'Run permission lifecycle real-DB gate',
+  id: 'permission-lifecycle-realdb',
+  if: "matrix.node-version == '20.x'",
+  env: {
+    DATABASE_URL: 'postgresql://postgres@localhost:5432/metasheet_test',
+    EXPECT_DB: '1',
+    RBAC_BYPASS: 'false',
+    RBAC_TOKEN_TRUST: 'false',
+    PRODUCT_MODE: 'plm-workbench',
+  },
+  run: [
+    ': "${DATABASE_URL:?DATABASE_URL is required for permission lifecycle real-DB gate}"',
+    'mkdir -p artifacts/grok-permission-lifecycle-ci',
+    'pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-lifecycle.config.ts run \\',
+    '  tests/integration/permission-lifecycle-realdb.test.ts \\',
+    '  --reporter=verbose --reporter=json --outputFile.json=../../artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json',
+    'node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 1',
+    '',
+  ].join('\n'),
+}
 
 const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
@@ -101,6 +123,15 @@ function assertParallelWorkflow(doc) {
       assert.ok(lintIndex >= 0, 'Keep the original lint step')
       assert.deepEqual(actual.splice(lintIndex + 1, 1), [directoryClientLintStep],
         'Keep the additional configured DingTalk client lint immediately after the original lint')
+    }
+    if (suite === 'runtime-db') {
+      const anchor = actual.findIndex(step => step.id === 'tasks-auth-gate')
+      assert.ok(anchor >= 0, 'Keep the tasks auth gate step')
+      assert.equal(actual.filter(step => step.id === permissionLifecycleStep.id).length, 1,
+        'Permission lifecycle real-DB gate must run exactly once')
+      assert.equal(actual[anchor + 1] && actual[anchor + 1].id, permissionLifecycleStep.id,
+        'Keep the permission lifecycle gate immediately after the tasks auth gate')
+      assert.deepEqual(actual.splice(anchor + 1, 1), [permissionLifecycleStep])
     }
     if (!['contracts', 'permissions', 'unit'].includes(suite)) {
       assert.deepEqual(actual.splice(-1), [resultUpload(suite)])
