@@ -40,6 +40,14 @@
 //         column transaction committed → the call fails (500; 422 for the option sync), the added columns stay, and ONE audit row records them
 //         (`outcome: failed_after_columns_added`, `failedStep: plm_lock`, columnAddedCount 3). The same for the
 //         option sync. Nothing added + a later failure → no row (unchanged). The healed retry writes its normal row.
+//         (fix round 2: the plm_lock leg strips the lock off one OLDER PLM column, the only way the lock step can
+//         still have a patch to fail on now that an added PLM column is inserted locked; the added ones stay locked.)
+//   RC-12 THE LOCK RIDES THE INSERT (Y7 review MEDIUM-1): the additive INSERT of a re-added plm_system column carries
+//         humanWriteLock 'plm_system', a re-added human column does not; the later lock step patches none of them;
+//         when the step after the add fails, the added PLM columns are STILL locked and the dry-run says unmarked 0.
+//   RC-13a-d NOT ON THE OTHER PATHS (Y7 review MEDIUM-1, negative): the shared reconcile helper called WITHOUT the flag,
+//         the canonical repair verb, the descriptor builder the ops script uses, and the deployment (MVP) repair
+//         insert no humanWriteLock at all.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -68,6 +76,8 @@ const TEMPLATE_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) =>
 const OWNERSHIP = new Map(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, field.ownership]))
 const DECISION_FIELD = 'lastPlmRefreshDecision'
 const PLM_COLUMN = 'componentSpec'
+// RC-11: a PLM column the aged sheet KEEPS (never dropped), playing a column from before the lock existed.
+const OLDER_UNLOCKED_PLM_COLUMN = 'material'
 const HUMAN_COLUMN = HUMAN_PRESERVED_FIELD_IDS.find((id) => OWNERSHIP.get(id) === 'human_preserved')
 // The three columns a "sheet created before the template grew" lacks here, in TEMPLATE order (the report's order).
 const DROPPED = TEMPLATE_IDS.filter((id) => id === PLM_COLUMN || id === HUMAN_COLUMN || id === DECISION_FIELD)
@@ -599,7 +609,9 @@ test('RC-11 a committed add is audited even when the option sync (422) or the PL
   for (const [step, failsOn, status] of [['plm_lock', lockPatch, 500], ['options', (input) => !lockPatch(input), 422]]) {
     const h = mount()
     try {
-      const { objectId } = await agedSheet(h)
+      const { objectId, object } = await agedSheet(h)
+      // An OLDER PLM column from before the lock existed: the lock step's only patch, so it has something to fail on.
+      if (step === 'plm_lock') delete object.fields.get(OLDER_UNLOCKED_PLM_COLUMN).property[HUMAN_WRITE_LOCK_PROPERTY_KEY]
       const p = h.provisioning
       const realPatch = p.patchObjectFieldProperty
       p.patchObjectFieldProperty = async (input) => {
@@ -610,6 +622,9 @@ test('RC-11 a committed add is audited even when the option sync (422) or the PL
       const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
       assert.equal(res.statusCode, status, `${step}: ${JSON.stringify(res.body)}`)
       for (const id of DROPPED) assert.ok(objectOf(h, objectId).fields.has(id), `${step}: ${id} stays (the column transaction committed)`)
+      for (const id of DROPPED.filter((fieldId) => OWNERSHIP.get(fieldId) === 'plm_system')) {
+        assert.equal(objectOf(h, objectId).fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `${step}: the added PLM column ${id} is locked although the ${step} step failed`)
+      }
       const appended = h.auditAppends.slice(auditBefore)
       assert.equal(appended.length, 1, `${step}: ONE audit row records the committed add`)
       assert.equal(appended[0].action, 'project_target_create')
@@ -645,6 +660,132 @@ test('RC-11 a committed add is audited even when the option sync (422) or the PL
       assert.equal(last.detail.columnAddedCount, 0)
     } finally { h.restore() }
   }
+})
+
+// ── RC-12 ────────────────────────────────────────────────────────────────────────────────────────────
+
+const PLM_DROPPED = DROPPED.filter((id) => OWNERSHIP.get(id) === 'plm_system')
+const HUMAN_DROPPED = DROPPED.filter((id) => OWNERSHIP.get(id) !== 'plm_system')
+
+/** Wrap the transaction-bound additive write so a suite sees exactly the descriptors the INSERT receives. */
+function captureInsert(h) {
+  const inserted = []
+  h.tx.ensure = async (input) => {
+    inserted.push(plain(input.fields))
+    return h.provisioning.ensureMissingObjectFields(input)
+  }
+  return inserted
+}
+
+test('RC-12 the INSERT of a re-added plm_system column carries the lock (a human one does not); the later lock step patches none of them; a failing later step leaves them locked and the dry-run says unmarked 0', async () => {
+  assert.ok(PLM_DROPPED.length >= 1 && HUMAN_DROPPED.length >= 1, 'the dropped set mixes PLM and human columns')
+  const h = mount()
+  try {
+    await agedSheet(h)
+    const inserted = captureInsert(h)
+    const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(inserted.length, 1, 'one additive write')
+    const byId = new Map(inserted[0].map((field) => [field.id, field]))
+    for (const id of PLM_DROPPED) assert.equal(byId.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `the INSERT of ${id} carries the lock`)
+    for (const id of HUMAN_DROPPED) assert.equal(Object.prototype.hasOwnProperty.call(byId.get(id).property || {}, HUMAN_WRITE_LOCK_PROPERTY_KEY), false, `the INSERT of the human column ${id} carries no lock`)
+    assert.deepEqual(plain(res.body.data.plmColumnLock), { marked: 0, alreadyMarked: 20, missing: 0 }, 'the lock step found every added PLM column already marked')
+    const lockPatches = h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty' && PLM_DROPPED.includes(call[2]) && call[2] !== DECISION_FIELD)
+    assert.deepEqual(lockPatches, [], 'no lock patch on an added PLM column')
+    const appended = h.auditAppends[h.auditAppends.length - 1]
+    assert.equal(appended.detail.plmLockMarkedFieldCount, 0, 'no double count of a column the INSERT already locked')
+    assert.equal(appended.detail.plmLockAlreadyMarkedFieldCount, 20)
+  } finally { h.restore() }
+
+  // The failure case: the option sync after the add fails (422). The added PLM columns are still locked.
+  const f = mount()
+  try {
+    const { objectId } = await agedSheet(f)
+    const p = f.provisioning
+    const realPatch = p.patchObjectFieldProperty
+    p.patchObjectFieldProperty = async (input) => {
+      if (!Object.prototype.hasOwnProperty.call(input.propertyPatch || {}, HUMAN_WRITE_LOCK_PROPERTY_KEY)) throw new Error('synthetic option patch failure')
+      return realPatch(input)
+    }
+    const res = await repair(f, { projectNo: PROJECT, addMissingColumns: true })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    for (const id of PLM_DROPPED) assert.equal(objectOf(f, objectId).fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `${id} is locked although the step after the add failed`)
+    for (const id of HUMAN_DROPPED) assert.equal(objectOf(f, objectId).fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], undefined, `${id} stays editable`)
+    const dry = await repair(f, { projectNo: PROJECT, dryRun: true })
+    assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
+    assert.deepEqual(plain(dry.body.data.plmColumnLock), { checked: true, alreadyMarked: 20, unmarked: 0, missing: 0 }, 'the dry-run after the failed call: unmarked 0')
+  } finally { f.restore() }
+})
+
+// ── RC-13 ────────────────────────────────────────────────────────────────────────────────────────────
+
+const {
+  reconcileFrozenTemplateColumnsOnObject,
+  repairStockPreparationCanonicalTarget,
+  buildStockPreparationTargetDescriptor,
+} = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
+const { repairStockPreparationMvpTargets } = require(path.join(LIB, 'stock-preparation-mvp-provisioning.cjs'))
+const { STOCK_PREPARATION_MVP_TABLE_TEMPLATES } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+
+/**
+ * A bare host whose objects each lack `missing` (logical ids); the tx surface records every INSERT's descriptors
+ * and answers the reads from what landed. Enough for the helper, the canonical verb and the MVP repair.
+ */
+function bareRepairHost({ fieldIdsByObject, missing }) {
+  const present = new Map([...fieldIdsByObject].map(([objectId, ids]) => [objectId, new Map(ids.filter((id) => !missing.includes(id)).map((id, order) => [id, { name: id, type: 'string', property: {}, order }]))]))
+  const inserted = []
+  const surface = {
+    findObjectSheet: async ({ objectId }) => (present.has(objectId) ? { id: `sheet_${objectId}`, baseId: null, name: objectId, description: null, systemKind: null } : null),
+    resolveExistingObjectFieldIds: async ({ objectId, fieldIds }) => Object.fromEntries(fieldIds.filter((id) => present.get(objectId) && present.get(objectId).has(id)).map((id) => [id, `fld_${id}`])),
+    readObjectFieldsContent: async ({ objectId, fieldIds }) => Object.fromEntries(fieldIds.filter((id) => present.get(objectId) && present.get(objectId).has(id)).map((id) => [id, plain(present.get(objectId).get(id))])),
+    ensureMissingObjectFields: async ({ objectId, fields }) => {
+      inserted.push(...plain(fields))
+      const object = present.get(objectId)
+      for (const field of fields) object.set(field.id, { name: field.name, type: field.type, property: plain(field.property || {}), order: field.order })
+      return { addedFieldIds: fields.map((field) => `fld_${field.id}`), skippedExistingFieldIds: [] }
+    },
+    readObjectMaxFieldOrder: async ({ objectId }) => Math.max(-1, ...[...present.get(objectId).values()].map((field) => field.order)),
+  }
+  const provisioning = {
+    runObjectFieldsRepairTransaction: async (fn) => fn(surface),
+    findObjectSheet: surface.findObjectSheet,
+    resolveExistingObjectFieldIds: surface.resolveExistingObjectFieldIds,
+  }
+  return { provisioning, inserted, context: { api: { multitable: { provisioning } } } }
+}
+
+const hasLock = (field) => Boolean(field.property) && Object.prototype.hasOwnProperty.call(field.property, HUMAN_WRITE_LOCK_PROPERTY_KEY)
+
+test('RC-13a no PLM lock off the project path: the shared reconcile helper called without the flag inserts no humanWriteLock', async () => {
+  const objectId = deriveProjectSheetObjectId(TENANT, PROJECT)
+  const helper = bareRepairHost({ fieldIdsByObject: new Map([[objectId, TEMPLATE_IDS]]), missing: DROPPED })
+  const summary = await reconcileFrozenTemplateColumnsOnObject({ provisioning: helper.provisioning, projectId: STAGING, objectId, apply: true })
+  assert.deepEqual(summary.addedFieldIds, DROPPED)
+  assert.equal(helper.inserted.length, DROPPED.length)
+  for (const field of helper.inserted) assert.equal(hasLock(field), false, `the helper without the flag inserts ${field.id} unlocked`)
+})
+
+test('RC-13b no PLM lock off the project path: the canonical repair verb (the deployment\'s own main object) inserts no humanWriteLock', async () => {
+  const canonicalObjectId = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+  const canonical = bareRepairHost({ fieldIdsByObject: new Map([[canonicalObjectId, TEMPLATE_IDS]]), missing: PLM_DROPPED })
+  const repaired = await repairStockPreparationCanonicalTarget({ context: canonical.context, projectId: STAGING, permission: 'admin' })
+  assert.equal(repaired.mode, 'canonical_repaired')
+  assert.deepEqual(canonical.inserted.map((field) => field.id), PLM_DROPPED)
+  for (const field of canonical.inserted) assert.equal(hasLock(field), false, `the canonical verb inserts ${field.id} unlocked`)
+})
+
+test('RC-13c no PLM lock off the project path: the shared descriptor builder the ops script (scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs) inserts from carries none', async () => {
+  for (const field of buildStockPreparationTargetDescriptor({}).fields) assert.equal(hasLock(field), false, `the shared descriptor of ${field.id} carries no lock`)
+})
+
+test('RC-13d no PLM lock off the project path: the deployment (MVP) repair re-adds a plm_system column unlocked', async () => {
+  const mvp = STOCK_PREPARATION_MVP_TABLE_TEMPLATES.find((template) => template.fields.some((field) => field.ownership === 'plm_system'))
+  assert.ok(mvp, 'an MVP template with a plm_system column')
+  const mvpPlm = mvp.fields.filter((field) => field.ownership === 'plm_system').map((field) => field.id).slice(0, 1)
+  const deployment = bareRepairHost({ fieldIdsByObject: new Map([[mvp.objectId, mvp.fields.map((field) => field.id)]]), missing: mvpPlm })
+  await repairStockPreparationMvpTargets({ context: deployment.context, projectId: STAGING, permission: 'admin', objectIds: [mvp.objectId] })
+  assert.deepEqual(deployment.inserted.map((field) => field.id), mvpPlm)
+  for (const field of deployment.inserted) assert.equal(hasLock(field), false, `the deployment repair inserts ${field.id} unlocked`)
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)

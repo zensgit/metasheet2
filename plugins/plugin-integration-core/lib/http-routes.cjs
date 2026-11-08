@@ -5676,8 +5676,10 @@ function requireStockPreparationAudit() {
    *
    * R-71 ⑦.4 PR-3 — THE MISSING TEMPLATE COLUMNS (report-first). A template column merged after a sheet was
    * created makes that sheet's pull answer 422 TARGET_SCHEMA_INCOMPLETE until the column exists there. The same
-   * locked step now reconciles the FROZEN main template's columns on the registry row's object, FIRST — so a
-   * column added here gets its option set and its PLM lock in the same call. Three modes, chosen by two
+   * locked step now reconciles the FROZEN main template's columns on the registry row's object, FIRST. An added
+   * `plm_system` column is INSERTED already carrying `humanWriteLock: 'plm_system'` (Y7 review MEDIUM-1), so it is
+   * read-only for people from the statement that creates it, even if the option sync or the lock step below then
+   * fails; the option set lands in the option sync's own later write (retryable). Three modes, chosen by two
    * optional exact-boolean body keys (anything but a boolean is 400, nothing is coerced):
    *   * neither (the pre-PR-3 call): options + lock exactly as before, plus a READ-ONLY report of the missing
    *     columns (`columns.missingFieldIds`); nothing is added.
@@ -5758,7 +5760,8 @@ function requireStockPreparationAudit() {
     let repaired
     try {
       repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
-        // R-71 ⑦.4 PR-3: columns FIRST, so a column added here gets its option set and its PLM lock below.
+        // R-71 ⑦.4 PR-3: columns FIRST. An added plm_system column is already locked by its own INSERT (MEDIUM-1); the
+        // option sync below gives an added select column its options, and the lock step finds the added ones marked.
         const columns = await reconcileProjectSheetTemplateColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId, sheetId: locked.sheetId, add: addMissingColumns })
         if (addMissingColumns) committedColumns = { row: locked, columns }
         laterStep = 'options'

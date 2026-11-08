@@ -1223,6 +1223,11 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   }
 }
 
+// The host's closed-vocabulary human write lock (core-backend multitable/human-write-lock.ts), as the pull-batch
+// band and the project-sheet PLM column lock write it.
+const PLM_SYSTEM_HUMAN_WRITE_LOCK_KEY = 'humanWriteLock'
+const PLM_SYSTEM_HUMAN_WRITE_LOCK_VALUE = 'plm_system'
+
 // ---------------------------------------------------------------------------
 // R-71 ⑦.4 PR-3 — THE FROZEN TEMPLATE'S MISSING COLUMNS, ON ONE NAMED OBJECT (report-first).
 //
@@ -1244,13 +1249,21 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
 //     writer inserted (skipped-existing) ROLLS THE WRITE BACK;
 //   * nothing missing ⇒ no write call at all (a second run adds 0 and says so).
 //
+// THE PLM LOCK RIDES THE INSERT (Y7 review MEDIUM-1). With `lockPlmSystemColumns: true` — passed ONLY by the
+// project-sheet wrapper (stock-preparation-project-targets.cjs `reconcileProjectSheetTemplateColumns`) — every
+// missing `plm_system` column is INSERTED with `property.humanWriteLock = 'plm_system'`, the same property shape
+// the pull-batch band is created with (templates.cjs `pullBatchBandProperty`). So the column is read-only for
+// people from the statement that creates it: a later option sync or lock-marking step that fails cannot leave
+// it human-writable while the pull already treats the sheet as ready. Human columns never get it. The default
+// is NO lock: the canonical and deployment repair paths have no PLM-lock semantics and never pass the flag.
+//
 // REPORT FIRST. `apply: false` (the default) only READS — the non-transactional existence read — and
 // answers what an apply would add, which missing columns an apply would refuse, and how many are
 // already present. It never calls a write method. `apply: true` is the owner-gated field-creating
 // write; there is no UI undo, so the caller decides when to send it.
 //
 // VALUES-FREE: logical template ids and counts only — never a physical id, a name or a row value.
-async function reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId, apply = false, locale } = {}) {
+async function reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId, apply = false, locale, lockPlmSystemColumns = false } = {}) {
   const project = requiredString(projectId, 'projectId')
   const object = requiredString(objectId, 'objectId')
   const template = normalizeStockPreparationTemplate({ ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, objectId: object })
@@ -1319,7 +1332,12 @@ async function reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId,
     if (missingIds.length === 0) return summarize({ checked: true, missingIds })
     const existingIds = fieldIds.filter((id) => !missingIds.includes(id))
     const beforeContent = await tx.readObjectFieldsContent({ projectId: project, objectId: object, fieldIds: existingIds })
-    const missingDescriptors = descriptor.fields.filter((field) => missingIds.includes(field.id))
+    const lockPlm = lockPlmSystemColumns === true
+    const missingDescriptors = descriptor.fields
+      .filter((field) => missingIds.includes(field.id))
+      .map((field) => (lockPlm && ownershipById.get(field.id) === 'plm_system'
+        ? { ...field, property: { ...(field.property || {}), [PLM_SYSTEM_HUMAN_WRITE_LOCK_KEY]: PLM_SYSTEM_HUMAN_WRITE_LOCK_VALUE } }
+        : field))
     const writeResult = await tx.ensureMissingObjectFields({ projectId: project, objectId: object, fields: missingDescriptors })
     const skipped = writeResult && Array.isArray(writeResult.skippedExistingFieldIds) ? writeResult.skippedExistingFieldIds : []
     if (skipped.length) {
