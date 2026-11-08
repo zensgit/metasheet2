@@ -8,7 +8,7 @@ import executionDigest from './yida-execution-digest.cjs'
 import sendBudgetModule from './yida-send-budget.cjs'
 import { createInternalYidaApprovedTargetTransactionReader } from './yida-approved-target-store.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
-import { compileYidaSendDraft } from './yida-draft-plan.mjs'
+import { compileYidaSendDraft, yidaDraftPlanErrorKind } from './yida-draft-plan.mjs'
 import { buildYidaStaticPlan, parseYidaStaticRows, yidaGeneratedLayout, yidaTransformSourceColumns } from './yida-static-plan.mjs'
 import { expandYidaProjectAllocationRows } from './stock-preparation-yida-allocation.mjs'
 
@@ -32,6 +32,10 @@ const GENERATED_LAYOUT_EVENTS = new Set(['approve', 'admit'])
 const GENERATED_LAYOUT_PKEY = 'integration_yida_generated_layout_pkey'
 const LAYOUT_CONFLICT = Object.freeze({ admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
 const layoutAdmissible = sealed => Object.freeze({ admissible: true, sealed })
+// Slice YE (external review recommendation 2, 2026-11-08): the compiler's four deterministic source-validation kinds.
+// validateDraftSource answers exactly these as a verdict; every other compile failure keeps its closed UNAVAILABLE.
+const SOURCE_PROBLEMS = new Set(['SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH'])
+const SOURCE_VALID = Object.freeze({ valid: true })
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const ERROR_CODES = new Set(['INPUT', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT'])
 const ownErrors = new WeakMap()
@@ -303,6 +307,51 @@ function createPrimitives(options) {
       return Object.freeze({ withinBudget: within })
     } catch (error) { closed(error) }
   }
+  // Slice YE (external review recommendation 2, 2026-11-08): the deterministic source-validation refusals of the persisted
+  // compile, answered BEFORE draftSendBudget (which compiles too and would close them to UNAVAILABLE). Pure and synchronous,
+  // like draftSendBudget: one frozen verdict, { valid: true } or { valid: false, code } with code one of the compiler's four
+  // SOURCE_* kinds (read through its own WeakMap reader, never a message or code property). Any other compile failure, and
+  // any malformed input, stays the closed UNAVAILABLE / INPUT it was; the host maps the verdict to its own fixed codes.
+  function validateDraftSource(input) {
+    try {
+      const source = record(input, draftKeys(input))
+      try { compileYidaSendDraft(source) } catch (error) {
+        const kind = yidaDraftPlanErrorKind(error)
+        if (SOURCE_PROBLEMS.has(kind)) return Object.freeze({ valid: false, code: kind })
+        throw error
+      }
+      return SOURCE_VALID
+    } catch (error) { closed(error) }
+  }
+  // Slice YE (coordinator, Y6 P1 addendum): a draft whose generated layout signature differs from its target's SEALED
+  // layout is refused already at draft creation, not first at approval. Read-only: the same signature rule as
+  // sealGeneratedLayoutInTransaction (a selection without a generated entry has the null signature, which never matches a
+  // seal), but no FOR UPDATE and no INSERT: an unsealed target stays unsealed until the first approval / admission seals it.
+  // The host's draft transaction already holds the approved-target row FOR UPDATE (the same slot lock the sealer's
+  // transaction holds), so a concurrent first seal is serialized there and this read sees it committed. The draft must
+  // first be one this target can take (create intent, its locator and key definition), exactly as prepareDraftInTransaction
+  // checks: otherwise the closed CONFLICT it always was. Answers { admissible: true, sealed: false } or
+  // { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }, the sealer's verdict shape (sealed is always false here).
+  async function checkGeneratedLayoutInTransaction(trx, input) {
+    try {
+      const db = crud(trx)
+      const { parsed: source, targetRef } = targeted(input, draftKeys(input))
+      const approved = await readTarget(db, targetRef)
+      const compiled = compileYidaSendDraft(source)
+      if (compiled.source.config.intent !== 'create') fail('CONFLICT')
+      if (approved.target.locator_digest !== compiled.locatorDigest
+        || approved.target.key_definition_digest !== compiled.keyDefinitionDigest
+        || !same(approved.envelope.locator, compiled.locator)
+        || !same(approved.envelope.keyDefinition, compiled.keyDefinition)) fail('CONFLICT')
+      const target = approved.target.target_ref
+      const existing = await db.selectOne(GENERATED_LAYOUT, { target_ref: target })
+      if (!existing) return layoutAdmissible(false)
+      if (existing.target_ref !== target || existing.tenant_id !== fixed.tenantId || existing.workspace_id !== null
+        || existing.owner_id !== fixed.ownerId || typeof existing.layout_digest !== 'string' || !DIGEST_RE.test(existing.layout_digest)) fail('UNAVAILABLE')
+      const layoutDigest = generatedLayoutDigest(compiled.source.config)
+      return layoutDigest !== null && existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
+    } catch (error) { closed(error) }
+  }
   // Admission of a bound row (design baseline v2.3 §7.2): the project-sheet registry must still name the
   // bound sheet for the row's project, active, inside the SAME admission transaction; the two digests then
   // enter the ledger row, where the identity fence (D16) is the final guarantee. The three binding keys come
@@ -432,7 +481,8 @@ function createPrimitives(options) {
     } catch (error) { closed(error) }
   }
   return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, sendBudget, draftSendBudget, sealGeneratedLayoutInTransaction, prepareInTransaction,
+    executionPayloadDigest, sendBudget, draftSendBudget, validateDraftSource, checkGeneratedLayoutInTransaction,
+    sealGeneratedLayoutInTransaction, prepareInTransaction,
     loadExecutionMaterialInTransaction })
 }
 

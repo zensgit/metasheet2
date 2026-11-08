@@ -649,11 +649,11 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
         .plan.rows[0].payload.materialCodeText
     }
     expect(localCode(lineB)).toBe(localCode(lineA))
-    // ... so the persisted compile refuses both bound drafts (row problem SOURCE_KEY_MISMATCH → PLAN) before any
+    // ... so the persisted compile refuses both bound drafts (kind SOURCE_KEY_FIELD_MISMATCH: rowIdOf names drawingNo, not the bound key field) before any
     // reservation is attempted: one code never names two identities.
     const before = await evidence()
     for (const line of [lineA, lineB]) {
-      await expect(generatedDraft([OFF_KEY], line)).rejects.toMatchObject({ code: 'YIDA_DRAFT_PLAN' })
+      await expect(generatedDraft([OFF_KEY], line)).rejects.toMatchObject({ code: 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH' })
     }
     expect(await evidence()).toEqual(before)
   })

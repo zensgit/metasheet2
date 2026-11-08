@@ -114,7 +114,7 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     expect((view.payload as Data).qty).toBe(6)
     noFetch(); expect((await f.proof()).counts).toEqual([0, 0, 0, 0, 0, 0])
     // SR5 (generated part, R-71 ⑦.4): a pasted body cannot carry a source binding, so a v3 config with a generated
-    // entry is refused at POST /drafts (fixed, values-free) and writes no draft; the same v3 config without it drafts.
+    // entry is refused at POST /drafts with the fixed, non-retryable 422 SOURCE_UNBOUND (slice YE; it was 503 UNAVAILABLE) and writes no draft; the same v3 config without it drafts.
     const v2 = draftInput().config as Data & { fieldMap: Data[]; fieldCatalog: Data[] }
     const v3 = { ...v2, version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
       fieldMap: v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })), fieldCatalog: [...v2.fieldCatalog] }
@@ -122,7 +122,7 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
       fieldMap: [...v3.fieldMap, { transform: 'generated', template: [{ literal: 'SYN-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-36' }],
         target: 'code', type: 'string', required: false }] }
     const drafts = (await f.rows('integration_yida_draft_operations')).length
-    denial(await f.http('POST', '/drafts', { ...input, config: generated }), 503, 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    denial(await f.http('POST', '/drafts', { ...input, config: generated }), 422, 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
     expect((await f.rows('integration_yida_draft_operations')).length).toBe(drafts)
     const plain = await prepare({ ...input, config: v3 })
     expect(plain.reused).toBe(false)

@@ -70,7 +70,10 @@ export function draftInput(mode = 'original', quantity = 6): Input {
 // branch with these; the permission logic itself is proved in tests/unit/yida-sheet-source.test.ts.
 export const sheetColumns = Object.freeze([{ fieldId: 'fld_project', source: 'projectNo' }, { fieldId: 'fld_line', source: 'lineId' },
   { fieldId: 'fld_parent', source: 'parentCode' }, { fieldId: 'fld_qty', source: 'quantity' }, { fieldId: 'fld_desc', source: 'description' }])
-type SheetState = { access: Data; records: Array<{ id: string; data: Data }> }
+// `registeredProject` (slice YE): when set, the synthetic sheet is a REGISTERED project sheet of that project (the
+// host's resolveProjectSheet answers it) and fld_line is its key column, so the sheet read yields a source binding.
+// Absent (the default), every read stays unbound exactly as before.
+type SheetState = { access: Data; records: Array<{ id: string; data: Data }>; registeredProject?: string }
 const defaultSheet = (): SheetState => ({ access: {}, records: [{ id: 'rec_synthetic_1',
   data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6, fld_desc: 'synthetic HTTP part' } }] })
 
@@ -125,7 +128,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const formReleases: Array<() => void> = []
   // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
   let sheetReads = 0
-  const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
+  // fld_line carries the stock-preparation key marker; it only matters on a registered sheet (unbound reads ignore it).
+  const sheetFields = [{ id: 'fld_project', type: 'string' },
+    { id: 'fld_line', type: 'string', property: { stockPreparation: { key: true } } }, { id: 'fld_parent', type: 'string' },
     { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
   const sheetSource = {
     async resolveAccess() {
@@ -140,6 +145,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     async readableRecordIds(_sheet: string, _user: string, _admin: boolean, ids: readonly string[]) { sheetReads++; return new Set(ids) },
     filter: { parse: () => null, prune: () => null, leaves: () => [], evaluate: () => true, leafMatches: () => true,
       effectiveType: (field: { type: string }) => field.type },
+    // Not counted in sheetReads: it is the host's registry lookup (087), not a read of the sheet itself.
+    async resolveProjectSheet() { return sheet.registeredProject === undefined ? null : { projectNo: sheet.registeredProject } },
   }
   let credentialRef = '', credentialGeneration = 0, seedDraft: Draft
   const load = (relative: string) => importNative(pathToFileURL(path.join(root, relative)).href)

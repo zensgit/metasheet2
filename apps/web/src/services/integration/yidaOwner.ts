@@ -134,6 +134,9 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze
   YIDA_SEND_APPROVAL_IDENTITY_RESERVED: [409],
   // Generated-layout seal (P1, 2026-11-08): the target's generated template layout is already sealed and this draft's differs.
   YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: [409],
+  // Source validation (slice YE, 2026-11-08): the draft is refused for good as it stands (fixed, not retryable); no draft saved.
+  YIDA_SEND_APPROVAL_SOURCE_UNBOUND: [422], YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH: [422],
+  YIDA_SEND_APPROVAL_SOURCE_KEY_MISMATCH: [422], YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH: [422],
   // Y2 target list and sheet/view source.
   YIDA_INITIALIZATION_INPUT: [400], YIDA_INITIALIZATION_DENIED: [403], YIDA_INITIALIZATION_DISABLED: [403],
   YIDA_INITIALIZATION_CONFLICT: [409], YIDA_INITIALIZATION_CANCELLED: [409], YIDA_INITIALIZATION_INACTIVE: [503],

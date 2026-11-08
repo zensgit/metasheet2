@@ -193,7 +193,8 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     doubles.push(value); return value
   }
   // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
-  async function session(scope = context(), budget?: { within: boolean | null; calls: number }): Promise<Session> {
+  // `overrides` (slice YE): replaces named primitives of the real set (only the verdict seams the test names).
+  async function session(scope = context(), budget?: { within: boolean | null; calls: number }, overrides: Row = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -230,11 +231,11 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       transaction: callback => database.transaction(trx => callback({ query: async (sql, params) => (await trx.query(sql, params)).rows })) }
     const db = createDb({ database: pluginDatabase }), config = { db, security, context: scope }
     const real = createPrimitives({ security, context: scope }) as Record<string, unknown> & { sendBudget(selection: unknown, grant: unknown): unknown }
-    const primitives = budget ? { ...real, sendBudget(selection: unknown, grant: unknown) {
+    const primitives = { ...(budget ? { ...real, sendBudget(selection: unknown, grant: unknown) {
       budget.calls++
       const verdict = real.sendBudget(selection, grant)
       return budget.within === null ? verdict : Object.freeze({ withinBudget: budget.within })
-    } } : real
+    } } : real), ...overrides }
     const authority = createAuthority({ database, security, context: { actorId: scope.ownerId, tenantId: scope.tenantId, workspaceId: null },
       primitives })
     const value: Session = { client, pid, db, authority, statements, draft: createDraft(config), target: createTarget(config),
@@ -870,5 +871,31 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const within = await first.authority.prepareDraft(liftV3(input(), constants(2)))
     expect(within.reused).toBe(false)
     expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
+  })
+
+  // Slice YE (external review recommendation 2, 2026-11-08): the host's draft source-verdict seam on the actual authority.
+  // The real compiler reaches three of the four kinds (the HTTP real-DB cases in the initialization HTTP file); this pins
+  // the mapping of all four — SOURCE_KEY_MISMATCH included, which no public input reaches — and the verdict's strictness.
+  it('YE: each frozen { valid: false, code } source verdict is that fixed YIDA_SEND_APPROVAL_SOURCE_* code, a malformed verdict is UNAVAILABLE, nothing is written', async () => {
+    await slot()
+    let verdict: unknown = Object.freeze({ valid: true })
+    const probe = await session(context(), undefined, { validateDraftSource: () => verdict })
+    const before = await draftCounts()
+    for (const code of ['SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH']) {
+      verdict = Object.freeze({ valid: false, code })
+      await rejected(probe.authority.prepareDraft(liftV3(input())), `YIDA_SEND_APPROVAL_${code}`)
+    }
+    for (const malformed of [{ valid: false, code: 'SOURCE_UNBOUND' }, Object.freeze({ valid: false, code: 'PLAN' }),
+      Object.freeze({ valid: false, code: 'GENERATED_LAYOUT_CONFLICT' }), Object.freeze({ valid: false }),
+      Object.freeze({ valid: true, code: 'SOURCE_UNBOUND' }), Object.freeze({ valid: 'true' }), Object.freeze({ valid: false, code: 'SOURCE_UNBOUND', extra: 1 }),
+      Promise.resolve(Object.freeze({ valid: true })), new Proxy(Object.freeze({ valid: true }), {}), null]) {
+      verdict = malformed
+      await rejected(probe.authority.prepareDraft(liftV3(input())), 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    }
+    expect(await draftCounts()).toEqual(before)
+    // Control: a valid verdict lets the same draft through, and the real verdict of a v3 draft without a generated entry is valid.
+    verdict = Object.freeze({ valid: true })
+    expect((await probe.authority.prepareDraft(liftV3(input()))).reused).toBe(false)
+    expect((await first.authority.prepareDraft(liftV3(input()))).reused).toBe(true)
   })
 })

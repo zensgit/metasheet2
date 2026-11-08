@@ -123,8 +123,9 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
   test(`actual full ${mode} selection uses allocated execution rows and never controls the host transaction`, async () => {
     const f = await fixture(mode), index = mode === 'original' ? 0 : 2
     const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, index))
-    assert.deepEqual(Object.keys(f.port).sort(), ['draftSendBudget', 'executionPayloadDigest', 'loadExecutionMaterialInTransaction',
-      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sealGeneratedLayoutInTransaction', 'sendBudget'])
+    assert.deepEqual(Object.keys(f.port).sort(), ['checkGeneratedLayoutInTransaction', 'draftSendBudget', 'executionPayloadDigest', 'loadExecutionMaterialInTransaction',
+      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sealGeneratedLayoutInTransaction', 'sendBudget',
+      'validateDraftSource'])
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
       'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest', 'rowPayloadDigest', 'planDigest',
@@ -888,6 +889,8 @@ test('R-71 ⑦.4 SR5 (generated): an unbound draft with a generated entry is ref
   assert.deepEqual([f.state[OP].length, f.state[ROWS].length, f.state[DRAFT_AUDIT].length], [operations, rows, 0])
   // The draft-time budget answers the same refusal (one compiler, one rule).
   assert.throws(() => f.port.draftSendBudget(unbound), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  // Slice YE: the source verdict the host consults first names it (a fixed, non-retryable code, never UNAVAILABLE).
+  assert.deepEqual(f.port.validateDraftSource(unbound), { valid: false, code: 'SOURCE_UNBOUND' })
   // The same pasted rows without the generated entry: an ordinary v3 draft whose rows carry no binding digest.
   const made = await f.port.prepareDraftInTransaction(f.trx, v3Source(f.source))
   const members = f.state[ROWS].filter(row => row.operation_id === made.operationId)
@@ -1028,4 +1031,100 @@ test('P1 seal: without a generated entry the seal row is read and nothing is wri
   f.faults.onQuery = async sql => { if (sql.startsWith(`INSERT INTO "${LAYOUT}"`)) throw Object.assign(new Error('synthetic other failure'), { code: '23505', constraint: 'other' }) }
   await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }))
   f.faults.onQuery = null
+})
+
+// ---- Slice YE (external review recommendation 2, 2026-11-08): draft-time verdicts for the host's fixed codes ----
+// The preset template of the material code: rowIdOf names the bound key field's direct target (componentCode), projectOf the
+// project target; a rowIdOf naming another string direct target (componentName) is the structural mismatch.
+const presetTemplate = (rowIdOf = 'componentCode') => [{ literal: 'SYN-' }, { preset: 'material-code-v1', rowIdOf, projectOf: 'project' }]
+// The example's two rows share one component code and project, so a preset code needs one row (two would be
+// DUPLICATE_GENERATED_VALUE, a PLAN refusal before any source check).
+const firstRow = candidate => ({ ...candidate, rowsText: JSON.stringify([JSON.parse(candidate.rowsText)[0]]),
+  sourceBinding: { ...candidate.sourceBinding, records: [candidate.sourceBinding.records[0]] } })
+
+test('YE validateDraftSource: one frozen verdict, pure (no SQL); the compiler\'s source-validation kinds are named, every other failure stays closed', async () => {
+  const f = await fixture(), { unbound, bound } = generatedSource(f)
+  const before = f.calls.length
+  const valid = f.port.validateDraftSource(bound)
+  assert.deepEqual(valid, { valid: true })
+  assert.equal(Object.isFrozen(valid), true)
+  // A plain v2 or v3 draft without a generated entry is valid too (nothing to validate against a source).
+  assert.deepEqual(f.port.validateDraftSource(f.source), { valid: true })
+  assert.deepEqual(f.port.validateDraftSource(v3Source(f.source)), { valid: true })
+  const preset = firstRow(withTemplate(bound, presetTemplate()))
+  assert.deepEqual(f.port.validateDraftSource(preset), { valid: true })
+  const otherProject = { ...preset, sourceBinding: { ...preset.sourceBinding,
+    records: preset.sourceBinding.records.map(record => ({ ...record, projectNo: 'DEMO-P9' })) } }
+  const cases = [['SOURCE_UNBOUND', unbound], ['SOURCE_PROJECT_MISMATCH', otherProject],
+    ['SOURCE_KEY_FIELD_MISMATCH', firstRow(withTemplate(bound, presetTemplate('componentName')))]]
+  for (const [code, candidate] of cases) {
+    const verdict = f.port.validateDraftSource(candidate)
+    assert.deepEqual(verdict, { valid: false, code })
+    assert.equal(Object.isFrozen(verdict), true)
+    assert.deepEqual(Object.keys(verdict), ['valid', 'code'])
+  }
+  assert.equal(f.calls.length, before)
+  // Not a source problem: the closed errors they always were (a duplicate generated value is PLAN → UNAVAILABLE; malformed
+  // input is INPUT; an empty row set is PLAN → UNAVAILABLE).
+  const rows = JSON.parse(bound.rowsText)
+  const twinRows = [rows[0], { ...rows[0], componentName: 'SYN-TWIN' }]
+  const twin = withTemplate({ ...bound, rowsText: JSON.stringify(twinRows), sourceBinding: { ...bound.sourceBinding,
+    records: twinRows.map((row, ordinal) => ({ recordId: `rec_twin_${ordinal}`, keyValue: row.componentCode, projectNo: 'DEMO-P1' })) } }, presetTemplate())
+  assert.throws(() => f.port.validateDraftSource(twin), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => f.port.validateDraftSource({ ...f.source, rowsText: '[]' }), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => f.port.validateDraftSource({ ...f.source, targetRef: 'caller' }), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.validateDraftSource(new Proxy(f.source, {})), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.validateDraftSource(null), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+})
+
+test('YE checkGeneratedLayoutInTransaction: read-only (no FOR UPDATE, no INSERT); unsealed is admissible; on a sealed target the same layout passes, another layout or none is the frozen conflict verdict', async () => {
+  const f = await fixture(), [, , planner] = await modules
+  const { bound } = generatedSource(f)
+  const readOnly = () => {
+    const layoutReads = f.calls.filter(sql => sql.startsWith(`SELECT * FROM "${LAYOUT}"`))
+    assert.equal(layoutReads.length, 1)
+    assert.equal(layoutReads[0].endsWith('FOR UPDATE'), false)
+    assert.equal(f.calls.some(sql => sql.startsWith('INSERT')), false)
+  }
+  // Unsealed target: a generated draft and a plain one are both admissible, nothing written, the seal table untouched.
+  for (const candidate of [bound, f.source, v3Source(f.source)]) {
+    f.calls.length = 0
+    const verdict = await f.port.checkGeneratedLayoutInTransaction(f.trx, candidate)
+    assert.deepEqual(verdict, { admissible: true, sealed: false })
+    assert.equal(Object.isFrozen(verdict), true)
+    readOnly()
+  }
+  assert.deepEqual(f.state[LAYOUT], [])
+  // Seal the target with the bound draft's layout (the approval path), then check drafts against it.
+  const selected = await generatedSelection(f, bound)
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), { admissible: true, sealed: true })
+  const sealed = f.state[LAYOUT][0]
+  assert.equal(sealed.layout_digest, oracleLayoutDigest(planner, bound.config))
+  f.calls.length = 0
+  assert.deepEqual(await f.port.checkGeneratedLayoutInTransaction(f.trx, withTemplate(bound, GENERATED_ENTRY.template, 5)), { admissible: true, sealed: false })
+  readOnly()
+  const [, hashPart] = GENERATED_ENTRY.template
+  for (const candidate of [withTemplate(bound, [hashPart, { field: 'componentName' }], 6), firstRow(withTemplate(bound, presetTemplate(), 7)), f.source, v3Source(f.source)]) {
+    f.calls.length = 0
+    const verdict = await f.port.checkGeneratedLayoutInTransaction(f.trx, candidate)
+    assert.deepEqual(verdict, { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+    assert.equal(Object.isFrozen(verdict), true)
+    readOnly()
+  }
+  assert.deepEqual(f.state[LAYOUT], [sealed])
+  // A draft this target cannot take (another form, an update intent) is the closed CONFLICT prepareDraftInTransaction answers.
+  const otherForm = structuredClone(bound); otherForm.config.target = { ...otherForm.config.target, formUuid: 'synthetic_other_form' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, otherForm), 'CONFLICT')
+  // A seal row that is not this owner's or whose digest is malformed: UNAVAILABLE, never a match.
+  f.state[LAYOUT][0] = { ...sealed, owner_id: 'synthetic-other-owner' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.state[LAYOUT][0] = { ...sealed, layout_digest: 'not-a-digest' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.state[LAYOUT][0] = sealed
+  // Closed input: a caller-supplied extra key, a Proxy, a database fault.
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, { ...bound, extra: 1 }), 'INPUT')
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, new Proxy(bound, {})), 'INPUT')
+  f.faults.query = new Error('synthetic database failure')
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.faults.query = null
 })

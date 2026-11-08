@@ -9,7 +9,9 @@ import { buildYidaProjectAllocationPreview, YidaAllocationError } from './stock-
 const { stableCanonicalStringify, deepCloneFrozenCanonical } = canonical
 const INPUT_BUDGET = Object.freeze({ bytes: 2 * 1024 * 1024, depth: 12, nodes: 20000 })
 const OUTPUT_BUDGET = Object.freeze({ bytes: 4 * 1024 * 1024, depth: 16, nodes: 50000 })
-const ERROR_KINDS = new Set(['INPUT', 'CONFIG', 'PLAN', 'LIMIT'])
+// The four SOURCE_* kinds are the deterministic source-validation refusals of the persistent send entry (ROW_PROBLEM).
+const ERROR_KINDS = new Set(['INPUT', 'CONFIG', 'PLAN', 'LIMIT',
+  'SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH'])
 const ownErrors = new WeakMap()
 // Source binding (design baseline v2.3 §7.2, decision D1 a′). The host attaches it ONLY when the rows were
 // read by the server from a registered project sheet; a pasted rowsText never carries one. The binding is
@@ -20,9 +22,11 @@ const PER_ROW_BINDING_KEYS = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', '
 const IDENTIFIER = /^[\p{L}\p{N}_-]{1,128}$/u
 const CONTROL = /[\u0000-\u001f\u007f]/u
 const MAX_KEY_VALUE_LENGTH = 4096
-// Row problems of the persistent send entry (addendum 2026-11-06; v2.3 §7.1). Each refuses the WHOLE draft with the
-// closed, values-free kind PLAN (HTTP: the send authority's UNAVAILABLE); the name is documentation, not a new code
-// (whether these get a dedicated code is an owner question, baseline §7.2 open item).
+// Row problems of the persistent send entry (addendum 2026-11-06; v2.3 §7.1). Each refuses the WHOLE draft with its own
+// closed, values-free kind (slice YE, external review recommendation 2, coordinator ruling 2026-11-08; before it, all four
+// were the generic PLAN and answered the send authority's retryable-looking 503 UNAVAILABLE). They are deterministic: the
+// same config, rows and binding are refused again, so the send authority answers each with a fixed, non-retryable
+// validation code at draft creation (HTTP 422, YIDA_SEND_APPROVAL_<kind>); yidaDraftPlanErrorKind() is its only reader.
 //   SOURCE_UNBOUND           - a generated entry on a row the server did not read (no source binding).
 //   SOURCE_PROJECT_MISMATCH  - a bound row whose preset projectOf cell is not the project its binding names
 //                              (「同码必同身份」 in original mode, Y4-05 option a; in a split it holds by construction).
@@ -32,8 +36,11 @@ const MAX_KEY_VALUE_LENGTH = 4096
 //   SOURCE_KEY_FIELD_MISMATCH - a bound draft whose preset rowIdOf does not NAME the bound key field (the direct target
 //                              whose source column the binding maps to keyFieldId): a column that merely holds the key's
 //                              value today may hold another value tomorrow (external review 2026-11-08, hardening).
-const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'PLAN', SOURCE_PROJECT_MISMATCH: 'PLAN', SOURCE_KEY_MISMATCH: 'PLAN',
-  SOURCE_KEY_FIELD_MISMATCH: 'PLAN' })
+//   Reachability (YE): parseSourceBinding refuses a binding whose keyValue is not the row's key cell and the structural
+//   SOURCE_KEY_FIELD_MISMATCH rule runs first, so SOURCE_KEY_MISMATCH fires only if the planner's direct string
+//   projection ever stopped copying the key cell verbatim; it stays as the second, per-row check.
+const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'SOURCE_UNBOUND', SOURCE_PROJECT_MISMATCH: 'SOURCE_PROJECT_MISMATCH',
+  SOURCE_KEY_MISMATCH: 'SOURCE_KEY_MISMATCH', SOURCE_KEY_FIELD_MISMATCH: 'SOURCE_KEY_FIELD_MISMATCH' })
 
 export class YidaDraftPlanError extends Error {
   constructor(kind = 'INPUT') {
@@ -43,6 +50,12 @@ export class YidaDraftPlanError extends Error {
     this.code = this.message
     ownErrors.set(this, fixed)
   }
+}
+
+// The fixed kind of this compiler's own error (a WeakMap read: never a message, code property, prototype or Proxy trap
+// of the value), or null for anything else. Consumers classify compile refusals only through this reader.
+export function yidaDraftPlanErrorKind(error) {
+  return ownErrors.get(error) ?? null
 }
 
 function fail(kind) { throw new YidaDraftPlanError(kind) }
@@ -335,7 +348,7 @@ export function compileYidaDraft(input) {
 
 // R-71 ⑦.3: the persistent send path (draft store, send authority, owner send port) compiles v2
 // or v3. A v3 draft can only go to a target whose sealed key definition it matches exactly.
-// It is the one entry that refuses a generated field on an unbound row (SOURCE_UNBOUND → PLAN).
+// It is the one entry that refuses a generated field on an unbound row (kind SOURCE_UNBOUND).
 export function compileYidaSendDraft(input) {
   return compile(input, [2, 3], true)
 }

@@ -17,10 +17,20 @@ type Row = Record<string, unknown>
 // GENERATED_LAYOUT_CONFLICT (external review P1, 2026-11-08; migration zzzz20261108120000): the target's generated layout
 // was sealed by an earlier approval / admission and this selection's layout signature differs (another template shape on
 // the same target could give another identity the same code). Refused at approval and at admission, before any write.
+// SOURCE_* (slice YE, external review recommendation 2, coordinator ruling 2026-11-08): the deterministic source-validation
+// refusals of a draft (the plugin compiler's four row problems). The same config, rows and binding are refused again, so
+// each is a fixed, non-retryable validation code at draft creation (HTTP 422), never the retryable-looking UNAVAILABLE:
+//   SOURCE_UNBOUND            a generated entry on rows the server did not read from a registered project sheet;
+//   SOURCE_PROJECT_MISMATCH   a bound row whose preset project cell is not the project its binding names;
+//   SOURCE_KEY_MISMATCH       a bound row whose preset row-id cell is not the key value the server read;
+//   SOURCE_KEY_FIELD_MISMATCH a bound draft whose preset row id does not name the bound key field.
+// Database, decryption and every other failure keep UNAVAILABLE.
 type ErrorCode = 'INPUT' | 'NOT_FOUND' | 'CONFLICT' | 'EXPIRED' | 'REVOKED' | 'CANCELLED' | 'UNAVAILABLE' | 'LIMIT' | 'IDENTITY_RESERVED'
-  | 'GENERATED_LAYOUT_CONFLICT'
+  | 'GENERATED_LAYOUT_CONFLICT' | SourceProblem
+type SourceProblem = 'SOURCE_UNBOUND' | 'SOURCE_PROJECT_MISMATCH' | 'SOURCE_KEY_MISMATCH' | 'SOURCE_KEY_FIELD_MISMATCH'
+const SOURCE_PROBLEMS = new Set<unknown>(['SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH'])
 const CODES = new Set<unknown>(['INPUT', 'NOT_FOUND', 'CONFLICT', 'EXPIRED', 'REVOKED', 'CANCELLED', 'UNAVAILABLE', 'LIMIT', 'IDENTITY_RESERVED',
-  'GENERATED_LAYOUT_CONFLICT'])
+  'GENERATED_LAYOUT_CONFLICT', ...SOURCE_PROBLEMS])
 const ownErrors = new WeakMap<object, ErrorCode>()
 const MAX_TTL = 900000
 const MAX_PLAIN = 16 * 1024 * 1024
@@ -238,6 +248,10 @@ export type YidaSendExecutionPrimitives = YidaSendAuthorityPrimitives & {
   prepareDraftInTransaction?(trx: Queryable, input: unknown): Promise<Readonly<Row>>
   // R-71 ⑦.3 decision C1: pure and synchronous, one frozen boolean, checked before a draft is written.
   draftSendBudget?(input: unknown): Readonly<{ withinBudget: boolean }>
+  // Slice YE: pure and synchronous, checked first: { valid: true } or { valid: false, code: <one of SOURCE_PROBLEMS> }.
+  validateDraftSource?(input: unknown): unknown
+  // Slice YE: the sealed generated layout, read-only, before a draft is written: the sealer's verdict shape.
+  checkGeneratedLayoutInTransaction?(trx: Queryable, input: unknown): Promise<unknown>
   previewInTransaction?(trx: Queryable, input: { operationId: string; rowKey: string }): Promise<Readonly<Row>>
 }
 export type YidaSendExecutionDependencies = Omit<Dependencies, 'primitives'> & { primitives: YidaSendExecutionPrimitives }
@@ -515,6 +529,28 @@ function createApprovalInternals({ database, security, context, primitives, mult
       || typeof descriptors.withinBudget.value !== 'boolean') fail('UNAVAILABLE')
     if (descriptors.withinBudget.value !== true) fail('LIMIT')
   }
+  // Slice YE: the draft source verdict, as strict as the budget verdict above. Only a frozen plain { valid: true } passes;
+  // { valid: false, code } with code exactly one of the four SOURCE_* kinds is that fixed code; anything else UNAVAILABLE.
+  function assertSourceVerdict(verdict: unknown) {
+    if (types.isPromise(verdict)) {
+      try {
+        if (!types.isProxy(verdict) && Object.getPrototypeOf(verdict) === Promise.prototype && !Object.hasOwn(verdict, 'constructor'))
+          Promise.prototype.then.call(verdict, undefined, () => {})
+      } catch { /* Still refused below. */ }
+      fail('UNAVAILABLE')
+    }
+    if (!verdict || typeof verdict !== 'object' || types.isProxy(verdict) || Array.isArray(verdict) || !Object.isFrozen(verdict)) fail('UNAVAILABLE')
+    const proto = Object.getPrototypeOf(verdict)
+    if (proto !== Object.prototype && proto !== null) fail('UNAVAILABLE')
+    const descriptors = Object.getOwnPropertyDescriptors(verdict), keys = Reflect.ownKeys(descriptors)
+    if (keys.some(key => typeof key !== 'string') || !Object.hasOwn(descriptors, 'valid') || !Object.hasOwn(descriptors.valid, 'value')) fail('UNAVAILABLE')
+    if (descriptors.valid.value === true && keys.length === 1) return
+    if (descriptors.valid.value !== false || keys.length !== 2 || !Object.hasOwn(descriptors, 'code')
+      || !Object.hasOwn(descriptors.code, 'value')) fail('UNAVAILABLE')
+    const code = descriptors.code.value
+    if (SOURCE_PROBLEMS.has(code)) fail(code as SourceProblem)
+    fail('UNAVAILABLE')
+  }
   async function audit(trx: Queryable, grantId: unknown, event: 'approve' | 'revoke' | 'admit') {
     const result = await trx.query('INSERT INTO integration_yida_send_approval_audit (id, grant_id, event, actor_id) VALUES ($1, $2, $3, $4) RETURNING id, grant_id, event, actor_id',
       [randomUUID(), grantId, event, fixed.actorId])
@@ -697,11 +733,23 @@ function createApprovalInternals({ database, security, context, primitives, mult
     // Literal data only, never a source/Connection reference or a query port.
     // The actual plugin compiler applies its tighter input/row budgets too.
     canonical(parsed)
-    if (!executionPrimitives?.prepareDraftInTransaction || typeof executionPrimitives.draftSendBudget !== 'function') fail('UNAVAILABLE')
+    if (!executionPrimitives?.prepareDraftInTransaction || typeof executionPrimitives.draftSendBudget !== 'function'
+      || typeof executionPrimitives.validateDraftSource !== 'function'
+      || typeof executionPrimitives.checkGeneratedLayoutInTransaction !== 'function') fail('UNAVAILABLE')
     return transaction(async (trx, targetRef, bound) => {
+      // Slice YE: a deterministic source-validation refusal is its own fixed code (422), answered first: the budget check
+      // below compiles too and would close it to UNAVAILABLE. Nothing is written; the transaction rolls back.
+      assertSourceVerdict(executionPrimitives.validateDraftSource!(parsed))
       // R-71 ⑦.3 decision C1: a draft the shared send budget would refuse at approval is refused
       // here (LIMIT, 422), before any draft row is written; the transaction rolls back.
       assertBudgetVerdict(executionPrimitives.draftSendBudget!(parsed))
+      // Slice YE (Y6 P1 addendum): a draft whose generated layout differs from the target's SEALED layout (or that has no
+      // generated entry while the target is sealed) is refused here already, GENERATED_LAYOUT_CONFLICT (409), before any
+      // draft row is written; approval and admission still seal-or-match on their own transactions. Read-only.
+      let layout: unknown
+      try { layout = await executionPrimitives.checkGeneratedLayoutInTransaction!(trx, targeted(parsed, targetRef, bound)) }
+      catch { fail('UNAVAILABLE') }
+      assertGeneratedLayoutVerdict(layout)
       const result = await executionPrimitives.prepareDraftInTransaction!(trx, targeted(parsed, targetRef, bound))
       const view = record(result, ['targetRef', 'operationId', 'status', 'identityKind', 'canSend', 'canApply',
         'tokenIssued', 'externalWriteAttempted', 'rowCount', 'rows', 'reused'])

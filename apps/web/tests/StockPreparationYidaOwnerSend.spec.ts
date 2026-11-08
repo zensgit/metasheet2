@@ -597,7 +597,7 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409))
     await click('approve')
     expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
-    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；未授权、未发送。请改回已封存的模板，或由管理员另建目标。')
+    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；这次请求没有保存草稿、授权或发送任何内容。请改回已封存的模板，或由管理员另建目标。')
     expect(absent('grant')).toBe(true)
     expect(absent('submit')).toBe(true)
     expect(absent('identity-reserved')).toBe(true)
@@ -866,6 +866,31 @@ describe('StockPreparationYidaOwnerSendPanel v3 drafts (R-71 ⑦.3)', () => {
     expect(JSON.parse(fetchSpy.mock.calls[1][1].body as string)).toEqual(transform())
     expect(absent('limit')).toBe(true)
     expect(q('draft').textContent).toContain('目标仍未核验')
+  })
+
+  // Slice YE (2026-11-08): the four deterministic source-validation refusals and the draft-time sealed-layout refusal are
+  // fixed codes with their own plain copy; no draft is shown; the same code on 503 is not this refusal.
+  it.each([
+    ['YIDA_SEND_APPROVAL_SOURCE_UNBOUND', 422, 'source-unbound', '此映射含编码模板，只能用服务端从已登记项目表格读取的行创建草稿；粘贴的行没有来源绑定。未保存草稿，原样再试仍会被拒绝。请改用“从表格”读取已登记的项目表格。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH', 422, 'source-project-mismatch', '表格中有行的项目号与该表格登记的项目不一致，生成的编码会对应到别的项目。未保存草稿，原样再试仍会被拒绝。请在表格中改正这些行的项目号后重新读取。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_KEY_MISMATCH', 422, 'source-key-mismatch', '编码模板读到的行标识与服务端读取的行键不一致。未保存草稿，原样再试仍会被拒绝。请检查表格的行键列与模板的行标识后重新读取。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH', 422, 'source-key-field-mismatch', '编码模板的行标识没有指向表格的行键列（另一列即使内容相同也不行）。未保存草稿，原样再试仍会被拒绝。请把模板的行标识改为行键列对应的字段后重新预演。'],
+    ['YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409, 'generated-layout-conflict', '该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；这次请求没有保存草稿、授权或发送任何内容。请改回已封存的模板，或由管理员另建目标。'],
+  ] as const)('a draft refused with %s (%i) shows the fixed code and its copy, no draft; the same code on 503 is invalid', async (code, status, id, copy) => {
+    mount(false)
+    fetchSpy.mockResolvedValueOnce(error(code, status))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/integration/yida-owner-send/drafts')
+    expect(q('error').textContent).toBe(code)
+    expect(q(id).textContent).toBe(copy)
+    expect(absent('draft')).toBe(true)
+    for (const other of ['source-unbound', 'source-project-mismatch', 'source-key-mismatch', 'source-key-field-mismatch',
+      'generated-layout-conflict', 'limit'].filter(name => name !== id)) expect(absent(other)).toBe(true)
+    fetchSpy.mockResolvedValueOnce(error(code, 503))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent(id)).toBe(true)
+    expect(absent('draft')).toBe(true)
   })
 
   it('the sheet column mapping of a v3 draft lists every column the mapping reads, concat-only ones included', async () => {

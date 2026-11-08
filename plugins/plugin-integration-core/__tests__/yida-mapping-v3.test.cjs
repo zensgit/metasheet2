@@ -285,7 +285,7 @@ test('v2 still refuses one source mapped twice; initialization still refuses v3 
   assert.throws(() => compileYidaDraft(input), (error) => error.code === 'YIDA_DRAFT_CONFIG')
   // R-71 ⑦.3: the facade carries the v2-only initialization entry and the v2+v3 send entry, never
   // the local recompute. The send entry gives the local recompute's exact result for a v3 input.
-  assert.deepEqual(Object.keys(await persistedPromise).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft'])
+  assert.deepEqual(Object.keys(await persistedPromise).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft', 'yidaDraftPlanErrorKind'])
   assert.deepEqual(compileYidaSendDraft(input), compileYidaLocalDraft(input))
   assert.equal((await persistedPromise).YidaDraftPlanError, (await draftPromise).YidaDraftPlanError)
 })
@@ -359,10 +359,10 @@ test('the shipped v2 material template and the v3 material template share one ke
   assert.deepEqual(v3.allocation, v2.allocation)
   const before = compileYidaSendDraft({ config: { ...v2.rules, target }, rowsText, allocation })
   // The v3 template carries the generated material code, so its persisted entry needs a server source binding
-  // (SOURCE_UNBOUND, R-71 ⑦.4): pasted rows are refused there and compared through the same compiler's local entry.
+  // (kind SOURCE_UNBOUND, R-71 ⑦.4): pasted rows are refused there and compared through the same compiler's local entry.
   assert.equal(v3.rules.fieldMap.some((entry) => entry.transform === 'generated'), true)
   assert.throws(() => compileYidaSendDraft({ config: { ...v3.rules, target }, rowsText, allocation }),
-    (error) => error instanceof YidaDraftPlanError && error.code === 'YIDA_DRAFT_PLAN')
+    (error) => error instanceof YidaDraftPlanError && error.code === 'YIDA_DRAFT_SOURCE_UNBOUND')
   const after = compileYidaLocalDraft({ config: { ...v3.rules, target }, rowsText, allocation })
   assert.equal(after.keyDefinition.fields.length, 7)
   assert.deepEqual(after.keyDefinition, before.keyDefinition)

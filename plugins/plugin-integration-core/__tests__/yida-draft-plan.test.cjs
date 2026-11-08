@@ -118,9 +118,9 @@ function expectError(compile, ErrorClass, candidate, code) {
   })
 }
 
-test('exports the two persisted-path compilers and the fixed draft error class', async () => {
+test('exports the two persisted-path compilers and the fixed draft error class (and, slice YE, its kind reader)', async () => {
   const exported = await modulePromise
-  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft'])
+  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft', 'yidaDraftPlanErrorKind'])
 })
 
 // R-71 ⑦.3 (B2): literal v2 goldens, computed by the base compiler before this change. A stored v2
@@ -860,7 +860,7 @@ test('generated (SOURCE_UNBOUND): the persisted send entry refuses a generated e
   }
   for (const patchConfig of [undefined, hashOnly]) {
     const { unbound, bound } = await generatedInput({ config: patchConfig })
-    expectError(compileYidaSendDraft, YidaDraftPlanError, unbound, 'YIDA_DRAFT_PLAN')
+    expectError(compileYidaSendDraft, YidaDraftPlanError, unbound, 'YIDA_DRAFT_SOURCE_UNBOUND')
     // The never-persisted local recompute needs no binding (browser preview parity), and a bound draft compiles.
     const local = compileYidaLocalDraft(unbound), sent = compileYidaSendDraft(bound)
     assert.equal(local.plan.rows.length, 2); assert.equal(sent.plan.rows.length, 2)
@@ -889,16 +889,16 @@ test('generated: a bound row whose preset project cell is not the project of its
   }
   // A row whose project cell differs from its binding (cell not re-pulled, plugin-SDK or SQL write): the code would be
   // minted for another project than the row's creation identity, so the whole draft is refused (row problem
-  // SOURCE_PROJECT_MISMATCH → PLAN). Verbatim comparison: no case folding.
+  // kind SOURCE_PROJECT_MISMATCH). Verbatim comparison: no case folding.
   for (const cell of ['DEMO-P2', 'demo-p1']) {
     const other = await generatedInput({ rows: (rows) => rows.map((entry, index) => index === 1 ? { ...entry, projectNo: cell } : entry) })
-    expectError(compileYidaSendDraft, YidaDraftPlanError, other.bound, 'YIDA_DRAFT_PLAN')
+    expectError(compileYidaSendDraft, YidaDraftPlanError, other.bound, 'YIDA_DRAFT_SOURCE_PROJECT_MISMATCH')
     // The same rows compile unbound locally (the preview has no identity to compare with).
     const { compileYidaLocalDraft } = await compilerPromise
     assert.equal(compileYidaLocalDraft(other.unbound).plan.rows.length, 2)
   }
   // The binding naming another project than all cells: refused as well.
-  expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ projectNo: 'DEMO-P9' })).bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ projectNo: 'DEMO-P9' })).bound, 'YIDA_DRAFT_SOURCE_PROJECT_MISMATCH')
   // Without a generated entry the same mismatch is not this row problem (Y4 pins the per-binding project rule).
   const noCode = await generatedInput({ projectNo: 'DEMO-P9', config: (layout) => {
     layout.fieldMap = layout.fieldMap.filter((entry) => entry.transform !== 'generated')
@@ -936,8 +936,8 @@ test('generated: a bound row whose preset rowIdOf cell is not the key value of i
   assert.equal(codesOf(locals[0])[0], oracleMaterialCode('DEMO-DRW-1', 'DEMO-P1'))
   assert.equal(codesOf(locals[1])[0], codesOf(locals[0])[0])
   assert.notEqual(locals[1].rowSpecs[0].businessKeyDigest, locals[0].rowSpecs[0].businessKeyDigest)
-  // The persisted compile refuses both bound drafts (row problem SOURCE_KEY_MISMATCH → PLAN), before any fence.
-  for (const draft of drafts) expectError(compileYidaSendDraft, YidaDraftPlanError, draft.bound, 'YIDA_DRAFT_PLAN')
+  // The persisted compile refuses both bound drafts (kind SOURCE_KEY_FIELD_MISMATCH since 2026-11-08: the structural rule sees rowIdOf name drawingNo, not the bound key field, before the per-row value hook), before any fence.
+  for (const draft of drafts) expectError(compileYidaSendDraft, YidaDraftPlanError, draft.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   // The default template (rowIdOf = the key column) still compiles bound, and its code is WLBH(identity).
   const keyed = await generatedInput({ rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })
   const compiled = compileYidaSendDraft(keyed.bound)
@@ -945,13 +945,13 @@ test('generated: a bound row whose preset rowIdOf cell is not the key value of i
   // Until 2026-11-08 the rule was on values alone and an off-key column holding exactly the key value was accepted; the
   // structural rule (rowIdOf must NAME the bound key field; the dedicated test below) now refuses it as well.
   const equalCell = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }] })
-  expectError(compileYidaSendDraft, YidaDraftPlanError, equalCell.bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, equalCell.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   // Verifier r2 M1: the hook covers every planned row, every preset of every generated entry, and compares verbatim.
   // (K5) Two bound rows: row 0's off-key cell equals its key value, only row 1's does not → the draft is refused.
   const rowTwoOff = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }, { ...rows[1] }] })
-  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOff.bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOff.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   const rowTwoOn = await generatedInput({ config: offKey, rows: (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey })) })
-  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOn.bound, 'YIDA_DRAFT_PLAN') // every cell equal, the column still not the bound key field
+  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOn.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH') // every cell equal, the column still not the bound key field
   // (K3) Two generated entries: the first is the default (key column), the SECOND one's preset reads the drawing number.
   const secondEntry = (rowIdOf) => (layout) => {
     layout.fieldCatalog.push({ id: 'secondCodeText', control: 'text', required: false })
@@ -960,16 +960,16 @@ test('generated: a bound row whose preset rowIdOf cell is not the key value of i
     return layout
   }
   const secondOff = await generatedInput({ config: secondEntry('drawingNo'), rows: (rows) => [rows[0]] })
-  expectError(compileYidaSendDraft, YidaDraftPlanError, secondOff.bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, secondOff.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   const secondOn = compileYidaSendDraft((await generatedInput({ config: secondEntry('sourceLineId'), rows: (rows) => [rows[0]] })).bound)
   assert.equal(secondOn.plan.rows[0].payload.secondCodeText, 'B-' + oracleMaterialCode('SYN-LINE-1', 'DEMO-P1'))
   // (K4) An off-key cell that differs from the key value only by case is another value: refused.
   const caseOnly = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey.toLowerCase() }] })
   assert.notEqual(caseOnly.rows[0].componentCode, caseOnly.rows[0].idempotencyKey)
-  expectError(compileYidaSendDraft, YidaDraftPlanError, caseOnly.bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, caseOnly.bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   // Split: every expanded row keeps the record's key value, so an off-key preset is refused there as well.
   expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ config: offKey,
-    allocation: { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'totalQuantity' } })).bound, 'YIDA_DRAFT_PLAN')
+    allocation: { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'totalQuantity' } })).bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
 })
 
 test('generated: fieldDependencies of a bound row name the field ids a generated target reads (preset inputs, hash members, field parts)', async () => {
@@ -1050,7 +1050,7 @@ test('generated SR1: a rebuilt bound draft keeps the code bytes and the source r
   assert.deepEqual(reordered.rowSpecs, first.rowSpecs)
 })
 
-test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a preset whose rowIdOf is another column that merely holds the key value is refused (SOURCE_KEY_FIELD_MISMATCH → PLAN); the same column bound AS the key field compiles; the local recompute is untouched', async () => {
+test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a preset whose rowIdOf is another column that merely holds the key value is refused (kind SOURCE_KEY_FIELD_MISMATCH); the same column bound AS the key field compiles; the local recompute is untouched', async () => {
   const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
   const { compileYidaLocalDraft } = await compilerPromise
   // rowIdOf = drawingNo (source componentCode) while the binding's key field is the idempotency key; every row's drawing
@@ -1059,7 +1059,7 @@ test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a pre
   const sameValue = (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey }))
   const { unbound, bound, rows } = await generatedInput({ config: offKey, rows: sameValue })
   for (const [index, entry] of rows.entries()) assert.equal(entry.componentCode, bound.sourceBinding.records[index].keyValue)
-  expectError(compileYidaSendDraft, YidaDraftPlanError, bound, 'YIDA_DRAFT_PLAN')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, bound, 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH')
   assert.equal(compileYidaLocalDraft(unbound).plan.rows.length, 2)
   // The same template with drawingNo's column bound AS the key field (keyFieldId fld_componentCode, key values = the drawing
   // numbers): rowIdOf names the bound key field, the value hook holds, the draft compiles and mints WLBH(drawing number, project).
@@ -1070,4 +1070,39 @@ test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a pre
   // The shipped template (rowIdOf = sourceLineId, the idempotency key's target) satisfies the rule as before.
   const shipped = await generatedInput()
   assert.equal(compileYidaSendDraft(shipped.bound).rowSpecs.length, 2)
+})
+
+// ---- Slice YE (external review recommendation 2, 2026-11-08): dedicated kinds for the deterministic source refusals ----
+test('YE: the four source-validation refusals are their own fixed kinds, read only through yidaDraftPlanErrorKind; every other compile failure keeps its kind', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError, yidaDraftPlanErrorKind } = await modulePromise
+  const caught = (candidate) => { try { compileYidaSendDraft(candidate) } catch (error) { return error } assert.fail('compiled') }
+  const offKey = (layout) => { layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }]; return layout }
+  const cases = [
+    ['SOURCE_UNBOUND', (await generatedInput()).unbound],
+    ['SOURCE_PROJECT_MISMATCH', (await generatedInput({ projectNo: 'DEMO-P9' })).bound],
+    ['SOURCE_KEY_FIELD_MISMATCH', (await generatedInput({ config: offKey })).bound],
+  ]
+  for (const [kind, candidate] of cases) {
+    const error = caught(candidate)
+    assert.ok(error instanceof YidaDraftPlanError)
+    assert.equal(error.code, `YIDA_DRAFT_${kind}`)
+    assert.equal(yidaDraftPlanErrorKind(error), kind)
+  }
+  // Other compile failures keep their kinds: a duplicate generated value (PLAN), a malformed binding (INPUT), a v1 config (CONFIG).
+  const twin = await generatedInput({ rows: (rows) => [rows[0], { ...rows[0], componentCode: 'DEMO-DRW-7' }] })
+  assert.equal(yidaDraftPlanErrorKind(caught(twin.bound)), 'PLAN')
+  const shipped = await generatedInput()
+  assert.equal(yidaDraftPlanErrorKind(caught({ ...shipped.bound, sourceBinding: { ...shipped.bound.sourceBinding, sheetId: ' x ' } })), 'INPUT')
+  assert.equal(yidaDraftPlanErrorKind(caught({ ...shipped.unbound, config: { ...shipped.unbound.config, version: 1 } })), 'CONFIG')
+  // The reader is the compiler's own WeakMap: a lookalike (same name, code and message), a plain value or a Proxy is null.
+  const lookalike = Object.assign(new Error('YIDA_DRAFT_SOURCE_UNBOUND'), { name: 'YidaDraftPlanError', code: 'YIDA_DRAFT_SOURCE_UNBOUND' })
+  for (const value of [lookalike, new Proxy(caught(cases[0][1]), {}), 'SOURCE_UNBOUND', null, undefined, {}]) {
+    assert.equal(yidaDraftPlanErrorKind(value), null)
+  }
+  // SOURCE_KEY_MISMATCH is a closed kind as well, but no public input reaches it today: parseSourceBinding refuses a binding
+  // whose keyValue is not the row's key cell (INPUT) and the structural rule refuses a rowIdOf that does not name the key
+  // field first, so the per-row value check only guards a future planner change. Its kind is pinned through the constructor.
+  assert.equal(yidaDraftPlanErrorKind(new YidaDraftPlanError('SOURCE_KEY_MISMATCH')), 'SOURCE_KEY_MISMATCH')
+  assert.equal(new YidaDraftPlanError('SOURCE_KEY_MISMATCH').code, 'YIDA_DRAFT_SOURCE_KEY_MISMATCH')
+  assert.equal(yidaDraftPlanErrorKind(new YidaDraftPlanError('SOURCE_OTHER')), 'INPUT')
 })
