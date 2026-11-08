@@ -956,3 +956,81 @@ describe('PT-ALIGN — rendered project-sheet controls equal granted capabilitie
 
 // Keep the report type import used (the run's own shape is what the flow returns).
 export type _Report = StockPreparationProjectSyncReport
+
+// ---------------------------------------------------------------------------
+// 批次标识 BI-3 (R-65; P-4): the create path's write prompt says whether the write will be recorded as a pull batch
+// ---------------------------------------------------------------------------
+
+describe('PT-PB — the write prompt carries the pull-batch preview (BI-3)', () => {
+  function syncWithPreview(log: string[], pullBatch: unknown, add = 5): Partial<StockPreparationProjectSyncApi> {
+    return {
+      dryRun: vi.fn(async () => {
+        log.push('dryRun')
+        return {
+          status: 'ready',
+          canApply: true,
+          dryRunToken: 'tok_syn',
+          counts: { add, update: 1, skip: 3, inactive: 0, manual_confirm: 0 },
+          ...(pullBatch === undefined ? {} : { pullBatch }),
+        }
+      }),
+    }
+  }
+
+  it('PT-PB-WRITE: the write request carries the clamped preview; without one, null', async () => {
+    for (const [pullBatch, expected] of [
+      [{ preview: true, wouldStamp: true, reason: null }, { wouldStamp: true, reason: null, gapRows: null }],
+      [undefined, null],
+    ] as const) {
+      const log: string[] = []
+      const asked: StockPrepProjectTargetConfirmRequest[] = []
+      const sync = { ...syncDouble(log), ...syncWithPreview(log, pullBatch) } as StockPreparationProjectSyncApi
+      const outcome = await runStockPreparationProjectPull({
+        targetApi: targetDouble(log, [ABSENT(), targetState({ rowCount: 5, activeRowCount: 5 })]),
+        canPull: true,
+        confirm: async (request) => { asked.push(request); return true },
+        runSync: (hooks) => runStockPreparationProjectSync(sync, PROJECT, undefined, hooks),
+      }, PROJECT)
+      expect(outcome.kind).toBe('synced')
+      const write = asked.find((request) => request.kind === 'write')
+      expect(write && write.kind === 'write' ? write.pullBatch : 'missing').toEqual(expected)
+    }
+  })
+
+  function mountPanel(log: string[], pullBatch: unknown, add = 5) {
+    return mount(StockPreparationProjectSyncPanel as Component, {
+      scope: SCOPE,
+      api: syncDouble(log, syncWithPreview(log, pullBatch, add)),
+      targetApi: targetDouble(log, [ABSENT(), targetState({ rowCount: 6, activeRowCount: 6 })]),
+    })
+  }
+
+  async function reachWritePrompt(root: HTMLElement): Promise<void> {
+    await typeAndRun(root)
+    await press(root, 'stock-prep-project-target-create')
+    expect(testid(root, 'stock-prep-project-sync-target-prompt')?.dataset.prompt).toBe('write')
+  }
+
+  it('PANEL-PB-PROMPT: would stamp / installing / ledger_unreadable / history_gap say their line; absent, not_installed and add = 0 say nothing', async () => {
+    const cases: Array<[unknown, number, string | null]> = [
+      [{ preview: true, wouldStamp: true, reason: null }, 5, '将新增 5 行（记入新的拉取批次）'],
+      [{ preview: true, wouldStamp: false, reason: 'installing' }, 5, '将新增 5 行；但这张表正在安装批次列，现在写入会被拒绝，请等安装完成。'],
+      [{ preview: true, wouldStamp: false, reason: 'ledger_unreadable' }, 5, '将新增 5 行；但批次记录暂时读不到，现在写入会被拒绝，请稍后再试。'],
+      [{ preview: true, wouldStamp: false, reason: 'history_gap', gapRows: 2 }, 5, '将新增 5 行（这次不记批次：有 2 行未登记批次，需要管理员补登记）'],
+      [{ preview: true, wouldStamp: false, reason: 'not_installed' }, 5, null],
+      [{ preview: true, wouldStamp: true, reason: null }, 0, null],
+      [undefined, 5, null],
+    ]
+    for (const [pullBatch, add, expected] of cases) {
+      const log: string[] = []
+      const root = mountPanel(log, pullBatch, add)
+      await reachWritePrompt(root)
+      const line = testid(root, 'stock-prep-project-sync-target-prompt-pull-batch')
+      if (expected === null) expect(line, JSON.stringify(pullBatch)).toBeNull()
+      else expect(line?.textContent).toBe(expected)
+      // The existing preview sentence is untouched either way.
+      expect(testid(root, 'stock-prep-project-sync-target-prompt-preview')?.textContent).toContain('预览')
+      unmountAll()
+    }
+  })
+})
