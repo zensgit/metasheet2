@@ -146,14 +146,14 @@ function assertParallelWorkflow(doc) {
         const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
         assert.equal(step.run.split(providerEvidenceAddition).length - 1, 1, 'Deprovision provider evidence DB suite must run exactly once')
         assert.ok(step.run.includes(providerSchemaAddition + providerEvidenceAddition), 'Keep the deprovision provider evidence suite right after the provider schema suite')
-        // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
-        // cases against real Postgres, whole file, right after the deprovision provider evidence suite.
-        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
-        assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
-        assert.ok(step.run.includes(providerEvidenceAddition + authzVersionAddition), 'Keep the authorization version protocol suite right after the deprovision provider evidence suite')
         const deferAddition = '  tests/integration/attendance-notification-defer.db.test.ts \\\n'
         assert.equal(step.run.split(deferAddition).length - 1, 1, 'Delivery deferral DB suite must run exactly once')
-        assert.ok(step.run.includes(authzVersionAddition + deferAddition), 'Keep the delivery deferral suite right after the authorization version protocol suite')
+        assert.ok(step.run.includes(providerEvidenceAddition + deferAddition), 'Keep the delivery deferral suite right after the deprovision provider evidence suite')
+        // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
+        // cases against real Postgres, whole file, right after the delivery deferral suite.
+        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
+        assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
+        assert.ok(step.run.includes(deferAddition + authzVersionAddition), 'Keep the authorization version protocol suite right after the delivery deferral suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -164,8 +164,8 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
-        step.run = step.run.replace(authzVersionAddition, '')
         step.run = step.run.replace(deferAddition, '')
+        step.run = step.run.replace(authzVersionAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
