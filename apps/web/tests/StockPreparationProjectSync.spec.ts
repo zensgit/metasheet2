@@ -1259,6 +1259,25 @@ describe('批次标识 BI-3 — the run carries the pull-batch answers', () => {
     expect('partial' in stepOf(other, 'apply').detail).toBe(false)
   })
 
+  // R line (R83): the wire parse of details.partial — BI-3's SYNC-PB-PARTIAL above constructs the error directly.
+  it('SYNC-PB-RL-1 (R line): an apply refusal envelope\'s details.partial reaches the step tri-state (true, false, absent)', async () => {
+    for (const [partial, expected] of [[true, 1], [false, 0], [undefined, null], ['yes', null]] as const) {
+      wireFetch.mockReset()
+      wireFetch.mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED', message: 'refused', details: partial === undefined ? {} : { partial } } }), { status: 503 }))
+      let thrown: unknown = null
+      try { await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).apply(PROJECT_NO, 'tok_syn') } catch (error) { thrown = error }
+      expect(thrown).toBeInstanceOf(StockPreparationProjectSyncCallError)
+      const err = thrown as StockPreparationProjectSyncCallError
+      expect(err.detailPartial).toBe(expected === null ? null : expected === 1)
+      const report = await runStockPreparationProjectSync(makeApi({ apply: vi.fn().mockRejectedValue(err) }), PROJECT_NO)
+      const detail = stepOf(report, 'apply').detail
+      if (expected === null) expect('partial' in detail).toBe(false)
+      else expect(detail.partial).toBe(expected)
+      expect(report.verdict).toBe(expected === 1 ? 'interrupted' : 'blocked')
+    }
+    wireFetch.mockReset()
+  })
+
   it('SYNC-PB-HOOK: confirmWrite receives the preview as its second argument (null without one)', async () => {
     const confirmWrite = vi.fn().mockResolvedValue(true)
     await runStockPreparationProjectSync(makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ pullBatch: PREVIEW })) }), PROJECT_NO, undefined, { confirmWrite })

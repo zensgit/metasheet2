@@ -22,6 +22,9 @@
 //   PL-07 THE PLUGIN STILL WRITES: dry-run → apply after the marking writes ≥ 1 row, and the rows it writes carry
 //         plm_system columns (the apply path is the system writer the lock exists to keep).
 //   PL-08 THE OVERVIEW IS UNAFFECTED: the create route provisions the overview, and no lock touches it.
+//   PL-09 (R line, R83; 批次标识 BI-2) THE READ: readProjectSheetPlmSystemColumnLock (main #6510, ported for the install
+//         precondition) counts marked / unmarked / missing without writing; refuses a non-project-sheet object before any
+//         host call; a host without the read port answers readBeforeWrite false (nothing proven).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -38,6 +41,7 @@ const {
 const {
   provisionProjectSheet,
   markProjectSheetPlmSystemColumns,
+  readProjectSheetPlmSystemColumnLock,
   deriveProjectSheetObjectId,
   PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
   HUMAN_WRITE_LOCK_PROPERTY_KEY,
@@ -276,6 +280,36 @@ test('PL-08 the read-only overview is unaffected: provisioned by the create rout
       assert.equal((field.property || {})[HUMAN_WRITE_LOCK_PROPERTY_KEY], undefined)
     }
     assert.ok(!h.lockPatches.some(([objectId]) => objectId === overviewId), 'no lock patch on the overview')
+  } finally { h.restore() }
+})
+
+// ── PL-09 (R line) ───────────────────────────────────────────────────────────────────────────────────
+
+test('PL-09 (R line, BI-2) the read counts marked / unmarked / missing without writing; refusals before any host call; no read port proves nothing', async () => {
+  const h = mount({ readPort: true })
+  try {
+    const { objectId } = h.seedRegistryRow(PROJECT)
+    const object = objectOf(h, objectId)
+    stripLocks(object)
+    object.fields.delete('componentSpec')
+    h.lockPatches.length = 0
+    const before = await readProjectSheetPlmSystemColumnLock({ provisioning: h.provisioning, projectId: STAGING, objectId })
+    assert.deepEqual(plain(before), { fieldCount: 20, marked: 0, missing: 1, unmarked: 19, readBeforeWrite: true })
+    assert.deepEqual(h.lockPatches, [], 'the read writes nothing')
+    await markProjectSheetPlmSystemColumns({ provisioning: h.provisioning, projectId: STAGING, objectId })
+    const after = await readProjectSheetPlmSystemColumnLock({ provisioning: h.provisioning, projectId: STAGING, objectId })
+    assert.deepEqual(plain(after), { fieldCount: 20, marked: 19, missing: 1, unmarked: 0, readBeforeWrite: true })
+    h.provisioning.calls.length = 0
+    for (const refused of [STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE.objectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId, 'some_other_object', '', null]) {
+      await assert.rejects(
+        readProjectSheetPlmSystemColumnLock({ provisioning: h.provisioning, projectId: STAGING, objectId: refused }),
+        (error) => error.code === 'STOCK_PREPARATION_PROJECT_TARGET_PLM_LOCK_OBJECT_REFUSED',
+        String(refused),
+      )
+    }
+    assert.deepEqual(h.provisioning.calls, [], 'zero host IO for every refusal')
+    const blind = await readProjectSheetPlmSystemColumnLock({ provisioning: {}, projectId: STAGING, objectId })
+    assert.deepEqual(plain(blind), { fieldCount: 20, marked: 0, missing: 20, unmarked: 0, readBeforeWrite: false })
   } finally { h.restore() }
 })
 
