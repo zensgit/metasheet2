@@ -60,6 +60,14 @@
 //   RC-16 OLDER HOST / BAD READ (Y7 review MEDIUM-2): a repair transaction without readObjectMaxFieldOrder → 503 with
 //         nothing written and no audit row (a nothing-missing run still answers 200); a non-integer max → 500,
 //         nothing written.
+//   RC-18 THE UPGRADE ORDER FOR THE TWO PR-4 COLUMNS (R-71 ⑦.4 PR-4; was Y8's RC-12 before the Y7 merge): a sheet
+//         without issueConfirmDate / projectSpecModel → pull 422, nothing written → ONE repair adds both, their
+//         INSERT already carrying the PLM lock (no later lock patch on either) → the pull writes rows carrying neither.
+//   RC-19 THE WINDOW BEFORE THE REPAIR (R-71 ⑦.4 PR-4; was Y8's RC-13): pull 422 naming exactly the two columns;
+//         export, archive and restore answer 200 with no host write.
+//   RC-20 THE TWO PR-4 COLUMNS UNDER R-89: template positions stay 33 / 34, but where a right-side band (with or
+//         without an ext_ column) already holds 33 / 34 the repair appends them at max + 1 / max + 2 (35 / 36 and
+//         36 / 37), locked on INSERT, no order tie, no existing order moved.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -945,7 +953,7 @@ test('RC-17 stock-prep:admin is not the repair gate: 403 FORBIDDEN in every mode
 // R-71 ⑦.4 PR-4, THE UPGRADE ORDER on a sheet created before the template gained 发料确认日期 / 项目规格型号: install
 // PR-3 + PR-4 → (pull now) a recoverable 422 with nothing written → the repair route once → the pull works, and the
 // refresh writes neither column (issueConfirmDate is machine write-back only; projectSpecModel has no source yet).
-test('RC-18 (R-71 7.4 PR-4) a pre-PR-4 sheet: pull 422 and nothing written; ONE repair adds + locks the two new columns, existing columns byte-identical; the pull then writes rows carrying neither column', async () => {
+test('RC-18 (R-71 7.4 PR-4) a pre-PR-4 sheet: pull 422 and nothing written; ONE repair adds the two new columns already locked by their INSERT (no later lock patch), existing columns byte-identical; the pull then writes rows carrying neither column', async () => {
   const NEW_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
   for (const id of NEW_COLUMNS) assert.equal(OWNERSHIP.get(id), 'plm_system', `${id} is a plm_system template column`)
   assert.deepEqual(TEMPLATE_IDS.slice(-2), NEW_COLUMNS, 'appended last, so no deployed column moves')
@@ -957,9 +965,19 @@ test('RC-18 (R-71 7.4 PR-4) a pre-PR-4 sheet: pull 422 and nothing written; ONE 
     assert.equal(blocked.statusCode, 422, JSON.stringify(blocked.body))
     assert.equal(blocked.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
     assert.equal(h.records.calls.filter(([method]) => method === 'createRecord' || method === 'patchRecord').length, 0, 'the refused pull wrote nothing')
+    const inserted = captureInsert(h)
     const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     assert.deepEqual(plain(res.body.data.columns.addedFieldIds), NEW_COLUMNS)
+    // Y7 review MEDIUM-1: the lock rides the INSERT itself, so no later step (option sync, lock marking) can leave
+    // either column human-writable. The post-state alone cannot tell the two apart; the INSERT's descriptors can.
+    assert.equal(inserted.length, 1, 'one additive write')
+    const insertedById = new Map(inserted[0].map((field) => [field.id, field]))
+    assert.deepEqual([...insertedById.keys()], NEW_COLUMNS, 'the INSERT carries exactly the two new columns')
+    for (const id of NEW_COLUMNS) {
+      assert.equal(insertedById.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `the INSERT of ${id} carries the lock`)
+    }
+    assert.deepEqual(h.provisioning.calls.filter((call) => call[0] === 'patchObjectFieldProperty' && NEW_COLUMNS.includes(call[2])), [], 'no later property patch on either new column')
     const after = objectOf(h, objectId)
     for (const id of NEW_COLUMNS) {
       assert.equal(after.fields.get(id).property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `${id} is locked for people by the same repair call`)
@@ -1036,6 +1054,47 @@ test('RC-19 (R-71 7.4 PR-4) before the repair: the pull is 422, the export answe
     const dry = await pullDryRun(h)
     assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   } finally { h.restore() }
+})
+
+// ── RC-20 ────────────────────────────────────────────────────────────────────────────────────────────
+
+// R-71 ⑦.4 PR-4 under R-89 (Y7 review MEDIUM-2): the two new columns keep TEMPLATE positions 33 / 34, but on an
+// existing sheet the repair appends them after the sheet's current last column. A sheet that got a right-side pull-batch
+// band before the repair already holds orders 33 / 34 (the band goes at the largest known order + 1 / + 2), so the
+// template index would tie with it. Two layouts: a band only, and an ext_ column before the band.
+test('RC-20 (R-71 7.4 PR-4, R-89) a right-side band (with and without an ext_ column) already sits at 33 / 34: the two new columns land at max + 1 / max + 2, locked on INSERT, no order tie, nothing existing moves', async () => {
+  const NEW_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
+  assert.deepEqual(NEW_COLUMNS.map((id) => TEMPLATE_IDS.indexOf(id)), [33, 34], 'template positions 33 / 34')
+  for (const [layout, withExt, expectedOrders] of [['band only', false, [35, 36]], ['ext_ + band', true, [36, 37]]]) {
+    const h = mount()
+    try {
+      const { objectId, object } = await agedSheet(h, PROJECT, NEW_COLUMNS)
+      const maxTemplate = Math.max(...[...object.fields.values()].map((field) => field.order))
+      assert.equal(maxTemplate, 32, `${layout}: precondition, the aged sheet ends at order 32`)
+      if (withExt) plant(object, EXT_COLUMN, maxTemplate + 1)
+      const bandBase = withExt ? maxTemplate + 1 : maxTemplate
+      for (const band of pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'right', maxExistingOrder: bandBase })) plant(object, band.id, band.order, band.property)
+      const before = ordersOf(object)
+      const taken = [...before.values()]
+      assert.ok(taken.includes(33) && taken.includes(34), `${layout}: precondition, orders 33 and 34 are already taken`)
+      const maxBefore = Math.max(...taken)
+      const inserted = captureInsert(h)
+      const res = await repair(h, { projectNo: PROJECT, addMissingColumns: true })
+      assert.equal(res.statusCode, 200, `${layout}: ${JSON.stringify(res.body)}`)
+      assert.deepEqual(plain(res.body.data.columns.addedFieldIds), NEW_COLUMNS)
+      const after = objectOf(h, objectId)
+      const landed = NEW_COLUMNS.map((id) => after.fields.get(id).order)
+      assert.deepEqual(landed, [maxBefore + 1, maxBefore + 2], `${layout}: the new columns are max + 1 / max + 2`)
+      assert.deepEqual(landed, expectedOrders, `${layout}: concretely ${expectedOrders.join(' / ')}`)
+      assert.notDeepEqual(landed, [33, 34], `${layout}: not at the template positions`)
+      for (const [id, order] of before) assert.equal(after.fields.get(id).order, order, `${layout}: ${id} keeps its order`)
+      const orders = [...after.fields.values()].map((field) => field.order)
+      assert.equal(new Set(orders).size, orders.length, `${layout}: no two columns share an order`)
+      assert.deepEqual(gridOrder(after).slice(-NEW_COLUMNS.length), NEW_COLUMNS, `${layout}: the grid shows them after the band`)
+      assert.equal(inserted.length, 1)
+      for (const field of inserted[0]) assert.equal(field.property[HUMAN_WRITE_LOCK_PROPERTY_KEY], 'plm_system', `${layout}: the INSERT of ${field.id} carries the lock`)
+    } finally { h.restore() }
+  }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-repair-columns.test.cjs', tests)
