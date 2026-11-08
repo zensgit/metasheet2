@@ -269,6 +269,11 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
     if (url.includes('/sandbox-target/ensure')) {
       return envelope({ mode: 'sandbox_existing', ready: true, dsn: PLANTED_DSN })
     }
+    // 批次标识 BI-7 (R-65): the pull-batch settings read — the realistic default is the switch-off 404 (C6: the panel
+    // renders nothing), never the empty envelope below (which its strict clamp would refuse and paint as a line).
+    if (url.includes('/stock-preparation/pull-batch/settings')) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED' } }), { status: 404 })
+    }
     return envelope({})
   })
 }

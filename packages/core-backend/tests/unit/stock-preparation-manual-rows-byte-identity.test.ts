@@ -231,6 +231,33 @@ afterAll(() => {
 
 const BASELINE_PATH = join(__dirname, '..', 'fixtures', 'stock-preparation-manual-rows-byte-identity.json')
 
+// 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07) added ONE key to /context on a stock-preparation
+// main-template sheet the plugin registered: `capabilities.stockPreparationBomRelations` (the five physical column ids,
+// for every reader — multitable/stock-preparation-bom-relations-context.ts). It is not a manual-rows concern, so the
+// /context answers below are compared to the base WITHOUT that one key — and the key itself is pinned exactly instead:
+// present with the derived ids on the sheets whose host registry row names plugin-integration-core (S_PREG, S_NO087,
+// S_ENV), absent on S_OTHER (another plugin) and S_COPY (no registry row). Everything else stays byte-identical.
+const BOM_RELATIONS_KEY = 'stockPreparationBomRelations'
+function expectedBomRelations(s: { objectId: string; plugin: string | null }) {
+  if (s.plugin !== 'plugin-integration-core') return undefined
+  return {
+    componentSourceFieldId: phys(s.objectId, 'componentSourceId'),
+    parentSourceFieldId: phys(s.objectId, 'parentSourceId'),
+    activeFieldId: phys(s.objectId, 'active'),
+    componentCodeFieldId: phys(s.objectId, 'componentCode'),
+    componentNameFieldId: phys(s.objectId, 'componentName'),
+  }
+}
+/** Pins the BOM relations key for sheet `s`, then returns the body without it (the base had no such key). */
+function withoutBomRelations(s: { objectId: string; plugin: string | null }, body: unknown): unknown {
+  const capabilities = (body as { data?: { capabilities?: Record<string, unknown> } } | null)?.data?.capabilities
+  expect(capabilities?.[BOM_RELATIONS_KEY], `${BOM_RELATIONS_KEY} on this sheet`).toEqual(expectedBomRelations(s))
+  if (!capabilities || !(BOM_RELATIONS_KEY in capabilities)) return body
+  const { [BOM_RELATIONS_KEY]: _pinnedAbove, ...rest } = capabilities
+  const data = (body as { data: Record<string, unknown> }).data
+  return { ...(body as Record<string, unknown>), data: { ...data, capabilities: rest } }
+}
+
 function expectIdentical(key: string, value: unknown) {
   observed[key] = value
   if (process.env.MRB2_CAPTURE_BASELINE) return
@@ -256,7 +283,7 @@ describe('manual rows B2 — every non-P_reg stock-prep sheet, and the P_reg she
           currentUser = userKey
           state.target087Missing = false
           const res = await request(pinned.url()).get('/api/multitable/context').query({ sheetId: s.sheetId })
-          expectIdentical(`context:${userKey}:${s.key}`, { status: res.status, body: res.body })
+          expectIdentical(`context:${userKey}:${s.key}`, { status: res.status, body: withoutBomRelations(s, res.body) })
           expect(JSON.stringify(res.body)).not.toContain('stockPreparationManualRows')
         }, 60_000)
       }
@@ -290,7 +317,7 @@ describe('manual rows B2 — every non-P_reg stock-prep sheet, and the P_reg she
       state.target087Missing = true
       try {
         const res = await request(pinned.url()).get('/api/multitable/context').query({ sheetId: sheetByKey('S_PREG').sheetId })
-        expectIdentical(`context:${userKey}:S_PREG:087-missing`, { status: res.status, body: res.body })
+        expectIdentical(`context:${userKey}:S_PREG:087-missing`, { status: res.status, body: withoutBomRelations(sheetByKey('S_PREG'), res.body) })
         expect(JSON.stringify(res.body)).not.toContain('stockPreparationManualRows')
       } finally {
         state.target087Missing = false
