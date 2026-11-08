@@ -370,6 +370,10 @@ async function readPullBatchBoardStanza(deps = {}) {
       batchCount: ledger.batchCount,
       paused,
       ...(gapRows !== null ? { gapRows } : {}),
+      // 批次标识 BI-3 S-1 (R-65): the sheet's CAPTURED 首次批次 rule, one closed token, so the board's meaning copy follows
+      // it (design §5.5). Present only when the ledger holds a _sheet row; every early return and the fail-soft shape are
+      // unchanged.
+      ...(ledger.captured && typeof ledger.captured.firstPullBatchRule === 'string' ? { firstPullBatchRule: ledger.captured.firstPullBatchRule } : {}),
     })
   } catch {
     return failSoft

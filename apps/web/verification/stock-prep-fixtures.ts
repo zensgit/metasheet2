@@ -68,8 +68,11 @@ export const SYN_DRY_RUN_JOB_ID = 'syn-dry-run-job-0001'
  *                   (`content_change`); 「拉取待确认」's 「变更计划」 proposes it as one plan, and the confirm resolves it.
  *   governedReview —— PR-9: project A has NO hold and one WRITTEN change awaiting its review (two record pages of one
  *                   row each, confirmed by this actor); after the review the board says 已执行待核对 (the 「核对」 step).
+ *   pullBatch    —— 批次标识 BI-3 (R-65): `ready`, with the pull-batch switch ON — project A's board carries the
+ *                   `pullBatch` stanza (ready, latest 第2批（2026-11-08）, 2 batches, captured rule 按物料). Every other
+ *                   world's board sends NO `pullBatch` key (the switch-off shape), so their DOM is unchanged.
  */
-export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed' | 'governedChangePlan' | 'governedReview'
+export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed' | 'governedChangePlan' | 'governedReview' | 'pullBatch'
 
 export interface StockPrepRouteOptions {
   /**
@@ -351,6 +354,11 @@ function synBoard(projectNo: string, state: ScenarioState): Record<string, unkno
     // PR-7: the real server shape since PR-5 — `readProjectRefreshState`'s own values-free object. Every world is
     // `not_governed` (the board renders exactly as before) except the governed project of the `governed` world.
     refresh: synRefreshStanza(projectNo, state),
+    // 批次标识 BI-3: the board stanza exists ONLY while the switch is on (`readPullBatchBoardStanza`, status.cjs) — here
+    // only in the `pullBatch` world, on its one project. Synthetic label; the rule key is S-1's.
+    ...(state.pullBatchProjectNo === projectNo
+      ? { pullBatch: { enabled: true, ready: true, latest: { label: '第2批（2026-11-08）', batchNo: 2 }, batchCount: 2, paused: null, firstPullBatchRule: 'material' } }
+      : {}),
   }
 }
 
@@ -768,6 +776,8 @@ interface ScenarioState {
   reviewServed: number[]
   /** PR-9: a change plan was confirmed (governedChangePlan, after the confirm). */
   changePlanConfirmed: boolean
+  /** 批次标识 BI-3: the project whose board carries the pull-batch stanza (pullBatch world only; null = switch off). */
+  pullBatchProjectNo: string | null
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -792,6 +802,7 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     reviewDone: false,
     reviewServed: [],
     changePlanConfirmed: false,
+    pullBatchProjectNo: null,
   }
 
   if (scenario === 'fresh') {
@@ -864,9 +875,10 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     }
   }
 
-  // ready
+  // ready (and pullBatch: the same world with the pull-batch switch on for project A)
   return {
     ...base,
+    pullBatchProjectNo: scenario === 'pullBatch' ? SYN_PROJECT_A : null,
     projects: [
       synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 3, heldLineCount: 0, readyLineCount: 1240 }),
       synProjectRow({ projectNo: SYN_PROJECT_B, projectName: SYN_PROJECT_B_NAME, pendingDecisionCount: 0, heldLineCount: 7, readyLineCount: 860 }),
