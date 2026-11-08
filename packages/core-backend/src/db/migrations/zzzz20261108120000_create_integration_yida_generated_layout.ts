@@ -43,8 +43,9 @@ import { sql, type Kysely } from 'kysely'
  * delete path exists today) must keep the sealing operation's row, or remove the seal row first through the privileged
  * path above.
  *
- * down() REFUSES (fixed code, ERRCODE 55000) while any row exists: a sealed layout is the evidence that every code
- * already sent under that target was minted under it. With no rows it drops the table and the guard function.
+ * down() REFUSES (fixed code, ERRCODE 55000) while any row exists: a sealed layout is the evidence that every
+ * GENERATED code sent under that target from the seal onward was minted under it. With no rows it drops the table and
+ * the guard function.
  */
 
 export const YIDA_GENERATED_LAYOUT_TABLE = 'integration_yida_generated_layout'
