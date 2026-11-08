@@ -103,7 +103,9 @@ describe('POST /issue-confirm-writeback (route)', () => {
 })
 
 const PRIMITIVE_KEYS = ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'draftSendBudget', 'prepareInTransaction',
-  'loadExecutionMaterialInTransaction', 'previewInTransaction', 'prepareDraftInTransaction']
+  'loadExecutionMaterialInTransaction', 'previewInTransaction', 'prepareDraftInTransaction',
+  // Y6 P1 (generated-layout seal): the core authority requires this primitive too; never reached here (no approval runs).
+  'sealGeneratedLayoutInTransaction']
 function runtimeFixture(options: { enabled?: () => unknown; recheck?: () => Promise<boolean> } = {}) {
   const calls = { transaction: 0, create: 0, sendOptions: [] as string[][], recheck: 0 }
   const runtime = createYidaOwnerRuntime({
