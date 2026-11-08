@@ -154,9 +154,10 @@ Flags:
   --help, -h          print this text and exit 0
 
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
-was simply skipped as manual_confirm_required, large_bom_bounded, not_found, (without --apply)
-ready-but-not-applied, or — with per-project sheets enabled on the server — project_sheet_absent
-(no 拉取人员 has created that project's sheet yet; this script NEVER creates one) or
+was simply skipped as manual_confirm_required, pull_batch_installing (批次标识: the project sheet's batch
+columns are being installed in an owner-approved window — at the preview or at the apply), large_bom_bounded,
+not_found, (without --apply) ready-but-not-applied, or — with per-project sheets enabled on the server —
+project_sheet_absent (no 拉取人员 has created that project's sheet yet; this script NEVER creates one) or
 project_sheet_archived.
 
 The account behind MS_TOKEN must be allowed to PULL: since S0 (stock-prep:pull) the floor tier
@@ -482,6 +483,11 @@ function errorCodeOf(envelope) {
     : null
 }
 
+// 批次标识 BI-2 (P2-8): the install skip's note. R line (R83): there is no project write lease here, so the only
+// signals are the preview stanza's closed reason `installing` and the apply's 409 INSTALL_IN_PROGRESS — a
+// WRITE_LOCKED refusal never names an install on this line and stays an error.
+const PULL_BATCH_INSTALLING_NOTE = 'the batch columns of this project sheet are being installed (an owner-approved window); nothing was applied'
+
 /**
  * Turns a `postJson` network-layer failure into the ONE string this script will ever report for it.
  * `'timeout'` is a literal fixed string (never composed with anything request-specific) for the
@@ -571,6 +577,12 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   }
 
   // status === 'ready'
+  // 批次标识 BI-2 (P2-8): the preview's pull-batch stanza says the sheet is being installed (a crashed install past its
+  // lease, or a host without a lease) — the apply would be refused 409; skipped here, never applied. Only the closed
+  // reason is read off the stanza.
+  if (data.pullBatch && typeof data.pullBatch === 'object' && data.pullBatch.reason === 'installing') {
+    return { ...record, action: 'skipped_pull_batch_installing', phase: 'preview', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+  }
   if (!applyFlag) {
     return { ...record, action: 'skipped_dry_run_only', durationMs: Date.now() - startedAt }
   }
@@ -597,6 +609,11 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   }
   if (!apply.ok || apply.parseError || !apply.json || apply.json.ok !== true) {
     const code = errorCodeOf(apply)
+    // 批次标识 BI-2 (P2-8): the install began between the preview and the apply — refused before any write (409
+    // INSTALL_IN_PROGRESS): the same skip. R line: no lease, so no install-held WRITE_LOCKED leg.
+    if (code === 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS') {
+      return { ...record, action: 'skipped_pull_batch_installing', phase: 'apply', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+    }
     return {
       ...record,
       action: 'error',
@@ -617,6 +634,7 @@ export function summarize(results, applyFlag) {
     mode: applyFlag ? 'apply' : 'dry-run-only',
     applied: count('applied'),
     skippedManualConfirmRequired: count('skipped_manual_confirm_required'),
+    skippedPullBatchInstalling: count('skipped_pull_batch_installing'),
     skippedLargeBomBounded: count('skipped_large_bom_bounded'),
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),

@@ -56,6 +56,7 @@ const {
 const {
   DECISIONS,
   EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
@@ -1125,6 +1126,18 @@ function unmapRecordFields(record, fieldIdMap = {}) {
   return out
 }
 
+// The record id + version the project-scoped read used to drop, on the planner's Symbol key — hash-neutral exactly
+// like EXISTING_ROW_CREATED_BY above. ENVELOPE records only (`data` present, read from the envelope, never from
+// `data`), and only for a non-blank string id; otherwise the key is ABSENT. R line (R83): main's #6584 helper, ported
+// for 批次标识 BI-2 — the per-sheet install library is its only reader on this line.
+function withExistingRowRecordRef(row, record) {
+  const id = isPlainObject(record) && isPlainObject(record.data) ? record.id : undefined
+  if (typeof id !== 'string' || id.trim() === '') return row
+  const version = Number.isInteger(record.version) ? record.version : null
+  row[EXISTING_ROW_RECORD_REF] = Object.freeze({ id, version })
+  return row
+}
+
 // 人工补充行 B1 (ADR §5.1): which `manual:` prefix row a record is — 'manual' (M′), 'unbound_prefix', or null (not a
 // prefix row). M′ reads the record ENVELOPE directly (its `id` and `createdBy`, never a `data` cell and never the
 // EXISTING_ROW_RECORD_REF Symbol) and the key from the unmapped row; (a′) is the bound target's objectId.
@@ -1167,7 +1180,7 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
       throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
     }
     for (const record of pageRows) {
-      const row = unmapRecordFields(record, target.fieldIdMap)
+      const row = withExistingRowRecordRef(unmapRecordFields(record, target.fieldIdMap), record)
       // 批次标识 BI-1b: BEFORE the prefix classification, so a parked manual row carries the Symbol too (BI-2 reads it).
       if (pullBatchBand) stripPullBatchBand(row, record, pullBatchBand)
       const prefixKind = manualPrefixKindOf(target, record, row)

@@ -3065,8 +3065,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // the staging project it reads it through are the proven tenant's.
   // 批次标识 BI-7 (R-65) added THREE — the pull-batch settings GET, the tenant-default POST and the per-sheet POST
   // (section D, items 24–26 on this line): the settings row and the sheet ledger rows they read or write are the proven tenant's.
-  assert.equal(callSites, 28, 'G9: twenty-eight call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet', 'stockPreparationProjectPullBatchGet', 'stockPreparationPullBatchSettingsGet', 'stockPreparationPullBatchSettingsSet', 'stockPreparationProjectPullBatchSettingsSet']) {
+  // 批次标识 BI-2 (R-65) added ONE — the per-sheet pull-batch install POST (section D, item 27 on this line): the sheet it
+  // writes and the staging project it writes it through are the proven tenant's.
+  assert.equal(callSites, 29, 'G9: twenty-nine call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet', 'stockPreparationProjectPullBatchGet', 'stockPreparationPullBatchSettingsGet', 'stockPreparationPullBatchSettingsSet', 'stockPreparationProjectPullBatchSettingsSet', 'stockPreparationProjectPullBatchInstall']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

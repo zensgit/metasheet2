@@ -130,6 +130,8 @@ node __tests__/stock-preparation-pull-batch-lanes.test.cjs
 node __tests__/stock-preparation-pull-batch-status.test.cjs
 node __tests__/stock-preparation-pull-batch-reader-scan.test.cjs
 node __tests__/stock-preparation-pull-batch-hash-neutrality.test.cjs
+node __tests__/stock-preparation-pull-batch-install.test.cjs
+node __tests__/stock-preparation-pull-batch-install-routes.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs

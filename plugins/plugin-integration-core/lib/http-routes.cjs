@@ -283,6 +283,13 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/pull-batch/settings', 'stockPreparationPullBatchSettingsGet'],
   ['POST', '/api/integration/stock-preparation/pull-batch/settings', 'stockPreparationPullBatchSettingsSet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings', 'stockPreparationProjectPullBatchSettingsSet'],
+  // 批次标识 BI-2 (design §8.1-§8.6; register R-65) — THE PER-SHEET INSTALL: `{ mode: dry_run | install | abort,
+  // confirmProjectNo, approvalRef?, planDigest?, confirmHistoricalBatchCount?, historyMode?, placement?, landing?,
+  // gapMinutes? }` (closed). stock-prep:admin; 404 DISABLED after the gate while the project-sheets switch is off; install /
+  // abort 409 STOCK_PREP_PULL_BATCH_DISABLED before any IO while the pull-batch switch is off (dry_run then reads the host
+  // only). The plan is persisted before the first cell write, the backfill is fill-blank only, a crash continues the
+  // persisted plan. Every real run is owner gate ② per sheet. Audited under 088's `project_target_create`.
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', 'stockPreparationProjectPullBatchInstall'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -535,6 +542,13 @@ const pullBatchLanes = require('./stock-preparation-pull-batch-lanes.cjs')
 const pullBatchStatus = require('./stock-preparation-pull-batch-status.cjs')
 // 批次标识 BI-7 (register R-65): the settings routes' helper (bodies, answers, the in-transaction audit adapter).
 const pullBatchSettings = require('./stock-preparation-pull-batch-settings.cjs')
+// 批次标识 BI-2 (register R-65): the per-sheet install library (portable: it requires the pure module only), and the helpers
+// its server-held deps bind (pullBatchInstallDepsFor / pullBatchBirthDepsFor below).
+const pullBatchInstall = require('./stock-preparation-pull-batch-install.cjs')
+const { isPullBatchBandProperty, pullBatchBandFieldDescriptors, pullBatchBandProperty, resolveTemplateLabelLocale } = require('./stock-preparation-templates.cjs')
+const { isPlmLockTargetObjectId, readProjectSheetPlmSystemColumnLock } = require('./stock-preparation-project-targets.cjs')
+const { manualPrefixRowsOf } = require('./stock-preparation-manual-rows.cjs')
+const { ensureStockPreparationFillView, ensureStockPreparationTodoView } = require('./stock-preparation-target-provisioning.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -2271,6 +2285,8 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationPullBatchSettingsGet',
   'stockPreparationPullBatchSettingsSet',
   'stockPreparationProjectPullBatchSettingsSet',
+  // 批次标识 BI-2 (R-65): the per-sheet install — modes, closed tokens, counts, booleans, ISO times, ordinals and labels.
+  'stockPreparationProjectPullBatchInstall',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -5640,6 +5656,102 @@ function requireStockPreparationAudit() {
       target,
       readExistingStockPreparationRows: tableActionInternals.readExistingStockPreparationRows,
       band: pullBatchBandFor(tenantId, target),
+    }
+  }
+  // 批次标识 BI-2 (design §8.2, §9; register R-65) — THE INSTALL'S SERVER-HELD DEPS, built per request. Wiring only: the
+  // library (lib/stock-preparation-pull-batch-install.cjs) decides everything. The ledger, the lease, the bump and the audit
+  // exist only while the switch is on (OFF: the dry-run reads the host only). The patch is a FACTORY the library calls
+  // inside its (here lease-less) run. The staging project is derived from the VERIFIED tenant.
+  function pullBatchKnownFieldIdsOf(target, extra = []) {
+    return Array.from(new Set([
+      ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
+      ...Object.keys((target && target.fieldIdMap) || {}),
+      ...(Array.isArray(extra) ? extra.filter((id) => typeof id === 'string' && id) : []),
+    ]))
+  }
+  function pullBatchAuditWithinFor({ tenantId, projectNo, sheetId, actor }) {
+    if (!stockPreparationAudit || typeof stockPreparationAudit.appendWithin !== 'function') return null
+    return (trx, entry) => stockPreparationAudit.appendWithin(trx, {
+      tenantId,
+      projectId: projectNo,
+      action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+      subjectId: sheetId,
+      mode: entry.mode,
+      actor,
+      detail: entry.detail,
+    })
+  }
+  // R line (R83): there is no project write lock, lease or host write fence on this line (survey D2/D7), so the
+  // band-cell patch is the plain records-API patch carrying the read's expectedVersion (the per-record CAS the
+  // library's raced-row retry rests on). The library's guard is always null here.
+  function pullBatchBandPatchFor(target) {
+    const recordsApi = getMultitableRecordsApi()
+    return async ({ recordId, changes, expectedVersion }) => recordsApi.patchRecord({ sheetId: target.sheetId, recordId, changes, expectedVersion })
+  }
+  function pullBatchInstallDepsFor({ tenantId, projectNo, action, actor, enabled, registry }) {
+    const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    const target = action.target
+    const band = pullBatchBandFor(tenantId, target)
+    return {
+      enabled,
+      scope: { tenantId, sheetId: target.sheetId, projectNo },
+      target,
+      projectId,
+      band,
+      store: enabled ? stockPreparationPullBatchStore : null,
+      provisioning,
+      knownFieldIds: pullBatchKnownFieldIdsOf(target, action.extensionFieldIds),
+      readRows: () => tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), target, projectNo, { pullBatchBand: band }),
+      parkedManualRowsOf: manualPrefixRowsOf,
+      readPlmLock: () => readProjectSheetPlmSystemColumnLock({ provisioning, projectId, objectId: target.objectId }),
+      bandDescriptors: pullBatchBandFieldDescriptors,
+      bandPropertyOf: pullBatchBandProperty,
+      isBandProperty: isPullBatchBandProperty,
+      ensureFillView: ({ locale }) => ensureStockPreparationFillView({ provisioning, projectId, objectId: target.objectId, sheetId: target.sheetId, locale }),
+      ensureTodoView: ({ locale }) => ensureStockPreparationTodoView({ provisioning, projectId, objectId: target.objectId, sheetId: target.sheetId, locale }),
+      labelLocale: () => resolveTemplateLabelLocale(),
+      readRecord: (recordId) => getMultitableRecordsApi().getRecord({ sheetId: target.sheetId, recordId }),
+      patchBandCellsFor: () => pullBatchBandPatchFor(target),
+      // R line (R83; design §12.2-§12.3): NO `withLease` / `holderWithinFor` / `bumpAfterRelease` — the library then runs
+      // its body as fn(null), the five store transactions carry no holder assert, and nothing is bumped. The guarantees
+      // that remain are the library's and the store's own: the plan persisted (Txn A, `installing`) before the first cell
+      // write, fill-blank only with the per-record CAS, the persisted-plan continuation, the `installing` refusals on every
+      // lane (LN), the I5 re-scan (`rows_after_plan`) for a pull already in flight, and the C7 lock release on abort.
+      withRegistryLock: (fn) => registry.withActiveRowLocked({ tenantId, projectNo }, fn),
+      auditWithin: enabled ? pullBatchAuditWithinFor({ tenantId, projectNo, sheetId: target.sheetId, actor }) : null,
+      actor,
+      logger: routeLogger,
+      writeBudget: pullBatchInstall.PULL_BATCH_INSTALL_WRITE_BUDGET,
+    }
+  }
+  // Born ready (design §9; P2-7): the switch is read FIRST and OFF answers null before any IO — the create route is then
+  // IO-identical by construction. No lease: the sheet is not registered yet, so no pull lane can reach it.
+  function pullBatchBirthDepsFor({ tenantId, projectNo, provisioned, createPlan, actor }) {
+    if (!pullBatchLanes.stockPrepPullBatchEnabled() || !provisioned) return null
+    const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    const target = { sheetId: provisioned.sheetId, objectId: provisioned.objectId, fieldIdMap: provisioned.fieldIdMap || {} }
+    const band = pullBatchBandFor(tenantId, target)
+    const packFieldIds = createPlan && Array.isArray(createPlan.packs)
+      ? createPlan.packs.flatMap((pack) => (Array.isArray(pack.extensionFields) ? pack.extensionFields.map((field) => field && field.id) : []))
+      : []
+    return {
+      enabled: true,
+      scope: { tenantId, sheetId: target.sheetId, projectNo },
+      target,
+      projectId,
+      band,
+      store: stockPreparationPullBatchStore,
+      provisioning,
+      knownFieldIds: pullBatchKnownFieldIdsOf(target, packFieldIds),
+      readRows: () => tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), target, projectNo, { pullBatchBand: band }),
+      parkedManualRowsOf: manualPrefixRowsOf,
+      bandDescriptors: pullBatchBandFieldDescriptors,
+      labelLocale: () => resolveTemplateLabelLocale(),
+      auditWithin: pullBatchAuditWithinFor({ tenantId, projectNo, sheetId: target.sheetId, actor }),
+      actor,
+      logger: routeLogger,
     }
   }
   function pullBatchContextFor(tenantId, target) {
@@ -10435,6 +10547,7 @@ function requireStockPreparationAudit() {
         })
         // S2: INSTALL BEFORE REGISTER — see the ordering note above this handler.
         packs = await installPacks(createPlan, provisioned.objectId)
+        provisioned = { ...provisioned, pullBatchBand: await pullBatchInstall.bornReadyBestEffort(pullBatchBirthDepsFor({ tenantId, projectNo, provisioned, createPlan, actor })) }
         registered = await store.create({
           tenantId,
           projectNo,
@@ -10529,6 +10642,7 @@ function requireStockPreparationAudit() {
         ...(provisioned ? { options: { synced: provisioned.options.synced, skipped: provisioned.options.skipped } } : {}),
         // B (awaiting owner): the PLM columns the create leg marked read-only for people (counts only).
         ...(provisioned ? { plmColumnLock: { marked: provisioned.plmColumnLock.marked, alreadyMarked: provisioned.plmColumnLock.alreadyMarked, missing: provisioned.plmColumnLock.missing } } : {}),
+        ...(provisioned && provisioned.pullBatchBand ? { pullBatchBand: provisioned.pullBatchBand } : {}),
         // S3 fix round 1 (R6): what the overview leg did, values-free (`code` is a closed error code).
         overview: { ensured: overviewOutcome.ensured, created: overviewOutcome.created, code: overviewOutcome.code },
       }, created ? 201 : 200)
@@ -10777,6 +10891,69 @@ function requireStockPreparationAudit() {
       }
       if (outcome.written) pullBatchSettings.assertSettingsAudited(auditWithin)
       return sendOk(res, { sheet: pullBatchSettings.pullBatchSheetAnswer(outcome.sheet, outcome.row), written: outcome.written })
+    },
+
+    // 批次标识 BI-2 (design §8.1-§8.6; register R-65) — THE PER-SHEET INSTALL (its own handler; the logic is the install
+    // library's). Guard chain: stock-prep:admin -> the project-sheets switch (404, zero IO) -> the closed body (pure) -> the
+    // pull-batch switch for install / abort (409 DISABLED, zero IO; dry_run then reads the host only) -> the project number
+    // and its typed repetition -> services -> the host-vouched scope (a tenantless platform admin is refused) -> the 088
+    // audit vocabulary (install / abort) -> the registry row (ABSENT / ARCHIVED 409) -> the WRITE target walled to the
+    // tenant, a project sheet and the registry's own -> the ledger probe (switch on). Never echoes the project number.
+    async stockPreparationProjectPullBatchInstall(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const body = pullBatchInstall.normalizePullBatchInstallBody(requestBody(req))
+      const enabled = pullBatchLanes.stockPrepPullBatchEnabled()
+      const writes = body.mode !== 'dry_run'
+      if (writes && !enabled) {
+        throw new HttpRouteError(409, 'STOCK_PREP_PULL_BATCH_DISABLED', 'the pull-batch switch is off; nothing was installed or aborted', { partial: false })
+      }
+      const projectNo = firstString(requestParams(req).projectNo)
+      if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+      }
+      if (body.confirmProjectNo !== projectNo) {
+        throw new HttpRouteError(409, 'STOCK_PREP_PULL_BATCH_INSTALL_CONFIRM_MISMATCH', 'confirmProjectNo must repeat the project number of the path exactly', { field: 'confirmProjectNo' })
+      }
+      const audit = writes ? requireStockPreparationAudit() : null
+      if (writes && typeof audit.appendWithin !== 'function') {
+        throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the install transactions; nothing is installed without its audit rows')
+      }
+      const registry = requireStockPreparationProjectTargets()
+      if (typeof registry.withActiveRowLocked !== 'function') {
+        throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot hold its lock for the install here')
+      }
+      if (enabled && (!stockPreparationPullBatchStore || typeof stockPreparationPullBatchStore.probeReadable !== 'function' || typeof stockPreparationPullBatchStore.beginInstall !== 'function')) {
+        throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger is not wired on this server; nothing was done', { operation: 'store_unwired', partial: false })
+      }
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      if (writes) await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION, '088', tenantId)
+      const registryRow = await registry.get({ tenantId, projectNo })
+      if (!registryRow) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+      }
+      if (registryRow.status === 'archived') {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNo' })
+      }
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        workspaceId: null,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose: 'write',
+      }))
+      await assertResolvedProjectTargetTenancy(action, tenantId)
+      if (!action.target || action.target.objectId !== registryRow.objectId || action.target.sheetId !== registryRow.sheetId || !isPlmLockTargetObjectId(action.target.objectId)) {
+        throw new HttpRouteError(409, 'STOCK_PREP_PULL_BATCH_INSTALL_OBJECT_REFUSED', 'only this project\'s registered stock-preparation sheet carries the batch columns', { field: 'projectNo' })
+      }
+      if (enabled) await stockPreparationPullBatchStore.probeReadable()
+      return sendOk(res, await pullBatchInstall.runPullBatchInstallRequest(pullBatchInstallDepsFor({ tenantId, projectNo, action, actor: user.id || user.email, enabled, registry }), requestBody(req)))
     },
 
     // ── 人工补充行 B4 — THE PER-SHEET SWITCH 「允许人工补充行」 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3 / §8

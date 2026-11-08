@@ -32,12 +32,12 @@
 //         creates no reminder record and leaves an existing one byte-identical (verification r1 MF-1). MP-03 also pins
 //         WHERE each record is written: the apply's inside its write lease, a preview's outside any lease.
 //
-// R line (R79 on onprem-r78): the project write lock, the refresh governance, the record reference Symbol
-// (EXISTING_ROW_RECORD_REF) and the settlement digest are not on this line. The suite drives the lib directly (no
-// lease wrappers) over the R-line lite kit (support/stock-preparation-manual-rows-pull-kit.cjs). Dropped: the
-// record-reference halves of MP-02, the lease-placement pins of MP-03 / MP-10 (each reminder write is still
-// recorded, by mode), the attempted-writes count of MP-08a, and MP-09 (no settlement on this line). Everything
-// else is main's.
+// R line (R79 on onprem-r78): the project write lock, the refresh governance and the settlement digest are not on
+// this line. The suite drives the lib directly (no lease wrappers) over the R-line lite kit
+// (support/stock-preparation-manual-rows-pull-kit.cjs). Dropped: the lease-placement pins of MP-03 / MP-10 (each
+// reminder write is still recorded, by mode), the attempted-writes count of MP-08a, and MP-09 (no settlement on this
+// line). Everything else is main's. R83 (批次标识 BI-2): the record reference Symbol (EXISTING_ROW_RECORD_REF) is on
+// this line's reader now (the install library addresses rows by it), so MP-02's record-reference half is main's again.
 //
 // Synthetic values only.
 
@@ -47,7 +47,7 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 const tableActions = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const writer = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
-const { DECISIONS, EXISTING_ROW_CREATED_BY } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+const { DECISIONS, EXISTING_ROW_CREATED_BY, EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
 const { EXISTING_ROWS_MANUAL_PREFIX, manualPrefixRowsOf } = require(path.join(LIB, 'stock-preparation-manual-rows.cjs'))
 const kit = require('./support/stock-preparation-manual-rows-pull-kit.cjs')
 
@@ -196,7 +196,7 @@ test('MP-01 the RAW page decides the last page and the page bound: limit 2, the 
 test('MP-02 no prefix row => the pre-B1 read exactly; a prefix row rides the non-enumerable array Symbol; a cell cannot forge M′', async () => {
   const plain = [plmRecord('rec_b_plm', 'SYN-B'), { ...plmRecord('rec_c_plm', 'SYN-C'), createdBy: PERSON }]
   const rows = await readExistingStockPreparationRows(pagedRecords(plain).api, target(), PROJECT_NO)
-  // The pre-B1 projection, row by row: unmap (string keys AND the createdBy Symbol). (R line: no record reference.)
+  // The pre-B1 projection, row by row: unmap (string keys AND the createdBy Symbol) + the record reference.
   const expected = plain.map((record) => unmapRecordFields(JSON.parse(JSON.stringify(record)), {}))
   assert.equal(rows.length, expected.length)
   for (let i = 0; i < rows.length; i += 1) {
@@ -204,8 +204,9 @@ test('MP-02 no prefix row => the pre-B1 read exactly; a prefix row rides the non
     assert.equal(JSON.stringify(rows[i]), JSON.stringify(expected[i]), `row ${i}: same cells`)
     assert.equal(rows[i][EXISTING_ROW_CREATED_BY], expected[i][EXISTING_ROW_CREATED_BY], `row ${i}: same creator Symbol`)
     assert.deepEqual(Object.getOwnPropertySymbols(rows[i]).sort((a, b) => String(a) < String(b) ? -1 : 1),
-      Object.getOwnPropertySymbols(expected[i]).sort((a, b) => String(a) < String(b) ? -1 : 1), `row ${i}: exactly the pre-B1 Symbols`)
+      [...Object.getOwnPropertySymbols(expected[i]), EXISTING_ROW_RECORD_REF].sort((a, b) => String(a) < String(b) ? -1 : 1), `row ${i}: exactly the pre-B1 Symbols`)
   }
+  assert.deepEqual(rows.map((row) => row[EXISTING_ROW_RECORD_REF]), [{ id: 'rec_b_plm', version: 1 }, { id: 'rec_c_plm', version: 1 }])
   assert.equal(rows[1][EXISTING_ROW_CREATED_BY], PERSON, 'GOV-05 still rides')
   assert.deepEqual(Object.getOwnPropertySymbols(rows), [], 'no array Symbol without a prefix row')
 

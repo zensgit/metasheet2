@@ -423,6 +423,15 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
     control: 'stock-prep-project-pull-batch-settings-set',
   }),
+  // 批次标识 BI-2 (R-65) — byte-equal to the plugin manifest's install row. `control: null`: there is no web install control
+  // (design §7.2), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

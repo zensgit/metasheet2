@@ -392,6 +392,10 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationPullBatchSettingsGet',
   'stockPreparationPullBatchSettingsSet',
   'stockPreparationProjectPullBatchSettingsSet',
+  // 批次标识 BI-2 (register R-65). The per-sheet install WRITES the caller's OWN tenant's project sheet (owner gate ② per
+  // sheet). It derives its staging project in its deps helper (`pullBatchInstallDepsFor`, from the scope's tenant with no
+  // request projectId), not inline, so it is not in the inline-staging set below.
+  'stockPreparationProjectPullBatchInstall',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and

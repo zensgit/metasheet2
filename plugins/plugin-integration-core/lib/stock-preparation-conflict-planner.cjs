@@ -123,6 +123,15 @@ const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
 // counts. Both rows are still `manual_confirm` holds, nothing is written, nothing is deactivated,
 // and `canApply` does not consult holds. `counts` (hashed) gains no key.
 const EXISTING_ROW_CREATED_BY = Symbol.for('metasheet.stock-preparation.existingRow.createdBy')
+// The meta_records `id` and `version` of an existing row, which `unmapRecordFields` drops (it projects a record
+// down to its `data`). Attached by the project-scoped reader (stock-preparation-table-actions.cjs
+// `readExistingStockPreparationRows`) on the SAME terms as EXISTING_ROW_CREATED_BY above: a Symbol key, so
+// stableStringify / JSON.stringify / Object.keys never see it and buildRevision, the archive revision and every digest
+// stay byte-identical; copied by `normalizeRows`' spread; read from the record ENVELOPE only, so a cell named `id`
+// cannot forge it. Value: frozen `{ id: string, version: number|null }`. R line (R83): ported from main (#6508 / #6584)
+// for 批次标识 BI-2 only — the per-sheet install library (through the pure module's registry-key spelling) is its ONLY
+// reader on this line (no continuation pairing here).
+const EXISTING_ROW_RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
 const EXISTING_MISSING_KEY_CONFLICT_TYPES = Object.freeze({
   pluginOrLegacy: 'missing_existing_idempotency_key',
   foreign: 'foreign_existing_row_missing_idempotency_key',
@@ -1741,6 +1750,7 @@ module.exports = {
   DENORMALIZED_PLM_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
   EXISTING_ROW_CREATED_BY,
+  EXISTING_ROW_RECORD_REF,
   EXISTING_MISSING_KEY_CONFLICT_TYPES,
   CARRY_PROPOSAL_CONFLICT_TYPE,
   CARRY_PROPOSAL_CONFLICT_SUMMARY,

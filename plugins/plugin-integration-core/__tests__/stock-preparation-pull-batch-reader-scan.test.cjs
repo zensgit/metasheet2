@@ -137,10 +137,11 @@ test('RS-1 every occurrence of the reader is reviewed; every CALL passes the ser
     assert.ok(!kinds.some((kind) => kind.startsWith('ref:UNREVIEWED')), `${file}: an unreviewed reference ${JSON.stringify(kinds)}`)
   }
   assert.deepEqual(found, {
-    // R line (R83; critic C5): the large plan (R4) is the one call with the band — the change-plan / review read (R2),
-    // readiness (R3) and the export gate (R5) are main-only; the status deps hand the reader on by reference (its
-    // consumer passes the band, below). (the deps line spells the name twice: the key and the value)
-    'lib/http-routes.cjs': sorted(['call:band', 'ref:deps', 'ref:deps']),
+    // R line (R83; critic C5): the large plan (R4) is the one route call with the band — the change-plan / review read
+    // (R2), readiness (R3) and the export gate (R5) are main-only; the status deps hand the reader on by reference (its
+    // consumer passes the band, below). (the deps line spells the name twice: the key and the value). 批次标识 BI-2
+    // (R-65): the install deps and the birth deps each read the project's rows with the band (two more calls).
+    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps']),
     // the status / board / readiness v3 rows read (R6).
     'lib/stock-preparation-pull-batch-status.cjs': sorted(['call:band', 'ref:status-param', 'ref:typeof']),
     // the definition, computeDryRun's read (R1) and the __internals export.

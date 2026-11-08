@@ -199,6 +199,12 @@
 //           admin-visible); the two POSTs are WRITES to that tenant's settings row and to one of its sheets' ledger
 //           rows. Plugin ledger only — no staging project, no host call. A header-fillable tenant here would read or
 //           change another tenant's settings.
+//       27. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
+//           批次标识 BI-2 (design §8.1-§8.6; register R-65), ADMIN. The per-sheet install (dry_run / install / abort): a
+//           WRITE of the proven tenant's project sheet — the band columns, the plugin views, the landing, the persisted
+//           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope
+//           with no request projectId. Every real run is owner gate ② per sheet. A header-fillable tenant here would
+//           install onto another tenant's sheet.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

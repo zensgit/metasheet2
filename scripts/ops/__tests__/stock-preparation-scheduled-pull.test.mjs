@@ -360,6 +360,54 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
   assert.equal(lines[1].summary.failed, 0)
 })
 
+// 批次标识 BI-2 (register R-65; P2-8): a project sheet whose batch columns are being installed (an owner-approved window) is
+// a SKIP, never an error and never applied. R line (R83): there is no project write lease on this line, so the two
+// signals are the preview stanza `installing` and the apply's 409 INSTALL_IN_PROGRESS; main's install-held WRITE_LOCKED
+// legs do not exist here (SP-2 pins that such a refusal stays an error). Only the stanza's closed reason is read.
+test('SP-1 (M-2B-6) a sheet being installed is recorded skipped_pull_batch_installing — at the preview (the stanza) and at the apply (INSTALL_IN_PROGRESS) — never applied, exit 0, counted', async () => {
+  const SENTINEL = 'syn_install_sentinel_never_printed'
+  const stanza = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {}, pullBatch: { preview: true, wouldStamp: false, reason: 'installing', [SENTINEL]: SENTINEL } } } }
+      return { status: 500, json: { ok: false, error: { code: 'SHOULD_NOT_BE_CALLED' } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(stanza.result.code, 0, `${stanza.result.stdout}\n${stanza.result.stderr}`)
+  assert.equal(stanza.requests.length, 1, 'never applied')
+  const stanzaLines = jsonLines(stanza.result.stdout)
+  assert.deepEqual([stanzaLines[0].action, stanzaLines[0].phase, stanzaLines[0].failed], ['skipped_pull_batch_installing', 'preview', undefined])
+  assert.equal(stanzaLines[1].summary.skippedPullBatchInstalling, 1)
+  assert.equal(stanzaLines[1].summary.failed, 0)
+  assert.ok(!stanza.result.stdout.includes(SENTINEL))
+  const applyLeg = await withMockFetch(
+    (record) => {
+      if (record.url.includes('/dry-run')) return { json: { ok: true, data: { status: 'ready', canApply: true, dryRunToken: 'tok_pb', revision: 'rev_1', counts: {} } } }
+      return { status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', message: 'refused', details: { partial: false } } } }
+    },
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(applyLeg.result.code, 0, `${applyLeg.result.stdout}\n${applyLeg.result.stderr}`)
+  assert.equal(applyLeg.requests.length, 2, 'the apply was attempted once and refused')
+  const lines = jsonLines(applyLeg.result.stdout)
+  assert.deepEqual([lines[0].action, lines[0].phase, lines[0].failed], ['skipped_pull_batch_installing', 'apply', undefined])
+  assert.equal(lines[1].summary.skippedPullBatchInstalling, 1)
+  assert.equal(lines[1].summary.failed, 0)
+})
+
+test('SP-2 (M-2B-7, R line) a WRITE_LOCKED refusal is an error, whatever holder it names — there is no install lease on this line', async () => {
+  for (const details of [{ holderPurpose: 'pull_batch_install' }, { holderPurpose: 'small_apply' }, {}, null]) {
+    const other = await withMockFetch(
+      () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', ...(details ? { details } : {}) } } }),
+      () => runMain(['--apply'], BASE_ENV),
+    )
+    assert.notEqual(other.result.code, 0, JSON.stringify(details))
+    const lines = jsonLines(other.result.stdout)
+    assert.deepEqual([lines[0].action, lines[0].failed], ['error', true])
+    assert.equal(lines[1].summary.skippedPullBatchInstalling, 0)
+  }
+})
+
 test('large_bom_bounded is recorded as skipped and NEVER applied', async () => {
   const { requests, result } = await withMockFetch(
     (record) => {

@@ -383,6 +383,16 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     control: 'stock-prep-project-pull-batch-settings-set',
   }),
   Object.freeze({
+    // 批次标识 BI-2 (design §8.1; register R-65) — THE PER-SHEET INSTALL (dry_run / install / abort). ADMIN: an install is an
+    // owner-gated production write (gate ② per sheet). `control: null` is deliberate: there is no web install control
+    // (design §7.2) — installs run through this route or the ops script, whose default is a dry-run.
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
     method: 'POST',
