@@ -1096,13 +1096,17 @@ test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pu
     'lib/stock-preparation-large-bom-jobs.cjs',
     'lib/stock-preparation-pilot-readiness.cjs',
     'lib/stock-preparation-pull-batch-lanes.cjs',
+    // 批次标识 BI-7 (R-65): the settings routes' helper — bodies, answers and the in-transaction audit adapter.
+    'lib/stock-preparation-pull-batch-settings.cjs',
     'lib/stock-preparation-pull-batch-status.cjs',
     'lib/stock-preparation-pull-batch-store.cjs',
     'lib/stock-preparation-table-actions.cjs',
     'lib/stock-preparation-templates.cjs',
   ])
   const storeUsers = runtime.filter((file) => file !== 'lib/stock-preparation-pull-batch-store.cjs' && textOf(file).includes('stock-preparation-pull-batch-store'))
-  assert.deepEqual(storeUsers, ['index.cjs', 'lib/stock-preparation-pull-batch-lanes.cjs'], 'the ledger store is built by index and read only through the lanes')
+  // BI-7: the settings helper requires the store for its CONSTANTS only (the setting keys and the audit action / modes,
+  // one spelling); the store INSTANCE still reaches the routes only as the service index.cjs builds.
+  assert.deepEqual(storeUsers, ['index.cjs', 'lib/stock-preparation-pull-batch-lanes.cjs', 'lib/stock-preparation-pull-batch-settings.cjs'], 'the ledger store is built by index and read only through the lanes and the settings helper')
 })
 
 test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP status; the vocabularies are frozen', () => {
