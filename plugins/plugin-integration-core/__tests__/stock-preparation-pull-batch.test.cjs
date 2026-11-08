@@ -13,6 +13,7 @@
 //   PB-V  the verifier's round-1 killing assertions (MF4), one per design rule no other test pinned
 //   PB-K  the configuration vocabulary (R-65 C2): defaults = the 10-27 design, four closed keys, fixed facts, locks
 //   PB-P  portability and not-wired pins over the file TEXT (MF5), closed vocabularies
+//   PB-A  the portable writer helpers (BI-1b review MF-5): the allocation answer must carry a LIVE label
 //
 // Synthetic values only (S-01, P-07, C, X, A, B).
 
@@ -1119,6 +1120,21 @@ test('PB-P3 the error codes are closed, code-shaped, unique and carry their HTTP
   assert.deepEqual([...PB.PULL_BATCH_LABEL_KINDS], ['live', 'inferred', 'unknown', 'manual', 'blank'])
   assert.deepEqual([...PB.FIRST_PULL_BATCH_RULES], ['material', 'predecessor_suffix'])
   assert.ok(PB.PULL_BATCH_CLOSED_REASONS.includes('recovery_verified'), 'S6 C-3 token')
+})
+
+test('PB-A1 (BI-1b review MF-5) assertAllocatedBatch: the ledger allocation must answer a LIVE label — manual, unknown, blank, inferred (both locales, both formats) or a non-string label is 500 STAMP_INVALID naming the label', () => {
+  const answer = (label) => ({ batchId: 'batch_syn_a1', batchNo: 2, label, joined: false })
+  for (const label of ['第2批（2026-11-08）', '第2批', 'Batch 2 (2026-11-08)', 'Batch 2']) {
+    assert.deepEqual({ ...PB.assertAllocatedBatch(answer(label)) }, answer(label), `calibration: ${label} is live`)
+  }
+  for (const label of ['人工补充', 'not a batch label', '', '   ', '第2批（推定，2026-11-08）', '第2批（推定）', 'Batch 2 (inferred, 2026-11-08)', 'Batch 2 (inferred)', 7, null]) {
+    assert.notEqual(PB.parsePullBatchLabel(typeof label === 'string' ? label : '').kind, 'live', `calibration: ${JSON.stringify(label)} is not live`)
+    assert.throws(
+      () => PB.assertAllocatedBatch(answer(label)),
+      (error) => error.code === 'STOCK_PREP_PULL_BATCH_STAMP_INVALID' && error.status === 500 && error.details.field === 'label',
+      JSON.stringify(label),
+    )
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch.test.cjs', tests)
