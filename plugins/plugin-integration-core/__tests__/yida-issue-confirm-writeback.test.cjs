@@ -79,7 +79,7 @@ function takeFailure(world, name) {
 // ── the world of doubles ─────────────────────────────────────────────────────────────────────────
 
 function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
-  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], authority: 0, acquire: [], bump: [], trace: 0 }
+  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0 }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
   // One-shot port failures: rowRead, registry, open, query, authority.
   world.failures = { rowRead: null, registry: null, open: null, query: null, authority: null }
@@ -153,7 +153,17 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
       world.leases.add(scopeKey)
       const guard = {
         beforeWriteCalls: 0,
-        async beforeWrite() { guard.beforeWriteCalls += 1 },
+        // The lease's pre-write holder check (the real lock re-reads the holder row, CAS): recorded with the
+        // number of patches issued so far, and refusable once through world.beforeWriteFailure.
+        async beforeWrite(input) {
+          guard.beforeWriteCalls += 1
+          calls.beforeWrite.push({ ...input, patchesBefore: calls.patch.length })
+          if (world.beforeWriteFailure) {
+            const failure = world.beforeWriteFailure
+            world.beforeWriteFailure = null
+            throw failure
+          }
+        },
         hostWriteFence() { return { lock: 'integration_stock_prep_project_write_lock', scopeKey, leaseId: 'lease-syn', fencingEpoch: 1, generationToken: 'gen-syn' } },
         async withHostWrite(write) { return write() },
         async hostFenceRefused() {
@@ -500,6 +510,8 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   assert.deepEqual(Object.keys(patch).sort(), ['changes', 'expectedVersion', 'recordId', 'writeFence'])
   assert.deepEqual(patch.changes, { issueConfirmDate: ACK_DAY })
   assert.equal(patch.expectedVersion, 3)
+  // The lease's pre-write holder check runs exactly once, before the only patch.
+  assert.deepEqual(world.calls.beforeWrite, [{ operation: 'patchRecord', subject: 'issue_confirm_writeback', patchesBefore: 0 }])
   assert.deepEqual(world.calls.acquire, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), purpose: 'issue_confirm_writeback', runId: 'run-syn', tenantId: TENANT }])
   assert.deepEqual(world.calls.bump, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), reason: 'issue_confirm_writeback', tenantId: TENANT }])
   assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET, outcome: 'written', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
@@ -583,6 +595,11 @@ test('retryable cases insert no trace row and converge on the next run', async (
     ['STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', (world) => { world.lockFailure = new writeLockModule.StockPreparationProjectWriteLockError(503, 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', 'store', {}) }],
     ['VERSION_CONFLICT', (world) => { world.patchFailure = Object.assign(new Error('version conflict'), { code: 'VERSION_CONFLICT' }) }],
     ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', (world) => { world.patchFailure = Object.assign(new Error('fence'), { code: 'PLUGIN_WRITE_FENCE_REJECTED' }) }],
+    // The lease's pre-write holder check refuses (holder row changed): no patch is issued at all.
+    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', (world) => {
+      world.beforeWriteFailure = new writeLockModule.StockPreparationProjectWriteLockError(409, 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'lost', {})
+      world.expectNoPatch = true
+    }],
     ['UNAVAILABLE', (world) => { world.patchFailure = Object.assign(new Error('host 5xx'), { status: 503 }) }],
   ]
   for (const [code, arrange] of cases) {
@@ -593,6 +610,10 @@ test('retryable cases insert no trace row and converge on the next run', async (
     assert.equal(world.trace.length, 0, code)
     assert.equal(world.cell(), null, code)
     assert.equal(world.leases.size, 0, 'the lease is released')
+    if (world.expectNoPatch) {
+      assert.equal(world.calls.beforeWrite.length, 1, code)
+      assert.equal(world.calls.patch.length, 0, 'a refused pre-write holder check issues no patch')
+    }
     world.lockFailure = null
     const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
     assert.equal(next.results[0].outcome, 'written', code)
