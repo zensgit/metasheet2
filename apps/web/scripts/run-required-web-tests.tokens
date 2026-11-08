@@ -526,6 +526,7 @@ StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts
 StockPreparationProjectTarget
 StockPreparationProjectWorkspaceView
+StockPreparationPullBatchSettingsPanel
 StockPreparationRail
 StockPreparationRefreshChangePlan
 StockPreparationRefreshQueue

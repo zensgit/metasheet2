@@ -393,6 +393,14 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // helper (`pullBatchStatusDepsFor`, from the scope's tenant with no request projectId), not inline, so it is not in
   // the inline-staging set below.
   'stockPreparationProjectPullBatchGet',
+  // 批次标识 BI-7 (register R-65). The three pull-batch SETTINGS routes: the READ answers the caller's OWN tenant's
+  // default and its registered sheets' captured values (with their project numbers, admin), and the two POSTs are
+  // WRITES to that tenant's settings row / to one of its sheets' ledger rows — keyed by the tenant this scope proves:
+  // a header-fillable tenant here would read or change another tenant's settings. None derives a staging project
+  // (they touch no sheet, only the plugin ledger), so none is in the inline-staging set below.
+  'stockPreparationPullBatchSettingsGet',
+  'stockPreparationPullBatchSettingsSet',
+  'stockPreparationProjectPullBatchSettingsSet',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and

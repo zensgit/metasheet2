@@ -1083,6 +1083,14 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
   },
   {
+    // 批次标识 BI-7 (R-65; ruling C6): 数据来源与体检's pull-batch settings panel reads its settings once on first render
+    // (stock-prep:admin). The acceptance deployment keeps STOCK_PREP_PULL_BATCH_ENABLED OFF, so the server answers the
+    // switch-off refusal with zero IO and the panel renders nothing. Its two POSTs never fire with the panel invisible.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
