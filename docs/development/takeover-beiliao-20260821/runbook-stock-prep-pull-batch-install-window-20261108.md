@@ -9,7 +9,11 @@
 > **R 线说明（R83，onprem-r82 之上；本仓 R 线分支专有）。** 客户装的是 R83。R83 **没有项目写入锁**（写入租约、持有者校验、宿主写入栅栏、代次推进都不在这条线上）。所以本手册里描述 main 的几处在 R83 上是这样的：
 > - 装机没有 I1「取写入租约」和 I7「释放租约并推进代次」：应答里 `generationBumped` 恒为 `false`。其余保证照旧：I3 先把计划持久化（表进入 `installing`）再写第一个格子，只填空格，崩溃后用同一摘要续跑，从 I3 起所有拉取车道都拒（409 `STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS`），I3 之前已在跑的拉取由 I5 的重新扫描接住（`rows_after_plan`，再 dry_run 用 `extension.planDigest`）。
 > - 409 `STOCK_PREP_PROJECT_WRITE_LOCKED` 在 R83 上不会出现；定时拉取遇到正在装机的表，是在试算看到 `pullBatch.reason = installing` 或写入被 409 `INSTALL_IN_PROGRESS` 拒时记 `skipped_pull_batch_installing`。
-> - 因为没有租约，窗口内**暂停定时拉取并通知拉取人员不要拉**（§1 第 5 条、§5 第 1b 步）是硬要求，不只是兜底；中止也只在确认没有拉取在跑时做（§6 最后一条）。
+> - 因为没有租约，窗口内**暂停定时拉取并通知拉取人员不要拉**（§1 第 5 条、§5 第 1b 步）是硬要求，不只是兜底。原因有两个：
+>   - I3 之前已在跑的拉取会新建行，由 I5 接住（`rows_after_plan`，见上条）；在 I5 之后、收尾之前落下的行，收尾时算作一行补缺行（状态 `history_gap`，之后用补缺把它标成「推定」，§7）。
+>   - 拉取的更新 / 停用补丁会按它读到的旧数据整行改写，**可能把装机已写上的批次格子改回空**。I5 会把它算成 `rows_unlabelled`，原样再 install 即可补上。多维表的写入栅栏开关 `MULTITABLE_ENABLE_WRITER_FENCE`（默认关）打开时会把这种竞争串行化；是否改它是另一项 owner 决定，本手册不改它。
+> - **中止（abort）只在确认没有拉取在跑、也没有安装请求还在执行时才做；客户端超时后用同一个摘要（digest）重跑 install，绝不 abort**（§6 最后一条，P2-9）。原因：没有租约，与还在写的 install 同时发生的 abort 会先放开 C7 设置锁，install 随后照样写上计划的标签，表停在 `pending`、带标签、锁已放开。批次号不会错，数据也不丢，但这张表的格式锁没了，之后改格式会造成新旧格式混用。
+> - **包里没有两个运维脚本。** R83 安装包不带 `scripts/ops/stock-preparation-pull-batch-install.mjs` 和 `scripts/ops/stock-preparation-scheduled-pull.mjs`（文首「核对包里有该脚本」在 R83 上的结果就是没有）。从包里操作用 §4 的 `Invoke-RestMethod` 写法；要用 `node` 脚本，只能从打了标签的源码（`onprem-r83`）复制，**绝不从 main 复制**。主机上如果还有 R83 之前复制的定时拉取脚本，它会把 409 `INSTALL_IN_PROGRESS` 当成错误：没有危害（服务端已拒绝写入），但窗口内会显示一次失败的定时运行。
 
 ## 0. 一页看懂
 
@@ -154,7 +158,7 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 | `resolved: true` | 收尾了，`historyStatus` 是 `backfilled` 或 `born_empty` | 去第 5 步 |
 | `reason: 'write_budget'` + `remaining` | 这次写满额度了 | 同一请求再 POST（脚本自动做） |
 | `reason: 'rows_after_plan'` + `count` | 计划之后又有新行（窗口内有人拉了） | 重新 dry_run，用 `extension.planDigest`（K 变了就重新确认次数）再 install |
-| `reason: 'rows_unlabelled'` + `count` | 还有没写上的空格（被人同时编辑） | 原样再 install |
+| `reason: 'rows_unlabelled'` + `count` | 还有没写上的空格（被人同时编辑；R83 上也可能是拉取的补丁把已写的格子改回空，见文首 R 线说明） | 原样再 install |
 | 409 `…_PLAN_CHANGED` | 摘要和当前计划不一致 | 先查 install 是否带了和 dry_run 同一个 `gapMinutes`；否则重新 dry_run，看清变了什么，必要时重新批复 |
 | 409 `…_HISTORY_COUNT_MISMATCH` | 次数和 K 对不上 | 回第 3 步 |
 | 409 `…_PLAN_CONFLICT` | 已有标签与计划不一致 | 停，报开发机 |
@@ -177,7 +181,7 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 - 效果：`installing` → `pending`（首装）或 → 原来的已收尾状态（补缺）。计划保留，标为已中止。之后拉取恢复：首装中止的表照常拉、不盖批次；补缺中止的表按补缺规则处理。
 - **只能中止正在 `installing` 的表**，否则 409 `not_installing`。**已经写上标签的补缺不能中止**（409 `plan_labels_on_sheet`），只能把它跑完。
 - **C7：设置锁什么时候放开。** 设置锁（`settings_locked_at`）只在一种情况下清除：中止的是**首次装机**，而且表上没有任何一行带着这份已持久化计划的标签，项目也没有在用批次。应答 `settingsReleased: true` 就是这种情况，之后可以改这张表的规则 / 格式，下一次 dry_run 也可以换一份计划（比如换一个 G）。表上已经有该计划的标签时，锁保留（`settingsReleased: false`），下一次 dry_run 是 `resume_aborted`，只能把同一份计划继续跑完或扩展（永久性规则：已经落到表上的计划只能扩展，不能替换）。
-- R 线没有写入租约：只在**确认没有拉取在跑**时才中止（P2-9）。
+- R 线没有写入租约：只在**确认没有拉取在跑、也没有安装请求还在执行**时才中止；客户端超时后用同一个摘要重跑 install，绝不 abort（P2-9，原因见文首 R 线说明）。
 
 ## 7. 补缺（gap pass）
 
