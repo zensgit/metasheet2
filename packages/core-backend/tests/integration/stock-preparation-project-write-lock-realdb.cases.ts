@@ -3934,6 +3934,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          shape the scheduled pull skips)
         //   BI-R11 born ready over an unreadable ledger: the create answers the legacy shape (ledger_unreadable), a pull
         //          afterwards is unaffected
+        //   BI-R18 (P2-18) an extension re-run in another history mode than the persisted run: 409 history_mode_changed
+        //          before any cell write; the persisted mode resolves (BI-R14 is the pull-batch file's zombie allocate)
         describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
           const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
@@ -4166,8 +4168,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           // while the switch is off, then an INFERRED re-run carrying the extension digest. The real route refuses the mode
           // change 409 PLAN_CHANGED history_mode_changed BEFORE any cell write (as the plain continue path does); the dry-run
           // names the persisted mode, and the re-run in that mode installs the extension and resolves.
-          test('BI-R14 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
-            const k = await installStack('bi2r14')
+          test('BI-R18 (P2-18) an extension re-run in another history mode than the persisted run is refused before any cell write on real PG; the persisted mode resolves', async () => {
+            const k = await installStack('bi2r18')
             await withPull(false, async () => { k.st.state.data = CF.firstPullSource(); await k.pull() })
             const dry = await k.post({ mode: 'dry_run', historyMode: 'unknown' })
             expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)

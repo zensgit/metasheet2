@@ -662,6 +662,37 @@ test('IN-14b (P2-18) an extension re-run in another history mode than the persis
   assert.deepEqual(world.cells('rec_late'), [UNKNOWN, UNKNOWN])
 })
 
+// Follow-up (BI-2 verify round 2, mutant G6): the early history-mode check covers the PLAIN continue too, not only the
+// extension. A crashed `unknown` run with NO rows created since (so the re-run is a plain continue, no extension)
+// attempted in `inferred` mode is refused 409 PLAN_CHANGED history_mode_changed before the lease is taken, before any
+// host write and with the ledger row untouched — the store's in-lease re-check is never the first line here.
+test('IN-14c (P2-18, G6) a PLAIN continue re-run in another history mode than the persisted run is refused before the lease and any write; the persisted mode resolves', async () => {
+  const world = createWorld({ records: c09() })
+  const preview = await dryRun(world, { historyMode: 'unknown' })
+  world.state.patchFault = () => Object.assign(new Error('crash'), { code: 'HOST_DOWN' })
+  await assert.rejects(install(world, { planDigest: preview.planDigest, count: 0, historyMode: 'unknown' }), /crash/)
+  world.state.patchFault = null
+  assert.equal(world.sheet().history_status, 'installing')
+  const labelled = () => Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== '')
+  assert.deepEqual(labelled(), [], 'the crash came at the first patch')
+  const next = await dryRun(world)
+  assert.equal(next.run, 'continue')
+  assert.equal(next.extension, null, 'no row was created since the plan: a plain continue, never an extension')
+  assert.equal(next.requires.historyMode, 'unknown')
+  assert.equal(next.planDigest, preview.planDigest, 'the plain continue offers the persisted digest')
+  const versionBefore = world.sheet().version
+  world.log.length = 0
+  const refused = await rejects(install(world, { planDigest: next.planDigest, count: next.requires.confirmHistoricalBatchCount.inferred, historyMode: 'inferred' }), PB.PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'mode changed on the plain continue path')
+  assert.equal(refused.details.reason, 'history_mode_changed')
+  assert.equal(world.log.includes('lease.acquire'), false, 'refused before the lease')
+  assert.equal(world.log.includes('host.patchRecord'), false, 'no cell written')
+  assert.deepEqual(labelled(), [], 'no row carries a label of a mode the persisted run does not carry')
+  assert.deepEqual([world.sheet().history_status, world.sheet().version], ['installing', versionBefore], 'the ledger row is untouched')
+  const done = await install(world, { planDigest: next.planDigest, count: 0, historyMode: 'unknown' })
+  assert.deepEqual([done.run, done.resolved], ['continue', true])
+  assert.equal(world.sheet().history_mode, 'unknown')
+})
+
 test('IN-15 (M-2B-21) the write budget: 3 over 7 rows answers write_budget remaining 4, then remaining 1, then resolved', async () => {
   const records = [...c09(), record('rec_06', { createdAt: '2026-10-20T02:30:04.000Z', part: 'Q1', plannedAt: P2 }), record('rec_07', { createdAt: '2026-10-20T02:30:05.000Z', part: 'Q2', plannedAt: P2 })]
   const world = createWorld({ records })
