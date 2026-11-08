@@ -738,7 +738,7 @@ describe('R — the hard-condition registry', () => {
     expect(AUTHORIZATION_PROTOCOL_GAPS.find((gap) => gap.id === 'request-cache-admin-and-codes')?.kind).toBe('forbidden-input')
   })
 
-  it('R-02 the legacy jsonb-STRING property encoding is listed while the trigger and the readers disagree on it (verifier r1 F4; the real-DB premise is G-01)', () => {
+  it('R-02 the legacy jsonb-STRING property encoding is listed while the trigger and the readers disagree on it (verifier r1 F4; the real-DB premise is M-10 in authz-version-protocol.db.test.ts)', () => {
     const gap = AUTHORIZATION_PROTOCOL_GAPS.find((entry) => entry.id === 'field-property-jsonb-string-encoding')
     expect(gap).toBeDefined()
     expect(gap!.checks).toEqual([3])
