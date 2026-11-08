@@ -2952,6 +2952,14 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       //   S3A-31 (R-71 ⑦.4 PR-3, plan 7.4 real-DB 补列) an aged project sheet missing two template columns: the
       //          pull preview 422, the repair route's dry-run writes nothing, a registry row naming another sheet 409,
       //          the add lands exactly the two with every existing meta_fields row byte-identical, the preview ready.
+      //   S3A-32 (Y7 review MEDIUM-1) the re-added plm_system column is INSERTED locked: with a trigger refusing every
+      //          later meta_fields UPDATE of the sheet the call fails AFTER the add, yet the column's row carries
+      //          humanWriteLock and the dry-run says unmarked 0; with a trigger refusing only lock-marking UPDATEs (the
+      //          reviewer's VY7A-03(b)) the add answers 200 because the lock step has nothing left to patch.
+      //   S3A-33 (Y7 review MEDIUM-2) a sheet missing the template's last two columns, with an ext_ column, a RIGHT-side
+      //          pull-batch band and a person-created column: the re-added columns land after every existing row's
+      //          order (MAX over all of meta_fields), no order is shared, no existing row changes; a second add moves
+      //          nothing.
       describe('S3A step-4 lanes (real Postgres, real lock, real host)', () => {
         const ownBaseLib = require(path.join(PLUGIN_LIB, 'stock-preparation-own-base.cjs')) as any
         const projectTargetsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-targets.cjs')) as any
@@ -4626,6 +4634,152 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(again.body.data.columns.added).toBe(0)
             expect(again.body.data.columns.missingFieldIds).toEqual([])
             expect(sameJson([...(await fieldRows())], [...settled])).toBe(true)
+          } finally {
+            if (before === undefined) delete process.env[SWITCH]
+            else process.env[SWITCH] = before
+            await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [st.tenantId]).catch(() => {})
+          }
+        }, 180000)
+
+        // Y7 review MEDIUM-1 (real DB): the lock rides the INSERT. Two PostgreSQL triggers stand in for "a later step
+        // fails": (A) every UPDATE of this sheet's meta_fields is refused, so the option sync after the add fails; (B) only
+        // an UPDATE that changes humanWriteLock is refused — the reviewer's VY7A-03(b), which used to answer 500
+        // PLM_LOCK_FAILED with the column left unlocked. The INSERT itself is never blocked (BEFORE UPDATE only).
+        test('S3A-32 (Y7 review MEDIUM-1) a re-added plm_system column is inserted locked: a later step refused by a trigger leaves it locked and the dry-run says unmarked 0; a lock-only refusing trigger no longer fails the add', async () => {
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const ownership = new Map<string, string>(templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => [field.id, field.ownership]))
+          const humanColumn: string = templatesLib.HUMAN_PRESERVED_FIELD_IDS.find((id: string) => ownership.get(id) === 'human_preserved')
+          const templateOrder: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+          const dropped = templateOrder.filter((id) => id === 'componentSpec' || id === humanColumn)
+          expect(dropped).toHaveLength(2)
+          const st = await s3aStack('s32', { pilot: false })
+          const REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const before = process.env[SWITCH]
+          process.env[SWITCH] = 'true'
+          const repair = (body: Record<string, unknown>) => callRoute(st.routes, 'POST', REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} })
+          const fn = `y7fx_refuse_fn_${TOKEN}`
+          const trg = `y7fx_refuse_trg_${TOKEN}`
+          const dropTrigger = async () => {
+            await q(`DROP TRIGGER IF EXISTS ${trg} ON meta_fields`)
+            await q(`DROP FUNCTION IF EXISTS ${fn}()`)
+          }
+          // The trigger refuses UPDATEs of THIS sheet only; `lockOnly` narrows it to a change of humanWriteLock.
+          const installTrigger = async (lockOnly: boolean) => {
+            await dropTrigger()
+            const condition = lockOnly
+              ? `NEW.sheet_id = '${st.sheetId}' AND (NEW.property->>'humanWriteLock') IS DISTINCT FROM (OLD.property->>'humanWriteLock')`
+              : `NEW.sheet_id = '${st.sheetId}'`
+            await q(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF ${condition} THEN RAISE EXCEPTION 'y7fx synthetic refusal'; END IF; RETURN NEW; END $f$`)
+            await q(`CREATE TRIGGER ${trg} BEFORE UPDATE ON meta_fields FOR EACH ROW EXECUTE FUNCTION ${fn}()`)
+          }
+          const physical = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: dropped })
+          expect(Object.keys(physical).sort()).toEqual([...dropped].sort())
+          const age = async () => {
+            const deleted = await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, dropped.map((id) => physical[id])])
+            expect(deleted.rowCount).toBe(2)
+          }
+          const propertyOf = async (logicalId: string) => (await q('SELECT property FROM meta_fields WHERE sheet_id = $1 AND id = $2', [st.sheetId, physical[logicalId]])).rows[0]?.property
+          const failureRows = async () => (await q(
+            `SELECT detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_target_create' AND mode = 'contract_options_synced' AND detail->>'outcome' = 'failed_after_columns_added'`,
+            [st.tenantId],
+          )).rows.map((row: any) => row.detail)
+          try {
+            // (A) every later UPDATE refused: the call fails after the column transaction committed.
+            await age()
+            await installTrigger(false)
+            const failed = await repair({ addMissingColumns: true })
+            expect(failed.statusCode, JSON.stringify(failed.body)).not.toBe(200)
+            expect(failed.statusCode).toBeGreaterThanOrEqual(400)
+            expect((await propertyOf('componentSpec'))?.humanWriteLock, 'the re-added PLM column is locked by its own INSERT').toBe('plm_system')
+            expect((await propertyOf(humanColumn))?.humanWriteLock, 'the re-added human column stays editable').toBeUndefined()
+            const failure = await failureRows()
+            expect(failure).toHaveLength(1)
+            expect(failure[0]).toMatchObject({ outcome: 'failed_after_columns_added', columnAddedCount: 2 })
+            const dry = await repair({ dryRun: true })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            expect(dry.body.data.plmColumnLock, 'the dry-run after the failed call: no PLM column is human-writable').toMatchObject({ checked: true, unmarked: 0, missing: 0 })
+            await dropTrigger()
+
+            // (B) only a lock-marking UPDATE refused (VY7A-03(b)): the INSERT already carries the lock, so the lock step
+            // patches nothing and the add answers 200.
+            await age()
+            await installTrigger(true)
+            const added = await repair({ addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.added).toBe(2)
+            expect(added.body.data.plmColumnLock).toMatchObject({ marked: 0, missing: 0 })
+            expect((await propertyOf('componentSpec'))?.humanWriteLock).toBe('plm_system')
+            const dryAfter = await repair({ dryRun: true })
+            expect(dryAfter.body.data.plmColumnLock).toMatchObject({ checked: true, unmarked: 0, missing: 0 })
+            await dropTrigger()
+            const ready = await st.dryRun()
+            expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+            expect(ready.body.data.status).toBe('ready')
+          } finally {
+            await dropTrigger().catch(() => {})
+            if (before === undefined) delete process.env[SWITCH]
+            else process.env[SWITCH] = before
+            await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [st.tenantId]).catch(() => {})
+          }
+        }, 180000)
+
+        // Y7 review MEDIUM-2 (real DB): the order of the re-added columns. The sheet lacks the template's last two
+        // columns; a pack's ext_ column and a RIGHT-side pull-batch band were created after that through the real host
+        // (each at "largest known order + 1", the orders the template tail would take by its index), and a person added
+        // a column through the grid (a random id — invisible to every logical-id read). The add must place the tail
+        // after every one of them.
+        test('S3A-33 (Y7 review MEDIUM-2) right-side band + ext_ column + a person-created column: the re-added tail lands after MAX(order) over every meta_fields row, no order is shared, no existing row changes; a second add moves nothing', async () => {
+          const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+          const templateOrder: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+          const tail = templateOrder.slice(-2)
+          for (const id of tail) expect(templatesLib.HUMAN_PRESERVED_FIELD_IDS).toContain(id)
+          const st = await s3aStack('s33', { pilot: false })
+          const REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const before = process.env[SWITCH]
+          process.env[SWITCH] = 'true'
+          const repair = (body: Record<string, unknown>) => callRoute(st.routes, 'POST', REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} })
+          const fieldRows = async () => new Map<string, string>(
+            (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+          )
+          const maxOrder = async () => Number((await q('SELECT MAX("order") AS m FROM meta_fields WHERE sheet_id = $1', [st.sheetId])).rows[0].m)
+          try {
+            const physical = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: tail })
+            const tailPhysical = tail.map((id) => physical[id])
+            expect(tailPhysical.every((id) => typeof id === 'string')).toBe(true)
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, tailPhysical])).rowCount).toBe(2)
+            const maxAged = await maxOrder()
+            // A pack's ext_ column, then a right-side band, through the real plugin-scoped host primitive.
+            await st.multitable.provisioning.ensureMissingObjectFields({ projectId: st.projectId, objectId: st.objectId, fields: [{ id: 'ext_site_note', name: 'Site note', type: 'string', order: maxAged + 1 }] })
+            const band = templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'right', maxExistingOrder: maxAged + 1 })
+            const bandWrite = await st.multitable.provisioning.ensureMissingObjectFields({ projectId: st.projectId, objectId: st.objectId, fields: band.map((d: any) => ({ ...d, property: { ...d.property } })) })
+            expect(bandWrite.addedFieldIds).toHaveLength(2)
+            // A person's column (POST /fields mints a random id).
+            await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [`fld_person_${TOKEN}`, st.sheetId, 'Person column', 'string', '{}', maxAged + 4])
+            const templateIndexOrders = tail.map((id) => templateOrder.indexOf(id))
+            const taken = (await q('SELECT "order" FROM meta_fields WHERE sheet_id = $1 AND "order" = ANY($2::int[])', [st.sheetId, templateIndexOrders])).rows
+            expect(taken.length, 'precondition: the template-index orders are already taken by the ext_ column and the band').toBe(2)
+            const settledBefore = await fieldRows()
+            const maxBefore = await maxOrder()
+            expect(maxBefore).toBe(maxAged + 4)
+
+            const added = await repair({ addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(tail)
+            const tailOrders = (await q('SELECT id, "order" FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, tailPhysical])).rows
+            const orderById = new Map(tailOrders.map((row: any) => [String(row.id), Number(row.order)]))
+            expect(tailPhysical.map((id) => orderById.get(id)), 'max + 1 + i, in template order').toEqual([maxBefore + 1, maxBefore + 2])
+            const shared = (await q('SELECT "order", COUNT(*) AS n FROM meta_fields WHERE sheet_id = $1 GROUP BY "order" HAVING COUNT(*) > 1', [st.sheetId])).rows
+            expect(shared, 'no two columns share an order').toEqual([])
+            const after = await fieldRows()
+            for (const [id, text] of settledBefore) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            const grid = (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [st.sheetId])).rows.map((row: any) => String(row.id))
+            expect(grid.slice(-2), 'the grid shows the re-added tail after the band, the ext_ and the person column').toEqual(tailPhysical)
+
+            const settled = await fieldRows()
+            const again = await repair({ addMissingColumns: true })
+            expect(again.statusCode, JSON.stringify(again.body)).toBe(200)
+            expect(again.body.data.columns.added).toBe(0)
+            expect(sameJson([...(await fieldRows())], [...settled]), 'a second add moves nothing').toBe(true)
           } finally {
             if (before === undefined) delete process.env[SWITCH]
             else process.env[SWITCH] = before
