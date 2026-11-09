@@ -23,6 +23,11 @@
 //   BI-IF  the 批次标识 hook gets the UNPREFIXED digest, the result and the sheet count; its outcome rides the audit and the
 //          answer; its refusal rolls the close back; no hook => no 批次标识 step at all
 //   RV-01..05, NS-01, NI-01, AU-01  the recovery lib (TA) over the small-lane world
+//   RV-06  every UNPROVABLE reason refuses through TA before any close (intent_missing / intent_corrupt / record_vanished /
+//          record_replaced; recompute_disagrees at the assessment), RECOMPUTE_INCOMPLETE (no audit row), the governed 500
+//   PB-01..03  the plan-bound mapping (§3.5 step 4e) through TA over the change-plan small lane: P7 (RW = the landed record
+//          only), P1 (CP written, no RW), a CP write record without an UPDATE entry (landed / not_landed from the plan's
+//          record set; diverged / vanished refuse)
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -38,7 +43,8 @@ const lanes = require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs'))
 const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { readProjectRefreshState } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_ROW_LOCK_WAIT_MS, StockPreparationProjectWriteLockError, sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
-const { EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+const { DECISIONS, EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { EXISTING_ROW_PULL_BATCH } = require(path.join(LIB, 'stock-preparation-pull-batch.cjs'))
 const { assertValuesFreeDetail } = require(path.join(LIB, 'stock-preparation-audit-store.cjs')).__internals || {}
 const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
@@ -549,7 +555,7 @@ function createSource(initial) {
 function createSheet() {
   const rows = []
   const calls = []
-  const sheet = { rows, calls, failCreates: 0 }
+  const sheet = { rows, calls, failCreates: 0, failPatches: 0, failedPatchIds: [] }
   sheet.api = {
     supportsWriteFence: true,
     async queryRecords(input = {}) {
@@ -571,6 +577,11 @@ function createSheet() {
     },
     async patchRecord(input = {}) {
       calls.push('patchRecord')
+      if (sheet.failPatches > 0) {
+        sheet.failPatches -= 1
+        sheet.failedPatchIds.push(input.recordId)
+        throw Object.assign(new Error('synthetic patch failure'), { code: 'SYN_PATCH_FAILED' })
+      }
       const record = rows.find((row) => row.sheetId === input.sheetId && row.id === input.recordId)
       record.version += 1
       record.data = { ...record.data, ...(input.changes || {}) }
@@ -760,6 +771,242 @@ test('RV-05 the close answers what was decided UNDER THE LOCKS: a zombie finishe
   assert.equal(w.executions()[0].pre_close_status, 'aborted')
 })
 
+// ── RV-06: every UNPROVABLE reason, RECOMPUTE_INCOMPLETE and the governed invariant, through the recovery lib ───────────
+
+const RW_SCOPE = Object.freeze({ tenantId: RW_TENANT, sheetId: RW_SHEET, projectNo: RW_PROJECT })
+const UNFINISHED = ['running', 'partial', 'failed', 'aborted']
+
+function unfinishedOf(w) {
+  const rows = w.executions().filter((row) => UNFINISHED.includes(row.status))
+  assert.equal(rows.length, 1, `one unfinished execution: ${w.executions().map((row) => row.status).join(',')}`)
+  return rows[0]
+}
+
+// A refusal before any close: 409 UNPROVABLE with exactly `reasons`; the execution keeps its status; no close audit.
+async function expectUnprovable(w, executionId, reasons) {
+  const verified = await w.recover('verify', { executionId })
+  assert.deepEqual(verified.report.refusalReasons, reasons, 'verify reports the reasons')
+  assert.equal(verified.report.closeAdmissible, false)
+  const status = w.executions().find((row) => row.id === executionId).status
+  const closeAuditsBefore = w.closeAudits.length
+  const refused = await expectCode(w.recover('close', { executionId, verifyDigest: verified.report.verifyDigest }), { status: 409, code: CODES.RECOVERY_UNPROVABLE })
+  assert.deepEqual(refused.details.reasons, reasons, 'the close refuses with the reasons')
+  const row = w.executions().find((item) => item.id === executionId)
+  assert.deepEqual([row.status, row.verified_result, row.closed_mode], [status, null, null], 'nothing closed')
+  assert.equal(w.closeAudits.length, closeAuditsBefore, 'no close audit row')
+  return verified
+}
+
+// An UNBOUND failed execution with ONE update entry for a landed row, journalled the way the apply journals it
+// (buildExecutionIntent over the reader's row and its record ref) and begun through the real store: a first pull
+// applied, then the update's run died before its host write (the entry is not_landed, the run nothing_landed).
+async function updateEntryWorld() {
+  const w = await recoveryWorld()
+  const first = await w.dryRun()
+  assert.equal((await w.apply(first.dryRunToken)).status, 'succeeded')
+  const rows = await tableActions.__internals.readExistingStockPreparationRows(w.sheet.api, w.action.target, RW_PROJECT)
+  const target = rows.find((row) => typeof row.rawQuantity === 'number')
+  const ref = target[EXISTING_ROW_RECORD_REF]
+  const intent = intentModule.buildExecutionIntent({
+    plan: { decisions: [{ decision: DECISIONS.UPDATE, idempotencyKey: target.idempotencyKey, patch: { rawQuantity: target.rawQuantity + 1 } }] },
+    planDigest: PLAN_DIGEST,
+    expectedRecords: new Map([[target.idempotencyKey, { id: ref.id, version: ref.version, row: target }]]),
+    template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  })
+  assert.equal(intent.chunks[0].entries[0].r, ref.id, 'calibration: the update entry names the record')
+  const begun = await w.env.store.beginExecution({ ...RW_SCOPE, lane: 'small_apply', guard: GUARD, tokenRevision: 'rev_rv_u', planDigest: PLAN_DIGEST, plannedCounts: { update: 1 }, refreshBinding: { continuations: [] }, startedBy: 'u_rv_puller', intent })
+  await w.env.db.updateRow(T.execution, { status: 'failed', finished_at: w.env.clock.now() }, { id: begun.id })
+  return { w, executionId: begun.id, recordId: ref.id }
+}
+
+test('RV-06 each UNPROVABLE reason refuses through the recovery lib before any close (intent_missing, intent_corrupt, record_vanished, record_replaced, recompute_disagrees); an incomplete recompute is 409 RECOMPUTE_INCOMPLETE with no audit row; an ungoverned recompute is the 500 invariant', async () => {
+  // intent_missing: a legacy row (no journal).
+  {
+    const w = await partialWorld(1)
+    const ex = unfinishedOf(w)
+    await w.env.db.updateRow(T.execution, { intent_version: null, intent_digest: null, intent_entry_count: null, pull_batch_source_digest: null }, { id: ex.id })
+    await expectUnprovable(w, ex.id, ['intent_missing'])
+  }
+  // intent_corrupt: a tampered chunk. Without the reason this run (its chunks unreadable => nothing classified) would
+  // close nothing_landed and TRANSPARENT over rows that did land.
+  {
+    const w = await partialWorld(1)
+    const ex = unfinishedOf(w)
+    const chunk = w.env.db.rows(T.intent).find((row) => row.id === `${ex.id}:0`)
+    await w.env.db.updateRow(T.intent, { entries: chunk.entries.map((entry, i) => (i === 0 ? { ...entry, post: 'f'.repeat(32) } : entry)) }, { id: chunk.id })
+    await expectUnprovable(w, ex.id, ['intent_corrupt'])
+  }
+  // record_vanished / record_replaced: an intended UPDATE's row deleted, or re-created under the same key with another id.
+  {
+    const { w, executionId, recordId } = await updateEntryWorld()
+    const baseline = await w.recover('verify', { executionId })
+    assert.deepEqual([baseline.report.result, baseline.report.refusalReasons], ['nothing_landed', []], 'calibration: the intact row classifies not_landed')
+    const at = w.sheet.rows.findIndex((row) => row.id === recordId)
+    const [removed] = w.sheet.rows.splice(at, 1)
+    await expectUnprovable(w, executionId, ['record_vanished'])
+    w.sheet.rows.splice(at, 0, { ...removed, id: `${recordId}_recreated`, version: 1, data: { ...removed.data } })
+    await expectUnprovable(w, executionId, ['record_replaced'])
+  }
+  // recompute_disagrees: a landed ADD the recompute plans again. The real planner and the classifier read the same
+  // existingRows by the same key, so the TA path cannot produce it honestly; the detector is pinned on the assessment
+  // the close consumes (the TA close refuses whenever refusalReasons is non-empty — the cases above).
+  {
+    const w = await partialWorld(1)
+    const ex = unfinishedOf(w)
+    const read = await w.env.store.readExecutionForRecovery({ ...RW_SCOPE, executionId: ex.id })
+    const rows = await tableActions.__internals.readExistingStockPreparationRows(w.sheet.api, w.action.target, RW_PROJECT)
+    const keyOf = (row) => row.idempotencyKey
+    const plain = recovery.assessExecutionRecovery({ read, rows, plan: { decisions: [] } })
+    assert.deepEqual([plain.result, plain.refusalReasons], ['mixed', []])
+    const again = recovery.assessExecutionRecovery({ read, rows, plan: { decisions: [{ decision: DECISIONS.ADD, idempotencyKey: keyOf(rows[0]) }] } })
+    assert.deepEqual([again.result, again.refusalReasons], ['unprovable', ['recompute_disagrees']])
+  }
+  // RECOMPUTE_INCOMPLETE: the source cannot be read completely under the lease (here: the project reads not_found).
+  {
+    const w = await partialWorld(1)
+    const ex = unfinishedOf(w)
+    const verified = await w.recover('verify', { executionId: ex.id })
+    w.source.state.data = {}
+    const audits = [w.verifyAudits.length, w.closeAudits.length]
+    await expectCode(w.recover('verify', { executionId: ex.id }), { status: 409, code: CODES.RECOVERY_RECOMPUTE_INCOMPLETE })
+    await expectCode(w.recover('close', { executionId: ex.id, verifyDigest: verified.report.verifyDigest }), { status: 409, code: CODES.RECOVERY_RECOMPUTE_INCOMPLETE })
+    assert.deepEqual([w.verifyAudits.length, w.closeAudits.length], audits, 'no audit row')
+    assert.deepEqual([unfinishedOf(w).status, unfinishedOf(w).verified_result], ['partial', null], 'the execution stays unfinished')
+  }
+  // The governed invariant: an execution exists, so a recompute that answers "not governed" is a defect (500).
+  {
+    const w = await partialWorld(1)
+    const ex = unfinishedOf(w)
+    const governance = { ...w.env.governance, consult: async (scope) => ({ ...(await w.env.governance.consult(scope)), governed: false }) }
+    const ungoverned = w.env.handleFor(RW_TENANT, { resolveServices: () => ({ governance, store: w.env.store }) })
+    await expectCode(w.recover('verify', { executionId: ex.id, refreshGovernance: ungoverned }), { status: 500, code: CODES.INPUT_INVALID, reason: 'recovery_recompute_not_governed' })
+    assert.equal(unfinishedOf(w).status, 'partial')
+  }
+})
+
+// ── PB: the plan-bound mapping (design §3.5 step 4e) through the recovery lib over the change-plan small lane ─────────
+
+// PART-A's material and PART-C's usage on S-001's own order (the CP-L changedSource shape): two UPDATE write records.
+function changedSource({ material = 'M-ALU', partCUsage = 5 } = {}) {
+  const parts = F.PARTS.map((part) => (part.OBJ_ID === 'PART-A' ? { ...part, Material: material } : part))
+  return F.project({ orders: [{ part: 'S-001', qty: 10 }], parts, boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: partCUsage }] } })
+}
+
+// The confirm as the route runs it (CP-L's confirmAll): every open content hold, the state's echoes.
+async function confirmAll(w) {
+  const state = w.env.db.rows(T.state)[0]
+  const content = w.env.db.rows(T.hold).filter((row) => row.status === 'open').map(storeModule.__internals.rowToHold).filter(pairing.isContentClassHold)
+  const records = pairing.changePlanRecordsFromHolds(content)
+  return w.env.store.confirmChangePlan({
+    ...RW_SCOPE,
+    confirmedBy: 'u_rv_puller',
+    holds: content.map((hold) => ({ id: hold.id, fingerprint: hold.fingerprint })),
+    echo: { holdSetFingerprint: state.hold_set_fingerprint, planFingerprint: pairing.changePlanFingerprintOf({ projectNo: RW_PROJECT, records, sourceContentDigest: state.last_computation_source_content_digest }), sourceContentDigest: state.last_computation_source_content_digest },
+    candidates: content.filter((hold) => hold.kind === 'candidate_content_differs').map((hold) => ({ holdId: hold.id, candidateId: hold.pairingFingerprint, basis: { kind: 'puller_confirmed_same_demand' } })),
+    sourceIdentity: lanes.refreshSourceIdentity({ action: tableActions.assertStockPreparationTargetReady(w.action), tenantId: RW_TENANT }),
+    template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  }, { bumpWithin: w.env.bump.bumpWithin })
+}
+
+// First pull applied; the changed read suspended, confirmed (CP) and re-previewed bound to CP.
+async function boundWorld() {
+  const w = await recoveryWorld()
+  const first = await w.dryRun()
+  assert.equal((await w.apply(first.dryRunToken)).status, 'succeeded')
+  w.source.state.data = changedSource()
+  assert.equal((await w.dryRun()).status, 'suspended')
+  const confirmed = await confirmAll(w)
+  const replan = await w.dryRun()
+  assert.equal(replan.status, 'ready', 'the re-preview matches CP')
+  const planOf = (id) => w.env.db.rows(T.changePlan).find((row) => row.id === id)
+  const writeRecordsOf = (plan) => plan.record_set.filter((record) => Object.values(record.fields).some((cell) => cell.reviewOnly !== true))
+  const cpRecordIds = writeRecordsOf(planOf(confirmed.changePlanId)).map((record) => record.recordId).sort()
+  assert.equal(cpRecordIds.length, 2, 'calibration: two write records')
+  return { w, cpId: confirmed.changePlanId, replan, planOf, writeRecordsOf, cpRecordIds }
+}
+
+// A plan-bound run whose FIRST patch the host refuses: partial, its finish invalidates CP (execution_failed).
+async function partialBoundWorld() {
+  const b = await boundWorld()
+  b.w.sheet.failPatches = 1
+  assert.equal((await b.w.apply(b.replan.dryRunToken)).status, 'partial')
+  const ex = unfinishedOf(b.w)
+  const cp = b.planOf(b.cpId)
+  assert.deepEqual([ex.status, cp.status, cp.invalidated_reason], ['partial', 'invalidated', 'execution_failed'])
+  assert.equal(b.w.sheet.failedPatchIds.length, 1)
+  const landedId = b.cpRecordIds.find((id) => !b.w.sheet.failedPatchIds.includes(id))
+  const notLandedId = b.w.sheet.failedPatchIds[0]
+  return { ...b, ex, landedId, notLandedId }
+}
+
+function changePlanCounts(report) {
+  const cp = report.changePlan
+  return cp ? [cp.bound, cp.landedRecords, cp.notLandedRecords, cp.possiblyLandedRecords] : null
+}
+
+test('PB-01 (§3.7 P7) a plan-bound partial run: the UPDATE entries decide its write records — verify mixed with changePlan landed 1 / not landed 1; the close writes a recovery-written plan carrying ONLY the landed record', async () => {
+  const b = await partialBoundWorld()
+  const verified = await b.w.recover('verify', { executionId: b.ex.id })
+  assert.equal(verified.report.result, 'mixed')
+  assert.deepEqual(verified.report.refusalReasons, [])
+  assert.deepEqual(changePlanCounts(verified.report), [true, 1, 1, 0])
+  const closed = await b.w.recover('close', { executionId: b.ex.id, verifyDigest: verified.report.verifyDigest })
+  assert.equal(closed.closed.changePlan.cell, 'P7')
+  const rw = b.planOf(closed.closed.changePlan.recoveredPlanId)
+  assert.deepEqual([rw.status, rw.recovered_from_change_plan_id, rw.execution_id, rw.write_record_count], ['written', b.cpId, b.ex.id, 1])
+  assert.deepEqual(b.writeRecordsOf(rw).map((record) => record.recordId), [b.landedId], 'RW carries exactly the landed write record')
+  assert.deepEqual([b.planOf(b.cpId).status, b.planOf(b.cpId).invalidated_reason], ['invalidated', 'execution_failed'], 'CP unchanged (terminal)')
+})
+
+test('PB-02 (§3.7 P1) a plan-bound run that wrote every UPDATE but whose finish failed (RUNNING, CP still confirmed): verify landed with changePlan landed 2; the close makes CP written (as a succeeded finish) and writes no recovery-written plan', async () => {
+  const b = await boundWorld()
+  let armed = true
+  b.w.env.db.faults.updateRow = (args) => {
+    if (armed && args.table === T.execution && args.set && args.set.status === 'succeeded') {
+      armed = false
+      return kit.sqlError('57P01', 'terminating connection due to administrator command')
+    }
+    return null
+  }
+  // The apply answers the store failure (thrown or answered); what matters is what the finish left behind.
+  await b.w.apply(b.replan.dryRunToken).catch((error) => error)
+  delete b.w.env.db.faults.updateRow
+  assert.equal(armed, false, 'calibration: the succeeded finish was refused')
+  const ex = unfinishedOf(b.w)
+  assert.deepEqual([ex.status, b.planOf(b.cpId).status, b.w.sheet.failedPatchIds.length], ['running', 'confirmed', 0])
+  const verified = await b.w.recover('verify', { executionId: ex.id })
+  assert.equal(verified.report.result, 'landed')
+  assert.deepEqual(changePlanCounts(verified.report), [true, 2, 0, 0])
+  assert.equal(verified.report.changePlan.planStatusSeen, 'confirmed')
+  const closed = await b.w.recover('close', { executionId: ex.id, verifyDigest: verified.report.verifyDigest })
+  assert.equal(closed.closed.changePlan.cell, 'P1')
+  const cp = b.planOf(b.cpId)
+  assert.deepEqual([cp.status, cp.execution_id], ['written', ex.id])
+  assert.equal(b.w.env.db.rows(T.changePlan).filter((row) => row.recovered_from_change_plan_id === b.cpId).length, 0, 'no RW')
+})
+
+test('PB-03 a CP write record WITHOUT an UPDATE entry is classed from the plan\'s own record set against the row the recompute read: landed (every write field = its after) and not_landed (= its before) both count; diverged / vanished refuse 409 UNPROVABLE through the plan mapping, nothing closed', async () => {
+  const b = await partialBoundWorld()
+  // A legacy row (no journal): no entry names either record, so the plan's own record set decides both.
+  await b.w.env.db.updateRow(T.execution, { intent_version: null, intent_digest: null, intent_entry_count: null, pull_batch_source_digest: null }, { id: b.ex.id })
+  const verified = await expectUnprovable(b.w, b.ex.id, ['intent_missing'])
+  assert.deepEqual(changePlanCounts(verified.report), [true, 1, 1, 0], 'landed from its after, not_landed from its before')
+  // A person moves the landed record's write field to a third value: diverged, raised by the plan mapping alone.
+  const landedRow = b.w.sheet.rows.find((row) => row.id === b.landedId)
+  const original = { ...landedRow.data }
+  const [fieldId, cell] = Object.entries(b.writeRecordsOf(b.planOf(b.cpId)).find((record) => record.recordId === b.landedId).fields).find(([, value]) => value.reviewOnly !== true)
+  landedRow.data = { ...landedRow.data, [fieldId]: typeof cell.after === 'number' ? cell.after + 37 : 'SYN-THIRD-VALUE' }
+  const diverged = await expectUnprovable(b.w, b.ex.id, ['intent_missing', 'diverged'])
+  assert.deepEqual(changePlanCounts(diverged.report), [true, 0, 1, 1])
+  // The landed record's row is gone: vanished.
+  landedRow.data = original
+  const at = b.w.sheet.rows.indexOf(landedRow)
+  b.w.sheet.rows.splice(at, 1)
+  const vanished = await expectUnprovable(b.w, b.ex.id, ['intent_missing', 'record_vanished'])
+  assert.deepEqual(changePlanCounts(vanished.report), [true, 0, 1, 1])
+  assert.deepEqual([b.planOf(b.cpId).status, b.w.env.db.rows(T.changePlan).length], ['invalidated', 1], 'no plan written by a refusal')
+})
+
 test('NS-01 (N-SWITCH, rebaseline (a)(b)) the pull-batch lane ON with a ledger: readBatchLink read, the report carries `batch`, the close hands batchWithin the UNPREFIXED digest; OFF: zero ledger IO and no `batch` key', async () => {
   const w = await partialWorld(1)
   const ledgerCalls = []
@@ -823,6 +1070,8 @@ test('CU-01 close-unverified: inspect reads the SHEET only (no source read) and 
   const row = w.executions()[0]
   assert.deepEqual([row.verified_result, row.closed_mode, row.runbook_ref], ['unknown', 'runbook', 'TICKET-9'])
   assert.equal(w.closeAudits[0].mode, 'execution_closed_unverified')
+  assert.equal(w.closeAudits[0].insideHostWrite, true, 'rebaseline (d): the runbook close transaction runs inside guard.withHostWrite too (N6)')
+  assert.equal(w.hostWriteDepth, 0)
 })
 
 test('RB-01 the request bodies: recover verify / close (digest required for close, cursor only on verify); close-unverified inspect / close (echo, ticket handle, the exact acknowledgement)', () => {

@@ -26,6 +26,11 @@
  *            an unfinished execution; a puller close not yet settled (the 106 header query); a TRANSPARENT close over an
  *            UNSETTLED `succeeded` subject (the 106 header query, B-22); a plan left `confirmed` by a nothing_landed close
  *            (P3); a recovery-written plan RW — and the 106 query is zero once the settlement names the subject.
+ *
+ * The recovery through the REAL routes on the REAL stack (the multitable host, the route table, the lock's heartbeat, the
+ * 批次标识 stamping writer) lives beside the stacks it needs, in stock-preparation-project-write-lock-realdb.cases.ts:
+ * S9R-BI-02, S9R-BI-03, S9R-25 / 25b, S9R-29d (in its BI-1b block) and S9R-16 (recovery leg) / S9R-18 (P1 leg) (in its S8
+ * block).
  */
 import { createRequire } from 'module'
 import path from 'node:path'
