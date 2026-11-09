@@ -652,6 +652,29 @@ test.describe('D2 落地裁决(§2.2 / workbenchAccess.stockPrepLandingKey)', ()
     await expect(page.locator('[data-testid="stock-prep-project-board-title"]')).toContainText(SYN_PROJECT_A)
     expectNoUnmockedRoutes(log)
   })
+
+  test('批次标识 BI-3 · 开关打开时项目备料页显示最近拉取批次和一次含义说明', async ({ page }) => {
+    const log = await openStockPrepHarness(page, { actor: 'platform', scenario: 'pullBatch', projectNo: SYN_PROJECT_A })
+    await expect(page.locator('[data-testid="stock-prep-project-board-title"]')).toContainText(SYN_PROJECT_A)
+    const line = page.locator('[data-testid="stock-prep-project-board-pull-batch"]')
+    await expect(line).toHaveCount(1)
+    await expect(line).toBeVisible()
+    await expect(line).toHaveAttribute('data-pull-batch-state', 'ready')
+    await expect(line).toContainText('最近拉取批次：第2批（2026-11-08） · 共 2 批')
+    const meaning = page.locator('[data-testid="stock-prep-project-board-pull-batch-meaning"]')
+    await expect(meaning).toHaveCount(1)
+    await expect(meaning).toBeVisible()
+    await expect(meaning).toContainText('首次批次：这个物料在本项目第几批拉取时第一次出现；不表示这一行已经备过料。')
+    await expect(page.getByText('本次拉取：这一行是在第几批拉取时建立的。')).toHaveCount(1)
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('批次标识 BI-3 · 开关关着(ready 世界,看板不带 pullBatch 键)时整段不存在', async ({ page }) => {
+    const off = await openStockPrepHarness(page, { actor: 'platform', scenario: 'ready', projectNo: SYN_PROJECT_A })
+    await expect(page.locator('[data-testid="stock-prep-project-board-title"]')).toContainText(SYN_PROJECT_A)
+    await expect(page.locator('[data-testid^="stock-prep-project-board-pull-batch"]')).toHaveCount(0)
+    expectNoUnmockedRoutes(off)
+  })
 })
 
 // ---------------------------------------------------------------------------

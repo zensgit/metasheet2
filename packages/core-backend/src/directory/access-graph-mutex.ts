@@ -22,6 +22,8 @@ export type LockedAccessGraphUser = {
   username: string | null
   mobile: string | null
   activationStatus: string | null
+  /** Raw `users.role`; the shared authentication gate treats `'disabled'` as inactive. */
+  role: string | null
   isActive: boolean
   accessGeneration: number
   deletedAt: string | null
@@ -49,6 +51,7 @@ export async function lockUsersForAccessGraphWrite(
               username,
               mobile,
               activation_status,
+              role,
               COALESCE(is_active, TRUE) AS is_active,
               COALESCE(access_generation, 0)::bigint AS access_generation,
               (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
@@ -74,6 +77,7 @@ export async function lockUsersForAccessGraphWrite(
         row.activation_status === null || row.activation_status === undefined
           ? null
           : String(row.activation_status),
+      role: row.role === null || row.role === undefined ? null : String(row.role),
       isActive: row.is_active === true,
       accessGeneration: Number(row.access_generation ?? 0),
       deletedAt: row.deleted_at === null || row.deleted_at === undefined || String(row.deleted_at).length === 0

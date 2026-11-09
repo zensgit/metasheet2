@@ -30,9 +30,11 @@ import { rawRequest, startTasksListener, type TasksListener } from '../helpers/t
  * The shape table compares, per seeded user, the server's own answer on both routes (a token with
  * no role or permission claims, so the user is read from the database as in production) with the
  * write points and with the predicate called on its own; each route's answer is also pinned on its
- * own (READ_OPEN, WRITE_OPEN), not only the two together. Each shape uses a fresh user: the route
- * guard keeps a short per-user memo, so a user's grants never change after their first request.
- * The source mutants at the end must each turn a cell red.
+ * own (READ_OPEN, WRITE_OPEN), not only the two together. Each shape uses a fresh user. A
+ * pool-path permission read follows the committed rows. The codes read inside the assignee
+ * predicate stays on the caller's db: an uncommitted removal is denied there while the pool
+ * still grants it, and rollback restores the grant. The source mutants at the end must each
+ * turn a cell red.
  */
 
 if (process.env.EXPECT_DB !== '1') {
@@ -497,7 +499,7 @@ describe('task access: source mutants', () => {
     `), {}, { unique: true })
   }, 180000)
 
-  it('mutant|m4: the codes read leaves the caller db, so a code removed after the first answer is still honoured', async () => {
+  it('mutant|m4: the codes read leaves the caller db, so an uncommitted tasks:write removal is still admitted', async () => {
     const stamp = stampOf()
     const orgId = orgOf('mut4', stamp)
     const seed = async (label: string): Promise<{ userId: string; roleId: string }> => {
@@ -508,19 +510,44 @@ describe('task access: source mutants', () => {
       await admissionRow(userId, true)
       return { userId, roleId }
     }
-    // Control, unmutated: the second answer follows the database.
+    const removeWrite = `DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'tasks:write'`
+    // Unmutated: the caller transaction sees the removal; the pool still grants; rollback restores.
     const control = await seed('m4c')
     expect((await findTaskAccessHolders(poolDb, [control.userId])).has(control.userId)).toBe(true)
-    await pool().query(`DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'tasks:write'`, [control.roleId])
-    expect((await findTaskAccessHolders(poolDb, [control.userId])).has(control.userId)).toBe(false)
+    const client = new pg.Client({ connectionString: process.env.DATABASE_URL })
+    let rolledBack = false
+    try {
+      await client.connect()
+      await client.query('BEGIN')
+      await client.query(removeWrite, [control.roleId])
+      const txDb: Db = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows }) }
+      expect((await findTaskAccessHolders(txDb, [control.userId])).has(control.userId)).toBe(false)
+      expect((await findTaskAccessHolders(poolDb, [control.userId])).has(control.userId)).toBe(true)
+      await client.query('ROLLBACK')
+      rolledBack = true
+    } finally {
+      if (!rolledBack) await client.query('ROLLBACK').catch(() => undefined)
+      await client.end().catch(() => undefined)
+    }
+    expect((await findTaskAccessHolders(poolDb, [control.userId])).has(control.userId)).toBe(true)
 
     const target = await seed('m4m')
     runSourceMutant(ACCESS_FILE, 'listUserPermissions(userId, db.query)', 'listUserPermissions(userId)', probe(`
-      const first = await holds(${JSON.stringify(target.userId)})
-      await pool.query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'tasks:write'", [${JSON.stringify(target.roleId)}])
-      const second = await holds(${JSON.stringify(target.userId)})
-      console.log(JSON.stringify({ mutant: 'm4', first, second }))
-      process.exit(first && second ? 0 : 1)
+      const client = await pool.getInternalPool().connect()
+      let admitted = false
+      let outside = false
+      try {
+        await client.query('BEGIN')
+        await client.query(${JSON.stringify(removeWrite)}, [${JSON.stringify(target.roleId)}])
+        const txDb = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows }) }
+        admitted = (await findTaskAccessHolders(txDb, [${JSON.stringify(target.userId)}])).has(${JSON.stringify(target.userId)})
+        outside = await holds(${JSON.stringify(target.userId)})
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+      console.log(JSON.stringify({ mutant: 'm4', admitted, outside }))
+      process.exit(admitted && outside ? 0 : 1)
     `), {}, { unique: true })
   }, 180000)
 

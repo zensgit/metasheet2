@@ -568,3 +568,67 @@ describe('MetaAutomationLogViewer — legacy DingTalk "not linked for users" err
     })
   }
 })
+
+// Delivery-result truthfulness: a send_email run whose transport only simulated (development) is recorded by the
+// executor as a SKIPPED execution and step — never success — with `{ outcome: 'not_sent', reason, notificationStatus }`.
+// The panel must badge it 已跳过 / skipped, render one sentence, and never show the raw tokens.
+const SIMULATED_EXECUTION: AutomationExecution = {
+  id: 'exec-simulated',
+  ruleId: 'rule-1',
+  status: 'skipped',
+  triggeredBy: 'event',
+  triggeredAt: '2026-11-06T10:00:00Z',
+  duration: 5,
+  steps: [
+    {
+      actionType: 'send_email',
+      status: 'skipped',
+      durationMs: 4,
+      output: {
+        outcome: 'not_sent',
+        reason: 'email_transport_simulated',
+        notificationId: 'email_fake_1',
+        notificationStatus: 'simulated',
+        recipientCount: 2,
+      },
+    },
+  ],
+}
+const SIMULATED_STATS: AutomationStats = { total: 1, success: 0, failed: 0, skipped: 1, avgDuration: 5 }
+
+describe('MetaAutomationLogViewer — a send_email run that only simulated (delivery-result truthfulness)', () => {
+  it('zh: counted as 已跳过 (not 成功), badged 已跳过, one sentence, raw tokens absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({ logs: [SIMULATED_EXECUTION], stats: SIMULATED_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    expect(mounted.container.querySelector('[data-stat="skipped"] [data-field="stat-skipped"]')?.textContent?.trim()).toBe('1')
+    expect(mounted.container.querySelector('.meta-log-viewer__stat-value--success')?.textContent?.trim()).toBe('0')
+    expect(mounted.container.querySelector('[data-log-id="exec-simulated"] [data-status="skipped"]')?.textContent?.trim()).toBe('已跳过')
+
+    const item = await expandLog(mounted.container, 'exec-simulated')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('已跳过')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--success')).toBeNull()
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('邮件未发送：邮件通道处于模拟模式（开发环境），未实际投递。')
+    const output = item.querySelector('[data-field="step-output"]')?.textContent ?? ''
+    expect(output).toContain('email_fake_1') // ids stay raw
+    expect(output).toContain('2')
+    const text = item.textContent ?? ''
+    for (const token of ['email_transport_simulated', 'not_sent', 'simulated', 'notificationStatus']) {
+      expect(text, token).not.toContain(token)
+    }
+  })
+
+  it('en: the same run reads in English, still without the raw tokens', async () => {
+    const client = makeMockClient({ logs: [SIMULATED_EXECUTION], stats: SIMULATED_STATS })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = await expandLog(mounted.container, 'exec-simulated')
+    expect(item.querySelector('[data-field="step-reason"]')?.textContent).toBe('Email not sent: the email transport is in simulation mode (development); nothing was delivered.')
+    expect(item.querySelector('.meta-log-viewer__step .meta-log-viewer__badge--skipped')?.textContent).toBe('skipped')
+    const text = item.textContent ?? ''
+    expect(text).not.toContain('email_transport_simulated')
+    expect(text).not.toContain('not_sent')
+  })
+})
