@@ -145,6 +145,9 @@ function makeFakeDb(options: {
         ? { rows: [{ id }], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
+    if (/^SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)$/i.test(norm)) {
+      return { rows: [{ pg_advisory_xact_lock: '' }], rowCount: 1 }
+    }
     if (/^SELECT id, name FROM roles WHERE id=/i.test(norm)) {
       const id = String(params[0])
       const name = state.roleNames.get(id)
@@ -1458,6 +1461,63 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     const roleDelete = statements.findIndex((sql) => /^DELETE FROM roles WHERE id=/i.test(sql))
     expect(removal).toBeGreaterThanOrEqual(0)
     expect(removal).toBeLessThan(roleDelete)
+    const admissionLocks = db.statements.filter((statement) => (
+      /pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/i.test(statement.sql)
+    ))
+    const firstLock = db.statements.findIndex((statement) => (
+      /pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/i.test(statement.sql)
+    ))
+    const memberRead = statements.findIndex((sql) => /^SELECT user_id FROM user_roles WHERE role_id=/i.test(sql))
+    expect(admissionLocks.map((statement) => statement.params)).toEqual([
+      ['namespace-admission:user-a'],
+      ['namespace-admission:user-b'],
+    ])
+    expect(firstLock).toBeGreaterThan(0)
+    expect(firstLock).toBeGreaterThan(memberRead)
+    expect(firstLock).toBeLessThan(removal)
+  })
+
+  it('LOCK: admission locks follow sorted user id, not the snapshot order, and an ordinary role takes none', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = makeFakeDb({
+      catalog: [...CATALOG, 'crm:read'],
+      roleDeleteCascades: false,
+      state: {
+        roleNames: new Map([['crm_admin', 'CRM 管理员'], ['role-1', '备料角色']]),
+        roleUpdatedAt: new Map([
+          ['crm_admin', SEEDED_UPDATED_AT],
+          ['role-1', SEEDED_UPDATED_AT],
+        ]),
+        rolePermissions: new Map([
+          ['crm_admin', ['crm:read']],
+          ['role-1', ['roles:read']],
+        ]),
+        members: new Map([
+          ['crm_admin', ['user-b', 'user-a']],
+          ['role-1', ['user-b', 'user-a']],
+        ]),
+        delegatedScopes: [{ admin_user_id: 'user-b', namespace: 'crm' }],
+        delegatedGroupScopes: [],
+      },
+    })
+    wire(db)
+    const adminRes = mockResponse()
+    await deleteRole(adminRes, 'crm_admin')
+    expect(adminRes.statusCode).toBe(200)
+    const locks = db.statements.filter((statement) => (
+      /pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/i.test(statement.sql)
+    ))
+    expect(locks.map((statement) => statement.params)).toEqual([
+      ['namespace-admission:user-a'],
+      ['namespace-admission:user-b'],
+    ])
+    const beforeOrdinary = db.statements.length
+    const ordinaryRes = mockResponse()
+    await deleteRole(ordinaryRes, 'role-1')
+    expect(ordinaryRes.statusCode).toBe(200)
+    expect(db.statements.slice(beforeOrdinary).some((statement) => (
+      /pg_advisory_xact_lock/i.test(statement.sql)
+    ))).toBe(false)
   })
 
   it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
