@@ -2,10 +2,12 @@
  * Privilege classification for security actions against real Postgres: the one-statement grant read
  * matches the live schema, every grant source classifies as high on its own, the second subject's
  * rows never reach the first subject, the classifier sees at least every code the authorization
- * aggregator sees, the permission cache is not consulted, and every read failure refuses.
+ * aggregator sees, an uncommitted admin grant is visible on the caller's transaction and absent
+ * from the pool until commit, and every read failure refuses.
  *
- * Real PG transactions only; no provider or network calls. Every case except the cache case runs
- * inside one transaction that is rolled back, so no row outlives it.
+ * Real PG transactions only; no provider or network calls. The transaction-affinity case commits a
+ * base user, rolls the admin grant back, then commits it once so the pool read is fresh. Every
+ * other case runs inside one transaction that is rolled back, so no row outlives it.
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -24,7 +26,7 @@ import {
 import type { HighPrivilegeReason, PrivilegeInputs } from '../../src/auth/security-action-privilege'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { isAdminLevelPermissionCode } from '../../src/rbac/role-assignment'
-import { invalidateUserPerms, isAdmin, listUserPermissions } from '../../src/rbac/service'
+import { isAdmin, listUserPermissions } from '../../src/rbac/service'
 import { LEGACY_KEY_EXISTENCE_PREDICATE, legacyKeyExistencePredicateIsPinned } from '../helpers/security-action-privilege-harness'
 
 const suite = process.env.DATABASE_URL ? describe : describe.skip
@@ -269,12 +271,16 @@ suite('security action privilege classification (real PostgreSQL)', () => {
     })
   })
 
-  it('classifies from the rows and not from the permission cache', async () => {
+  it('classifies an uncommitted admin grant on the caller transaction and a committed grant on the pool', async () => {
     const user = 'p04a-' + randomUUID()
     const role = 'p04a-role-' + user
     const baseCode = `permission:${user}`
     const addedCode = `admin:${user}`
     const client = await getPool().connect()
+    const grantAdminCode = async () => {
+      await ensurePermission(client, addedCode)
+      await client.query('INSERT INTO role_permissions(role_id,permission_code) VALUES($1,$2)', [role, addedCode])
+    }
     try {
       await client.query('BEGIN')
       await client.query(
@@ -285,25 +291,36 @@ suite('security action privilege classification (real PostgreSQL)', () => {
       await grantRole(client, user, role, [baseCode])
       await client.query('COMMIT')
 
-      invalidateUserPerms(user)
-      const cached = await listUserPermissions(user)
-      expect(cached).toContain(baseCode)
+      const committedBase = await listUserPermissions(user)
+      expect(committedBase).toContain(baseCode)
+      expect(committedBase).not.toContain(addedCode)
 
       await client.query('BEGIN')
-      await ensurePermission(client, addedCode)
-      await client.query('INSERT INTO role_permissions(role_id,permission_code) VALUES($1,$2)', [role, addedCode])
+      await grantAdminCode()
+      const poolDuring = await listUserPermissions(user)
+      expect(poolDuring).toContain(baseCode)
+      expect(poolDuring).not.toContain(addedCode)
+      expect(await listUserPermissions(user, runnerOf(client))).toContain(addedCode)
+      const elevated = await assessSecurityActionPrivilege(executorOf(client), user)
+      expect(elevated.privilegeClass).toBe('high')
+      expect(elevated.reasons).toEqual(['admin_level_code'])
+      await client.query('ROLLBACK')
+
+      const restoredPool = await listUserPermissions(user)
+      expect(restoredPool).toContain(baseCode)
+      expect(restoredPool).not.toContain(addedCode)
+      await client.query('BEGIN')
+      const restored = await assessSecurityActionPrivilege(executorOf(client), user)
+      expect(restored.privilegeClass).toBe('standard')
+      expect(restored.reasons).toEqual([])
+      await client.query('ROLLBACK')
+
+      await client.query('BEGIN')
+      await grantAdminCode()
       await client.query('COMMIT')
-
-      const stillCached = await listUserPermissions(user)
-      expect(stillCached).toContain(baseCode)
-      expect(stillCached).not.toContain(addedCode)
-
-      await withRollback(async (fresh) => {
-        expect(await listUserPermissions(user, runnerOf(fresh))).toContain(addedCode)
-        const assessment = await assessSecurityActionPrivilege(executorOf(fresh), user)
-        expect(assessment.privilegeClass).toBe('high')
-        expect(assessment.reasons).toEqual(['admin_level_code'])
-      })
+      const freshPool = await listUserPermissions(user)
+      expect(freshPool).toContain(baseCode)
+      expect(freshPool).toContain(addedCode)
     } finally {
       try {
         await client.query('ROLLBACK').catch(() => undefined)
@@ -312,7 +329,6 @@ suite('security action privilege classification (real PostgreSQL)', () => {
         await client.query('DELETE FROM roles WHERE id = $1', [role])
         await client.query('DELETE FROM permissions WHERE code = ANY($1::text[])', [[baseCode, addedCode]])
         await client.query('DELETE FROM users WHERE id = $1', [user])
-        invalidateUserPerms(user)
       } finally {
         client.release()
       }
