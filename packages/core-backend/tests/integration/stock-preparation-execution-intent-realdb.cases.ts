@@ -26,6 +26,9 @@
  *   S9R-30   the subject window: one verified_closed / landed subject, then six transparent closes — the consult still
  *            carries the subject (the settlement-subject read), the derivation answers executed_pending_settlement and the
  *            formal surface refuses; settled naming it => complete and allowed.
+ *   S9R-RB   the ROLLBACK stop condition, run as the 106 header prints it: a transparent close newer than an unsettled
+ *            subject (`succeeded`, and `verified_closed` / landed) counts 1 — an older build would derive that raw newest
+ *            as 已完成 — and 0 once the settlement names the subject.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -271,6 +274,58 @@ export function defineStockPreparationExecutionIntentRealDbCases(): void {
       expect(formalSurfaceVerdict(derived)).toEqual({ allowed: false, reason: 'state' })
       const settled = readProjectRefreshState({ ...consult, state: { settledAt: new Date().toISOString(), settledExecutionId: subject.id, settledSheetMachineDigest: 'd' } })
       expect([settled.status, formalSurfaceVerdict(settled).allowed]).toEqual(['complete', true])
+    }, 120000)
+
+    test('S9R-RB the ROLLBACK stop condition printed in migration 106\'s header counts a transparent close over an UNSETTLED subject — a `succeeded` one as well as a `verified_closed` one — and is zero once the settlement names the subject', async () => {
+      // The query exactly as the header prints it: from its `SELECT count(*)` line through the line that closes it, `-- `
+      // stripped. An older build derives the RAW newest execution; a transparent close newer than an unsettled subject
+      // reads to it as 已完成, so the stop condition must see that subject whatever its status.
+      const header = fs.readFileSync(MIGRATION_106, 'utf8').replace(/\r\n/g, '\n').split('\n')
+      const first = header.findIndex((line) => /^--\s+SELECT count\(\*\) FROM integration_stock_prep_refresh_state s\s*$/.test(line))
+      const last = header.findIndex((line, index) => index > first && /\)\);\s*$/.test(line))
+      expect([first > 0, last > first]).toEqual([true, true])
+      const stopSql = header.slice(first, last + 1).map((line) => line.replace(/^--\s?/, '')).join('\n').replace(/;\s*$/, '')
+      const stopCount = async (scope: any) => Number((await q(`${stopSql} AND s.tenant_id = $1 AND s.sheet_id = $2 AND s.project_no = $3`, [TENANT, scope.sheetId, scope.projectNo])).rows[0].count)
+
+      const store = storeOn()
+      const intent = () => buildExecutionIntent({ plan: { decisions: addDecisions(1) }, planDigest: PLAN_DIGEST })
+      const seed = async (name: string, subjectKind: 'succeeded' | 'verified_closed') => {
+        const scope = scopeOf(`rb_${name}`)
+        const stateId = `rst_s61_${TOKEN}_${name}`
+        await q(`INSERT INTO ${RT.state} (id, tenant_id, sheet_id, project_no, write_scope_key) VALUES ($1, $2, $3, $4, 'k')`, [stateId, TENANT, scope.sheetId, scope.projectNo])
+        // E0: an earlier success the settlement names.
+        const e0 = await store.beginExecution(beginInput(scope, { intent: intent() }))
+        await store.finishExecution({ ...scope, executionId: e0.id, status: 'succeeded', written: 1, attemptedWrites: 1 })
+        await q(`UPDATE ${RT.state} SET settled_at = now(), settled_execution_id = $1, settled_sheet_machine_digest = 'm0', settled_source_content_digest = 's0', settled_generation_token = 'g0' WHERE id = $2`, [e0.id, stateId])
+        // E1: the newest settlement subject, NOT settled — a success that wrote, or a landed close (S6-2's puller shape).
+        const e1 = await store.beginExecution(beginInput(scope, { intent: intent() }))
+        await store.finishExecution({ ...scope, executionId: e1.id, status: 'succeeded', written: 1, attemptedWrites: 1 })
+        if (subjectKind === 'verified_closed') {
+          await q(`UPDATE ${RT.execution} SET status = 'verified_closed', verified_result = 'landed', verified_at = now(), verified_by = 'u_s61', closed_mode = 'puller_verified', pre_close_status = 'running' WHERE id = $1`, [e1.id])
+        }
+        // E2: a TRANSPARENT close after it (an unbound decision-0 stop: aborted 0 / 0), the raw newest.
+        const e2 = await store.beginExecution(beginInput(scope, { intent: intent() }))
+        const done = await store.finishExecution({ ...scope, executionId: e2.id, status: 'aborted', written: 0, attemptedWrites: 0 })
+        expect([done.selfVerified, done.settlementSubject]).toEqual([true, false])
+        for (const [id, minutes] of [[e0.id, 3], [e1.id, 2], [e2.id, 1]] as Array<[string, number]>) {
+          await q(`UPDATE ${RT.execution} SET started_at = now() - make_interval(mins => $2) WHERE id = $1`, [id, minutes])
+        }
+        return { scope, stateId, e1, e2 }
+      }
+
+      for (const kind of ['succeeded', 'verified_closed'] as const) {
+        const { scope, stateId, e1, e2 } = await seed(kind === 'succeeded' ? 'succ' : 'vc', kind)
+        const consult = await consultOf(store, scope)
+        // The hazard: the raw newest is the transparent close (an older build's 已完成); this build names E1 and refuses.
+        expect(stateLib.newestExecution(consult.executions).id).toBe(e2.id)
+        const derived = readProjectRefreshState(consult)
+        expect([kind, derived.status, formalSurfaceVerdict(derived).allowed]).toEqual([kind, 'executed_pending_settlement', false])
+        expect([kind, await stopCount(scope)]).toEqual([kind, 1])
+        // Settled naming the subject: complete here, and the stop condition is zero.
+        await q(`UPDATE ${RT.state} SET settled_execution_id = $1 WHERE id = $2`, [e1.id, stateId])
+        expect([kind, readProjectRefreshState(await consultOf(store, scope)).status]).toEqual([kind, 'complete'])
+        expect([kind, await stopCount(scope)]).toEqual([kind, 0])
+      }
     }, 120000)
   })
 }

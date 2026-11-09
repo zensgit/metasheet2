@@ -47,13 +47,15 @@
 -- before) SELECT, INSERT and UPDATE on integration_stock_prep_refresh_execution and integration_stock_prep_change_plan.
 --
 -- ROLLBACK. Plugin SQL migrations are up-only; there is no down(). Roll back with the older build and RunMigrations 0.
--- An older build ignores every new column and the intent table, but it derives a `verified_closed` newest execution as
--- 已完成 — so before rolling back, settle every governed project whose newest settlement subject is `verified_closed`
--- and not named by settled_execution_id (zero required):
+-- An older build ignores every new column and the intent table, but it derives the RAW newest execution, and a
+-- `verified_closed` one as 已完成 — so a transparent close newer than an unsettled `succeeded` or `verified_closed`
+-- subject hides that subject from it. Before rolling back, settle every governed project whose newest settlement
+-- subject is not named by settled_execution_id (zero required; an unfinished subject is already 失败待恢复 in both
+-- builds and is covered by the 102 / 103 / 104 stop conditions):
 --   SELECT count(*) FROM integration_stock_prep_refresh_state s
 --    WHERE EXISTS (SELECT 1 FROM integration_stock_prep_refresh_execution e
 --                   WHERE e.sheet_id = s.sheet_id AND e.project_no = s.project_no AND e.settlement_subject
---                     AND e.status = 'verified_closed' AND e.id IS DISTINCT FROM s.settled_execution_id
+--                     AND e.status IN ('succeeded', 'verified_closed') AND e.id IS DISTINCT FROM s.settled_execution_id
 --                     AND e.started_at = (SELECT max(e2.started_at) FROM integration_stock_prep_refresh_execution e2
 --                                          WHERE e2.sheet_id = s.sheet_id AND e2.project_no = s.project_no AND e2.settlement_subject));
 -- next to the 102 / 103 / 104 stop conditions. Rows always stay.
