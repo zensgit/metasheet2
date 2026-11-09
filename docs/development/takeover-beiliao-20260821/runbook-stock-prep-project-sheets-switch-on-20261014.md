@@ -552,7 +552,7 @@ $line = (Select-String -LiteralPath $envFile -Pattern '^\s*STOCK_PREP_SANDBOX_TA
 @($line.Substring($line.IndexOf('=') + 1).Trim().Trim('"').Trim("'").Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq '<旧表 objectId>' }).Count
 ```
 
-④ 现算的字段 id 在这张表上都存在（模板 35 列 + 客户包的 `ext_` 列。2026-11-06 修订：R-71 ⑦.4 PR-4 在模板末尾加了 `issueConfirmDate`、`projectSpecModel` 两列，此前为 33 列；两列的升级顺序见附录 C；任何一列对不上，dry-run 会被字段存在探针挡下，`stock-preparation-table-actions.cjs:801`，调用 `:2404`、`:3221`）：
+④ 现算的字段 id 在这张表上都存在（模板 35 列 + 客户包的 `ext_` 列。2026-11-06 修订：R-71 ⑦.4 PR-4 在模板末尾加了 `issueConfirmDate`、`projectSpecModel` 两列，此前为 33 列；两列的升级顺序见附录 C；任何一列对不上，dry-run 会被字段存在探针挡下，`stock-preparation-table-actions.cjs:807`，调用 `:2432`、`:3268`）：
 
 ```
 WITH o AS (
@@ -704,7 +704,7 @@ END $$;
 | 操作 | 结果 |
 |---|---|
 | 拉取 dry-run / apply / mvp-persist、大 BOM「计划」 | 422 `fieldExistenceMode: 'db'`，**什么都没写**（探针在读来源、读存量行之前就拒）；补列后清（第 3–4 步） |
-| 大 BOM「批准」/「分块执行」/ 作业 GET（展开作业、应用作业）/「取消」 | 422 `fieldMapMode: 'explicit'`，**每个项目都一样**：这五处按 `readiness` 用途查动作（`http-routes.cjs:9128`、`:9363`、`:9465`、`:9484`、`:9602`），而 `readiness` 用途不叠加项目表（`stock-preparation-project-targets.cjs:220` 返回 null），查到的是 env 动作。**补列清不掉**，只有第 2 步之后才恢复；第 2 步做了、该项目还没补列时，这几处改答 422 `fieldExistenceMode: 'db'`，补列后才 200 |
+| 大 BOM「批准」/「分块执行」/ 作业 GET（展开作业、应用作业）/「取消」 | 第 2 步之前：422 `fieldMapMode: 'explicit'`，**每个项目都一样**：这五处按 `readiness` 用途查动作（`http-routes.cjs:9128`、`:9363`、`:9465`、`:9484`、`:9602`），而 `readiness` 用途不叠加项目表（`stock-preparation-project-targets.cjs:220` 返回 null），查到的是 env 动作。**补列清不掉**，只有第 2 步之后才恢复。第 2 步之后、该项目还没补列时，只有「批准」（`:9407`）和「分块执行」（`:9524`）做字段存在检查，答 422 `fieldExistenceMode: 'db'`，补列后才 200；作业 GET 和「取消」过了绑定门就直接处理作业，不查列 |
 | 大 BOM「开始」「运行」 | 照常 202 / 200。「开始」也经过绑定门（`http-routes.cjs:9083-9087`，`write` 用途），但开关开着时项目表的绑定是按这张表现算的（`stock-preparation-project-targets.cjs:171-188`），不用 env 里那份显式映射，所以放行；它们不走字段存在探针，随后的「计划」才停在探针上 |
 | 按项目导出 Excel | 照常 200（导出按项目表解析，是固定列投影，不走字段存在探针） |
 | 归档 / 恢复 | 照常 200（只改登记行，不碰表的列和行） |
@@ -714,7 +714,8 @@ END $$;
 
 | 操作 | 结果 |
 |---|---|
-| 拉取 dry-run（于是 apply 也拿不到令牌）、大 BOM 开始 | 422 `fieldMapMode: 'explicit'`，什么都没写；第 2 步之后若部署表还缺列，改答 422 `fieldExistenceMode: 'db'`，跑完上机脚本后 200 |
+| 拉取 dry-run（于是 apply 也拿不到令牌） | 422 `fieldMapMode: 'explicit'`，什么都没写；第 2 步之后若部署表还缺列，改答 422 `fieldExistenceMode: 'db'`，跑完上机脚本后 200 |
+| 大 BOM「开始」 | 422 `fieldMapMode: 'explicit'`，什么都没写；第 2 步之后答 202（「开始」不做字段存在检查），部署表还缺列时随后的「计划」答 422 `fieldExistenceMode: 'db'`，跑完上机脚本后正常 |
 | 导出 Excel | 422 `fieldMapMode: 'explicit'`（导出走 env 动作，`http-routes.cjs:13196-13198`）；第 2 步之后 200 |
 
 两个 422 都可恢复，什么都没写，不需要回退。
@@ -729,7 +730,7 @@ END $$;
    2. 照 §2.1 备份 `app.env`（带时间戳的副本）。
    3. 在 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` 里，把 `plm.stock-preparation.pull-bom.v1` 这一项的 `target` 和 `extensionFieldIds` **两个键整体替换**成上一步输出里的同名两半；其它键（来源、沙箱放行等）不动。不要用会写 BOM / UTF-16 的方式重写整个文件（§2.2 的说明）。
    4. 按 §2.4 的加键路径重启：先把 `app.env` 导入当前会话，再 `pm2 restart metasheet-backend --update-env`，带 §2.4 的门。
-   5. 核对：调一次只读的 `GET /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/large-bom/expansion-jobs/<任意作业号>`（开关开着、关着都走 env 动作；绑定门在读作业之前），或开关关着时对部署表做一次 dry-run。**不再**答 422 `fieldMapMode: 'explicit'` 就对了：作业号不存在时答 `LARGE_BOM_JOB_NOT_FOUND`；表还缺列时答 422 `fieldExistenceMode: 'db'`（第 3–4 步清）。注意「不再答 explicit 的 422」不等于绑定不再是显式映射——重新导出的那份仍是显式映射，只是完整了。
+   5. 核对：调一次只读的 `GET /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/large-bom/expansion-jobs/<任意作业号>`（开关开着、关着都走 env 动作；绑定门在读作业之前），或开关关着时对部署表做一次 dry-run。**不再**答 422 `fieldMapMode: 'explicit'` 就对了：作业号不存在时答 `LARGE_BOM_JOB_NOT_FOUND`——作业 GET 不做字段存在检查，表缺不缺列答的都一样；用 dry-run 核对时，部署表还缺列会答 422 `fieldExistenceMode: 'db'`（跑上机脚本后清）。注意「不再答 explicit 的 422」不等于绑定不再是显式映射——重新导出的那份仍是显式映射，只是完整了。
 3. 报告：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>", "dryRun": true}`。什么都不写；看 `columns.wouldAddFieldIds`，期望正好是 `["issueConfirmDate", "projectSpecModel"]`（更早建的表可能还缺别的列，照单补）。
 4. 核对后补列：同一路径，请求体 `{"projectNo": "<项目号>", "addMissingColumns": true}`。一次宿主事务加列；两列都是 `plm_system`，锁在建列的那条 INSERT 上（插入时就带 `humanWriteLock = 'plm_system'`），不靠之后的选项同步或加锁步骤，后面的步骤失败也不会让它们变成人可写（RC-18）。两列在模板里的位置是 33 / 34，但在已有的表上补列是接在表当前最后一列之后：第 i 列的 `order` = 表上所有列（模板列、`ext_` 列、批次列、人建的列）的最大 `order` + 1 + i（R-89）；表右侧已有批次列时，两列落在批次列之后（例如没有 `ext_` 列时是 35 / 36），不是 33 / 34（RC-20）。已有列逐字节不变（`order` 也不动），行不动；审计行记加了几列。再调一次加 0 列（幂等）。
    - 在这张表做 BI-6b 批次安装窗口（`runbook-stock-prep-pull-batch-install-window-20261108.md`）之前，先跑这一步补列（`addMissingColumns: true`）；没补之前，安装 dry_run 显示 `plm_lock_required`、`plmLock.missing = 2`，install 答 409 `STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED`。按 R-89，补列和批次安装先后执行时，两种顺序都不会把排列弄乱。例外：如果补列之后、批次安装之前有人在这张表上新建了列，批次列可能和那一列同序——这是 main 上批次列建列只看已知列、并在拿栅栏前读最大序号造成的（只影响排列，由 #6828 修）。
