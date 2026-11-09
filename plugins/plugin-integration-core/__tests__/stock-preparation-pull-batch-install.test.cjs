@@ -1013,6 +1013,7 @@ test('IN-28b (#6828 verifier) a firstPullBatch column committed concurrently bet
   const world = createWorld({ records: c09() })
   const CONCURRENT = Object.freeze({ physical: P_FPB, order: 77, property: { ...TP.pullBatchBandProperty('zh-CN'), concurrentSyn: true } })
   let committed = false
+  let seenBeforeRollback = null
   const racing = (tx) => ({
     ...tx,
     async resolveExistingObjectFieldIds(input) {
@@ -1029,7 +1030,11 @@ test('IN-28b (#6828 verifier) a firstPullBatch column committed concurrently bet
     ...base,
     async runObjectFieldsRepairTransaction(fn) {
       try {
-        return await base.runObjectFieldsRepairTransaction((tx) => fn(racing(tx)))
+        // The row as this transaction left it, read at the refusal, BEFORE the fake's snapshot rollback erases it.
+        return await base.runObjectFieldsRepairTransaction((tx) => fn(racing(tx)).catch((error) => {
+          seenBeforeRollback = structuredClone(world.fields.get('firstPullBatch'))
+          throw error
+        }))
       } finally {
         if (committed) world.fields.set('firstPullBatch', structuredClone(CONCURRENT))
       }
@@ -1047,7 +1052,8 @@ test('IN-28b (#6828 verifier) a firstPullBatch column committed concurrently bet
   const during = world.log.slice(logStart)
   assert.ok(during.includes('tx.ensureMissingObjectFields'), 'the write ran and reported the skipped id')
   assert.equal(world.fields.has('pullBatch'), false, 'the band\'s own new column is rolled back')
-  assert.deepEqual(world.fields.get('firstPullBatch'), CONCURRENT, 'the concurrent row is untouched')
+  assert.deepEqual(seenBeforeRollback, CONCURRENT, 'the repair transaction never touched the concurrent row')
+  assert.deepEqual(world.fields.get('firstPullBatch'), CONCURRENT, 'the concurrent row survives the rollback')
   assert.deepEqual(Array.from(world.fields.entries()).filter(([id]) => id !== 'firstPullBatch'), fieldsBefore, 'no other column changed')
   assert.deepEqual(allCells(world), cellsBefore, 'no cell written')
   assert.equal(during.some((entry) => entry === 'host.patchRecord' || entry.startsWith('prov.patchProperty') || entry.startsWith('prov.ensureView') || entry.startsWith('prov.promote')), false, 'no host write after the refusal')
