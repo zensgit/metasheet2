@@ -249,6 +249,21 @@ async function invokeRoute(
   return res
 }
 
+function expectScopeWriteSerialized(userId: string, writeSqlIncludes: string): void {
+  expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), userId)
+  const roleReads = pgMocks.query.mock.calls
+    .map((call, index) => ({ index, sql: String(call[0]) }))
+    .filter((call) => call.sql.includes('FROM user_roles'))
+  const writeIndex = pgMocks.query.mock.calls.findIndex((call) => String(call[0]).includes(writeSqlIncludes))
+  expect(roleReads.length).toBeGreaterThanOrEqual(2)
+  expect(writeIndex).toBeGreaterThan(roleReads[1].index)
+  const lockAt = namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mock.invocationCallOrder[0]
+  const roleAt = pgMocks.query.mock.invocationCallOrder[roleReads[1].index]
+  const writeAt = pgMocks.query.mock.invocationCallOrder[writeIndex]
+  expect(lockAt).toBeLessThan(roleAt)
+  expect(roleAt).toBeLessThan(writeAt)
+}
+
 describe('admin-users routes', () => {
   beforeEach(() => {
     vi.unstubAllEnvs()
@@ -2270,6 +2285,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -2310,6 +2326,38 @@ describe('admin-users routes', () => {
       resourceType: 'delegated-admin-scope',
       resourceId: 'user-2:crm:dept-1',
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
+  })
+
+  it('refuses a department scope assign when the role is gone under the admission lock', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'plugin-admin@example.com',
+          name: 'Plugin Admin',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_NAMESPACE_NOT_HELD')
+    expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), 'user-2')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
   })
 
   it('creates an organization scope template', async () => {
@@ -2473,6 +2521,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2507,6 +2556,7 @@ describe('admin-users routes', () => {
       resourceType: 'delegated-admin-group-scope',
       resourceId: 'user-2:crm:group:group-1',
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_member_groups')
   })
 
   it('applies template member groups to a delegated admin namespace', async () => {
@@ -2550,6 +2600,7 @@ describe('admin-users routes', () => {
           member_count: 2,
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -2581,6 +2632,7 @@ describe('admin-users routes', () => {
         memberGroupCount: 1,
       }),
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_member_groups')
   })
 
   it('adds a department to a scope template', async () => {
@@ -2681,6 +2733,7 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2717,6 +2770,7 @@ describe('admin-users routes', () => {
         mode: 'replace',
       }),
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
   })
 
   it('updates dingtalk grant and records an audit entry', async () => {

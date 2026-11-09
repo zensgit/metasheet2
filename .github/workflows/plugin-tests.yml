@@ -1698,8 +1698,9 @@ jobs:
           mkdir -p artifacts/grok-permission-lifecycle-ci
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-lifecycle.config.ts run \
             tests/integration/permission-lifecycle-realdb.test.ts \
+            tests/integration/permission-role-delete-realdb.test.ts \
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json
-          node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 1
+          node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 2
 
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
@@ -1727,6 +1728,23 @@ jobs:
         id: stock-preparation-yida-owner-browser-install
         if: matrix.node-version == '20.x'
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run permission browser real-DB gate
+        id: permission-browser-realdb
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for permission browser real-DB gate}"
+          mkdir -p artifacts/permission-browser-ci
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-browser.config.ts run \
+            tests/integration/permission-browser-realdb.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/permission-browser-ci/vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/permission-browser-ci/vitest.json 1
 
       - name: Install hash-pinned Chromium candidate for owner YiDa acceptance
         id: stock-preparation-pinned-browser-install

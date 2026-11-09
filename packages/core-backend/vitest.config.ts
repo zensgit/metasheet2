@@ -86,6 +86,9 @@ export default defineConfig({
       'tests/integration/yida-connection-test-http-realdb.test.ts',
       // Permission lifecycle real-DB gate. Trust-off config; whole file in plugin-tests.yml runtime-db.
       'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
+      // Real Chromium + HTTP + database; runs under its dedicated trust-off configuration.
+      'tests/integration/permission-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

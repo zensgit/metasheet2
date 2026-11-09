@@ -20,6 +20,8 @@ export default defineConfig({
       'tests/integration/task-enablement-http.db.test.ts',
       // Permission lifecycle real-DB gate. Trust-off config; this harness enables RBAC bypass.
       'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
+      'tests/integration/permission-browser-realdb.test.ts',
     ],
     testTimeout: 30000,
     hookTimeout: 15000,
