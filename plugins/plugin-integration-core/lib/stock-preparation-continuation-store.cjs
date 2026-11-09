@@ -1826,6 +1826,13 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * continuation's status_reason is one of RECONFIRMABLE_REASONS AND the hold (`relationship_reconfirm`
    * about this continuation) is confirmable. S25 and O-22 are re-checked under the lock exactly as in
    * `confirmContinuation` (the open holds before the bump, the unfinished executions after it).
+   *
+   * Pre-pilot fix batch 8(a) (register R-91; the PR-4 rule — every admissibility fact under the lock): a re-confirm
+   * re-activates a relationship, so it needs the pilot marker exactly as the plain confirm does (N1-b). The route's
+   * NOT_PILOT is the consult's picture; `options.pilotWithin` (REQUIRED — unwired is 501 `pilot_read_within` before any
+   * statement) re-decides it on THIS transaction's handle after the state-row lock and the hold re-read, before the
+   * bump and before any row moves. Cleared, or a pilot row on another sheet => 409 NOT_PILOT `{ decidedUnderLock: true }`
+   * and nothing is written; a failed read throws (never "not pilot").
    */
   async function reconfirmContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1839,6 +1846,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     const echo = normalizeEcho(input.echo)
     const sourceIdentity = normalizeSourceIdentity(input.sourceIdentity)
     const bumpWithin = requireBumpWithin(options)
+    const pilotWithin = requirePilotWithin(options)
     const auditWithin = auditHookOf(options)
     const at = clock()
 
@@ -1857,6 +1865,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (!nonBlankString(hold.pairingFingerprint) || !nonBlankString(hold.comparisonFingerprint) || !nonBlankString(hold.evidenceFingerprint)) throw holdMalformed('fingerprints_missing')
       const detail = isPlainObject(hold.detail) ? hold.detail : {}
       const history = EVIDENCE_HISTORY_STATUSES.includes(detail.history) ? detail.history : 'history_unknown'
+      // Pre-pilot fix batch 8(a): the pilot marker re-decided on this handle, after the state lock and the hold re-read.
+      await assertPilotWithin(trx, pilotWithin)
 
       // S25 under the lock: the last read before the bump (PR-4 review N2).
       const runbookOpen = runbookOnlyOf(await openHoldsOf(trx, scope))

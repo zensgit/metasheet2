@@ -986,6 +986,42 @@ test('RT-RC a relationship_reconfirm hold is confirmed through the SAME route wi
   } finally { st.restore() }
 })
 
+// Pre-pilot fix batch 8(a) (R-91): the re-confirm's NOT_PILOT is decided UNDER THE LOCK, as the plain confirm's is.
+test('RT-RC2 (8a) the pilot marker cleared AFTER the re-confirm route\'s consult (its NOT_PILOT passed), before the store\'s transaction: 409 NOT_PILOT decided under the lock — the relationship stays needs_reconfirmation at revision 1, the hold open, no bump, no decision audit; the marker back => the same body 201 revision 2', async () => {
+  const st = mount()
+  try {
+    const fixture = await refreshKit.candidateHoldFixture()
+    const confirmed = await st.env.seedConfirmedContinuation(st.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
+    const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId, { verdict: 'source_scope_changed' })
+    await st.env.seedHolds(st.scope, [reconfirm], { verdicts: { [confirmed.continuationId]: 'source_scope_changed' } })
+    const row = st.holds().find((entry) => entry.fingerprint === reconfirm.fingerprint && entry.status === 'open')
+    const page = dataOf(await listHolds(st))
+    const body = { holdId: row.id, holdFingerprint: reconfirm.fingerprint, comparisonFingerprint: reconfirm.comparisonFingerprint, evidenceFingerprint: reconfirm.evidenceFingerprint, readReceipt: page.readReceipt.id, acknowledge: { historyUnknown: true }, continuation: { id: confirmed.continuationId, revision: 1 } }
+    const before = JSON.stringify(st.env.snapshot())
+    const lock0 = JSON.stringify(st.lockRow())
+    const decisionAudits = () => st.audits().filter((item) => item.action === REFRESH_DECISION_AUDIT.decisionAction).length
+    const audits0 = decisionAudits()
+    const fired = pauseBeforeTransaction(st, 'hold', row.id, async () => {
+      for (const entry of st.h.registryRows()) if (entry.project_no === PROJECT) entry.pilot_enabled_at = null
+    })
+    const refused = await confirm(st, body)
+    assert.equal(fired(), true, 'calibration: the marker was cleared after the consult, before the transaction')
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(errorOf(refused).code, CODES.NOT_PILOT)
+    assert.equal(errorOf(refused).details.decidedUnderLock, true, 'refused by the STORE under the lock (the consult said pilot)')
+    assert.equal(JSON.stringify(st.env.snapshot()), before, 'nothing persisted')
+    assert.equal(JSON.stringify(st.lockRow()), lock0, 'no bump')
+    assert.equal(decisionAudits(), audits0, 'no decision audit row')
+    assert.equal(st.continuations()[0].status, 'needs_reconfirmation')
+    assert.equal(st.continuations()[0].revision, 1)
+    markPilot(st.h)
+    const done = await confirm(st, body)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(done.body.data.revision, 2)
+    assert.equal(st.continuations()[0].status, 'active')
+  } finally { st.restore() }
+})
+
 // ── RT-E: the end ────────────────────────────────────────────────────────────────────────────────
 
 async function needsReconfirmation(st, { count, verdict = 'new_position_removed' } = {}) {
