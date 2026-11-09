@@ -33,6 +33,7 @@ import {
   parsePersistedRunIntegrationJobConfig,
   type NormalizedRunIntegrationJobConfig,
 } from './automation-run-integration-job'
+import { checkRunIntegrationJobRuleSheet } from './automation-run-integration-job-rule-sheet'
 import {
   sanitizeIntegrationRunSummary,
   type IntegrationRunJob,
@@ -4329,6 +4330,18 @@ export class AutomationExecutor {
     if (parsed.binding.principalId !== context.ruleCreatedBy) {
       // ADR §6.2: the binding is frozen to created_by; a config whose binding names someone else never runs.
       return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', { cause: 'binding_principal_mismatch' })
+    }
+    // 0.5. R-69 I6a (ADR §3.1 + §6.5, re-checked on EVERY trigger): the rule's sheet is still the ACTIVE registered
+    // project sheet (registry 087) of the binding tenant. Archived / never registered / switch off ⇒ unregistered;
+    // another tenant's row ⇒ tenant mismatch — both skipped(principal_unauthorized) with a closed cause (the
+    // binding_principal_mismatch pattern; INTEGRATION_RUN_FINISHED_REASONS stays closed). Unreadable ⇒
+    // not_started(authority_unavailable). Before the port lookup: nothing is claimed, leased or called.
+    const ruleSheet = await checkRunIntegrationJobRuleSheet(this.deps.queryFn, { sheetId: context.sheetId, tenantId: parsed.binding.tenantId })
+    if (ruleSheet.ok === false) {
+      if (ruleSheet.refusal === 'unreadable') return this.runIntegrationJobStep('failed', 'not_started', 'authority_unavailable')
+      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', {
+        cause: ruleSheet.refusal === 'tenant_mismatch' ? 'rule_sheet_tenant_mismatch' : 'rule_sheet_unregistered',
+      })
     }
     const port = this.deps.integrationRunPort ? this.deps.integrationRunPort() : null
     if (!port) return this.runIntegrationJobStep('failed', 'not_started', 'port_inactive')

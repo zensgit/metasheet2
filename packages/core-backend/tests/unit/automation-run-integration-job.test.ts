@@ -7,6 +7,8 @@
  *
  * The fake database answers EXACTLY the statements automation-outbound-intent.ts and automation-job-lease.ts
  * issue (matched by shape), evaluates `now()` with the fake clock, and rolls a transaction back on throw.
+ * R-69 I6a: it is now the shared tests/utils/run-integration-job-fake-db.ts (it was a verbatim copy of it — diffed
+ * identical at 811552dd6), which also answers the project-sheet registry read of the rule-sheet re-check.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -25,124 +27,13 @@ import {
   validateRunIntegrationJobTriggerCoupling,
 } from '../../src/multitable/automation-run-integration-job'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
+import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
+import { createFakeJobDb } from '../utils/run-integration-job-fake-db'
 
 const FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
 const PRINCIPAL = { id: 'svc_user', permissions: ['stock-prep:pull', 'stock-prep:operate', 'stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' }
 const BINDING = { principalId: 'svc_user', tenantId: 'tenant_1' }
-
-// ── in-memory ledger model ─────────────────────────────────────────────────────────────────────────────────
-
-interface IntentRow { status: string; attempts: number; token: string | null; lease: number | null; lastError: string | null }
-interface LeaseRow { holder: string | null; fence: number; expires: number }
-
-function createFakeJobDb() {
-  const intents = new Map<string, IntentRow>()
-  const leases = new Map<string, LeaseRow>()
-  const log: string[] = []
-  let renewalsFailing = false
-  const key = (p: unknown[], idx = [0, 1, 2, 3]) => idx.map((i) => String(p[i])).join('|')
-  const query: AutomationDeps['queryFn'] = async (sql, params = []) => {
-    const now = Date.now()
-    if (/INSERT INTO meta_automation_outbound_intent/.test(sql)) {
-      const k = key(params)
-      log.push('intent:claim')
-      if (intents.has(k)) return { rows: [], rowCount: 0 }
-      intents.set(k, { status: 'pending', attempts: 1, token: String(params[4]), lease: now + Number(params[5]), lastError: null })
-      return { rows: [], rowCount: 1 }
-    }
-    if (/SELECT status, attempt_token/.test(sql)) {
-      const row = intents.get(key(params))
-      return { rows: row ? [{ status: row.status, attempt_token: row.token, lease_live: row.lease !== null && row.lease > now }] : [], rowCount: row ? 1 : 0 }
-    }
-    if (/SET status = 'outcome_unknown', last_error = 'lease_expired'/.test(sql)) {
-      const row = intents.get(key(params))
-      log.push('intent:expire')
-      if (row && row.status === 'pending' && row.token === (params[4] ?? null) && (row.lease === null || row.lease <= now)) {
-        row.status = 'outcome_unknown'; row.lastError = 'lease_expired'
-        return { rows: [], rowCount: 1 }
-      }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/SET status = 'pending', attempts = attempts \+ 1/.test(sql)) {
-      const row = intents.get(key(params))
-      if (row && row.status === 'failed') {
-        row.status = 'pending'; row.attempts += 1; row.token = String(params[4]); row.lease = now + Number(params[5])
-        return { rows: [], rowCount: 1 }
-      }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/UPDATE meta_automation_outbound_intent\s+SET lease_expires_at = now\(\)/.test(sql)) {
-      const row = intents.get(key(params))
-      log.push('intent:renew')
-      if (row && row.status === 'pending' && row.token === String(params[5])) { row.lease = now + Number(params[4]); return { rows: [], rowCount: 1 } }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/UPDATE meta_automation_outbound_intent\s+SET status = \$4/.test(sql)) {
-      const row = intents.get(key(params, [0, 1, 2, 5]))
-      log.push('intent:outcome')
-      if (row && row.status === 'pending' && row.token === String(params[6])) { row.status = String(params[3]); row.lastError = params[4] == null ? null : String(params[4]); return { rows: [], rowCount: 1 } }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/INSERT INTO meta_automation_job_leases/.test(sql)) {
-      const scope = String(params[0]); const row = leases.get(scope); const ttl = Number(params[2])
-      log.push('lease:claim')
-      if (!row) { leases.set(scope, { holder: String(params[1]), fence: 1, expires: now + ttl }); return { rows: [{ fence: '1' }], rowCount: 1 } }
-      if (row.expires <= now) { row.fence += 1; row.holder = String(params[1]); row.expires = now + ttl; return { rows: [{ fence: String(row.fence) }], rowCount: 1 } }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/SELECT 1 AS ok FROM meta_automation_job_leases/.test(sql)) {
-      const row = leases.get(String(params[0]))
-      log.push('lease:checkpoint')
-      return row && String(row.fence) === String(params[1]) && row.expires > now ? { rows: [{ ok: 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
-    }
-    if (/FROM meta_automation_job_leases[\s\S]*FOR UPDATE/.test(sql)) {
-      const row = leases.get(String(params[0]))
-      log.push('lease:lock')
-      return row ? { rows: [{ holder: row.holder, fence: String(row.fence), live: row.expires > now }], rowCount: 1 } : { rows: [], rowCount: 0 }
-    }
-    if (/UPDATE meta_automation_job_leases\s+SET lease_expires_at = now\(\) \+/.test(sql)) {
-      const row = leases.get(String(params[0]))
-      log.push('lease:renew')
-      if (row && String(row.fence) === String(params[1]) && row.holder === String(params[2]) && row.expires > now) { row.expires = now + Number(params[3]); return { rows: [], rowCount: 1 } }
-      return { rows: [], rowCount: 0 }
-    }
-    if (/UPDATE meta_automation_job_leases\s+SET lease_expires_at = now\(\), holder = NULL/.test(sql)) {
-      const row = leases.get(String(params[0]))
-      log.push('lease:release')
-      if (row && String(row.fence) === String(params[1])) { row.expires = now; row.holder = null; return { rows: [], rowCount: 1 } }
-      return { rows: [], rowCount: 0 }
-    }
-    throw new Error(`fake db: unexpected statement: ${sql.slice(0, 70)}`)
-  }
-  const snapshot = () => ({ i: new Map([...intents].map(([k, v]) => [k, { ...v }])), l: new Map([...leases].map(([k, v]) => [k, { ...v }])) })
-  const transaction: NonNullable<AutomationDeps['transaction']> = async (handler) => {
-    if (renewalsFailing) throw new Error('fake db: connection lost')
-    const before = snapshot()
-    log.push('BEGIN')
-    try {
-      const result = await handler({ query })
-      log.push('COMMIT')
-      return result
-    } catch (error) {
-      intents.clear(); leases.clear()
-      for (const [k, v] of before.i) intents.set(k, v)
-      for (const [k, v] of before.l) leases.set(k, v)
-      log.push('ROLLBACK')
-      throw error
-    }
-  }
-  return {
-    query,
-    transaction,
-    intents,
-    leases,
-    log,
-    /** Simulate the database becoming unreachable for every transaction (a dead process renews nothing). */
-    setTransactionsFailing(value: boolean) { renewalsFailing = value },
-    lease(scope: string) { return leases.get(scope) },
-    intentRows() { return [...intents.entries()] },
-  }
-}
 
 // ── fake port ──────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -248,9 +139,20 @@ describe('run_integration_job — save-time vocabulary (pure)', () => {
 
 describe('run_integration_job — AutomationService save gate', () => {
   const ORGS = /FROM user_orgs/i
-  function makeService(orgRows: Array<{ org_id: string }>) {
+  // R-69 I6a: every save now reads the project-sheet registry for the rule's sheet; 'sheet_1' is registered (active,
+  // tenant_1, P-1) by default so the existing cases keep their meaning; the I6a cases pass their own registry.
+  const REGISTRY = /FROM integration_stock_prep_project_target WHERE sheet_id = \$1/
+  function makeService(orgRows: Array<{ org_id: string }>, registry: Record<string, Record<string, unknown>> | Error = { sheet_1: { tenant_id: 'tenant_1', project_no: 'P-1', status: 'active', object_id: 'obj_1' } }) {
     const inserted: Record<string, unknown>[] = []
-    const queryFn = vi.fn(async (sql: string) => (ORGS.test(sql) ? { rows: orgRows, rowCount: orgRows.length } : { rows: [], rowCount: 0 }))
+    const queryFn = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (ORGS.test(sql)) return { rows: orgRows, rowCount: orgRows.length }
+      if (REGISTRY.test(sql)) {
+        if (registry instanceof Error) throw registry
+        const row = registry[String(params[0])]
+        return row ? { rows: [{ sheet_id: params[0], ...row }], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
     const chain: Record<string, unknown> = {}
     const chainFn = () => chain
     for (const m of ['selectFrom', 'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy', 'onConflict', 'columns', 'doUpdateSet', 'returningAll', 'leftJoin', 'insertInto', 'updateTable', 'deleteFrom', 'set']) chain[m] = vi.fn(chainFn)
@@ -265,7 +167,7 @@ describe('run_integration_job — AutomationService save gate', () => {
   })
   const JOB = { job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'dry_run_only' } }
 
-  beforeEach(() => { vi.stubEnv(FLAG, 'true') })
+  beforeEach(() => { vi.stubEnv(FLAG, 'true'); vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true') })
   afterEach(() => { vi.unstubAllEnvs() })
 
   it('switch OFF ⇒ RUN_ACTION_DISABLED (the route answers it 403), nothing persisted, no tenant read', async () => {
@@ -315,12 +217,69 @@ describe('run_integration_job — AutomationService save gate', () => {
     const { service } = makeService([{ org_id: 'tenant_1' }])
     await expect(service.createRule('sheet_1', cronInput({ job: { kind: 'nope' } }))).rejects.toBeInstanceOf(AutomationRuleValidationError)
   })
+
+  // ── R-69 I6a (ADR §3.1 + §6.5; T-layer defaults R-90): the rule's sheet = the binding tenant's registered sheet ──
+  const M = RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES
+  const ROW = (tenant: string, projectNo: string, status = 'active') => ({ tenant_id: tenant, project_no: projectNo, status, object_id: 'obj_x' })
+  it.each([
+    ['an unregistered sheet', 'sheet_9', JOB, { sheet_1: ROW('tenant_1', 'P-1') }, M.unregistered],
+    ["another tenant's registered sheet", 'sheet_2', JOB, { sheet_2: ROW('tenant_2', 'P-1') }, M.tenant_mismatch],
+    ['an archived sheet', 'sheet_1', JOB, { sheet_1: ROW('tenant_1', 'P-1', 'archived') }, M.unregistered],
+    ["a project that is not the sheet's", 'sheet_1', { job: { ...JOB.job, projectNos: ['P-2'] } }, { sheet_1: ROW('tenant_1', 'P-1') }, M.project_mismatch],
+    ["more than one project (even including the sheet's)", 'sheet_1', { job: { ...JOB.job, projectNos: ['P-1', 'P-2'] } }, { sheet_1: ROW('tenant_1', 'P-1') }, M.project_mismatch],
+  ])('I6a: saving on %s is a 400 (AutomationRuleValidationError) and nothing is written', async (_label, sheetId, actionConfig, registry, message) => {
+    const { service, inserted } = makeService([{ org_id: 'tenant_1' }], registry)
+    const refusal = await service.createRule(sheetId, cronInput(actionConfig)).then(() => null, (error: unknown) => error)
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect((refusal as Error).message).toBe(message)
+    expect(inserted).toHaveLength(0)
+    // values-free: the refusal names no sheet, tenant or project
+    for (const needle of ['sheet_', 'tenant_', 'P-1', 'P-2']) expect((refusal as Error).message).not.toContain(needle)
+  })
+  it("I6a: the project-sheets switch off (anything but exact 'true') fails closed — 400, nothing written, no registry read", async () => {
+    for (const value of ['TRUE', ' true', '1', '']) {
+      vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, value)
+      const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }])
+      await expect(service.createRule('sheet_1', cronInput(JOB))).rejects.toThrow(M.switch_off)
+      expect(inserted).toHaveLength(0)
+      expect(queryFn.mock.calls.some(([sql]) => REGISTRY.test(String(sql)))).toBe(false)
+    }
+  })
+  it('I6a: an unreadable registry is "could not be read; the rule was not saved" (400); a missing table (42P01) is unregistered', async () => {
+    const unreadable = makeService([{ org_id: 'tenant_1' }], Object.assign(new Error('boom'), { code: '57P01' }))
+    await expect(unreadable.service.createRule('sheet_1', cronInput(JOB))).rejects.toThrow(M.unreadable)
+    expect(M.unreadable).toMatch(/could not be read; the rule was not saved$/)
+    const missing = makeService([{ org_id: 'tenant_1' }], Object.assign(new Error('no table'), { code: '42P01' }))
+    await expect(missing.service.createRule('sheet_1', cronInput(JOB))).rejects.toThrow(M.unregistered)
+    expect(unreadable.inserted.length + missing.inserted.length).toBe(0)
+  })
+  it('I6a: the registered sheet of the binding tenant and its single project saves (the read names the RULE sheet)', async () => {
+    const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }], { sheet_7: ROW('tenant_1', 'P-7') })
+    await service.createRule('sheet_7', cronInput({ job: { ...JOB.job, projectNos: ['P-7'] } }))
+    expect(inserted).toHaveLength(1)
+    expect(queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)).toEqual([['sheet_7']])
+  })
+  it("I6a: an update re-runs the check on the rule's STORED sheet (archived since save => 400, nothing written)", async () => {
+    const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }], { sheet_1: ROW('tenant_1', 'P-1', 'archived') })
+    const chain = (service as unknown as { db: Record<string, ReturnType<typeof vi.fn>> }).db
+    chain.executeTakeFirst.mockImplementation(async () => ({
+      id: 'atr_1', sheet_id: 'sheet_1', trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+      action_type: 'run_integration_job', action_config: { ...JOB, timeoutMs: 60_000, binding: { principalId: 'svc_user', tenantId: 'tenant_1' } },
+      enabled: true, created_by: 'svc_user', actions: null, conditions: null, execution_mode: null,
+    }))
+    await expect(service.updateRule('atr_1', 'sheet_1', { actionConfig: { ...JOB, timeoutMs: 120_000 } }, 'editor_2')).rejects.toThrow(M.unregistered)
+    expect(chain.set).not.toHaveBeenCalled()
+    expect(inserted).toHaveLength(0)
+    expect(queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)).toEqual([['sheet_1']])
+  })
 })
 
 describe('run_integration_job — executor state machine (fake DB, fake clock)', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.stubEnv(FLAG, 'true')
+    // R-69 I6a: the rule-sheet re-check reads the registry only while the project-sheets switch is exactly 'true'.
+    vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true')
   })
   afterEach(() => {
     vi.useRealTimers()
@@ -590,5 +549,78 @@ describe('run_integration_job — executor state machine (fake DB, fake clock)',
     ])
     expect(db.intentRows()).toHaveLength(3)
     expect([...db.leases.keys()].sort()).toEqual(['stock_prep_pull:tenant_1:P-1', 'stock_prep_pull:tenant_1:P-2', 'stock_prep_pull:tenant_1:P-3'])
+  })
+})
+
+describe('R-69 I6a — the trigger re-checks the rule sheet before anything is claimed, leased or called', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.stubEnv(FLAG, 'true')
+    vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true')
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+  const nothingHappened = (db: ReturnType<typeof createFakeJobDb>, run: ReturnType<typeof vi.fn>) => {
+    expect(run).toHaveBeenCalledTimes(0)
+    expect(db.intentRows()).toHaveLength(0)
+    expect(db.lease(SCOPE)).toBeUndefined()
+  }
+
+  it('the registered sheet runs (control): the port is called once', async () => {
+    const db = createFakeJobDb()
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_i6a_ok')
+    expect(step.status).toBe('success')
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+  it('the sheet was ARCHIVED after save => skipped(principal_unauthorized, rule_sheet_unregistered), 0 port calls', async () => {
+    const db = createFakeJobDb()
+    db.projectTargets.get('sheet_1')!.status = 'archived'
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_i6a_archived')
+    expect(step).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+    nothingHappened(db, run)
+  })
+  it('the registration is GONE => rule_sheet_unregistered, 0 port calls', async () => {
+    const db = createFakeJobDb()
+    db.projectTargets.delete('sheet_1')
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_i6a_gone')
+    expect(step).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+    nothingHappened(db, run)
+  })
+  it('the sheet was RE-REGISTERED under another tenant after save => skipped(principal_unauthorized, rule_sheet_tenant_mismatch), 0 port calls', async () => {
+    const db = createFakeJobDb()
+    db.projectTargets.set('sheet_1', { tenantId: 'tenant_2', projectNo: 'P-1', status: 'active' })
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_i6a_tenant')
+    expect(step).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_tenant_mismatch' } })
+    nothingHappened(db, run)
+  })
+  it('the project-sheets switch was turned OFF after save => rule_sheet_unregistered, 0 port calls', async () => {
+    const db = createFakeJobDb()
+    const { port, run } = fakePort('immediate')
+    for (const value of ['false', 'TRUE', '']) {
+      vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, value)
+      const step = await harness(db, port).run(`exec_i6a_off_${value || 'empty'}`)
+      expect(step).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+    }
+    nothingHappened(db, run)
+  })
+  it('the registry is UNREADABLE => not_started(authority_unavailable), 0 port calls; the context sheet is the one read', async () => {
+    const db = createFakeJobDb()
+    db.setRegistryUnreadable('57P01')
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_i6a_unreadable')
+    expect(step).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'authority_unavailable' } })
+    expect(step.output).not.toHaveProperty('cause')
+    nothingHappened(db, run)
+    // the rule's OWN sheet (context.sheetId) is the one checked: a context naming another sheet is unregistered
+    db.setRegistryUnreadable(null)
+    const other = await harness(db, port).run('exec_i6a_other_sheet', CONFIG, { sheetId: 'sheet_2' })
+    expect(other).toMatchObject({ status: 'skipped', output: { cause: 'rule_sheet_unregistered' } })
+    nothingHappened(db, run)
   })
 })

@@ -166,6 +166,7 @@ import {
   validateRunIntegrationJobConfig,
   validateRunIntegrationJobTriggerCoupling,
 } from './automation-run-integration-job'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES, checkRunIntegrationJobRuleSheet } from './automation-run-integration-job-rule-sheet'
 // R-69 1c — Bridge 2: the integration.run_finished trigger (save gate, job-keyed dispatch, durable leg); its
 // trigger vocabulary is imported with the other automation-triggers names above.
 import {
@@ -1765,6 +1766,7 @@ export class AutomationService {
     // R-69 1b-ii: run_integration_job save gate — switch (403 RUN_ACTION_DISABLED), closed config, cron + timezone
     // coupling, and the SERVER-STAMPED binding (created_by + its single active tenant); a client binding is dropped.
     const runIntegrationJobSave = await this.assertRunIntegrationJobAtSave({
+      sheetId,
       triggerType: input.triggerType,
       triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
       actionType: input.actionType,
@@ -2061,6 +2063,8 @@ export class AutomationService {
       // R-69 1b-ii: the RESULTING rule (trigger = incoming ?? stored; actions as merged) must satisfy the save
       // gate; the binding is re-stamped from the STORED created_by (ADR §6.2: the editor never takes it over).
       const runIntegrationJobUpdate = await this.assertRunIntegrationJobAtSave({
+        // R-69 I6a: the STORED sheet (an update never moves a rule; the route's sheetId already equals it).
+        sheetId: existing.sheet_id,
         triggerType: input.triggerType ?? existing.trigger_type,
         triggerConfig: (input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config) as Record<string, unknown> | null,
         actionType: nextActionType,
@@ -2994,11 +2998,16 @@ export class AutomationService {
    *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
    *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
    *   - binding: `createdBy` must be bound to EXACTLY ONE active tenant (user_orgs) — a tenantless or
-   *     multi-tenant principal cannot bind the job (ADR §6.1 ③) → 400.
+   *     multi-tenant principal cannot bind the job (ADR §6.1 ③) → 400;
+   *   - R-69 I6a (ADR §3.1 + §6.5; T-layer defaults R-90): the rule's `sheetId` must be the ACTIVE registered
+   *     project sheet (registry 087) of the binding tenant, and every occurrence must list exactly that sheet's one
+   *     project; the project-sheets switch off fails closed; an unreadable registry is "could not be read; not
+   *     saved" → 400 (automation-run-integration-job-rule-sheet.ts). The executor re-checks on every trigger.
    * The binding is derived from the rule's creator (create) or its STORED creator (update); a client-supplied
    * `binding` is dropped (the same posture as the stock-prep `dataSourceOwnerId` stamp).
    */
   private async assertRunIntegrationJobAtSave(input: {
+    sheetId: string
     triggerType: string
     triggerConfig: Record<string, unknown> | null
     actionType: string
@@ -3023,6 +3032,13 @@ export class AutomationService {
     const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
     if (couplingError) throw new AutomationRuleValidationError(couplingError)
     const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
+    // R-69 I6a: the rule's sheet = the binding tenant's registered sheet of the (single) project, per occurrence.
+    for (const occurrence of occurrences) {
+      const job = occurrence.config.job as { projectNos?: unknown }
+      const projectNos = Array.isArray(job?.projectNos) ? (job.projectNos as string[]) : []
+      const verdict = await checkRunIntegrationJobRuleSheet(this.queryFn, { sheetId: input.sheetId, tenantId: binding.tenantId, projectNos })
+      if (verdict.ok === false) throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES[verdict.refusal])
+    }
     let actionConfig = input.actionConfig
     let stampedTopLevel = false
     if (input.actionType === RUN_INTEGRATION_JOB_ACTION_TYPE) {

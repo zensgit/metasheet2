@@ -3,20 +3,40 @@
  * tests/unit/automation-run-integration-job.test.ts (I3) defines inline — the same statements, matched by shape,
  * `now()` evaluated with the (fake) clock, a transaction rolled back on throw. Copied verbatim (not imported) so the
  * I3 suite stays byte-identical. Synthetic only.
+ *
+ * R-69 I6a: the model also answers the ONE project-sheet registry read the executor's rule-sheet re-check issues
+ * (stock-preparation-manual-rows-gate.ts MANUAL_ROWS_PROJECT_TARGET_SQL, migration 087). `projectTargets` defaults to
+ * the one row every harness here runs on — `sheet_1` registered, active, to `tenant_1` / `P-1` — so the existing
+ * cases keep their meaning; a case mutates the map (archive, re-register) or sets the registry unreadable. The read
+ * is not logged (the `log` assertions are about the ledgers).
  */
 import type { AutomationDeps } from '../../src/multitable/automation-executor'
 
 interface IntentRow { status: string; attempts: number; token: string | null; lease: number | null; lastError: string | null }
 interface LeaseRow { holder: string | null; fence: number; expires: number }
+export interface FakeProjectTargetRow { tenantId: string; projectNo: string; status: 'active' | 'archived'; objectId?: string }
 
-export function createFakeJobDb() {
+export const FAKE_REGISTERED_SHEET = Object.freeze({ sheetId: 'sheet_1', tenantId: 'tenant_1', projectNo: 'P-1' })
+
+export function createFakeJobDb(options: { projectTargets?: Record<string, FakeProjectTargetRow> } = {}) {
   const intents = new Map<string, IntentRow>()
   const leases = new Map<string, LeaseRow>()
   const log: string[] = []
   let renewalsFailing = false
+  const projectTargets = new Map<string, FakeProjectTargetRow>(Object.entries(options.projectTargets ?? {
+    [FAKE_REGISTERED_SHEET.sheetId]: { tenantId: FAKE_REGISTERED_SHEET.tenantId, projectNo: FAKE_REGISTERED_SHEET.projectNo, status: 'active' },
+  }))
+  let registryError: (Error & { code?: string }) | null = null
   const key = (p: unknown[], idx = [0, 1, 2, 3]) => idx.map((i) => String(p[i])).join('|')
   const query: AutomationDeps['queryFn'] = async (sql, params = []) => {
     const now = Date.now()
+    if (/FROM integration_stock_prep_project_target WHERE sheet_id = \$1/.test(sql)) {
+      if (registryError) throw registryError
+      const row = projectTargets.get(String(params[0]))
+      return row
+        ? { rows: [{ sheet_id: String(params[0]), project_no: row.projectNo, status: row.status, object_id: row.objectId ?? 'obj_1', tenant_id: row.tenantId }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
     if (/INSERT INTO meta_automation_outbound_intent/.test(sql)) {
       const k = key(params)
       log.push('intent:claim')
@@ -115,5 +135,9 @@ export function createFakeJobDb() {
     setTransactionsFailing(value: boolean) { renewalsFailing = value },
     lease(scope: string) { return leases.get(scope) },
     intentRows() { return [...intents.entries()] },
+    /** R-69 I6a: the project-sheet registry rows (sheet id → row); mutate to archive / re-register / remove. */
+    projectTargets,
+    /** R-69 I6a: every registry read throws this SQLSTATE (anything but 42P01 is "unreadable"); null restores. */
+    setRegistryUnreadable(code: string | null) { registryError = code ? Object.assign(new Error('fake db: registry unreadable'), { code }) : null },
   }
 }

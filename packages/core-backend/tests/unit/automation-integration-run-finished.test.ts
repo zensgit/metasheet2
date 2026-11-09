@@ -61,6 +61,10 @@ import {
 } from '../../src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type'
 
 const ACTION_FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
+// R-69 I6a: the executor's rule-sheet re-check reads the project-sheet registry only while this switch is exactly
+// 'true' (off => skipped(principal_unauthorized, rule_sheet_unregistered)); every harness here runs on the fake DB's
+// registered 'sheet_1' (tenant_1, P-1), so each describe that executes the action turns it on with ACTION_FLAG.
+const PROJECT_SHEETS_FLAG = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
 const EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
 const TENANT = 'tenant_1'
 const PRINCIPAL = { id: 'svc_user', permissions: ['stock-prep:pull', 'stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: TENANT }
@@ -293,6 +297,7 @@ function captureSink() {
 describe('integration.run_finished — the action layer emits EXACTLY ONE summary per job, after the final attempt', () => {
   beforeEach(() => {
     vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(PROJECT_SHEETS_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
   })
   afterEach(() => {
@@ -523,6 +528,7 @@ describe('integration.run_finished — dispatch (per-rule exactly once, held qui
 
   it('end to end: the executor\'s replayed step (same id) reaches the rule once', async () => {
     vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(PROJECT_SHEETS_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
     try {
       const { service, executeRule } = dispatchHarness([ruleRow({ trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['succeeded'], binding: { principalId: 'alerter', tenantId: TENANT } } })])
@@ -721,6 +727,7 @@ function dbError(code = '08006'): Error {
 describe('fix-I5 F1 — a throw inside the step still yields EXACTLY ONE summary per job (ADR §4.1, baseline §10.2)', () => {
   beforeEach(() => {
     vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(PROJECT_SHEETS_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
   })
   afterEach(() => {
@@ -919,6 +926,7 @@ describe('fix-I5 F3 — the publish port reads every level ONCE and refuses Prox
 describe('fix-I5 F4 — one job-id shape: an actionId the I3 save gate accepts always fits the summary', () => {
   beforeEach(() => {
     vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(PROJECT_SHEETS_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
   })
   afterEach(() => {
@@ -1171,6 +1179,7 @@ const GATE3_SUMMARY_COUNTERS: ReadonlyArray<[counter: string, status: string, re
 describe('F7 gate ③ — per project, the summary event equals what the scheduled-pull script logs (status; canApply on the ready pair; counts unless failed)', () => {
   beforeEach(() => {
     vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(PROJECT_SHEETS_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
   })
   afterEach(() => {
