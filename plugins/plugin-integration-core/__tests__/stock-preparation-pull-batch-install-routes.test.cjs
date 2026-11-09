@@ -131,6 +131,13 @@ function mount({ switchOn = true, ledger = 'real' } = {}) {
       resolveExistingObjectFieldIds: (input) => p.resolveExistingObjectFieldIds(input),
       readObjectFieldsContent: (input) => p.readObjectFieldsContent(input),
       ensureMissingObjectFields: (input) => p.ensureMissingObjectFields(input),
+      // The host's whole-sheet max (Y7 #6768; the band's right placement, R-89): every field of the object, null when empty.
+      readObjectMaxFieldOrder: async ({ projectId, objectId }) => {
+        p.calls.push(['readObjectMaxFieldOrder', objectId])
+        const object = p.objects.get(`${projectId}/${objectId}`)
+        const orders = object ? Array.from(object.fields.values()).map((field) => field.order) : []
+        return orders.length > 0 ? Math.max(...orders) : null
+      },
     })
   }
   return { ...h, db, store, lock, records, audits, views }

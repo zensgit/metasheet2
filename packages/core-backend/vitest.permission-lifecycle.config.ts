@@ -20,6 +20,7 @@ export default defineConfig({
     },
     include: [
       'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
     ],
     exclude: [
       '**/node_modules/**',

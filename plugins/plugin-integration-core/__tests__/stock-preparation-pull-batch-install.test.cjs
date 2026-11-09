@@ -35,6 +35,11 @@
 //   IN-24  the band cannot be derived (critic C3): dry_run band_unavailable, install 503, birth provisioning_unavailable
 //
 //   Review round 1 killing tests: IN-4b (X7), IN-10c (H2d), IN-12b (H3h), IN-17b (H5b), IN-18b (X4), IN-23b (X2), IN-28 (X3)
+//   IN-29  (R-89, Y7 close-out) right = after the LAST column of the sheet: the whole-sheet max (the fenced
+//          readObjectMaxFieldOrder, read first) — a person column with a higher order than every known id sorts BEFORE
+//          the band (install and birth); left keeps −2 / −1 with the same person column
+//   IN-30  a repair transaction without readObjectMaxFieldOrder => install 503 PROVISIONING_UNAVAILABLE (both
+//          placements) and birth provisioning_unavailable, nothing written; a non-integer max => 500, nothing written
 //
 // Synthetic values only (rec_*, S-01, P-07, X).
 
@@ -100,7 +105,7 @@ function record(id, { createdAt, part = 'X', tokens, decision = 'add', plannedAt
   return { id, version, createdAt, locked, createdBy: createdBy || null, data }
 }
 
-function createWorld({ records = [], bandPresent = false, bandOrders = [-2, -1], bandMarked = true, views = { 'prep-fill': [], 'prep-todo': [] }, layout = { viewCount: 3, firstView: 'default', viewsWithFrozenColumns: 0, viewsLosingFrozen: 0, personalOrderOverrides: 0, trashedRecordCount: 0 }, plm = { fieldCount: 20, marked: 20, unmarked: 0, missing: 0, readBeforeWrite: true }, enabled = true, promote = true, sheetRow = null, tenantSettings = null, ledgerBatches = [], band = BAND, withLease = true } = {}) {
+function createWorld({ records = [], bandPresent = false, bandOrders = [-2, -1], bandMarked = true, views = { 'prep-fill': [], 'prep-todo': [] }, layout = { viewCount: 3, firstView: 'default', viewsWithFrozenColumns: 0, viewsLosingFrozen: 0, personalOrderOverrides: 0, trashedRecordCount: 0 }, plm = { fieldCount: 20, marked: 20, unmarked: 0, missing: 0, readBeforeWrite: true }, enabled = true, promote = true, sheetRow = null, tenantSettings = null, ledgerBatches = [], band = BAND, withLease = true, maxOrderRead = true, extraFields = [] } = {}) {
   const log = []
   const host = new Map(records.map((entry) => [entry.id, structuredClone(entry)]))
   const fields = new Map(KNOWN_FIELDS.map((id, index) => [id, { physical: FIELD_ID_MAP[id], order: index, property: { humanWriteLock: 'plm_system' } }]))
@@ -108,6 +113,8 @@ function createWorld({ records = [], bandPresent = false, bandOrders = [-2, -1],
     fields.set('firstPullBatch', { physical: P_FPB, order: bandOrders[0], property: bandMarked ? TP.pullBatchBandProperty('zh-CN') : {} })
     fields.set('pullBatch', { physical: P_PB, order: bandOrders[1], property: bandMarked ? TP.pullBatchBandProperty('zh-CN') : {} })
   }
+  // Columns no logical-id read sees (a person's POST /fields column, a random id): only the whole-sheet max finds them.
+  for (const extra of extraFields) fields.set(extra.id, { physical: extra.id, order: extra.order, property: {}, unnamed: true })
   const viewState = new Map(Object.entries(views).filter(([, hidden]) => hidden !== null).map(([id, hidden]) => [id, { hiddenFieldIds: hidden.slice() }]))
   const state = { patchFault: null, readFault: null, registryLocked: false, leaseHeld: false, inTx: false, ioWhileRegistryLocked: [] }
   const note = (entry) => {
@@ -149,12 +156,21 @@ function createWorld({ records = [], bandPresent = false, bandOrders = [-2, -1],
     async resolveExistingObjectFieldIds({ fieldIds }) {
       note('tx.resolve')
       const out = {}
-      for (const id of fieldIds) if (fields.has(id)) out[id] = fields.get(id).physical
+      for (const id of fieldIds) if (fields.has(id) && !fields.get(id).unnamed) out[id] = fields.get(id).physical
       return out
     },
+    // The host's read (Y7 #6768): the fence first, then MAX("order") over EVERY field row of the sheet; null when empty.
+    ...(maxOrderRead ? {
+      async readObjectMaxFieldOrder() {
+        note('tx.readMaxOrder')
+        if (typeof maxOrderRead === 'function') return maxOrderRead()
+        const orders = Array.from(fields.values()).map((entry) => entry.order)
+        return orders.length > 0 ? Math.max(...orders) : null
+      },
+    } : {}),
     async readObjectFieldsContent({ fieldIds }) {
       const out = {}
-      for (const id of fieldIds) if (fields.has(id)) out[id] = { name: id, type: 'string', property: structuredClone(fields.get(id).property), order: fields.get(id).order }
+      for (const id of fieldIds) if (fields.has(id) && !fields.get(id).unnamed) out[id] = { name: id, type: 'string', property: structuredClone(fields.get(id).property), order: fields.get(id).order }
       return out
     },
     async ensureMissingObjectFields({ fields: descriptors }) {
@@ -403,7 +419,7 @@ test('IN-4 (M-2B-16) the PLM-lock precondition: a missing, an unmarked or an unr
   }
 })
 
-test('IN-5 (M-2B-14) placement: a left band that would unfreeze a view needs an explicit placement — the tenant default never waives it (C6); right goes after the last KNOWN column; an existing band\'s placement is a fact', async () => {
+test('IN-5 (M-2B-14) placement: a left band that would unfreeze a view needs an explicit placement — the tenant default never waives it (C6); right goes after the last column (R-89; no person column here, so max known + 1 / + 2); an existing band\'s placement is a fact', async () => {
   const frozen = { viewCount: 3, firstView: 'default', viewsWithFrozenColumns: 1, viewsLosingFrozen: 1, personalOrderOverrides: 0, trashedRecordCount: 0 }
   const world = createWorld({ records: c09(), layout: frozen, tenantSettings: { first_pull_batch_rule: 'material', label_format: 'ordinal_date', landing_mode: 'promote_prep_fill', band_placement: 'left' } })
   const preview = await dryRun(world)
@@ -1008,6 +1024,60 @@ test('IN-4b (review X7) a PLM column unlocked between the preview and the lease 
   await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { readPlmLock: flaky }), PB.PULL_BATCH_ERROR_CODES.PLM_LOCK_REQUIRED, 'plm lock moved')
   assert.equal(world.sheet(), null)
   assert.deepEqual(Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== ''), [])
+})
+
+// R-89 (Y7 close-out): a person column (random id, invisible to every logical-id read) at an order above every known id.
+const PERSON_COLUMN = Object.freeze({ id: 'fld_person_syn', order: 40 })
+const bandOrdersOf = (world) => [world.fields.get('firstPullBatch').order, world.fields.get('pullBatch').order]
+// The calls inside the (one) band repair transaction (the fake's provisioning.resolve also notes 'tx.resolve').
+const txCalls = (world) => world.log.slice(world.log.indexOf('prov.repairTx') + 1).filter((entry) => entry.startsWith('tx.'))
+
+test('IN-29 (R-89, Y7 close-out) right = after the LAST column of the sheet: the fenced whole-sheet max is read first, so a person column above every known id sorts before the band (install and birth); left keeps −2 / −1', async () => {
+  const right = createWorld({ records: c09(), extraFields: [PERSON_COLUMN] })
+  const done = await install(right, { placement: 'right' })
+  assert.equal(done.resolved, true)
+  assert.deepEqual(bandOrdersOf(right), [PERSON_COLUMN.order + 1, PERSON_COLUMN.order + 2], 'whole-sheet max + 1 / + 2, never max KNOWN (6) + 1 / + 2')
+  const calls = txCalls(right)
+  assert.equal(calls[1], 'tx.readMaxOrder', 'the fenced max is read right after the sheet check, before the resolve and the snapshot')
+  assert.ok(calls.indexOf('tx.readMaxOrder') < calls.indexOf('tx.resolve') && calls.indexOf('tx.readMaxOrder') < calls.indexOf('tx.ensureMissingObjectFields'))
+  assert.equal(right.fields.get(PERSON_COLUMN.id).order, PERSON_COLUMN.order, 'the person column is never moved')
+  assert.equal(right.sheet().band_placement, 'right')
+  const born = createWorld({ extraFields: [PERSON_COLUMN], tenantSettings: { first_pull_batch_rule: 'material', label_format: 'ordinal_date', landing_mode: 'keep_current', band_placement: 'right' } })
+  assert.deepEqual(await IN.bornReadyBestEffort(born.deps()), { installed: true, landingPromoted: false, reason: null })
+  assert.deepEqual(bandOrdersOf(born), [PERSON_COLUMN.order + 1, PERSON_COLUMN.order + 2], 'birth: the same whole-sheet rule')
+  const left = createWorld({ records: c09(), extraFields: [PERSON_COLUMN] })
+  assert.equal((await install(left, { placement: 'left' })).resolved, true)
+  assert.deepEqual(bandOrdersOf(left), [-2, -1], 'left is unaffected by the max')
+  assert.ok(txCalls(left).includes('tx.readMaxOrder'), 'the read (the fence) runs for left too')
+})
+
+test('IN-30 a repair transaction without readObjectMaxFieldOrder => install 503 PROVISIONING_UNAVAILABLE for both placements and birth provisioning_unavailable, nothing written; a non-integer max => 500 with nothing written', async () => {
+  for (const placement of ['right', 'left']) {
+    const world = createWorld({ records: c09(), extraFields: [PERSON_COLUMN], maxOrderRead: false })
+    const error = await rejects(install(world, { placement }), 'STOCK_PREPARATION_PROJECT_TARGET_PROVISIONING_UNAVAILABLE', `older host ${placement}`)
+    assert.equal(error.status, 503)
+    assert.deepEqual(error.details.requiredMethods, ['runObjectFieldsRepairTransaction.readObjectMaxFieldOrder'])
+    assert.equal(world.log.includes('tx.ensureMissingObjectFields'), false, `${placement}: refused before any write`)
+    assert.equal(world.fields.has('pullBatch') || world.fields.has('firstPullBatch'), false)
+    assert.equal(world.sheet(), null, 'the ledger is untouched')
+    assert.deepEqual(Object.values(allCells(world)).filter(([a, b]) => a !== '' || b !== ''), [])
+  }
+  const born = createWorld({ maxOrderRead: false, tenantSettings: { first_pull_batch_rule: 'material', label_format: 'ordinal_date', landing_mode: 'promote_prep_fill', band_placement: 'right' } })
+  assert.deepEqual(await IN.bornReadyBestEffort(born.deps()), { installed: false, landingPromoted: false, reason: 'provisioning_unavailable' })
+  assert.equal(born.log.includes('tx.ensureMissingObjectFields'), false)
+  assert.equal(born.log.some((entry) => entry.startsWith('prov.promote')), false, 'no landing after a refused band')
+  assert.equal(born.sheet(), null)
+  for (const bad of [1.5, Number.NaN, '7']) {
+    const world = createWorld({ records: c09(), maxOrderRead: () => bad })
+    const error = await rejects(install(world, { placement: 'right' }), PB.PULL_BATCH_ERROR_CODES.STAMP_INVALID, `max ${String(bad)}`)
+    assert.equal(error.status, 500)
+    assert.equal(error.details.field, 'maxFieldOrder')
+    assert.equal(world.log.includes('tx.ensureMissingObjectFields'), false)
+    assert.equal(world.sheet(), null)
+  }
+  const empty = createWorld({ records: c09(), maxOrderRead: () => null })
+  assert.equal((await install(empty, { placement: 'right' })).resolved, true)
+  assert.deepEqual(bandOrdersOf(empty), [0, 1], 'an empty sheet (max null) starts the band at 0')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-install.test.cjs', tests)
