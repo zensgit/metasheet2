@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { createOnlinePunchDbFixture, punchClock } from '../utils/attendance-online-punch-db'
+import { SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 if (!process.env.ATTENDANCE_TEST_DATABASE_URL) throw new Error('ATTENDANCE_TIMEZONE_READ_CONTEXT_REAL_DATABASE_REQUIRED')
 const require = createRequire(import.meta.url)
 const { setBusinessTripInstantForTests } = require('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs')
@@ -13,7 +14,12 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
   let admin: Awaited<ReturnType<typeof live.user>>
   let employee: Awaited<ReturnType<typeof live.user>>
   let authRoleStatements = 0
+  let authzVersionStatements = 0
   let existingAuditStatements = 0
+  // D21 (Y5a): assignUserRoles bumps the subject authorization version row as its first protocol
+  // statement (zzzz20261106110500) — the companion of the exempted role materialization, not a
+  // business write. Exempted by its exact statement text, like the materialization itself.
+  const authzVersionBump = SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL.trim().replace(/\s+/g, ' ')
   async function readWithoutBusinessDml<T>(work: () => Promise<T>): Promise<T> {
     const clientPrototype = require('pg').Client.prototype as { query: (...args: unknown[]) => unknown }
     const original = clientPrototype.query
@@ -30,6 +36,7 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
         const roleMaterialization = normalized === 'INSERT INTO user_roles (user_id, role_id) SELECT unnest($1::text[]), $2 ON CONFLICT DO NOTHING RETURNING user_id'
         const existingAttendanceAudit = normalized === 'INSERT INTO operation_audit_logs ( actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent, route, status_code, latency_ms, meta, occurred_at, created_at ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb, now(), now())'
         if (roleMaterialization) authRoleStatements += 1
+        else if (normalized === authzVersionBump) authzVersionStatements += 1
         else if (existingAttendanceAudit) existingAuditStatements += 1
         else writes.push(verb + ':' + (sql.match(/(?:INTO|UPDATE|FROM|TABLE)\s+([a-zA-Z_][a-zA-Z_0-9]*)/i)?.[1] ?? 'unknown'))
       }
@@ -71,7 +78,7 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
     admin = await live.start(); employee = await live.user(false)
   }, 180000)
   beforeEach(() => punchClock.setOnlinePunchInstantForTests(instant(0, 0.5)))
-  afterAll(async () => { console.info('readonly-existing-infrastructure-statements', { authRoleStatements, existingAuditStatements }); setBusinessTripInstantForTests(null); await live.stop() }, 60000)
+  afterAll(async () => { console.info('readonly-existing-infrastructure-statements', { authRoleStatements, authzVersionStatements, existingAuditStatements }); setBusinessTripInstantForTests(null); await live.stop() }, 60000)
 
   it('missing organization default produces explicit 422 on all three reads with policy OFF; saving the default restores them', async () => {
     expect((await live.pool.query('SELECT enabled FROM attendance_timezone_policies WHERE org_id=$1', [live.orgId])).rows).toEqual([])

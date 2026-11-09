@@ -5,6 +5,7 @@ import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import { createYidaOwnerClient, type YidaOwnerApproval, type YidaOwnerDraftInput } from '../src/services/integration/yidaOwner'
 import * as yidaSendBudget from '../src/services/integration/yidaSendBudget'
+import { createYidaTransformExample, yidaTransformSourceColumns } from '../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 
 // Gate 4: the plugin module is the single definition; the web bundle only carries a constants mirror.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -572,6 +573,45 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(absent('submit')).toBe(true)
   })
 
+  it('identity fence (D16): an approval refused with 409 YIDA_SEND_APPROVAL_IDENTITY_RESERVED shows the fixed code and its copy, no grant, no submit', async () => {
+    await preview(); await acknowledge()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_IDENTITY_RESERVED', 409))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_IDENTITY_RESERVED')
+    expect(q('identity-reserved').textContent).toBe('此物料行在该目标已经创建过，不再新建；请到宜搭核对。')
+    expect(absent('grant')).toBe(true)
+    expect(absent('submit')).toBe(true)
+    expect(absent('limit')).toBe(true)
+    expect(submissionPosts()).toBe(0)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    // The same code on any other status is not this refusal: the client calls the reply invalid.
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_IDENTITY_RESERVED', 503))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('identity-reserved')).toBe(true)
+    expect(absent('submit')).toBe(true)
+  })
+
+  it('generated-layout seal (P1): an approval refused with 409 YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT shows the fixed code and its copy, no grant, no submit', async () => {
+    await preview(); await acknowledge()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    expect(q('generated-layout-conflict').textContent).toBe('该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；这次请求没有保存草稿、授权或发送任何内容。请改回已封存的模板，或由管理员另建目标。')
+    expect(absent('grant')).toBe(true)
+    expect(absent('submit')).toBe(true)
+    expect(absent('identity-reserved')).toBe(true)
+    expect(absent('limit')).toBe(true)
+    expect(submissionPosts()).toBe(0)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    // The same code on any other status is not this refusal: the client calls the reply invalid.
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 503))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('generated-layout-conflict')).toBe(true)
+    expect(absent('submit')).toBe(true)
+  })
+
   it('the frozen notice names the grant id and the durable record; the uncertain hint needs a submission and an error', async () => {
     await save(); await selectRow()
     fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_UNAVAILABLE', 503))
@@ -787,5 +827,79 @@ describe('StockPreparationYidaOwnerSendPanel multi-target controls (Y2)', () => 
     await click('save')
     expect(q('error').textContent).toBe('YIDA_SHEET_SOURCE_DENIED')
     expect(absent('draft')).toBe(true)
+  })
+})
+
+// R-71 ⑦.3: a v3 draft goes to the server exactly as previewed; a draft-time 422 LIMIT is shown with its
+// hint and leaves no draft; the sheet column mapping lists every column the v3 mapping reads.
+describe('StockPreparationYidaOwnerSendPanel v3 drafts (R-71 ⑦.3)', () => {
+  let app: VueApp<Element> | null = null
+  let root: HTMLDivElement | null = null
+  const fetchSpy = vi.fn()
+  const transform = (): YidaOwnerDraftInput => {
+    const example = createYidaTransformExample()
+    return { config: example.config, rowsText: example.text, allocation: { ...example.allocation, projects: ['DEMO-P1'] } }
+  }
+  function mount(multiTarget: boolean) {
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp({ render: () => h(StockPreparationYidaOwnerSendPanel, { draftInput: transform(), multiTarget }) })
+    app.mount(root)
+  }
+  beforeEach(() => { localStorage.setItem('auth_token', token); fetchSpy.mockReset(); vi.stubGlobal('fetch', fetchSpy) })
+  afterEach(() => { app?.unmount(); root?.remove(); app = null; root = null; vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  async function flush(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); await nextTick() }
+  function q<T extends HTMLElement = HTMLElement>(id: string): T { const node = root?.querySelector<T>(`[data-testid="sp-yida-owner-${id}"]`); if (!node) throw new Error(`missing ${id}`); return node }
+  function absent(id: string) { return root?.querySelector(`[data-testid="sp-yida-owner-${id}"]`) === null }
+
+  it('saves the v3 draft input verbatim and shows a draft-time 422 LIMIT with its hint and no draft', async () => {
+    mount(false)
+    expect(absent('input-required')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_LIMIT', 422))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/integration/yida-owner-send/drafts')
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body as string)).toEqual(transform())
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_LIMIT')
+    expect(q('limit').textContent).toContain('没有保存、授权或发送任何内容')
+    expect(absent('draft')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body as string)).toEqual(transform())
+    expect(absent('limit')).toBe(true)
+    expect(q('draft').textContent).toContain('目标仍未核验')
+  })
+
+  // Slice YE (2026-11-08): the four deterministic source-validation refusals and the draft-time sealed-layout refusal are
+  // fixed codes with their own plain copy; no draft is shown; the same code on 503 is not this refusal.
+  it.each([
+    ['YIDA_SEND_APPROVAL_SOURCE_UNBOUND', 422, 'source-unbound', '此映射含编码模板，只能用服务端从已登记项目表格读取的行创建草稿；粘贴的行，以及从未登记为项目表格的表格读取的行，都没有来源绑定。未保存草稿，原样再试仍会被拒绝。请改用“从表格”读取已登记的项目表格。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH', 422, 'source-project-mismatch', '表格中有行的项目号与该表格登记的项目不一致，生成的编码会对应到别的项目。未保存草稿，原样再试仍会被拒绝。请在表格中改正这些行的项目号后重新读取。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_KEY_MISMATCH', 422, 'source-key-mismatch', '编码模板读到的行标识与服务端读取的行键不一致。未保存草稿，原样再试仍会被拒绝。请检查表格的行键列与模板的行标识后重新读取。'],
+    ['YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH', 422, 'source-key-field-mismatch', '编码模板的行标识没有指向表格的行键列（另一列即使内容相同也不行）。未保存草稿，原样再试仍会被拒绝。请把模板的行标识改为行键列对应的字段后重新预演。'],
+    ['YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT', 409, 'generated-layout-conflict', '该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；这次请求没有保存草稿、授权或发送任何内容。请改回已封存的模板，或由管理员另建目标。'],
+  ] as const)('a draft refused with %s (%i) shows the fixed code and its copy, no draft; the same code on 503 is invalid', async (code, status, id, copy) => {
+    mount(false)
+    fetchSpy.mockResolvedValueOnce(error(code, status))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/integration/yida-owner-send/drafts')
+    expect(q('error').textContent).toBe(code)
+    expect(q(id).textContent).toBe(copy)
+    expect(absent('draft')).toBe(true)
+    for (const other of ['source-unbound', 'source-project-mismatch', 'source-key-mismatch', 'source-key-field-mismatch',
+      'generated-layout-conflict', 'limit'].filter(name => name !== id)) expect(absent(other)).toBe(true)
+    fetchSpy.mockResolvedValueOnce(error(code, 503))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent(id)).toBe(true)
+    expect(absent('draft')).toBe(true)
+  })
+
+  it('the sheet column mapping of a v3 draft lists every column the mapping reads, concat-only ones included', async () => {
+    mount(true)
+    q<HTMLInputElement>('source-sheet').click(); await flush()
+    const listed = Array.from(root!.querySelectorAll('[data-testid^="sp-yida-owner-column-"]'))
+      .map(node => node.getAttribute('data-testid')!.slice('sp-yida-owner-column-'.length))
+    expect(listed).toEqual([...yidaTransformSourceColumns(transform().config)])
+    expect(listed).toEqual(expect.arrayContaining(['ext_blankLength', 'ext_blankWidth', 'ext_blankThickness']))
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

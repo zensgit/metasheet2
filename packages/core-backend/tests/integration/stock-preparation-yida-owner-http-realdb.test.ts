@@ -113,6 +113,22 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     expect(view.payload).not.toEqual(f.compiledPayload(reverse, reused.rows[0].index))
     expect((view.payload as Data).qty).toBe(6)
     noFetch(); expect((await f.proof()).counts).toEqual([0, 0, 0, 0, 0, 0])
+    // SR5 (generated part, R-71 ⑦.4): a pasted body cannot carry a source binding, so a v3 config with a generated
+    // entry is refused at POST /drafts with the fixed, non-retryable 422 SOURCE_UNBOUND (slice YE; it was 503 UNAVAILABLE) and writes no draft; the same v3 config without it drafts.
+    const v2 = draftInput().config as Data & { fieldMap: Data[]; fieldCatalog: Data[] }
+    const v3 = { ...v2, version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+      fieldMap: v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })), fieldCatalog: [...v2.fieldCatalog] }
+    const generated = { ...v3, fieldCatalog: [...v3.fieldCatalog, { id: 'code', control: 'text', required: false }],
+      fieldMap: [...v3.fieldMap, { transform: 'generated', template: [{ literal: 'SYN-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-36' }],
+        target: 'code', type: 'string', required: false }] }
+    const drafts = (await f.rows('integration_yida_draft_operations')).length
+    denial(await f.http('POST', '/drafts', { ...input, config: generated }), 422, 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
+    expect((await f.rows('integration_yida_draft_operations')).length).toBe(drafts)
+    const plain = await prepare({ ...input, config: v3 })
+    expect(plain.reused).toBe(false)
+    expect((await f.rows('integration_yida_draft_rows')).filter(row => row.operation_id === plain.operationId)
+      .every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    noFetch()
   })
 
   it('the omitted runtime flag defaults OFF before any owner SQL or fetch', async () => {
@@ -321,5 +337,34 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     await f.runtime.stop()
     denial(await f.http('POST', '/drafts', draftInput()), 503, 'YIDA_OWNER_RUNTIME_INACTIVE')
     expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+  })
+
+  it('SR5 (draft level): a pasted rowsText draft is unbound end to end; its draft rows, grant and ledger row carry NULL binding digests', async () => {
+    const fixture = await confirmed()
+    const members = await f.rows('integration_yida_draft_rows')
+    expect(members.length).toBeGreaterThan(0)
+    expect(members.every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    const grant = (await f.rows('integration_yida_send_approvals')).find(row => row.grant_id === fixture.grant.grantId)!
+    expect([grant.source_record_digest, grant.creation_identity_digest]).toEqual([null, null])
+    const sent = bodyData(await f.http('POST', '/submissions', fixture.request), 200)
+    expect(sent).toMatchObject({ status: 'acknowledged', reused: false, externalWriteAttempted: true })
+    const ledger = (await f.rows('integration_yida_delivery_ledger'))[0]
+    expect([ledger.source_record_digest, ledger.creation_identity_digest, ledger.status]).toEqual([null, null, 'acknowledged'])
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
+    // The identity fence has no row to cover: a second unbound draft of the same line with a corrected description is a
+    // second reservation on the test copy (CF1 residue), while the same seven keys are still fenced.
+    const input = draftInput(); const rows = JSON.parse(input.rowsText) as Data[]
+    rows[0].description = 'synthetic corrected HTTP part'; input.rowsText = JSON.stringify(rows)
+    const second = await prepare(input)
+    expect(second.operationId).not.toBe(fixture.draft.operationId)
+    await preview(second)
+    const grant2 = await approve(second)
+    expect(grant2.status).toBe('approved')
+    const sameKeys = await prepare({ ...draftInput(), rowsText: JSON.stringify([{ ...(JSON.parse(draftInput().rowsText) as Data[])[0], quantity: 7 }]) })
+    await preview(sameKeys)
+    const grant3 = await approve(sameKeys)
+    denial(await f.http('POST', '/submissions', { grantId: grant3.grantId, submissionId: randomUUID() }), 503, 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
+    expect((await f.rows('integration_yida_delivery_ledger')).length).toBe(1)
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
   })
 })

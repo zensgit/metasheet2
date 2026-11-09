@@ -1,5 +1,6 @@
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('NamespaceAdmission')
@@ -567,6 +568,10 @@ export async function setUserNamespaceAdmission(options: {
 
   await transaction(async (client) => {
     await lockNamespaceAdmissionWrites(client, userId)
+    // D21 (Y5a): the subject authorization version row after the advisory (outside the admission
+    // holder's lock set) and BEFORE the upsert, whose UPDATE path takes the admissions row the holder
+    // shares; the trigger alone would bump only after that row is held (users-order, a cycle).
+    await bumpSubjectAuthorizationVersions(client, [userId])
     await client.query(
       `INSERT INTO user_namespace_admissions
          (user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at)

@@ -14,6 +14,7 @@ const TARGET = 'integration_yida_approved_target', MATERIAL = 'integration_yida_
 const DRAFT = 'integration_yida_draft_targets', OP = 'integration_yida_draft_operations', ROWS = 'integration_yida_draft_rows'
 const LEDGER = 'integration_yida_delivery_ledger', AUDIT = 'integration_yida_delivery_audit'
 const DRAFT_AUDIT = 'integration_yida_draft_audit'
+const LAYOUT = 'integration_yida_generated_layout'
 const context = { tenantId: 'synthetic-tenant', workspaceId: null, ownerId: 'synthetic-owner' }
 const bundle = () => ({ appKey: 'synthetic-key', appSecret: 'synthetic-secret', systemToken: 'synthetic-system', userId: 'synthetic-executor' })
 const grant = () => ({ grantRef: 'synthetic-grant', expiresAt: 2000000000000, actorId: context.ownerId })
@@ -37,8 +38,9 @@ function prepared(selection, payloadDigest) {
 // verification uses actual stores/planners. This object has no transaction or
 // isolation fake: BEGIN/SET/COMMIT are rejected. Atomicity/locks are PG proofs.
 async function fixture(mode = 'original', alternateFactory) {
-  const [{ createYidaSendAuthorityPrimitives }, { compileYidaDraft }, { createYidaProtocolExample }] = await modules
-  const key = randomBytes(32), calls = [], state = Object.fromEntries([TARGET, MATERIAL, DRAFT, OP, ROWS, LEDGER, AUDIT, DRAFT_AUDIT].map(name => [name, []]))
+  const [{ createYidaSendAuthorityPrimitives }, { compileYidaSendDraft: compileYidaDraft }, { createYidaProtocolExample }] = await modules
+  const key = randomBytes(32), calls = [], state = Object.fromEntries([TARGET, MATERIAL, DRAFT, OP, ROWS, LEDGER, AUDIT, DRAFT_AUDIT,
+    'integration_stock_prep_project_target', LAYOUT].map(name => [name, []]))
   const faults = { query: null, audit: null, wrapped: true, onQuery: null }
   const security = {
     async encrypt(text) {
@@ -121,12 +123,15 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
   test(`actual full ${mode} selection uses allocated execution rows and never controls the host transaction`, async () => {
     const f = await fixture(mode), index = mode === 'original' ? 0 : 2
     const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, index))
-    assert.deepEqual(Object.keys(f.port).sort(), ['executionPayloadDigest', 'loadExecutionMaterialInTransaction',
-      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sendBudget'])
+    assert.deepEqual(Object.keys(f.port).sort(), ['checkGeneratedLayoutInTransaction', 'draftSendBudget', 'executionPayloadDigest', 'loadExecutionMaterialInTransaction',
+      'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sealGeneratedLayoutInTransaction', 'sendBudget',
+      'validateDraftSource'])
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
       'targetRevision', 'planRevision', 'credentialRef', 'credentialGeneration', 'businessKeyDigest', 'rowPayloadDigest', 'planDigest',
-      'config', 'selectedRow', 'source', 'plan'].sort())
+      'sourceRecordDigest', 'creationIdentityDigest', 'sourceBinding', 'config', 'selectedRow', 'source', 'plan'].sort())
+    // A pasted (unbound) draft: no source binding, both digests null (design baseline v2.3 §7.2).
+    assert.deepEqual([selected.sourceRecordDigest, selected.creationIdentityDigest, selected.sourceBinding], [null, null, null])
     assert.equal(selected.targetRef, f.state[TARGET][0].target_ref)
     assert.notEqual(selected.targetRef, f.draft.target.target_ref)
     assert.equal(selected.targetRevision, 'evidence-1'); assert.equal(selected.planRevision, f.draft.compiled.planDigest)
@@ -151,10 +156,12 @@ test('execution digest is the original runner formula, binds grant and requires 
   const f = await fixture('equal_integer'), selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, 2))
   const authorization = grant(), payload = selected.plan.rows[2], intent = 'create'
   const data = { ...payload.protocolPreview.data, formDataJson: stableCanonicalStringify(payload.payload) }
+  // Version 2 (design baseline v2.3 §7.2, D18): the formula also covers the two source-binding digests, null here.
   const expected = createHash('sha256').update(stableCanonicalStringify({
-    version: 1, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt,
+    version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt,
     actorId: authorization.actorId, targetRef: selected.targetRef, targetRevision: selected.targetRevision,
     planRevision: selected.planRevision, intent, data, formUuid: selected.config.target.formUuid,
+    sourceRecordDigest: null, creationIdentityDigest: null,
   })).digest('hex')
   assert.equal(f.port.executionPayloadDigest(selected, authorization), expected)
   assert.notEqual(f.port.executionPayloadDigest(selected, { ...authorization, grantRef: 'synthetic-other-grant' }), expected)
@@ -630,4 +637,494 @@ test('in-memory removal of each new prepare/preview guard makes its rejection as
     await assert.rejects(probe(f), error => error instanceof assert.AssertionError && /Missing expected rejection/.test(error.message))
     console.log(`MUTATION ${name}: RED (Missing expected rejection)`)
   }
+})
+
+// R-71 ⑦.3: the slot's v2 protocol layout restated as v3 (same locator, key targets, types and
+// nullable parts, so the same key definition), plus one copy, one constant and one concat. The concat
+// reads ext_size, a column the payload never carries; ext_unmapped is read by nothing.
+function v3Of(v2, extra = []) {
+  const target = source => v2.fieldMap.find(entry => entry.source === source).target
+  return { ...structuredClone(v2), version: 3, businessKey: v2.businessKey.map(target), emptyKeyFields: v2.emptyKeyFields.map(target),
+    fieldCatalog: [...structuredClone(v2.fieldCatalog), { id: 'nameCopy', control: 'text', required: false },
+      { id: 'rule', control: 'text', required: true }, { id: 'label', control: 'text', required: false },
+      ...extra.map(entry => ({ id: entry.target, control: 'text', required: false }))],
+    fieldMap: [...v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+      { transform: 'copy', copyOf: 'componentName', target: 'nameCopy', type: 'string', required: false },
+      { transform: 'constant', value: 'SYN-RULE', target: 'rule', type: 'string', required: true },
+      { transform: 'concat', parts: [{ source: 'ext_size' }, { literal: 'mm' }], separator: ' ', blank: 'skip',
+        target: 'label', type: 'string', required: false }, ...extra] }
+}
+function v3Source(source, extra) {
+  const rows = JSON.parse(source.rowsText).map((row, index) => ({ ...row, ext_size: 1200 + index, ext_unmapped: 'SYN-UNMAPPED' }))
+  return { config: v3Of(source.config, extra), rowsText: JSON.stringify(rows), allocation: structuredClone(source.allocation) }
+}
+const constants = (count, character) => Array.from({ length: count }, (_, index) => ({ transform: 'constant',
+  value: character.repeat(4096), target: 'big' + index, type: 'string', required: false }))
+
+for (const mode of ['original', 'equal_integer']) {
+  test(`R-71 ⑦.3 ${mode}: a v3 draft for the v2 slot selects projected rows; preview payload is the executed data`, async () => {
+    const f = await fixture(mode), [, , { buildYidaStaticPlan, yidaTransformSourceColumns }] = await modules
+    const source = v3Source(f.source), index = mode === 'original' ? 0 : 2
+    const made = await f.port.prepareDraftInTransaction(f.trx, source)
+    assert.equal(made.reused, false); assert.equal(made.targetRef, f.draft.target.target_ref)
+    assert.notEqual(made.operationId, f.draft.operation.operation_id)
+    const operation = f.state[OP].find(row => row.operation_id === made.operationId)
+    assert.notEqual(operation.plan_digest, f.draft.operation.plan_digest)
+    const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+    // Same layout and rows: every row keeps the v2 draft's business identity (the create fence).
+    assert.deepEqual(members.map(row => row.business_key_digest), f.draft.members.map(row => row.business_key_digest))
+    const request = { operationId: made.operationId, rowKey: members[index].row_key }
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, request)
+    assert.equal(selected.config.version, 3)
+    const columns = yidaTransformSourceColumns(selected.config)
+    assert.deepEqual(Object.keys(selected.selectedRow).sort(), [...columns])
+    assert.equal(columns.includes('ext_size') && !columns.includes('ext_unmapped'), true)
+    assert.equal(JSON.stringify(selected.selectedRow).includes('SYN-UNMAPPED'), false)
+    const planned = buildYidaStaticPlan({ config: selected.config, rows: [selected.selectedRow] }).rows[0]
+    assert.deepEqual(planned.payload, selected.plan.rows[index].payload)
+    assert.equal(planned.payload.label, '1200 mm')
+    assert.equal(planned.payload.rule, 'SYN-RULE'); assert.equal(planned.payload.nameCopy, planned.payload.componentName)
+    const preview = await f.port.previewInTransaction(f.trx, request)
+    assert.deepEqual(preview.payload, selected.plan.rows[index].payload)
+    // The digest the runner verifies is over exactly the previewed payload bytes.
+    const authorization = grant()
+    const data = { ...selected.plan.rows[index].protocolPreview.data, formDataJson: stableCanonicalStringify(preview.payload) }
+    assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+      version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+      targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+      intent: 'create', data, formUuid: selected.config.target.formUuid,
+      sourceRecordDigest: null, creationIdentityDigest: null })).digest('hex'))
+    for (const target of Object.keys(preview.payload)) assert.equal(selected.config.fieldCatalog.some(item => item.id === target), true)
+    assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+    assert.deepEqual(f.port.draftSendBudget(source), { withinBudget: true })
+    assert.equal(f.state[LEDGER].length, 0)
+  })
+}
+
+test('R-71 ⑦.3: a v3 draft whose key definition or intent differs from the slot is CONFLICT with no draft written', async () => {
+  const f = await fixture(), base = v3Source(f.source)
+  const narrowed = structuredClone(base); narrowed.config.businessKey = narrowed.config.businessKey.filter(target => target !== 'componentName')
+  const nullable = structuredClone(base); nullable.config.emptyKeyFields = []
+  nullable.rowsText = JSON.stringify(JSON.parse(nullable.rowsText).map(row => ({ ...row, parentCode: 'SYN-PARENT-' + row.quantity })))
+  const update = structuredClone(base); update.config.intent = 'update'; update.config.instanceIdField = 'instanceId'
+  update.rowsText = JSON.stringify(JSON.parse(update.rowsText).map((row, index) => ({ ...row, instanceId: 'SYN-INSTANCE-' + index })))
+  for (const input of [narrowed, nullable, update]) await rejected(f.port.prepareDraftInTransaction(f.trx, input), 'CONFLICT')
+  assert.equal(f.state[OP].length, 1); assert.equal(f.state[DRAFT_AUDIT].length, 0)
+  assert.throws(() => f.port.draftSendBudget(update), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+})
+
+test('R-71 ⑦.3 C1: draftSendBudget is one frozen boolean, v2 always within, v3 assessed per row; within implies sendBudget within', async () => {
+  const f = await fixture(), sql = f.calls.length
+  const v2 = f.port.draftSendBudget(f.source)
+  assert.deepEqual(v2, { withinBudget: true }); assert.equal(Object.isFrozen(v2), true)
+  assert.deepEqual(Object.getOwnPropertyNames(v2), ['withinBudget'])
+  // Over budget for v3 (constants live in the config, not the 128 KiB row text): refused.
+  assert.deepEqual(f.port.draftSendBudget(v3Source(f.source, constants(20, '中'))), { withinBudget: false })
+  assert.deepEqual(f.port.draftSendBudget(v3Source(f.source, constants(20, '"'))), { withinBudget: false })
+  assert.throws(() => f.port.draftSendBudget({ ...f.source, targetRef: 'caller' }), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.draftSendBudget(new Proxy(f.source, {})), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.draftSendBudget({ ...f.source, rowsText: '[]' }), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.equal(f.calls.length, sql)
+  // Property: whenever the draft-time verdict is within, the approval-time verdict on the real
+  // selection is within too (the placeholders dominate the real ids, expiry and credentials).
+  const seen = new Set()
+  for (const character of ['中', '"', 'a']) {
+    for (let count = 0; count <= 20; count += 2) {
+      const source = v3Source(f.source, constants(count, character)), verdict = f.port.draftSendBudget(source)
+      seen.add(verdict.withinBudget)
+      if (!verdict.withinBudget) continue
+      const made = await f.port.prepareDraftInTransaction(f.trx, source)
+      for (const row of made.rows) {
+        const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: row.rowKey })
+        assert.deepEqual(f.port.sendBudget(selected, { ...grant(), expiresAt: Number.MAX_SAFE_INTEGER }), { withinBudget: true },
+          `${character} x ${count}`)
+      }
+    }
+  }
+  assert.deepEqual([...seen].sort(), [false, true])
+})
+
+test('R-71 ⑦.3 C1: at the exact draft-time edge the approval-time budget still holds with real-length ids', async () => {
+  const f = await fixture()
+  // Total constant text T split into 4096-char constants; find the largest T the draft accepts.
+  const sized = total => {
+    const extra = constants(Math.ceil(total / 4096), '中')
+    if (extra.length) extra[extra.length - 1].value = '中'.repeat(total - 4096 * (extra.length - 1))
+    return v3Source(f.source, extra)
+  }
+  let low = 0, high = 20 * 4096
+  assert.equal(f.port.draftSendBudget(sized(low)).withinBudget, true)
+  assert.equal(f.port.draftSendBudget(sized(high)).withinBudget, false)
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2)
+    if (f.port.draftSendBudget(sized(middle)).withinBudget) low = middle; else high = middle
+  }
+  const made = await f.port.prepareDraftInTransaction(f.trx, sized(low))
+  for (const row of made.rows) {
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: row.rowKey })
+    // A real grant: a 36-char UUID ref and a current-epoch expiry, the shapes the host mints.
+    assert.deepEqual(f.port.sendBudget(selected, { grantRef: randomUUID(), expiresAt: Date.now() + 900000, actorId: context.ownerId }),
+      { withinBudget: true })
+  }
+})
+
+// ---- Source binding (design baseline v2.3 §7.2): bound drafts, bound selections, the registry check at admission ----
+const REGISTRY = 'integration_stock_prep_project_target'
+function boundSource(f, index = 0) {
+  const rows = JSON.parse(f.source.rowsText)
+  const keySource = f.source.config.businessKey[1]
+  const fieldBindings = Object.fromEntries(f.source.config.fieldMap.map(entry => [entry.source, 'fld_' + entry.source]))
+  return { ...f.source, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings[keySource], fieldBindings,
+    records: rows.map((row, ordinal) => ({ recordId: `rec_${ordinal}`, keyValue: String(row[keySource]), projectNo: 'DEMO-P1' })) } }
+}
+function registryRow(patch = {}) {
+  return { id: randomUUID(), tenant_id: context.tenantId, project_no: 'DEMO-P1', sheet_id: 'sheet_registered', object_id: 'synthetic-object', status: 'active', ...patch }
+}
+
+test('a bound draft is written with both row digests; its selection carries them and the per-row binding; the digest covers them', async () => {
+  const f = await fixture(), [, { compileYidaSendDraft }] = await modules
+  const source = boundSource(f)
+  const made = await f.port.prepareDraftInTransaction(f.trx, source)
+  assert.equal(made.reused, false)
+  const compiled = compileYidaSendDraft(source)
+  const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+  assert.deepEqual(members.map(row => [row.source_record_digest, row.creation_identity_digest]),
+    compiled.rowSpecs.map(spec => [spec.sourceRecordDigest, spec.creationIdentityDigest]))
+  assert.equal(members.every(row => /^[0-9a-f]{64}$/.test(row.source_record_digest) && /^[0-9a-f]{64}$/.test(row.creation_identity_digest)), true)
+  // The unbound draft of the same rows is another operation with null digests (SR5, draft level).
+  assert.equal(f.state[ROWS].filter(row => row.operation_id === f.draft.operation.operation_id)
+    .every(row => row.source_record_digest === undefined && row.creation_identity_digest === undefined), true)
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: members[0].row_key })
+  assert.equal(selected.sourceRecordDigest, compiled.rowSpecs[0].sourceRecordDigest)
+  assert.equal(selected.creationIdentityDigest, compiled.rowSpecs[0].creationIdentityDigest)
+  assert.deepEqual(selected.sourceBinding, compiled.rowSpecs[0].sourceBinding)
+  assert.equal(Object.isFrozen(selected.sourceBinding), true)
+  // Version 2 digest: the binding digests are inputs, so the same payload under another record is another digest.
+  const authorization = grant(), payload = selected.plan.rows[0]
+  const data = { ...payload.protocolPreview.data, formDataJson: stableCanonicalStringify(payload.payload) }
+  assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+    version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+    targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+    intent: 'create', data, formUuid: selected.config.target.formUuid,
+    sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest })).digest('hex'))
+  const unboundSelected = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  assert.notEqual(f.port.executionPayloadDigest(unboundSelected, authorization), f.port.executionPayloadDigest(selected, authorization))
+  assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+  assert.deepEqual(f.port.draftSendBudget(source), { withinBudget: true })
+  // A durable digest that no longer matches the recompiled row is refused on read.
+  members[0].creation_identity_digest = 'e'.repeat(64)
+  await rejected(f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: members[0].row_key }))
+})
+
+test('admission of a bound row reads the project registry in the same transaction and refuses an absent, archived or moved registration', async () => {
+  const f = await fixture()
+  const made = await f.port.prepareDraftInTransaction(f.trx, boundSource(f))
+  const member = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)[0]
+  const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: member.row_key })
+  const authorization = grant(), payloadDigest = f.port.executionPayloadDigest(selected, authorization)
+  const request = () => ({ ...prepared(selected, payloadDigest), sourceRecordDigest: selected.sourceRecordDigest,
+    creationIdentityDigest: selected.creationIdentityDigest, sourceBinding: selected.sourceBinding })
+  // No registry row for the project: CONFLICT, nothing written.
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  assert.equal(f.state[LEDGER].length, 0)
+  // Archived registration, and a registration that names another sheet: CONFLICT.
+  f.state[REGISTRY].push(registryRow({ status: 'archived' }))
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  f.state[REGISTRY][0] = registryRow({ sheet_id: 'sheet_other' })
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  // Another tenant's registration of the same project does not count.
+  f.state[REGISTRY][0] = registryRow({ tenant_id: 'synthetic-other-tenant' })
+  await rejected(f.port.prepareInTransaction(f.trx, request()), 'CONFLICT')
+  assert.equal(f.state[LEDGER].length, 0)
+  // The three binding keys come together: a partial set is INPUT.
+  for (const partial of [{ sourceRecordDigest: selected.sourceRecordDigest }, { sourceBinding: selected.sourceBinding },
+    { sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: null, sourceBinding: selected.sourceBinding }]) {
+    await rejected(f.port.prepareInTransaction(f.trx, { ...prepared(selected, payloadDigest), ...partial }), 'INPUT')
+  }
+  // Active registration naming the bound sheet: prepared, with both digests on the ledger row.
+  f.state[REGISTRY][0] = registryRow()
+  const result = await f.port.prepareInTransaction(f.trx, request())
+  assert.equal(result.reused, false); assert.equal(result.record.status, 'prepared')
+  assert.equal(f.state[LEDGER][0].source_record_digest, selected.sourceRecordDigest)
+  assert.equal(f.state[LEDGER][0].creation_identity_digest, selected.creationIdentityDigest)
+  assert.equal(f.calls.some(sql => sql.startsWith(`SELECT * FROM "${REGISTRY}"`)), true)
+  // Unbound admission (all three null, or absent) never reads the registry.
+  const unbound = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  const unboundDigest = f.port.executionPayloadDigest(unbound, authorization)
+  f.calls.length = 0
+  const plain = await f.port.prepareInTransaction(f.trx, { ...prepared(unbound, unboundDigest), sourceRecordDigest: null, creationIdentityDigest: null, sourceBinding: null })
+  assert.equal(plain.reused, false)
+  assert.equal(f.calls.some(sql => sql.includes(REGISTRY)), false)
+  assert.deepEqual([f.state[LEDGER][1].source_record_digest, f.state[LEDGER][1].creation_identity_digest], [null, null])
+})
+
+// ---- R-71 ⑦.4 PR-2 (Y6): a v3 draft with a generated entry through the send authority (SR5 generated part, and the
+// ⑦.3 points 3/4/5 re-run with the generated value: projected selection, re-plan equality, preview ≡ executed data) ----
+const GENERATED_ENTRY = { transform: 'generated', target: 'code', type: 'string', required: true,
+  template: [{ literal: 'SYN-' }, { hash: ['project', 'componentCode', 'componentName', 'specification', 'material', 'version', 'parentCode'], form: 'uuid-36' }] }
+// Independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 bit layout, the generated-hash name layout: [target, value] pairs
+// sorted by target, coordinator ruling L1).
+function oracleGeneratedHash(members) {
+  const pairs = Object.entries(members).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+  const digest = createHash('sha1').update(Buffer.from('de2dfbd78b3f41a493228487ec85637f', 'hex'))
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-generated-hash', 'v1', pairs]), 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+function generatedSource(f) {
+  const source = v3Source(f.source, [GENERATED_ENTRY])
+  const columns = [...new Set(source.config.fieldMap.flatMap(entry => entry.source ? [entry.source] : []).concat(['ext_size']))]
+  const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+  const rows = JSON.parse(source.rowsText)
+  return { unbound: source, bound: { ...source, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: 'fld_componentCode', fieldBindings,
+    records: rows.map((row, ordinal) => ({ recordId: `rec_${ordinal}`, keyValue: row.componentCode, projectNo: 'DEMO-P1' })) } } }
+}
+
+test('R-71 ⑦.4 SR5 (generated): an unbound draft with a generated entry is refused before any draft row; without it the pasted draft is written unbound', async () => {
+  const f = await fixture(), { unbound } = generatedSource(f)
+  const operations = f.state[OP].length, rows = f.state[ROWS].length
+  await rejected(f.port.prepareDraftInTransaction(f.trx, unbound))
+  assert.deepEqual([f.state[OP].length, f.state[ROWS].length, f.state[DRAFT_AUDIT].length], [operations, rows, 0])
+  // The draft-time budget answers the same refusal (one compiler, one rule).
+  assert.throws(() => f.port.draftSendBudget(unbound), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  // Slice YE: the source verdict the host consults first names it (a fixed, non-retryable code, never UNAVAILABLE).
+  assert.deepEqual(f.port.validateDraftSource(unbound), { valid: false, code: 'SOURCE_UNBOUND' })
+  // The same pasted rows without the generated entry: an ordinary v3 draft whose rows carry no binding digest.
+  const made = await f.port.prepareDraftInTransaction(f.trx, v3Source(f.source))
+  const members = f.state[ROWS].filter(row => row.operation_id === made.operationId)
+  assert.equal(members.length, 2)
+  assert.equal(members.every(row => row.source_record_digest === null && row.creation_identity_digest === null), true)
+})
+
+for (const mode of ['original', 'equal_integer']) {
+  test(`R-71 ⑦.4 (⑦.3 points 3-5 with generated) ${mode}: a bound generated draft selects projected rows; re-plan, preview and executed data carry the same code`, async () => {
+    const f = await fixture(mode), [, { compileYidaSendDraft }, { buildYidaStaticPlan, yidaTransformSourceColumns }] = await modules
+    const { bound } = generatedSource(f), index = mode === 'original' ? 0 : 2
+    const made = await f.port.prepareDraftInTransaction(f.trx, bound)
+    const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+    const compiled = compileYidaSendDraft(bound)
+    assert.deepEqual(members.map(row => row.payload_digest), compiled.rowSpecs.map(spec => spec.payloadDigest))
+    // Every planned row has its own code (split rows included), equal to the independent oracle over its own key tuple.
+    const codes = compiled.plan.rows.map(row => row.payload.code)
+    assert.equal(new Set(codes).size, codes.length)
+    for (const row of compiled.plan.rows) {
+      const p = row.payload
+      assert.equal(p.code, 'SYN-' + oracleGeneratedHash({ project: p.project, componentCode: p.componentCode, componentName: p.componentName,
+        specification: p.specification, material: p.material, version: p.version, parentCode: p.parentCode ?? '' }))
+    }
+    const request = { operationId: made.operationId, rowKey: members[index].row_key }
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, request)
+    // (4) the selection is projected onto the columns the mapping reads, generated inputs included, nothing else.
+    const columns = yidaTransformSourceColumns(selected.config)
+    assert.deepEqual(Object.keys(selected.selectedRow).sort(), [...columns])
+    assert.equal(JSON.stringify(selected.selectedRow).includes('SYN-UNMAPPED'), false)
+    // (3) a one-row re-plan of the projected row reproduces the compiled payload, code included.
+    const planned = buildYidaStaticPlan({ config: selected.config, rows: [selected.selectedRow] }).rows[0]
+    assert.deepEqual(planned.payload, selected.plan.rows[index].payload)
+    assert.equal(planned.payload.code, codes[index])
+    // (5) preview is the executed data, and the execution digest covers exactly those bytes (with both binding digests).
+    const preview = await f.port.previewInTransaction(f.trx, request)
+    assert.deepEqual(preview.payload, selected.plan.rows[index].payload)
+    const authorization = grant()
+    const data = { ...selected.plan.rows[index].protocolPreview.data, formDataJson: stableCanonicalStringify(preview.payload) }
+    assert.equal(JSON.parse(data.formDataJson).code, codes[index])
+    assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+      version: 2, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+      targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+      intent: 'create', data, formUuid: selected.config.target.formUuid,
+      sourceRecordDigest: selected.sourceRecordDigest, creationIdentityDigest: selected.creationIdentityDigest })).digest('hex'))
+    assert.deepEqual(selected.sourceBinding.fieldDependencies.code, ['fld_componentCode', 'fld_componentName', 'fld_material',
+      'fld_parentCode', 'fld_projectNo', 'fld_specification', 'fld_version'])
+    assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+    assert.deepEqual(f.port.draftSendBudget(bound), { withinBudget: true })
+    assert.equal(f.state[LEDGER].length, 0)
+  })
+}
+
+// ---- P1 (external review 2026-11-08): one sealed generated layout per approved target (migration zzzz20261108120000) ----
+// Independent oracle of the seal's digest: the planner's canonical layout through canonical JSON and sha256.
+function oracleLayoutDigest(planner, config) {
+  return createHash('sha256').update(stableCanonicalStringify(planner.yidaGeneratedLayout(config)), 'utf8').digest('hex')
+}
+// A bound generated draft written by the real draft writer (its member rows carry the binding digests), selected at row 0.
+// `salt` moves ext_size (a concat input) so a template variant becomes its own operation instead of reusing the first plan.
+async function generatedSelection(f, bound) {
+  const made = await f.port.prepareDraftInTransaction(f.trx, bound)
+  const member = f.state[ROWS].find(row => row.operation_id === made.operationId && row.ordinal === 0)
+  return f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: member.row_key })
+}
+const withTemplate = (bound, template, salt = 0) => ({ ...bound,
+  rowsText: JSON.stringify(JSON.parse(bound.rowsText).map(row => ({ ...row, ext_size: row.ext_size + salt }))),
+  config: { ...bound.config, fieldMap: bound.config.fieldMap.map(entry => entry.transform === 'generated' ? { ...entry, template } : entry) } })
+
+test('P1 seal: without a generated entry the seal row is read and nothing is written on an unsealed target; the first generated selection seals the target layout (digest = canonical layout sha256, this operation, the event); the same layout matches, a reordered hash is the same layout, another layout — and a selection without a generated entry — is the frozen conflict verdict with nothing written', async () => {
+  const f = await fixture(), [, , planner] = await modules
+  // v2 (no generated entry) on an UNSEALED target: admissible, not sealed; exactly one SELECT … FOR UPDATE of the seal
+  // row (the null signature must be compared with a seal that may exist), no write.
+  const plain = await f.port.resolveSelectionInTransaction(f.trx, f.selection())
+  f.calls.length = 0
+  const untouched = await f.port.sealGeneratedLayoutInTransaction(f.trx, plain, { event: 'approve' })
+  assert.deepEqual(untouched, { admissible: true, sealed: false })
+  assert.equal(Object.isFrozen(untouched), true)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].startsWith(`SELECT * FROM "${LAYOUT}"`) && f.calls[0].endsWith('FOR UPDATE'), true)
+  assert.deepEqual(f.state[LAYOUT], [])
+  // The first generated selection: the row is locked FOR UPDATE, absent, written with this target, scope, operation and event.
+  const { bound } = generatedSource(f)
+  const selected = await generatedSelection(f, bound)
+  f.calls.length = 0
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), { admissible: true, sealed: true })
+  assert.equal(f.calls.some(sql => sql.startsWith(`SELECT * FROM "${LAYOUT}"`) && sql.endsWith('FOR UPDATE')), true)
+  assert.equal(f.state[LAYOUT].length, 1)
+  const sealed = f.state[LAYOUT][0]
+  assert.deepEqual([sealed.target_ref, sealed.tenant_id, sealed.workspace_id, sealed.owner_id, sealed.operation_id, sealed.event, sealed.actor_id],
+    [selected.targetRef, context.tenantId, null, context.ownerId, selected.operationId, 'approve', context.ownerId])
+  assert.equal(sealed.layout_digest, oracleLayoutDigest(planner, bound.config))
+  // The same plain selection on the now SEALED target (verifier r1 of the P1 fix): null is another signature — the frozen
+  // conflict verdict, nothing written (a cell mapped directly onto the sealed code target could otherwise carry another
+  // identity's generated code).
+  f.calls.length = 0
+  const refusedPlain = await f.port.sealGeneratedLayoutInTransaction(f.trx, plain, { event: 'admit' })
+  assert.deepEqual(refusedPlain, { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+  assert.equal(Object.isFrozen(refusedPlain), true)
+  assert.equal(f.calls.some(sql => sql.startsWith('INSERT')), false)
+  assert.deepEqual(f.state[LAYOUT], [sealed])
+  // Another draft of the same layout (another operation, the admission event): matches, nothing written.
+  const again = await generatedSelection(f, withTemplate(bound, GENERATED_ENTRY.template, 1))
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, again, { event: 'admit' }), { admissible: true, sealed: false })
+  assert.equal(f.state[LAYOUT].length, 1)
+  // A hash listing its members in another order is the same layout (ruling L1: the listed order never changes a code).
+  const [prefix, hashPart] = GENERATED_ENTRY.template
+  const reordered = await generatedSelection(f, withTemplate(bound, [prefix, { ...hashPart, hash: [...hashPart.hash].reverse() }], 2))
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, reordered, { event: 'approve' }), { admissible: true, sealed: false })
+  // Another layout of the same target (the reviewer's counterexample shape: the hash first, a field part after it; and the
+  // bare hash): the frozen conflict verdict, no write, the seal unchanged.
+  for (const [salt, template] of [[3, [hashPart, { field: 'componentName' }]], [4, [hashPart]]]) {
+    const other = await generatedSelection(f, withTemplate(bound, template, salt))
+    f.calls.length = 0
+    const verdict = await f.port.sealGeneratedLayoutInTransaction(f.trx, other, { event: 'approve' })
+    assert.deepEqual(verdict, { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+    assert.equal(Object.isFrozen(verdict), true)
+    assert.equal(f.calls.some(sql => sql.startsWith('INSERT')), false)
+    assert.deepEqual(f.state[LAYOUT], [sealed])
+  }
+  // Closed inputs: an unbranded copy of a selection, another port's selection, an unknown or missing event.
+  await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, structuredClone(selected), { event: 'approve' }), 'INPUT')
+  await rejected(f.fresh().sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), 'INPUT')
+  for (const bad of [{ event: 'draft' }, { event: 'approve', extra: 1 }, {}, null, 'approve']) {
+    await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, selected, bad), 'INPUT')
+  }
+  // A seal row under this target ref that is not this owner's, or whose digest is malformed: UNAVAILABLE, never a match.
+  f.state[LAYOUT][0] = { ...sealed, owner_id: 'synthetic-other-owner' }
+  await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }))
+  f.state[LAYOUT][0] = { ...sealed, layout_digest: 'not-a-digest' }
+  await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }))
+  f.state[LAYOUT][0] = sealed
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'admit' }), { admissible: true, sealed: false })
+  // The seal's primary-key race (reachable only without the host's approved-target row lock): the conflict verdict.
+  f.state[LAYOUT].length = 0
+  const race = Object.assign(new Error('synthetic unique violation'), { code: '23505', constraint: 'integration_yida_generated_layout_pkey' })
+  f.faults.onQuery = async sql => { if (sql.startsWith(`INSERT INTO "${LAYOUT}"`)) throw race }
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+  f.faults.onQuery = async sql => { if (sql.startsWith(`INSERT INTO "${LAYOUT}"`)) throw Object.assign(new Error('synthetic other failure'), { code: '23505', constraint: 'other' }) }
+  await rejected(f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }))
+  f.faults.onQuery = null
+})
+
+// ---- Slice YE (external review recommendation 2, 2026-11-08): draft-time verdicts for the host's fixed codes ----
+// The preset template of the material code: rowIdOf names the bound key field's direct target (componentCode), projectOf the
+// project target; a rowIdOf naming another string direct target (componentName) is the structural mismatch.
+const presetTemplate = (rowIdOf = 'componentCode') => [{ literal: 'SYN-' }, { preset: 'material-code-v1', rowIdOf, projectOf: 'project' }]
+// The example's two rows share one component code and project, so a preset code needs one row (two would be
+// DUPLICATE_GENERATED_VALUE, a PLAN refusal before any source check).
+const firstRow = candidate => ({ ...candidate, rowsText: JSON.stringify([JSON.parse(candidate.rowsText)[0]]),
+  sourceBinding: { ...candidate.sourceBinding, records: [candidate.sourceBinding.records[0]] } })
+
+test('YE validateDraftSource: one frozen verdict, pure (no SQL); the compiler\'s source-validation kinds are named, every other failure stays closed', async () => {
+  const f = await fixture(), { unbound, bound } = generatedSource(f)
+  const before = f.calls.length
+  const valid = f.port.validateDraftSource(bound)
+  assert.deepEqual(valid, { valid: true })
+  assert.equal(Object.isFrozen(valid), true)
+  // A plain v2 or v3 draft without a generated entry is valid too (nothing to validate against a source).
+  assert.deepEqual(f.port.validateDraftSource(f.source), { valid: true })
+  assert.deepEqual(f.port.validateDraftSource(v3Source(f.source)), { valid: true })
+  const preset = firstRow(withTemplate(bound, presetTemplate()))
+  assert.deepEqual(f.port.validateDraftSource(preset), { valid: true })
+  const otherProject = { ...preset, sourceBinding: { ...preset.sourceBinding,
+    records: preset.sourceBinding.records.map(record => ({ ...record, projectNo: 'DEMO-P9' })) } }
+  const cases = [['SOURCE_UNBOUND', unbound], ['SOURCE_PROJECT_MISMATCH', otherProject],
+    ['SOURCE_KEY_FIELD_MISMATCH', firstRow(withTemplate(bound, presetTemplate('componentName')))]]
+  for (const [code, candidate] of cases) {
+    const verdict = f.port.validateDraftSource(candidate)
+    assert.deepEqual(verdict, { valid: false, code })
+    assert.equal(Object.isFrozen(verdict), true)
+    assert.deepEqual(Object.keys(verdict), ['valid', 'code'])
+  }
+  assert.equal(f.calls.length, before)
+  // Not a source problem: the closed errors they always were (a duplicate generated value is PLAN → UNAVAILABLE; malformed
+  // input is INPUT; an empty row set is PLAN → UNAVAILABLE).
+  const rows = JSON.parse(bound.rowsText)
+  const twinRows = [rows[0], { ...rows[0], componentName: 'SYN-TWIN' }]
+  const twin = withTemplate({ ...bound, rowsText: JSON.stringify(twinRows), sourceBinding: { ...bound.sourceBinding,
+    records: twinRows.map((row, ordinal) => ({ recordId: `rec_twin_${ordinal}`, keyValue: row.componentCode, projectNo: 'DEMO-P1' })) } }, presetTemplate())
+  assert.throws(() => f.port.validateDraftSource(twin), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => f.port.validateDraftSource({ ...f.source, rowsText: '[]' }), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => f.port.validateDraftSource({ ...f.source, targetRef: 'caller' }), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.validateDraftSource(new Proxy(f.source, {})), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.validateDraftSource(null), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+})
+
+test('YE checkGeneratedLayoutInTransaction: read-only (no FOR UPDATE, no INSERT); unsealed is admissible; on a sealed target the same layout passes, another layout or none is the frozen conflict verdict', async () => {
+  const f = await fixture(), [, , planner] = await modules
+  const { bound } = generatedSource(f)
+  const readOnly = () => {
+    const layoutReads = f.calls.filter(sql => sql.startsWith(`SELECT * FROM "${LAYOUT}"`))
+    assert.equal(layoutReads.length, 1)
+    assert.equal(layoutReads[0].endsWith('FOR UPDATE'), false)
+    assert.equal(f.calls.some(sql => sql.startsWith('INSERT')), false)
+  }
+  // Unsealed target: a generated draft and a plain one are both admissible, nothing written, the seal table untouched.
+  for (const candidate of [bound, f.source, v3Source(f.source)]) {
+    f.calls.length = 0
+    const verdict = await f.port.checkGeneratedLayoutInTransaction(f.trx, candidate)
+    assert.deepEqual(verdict, { admissible: true, sealed: false })
+    assert.equal(Object.isFrozen(verdict), true)
+    readOnly()
+  }
+  assert.deepEqual(f.state[LAYOUT], [])
+  // Seal the target with the bound draft's layout (the approval path), then check drafts against it.
+  const selected = await generatedSelection(f, bound)
+  assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), { admissible: true, sealed: true })
+  const sealed = f.state[LAYOUT][0]
+  assert.equal(sealed.layout_digest, oracleLayoutDigest(planner, bound.config))
+  f.calls.length = 0
+  assert.deepEqual(await f.port.checkGeneratedLayoutInTransaction(f.trx, withTemplate(bound, GENERATED_ENTRY.template, 5)), { admissible: true, sealed: false })
+  readOnly()
+  const [, hashPart] = GENERATED_ENTRY.template
+  for (const candidate of [withTemplate(bound, [hashPart, { field: 'componentName' }], 6), firstRow(withTemplate(bound, presetTemplate(), 7)), f.source, v3Source(f.source)]) {
+    f.calls.length = 0
+    const verdict = await f.port.checkGeneratedLayoutInTransaction(f.trx, candidate)
+    assert.deepEqual(verdict, { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+    assert.equal(Object.isFrozen(verdict), true)
+    readOnly()
+  }
+  assert.deepEqual(f.state[LAYOUT], [sealed])
+  // A draft this target cannot take (another form, an update intent) is the closed CONFLICT prepareDraftInTransaction answers.
+  const otherForm = structuredClone(bound); otherForm.config.target = { ...otherForm.config.target, formUuid: 'synthetic_other_form' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, otherForm), 'CONFLICT')
+  // A seal row that is not this owner's or whose digest is malformed: UNAVAILABLE, never a match.
+  f.state[LAYOUT][0] = { ...sealed, owner_id: 'synthetic-other-owner' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.state[LAYOUT][0] = { ...sealed, layout_digest: 'not-a-digest' }
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.state[LAYOUT][0] = sealed
+  // Closed input: a caller-supplied extra key, a Proxy, a database fault.
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, { ...bound, extra: 1 }), 'INPUT')
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, new Proxy(bound, {})), 'INPUT')
+  f.faults.query = new Error('synthetic database failure')
+  await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
+  f.faults.query = null
 })

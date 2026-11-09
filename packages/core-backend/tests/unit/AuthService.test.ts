@@ -424,6 +424,8 @@ describe('AuthService.verifyToken', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      // D21 (Y5a): assignUserRoles bumps the subject authorization version row before the insert.
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       // The user held no attendance role: ON CONFLICT DO NOTHING ... RETURNING returns the inserted row.
       .mockResolvedValueOnce({ rows: [{ user_id: 'u5' }], rowCount: 1 })
     rbacMocks.isAdmin.mockResolvedValue(false)
@@ -450,6 +452,11 @@ describe('AuthService.verifyToken', () => {
     )
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       4,
+      expect.stringContaining('INSERT INTO subject_authorization_versions'),
+      [['u5']],
+    )
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      5,
       expect.stringContaining('INSERT INTO user_roles'),
       [['u5'], 'attendance_employee'],
     )

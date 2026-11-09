@@ -74,6 +74,10 @@ function createQuery(): {
   const query: MultitableProvisioningQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
 
+    // D21 field-row writer rule: patchObjectFieldProperty and an overwriting ensureFields take the sheet version row
+    // first (authz-version-protocol.ts). A lock-protocol statement; this fake keeps no version rows.
+    if (normalized.startsWith('INSERT INTO sheet_permission_versions')) return { rows: [], rowCount: 1 }
+
     if (normalized.startsWith('INSERT INTO meta_bases')) {
       const [id, name] = params as [string, string]
       if (!bases.find((base) => base.id === id)) {

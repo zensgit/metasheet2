@@ -167,6 +167,10 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
     const plannerModule = pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href
     example = (await import(plannerModule)).createYidaProtocolExample
     ddl = readFileSync(path.join(root, 'packages/core-backend/migrations/093_create_integration_yida_draft_plans.sql'), 'utf8')
+    // Source binding (design baseline v2.3 §7.2): the draft-row columns of zzzz20261106110300, exactly what its up() executes.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL: string }).YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -464,5 +468,119 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
       await rejected(second.store.replay({ operationId: one.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
       expect(await evidence()).toEqual(before)
     } finally { process.env[key] = prior }
+  })
+
+  // ---- Source binding (design baseline v2.3 §7.2): the two row digests are durable and stable across a draft rebuild ----
+  function bound(value: Input = input()): Input & { sourceBinding: Row } {
+    // The sheet's key column is the component code; the example rows share it, so each bound row gets its own.
+    const keyField = value.config.fieldMap.find(field => field.target === 'componentCode')!.source
+    const rows = (JSON.parse(value.rowsText) as Row[]).map((row, index) => ({ ...row, [keyField]: 'DEMO-PART-' + String.fromCharCode(65 + index) }))
+    const fieldBindings = Object.fromEntries(value.config.fieldMap.map(field => [field.source, 'fld_' + field.target]))
+    return { ...value, rowsText: JSON.stringify(rows), sourceBinding: { sheetId: 'sheet_registered', keyFieldId: fieldBindings[keyField], fieldBindings,
+      records: rows.map((entry, index) => ({ recordId: 'rec_' + index, keyValue: String(entry[keyField]), projectNo: 'SYN-P1' })) } }
+  }
+  it('bound drafts persist both row digests; a rebuilt draft with an unrelated change is a new operation with the same digests', async () => {
+    const one = await first.store.createDraft(bound())
+    const members = (await tableRows(ROWS)).filter(row => row.operation_id === one.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(members.every(row => /^[0-9a-f]{64}$/.test(String(row.source_record_digest)) && /^[0-9a-f]{64}$/.test(String(row.creation_identity_digest)))).toBe(true)
+    expect(new Set(members.map(row => row.creation_identity_digest)).size).toBe(members.length)
+    // The unbound draft of the same rows is another operation whose rows carry NULL digests (SR5, draft level).
+    const plain = await second.store.createDraft(input())
+    expect(plain.operationId !== one.operationId && plain.reused === false).toBe(true)
+    expect((await tableRows(ROWS)).filter(row => row.operation_id === plain.operationId)
+      .every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    // Rebuild: the quantity of the first row corrected (not a key). New operation and row keys; identical binding digests per ordinal.
+    const two = await second.store.createDraft(bound(changedPlan()))
+    expect(two.operationId !== one.operationId && two.reused === false).toBe(true)
+    const rebuilt = (await tableRows(ROWS)).filter(row => row.operation_id === two.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(rebuilt.map(row => row.row_key).some(key => members.some(row => row.row_key === key))).toBe(false)
+    expect(rebuilt.map(row => [row.source_record_digest, row.creation_identity_digest])).toEqual(members.map(row => [row.source_record_digest, row.creation_identity_digest]))
+    expect(rebuilt[0].payload_digest).not.toBe(members[0].payload_digest)
+    // The same binding again reuses the first operation; a re-created record (new id) is another operation, same identity.
+    expect((await second.store.createDraft(bound())).operationId).toBe(one.operationId)
+    const recreated = bound(); (recreated.sourceBinding.records as Row[])[0] = { ...(recreated.sourceBinding.records as Row[])[0], recordId: 'rec_new' }
+    const three = await second.store.createDraft(recreated)
+    const moved = (await tableRows(ROWS)).filter(row => row.operation_id === three.operationId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    expect(three.operationId !== one.operationId && moved[0].creation_identity_digest === members[0].creation_identity_digest
+      && moved[0].source_record_digest !== members[0].source_record_digest).toBe(true)
+    for (const operationId of [one.operationId, two.operationId, three.operationId]) {
+      expect((await second.store.replay({ operationId })).replayVerified).toBe(true)
+    }
+    const persisted = JSON.stringify([await tableRows(TARGETS), await tableRows(OPERATIONS), await tableRows(ROWS), await tableRows(AUDIT)])
+    for (const value of ['sheet_registered', 'rec_0', 'SYN-P1', 'fld_line']) expect(persisted.includes(value)).toBe(false)
+  })
+  it.each(['source_record_digest', 'creation_identity_digest'])('replay independently checks the durable binding digest %s against the sealed source', async column => {
+    const one = await first.store.createDraft(bound())
+    await corrupt(ROWS, 'row_key', one.rows[0].rowKey, column, 'c'.repeat(64))
+    await rejected(second.store.replay({ operationId: one.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
+    const plain = await first.store.createDraft(input())
+    await corrupt(ROWS, 'row_key', plain.rows[0].rowKey, column, 'c'.repeat(64))
+    await rejected(second.store.replay({ operationId: plain.operationId }), 'YIDA_DRAFT_UNAVAILABLE')
+  })
+
+  // ---- R-71 ⑦.4 PR-2 (Y6) SR1 / SR5 with the generated material code (design baseline v2.3 §7.2 acceptance) ----
+  async function generatedInputs(defaultText = 'SYN-DEFAULT') {
+    const lib = (name: string) => pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib', name)).href
+    const { createYidaTransformExample, transformDependencies } = await import(lib('yida-static-plan.mjs')) as {
+      createYidaTransformExample(): { config: Config & { fieldMap: Row[] }; rows: Row[] }
+      transformDependencies(entry: unknown, config: unknown): string[] }
+    const example = createYidaTransformExample()
+    const config = structuredClone(example.config)
+    config.fieldMap.find(entry => entry.target === 'defaultText')!.value = defaultText
+    const columns = [...new Set(config.fieldMap.flatMap(entry => transformDependencies(entry, config)))]
+    const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+    const unbound: Input = { config, rowsText: JSON.stringify(example.rows), allocation: { mode: 'original' } }
+    return { unbound, bound: { ...unbound, sourceBinding: { sheetId: 'sheet_registered', keyFieldId: 'fld_idempotencyKey', fieldBindings,
+      records: example.rows.map((row, index) => ({ recordId: 'rec_g' + index, keyValue: String(row.idempotencyKey), projectNo: String(row.projectNo) })) } } }
+  }
+  async function sealedCodes(operationId: string) {
+    const { compileYidaLocalDraft } = await import(pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib/yida-draft-compiler.mjs')).href) as {
+      compileYidaLocalDraft(input: unknown): { plan: { rows: Array<{ payload: Row }> } } }
+    const operation = (await tableRows(OPERATIONS)).find(row => row.operation_id === operationId)!
+    const snapshot = JSON.parse(await security.decrypt(String(operation.snapshot_encrypted))) as { source: unknown }
+    return compileYidaLocalDraft(snapshot.source).plan.rows.map(row => String(row.payload.materialCodeText))
+  }
+  it('SR1 (generated): a rebuilt bound draft with an unrelated constant changed is a new operation with new row keys, the same source records and the same code bytes', async () => {
+    const a = await generatedInputs(), b = await generatedInputs('SYN-DEFAULT-CHANGED')
+    const one = await first.store.createDraft(a.bound)
+    const two = await second.store.createDraft(b.bound)
+    expect(two.operationId !== one.operationId && two.reused === false).toBe(true)
+    const members = async (operationId: string) => (await tableRows(ROWS)).filter(row => row.operation_id === operationId)
+      .sort((left, right) => Number(left.ordinal) - Number(right.ordinal))
+    const rowsOne = await members(one.operationId), rowsTwo = await members(two.operationId)
+    expect(rowsOne.length).toBe(2)
+    expect(rowsTwo.map(row => row.row_key).some(key => rowsOne.some(row => row.row_key === key))).toBe(false)
+    expect(rowsTwo.map(row => [row.source_record_digest, row.creation_identity_digest, row.business_key_digest]))
+      .toEqual(rowsOne.map(row => [row.source_record_digest, row.creation_identity_digest, row.business_key_digest]))
+    expect(rowsTwo.every((row, index) => row.payload_digest !== rowsOne[index].payload_digest)).toBe(true)
+    // The code is never stored: recompiled from each sealed source, both operations carry the same bytes per row.
+    const codes = await sealedCodes(one.operationId)
+    expect(codes.every(code => /^WLBH-[0-9A-F]{8}-[0-9A-F]{4}-5[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/.test(code))).toBe(true)
+    expect(new Set(codes).size).toBe(2)
+    expect(await sealedCodes(two.operationId)).toEqual(codes)
+    // The first draft again reuses its operation; both replay against their sealed sources.
+    expect((await second.store.createDraft(a.bound)).operationId).toBe(one.operationId)
+    for (const operationId of [one.operationId, two.operationId]) expect((await second.store.replay({ operationId })).replayVerified).toBe(true)
+    // SR5 at the draft store: the same rows pasted (unbound) with the generated entry are refused, nothing written.
+    const before = await evidence()
+    await rejected(first.store.createDraft(a.unbound), 'YIDA_DRAFT_SOURCE_UNBOUND')
+    expect(await evidence()).toEqual(before)
+    const persisted = JSON.stringify([await tableRows(TARGETS), await tableRows(OPERATIONS), await tableRows(ROWS), await tableRows(AUDIT)])
+    for (const value of ['WLBH-', ...codes, 'SYN-LINE-1', 'sheet_registered']) expect(persisted.includes(value)).toBe(false)
+  })
+
+  it('A4 (generated) at the draft store: a bound draft whose two rows carry one preset code (one key value, other seven keys) is refused and writes nothing', async () => {
+    // Verifier r2 L4 (probe PD): the in-batch DUPLICATE_GENERATED_VALUE pass through the persisted entry.
+    const a = await generatedInputs()
+    const base = (JSON.parse(a.unbound.rowsText) as Row[])[0]
+    const twin = [{ ...base }, { ...base, componentCode: 'DEMO-DRW-7' }]
+    const binding = (a.bound as unknown as { sourceBinding: Row }).sourceBinding
+    const sourceBinding = { ...binding, records: twin.map((row, index) => ({ recordId: 'rec_d' + index, keyValue: String(row.idempotencyKey), projectNo: String(row.projectNo) })) }
+    const before = await evidence()
+    expect(await outcome(first.store.createDraft({ ...a.unbound, rowsText: JSON.stringify(twin), sourceBinding }))).toEqual({ ok: false, code: 'YIDA_DRAFT_PLAN' })
+    expect(await evidence()).toEqual(before)
+    // Each row alone is an ordinary bound draft: the refusal is the shared code, not the rows.
+    const single = await first.store.createDraft({ ...a.unbound, rowsText: JSON.stringify([twin[1]]), sourceBinding: { ...binding, records: [sourceBinding.records[1]] } })
+    expect(single.reused).toBe(false)
   })
 })
