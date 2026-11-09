@@ -144,11 +144,17 @@
 - 点击任意数据表节点（含 active 自身）→ `emit('select-sheet', s.id)`——与今天点 sheet tab 逐字同语义（今天点 active tab 也重发 emit，保留）。父组件更新 `activeSheetId` + 重载 `views` → 树重渲染，新 active 节点展开。
 - 好处：(a) 展开/数据加载的因果关系不变——组件仍然只是"发 emit、等新 props"，零数据路径触碰；(b) 行为等价可测——展开行为完全由 props 驱动，测试喂不同 `activeSheetId` 断言 group 渲染。
 
+> **2026-10-21 修订（客户现场反馈 #6：展开后再点箭头无法折叠）**：在上述派生态之上加**一个**本地折叠态 `collapsedSheetId`（只可能等于 active sheet）。展开 = `s.id === activeSheetId && collapsedSheetId !== s.id`。
+> - active 数据表的 chevron（`data-testid="rail-sheet-chevron"`）切换折叠：`stopPropagation` 防止落到按钮自身的"点名称展开"逻辑，但仍发同 id 的 `select-sheet`（与点按钮相同；workbench 的 `onSelectSheet` 同 id 分支只做"退出仪表盘回网格"，不切换任何东西）。非 active 数据表的 chevron 不拦截，落到按钮 → 激活该表（自动展开）。
+> - 点已折叠的 active 数据表名称 → 展开 + 照旧 emit。
+> - `activeSheetId` 变化即清空折叠态 → 首次激活仍自动展开。不持久化。
+> - `aria-expanded` 与扁平可见节点序列（roving tabindex / 方向键）都跟随折叠态。
+
 ## 4. 4 emits 等价映射（行为等价的可检对照表）
 
 | emit | 今天的触发（水平条） | 2b 的触发（垂直树） | payload | gating |
 |------|--------------------|--------------------|---------|--------|
-| `select-sheet` | 点 sheet tab | 点数据表节点 button（整行含 chevron 一颗 button；Enter/Space = 原生 button 激活，与今天相同——今天也是原生 button） | `s.id`（不变） | 无（与今天同：任意 sheet 含 active 可点） |
+| `select-sheet` | 点 sheet tab | 点数据表节点 button（整行含 chevron 一颗 button；Enter/Space = 原生 button 激活，与今天相同——今天也是原生 button）。2026-10-21 修订：active 数据表的 chevron 自己处理点击（切换折叠，§3.2 修订），并照样发同 id 的 `select-sheet` | `s.id`（不变） | 无（与今天同：任意 sheet 含 active 可点） |
 | `select-view` | 点 view tab | 点视图叶子 button（Enter/Space 同上） | `v.id`（不变） | 无（active 视图可重点，与今天同） |
 | `create-sheet` | 点 "+" tab | 点 "＋ 新建数据表" 行 | `` `Sheet ${sheets.length + 1}` ``（`onAddSheet` 逐字保留） | `canCreateSheet`（v-if，false/absent 无 DOM） |
 | `toggle-personal` | active view tab 旁 pill | active 视图叶子行内 pill（testid/aria-pressed/label 逐字保留） | `v.id`（渲染处即 activeViewId，不变） | `personalViewsEnabled && v.id === activeViewId`（逐字保留） |
@@ -168,8 +174,8 @@
 | 键 | 在数据表节点上 | 在视图叶子上 | emit？ |
 |----|--------------|-------------|--------|
 | `↓` / `↑` | 焦点移到可见节点序列的下/上一个（序列 = sheet1, …, activeSheet, 其 view1..M, …, sheetN 的扁平顺序） | 同左 | 否 |
-| `→` | active（已展开）→ 焦点进第一个视图叶子；非 active → **no-op**（展开=激活=有副作用 emit，方向键不做有副作用的事——对 APG 的克制偏离，理由 §1.3/§4） | no-op | 否 |
-| `←` | no-op（折叠是派生态，不能"取消激活"） | 焦点回父数据表节点 | 否 |
+| `→` | active 且已展开 → 焦点进第一个视图叶子；active 但已折叠（2026-10-21 修订）→ 展开，焦点不动；非 active → **no-op**（展开=激活=有副作用 emit，方向键不做有副作用的事——对 APG 的克制偏离，理由 §1.3/§4） | no-op | 否 |
+| `←` | active 且有视图（2026-10-21 修订）→ 折叠（本地态，焦点不动）；非 active → no-op（不能"取消激活"） | 焦点回父数据表节点 | 否 |
 | `Home` / `End` | 焦点到第一个/最后一个可见节点 | 同左 | 否 |
 | `Enter` / `Space` | 原生 button 激活 → `select-sheet` | 原生激活 → `select-view` | **是** |
 | `Tab` | 离开树（roving tabindex ⇒ 树整体一个 tab stop），到 pill/添加行/折叠钮等普通按钮 | 同左 | 否 |

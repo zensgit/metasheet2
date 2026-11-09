@@ -28,6 +28,7 @@ import {
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
+import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -548,6 +549,14 @@ export class RecordWriteService {
 
         if (field.hidden) {
           throw new RecordFieldForbiddenError(`Field is hidden: ${change.fieldId}`, change.fieldId, 'FIELD_HIDDEN')
+        }
+
+        // Human write lock (human-write-lock.ts): the guard's `readOnly` already carries it (every person
+        // guard builder folds it in), so the generic refusal below would fire anyway. Answer the CLOSED code
+        // first when the guard carries the property (univer-meta + Yjs builders always do).
+        const humanLockKind = fieldHumanWriteLockKind(field)
+        if (humanLockKind) {
+          throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${change.fieldId}`, change.fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 
         if (field.readOnly === true) {

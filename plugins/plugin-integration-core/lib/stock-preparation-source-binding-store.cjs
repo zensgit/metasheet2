@@ -56,6 +56,9 @@ const SOURCE_NOT_LIVE_CODE = 'SOURCE_BINDING_SOURCE_NOT_LIVE'
 // The unique index from migration 079 — (tenant_id, COALESCE(workspace_id,''), action_id).
 const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_source_binding_scope'
 const MAX_SET_ATTEMPTS = 3
+// `listForAction`'s page: one row per workspace that ever bound this action. A tenant with more
+// workspaces bound than this is not one `listForAction` can vouch for, and says so (`complete: false`).
+const LIST_FOR_ACTION_LIMIT = 64
 
 // Postgres unique-violation routing, same idiom as read-source-config-store.cjs.
 function isUniqueViolation(error, constraint) {
@@ -272,6 +275,35 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
   }
 
   /**
+   * EVERY binding row of one (tenant, action), across ALL of its workspaces — the null row included.
+   *
+   * #6475 fix round 1. `get()` answers "what does THIS hint resolve to"; mvp-persist (step ④ of the
+   * project-sync panel) needs the other question — "could a DIFFERENT hint have resolved something
+   * else" — because it resolves its source with no hint while the panel's dry-run and apply carry the
+   * page's workspace hint. When the caller cannot say which source its write read, that route
+   * proceeds only if every row here names the source it is about to read (see
+   * `assertMvpPersistReadsTheWrittenSource` in http-routes.cjs).
+   *
+   * READ-ONLY and SCOPED: `tenant_id` and `action_id` are the caller's own, and nothing here is ever
+   * handed back as a resolution — it is evidence for a refusal, never a wider answer. BOUNDED: asks
+   * for `LIST_FOR_ACTION_LIMIT + 1` rows so the caller can tell "this is all of them" (`complete`)
+   * from "there were more than we read" — and a caller that cannot see all of them must refuse, not
+   * decide on a prefix.
+   */
+  async function listForAction(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const actionId = requiredString(input.actionId, 'actionId')
+    const raw = allRows(await db.select(BINDING_TABLE, {
+      where: { tenant_id: tenantId, action_id: actionId },
+      limit: LIST_FOR_ACTION_LIMIT + 1,
+    })).filter(Boolean)
+    return {
+      bindings: raw.slice(0, LIST_FOR_ACTION_LIMIT).map(rowToPublicBinding),
+      complete: raw.length <= LIST_FOR_ACTION_LIMIT,
+    }
+  }
+
+  /**
    * Bind (or rebind) this scope's source.
    *
    * Returns `{ binding, previousExternalSystemId, changed }` — the caller needs all three to write
@@ -371,11 +403,12 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     })
   }
 
-  return { get, set }
+  return { get, set, listForAction }
 }
 
 module.exports = {
   BINDING_TABLE,
+  LIST_FOR_ACTION_LIMIT,
   SOURCE_NOT_LIVE_CODE,
   StockPreparationSourceBindingStoreError,
   createStockPreparationSourceBindingStore,

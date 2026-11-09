@@ -587,6 +587,8 @@ module.exports = {
   syncStockPreparationSandboxOptions,
   syncStockPreparationContractOptionsForObject,
   summarizeOptionSyncEvidence,
+  // PR B: the pilot readiness probe reads the template's CONTRACT select fields (read-only).
+  templateContractOptionFields,
   __internals: {
     isPlainObject,
     assertNoExecutableKeys,

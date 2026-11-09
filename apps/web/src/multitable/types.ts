@@ -332,6 +332,62 @@ export interface MetaRowActions {
   canEdit: boolean
   canDelete: boolean
   canComment: boolean
+  /** R-66: set by the server only where `canDelete` is false because the row is a PLM row the stock-preparation
+   *  pull maintains (nobody may delete it). The delete entry is then shown disabled with the reason. */
+  deleteBlockedReason?: 'plm_row'
+  /** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3): set by GET /view and GET /records/:id only on a
+   *  manual supplementary row, for every actor who can read it — the grid's 「人工补充」 label. A DISPLAY mark only:
+   *  no editing control is ever gated on it alone (#6664 note N2); they read /context's `stockPreparationManualRows`. */
+  manualSupplement?: true
+}
+
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): the state of a registered project sheet's manual rows. */
+export type MetaManualRowsState = 'allowed' | 'disabled' | 'unavailable'
+/** The closed reasons the host sends with `unavailable` (ADR §3.1). */
+export type MetaManualRowsUnavailableReason =
+  | 'lock_missing'
+  | 'project_archived'
+  | 'project_sheets_off'
+  | 'contract_mismatch'
+  | 'registry_unreadable'
+
+/**
+ * /context `capabilities.stockPreparationManualRows` as the host sends it (multitable/stock-preparation-manual-rows-gate.ts
+ * ManualRowsContextBlock): only on a registered project sheet (P_reg), only to an actor who can create, edit or delete.
+ * Every id list is SHEET-level; the web narrows them by the actor's field permissions (utils/manual-rows.ts, N5).
+ */
+export interface MetaManualRowsContextBlock {
+  state: MetaManualRowsState
+  /** Only with `unavailable`. */
+  reason?: string
+  /** The six fillable columns (physical ids) PATCH /records/:recordId/manual-fields may write on a manual row. */
+  editableFieldIds: string[]
+  /** The columns a manual-row create needs a value for (名称, then every column whose own validation requires it). */
+  requiredFieldIds: string[]
+  /** The 新增人工补充行 dialog's columns in its order (名称, 总用量, 图号, 规格, 材料, 用量, 备注 — the present ones). */
+  dialogFieldIds?: string[]
+}
+
+/**
+ * 备料 「查看子件」 / 「查看所有使用位置」: /context `capabilities.stockPreparationBomRelations` as the host sends it
+ * (multitable/stock-preparation-bom-relations-context.ts) — the PHYSICAL ids of five main-template columns, only on a
+ * stock-preparation main-template sheet and only when the actor may read each of them. Field ids only, never a value.
+ */
+export interface MetaBomRelationsBlock {
+  componentSourceFieldId: string
+  parentSourceFieldId: string
+  activeFieldId: string
+  componentCodeFieldId: string
+  componentNameFieldId: string
+}
+
+/** The block as the web reads it (utils/manual-rows.ts readManualRowsBlock): every list present, malformed → unavailable. */
+export interface MetaManualRowsBlock {
+  state: MetaManualRowsState
+  reason?: string
+  editableFieldIds: string[]
+  requiredFieldIds: string[]
+  dialogFieldIds: string[]
 }
 
 export interface MetaScopedPermissions {
@@ -392,6 +448,9 @@ export interface MetaDeletedRecord {
   /** Backend-resolved display name (name → email) for `deletedBy`; null when unresolved → fall back to the id. */
   deletedByName?: string | null
   deletedAt: string
+  /** R-66: on a stock-preparation template sheet, why the server would refuse restoring this row (a live row holds
+   *  its key, or the key column is unresolvable). Absent ⇒ restorable as before. Display only; the route decides. */
+  restoreBlocked?: 'plm_key_active' | 'plm_key_unresolved'
 }
 
 export interface MetaRecordRevision {
@@ -578,6 +637,46 @@ export interface MetaCapabilities {
    * construction, like canDeleteSheet — never applied to the rail's other rows.
    */
   canCopySheet?: boolean
+  /**
+   * Customer feedback 2026-10-27: set by /context ONLY when true — the sheet's rows are maintained by the
+   * stock-preparation plugin (a `stockPreparation*` field namespace ∧ a plugin registry row), and
+   * `POST /records/:id/duplicate` answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET there. Sent only
+   * to an actor who could otherwise create. The drawer's duplicate entry is shown disabled with the reason.
+   * Absent ⇒ unchanged. Display only: the route refuses on its own.
+   */
+  recordDuplicateBlocked?: boolean
+  /**
+   * R68 (#6454 judge note): set by /context ONLY when true — the sheet has a column people may not write
+   * (`property.humanWriteLock`, the 备料 project sheet's PLM columns) that its own validation also marks
+   * required, so a person-created record can never pass (empty fails the rule, filled is a locked write).
+   * Sent only to an actor who could otherwise create. The workbench then hides its hand-create entries
+   * (toolbar add / import, grid "+ row", duplicate, new form submission) and says why. Absent ⇒ unchanged.
+   * Display only: every create route keeps its own refusal.
+   */
+  recordCreateBlockedByLock?: boolean
+  /**
+   * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): set by /context ONLY on a registered project sheet, to an
+   * actor who can create, edit or delete. While it is present — whatever its state — the workbench hides EVERY generic
+   * create entry and shows either 「新增人工补充行」 (state `allowed`) or the state's reason; the drawer offers
+   * 「复制为新行」 (`allowed`); the six fillable cells of a manual row write through PATCH …/manual-fields. Absent ⇒
+   * unchanged. Display only: every route re-gates on its own (generic create answers 409 / 503 by state).
+   */
+  stockPreparationManualRows?: MetaManualRowsContextBlock
+  /**
+   * 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): set by /context ONLY on a stock-preparation
+   * main-template sheet, to any reader who may read the five columns (see MetaBomRelationsBlock). The record drawer then
+   * offers the two viewer-only filters (utils/bom-relations.ts); absent ⇒ no buttons. Display only: the narrowing is
+   * the GET /view `viewerFilter` parameter, which never writes the view.
+   */
+  stockPreparationBomRelations?: MetaBomRelationsBlock
+  /**
+   * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
+   * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
+   * keeps its export buttons visible but DISABLED with the reason, and re-checks before it builds a
+   * selected-rows CSV / XLSX in the browser. Absent ⇒ unchanged. Display only: the export route refuses itself
+   * (403 MULTITABLE_GRID_EXPORT_CLOSED) and copy-with-data refuses too. Print and copy-selection stay open.
+   */
+  gridExportClosure?: { reason: string }
 }
 
 export interface YjsPresenceUser {
@@ -607,6 +706,17 @@ export interface MetaSheetPermissionEntry {
   label: string
   subtitle?: string | null
   isActive: boolean
+}
+
+/**
+ * 客户反馈 2026-10-21 item 1: whether the DingTalk person-message sender would reach a local user id
+ * (POST …/automations/dingtalk-person-recipient-status). Booleans only — the server sends no name.
+ */
+export interface DingTalkPersonRecipientStatus {
+  userId: string
+  exists: boolean
+  active: boolean
+  dingtalkLinked: boolean
 }
 
 export interface MetaSheetPermissionCandidate {
@@ -1082,6 +1192,14 @@ export interface PatchRecordsInput {
   changes: CellChange[]
 }
 
+/** 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.4): PATCH /records/:recordId/manual-fields — the six fillable
+ *  columns of ONE manual row; the answer has the /patch shape (`updated` carries the new version). */
+export interface PatchManualRowFieldsInput {
+  sheetId?: string
+  expectedVersion?: number
+  data: Record<string, unknown>
+}
+
 export interface FormSubmitInput {
   recordId?: string
   expectedVersion?: number
@@ -1317,6 +1435,8 @@ export interface AutomationRule {
 export interface AutomationStepResult {
   actionType: AutomationActionType
   status: 'success' | 'failed' | 'skipped'
+  /** Test-run simulation marker: the step was planned but nothing was dispatched (backend AutomationStepResult.simulated). */
+  simulated?: boolean
   output?: unknown
   error?: string
   durationMs?: number
@@ -1648,6 +1768,8 @@ export interface Webhook {
   maxRetries?: number
   retryBaseDelayMs?: number
   retryMaxDelayMs?: number
+  /** The sheet the webhook is bound to; null = not bound yet (receives no events). */
+  sheetId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -1656,6 +1778,8 @@ export interface WebhookCreateInput {
   name: string
   url: string
   events: string[]
+  /** The sheet the webhook is bound to. Required on create; on update only to bind an unbound webhook. */
+  sheetId: string
   secret?: string
   active?: boolean
   maxRetries?: number
@@ -1663,14 +1787,18 @@ export interface WebhookCreateInput {
   retryMaxDelayMs?: number
 }
 
+/** Delivery history item: status fields only (no stored request or response body). */
 export interface WebhookDelivery {
   id: string
   webhookId: string
   event: string
-  httpStatus: number | null
-  success: boolean
-  retryCount: number
-  timestamp: string
+  status: 'pending' | 'success' | 'failed'
+  httpStatus?: number | null
+  /** Attempts made so far, the first attempt included. */
+  attemptCount: number
+  createdAt: string
+  deliveredAt?: string
+  nextRetryAt?: string
 }
 
 // --- DingTalk Group Destinations ---
@@ -1740,7 +1868,12 @@ export interface DingTalkPersonDelivery {
   deliveredAt?: string
   localUserLabel?: string
   localUserSubtitle?: string
-  localUserIsActive: boolean
+  /** Review round 2: false when no user has this id (a mistyped id) — the viewer says 未找到该用户. */
+  localUserExists?: boolean
+  /** null when the user does not exist (unknown, not "inactive"). */
+  localUserIsActive: boolean | null
+  /** Codex review P2: linked to DingTalk NOW (a current fact, never the cause of a past skip); null if no user. */
+  localUserDingTalkLinked?: boolean | null
 }
 
 // --- Field Validation ---

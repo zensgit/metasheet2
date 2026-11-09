@@ -1804,6 +1804,23 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
   it('P13 source guard: specialized terminal routes stay delegated and approval updates keep OCC', () => {
     const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
     const source = readFileSync(path.join(repoRoot, 'plugins/plugin-attendance/index.cjs'), 'utf8')
+    const registrars = ['context.api.http.addRoute(', 'addAttendanceIdUpdateRoute(']
+    const nextRegistration = (from: number): number => {
+      let next = -1
+      for (const marker of registrars) {
+        const at = source.indexOf(marker, from)
+        if (at !== -1 && (next === -1 || at < next)) next = at
+      }
+      return next
+    }
+    const previousRegistration = (from: number): number => {
+      let previous = -1
+      for (const marker of registrars) {
+        const at = source.lastIndexOf(marker, from)
+        if (at > previous) previous = at
+      }
+      return previous
+    }
     const routeContracts = [
       ['/api/attendance/schedule-dispatch-requests/:id/cancel', 'w4RequestOperationBoundary.execute({', "routeVariant: 'schedule_dispatch_cancel'"],
       ['/api/attendance/shift-swap-requests/:id/accept', "respondShiftSwapConsent(req, res, 'accepted')", null],
@@ -1812,8 +1829,8 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     ] as const
     for (const [route, delegate, variant] of routeContracts) {
       const pathIndex = source.lastIndexOf(`'${route}'`)
-      const start = source.lastIndexOf('context.api.http.addRoute(', pathIndex)
-      const end = source.indexOf('context.api.http.addRoute(', pathIndex + route.length)
+      const start = previousRegistration(pathIndex)
+      const end = nextRegistration(pathIndex + route.length)
       expect(pathIndex, `${route} must remain registered`).toBeGreaterThan(-1)
       expect(start, `${route} must remain a host route`).toBeGreaterThan(-1)
       const body = source.slice(start, end < 0 ? source.length : end)
@@ -1822,7 +1839,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(body).not.toMatch(/\b(?:trx|db|client)\.query\s*\(/)
     }
     const consentStart = source.indexOf('async function respondShiftSwapConsent(')
-    const consentEnd = source.indexOf('context.api.http.addRoute(', consentStart)
+    const consentEnd = nextRegistration(consentStart)
     const consentBody = source.slice(consentStart, consentEnd)
     expect(consentStart).toBeGreaterThan(-1)
     expect(consentBody).toContain('w4RequestOperationBoundary.execute({')

@@ -29,8 +29,7 @@
             <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
                  badge above is now DATA-wired to the todo center's own aggregate, but that alone
                  left the page it aggregates into reachable only by typing /todo — no nav entry
-                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
-                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 anywhere pointed at it. Same gate as the badge/审批中心 link in this shell, same
                  nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
                  made the badge's own href — deliberately, so this addition cannot regress the
                  existing "badge is a sibling of the link, never a child of it" contract the P1b
@@ -48,8 +47,10 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
-            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
-            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. In this
+                 shell the page also lists tasks, so task access alone reaches it. The focused branch
+                 above keeps its approval-only gate: /todo and /tasks are outside that shell. -->
+            <router-link v-if="canUseApprovals || canUseTasks" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
             <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
                  the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
                  failure cannot blank the shell, and gated
@@ -68,9 +69,19 @@
             >
               {{ item.label }}
             </router-link>
-            <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
+            <span
+              v-if="canManageUsers"
+              class="nav-org"
+              data-testid="nav-org-permissions"
+              role="group"
+              :aria-label="navLabels.organizationPermissions"
+            >
+              <span class="nav-org__label">{{ navLabels.organizationPermissions }}</span>
+              <router-link to="/admin/users" class="nav-link">{{ navLabels.membersAuthorization }}</router-link>
+              <router-link to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+              <router-link to="/admin/role-delegation" class="nav-link">{{ navLabels.managementScope }}</router-link>
+              <router-link to="/admin/permissions" class="nav-link">{{ navLabels.permissionSources }}</router-link>
+            </span>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
@@ -223,9 +234,11 @@ const navLabels = computed(() => {
       // B-2: the nav entry point into the cross-source todo center page (/todo).
       todoCenter: '待办中心',
       apps: '应用',
-      users: '用户',
+      organizationPermissions: '组织与权限',
+      membersAuthorization: '成员与授权',
       roles: '角色',
-      permissions: '权限',
+      managementScope: '管理范围',
+      permissionSources: '权限来源与例外',
       adminAudit: '管理审计',
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
@@ -254,9 +267,11 @@ const navLabels = computed(() => {
     approvalTodo: 'Pending approvals',
     todoCenter: 'Todo Center',
     apps: 'Apps',
-    users: 'Users',
+    organizationPermissions: 'Organization and permissions',
+    membersAuthorization: 'Members and authorization',
     roles: 'Roles',
-    permissions: 'Permissions',
+    managementScope: 'Management scope',
+    permissionSources: 'Permission sources and exceptions',
     adminAudit: 'Admin Audit',
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
@@ -434,6 +449,26 @@ html, body {
   flex: 0 0 auto;
 }
 
+.nav-org {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+  max-width: 100%;
+  margin: 0 4px;
+  padding: 2px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.nav-org__label {
+  padding: 0 8px;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .nav-links::-webkit-scrollbar {
   display: none;
 }
@@ -561,6 +596,10 @@ html, body {
 
   .nav-link {
     padding: 8px 12px;
+  }
+
+  .nav-org {
+    flex-wrap: wrap;
   }
 }
 

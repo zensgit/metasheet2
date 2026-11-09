@@ -74,6 +74,11 @@ export function useMultitableWorkbench(opts?: {
   const activeSheetId = ref(opts?.initialSheetId ?? '')
   const activeViewId = ref(opts?.initialViewId ?? '')
   const capabilities = ref<MetaCapabilities>({ ...EMPTY_CAPABILITIES })
+  // 备料分批拉取第一期 step 3 (review round 1, fix 3): WHICH sheet `capabilities` was resolved for. `selectSheet`
+  // switches `activeSheetId` at once while `capabilities` keeps the previous sheet's until `/context` lands; a
+  // consumer that must not act on another sheet's capabilities (the grid-export closure gate) compares the two.
+  // null until the first context is applied.
+  const capabilitiesSheetId = ref<string | null>(null)
   const capabilityOrigin = ref<MetaCapabilityOrigin | null>(null)
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermissions = ref<Record<string, MetaViewPermission>>({})
@@ -172,6 +177,7 @@ export function useMultitableWorkbench(opts?: {
     fields: MetaField[]
     views: MetaView[]
     capabilities: MetaCapabilities
+    capabilitiesSheetId: string | null
     capabilityOrigin: MetaCapabilityOrigin | null
     fieldPermissions: Record<string, MetaFieldPermission>
     viewPermissions: Record<string, MetaViewPermission>
@@ -186,6 +192,7 @@ export function useMultitableWorkbench(opts?: {
       fields: [...fields.value],
       views: [...views.value],
       capabilities: { ...capabilities.value },
+      capabilitiesSheetId: capabilitiesSheetId.value,
       capabilityOrigin: capabilityOrigin.value ? { ...capabilityOrigin.value } : null,
       fieldPermissions: { ...fieldPermissions.value },
       viewPermissions: { ...viewPermissions.value },
@@ -203,6 +210,7 @@ export function useMultitableWorkbench(opts?: {
     fields.value = [...snapshot.fields]
     views.value = [...snapshot.views]
     capabilities.value = { ...snapshot.capabilities }
+    capabilitiesSheetId.value = snapshot.capabilitiesSheetId
     capabilityOrigin.value = snapshot.capabilityOrigin ? { ...snapshot.capabilityOrigin } : null
     fieldPermissions.value = { ...snapshot.fieldPermissions }
     viewPermissions.value = { ...snapshot.viewPermissions }
@@ -245,6 +253,8 @@ export function useMultitableWorkbench(opts?: {
     } else if (!views.value.find((view) => view.id === activeViewId.value)) {
       activeViewId.value = views.value[0]?.id ?? ''
     }
+    // The capabilities just applied belong to the sheet this context resolved to.
+    capabilitiesSheetId.value = activeSheetId.value || null
     noteContextApplication()
   }
 
@@ -543,6 +553,7 @@ export function useMultitableWorkbench(opts?: {
     activeSheetId,
     activeViewId,
     capabilities,
+    capabilitiesSheetId,
     capabilityOrigin,
     fieldPermissions,
     viewPermissions,

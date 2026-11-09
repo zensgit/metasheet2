@@ -170,6 +170,16 @@ const CAPABILITY_ENTRY_POINTS = Object.freeze([
     exportName: 'runStockPreparationManagedTableRelabel',
     why: '「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): the ONLY path by which an already-created managed table gets its Chinese headers. Names are chosen once at creation and never re-described, so with no caller an English-created deployment keeps English headers forever — or someone renames them with SQL, which is the unaudited write this exists to replace',
   },
+  {
+    module: 'lib/stock-preparation-governed-sheet-probe.cjs',
+    exportName: 'createStockPreparationGovernedSheetProbe',
+    why: 'batch-refresh step 4 PR-6: the generic configured writers (pipelines target adapter, C6 write-source, ERP feedback) refuse a governed stock-prep sheet only through this probe, built in index.cjs. Unreferenced, every writer falls back to the not-wired rule, which catches only namespace object keys — a free-text key naming a pilot sheet would be written unrefused again (V50B-12)',
+  },
+  {
+    module: 'lib/stock-preparation-own-base.cjs',
+    exportName: 'isStockPreparationNamespaceObjectId',
+    why: 'batch-refresh step 4 PR-6: the not-wired backstop — a generic writer built WITHOUT the probe refuses an object id in the stock-prep namespace (501) instead of writing it unchecked',
+  },
   // NOT declared here, deliberately: `assertSourcePreflightValuesFree`. This guard asks whether some
   // OTHER production file names a capability, and that self-check has exactly one production caller —
   // the preflight itself, in the same module, on every run before it returns. Declaring it would make

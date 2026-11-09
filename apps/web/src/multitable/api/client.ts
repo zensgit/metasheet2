@@ -39,6 +39,7 @@ import type {
   PersonalViewConfigResponse,
   DeletePersonalViewConfigResponse,
   CreateRecordInput,
+  PatchManualRowFieldsInput,
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
@@ -52,6 +53,7 @@ import type {
   MetaCommentMentionSuggestion,
   MetaSheetPermissionAccessLevel,
   MetaSheetPermissionCandidate,
+  DingTalkPersonRecipientStatus,
   MetaSheetPermissionEntry,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
@@ -792,6 +794,46 @@ function normalizeRecordApprovalSubmission(value: unknown): MetaRecordApprovalSu
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * One task dispatched from a record, as the record's 关联任务 panel lists it
+ * (`GET /api/multitable/sheets/:sheetId/records/:recordId/tasks`): ids, the title, the status and the
+ * dates. `isMine` is whether the viewer created it. No person and no record value.
+ */
+export interface MetaRecordTaskItem {
+  id: string
+  title: string
+  status: string
+  completionMode: string | null
+  dueAt: string | null
+  dueDate: string | null
+  createdAt: string | null
+  isMine: boolean
+}
+
+/** One page of a record's tasks. `hasMore` is the server's own flag; `degraded` means the server
+ *  could not tell the session's org and answered no rows. */
+export interface MetaRecordTaskListPage {
+  items: MetaRecordTaskItem[]
+  hasMore: boolean
+  degraded: boolean
+}
+
+function normalizeRecordTaskItem(value: unknown): MetaRecordTaskItem | null {
+  if (!isPlainObject(value)) return null
+  const id = optionalStringValue(value.id)
+  if (!id) return null
+  return {
+    id,
+    title: typeof value.title === 'string' ? value.title : '',
+    status: typeof value.status === 'string' ? value.status : '',
+    completionMode: optionalStringValue(value.completionMode) ?? null,
+    dueAt: optionalStringValue(value.dueAt) ?? null,
+    dueDate: optionalStringValue(value.dueDate) ?? null,
+    createdAt: optionalStringValue(value.createdAt) ?? null,
+    isMine: value.isMine === true,
+  }
 }
 
 function stringValue(value: unknown, fallback = ''): string {
@@ -2541,6 +2583,46 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   /**
+   * The tasks dispatched from this record that the viewer can open (package 2, the 关联任务 panel).
+   * The server answers only those, and never a count of the others. `limit` is the page size the
+   * panel asks for (the server clamps it to 1..100). With `dispatchKey` (the 派发任务 dialog resolving
+   * an attempt that got no readable answer) the server answers only the caller's own live task made
+   * from this record under that key: zero or one row. A 2xx whose body is not an object with an
+   * `items` list (a proxy's page, say) throws, like a refusal: it says nothing about the record's tasks,
+   * so it is not read as an empty list.
+   */
+  async listRecordTasks(
+    sheetId: string,
+    recordId: string,
+    options: { limit?: number; dispatchKey?: string } = {},
+  ): Promise<MetaRecordTaskListPage> {
+    const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.trunc(options.limit)
+      : undefined
+    const dispatchKey = typeof options.dispatchKey === 'string' && options.dispatchKey !== '' ? options.dispatchKey : undefined
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/tasks${qs({ limit, dispatchKey })}`,
+    )
+    const raw = await this.parseJson<unknown>(res)
+    const body = isPlainObject(raw) && Array.isArray(raw.items) ? raw : null
+    if (body === null) {
+      const error = new Error('The record\'s tasks could not be read.') as Error & { status?: number }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      throw error
+    }
+    const items = (body.items as unknown[])
+      .map((row: unknown) => normalizeRecordTaskItem(row))
+      .filter((row): row is MetaRecordTaskItem => row !== null)
+    return {
+      items,
+      // Strictly boolean-true, as for the approvals list: anything else claims no more rows.
+      hasMore: body.hasMore === true,
+      degraded: body.degraded === true,
+    }
+  }
+
+  /**
    * FWB production authoring — server-owned confirmation hash (FWB0 §11 Q6 gate 3).
    * The client sends the validated mapping subject; the server derives confirmationHash over
    * {templateId, sourceTemplateVersionId, targetBaseId, targetSheetId, mappings, mode/link when
@@ -3058,6 +3140,8 @@ export class MultitableApiClient implements CommentsApiClient {
     offset?: number
     includeLinkSummaries?: boolean
     search?: string
+    /** 备料 「查看子件」 / 「查看所有使用位置」: the grid's transient viewer filter (JSON), ANDed server-side for this read only. */
+    viewerFilter?: string
   }): Promise<MetaViewData> {
     const res = await this.fetch(`/api/multitable/view${qs(params as Record<string, string | number | boolean | undefined>)}`)
     return this.parseJson(res)
@@ -3066,7 +3150,7 @@ export class MultitableApiClient implements CommentsApiClient {
   // Footer aggregation (#4-3b-1): server aggregates over the full filtered set. On 413 (too large)
   // parseJson throws a MultitableApiError with code 'AGGREGATE_TOO_LARGE' — caller handles, never
   // falls back to local aggregation.
-  async aggregateView(params: { sheetId: string; viewId?: string; search?: string; statsFields?: string[] }): Promise<ViewAggregateResult> {
+  async aggregateView(params: { sheetId: string; viewId?: string; search?: string; viewerFilter?: string; statsFields?: string[] }): Promise<ViewAggregateResult> {
     const { sheetId, statsFields, ...rest } = params
     // A5: request full-column numeric min/max/count for the given fields (conditional-formatting scale).
     // Joined CSV → the server omits `stats` entirely when this is absent (byte-identical footer shape).
@@ -3703,6 +3787,37 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4; host routes of #6664, session requests only).
+  // 新增: `data` is { <physical field id>: value }; the server stamps 项目号, the row's own `manual:v1:` key and 有效.
+  async createManualRow(sheetId: string, data: Record<string, unknown>): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/manual-rows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    })
+    return this.parseJson(res)
+  }
+
+  // 复制为新行: a NEW manual row from the whitelisted columns of `recordId` (the server picks the columns).
+  async copyAsManualRow(recordId: string, params?: { sheetId?: string }): Promise<{ record: MetaRecord }> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params?.sheetId ? { sheetId: params.sheetId } : {}),
+    })
+    return this.parseJson(res)
+  }
+
+  // 修改: the six fillable columns of one manual row; every other column keeps going through `patchRecords`.
+  async patchManualRowFields(recordId: string, input: PatchManualRowFieldsInput): Promise<PatchResult> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-fields`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson(res)
+  }
+
   /**
    * Restore a record to a prior revision (Layer 1). On failure the thrown
    * MultitableApiError carries `.code` — VERSION_CONFLICT (409) / VERSION_EXPIRED (410) /
@@ -4307,6 +4422,38 @@ export class MultitableApiClient implements CommentsApiClient {
     return data.deliveries ?? []
   }
 
+  /**
+   * 客户反馈 2026-10-21 item 1: the rule editor's DingTalk person-recipient preflight. The server reads the
+   * sender's own query and answers booleans per id (at most 200 ids per request; callers chunk).
+   */
+  async getDingTalkPersonRecipientStatus(
+    sheetId: string,
+    userIds: string[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DingTalkPersonRecipientStatus[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/dingtalk-person-recipient-status`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds }),
+        // Review round 2: the editor abandons a hung lookup after a timeout.
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    )
+    const data = await this.parseJson<{ items?: unknown }>(res)
+    const items = Array.isArray(data?.items) ? data.items : []
+    return items
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .filter((item) => typeof item.userId === 'string')
+      .map((item) => ({
+        userId: item.userId as string,
+        exists: item.exists === true,
+        active: item.active === true,
+        dingtalkLinked: item.dingtalkLinked === true,
+      }))
+  }
+
   // --- Automation V1: test / logs / stats ---
   async testAutomationRule(sheetId: string, ruleId: string): Promise<AutomationExecution> {
     const res = await this.fetch(
@@ -4390,9 +4537,15 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson<AutomationRunView>(res)
   }
 
-  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
+  async getAutomationDingTalkPersonDeliveries(
+    sheetId: string,
+    ruleId: string,
+    limit?: number,
+    options: { status?: 'success' | 'failed' | 'skipped' | 'outcome_unknown' } = {},
+  ): Promise<DingTalkPersonDelivery[]> {
+    // Review round 2: `status` is filtered on the SERVER (before its LIMIT), not only in the viewer.
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit, status: options.status })}`,
     )
     const data = await this.parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []

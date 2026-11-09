@@ -59,6 +59,7 @@ function fakeWebhook(overrides: Partial<Webhook> = {}): Webhook {
     active: true,
     secret: null,
     failureCount: 0,
+    sheetId: 'sheet_1',
     createdAt: '2026-04-01T00:00:00Z',
     updatedAt: '2026-04-01T00:00:00Z',
     ...overrides,
@@ -70,10 +71,10 @@ function fakeDelivery(overrides: Partial<WebhookDelivery> = {}): WebhookDelivery
     id: 'del_1',
     webhookId: 'wh_1',
     event: 'record.created',
+    status: 'success',
     httpStatus: 200,
-    success: true,
-    retryCount: 0,
-    timestamp: '2026-04-01T00:00:00Z',
+    attemptCount: 1,
+    createdAt: '2026-04-01T00:00:00Z',
     ...overrides,
   }
 }
@@ -612,6 +613,28 @@ describe('MetaApiTokenManager', () => {
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
   })
 
+  // 客户反馈 2026-10-21 (c): the automation editor opens this dialog directly on DingTalk Groups, on top of its drawer.
+  it('opens directly on the DingTalk Groups tab when asked, above the drawer that opened it', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, sheetId: 'sheet_1', client, initialTab: 'dingtalk-groups' })
+    await flushPromises()
+
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+    expect(selected?.textContent?.trim()).toBe('DingTalk Groups')
+    expect(document.querySelectorAll('[data-dingtalk-group-id]').length).toBe(1)
+    const overlay = document.querySelector('.meta-api-mgr__overlay') as HTMLElement
+    // element-plus drawers start at z-index 2000; a fixed 1000 would sit behind the rule editor.
+    expect(Number(overlay.style.zIndex)).toBeGreaterThanOrEqual(2000)
+  })
+
+  it('ignores an initial DingTalk Groups tab the actor cannot see', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, sheetId: 'sheet_1', client, canManageAutomation: false, initialTab: 'dingtalk-groups' })
+    await flushPromises()
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+    expect(selected?.textContent?.trim()).toBe('API Tokens')
+  })
+
   it('hides DingTalk group management without automation permission', async () => {
     const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
     mount({ visible: true, client, canManageAutomation: false })
@@ -630,7 +653,7 @@ describe('MetaApiTokenManager', () => {
     const { client } = mockClient(
       [fakeToken({ scopes: ['read', 'admin'] })],
       [fakeWebhook({ events: ['record.created', 'field.changed'] })],
-      [fakeDelivery({ event: 'field.changed', retryCount: 2 })],
+      [fakeDelivery({ event: 'field.changed', attemptCount: 2 })],
       [fakeDingTalkGroup({ hasSecret: true })],
       [fakeDingTalkDelivery({ sourceType: 'manual_test' })],
     )
@@ -666,7 +689,7 @@ describe('MetaApiTokenManager', () => {
     await flushPromises()
     expect(document.querySelector('[data-deliveries]')?.textContent).toContain('最近投递')
     expect(document.querySelector('[data-deliveries]')?.textContent).toContain('字段已变更')
-    expect(document.querySelector('[data-deliveries]')?.textContent).toContain('重试次数: 2')
+    expect(document.querySelector('[data-deliveries]')?.textContent).toContain('尝试次数: 2')
 
     const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
     dingTalkTab.click()
@@ -1050,5 +1073,203 @@ describe('MetaApiTokenManager', () => {
     const panelText = document.querySelector('[data-dingtalk-deliveries]')?.textContent ?? ''
     expect(panelText).toContain('Group B delivery')
     expect(panelText).not.toContain('Group A delivery')
+  })
+})
+
+describe('MetaApiTokenManager webhooks bound to the current sheet (W1–W9)', () => {
+  beforeEach(() => {
+    useLocale().setLocale('en')
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  async function openWebhooksTab() {
+    const tab = document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement
+    tab.click()
+    await flushPromises()
+  }
+
+  function calls(fetchFn: ReturnType<typeof mockClient>['fetchFn'], method: string) {
+    return fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => (c[1]?.method ?? 'GET') === method && String(c[0]).includes('/webhooks'),
+    )
+  }
+
+  function bodyOf(call: [string, RequestInit?]) {
+    return JSON.parse(String(call[1]?.body ?? '{}')) as Record<string, unknown>
+  }
+
+  async function fillCreateForm() {
+    ;(document.querySelector('[data-webhook-new]') as HTMLButtonElement).click()
+    await flushPromises()
+    const name = document.querySelector('[data-webhook-name]') as HTMLInputElement
+    name.value = 'Bound hook'
+    name.dispatchEvent(new Event('input', { bubbles: true }))
+    const url = document.querySelector('[data-webhook-url]') as HTMLInputElement
+    url.value = 'https://example.com/bound'
+    url.dispatchEvent(new Event('input', { bubbles: true }))
+    ;(document.querySelector('[data-webhook-event="record.created"]') as HTMLInputElement).click()
+    await flushPromises()
+  }
+
+  it('W1 create sends the current sheet; New is disabled without a current sheet or without permission', async () => {
+    const { client, fetchFn } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    await fillCreateForm()
+    ;(document.querySelector('[data-webhook-save]') as HTMLButtonElement).click()
+    await flushPromises()
+    const posts = calls(fetchFn, 'POST')
+    expect(posts.length, 'W1.posts').toBe(1)
+    expect(bodyOf(posts[0]).sheetId, 'W1.body.sheetId').toBe('sheet_1')
+    document.body.innerHTML = ''
+
+    mount({ visible: true, client: mockClient().client, sheetId: undefined })
+    await flushPromises()
+    await openWebhooksTab()
+    expect((document.querySelector('[data-webhook-new]') as HTMLButtonElement).disabled, 'W1.noSheet.disabled').toBe(true)
+    document.body.innerHTML = ''
+
+    mount({ visible: true, client: mockClient().client, canManageAutomation: false })
+    await flushPromises()
+    await openWebhooksTab()
+    expect((document.querySelector('[data-webhook-new]') as HTMLButtonElement).disabled, 'W1.noPermission.disabled').toBe(true)
+  })
+
+  it('W2 each row shows its bound sheet; an unbound row shows the bind action', async () => {
+    const { client } = mockClient([], [
+      fakeWebhook({ id: 'wh_here', sheetId: 'sheet_1' }),
+      fakeWebhook({ id: 'wh_there', sheetId: 'sheet_other' }),
+      fakeWebhook({ id: 'wh_none', sheetId: null }),
+    ])
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    const here = document.querySelector('[data-webhook-id="wh_here"]') as HTMLElement
+    const there = document.querySelector('[data-webhook-id="wh_there"]') as HTMLElement
+    const none = document.querySelector('[data-webhook-id="wh_none"]') as HTMLElement
+    expect(here.querySelector('[data-webhook-sheet]')?.textContent, 'W2.here').toContain('This sheet')
+    expect(there.querySelector('[data-webhook-sheet]')?.textContent, 'W2.there').toContain('sheet_other')
+    expect(none.querySelector('[data-webhook-sheet]')?.textContent, 'W2.none').toContain('Not bound to a sheet')
+    expect(none.querySelector('[data-webhook-bind]'), 'W2.bindAction').toBeTruthy()
+    expect(here.querySelector('[data-webhook-bind]'), 'W2.noBindWhenBound').toBeNull()
+  })
+
+  it('W3 bind sends a PATCH with only the current sheet', async () => {
+    const { client, fetchFn } = mockClient([], [fakeWebhook({ id: 'wh_none', sheetId: null, active: false })])
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    ;(document.querySelector('[data-webhook-bind]') as HTMLButtonElement).click()
+    await flushPromises()
+    const patches = calls(fetchFn, 'PATCH')
+    expect(patches.length, 'W3.patches').toBe(1)
+    expect(bodyOf(patches[0]), 'W3.body').toEqual({ sheetId: 'sheet_1' })
+  })
+
+  it('W4 without permission the tab and list stay visible; New, bind and enable are disabled', async () => {
+    const { client } = mockClient([], [
+      fakeWebhook({ id: 'wh_off', sheetId: 'sheet_1', active: false }),
+      fakeWebhook({ id: 'wh_none', sheetId: null, active: false }),
+    ])
+    mount({ visible: true, client, canManageAutomation: false })
+    await flushPromises()
+    await openWebhooksTab()
+    expect(document.querySelectorAll('[data-webhook-id]').length, 'W4.listVisible').toBe(2)
+    expect((document.querySelector('[data-webhook-new]') as HTMLButtonElement).disabled, 'W4.newDisabled').toBe(true)
+    const off = document.querySelector('[data-webhook-id="wh_off"]') as HTMLElement
+    expect((off.querySelector('[data-webhook-toggle]') as HTMLButtonElement).disabled, 'W4.enableDisabled').toBe(true)
+    const none = document.querySelector('[data-webhook-id="wh_none"]') as HTMLElement
+    expect((none.querySelector('[data-webhook-bind]') as HTMLButtonElement).disabled, 'W4.bindDisabled').toBe(true)
+  })
+
+  it('W5 editing only the name sends only the name (no url, no events)', async () => {
+    const { client, fetchFn } = mockClient([], [fakeWebhook({ events: ['record.created', 'record.updated'] })])
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    ;(document.querySelector('[data-webhook-edit]') as HTMLButtonElement).click()
+    await flushPromises()
+    const name = document.querySelector('[data-webhook-name]') as HTMLInputElement
+    name.value = 'Renamed'
+    name.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    ;(document.querySelector('[data-webhook-save]') as HTMLButtonElement).click()
+    await flushPromises()
+    const patches = calls(fetchFn, 'PATCH')
+    expect(patches.length, 'W5.patches').toBe(1)
+    expect(bodyOf(patches[0]), 'W5.patch.keys').toEqual({ name: 'Renamed' })
+  })
+
+  it('W6 enabling an unbound row points to binding (no PATCH); a row bound elsewhere cannot be enabled here', async () => {
+    const { client, fetchFn } = mockClient([], [
+      fakeWebhook({ id: 'wh_none', sheetId: null, active: false }),
+      fakeWebhook({ id: 'wh_there', sheetId: 'sheet_other', active: false }),
+    ])
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    const none = document.querySelector('[data-webhook-id="wh_none"]') as HTMLElement
+    ;(none.querySelector('[data-webhook-toggle]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(calls(fetchFn, 'PATCH').length, 'W6.noPatch').toBe(0)
+    expect(document.querySelector('[data-webhook-id="wh_none"] [data-webhook-bind-hint]'), 'W6.bindHint').toBeTruthy()
+    const there = document.querySelector('[data-webhook-id="wh_there"]') as HTMLElement
+    expect((there.querySelector('[data-webhook-toggle]') as HTMLButtonElement).disabled, 'W6.elsewhereDisabled').toBe(true)
+    expect(there.querySelector('[data-webhook-enable-hint]'), 'W6.elsewhereHint').toBeTruthy()
+  })
+
+  it('W7 without any permission the owner can still turn off and delete their webhook', async () => {
+    const { client, fetchFn } = mockClient([], [fakeWebhook({ id: 'wh_on', sheetId: 'sheet_other', active: true })])
+    mount({ visible: true, client, canManageAutomation: false, sheetId: undefined })
+    await flushPromises()
+    await openWebhooksTab()
+    const toggle = document.querySelector('[data-webhook-toggle]') as HTMLButtonElement | null
+    expect(toggle, 'W7.toggleVisible').toBeTruthy()
+    expect(toggle!.disabled, 'W7.toggleEnabled').toBe(false)
+    toggle.click()
+    await flushPromises()
+    const patches = calls(fetchFn, 'PATCH')
+    expect(patches.length, 'W7.patches').toBe(1)
+    expect(bodyOf(patches[0]), 'W7.patch.body').toEqual({ active: false })
+    const del = document.querySelector('[data-webhook-delete]') as HTMLButtonElement
+    expect(del.disabled, 'W7.deleteEnabled').toBe(false)
+    del.click()
+    await flushPromises()
+    expect(calls(fetchFn, 'DELETE').length, 'W7.deletes').toBe(1)
+  })
+
+  it('W8 event options are only the event types the server accepts', async () => {
+    const { client } = mockClient()
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    ;(document.querySelector('[data-webhook-new]') as HTMLButtonElement).click()
+    await flushPromises()
+    const options = Array.from(document.querySelectorAll('[data-webhook-event]')).map((el) => el.getAttribute('data-webhook-event'))
+    expect(options, 'W8.options').toEqual(['record.created', 'record.updated', 'record.deleted'])
+  })
+
+  it('W9 delivery history shows status (three states), attempts and time from the status fields', async () => {
+    const { client } = mockClient([], [fakeWebhook()], [
+      fakeDelivery({ id: 'd_ok', status: 'success', attemptCount: 1, createdAt: '2026-04-02T00:00:00Z' }),
+      fakeDelivery({ id: 'd_fail', status: 'failed', attemptCount: 3, createdAt: '2026-04-03T00:00:00Z' }),
+      fakeDelivery({ id: 'd_wait', status: 'pending', attemptCount: 2, createdAt: '2026-04-04T00:00:00Z' }),
+    ])
+    mount({ visible: true, client })
+    await flushPromises()
+    await openWebhooksTab()
+    ;(document.querySelector('[data-webhook-deliveries]') as HTMLButtonElement).click()
+    await flushPromises()
+    const row = (id: string) => document.querySelector(`[data-delivery-id="${id}"]`) as HTMLElement
+    expect(row('d_ok').querySelector('[data-delivery-status]')?.textContent?.trim(), 'W9.ok').toBe('OK')
+    expect(row('d_fail').querySelector('[data-delivery-status]')?.textContent?.trim(), 'W9.fail').toBe('FAIL')
+    expect(row('d_wait').querySelector('[data-delivery-status]')?.textContent?.trim(), 'W9.pending').toBe('PENDING')
+    expect(row('d_fail').querySelector('[data-delivery-attempts]')?.textContent, 'W9.attempts').toContain('Attempts: 3')
+    expect(row('d_wait').querySelector('[data-delivery-time]')?.textContent, 'W9.time').toContain('2026-04-04')
   })
 })

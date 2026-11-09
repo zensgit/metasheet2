@@ -51,6 +51,9 @@ async function cleanup(): Promise<void> {
   await query(`DELETE FROM directory_integrations WHERE org_id LIKE $1`, [
     `${PREFIX}-%`,
   ])
+  await query(`DELETE FROM user_external_identities WHERE local_user_id LIKE $1`, [
+    `${PREFIX}-%`,
+  ])
   await query(`DELETE FROM users WHERE id LIKE $1`, [`${PREFIX}-%`])
 }
 
@@ -189,6 +192,22 @@ async function resetSeededForAccessOverride(
      ON CONFLICT (user_id, org_id)
      DO UPDATE SET is_active = TRUE`,
     [seeded.userId, seeded.orgId],
+  )
+}
+
+// Self-service positives require an enabled, self-managed account. A directory-owned
+// identity or an explicit deny grant must now reject before changing access evidence.
+async function resetSeededForSelfManagedOAuth(seeded: SeededEvidence): Promise<void> {
+  await resetSeededForAccessOverride(seeded)
+  await query(
+    `UPDATE directory_account_links SET link_status = 'unlinked'
+      WHERE directory_account_id = $1::uuid`,
+    [seeded.accountId],
+  )
+  await query(
+    `UPDATE user_external_auth_grants SET enabled = TRUE
+      WHERE provider = 'dingtalk' AND local_user_id = $1`,
+    [seeded.userId],
   )
 }
 
@@ -566,6 +585,7 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
           client,
           {
             integrationId: seeded.integrationId,
+            provider: 'dingtalk',
             users: [{
               userId: seeded.externalUserId,
               name: 'D5C Sync',
@@ -596,9 +616,69 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
     }
   })
 
-  it('OAuth bind supersedes only a real canonical identity or grant change', async () => {
+  it('automatic sync inventory reaches a user through the identity row of the integration provider only', async () => {
     const seeded = await seedAppliedEvidence()
     await resetSeededForAccessOverride(seeded)
+    const identityUserId = `${PREFIX}-identity-user-${randomUUID()}`
+    const identityUnionId = `${PREFIX}-identity-union-${randomUUID()}`
+    await query(
+      `INSERT INTO users (
+         id, password_hash, is_active, activation_status, access_generation
+       ) VALUES ($1, 'x', TRUE, 'activated', 1)`,
+      [identityUserId],
+    )
+    await query(
+      `INSERT INTO user_external_identities (
+         provider, local_user_id, corp_id, external_key, provider_union_id, profile
+       ) VALUES ('dingtalk', $1, $2, $3, $4, '{}'::jsonb)`,
+      [
+        identityUserId,
+        seeded.corpId,
+        `${seeded.corpId}:${identityUnionId}`,
+        identityUnionId,
+      ],
+    )
+    const inventoryFor = (provider: string) =>
+      transaction((client) =>
+        __directorySyncInternalsForTests.lockDirectorySyncAccessGraphUsers(
+          client,
+          {
+            integrationId: seeded.integrationId,
+            provider,
+            users: [{
+              userId: `${PREFIX}-identity-member-${randomUUID()}`,
+              name: 'D5C Identity',
+              unionId: identityUnionId,
+              departmentIds: [],
+              source: {},
+            }],
+          },
+        ),
+      )
+
+    const own = await inventoryFor('dingtalk')
+    expect(own.lockedUserIds.has(identityUserId)).toBe(true)
+    expect(own.lockedUserIds.has(seeded.userId)).toBe(true)
+
+    const foreign = await inventoryFor(`${PREFIX}-other-provider`)
+    expect(foreign.lockedUserIds.has(identityUserId)).toBe(false)
+    expect(foreign.lockedUserIds.has(seeded.userId)).toBe(true)
+  })
+
+  it('automatic sync inventory refuses a missing provider before any query', async () => {
+    await expect(
+      transaction((client) =>
+        __directorySyncInternalsForTests.lockDirectorySyncAccessGraphUsers(
+          client,
+          { integrationId: randomUUID(), provider: '', users: [] },
+        ),
+      ),
+    ).rejects.toThrow('requires a provider')
+  })
+
+  it('OAuth bind supersedes only a real canonical identity or grant change', async () => {
+    const seeded = await seedAppliedEvidence()
+    await resetSeededForSelfManagedOAuth(seeded)
     configureDingTalkOAuth(seeded.corpId)
     const profile = {
       openId: seeded.openId,
@@ -634,7 +714,7 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
 
   it('self-managed OAuth unbind supersedes evidence in the same transaction', async () => {
     const seeded = await seedAppliedEvidence()
-    await resetSeededForAccessOverride(seeded)
+    await resetSeededForSelfManagedOAuth(seeded)
     configureDingTalkOAuth(seeded.corpId)
     await bindDingTalkIdentityToUser({
       localUserId: seeded.userId,
@@ -646,12 +726,6 @@ describeIfDatabase('directory access-graph mutex (real DB)', () => {
       boundBy: 'admin:d5c-oauth',
       enableGrant: false,
     })
-    await query(
-      `UPDATE directory_account_links
-          SET link_status = 'unlinked'
-        WHERE directory_account_id = $1::uuid`,
-      [seeded.accountId],
-    )
     await reopenEvidence(seeded.eventId)
     const before = await readEvidence(seeded.userId)
 

@@ -144,7 +144,17 @@ Notes:
   drop the three batch-bookkeeping tables while any of them still holds a
   row; otherwise --rollback/--reset fails closed on this step and, for
   --reset, no earlier migration is rolled back either (the whole reset is
-  one transaction).`)
+  one transaction).
+- Some migrations refuse their down() outright while their table holds a
+  row, and no env var unlocks it. Known example:
+  zzzz20261104150000_create_task_source_links.ts refuses while
+  task_source_links holds any row; roll back the application build and
+  leave the table in place. Likewise
+  zzzz20261106120000_create_security_action_challenges.ts refuses while
+  security_action_challenges holds any row, and
+  zzzz20261106130000_create_directory_integration_capabilities.ts refuses
+  while directory_integration_capabilities or
+  directory_integration_capability_history holds any row.`)
 }
 
 async function main(): Promise<void> {

@@ -224,7 +224,7 @@ describe('explicit session organization routes', () => {
     authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
     authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
     authServiceMocks.createToken.mockReturnValue('signed-new-token')
-    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+    sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
   })
 
   it('lists only the authenticated actor memberships, ignoring submitted actor selectors', async () => {
@@ -244,6 +244,22 @@ describe('explicit session organization routes', () => {
     expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
     expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId: 'session', expectedAccessGeneration: 0,
+    }))
+  })
+
+  it('fences the reminted session on the authenticated access generation and returns 409 when it moved', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a', access_generation: 3 })
+    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId: 'session', expectedAccessGeneration: 3,
+    }))
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
   })
 
   it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
@@ -289,7 +305,7 @@ describe('auth login routes', () => {
     sessionMocks.revokeUserSessions.mockReset()
     activationMocks.activatePendingUser.mockReset()
     auditMocks.auditLog.mockReset()
-    sessionRegistryMocks.createUserSession.mockReset()
+    sessionRegistryMocks.createUserSession.mockReset().mockResolvedValue({id:'synthetic-session'})
     sessionRegistryMocks.listUserSessions.mockReset()
     sessionRegistryMocks.getUserSession.mockReset()
     sessionRegistryMocks.revokeUserSession.mockReset()
@@ -715,10 +731,96 @@ describe('auth login routes', () => {
         expiresAt: '2026-03-14T00:00:00.000Z',
         ipAddress: '127.0.0.1',
         userAgent: 'Vitest',
+        expectedAccessGeneration: 0,
       }),
     )
     expect((response.body as Record<string, any>).data.passwordChangeRequired).toBe(false)
     expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
+  })
+
+  it('fences the forced password change session with the access generation read at authentication', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      access_generation: 4,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
+    authServiceMocks.createToken.mockReturnValue('fresh-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      sub: 'user-1',
+      sid: 'fresh-session',
+      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
+    })
+    pgMocks.query.mockResolvedValue({ rows: [] })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: { authorization: 'Bearer live-token' },
+      body: { password: 'WelcomePass9A' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({ expectedAccessGeneration: 4 }),
+    )
+    expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
+  })
+
+  it('returns 409 authentication_changed and no token when the generation moved during a forced password change', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      access_generation: 3,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    bcryptMocks.hash.mockResolvedValue('hashed-password')
+    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
+    authServiceMocks.createToken.mockReturnValue('fresh-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      sub: 'user-1',
+      sid: 'fresh-session',
+      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
+    })
+    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+    pgMocks.query.mockResolvedValue({ rows: [] })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: { authorization: 'Bearer live-token' },
+      body: { password: 'WelcomePass9A' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Authentication changed; please sign in again with the new password',
+      code: 'authentication_changed',
+    })
+    // The password write and the session revocation stay committed; only the re-issued session is refused.
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('must_change_password = FALSE'),
+      ['hashed-password', 'user-1'],
+    )
+    expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      reason: 'password-change-required-cleared',
+    }))
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({ sessionId: expect.any(String), expectedAccessGeneration: 3 }),
+    )
   })
 
   it('rejects a forced password change that hits the weak-pattern rule with the weak_pattern reason code', async () => {
@@ -1456,6 +1558,41 @@ describe('auth login routes', () => {
     expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
   })
 
+  it('activation without configured corp cannot fall back to an unscoped identity', async () => {
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({ corpId: null })
+    dingtalkOauthMocks.validateState.mockResolvedValue({
+      valid: true,
+      intent: 'activate',
+      activateUserId: 'pending-user',
+      activateAdminUserId: 'platform-admin',
+    })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({
+      openId: 'wrong-open',
+      unionId: 'wrong-union',
+      nick: 'Wrong Person',
+    })
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          is_active: true,
+          activation_status: 'activated',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-activate-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).code).toBe('activate_source_ineligible')
+    expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
   it('issues no session and hides internal details when activate commit fails', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,
@@ -1800,6 +1937,35 @@ describe('auth login routes', () => {
     })
   })
 
+  it('#6467 anonymous probe passes missingEnv (variable names only) through unchanged', async () => {
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(false)
+    dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({
+      configured: false,
+      available: false,
+      corpId: null,
+      allowedCorpIds: [],
+      requireGrant: false,
+      autoLinkEmail: false,
+      autoProvision: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/launch', {
+      query: {
+        probe: '1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(dingtalkOauthMocks.generateState).not.toHaveBeenCalled()
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      available: false,
+      unavailableReason: 'missing_client_id',
+      missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_REDIRECT_URI'],
+    })
+  })
+
   it('exchanges a DingTalk callback into a local session token', async () => {
     const expSeconds = Math.floor(new Date('2026-04-08T10:00:00.000Z').getTime() / 1000)
 
@@ -1816,6 +1982,7 @@ describe('auth login routes', () => {
         email: 'manager@example.com',
       },
       localUserId: 'user-1',
+      sessionGeneration: 7,
       localUserEmail: 'manager@example.com',
       localUserName: 'Manager',
       localUserRole: 'admin',
@@ -1827,7 +1994,7 @@ describe('auth login routes', () => {
     authServiceMocks.readTokenPayload.mockReturnValue({
       exp: expSeconds,
     })
-    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+    sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
     pgMocks.query.mockResolvedValue({ rows: [] })
 
     const response = await invokeRoute('post', '/dingtalk/callback', {
@@ -1859,6 +2026,7 @@ describe('auth login routes', () => {
       'user-1',
       expect.objectContaining({
         ipAddress: '127.0.0.1',
+        expectedAccessGeneration: 7,
         userAgent: 'Vitest Browser',
       }),
     )
@@ -2033,6 +2201,7 @@ describe('auth login routes', () => {
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockResolvedValue({
         dingtalkUser: { unionId: 'union-1', nick: 'Alpha' },
         localUserId: 'user-1',
+        sessionGeneration: 9,
         localUserEmail: 'alpha@example.com',
         localUserName: 'Alpha',
         localUserRole: 'user',
@@ -2041,7 +2210,7 @@ describe('auth login routes', () => {
       rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
       authServiceMocks.createToken.mockReturnValue('jwt-container-token')
       authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
-      sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+      sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
       pgMocks.query.mockResolvedValue({ rows: [] })
 
       const response = await invokeRoute('post', '/login/dingtalk/container', {
@@ -2053,6 +2222,7 @@ describe('auth login routes', () => {
       expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).toHaveBeenCalledWith('auth-code-9')
       const body = response.body as Record<string, any>
       expect(body.success).toBe(true)
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('user-1',expect.objectContaining({expectedAccessGeneration:9}))
       expect(body.data).toMatchObject({
         mode: 'login',
         token: 'jwt-container-token',
@@ -2200,5 +2370,39 @@ describe('E1 container login — full HTTP wire (whitelist + route mount)', () =
       .send({ authCode: 'x' })
     // Not whitelisted → global gate returns 401 before any container handler runs.
     expect(res.status).toBe(401)
+  })
+})
+
+describe('GET /api/auth/users', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('uses verifyToken and hides recycled or purged accounts', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'admin-1', role: 'admin', email: 'admin@example.com' })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/users', {
+      headers: { authorization: 'Bearer signed-token' },
+      query: { q: '100%' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.verifyToken).toHaveBeenCalledWith('signed-token')
+    const sql = String(pgMocks.query.mock.calls[0]?.[0])
+    expect(sql).toContain('deleted_at IS NULL')
+    expect(sql).toContain('purged_at IS NULL')
+    expect(pgMocks.query.mock.calls[0]?.[1]).toEqual(['%100\\%%'])
+  })
+
+  it('rejects a token verifyToken does not accept', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue(null)
+    const response = await invokeRoute('get', '/users', {
+      headers: { authorization: 'Bearer stale' },
+    })
+    expect(response.statusCode).toBe(401)
+    expect(pgMocks.query).not.toHaveBeenCalled()
   })
 })

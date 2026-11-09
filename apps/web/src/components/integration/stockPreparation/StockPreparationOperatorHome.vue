@@ -430,6 +430,7 @@ import {
 import {
   resolveStockPrepPullBanner,
   stockPrepErrorPlain,
+  stockPrepExportRefreshGatePlain,
   stockPrepExportTenantWallPlain,
   stockPrepHomeArchivedHeading,
   stockPrepProjectOverviewPlain,
@@ -969,6 +970,19 @@ async function exportCard(projectNo: string): Promise<void> {
         tone: 'error',
         zh: wall.zhNext ? `${wall.zh}${wall.zhNext}` : wall.zh,
         en: wall.enNext ? `${wall.en} ${wall.enNext}` : wall.en,
+      }
+      return
+    }
+    // 备料分批拉取第一期 step 4 PR-7: the formal-export gate's refusals (and the retarget wall) say which state it is —
+    // for `not_settled` / `state` 「稍后再点一次」 is the one instruction that never works. Reason-aware, values-free.
+    const failure = error as { code?: unknown; reason?: unknown } | null
+    const gate = stockPrepExportRefreshGatePlain(failure?.code, typeof failure?.reason === 'string' ? failure.reason : null)
+    if (gate) {
+      exportNotice.value = {
+        projectNo,
+        tone: 'error',
+        zh: gate.zhNext ? `${gate.zh}${gate.zhNext}` : gate.zh,
+        en: gate.enNext ? `${gate.en} ${gate.enNext}` : gate.en,
       }
       return
     }

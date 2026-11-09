@@ -73,6 +73,7 @@ const {
 } = require('./stock-preparation-project-targets.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const { pendingDecisionCountsByProjectNo } = require('./stock-preparation-operator-project-directory.cjs')
+const { readProjectRefreshState } = require('./stock-preparation-refresh-state.cjs')
 const { PULL_TARGET_PAGE_LIMIT, PULL_TARGET_MAX_PAGES } = require('./stock-preparation-pull-target-scan.cjs')
 
 const TEMPLATE = STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE
@@ -153,6 +154,47 @@ const POSTURE_ARCHIVED = Object.freeze({ key: 'archived', zh: '已归档', en: '
 const POSTURE_NOT_PULLED = Object.freeze({ key: 'not_pulled', zh: '还没拉过', en: 'Not pulled yet', tone: 'neutral' })
 const POSTURE_READY = Object.freeze({ key: 'ready', zh: '可以导出', en: 'Ready to export', tone: 'success' })
 
+// ── PR-5 (batch-refresh step 4, design §11; plan §5.3 U01): THE REFRESH-STATE BRANCH ─────────────
+//
+// 「可以导出」 is a promise the formal export keeps or refuses (stock-preparation-export-gate.cjs), so the
+// posture must never say it while the project's refresh state is unfinished or unreadable. ONE key,
+// `blocked_pull_state`, carries every such state; the WORDS name the state (the closed vocabulary below,
+// mirrored word for word in apps/web projectPosture.ts and driven by the same spec). Checked BEFORE
+// `ready` / `not_pulled` and AFTER the two count badges, which stay what they were: a pending decision or
+// a missing part is still the operator's own first item.
+//
+// Inputs (all optional; a caller that passes no `refreshStatus` gets the pre-PR-5 posture — the web
+// mirror's consumers wire the stanza in PR-7, the server overview always passes one):
+//   refreshStatus              the derived state's status token (lib/stock-preparation-refresh-state.cjs);
+//   refreshSettled             the derived state's `settled` (default false: a `complete` that is not
+//                              settled is 「待核对」, never 「可以导出」 — fail closed);
+//   refreshPendingConfirmCount the derived counts.pendingConfirm, folded into 「待确认 N 件」.
+const REFRESH_POSTURE_KEY = 'blocked_pull_state'
+const REFRESH_BLOCKED_TEXT = Object.freeze({
+  pending_confirmation: Object.freeze({ zh: (n) => (n > 0 ? `待确认 ${n} 件` : '待确认'), en: (n) => (n > 0 ? `Awaiting confirmation (${n})` : 'Awaiting confirmation'), tone: 'warning' }),
+  confirmed_pending_execution: Object.freeze({ zh: () => '已确认待执行', en: () => 'Confirmed, awaiting execution', tone: 'warning' }),
+  executing: Object.freeze({ zh: () => '正在写入', en: () => 'Writing now', tone: 'primary' }),
+  failed_pending_recovery: Object.freeze({ zh: () => '上次写入未完成', en: () => 'Last write unfinished', tone: 'danger' }),
+  executed_pending_settlement: Object.freeze({ zh: () => '已执行待核对', en: () => 'Executed, awaiting check', tone: 'warning' }),
+  change_pending_review: Object.freeze({ zh: () => '变更待复核', en: () => 'Change awaiting review', tone: 'warning' }),
+  unreadable: Object.freeze({ zh: () => '状态读取失败', en: () => 'Refresh state unreadable', tone: 'danger' }),
+  // `complete` whose settlement never landed (O-9's never-settled pilot project): a clean preview settles it.
+  unsettled: Object.freeze({ zh: () => '待核对', en: () => 'Awaiting check', tone: 'warning' }),
+  // A token outside the closed vocabulary is an unfinished state by construction — never 「可以导出」.
+  unknown: Object.freeze({ zh: () => '刷新未完成', en: () => 'Refresh unfinished', tone: 'warning' }),
+})
+
+function refreshBlockedPosture(input) {
+  const status = input.refreshStatus
+  if (status === undefined || status === null) return null
+  if (status === 'not_governed') return null
+  if (status === 'complete' && input.refreshSettled === true) return null
+  const token = status === 'complete' ? 'unsettled' : (Object.prototype.hasOwnProperty.call(REFRESH_BLOCKED_TEXT, status) ? status : 'unknown')
+  const text = REFRESH_BLOCKED_TEXT[token]
+  const n = nonNegativeInt(input.refreshPendingConfirmCount)
+  return { key: REFRESH_POSTURE_KEY, zh: text.zh(n), en: text.en(n), tone: text.tone }
+}
+
 function projectOverviewPosture(input = {}) {
   if (input.archived === true) return POSTURE_ARCHIVED
   const pending = nonNegativeInt(input.pendingDecisionCount)
@@ -163,9 +205,49 @@ function projectOverviewPosture(input = {}) {
   if (missing > 0) {
     return { key: 'blocked', zh: `卡住了:缺件 ${missing} 种`, en: `Blocked: ${missing} missing part(s)`, tone: 'danger' }
   }
+  const blockedPull = refreshBlockedPosture(input)
+  if (blockedPull) return blockedPull
   const pulled = nonNegativeInt(input.pulledRowCount)
   if (pulled > 0) return POSTURE_READY
   return POSTURE_NOT_PULLED
+}
+
+/**
+ * PR-5: the posture inputs a derived refresh state contributes to ONE overview row. `null` / `undefined`
+ * (no reader wired, no sheet to consult) is the UNREADABLE state — never 「可以导出」 (plan §8 / design D8).
+ */
+function refreshPostureInputOf(refreshState) {
+  const state = isPlainObject(refreshState) ? refreshState : null
+  return {
+    refreshStatus: state && typeof state.status === 'string' ? state.status : 'unreadable',
+    refreshSettled: Boolean(state && state.settled === true),
+    refreshPendingConfirmCount: state && isPlainObject(state.counts) ? nonNegativeInt(state.counts.pendingConfirm) : 0,
+  }
+}
+
+/**
+ * PR-5: ONE project's derived refresh state for the overview, through the route-bound reader
+ * (`readRefreshState({ projectNo, sheetId })` => `{ state }`). A reader that is not wired, a registry row
+ * with no sheet, a thrown read or a REFUSAL (409 RETARGETED / TENANT_MISMATCH, 422) all answer the
+ * `unreadable` state with a closed-shape reason — the row then says 「状态读取失败」 and the refresh goes on
+ * with the tenant's other projects. Never thrown: one project's refusal must not fail the tenant's refresh.
+ */
+async function readRefreshStateForOverview(readRefreshState, { projectNo, sheetId } = {}) {
+  if (typeof readRefreshState !== 'function') {
+    return readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'reader_absent' } })
+  }
+  if (!optionalString(sheetId)) {
+    return readProjectRefreshState({ ok: false, failure: { store: 'registry', operation: 'sheet_absent' } })
+  }
+  try {
+    const read = await readRefreshState({ projectNo, sheetId })
+    const state = read && isPlainObject(read.state) ? read.state : null
+    return state || readProjectRefreshState({ ok: false, failure: { store: 'governance', operation: 'reader_shape' } })
+  } catch (error) {
+    const status = error && Number.isInteger(error.status) ? error.status : null
+    const operation = status === 409 || status === 422 ? 'consult_refused' : 'consult_failed'
+    return readProjectRefreshState({ ok: false, failure: { store: 'governance', operation } })
+  }
 }
 
 // ── 「最近拉取结果」 ────────────────────────────────────────────────────────────────────────────────
@@ -523,7 +605,7 @@ function countsDifferFromRegistry(target, counts) {
  * ledger's pending count, and the derived deep link. `countsAt` is the 「截至」 of measured counts (the
  * caller passes the registry's own clock when the measurement changed nothing). Pure.
  */
-function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount, todoViewId, locale, countsAt } = {}) {
+function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount, todoViewId, locale, countsAt, refreshState } = {}) {
   const archived = target.status === 'archived'
   const measured = counts && counts.ready === true ? counts : null
   const rowCount = measured ? measured.rowCount : target.rowCount
@@ -533,7 +615,8 @@ function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount,
   const warehouseOpenCount = measured ? measured.warehouseOpenCount : target.warehouseOpenCount
   const pending = nonNegativeInt(pendingDecisionCount)
   const missing = nonNegativeInt(target.missingComponentsCount)
-  const posture = projectOverviewPosture({ archived, pendingDecisionCount: pending, missingComponentsCount: missing, pulledRowCount: nonNegativeInt(rowCount) })
+  // PR-5: the derived refresh state (or its absence = unreadable) decides before 「可以导出」 can be said.
+  const posture = projectOverviewPosture({ archived, pendingDecisionCount: pending, missingComponentsCount: missing, pulledRowCount: nonNegativeInt(rowCount), ...refreshPostureInputOf(refreshState) })
   const resolvedLocale = locale === undefined ? resolveTemplateLabelLocale() : locale
   const zh = String(resolvedLocale).toLowerCase().startsWith('zh')
   const measuredAt = countsAt instanceof Date ? countsAt.toISOString() : (countsAt ? String(countsAt) : null)
@@ -642,7 +725,7 @@ async function deleteOverviewRow(writer, overviewSheetId, record) {
  * is deleted. Runs under the caller's overview lock. `recordsApi` (generic, reads) counts the project sheet;
  * `writer` / `scoped` (the overview port) write the overview.
  */
-async function writeProjectRow({ api, recordsApi, writer, scoped, store, tenant, projectId, overviewSheetId, target, fields, pendingDecisionCount, existingRecords, recount, locale, now, summary }) {
+async function writeProjectRow({ api, recordsApi, writer, scoped, store, tenant, projectId, overviewSheetId, target, fields, pendingDecisionCount, refreshState, existingRecords, recount, locale, now, summary }) {
   let counts = { ready: false }
   if (recount) {
     counts = await countProjectSheetRows({ recordsApi, provisioning: api, projectId, row: target })
@@ -673,6 +756,7 @@ async function writeProjectRow({ api, recordsApi, writer, scoped, store, tenant,
     fields,
     counts,
     pendingDecisionCount,
+    refreshState,
     todoViewId: projectTodoViewId({ provisioning: api, projectId, objectId: target.objectId }),
     locale,
     countsAt: measuredAt,
@@ -911,7 +995,7 @@ async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne,
  * later success in the same run can take that one back, and a log naming it would point at a failure that no longer
  * stands while the one that does goes unnamed.
  */
-function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId, sheet, locale, now }) {
+function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId, sheet, locale, now, readRefreshState = null }) {
   let scopedPromise = null
   // projectNo → { error, seq } of its latest failure in this run; the latest project-less failure; a run-local order.
   const failureByProjectNo = new Map()
@@ -972,6 +1056,8 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
         } catch (error) {
           pendingDecisionCount = 0
         }
+        // PR-5: one consult per project — the row's 「状态」 never says 「可以导出」 over an unfinished or unreadable state.
+        const refreshState = await readRefreshStateForOverview(readRefreshState, { projectNo: no, sheetId: target.sheetId })
         await writeProjectRow({
           api,
           recordsApi,
@@ -984,6 +1070,7 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
           target,
           fields,
           pendingDecisionCount,
+          refreshState,
           existingRecords: mine,
           recount: flags.recount === true,
           locale,
@@ -1019,7 +1106,7 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
  * step 3 / 4 / 5 does not stop the others, stays DIRTY for the next writer, and the refresh then throws the
  * typed 503 REFRESH_INCOMPLETE (counts only) instead of returning a summary the caller would call fresh.
  */
-async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, now = () => new Date() } = {}) {
+async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, now = () => new Date(), readRefreshState = null } = {}) {
   const api = requireProvisioning(provisioning)
   assertHostStampsSystemKind(api)
   const tenant = requiredString(tenantId, 'tenantId')
@@ -1034,7 +1121,7 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
   const state = overviewWriterState(registry, tenant)
   // In-process: another overview writer of this tenant is running — answer at once, without a connection.
   if (state.running) throw overviewBusyError()
-  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
+  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now, readRefreshState })
   const run = await runOverviewWriter({
     registry,
     tenant,
@@ -1109,6 +1196,8 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
         // S3 follow-up C: one project's failure does not stop the others; it is collected, the project stays
         // dirty, and the refresh answers REFRESH_INCOMPLETE instead of `fresh: true`.
         try {
+          // PR-5: one consult per registered project (the cost of the full pass grows by one consult per row).
+          const refreshState = await readRefreshStateForOverview(readRefreshState, { projectNo: target.projectNo, sheetId: target.sheetId })
           await writeProjectRow({
             api,
             recordsApi,
@@ -1121,6 +1210,7 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
             target,
             fields: fieldsByProjectNo.get(target.projectNo) || null,
             pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
+            refreshState,
             existingRecords,
             recount: true,
             locale,
@@ -1174,7 +1264,7 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
  * rows; the others do not). BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's
  * outcome. The last failure of the drain that still stands (follow-ups 2, item 4) is rethrown for that log.
  */
-async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenantId, projectId, projectNo, recount = false, locale, now = () => new Date() } = {}) {
+async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenantId, projectId, projectNo, recount = false, locale, now = () => new Date(), readRefreshState = null } = {}) {
   const api = requireProvisioning(provisioning)
   const tenant = requiredString(tenantId, 'tenantId')
   const scopedProjectId = requiredString(projectId, 'projectId')
@@ -1186,7 +1276,7 @@ async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenan
   const state = overviewWriterState(registry, tenant)
   markOverviewProjectDirty(state, no, { recount })
   if (state.running) return { outcome: 'deferred', sheetId: sheet.sheetId }
-  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
+  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now, readRefreshState })
   // S3 follow-up C: a project whose write failed is put back into the dirty set when the writer stops (it was taken
   // out by the drain) — the next overview writer of this tenant here retries it instead of it being dropped.
   // Fix round 1: this writer runs inside a request handler, so it retries at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS

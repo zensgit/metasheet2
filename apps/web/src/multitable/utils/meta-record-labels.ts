@@ -150,10 +150,17 @@ export type MetaRecordLabelKey =
   | 'dispatch.dueDateLabel' | 'dispatch.dueTimeLabel' | 'dispatch.requiredMark' | 'dispatch.accessNote'
   | 'dispatch.titleRequired' | 'dispatch.invalidTitle' | 'dispatch.dueDateRequired' | 'dispatch.zoneUnavailable'
   | 'dispatch.invalidDate' | 'dispatch.assigneeInvalid' | 'dispatch.assigneeLimit'
-  | 'dispatch.errorInactiveMember' | 'dispatch.errorOrgMissing' | 'dispatch.errorForbidden'
-  | 'dispatch.errorTasksUnavailable' | 'dispatch.errorFailed'
-  | 'dispatch.success' | 'dispatch.openTask' | 'dispatch.sourceNoteFailed' | 'dispatch.sourceLinePrefix'
+  | 'dispatch.errorInactiveMember' | 'dispatch.errorAssigneeTaskAccess' | 'dispatch.errorOrgMissing' | 'dispatch.errorForbidden'
+  | 'dispatch.errorTasksUnavailable'
+  | 'dispatch.success' | 'dispatch.openTask'
   | 'dispatch.pendingElsewhere' | 'dispatch.inactiveSkipped'
+  // Package 2: the create's retry key and the source link. Each sentence says only what the browser
+  // knows: a 4xx means THIS request created nothing; no readable answer means the outcome is unknown.
+  | 'dispatch.outcomeUnknown' | 'dispatch.keyNotSaved' | 'dispatch.errorRejected' | 'dispatch.errorSourceNotReadable'
+  | 'dispatch.errorNotSent' | 'dispatch.earlierUnresolved' | 'dispatch.earlierNoTask' | 'dispatch.earlierCreated'
+  | 'dispatch.reusedHeading' | 'dispatch.reusedNote' | 'dispatch.reusedNotOpenable' | 'dispatch.existingReadFailed'
+  | 'dispatch.sourceNotLinked' | 'dispatch.retry' | 'dispatch.another' | 'dispatch.existingHeading'
+  | 'dispatch.pickPeople' | 'dispatch.assigneeNoAccess'
   | 'dispatch.identityChanged' | 'dispatch.identityUnavailable'
   // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
   //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
@@ -197,6 +204,13 @@ export type MetaRecordLabelKey =
   | 'approval.progressForbidden' | 'approval.progressNotParticipant' | 'approval.progressFailed'
   | 'approval.progressMismatch'
   | 'approval.progressRetry' | 'approval.completedAt'
+  // --- 关联任务 / the record's linked tasks (package 2). Every `recordTasks.*` key belongs to
+  //     MetaRecordTasksPanel.vue. The panel lists only tasks the viewer can open: no sentence here
+  //     names a person, echoes a record value or counts tasks the viewer cannot open. ---
+  | 'recordTasks.panelTitle' | 'recordTasks.panelExpand' | 'recordTasks.panelCollapse'
+  | 'recordTasks.panelLoading' | 'recordTasks.panelEmpty' | 'recordTasks.panelError' | 'recordTasks.panelRetry'
+  | 'recordTasks.panelForbidden' | 'recordTasks.panelUnavailable'
+  | 'recordTasks.statusOpen' | 'recordTasks.statusDone' | 'recordTasks.due' | 'recordTasks.untitled'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -466,7 +480,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.dueDateLabel': { en: 'Due date', zh: '截止日期' },
   'dispatch.dueTimeLabel': { en: 'Due time (optional)', zh: '截止时间（可选）' },
   'dispatch.requiredMark': { en: 'required', zh: '必填' },
-  'dispatch.accessNote': { en: 'Assignees are not notified when the task is dispatched, and need task access to see the task.', zh: '派发时不会通知负责人；负责人需要有任务权限才能看到该任务。' },
+  // True whether or not task notifications are switched on where this runs: it promises neither.
+  'dispatch.accessNote': { en: 'Whether assignees are notified depends on the notification settings. Every assignee needs task access; the task cannot be dispatched to someone without it.', zh: '是否通知负责人取决于系统的通知设置；负责人需要已开通任务功能，未开通的负责人无法被派发。' },
   'dispatch.titleRequired': { en: 'Enter a title', zh: '请填写标题' },
   'dispatch.invalidTitle': { en: 'The title contains characters that cannot be saved', zh: '标题包含无法保存的字符' },
   'dispatch.dueDateRequired': { en: 'Choose a due date', zh: '请选择截止日期' },
@@ -475,17 +490,43 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.assigneeInvalid': { en: 'The user ID is not valid', zh: '用户 ID 格式不正确' },
   'dispatch.assigneeLimit': { en: 'At most 50 assignees', zh: '负责人最多 50 人' },
   'dispatch.errorInactiveMember': { en: 'At least one assignee is not an active member of the current organization. Check the assignees and try again.', zh: '有负责人不是当前组织的有效成员，请检查负责人后重试。' },
+  'dispatch.errorAssigneeTaskAccess': { en: "At least one assignee can't use tasks yet. Ask an administrator to give them task access.", zh: '有负责人还不能使用任务功能，请管理员先为其开通任务权限。' },
   'dispatch.errorOrgMissing': { en: 'Choose an organization first, then dispatch the task.', zh: '请先选择组织，再派发任务。' },
   'dispatch.errorForbidden': { en: 'You do not have permission to create tasks.', zh: '你没有创建任务的权限。' },
   'dispatch.errorTasksUnavailable': { en: 'Tasks are not enabled.', zh: '任务功能未开启。' },
-  'dispatch.errorFailed': { en: 'Could not dispatch the task. Try again later.', zh: '派发任务失败，请稍后重试。' },
   'dispatch.success': { en: 'Task created.', zh: '任务已创建。' },
   'dispatch.openTask': { en: 'Open task', zh: '打开任务' },
-  'dispatch.sourceNoteFailed': { en: 'The source record link could not be added to the task description. You can add it on the task page.', zh: '来源记录链接未能写入任务描述，可在任务页面手动补充。' },
-  'dispatch.sourceLinePrefix': { en: 'Source: multitable record', zh: '来源：多维表记录' },
   'dispatch.pendingElsewhere': { en: 'A task from this record is still being dispatched. Wait for the result.', zh: '此记录的任务仍在派发中，请等待结果。' },
   'dispatch.inactiveSkipped': { en: 'Deactivated people in the person field were not filled in.', zh: '人员字段中已停用的人员未带入。' },
-  'dispatch.identityChanged': { en: 'The signed-in account or organization has changed, so this dispatch was stopped and the form cleared. Reload the page to dispatch again.', zh: '登录账号或组织已变化，本次派发已停止，表单已清空。请刷新页面后再派发任务。' },
+  // Package 2. EN uses ASCII punctuation only (the parity cell treats fullwidth forms as CJK).
+  'dispatch.outcomeUnknown': { en: 'No result was received for this dispatch: the task may or may not have been created. Retry resubmits the same entries; you can also check the task page first.', zh: '没有收到这次派发的结果：任务可能已创建，也可能没有。点「重试」会按原内容再提交一次；也可以先到任务页查看。' },
+  'dispatch.keyNotSaved': { en: 'This page could not remember this dispatch. If you dispatch again after reloading the page, a duplicate may be created; check the task page first.', zh: '本页无法记住这次派发。如果刷新页面后再派发，可能会重复创建，请先到任务页确认。' },
+  'dispatch.errorRejected': { en: 'This dispatch was not accepted and created no task. Check the entries and try again; if it still does not go through, reload the page.', zh: '这次派发未被接受，没有创建任务。请检查填写内容后再试；如果仍然不行，请刷新页面。' },
+  // One code covers the record, its view, its sheet and the signed-in user: it says only that the record
+  // could not be confirmed as the source, not why.
+  'dispatch.errorSourceNotReadable': { en: 'Nothing was dispatched this time: this record could not be confirmed as the task source. Make sure you can still open the record, then try again.', zh: '这次没有派发：无法确认这条记录可以作为任务来源。请确认你仍能打开这条记录，再试一次。' },
+  'dispatch.errorNotSent': { en: 'Nothing was dispatched: the browser could not generate a dispatch identifier. Reload the page and try again, or create the task from the task page.', zh: '这次没有派发：浏览器无法生成派发标识。请刷新页面重试，或到任务页创建。' },
+  'dispatch.earlierUnresolved': { en: 'An earlier dispatch received no result, so it is not known whether it created a task. Check the task page before dispatching again.', zh: '此前有一次派发没有收到结果，无法确认它是否已创建任务。请到任务页查看后再决定是否重新派发。' },
+  'dispatch.earlierNoTask': { en: 'An earlier dispatch received no result and left no task that you can open. You can dispatch again.', zh: '此前有一次派发没有收到结果，它没有留下你可以打开的任务，可以重新派发。' },
+  'dispatch.earlierCreated': { en: 'The earlier dispatch did create this task.', zh: '此前那次派发已创建了这个任务。' },
+  'dispatch.reusedHeading': { en: 'The task was already created.', zh: '任务此前已创建。' },
+  'dispatch.reusedNote': { en: 'This is the task created by the earlier dispatch; this submission created nothing new and changed nothing on it. To create another task with new entries, choose Dispatch another.', zh: '这是此前那次派发创建的任务；这次提交没有另建任务，也没有改动它。如需按新内容另建一项，请点「再派一项」。' },
+  'dispatch.reusedNotOpenable': { en: 'The task created by the earlier dispatch cannot be opened now (it may have been deleted). To dispatch again, choose Dispatch another.', zh: '此前那次派发创建的任务现在无法打开（可能已被删除）。如需重新派发，请点「再派一项」。' },
+  'dispatch.existingReadFailed': { en: 'The tasks already dispatched from this record could not be read. If you dispatched from this record before, dispatching now may create another one.', zh: '无法读取这条记录已派发的任务。如果你之前从这条记录派发过，现在派发可能会再建一项。' },
+  'dispatch.sourceNotLinked': { en: 'The task was created, but the source record could not be linked. You can note the source record in the task description.', zh: '任务已创建，但未能关联来源记录，可在任务描述里手动写明来源记录。' },
+  'dispatch.retry': { en: 'Retry', zh: '重试' },
+  'dispatch.another': { en: 'Dispatch another', zh: '再派一项' },
+  'dispatch.existingHeading': { en: 'Dispatched from this record', zh: '已从此记录派发' },
+  'dispatch.pickPeople': { en: 'Choose people', zh: '选择人员' },
+  'dispatch.assigneeNoAccess': { en: "can't use tasks yet", zh: '还不能使用任务' },
+  // True in every case that latches the refusal (another account, the same account after a sign-out
+  // or an expired session, an org switch, a change while a create is out or after it landed): it
+  // says only that dispatching is off on this page and the form was cleared, claims neither that the
+  // account changed nor anything about any particular dispatch, and names no task.
+  'dispatch.identityChanged': {
+    en: 'Your sign-in or organization changed after this page was opened (for example, you signed out, signed in again or switched account in another tab, your session expired, or you switched organization here or in another tab). For safety, dispatching is turned off on this page and anything entered in the form was cleared. Reload the page to dispatch again.',
+    zh: '本页打开后，登录状态或所在组织有过变化（例如在其他标签页退出、重新登录或切换了账号，登录已过期，或在本页或其他标签页切换了组织）。为安全起见，本页已停用派发任务，表单内容已清空。请刷新页面后再派发。',
+  },
   'dispatch.identityUnavailable': { en: 'The signed-in account could not be confirmed. Sign in again, then reload the page to dispatch a task.', zh: '无法确认当前登录账号。请重新登录并刷新页面后再派发任务。' },
   // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
   // convention as every other block in this table.
@@ -585,6 +626,21 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'approval.progressMismatch': { en: 'Progress data does not match this approval — not shown.', zh: '返回的进度与该审批不一致，已隐藏' },
   'approval.progressRetry': { en: 'Retry', zh: '重试' },
   'approval.completedAt': { en: 'Completed at', zh: '完成时间' },
+  // 关联任务 / the record's linked tasks (package 2). "you can open" on purpose: the list holds only the
+  // tasks the viewer can open, so an empty list says nothing about anyone else's tasks.
+  'recordTasks.panelTitle': { en: 'Linked tasks', zh: '关联任务' },
+  'recordTasks.panelExpand': { en: 'Show linked tasks', zh: '展开关联任务' },
+  'recordTasks.panelCollapse': { en: 'Hide linked tasks', zh: '收起关联任务' },
+  'recordTasks.panelLoading': { en: 'Loading linked tasks…', zh: '正在加载关联任务…' },
+  'recordTasks.panelEmpty': { en: 'No linked tasks that you can open.', zh: '没有你可以打开的关联任务。' },
+  'recordTasks.panelError': { en: 'Failed to load linked tasks.', zh: '加载关联任务失败。' },
+  'recordTasks.panelRetry': { en: 'Retry', zh: '重试' },
+  'recordTasks.panelForbidden': { en: 'You do not have permission to view the linked tasks of this record.', zh: '你没有查看此记录关联任务的权限。' },
+  'recordTasks.panelUnavailable': { en: 'Linked tasks are not available right now.', zh: '关联任务暂不可用。' },
+  'recordTasks.statusOpen': { en: 'Open', zh: '进行中' },
+  'recordTasks.statusDone': { en: 'Done', zh: '已完成' },
+  'recordTasks.due': { en: 'Due', zh: '截止' },
+  'recordTasks.untitled': { en: 'Untitled task', zh: '未命名任务' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -680,6 +736,16 @@ export function recordPosition(current: number, total: number, isZh: boolean): s
 // Same interpolated-helper shape as `recordPosition` above; the count is data, rendered raw.
 export function recordHiddenFieldsHeading(count: number, isZh: boolean): string {
   return isZh ? `本视图中隐藏的字段 (${count})` : `Hidden in this view (${count})`
+}
+
+// dispatchAccessSkipped: the 派发任务 dialog's note under the assignee chips after a person-field
+// prefill (task usability package 1b): how many people of the field were not filled in because they
+// cannot use tasks yet. Names nobody; the count is rendered raw.
+export function dispatchAccessSkipped(count: number, isZh: boolean): string {
+  if (isZh) return `人员字段中有 ${count} 人还不能使用任务，未带入。`
+  return count === 1
+    ? "1 person in the person field can't use tasks yet and was not filled in."
+    : `${count} people in the person field can't use tasks yet and were not filled in.`
 }
 
 // configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt
@@ -1049,4 +1115,22 @@ export function recordApprovalHistoryActionLabel(action: string, isZh: boolean):
     : undefined
   if (!entry) return action
   return isZh ? entry.zh : entry.en
+}
+
+// 关联任务 / the record's linked tasks (package 2): the server answered `hasMore` for the page the panel
+// asked for. Counts the rows ON SCREEN, never a total: the server counts nothing, and a reader learns
+// nothing about tasks they cannot open.
+export function recordTasksHasMoreNotice(shown: number, isZh: boolean): string {
+  const count = Number.isFinite(shown) && shown > 0 ? Math.trunc(shown) : 0
+  if (count <= 0) {
+    return isZh ? '还有更多（仅显示最近一页）' : 'More exist (showing the most recent page only)'
+  }
+  return isZh
+    ? `还有更多（仅显示最近 ${count} 条）`
+    : `More exist (showing the latest ${count} only)`
+}
+
+/** Every key of the record drawer's label table, for the language-parity cells. */
+export function recordLabelKeys(): MetaRecordLabelKey[] {
+  return Object.keys(META_RECORD_LABELS) as MetaRecordLabelKey[]
 }

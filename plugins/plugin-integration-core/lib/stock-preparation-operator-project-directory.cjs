@@ -133,6 +133,9 @@ const OPERATOR_PROJECT_SOURCE_PULL_TARGET = 'pull_target'
 
 /** The action the materials export stamps its own audit row with. */
 const PREP_LINE_EXPORT_AUDIT_ACTION = 'prep_line_export'
+// PR-5: the audit mode of a formal export the gate REFUSED (nothing delivered) — skipped by the
+// 「最近导出」 window and never a timestamp a reader could mistake for a delivery.
+const PREP_LINE_EXPORT_REFUSED_MODE = 'export_refused'
 
 /**
  * The audit window `lastExportAtByProjectNo` reads. The store clamps `limit` to its own
@@ -216,6 +219,9 @@ async function lastExportAtByProjectNo(audit, { tenantId, limit = EXPORT_AUDIT_W
     const entries = result && Array.isArray(result.entries) ? result.entries : []
     const byProjectNo = new Map()
     for (const entry of entries) {
+      // PR-5: a REFUSED formal export (mode `export_refused`, the gate's audit row) delivered nothing —
+      // it is not a 「最近导出」 and must not shadow the real one behind it in the window.
+      if (entry && entry.mode === PREP_LINE_EXPORT_REFUSED_MODE) continue
       // `project_id` is where the export route stamps the customer's projectNo. A row without one
       // cannot be attributed to a project, so it is skipped — never guessed at.
       const projectNo = optionalString(entry && entry.projectId)
@@ -432,6 +438,14 @@ async function listOperatorProjectDirectory({
   // own bounded counts and its archived flag. `null` (the default, and the switch-off value) leaves
   // every response below byte-identical to S2.
   projectTargets = null,
+  // PR-5 (design §11): the tenant's OPEN refresh holds counted by project number — the second
+  // pending-work ledger (batch-refresh step 4's hold table), read by the route through the continuation
+  // store. `{ ready, byProjectNo }`: `pendingDecisionCount` becomes the UNION of the confirmation
+  // ledger's pending rows and the open holds, and `ledgerReady` is true only when BOTH ledgers answered
+  // (a hold table that could not be read never degrades to "no holds" — plan §8 / design §9.5; the
+  // directory then says the pending counts cannot be trusted, which the FE already renders). Absent
+  // (`null`, a direct module caller that did not ask): the confirmation ledger alone, as before PR-5.
+  refreshHoldCounts = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
@@ -460,6 +474,19 @@ async function listOperatorProjectDirectory({
   const exceptionSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, EXCEPTION_OBJECT_ID)
   const prepLineSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, PREP_LINE_OBJECT_ID)
   const pending = await pendingDecisionCountsByProjectNo(recordsApi, provisioning, stagingProjectId, narrowTo)
+  // PR-5: the UNION of the two pending-work ledgers — the confirmation ledger's pending rows and the
+  // open refresh holds the route counted — keyed by project number. The rows AND the index below are
+  // projected from this one map, so a row and the board (which consumes the index) cannot disagree.
+  const holdCounts = refreshHoldCounts === null || refreshHoldCounts === undefined
+    ? null
+    : { ready: refreshHoldCounts.ready === true, byProjectNo: refreshHoldCounts.byProjectNo instanceof Map ? refreshHoldCounts.byProjectNo : new Map() }
+  const pendingUnion = new Map(pending.byProjectNo)
+  if (holdCounts) {
+    for (const [no, n] of holdCounts.byProjectNo) {
+      if (Number.isInteger(n) && n > 0) pendingUnion.set(no, (pendingUnion.get(no) || 0) + n)
+    }
+  }
+  const pendingUnionOf = (no) => pendingUnion.get(no) || 0
 
   // THE SECOND STORE — AND THE ONE SWITCH THAT DECIDES WHETHER IT IS READ AT ALL.
   //
@@ -570,7 +597,7 @@ async function listOperatorProjectDirectory({
       openExceptionCount: counts.openExceptionCount,
       heldLineCount: counts.heldLineCount,
       readyLineCount: counts.readyLineCount,
-      pendingDecisionCount: rowProjectNo ? (pending.byProjectNo.get(rowProjectNo) || 0) : 0,
+      pendingDecisionCount: rowProjectNo ? pendingUnionOf(rowProjectNo) : 0,
     }
     if (!unioned) return row
     const pullFacts = rowProjectNo ? pullScan.byProjectNo.get(rowProjectNo) : undefined
@@ -681,7 +708,9 @@ async function listOperatorProjectDirectory({
     // gate that did was deleted when the owner ruled against project ownership (2026-09-06), and it
     // took its `archiveEmpty` opt-in with it.
     directoryReady: projectSheet !== null,
-    ledgerReady: pending.ready,
+    // PR-5: both pending-work ledgers answered (the confirmation ledger, and — when the route consulted
+    // it — the refresh hold table); an unreadable hold table is `false`, never "zero holds".
+    ledgerReady: pending.ready && (holdCounts === null || holdCounts.ready === true),
     // ─────────────────────────────────────────────────────────────────────────
     // THE UNION'S OWN KEYS — PRESENT ONLY UNDER `includePullTargets` (核验裁决 r3).
     //
@@ -716,7 +745,7 @@ async function listOperatorProjectDirectory({
       // THE DEEP-LINK HANDLE, `{ sheetId, viewId }` or null — see its own note above the computation.
       // It is NOT a permission decision and this module cannot make one: multitable enforces access
       // when the operator lands. Null means "no bound sheet this caller is proved to own", which the
-      // front end renders as 「打开多维表工作台」 rather than as a dead button.
+      // front end renders as 「打开多维表首页」 (it opens the multitable home) rather than as a dead button.
       fillTarget,
       // THE ANTI-SILENT-TRUNCATION FLAG (设计稿 N1). True when the union may be missing project
       // numbers, in all THREE ways that can happen: the pull-target scan hit `PULL_TARGET_MAX_PAGES`,
@@ -773,8 +802,8 @@ async function listOperatorProjectDirectory({
     // set is frozen and asserted (S-02a). Making either default would be an unreviewed widening of a
     // value-bearing response projection — the index's KEYS are customer project numbers — so only a
     // caller that asks gets it, and the route's default shape is unchanged by construction.
-    ...(includePendingIndex ? { pendingByProjectNo: pending.byProjectNo } : {}),
-    ...(includePendingCounts ? { pendingCountsByProjectNo: pendingCountsObject(pending.byProjectNo) } : {}),
+    ...(includePendingIndex ? { pendingByProjectNo: pendingUnion } : {}),
+    ...(includePendingCounts ? { pendingCountsByProjectNo: pendingCountsObject(pendingUnion) } : {}),
     projects,
   }
 }
@@ -791,6 +820,7 @@ module.exports = {
   OPERATOR_PROJECT_SOURCE_MVP,
   OPERATOR_PROJECT_SOURCE_PULL_TARGET,
   PREP_LINE_EXPORT_AUDIT_ACTION,
+  PREP_LINE_EXPORT_REFUSED_MODE,
   PROJECT_OBJECT_ID,
   StockPreparationOperatorDirectoryError,
   StockPreparationProjectReadsError,

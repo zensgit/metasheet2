@@ -90,6 +90,18 @@ export interface StockPreparationProjectBoard {
   fillTarget: StockPreparationFillTarget | null
   directoryReady: boolean
   ledgerReady: boolean
+  /**
+   * 备料分批拉取第一期 step 4 PR-5's stanza — the project's derived refresh state (values-free). UNTYPED at the
+   * boundary on purpose: read ONLY through `parseStockPrepRefreshStanza` (refreshState.ts), which answers `null`
+   * when the key is absent (an older backend) and the `unreadable` stanza for anything malformed.
+   */
+  refresh?: unknown
+  /**
+   * 批次标识 BI-3 (R-65): the board's pull-batch stanza (`readPullBatchBoardStanza`, BI-1b), present ONLY while the switch
+   * `STOCK_PREP_PULL_BATCH_ENABLED` is exactly 'true'. UNTYPED at the boundary on purpose: read ONLY through
+   * `parseStockPrepPullBatchBoardStanza` (pullBatch.ts), which answers `null` when the key is absent (C6: nothing renders).
+   */
+  pullBatch?: unknown
 }
 
 /**

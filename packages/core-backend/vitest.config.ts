@@ -29,6 +29,8 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      'tests/integration/admin-user-batch-review.db.test.ts',
+      'tests/integration/admin-user-recycle-review.db.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
@@ -61,6 +63,32 @@ export default defineConfig({
       // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
       'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
+      'tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',
+      'tests/integration/yida-initialization-runtime-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-http-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-initialization-http-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
+      'tests/integration/automation-live-authority-realdb.test.ts',
+      // #6315 host boundaries boot the actual MetaSheetServer on the migrated CI database; whole
+      // files in the same EXPECT_DB plugin-tests step as the YiDa real-DB proofs above.
+      'tests/integration/yida-host-boundaries-realdb.test.ts',
+      'tests/integration/yida-host-initialization-barrier-realdb.test.ts',
+      // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
+      'tests/integration/yida-host-connection-test-realdb.test.ts',
+      'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // Permission lifecycle real-DB gate. Trust-off config; whole file in plugin-tests.yml runtime-db.
+      'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
+      // Real Chromium + HTTP + database; runs under its dedicated trust-off configuration.
+      'tests/integration/permission-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -88,6 +116,11 @@ export default defineConfig({
       // skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-can-decide-current-node.db.test.ts',
+      // Role seats matched through `user_roles` role ids on every can-act surface (pending tab,
+      // pending-count, todo count/items, canDecideCurrentNode, the decision door). Real HTTP + real
+      // DB with the claim-trusting fast path off; wired as a WHOLE FILE into the same
+      // .github/workflows/approval-realdb-can-decide-current-node.yml lane (EXPECT_DB=1).
+      'tests/integration/approval-role-seat-user-roles.db.test.ts',
       // todo-center-design-lock v2.14 §3.0/§5 — the shared "pending" query production-path gate.
       // Runs under its OWN vitest.todo-center-pending-gate.config.ts (RBAC_BYPASS=false,
       // RBAC_TOKEN_TRUST=false, PRODUCT_MODE=plm-workbench — the OPPOSITE of this default config's
@@ -167,6 +200,10 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // DT-HARDEN-02 grant openId source (real DB): same corp+union linked openId, sync/bind keep or
+      // clear, login backfill. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it, and wired as a WHOLE FILE into the approval real-DB step (EXPECT_DB sentinel armed there).
+      'tests/integration/directory-dingtalk-openid-grant-path.db.test.ts',
       // O2-S1 register() whole-transaction atomicity goldens: DATABASE_URL-gated; excluded here so
       // the no-DB job cannot skip-green it; wired whole-file into the auth real-DB step in plugin-tests.yml.
       'tests/integration/auth-register-atomicity.db.test.ts',
@@ -326,6 +363,56 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
       // plugin-tests.yml (both points asserted by t2-source-freeze-ci-wiring.test.mjs).
       'tests/integration/directory-org-transfer-source-freeze.db.test.ts',
+      'tests/integration/directory-controlled-handover.db.test.ts',
+      'tests/integration/dingtalk-login-repair.db.test.ts',
+      // Privilege classification for security actions against real Postgres: one-statement grant read on a
+      // read-committed transaction, refusal when any source cannot be read, superset of the authorization
+      // aggregator. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/security-action-privilege.test.ts).
+      'tests/integration/security-action-privilege.db.test.ts',
+      // Directory link intent: an administrator's explicit unbind must survive repeated syncs,
+      // identity/email/mobile candidates, ambiguity, preview/apply parity and a concurrent
+      // write — real PostgreSQL only; excluded here and wired whole-file into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-unbind-intent-persistence.db.test.ts',
+      // Directory sync membership writes gated on the local account (real sync, real Postgres,
+      // two-connection lock barrier). DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-sync-membership-local-account-gate.db.test.ts',
+      // One-time action proofs against real Postgres: schema, constraints and the transition trigger,
+      // the guarded down/up round trip, issuance and consumption bindings, invalidation, and
+      // concurrency on read-committed and repeatable-read-default pools. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/security-action-proof-inert.test.ts).
+      'tests/integration/security-action-proof.db.test.ts',
+      // Directory sync characterization against real PostgreSQL (mocked provider client, real
+      // reconcile). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and
+      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/directory-adapter-golden-parity.db.test.ts',
+      // Directory integration capability tables against real PostgreSQL: structure and constraints,
+      // update and append-only guards, the guarded down(), the table-existence probe on an open
+      // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step in
+      // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Deprovision effect provider witness: the provider column migration (isolated schema:
+      // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
+      // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
+      // no-DB job cannot skip-green them, and wired as WHOLE FILES into the approval real-DB step
+      // in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
+      'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
@@ -355,6 +442,7 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded so the no-DB job cannot skip-green; whole-file wired into
       // the approval real-DB step (both points self-asserted inside the suite).
       'tests/integration/directory-activation-source-lock.db.test.ts',
+      'tests/integration/dingtalk-identity-boundaries.db.test.ts',
       // D3 Rev 4.3 evidence-ledger migration: isolated-schema upgrade, replay with evidence,
       // fail-before-DDL weak-data guard, FK/trigger invariants, and ownership-safe down.
       // DATABASE_URL-gated; excluded here and wired as a whole file into the approval real-DB
@@ -940,6 +1028,24 @@ export default defineConfig({
       // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point
       // wiring).
       'tests/integration/attendance-w4c2-sweep-call-through.db.test.ts',
+      // Attendance settlement coordination (P1-1): dedicated key + credential, S1 / S2 handover
+      // snapshot and lock semantics, and cleanup of unknown results, each against a REAL
+      // PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green them;
+      // wired whole-file into the attendance real-DB step in plugin-tests.yml (two-point wiring).
+      'tests/integration/attendance-coordination-key-credential.db.test.ts',
+      'tests/integration/attendance-coordination-s1s2-snapshot.db.test.ts',
+      'tests/integration/attendance-coordination-cleanup.db.test.ts',
+      // P1-1 S2: the coordinator (quota, prober, connect race, restart) on a real pool; same two-point wiring.
+      'tests/integration/attendance-coordination-acquire.db.test.ts',
+      'tests/integration/attendance-coordination-approval-handover.db.test.ts',
+      // P1-1 S3: the coordinated-transaction port, the handed-over runner and the class-00 re-entry; same two-point wiring.
+      'tests/integration/attendance-coordination-port.db.test.ts',
+      // P1-1 S4: every W4 runner-connection releaser destroys on the uncertainty mark (A05 / A06); same two-point wiring.
+      'tests/integration/attendance-w4-release-destroy.db.test.ts',
+      // P1-1 S5: production inertness from the real composition root (A01) and the hot-path measurement (A12); same two-point wiring.
+      'tests/integration/attendance-p11-hotpath-compare.db.test.ts',
+      'tests/integration/attendance-p11-inertness-baseline.db.test.ts',
+      'tests/integration/attendance-p11-inertness-head.db.test.ts',
       // W4C-3a durable legacy-plan migration: exact manifest/chunk/terminal
       // constraints, V1 frozen idempotency, direct-corruption congruence, and
       // guarded down. DATABASE_URL-gated; excluded here so the no-DB lane
@@ -1177,6 +1283,7 @@ export default defineConfig({
       'tests/integration/attendance-timezone-scheduled.db.test.ts',
       'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
       'tests/integration/attendance-timezone-policy-store.db.test.ts',
+      'tests/integration/attendance-daily-calendar.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -1351,6 +1458,11 @@ export default defineConfig({
       // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
+      // Delivery-result truthfulness: the real EmailNotificationChannel driven through the executor's two-phase
+      // send_email path against the REAL outbound-intent ledger + AutomationLogService.getStats — real Postgres
+      // only (EXPECT_DB sentinel throws at import without it), excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/notification-delivery-result.db.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
       // FWB activation — production write_approval_form_values wiring (save gate + real trigger chain +
@@ -1591,6 +1703,12 @@ export default defineConfig({
       // (zero assertions, reported green). Both points are now present.
       'tests/integration/multitable-webhook-retry-tick.test.ts',
       'tests/integration/multitable-webhook-durable-dedup.test.ts',
+      // Subscription webhook delivery-rule suites (floor, switch-on, permission matrix): DATABASE_URL-gated
+      // (describeIfDatabase) with an EXPECT_DB sentinel. Excluded from the no-DB default job so they cannot
+      // skip-green; they belong in the multitable real-DB integration step as WHOLE FILES.
+      'tests/integration/multitable-webhook-floor-realdb.test.ts',
+      'tests/integration/multitable-webhook-switch-on-realdb.test.ts',
+      'tests/integration/multitable-webhook-scoping-realdb.test.ts',
       // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
@@ -1910,6 +2028,11 @@ export default defineConfig({
       'tests/integration/task-m4-list-items.db.test.ts',
       'tests/integration/task-m4-groups.db.test.ts',
       'tests/integration/task-m4-org-members.db.test.ts',
+      'tests/integration/task-member-access.db.test.ts',
+      'tests/integration/task-p2-source-links.db.test.ts',
+      'tests/integration/task-people.db.test.ts',
+      // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).
+      'tests/integration/task-enablement-http.db.test.ts',
       'tests/integration/task-m4-outbox.db.test.ts',
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
@@ -1917,6 +2040,8 @@ export default defineConfig({
       'tests/integration/task-m4-realtime.db.test.ts',
       // G2-core status filter on GET /api/tasks: real DB, same lane as the files above.
       'tests/integration/task-g2-status-filter.db.test.ts',
+      // The todo center's task source under the production wiring: real DB, same lane.
+      'tests/integration/task-todo-source.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

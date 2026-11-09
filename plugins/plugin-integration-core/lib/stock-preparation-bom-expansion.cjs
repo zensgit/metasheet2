@@ -11,6 +11,9 @@ const {
   applyExtFieldMapping,
   isNormalizedExtFieldMapping,
 } = require('./stock-preparation-ext-field-mapping.cjs')
+// Batch-refresh step 2b. Held as a namespace (not destructured) so the capture seam stays the
+// module's own export — see `openDemandEvidenceCapture`.
+const demandEvidenceCapture = require('./stock-preparation-demand-evidence.cjs')
 
 const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
@@ -38,6 +41,23 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
   ...LARGE_BOM_BOUNDED_ERROR_TYPES,
   READ_CURSOR_BROKEN_ERROR_TYPE,
 ])
+// A READ THAT ANSWERED SOMETHING ELSE (R67 ③ fix rounds 1–2). Every read this module issues is an
+// equality read, and a source that applied — or did not say it skipped — its filter must not return a
+// row the filter excludes. Such a row is a transport cross-wire (one read handed another read's
+// answer), not data, and believing it is how a swapped part answer turned into a quiet
+// `missing_component` hold with an apply token. So it is a FAILED READ with its own closed code:
+// global error, status `failed`, `canApply: false`, at every read width including 1 and on the
+// pre-R67 path too. A source that DECLARES it did not filter (`filtersApplied: false`) is not refused:
+// its answer is filtered locally by the same comparison instead (see `readPages`).
+//
+// Deliberately NOT a member of `INCOMPLETE_READ_ERROR_TYPES`: that list is the B2a seam's roster of
+// classified bounds (b2a-trial-registry.cjs), and an armed read that hits this already refuses there
+// as an unclassified global error (`C6_FULL_BATCH_INCOMPLETE`), fail-closed, with no roster change.
+const READ_ROW_MISMATCH_ERROR_TYPE = 'read_row_mismatch'
+const STRUCTURED_READ_ERROR_TYPES = Object.freeze([
+  ...INCOMPLETE_READ_ERROR_TYPES,
+  READ_ROW_MISMATCH_ERROR_TYPE,
+])
 
 // ---------------------------------------------------------------------------
 // PROJECT-SUBTREE ROOT DISCOVERY — the OPTIONAL second root segment.
@@ -63,12 +83,13 @@ const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
 //      projects' BOM heads under this project's authorization. `visited` and `maxSubtreeDepth` do
 //      not help there: the breach happens on the first read, at depth 1, on nodes seen once each.
 //
-//      NOT re-filtered, and stated plainly rather than glossed: the two reads `expandChildren`
-//      issues per row (bomHead by part+version, bomDetail by bom id). Those are the ORDER path's
-//      own reads — both root segments call the same function — so their exposure to a lying source
-//      is pre-existing and shared, not something root discovery introduces. Closing it is a change
-//      to the order path with its own regressions, deferred to W4; the test file's "WHAT IS NOT
-//      PINNED" note says the same thing at the same altitude.
+//      The two reads `expandChildren` issues per row (bomHead by part+version, bomDetail by bom id)
+//      are the ORDER path's own reads — both root segments call the same function. They used to be
+//      believed as returned; since R67 ③ (fix round 2) EVERY read's rows are held to that read's own
+//      equality filter in the page loop (`readPages`): a source that DECLARED it did not filter has
+//      its answer filtered locally, any other source must match or the read fails
+//      (`read_row_mismatch`). So an unfiltered source can no longer hand those two reads another
+//      part's heads either; the project-subtree suite's G-04 now pins the whole expansion.
 //   2. DE-DUPLICATION COVERS EVERY EXPANDED COMPONENT, not just roots. `makeIdempotencyKey` eats
 //      {projectNo, componentSourceId, parentSourceId, path}; a part that is already an order root's
 //      CHILD and is then re-rooted by the subtree produces a DIFFERENT key, so the conflict planner
@@ -615,8 +636,52 @@ function isReadLimitError(error) {
     error &&
     error.name === 'StockPreparationBomExpansionError' &&
     error.details &&
-    INCOMPLETE_READ_ERROR_TYPES.includes(error.details.code),
+    STRUCTURED_READ_ERROR_TYPES.includes(error.details.code),
   )
+}
+
+// A numeric-looking string in canonical form ('0010' -> '10', '10.0' -> '10', '+3' -> '3', '-0' ->
+// '0'), or null. Exact — a string rewrite, not `Number()` — so two long numeric ids that differ past
+// 2^53 still differ.
+const NUMERIC_TEXT = /^([+-]?)(\d+)(?:\.(\d+))?$/
+function canonicalNumericText(text) {
+  const match = NUMERIC_TEXT.exec(text)
+  if (!match) return null
+  const integer = match[2].replace(/^0+(?=\d)/, '')
+  const fraction = (match[3] || '').replace(/0+$/, '')
+  const negative = match[1] === '-' && !(integer === '0' && fraction === '')
+  return `${negative ? '-' : ''}${integer}${fraction ? `.${fraction}` : ''}`
+}
+
+// One returned value against one filter value — "would SQL Server's `=` have matched these?", erring
+// toward YES, because a false mismatch fails a legal pull while a false match only lets through what
+// the serial walk always believed:
+//   * `toKey` on both sides — trimmed strings (SQL Server ignores trailing blanks in `=`);
+//   * CASE-INSENSITIVE — SQL Server's default collations are, so one id stored upper-case in one table
+//     and lower-case in another is one id;
+//   * NUMERIC when both sides look numeric — SQL Server converts a char column to the int it is
+//     compared with, so an int `bom_id` 10 and a char `bom_pid` '0010' are one key.
+// Deliberately NOT folded: full-width / half-width forms and any other Unicode normalisation — an
+// accent- or width-insensitive collation can match what this calls a mismatch (the read then fails
+// closed as `read_row_mismatch` rather than expanding on a guess). A cross-wire hands back a DIFFERENT
+// id, which none of the above folds.
+function sameFilterValue(rowValue, filterValue) {
+  const left = toKey(rowValue)
+  const right = toKey(filterValue)
+  if (left === null || right === null) return false
+  if (left.toLowerCase() === right.toLowerCase()) return true
+  const leftNumber = canonicalNumericText(left)
+  return leftNumber !== null && leftNumber === canonicalNumericText(right)
+}
+
+// The first of the read's filter columns `record` does not satisfy, or `undefined`. The columns are
+// the read's own (normalized) filter keys — i.e. the read plan's configured, dictionary-resolved
+// names, never a literal — read through `readField` like every other column.
+function filterFieldViolatedBy(record, normalizedFilters) {
+  for (const [field, value] of Object.entries(normalizedFilters)) {
+    if (!sameFilterValue(readField(record, field), value)) return field
+  }
+  return undefined
 }
 
 function readLimitErrorDetails(error, fallbackObject) {
@@ -649,6 +714,17 @@ function assertReadBudget(options, readStats, object) {
 
 async function readAll(adapter, object, filters, options, readStats) {
   const normalizedFilters = normalizeFilters(filters)
+  return readPages(adapter, object, normalizedFilters, options, readStats, () => assertReadBudget(options, readStats, object))
+}
+
+// THE ONE PAGE LOOP. R67 ③ lifted it out of `readAll` unchanged, so the walk's own reads and the
+// read-ahead's (`createPlmReadAheadEngine` below) page through the source with the SAME code — the
+// same maxPages refusal, the same stat shape, the same broken-cursor rule — and cannot drift apart.
+// The two differences are parameters: WHERE the per-page stats go (`readAll`: the walk's own
+// `readStats`; a read-ahead: a private list it hands over at the claim) and WHAT runs before each
+// page (`readAll`: `assertReadBudget` against the walk's count; a read-ahead: nothing — its pages
+// are budget-checked when the walk claims them, in walk order, by the same `assertReadBudget`).
+async function readPages(adapter, object, normalizedFilters, options, stats, beforePage) {
   const rows = []
   let cursor
   for (let page = 0; ; page += 1) {
@@ -659,7 +735,7 @@ async function readAll(adapter, object, filters, options, readStats) {
         maxPages: options.maxPages,
       })
     }
-    assertReadBudget(options, readStats, object)
+    beforePage()
     const input = { object, filters: normalizedFilters, limit: options.pageLimit }
     if (cursor) input.cursor = cursor
     const stat = {
@@ -669,7 +745,7 @@ async function readAll(adapter, object, filters, options, readStats) {
       status: 'attempted',
       filtersSent: true,
     }
-    readStats.push(stat)
+    stats.push(stat)
     let result
     try {
       result = await adapter.read(input)
@@ -686,8 +762,27 @@ async function readAll(adapter, object, filters, options, readStats) {
     }
     const records = isPlainObject(result) && Array.isArray(result.records) ? result.records : []
     stat.count = records.length
+    // ROW SELF-VALIDATION (see READ_ROW_MISMATCH_ERROR_TYPE), for EVERY read kind, by `sameFilterValue`:
+    //   * the source DECLARED it did not apply the filter (`filtersApplied === false` — a legal
+    //     whole-table answer; `bridge:legacy-sql-readonly` is the only adapter that says so): its
+    //     answer is FILTERED LOCALLY. A whole-table answer stays legal, and a cross-wired answer no
+    //     longer expands silently — what survives is exactly what a filtering source would have sent;
+    //   * otherwise (`true`, or not stated — the shipped SQL adapter states nothing because its WHERE
+    //     always applies) every row must satisfy the filter, or the read fails.
+    // `stat.count` stays what the source returned, so the diagnostics still show the source's answer.
     for (const record of records) {
-      if (isPlainObject(record)) rows.push(record)
+      if (!isPlainObject(record)) continue
+      const field = filterFieldViolatedBy(record, normalizedFilters)
+      if (field === undefined) {
+        rows.push(record)
+      } else if (stat.filtersApplied !== false) {
+        throw new StockPreparationBomExpansionError('PLM read answered a row its own filter excludes', {
+          code: READ_ROW_MISMATCH_ERROR_TYPE,
+          object,
+          field,
+          page,
+        })
+      }
     }
     // COMPLETE-BATCH CHECK, opt-in. `done === false` with no `nextCursor` is the source saying the
     // batch is unfinished and refusing to say where to resume — §9.1's 断游标. Gated on
@@ -706,6 +801,392 @@ async function readAll(adapter, object, filters, options, readStats) {
     cursor = result.nextCursor
   }
   return rows
+}
+
+// ---------------------------------------------------------------------------
+// R67 ③ — BOUNDED-CONCURRENCY READ-AHEAD FOR THE BOM WALK.
+//
+// THE MEASUREMENT (demo host, field team, values-free). The walk in `expandPlmProjectBom` issues one
+// PLM read per step — the part, then its BOM head, then a detail list per active head — and awaits
+// each before issuing the next, so one dry-run rides ONE pooled connection (80 s sampled: exactly one
+// Established connection to the customer SQL Server; local PostgreSQL idle). Project A ≈ 1,414
+// reads, B ≈ 460; at the customer PLM's ~15–130 ms per round trip A took 18–33 s on a good moment
+// and > 120 s on a bad one — past the scheduled pull's timeout and nginx's 60 s.
+//
+// THE CHANGE IS A READ-AHEAD, NOT A NEW TRAVERSAL. The walk — every `if`, counter, dedupe set, cycle
+// test, budget check, and the order in which it produces rows / rowErrors / readStats — is untouched
+// and remains the ONLY thing that decides anything. What changes is where a read's answer comes
+// from. When the walk learns reads it is about to make (a detail list names every child; a part row
+// names its BOM head; a BOM head names its detail lists) it asks this engine to issue them now, at
+// most `concurrency` at a time, and later CLAIMS each answer at exactly the point where it would have
+// issued that read itself. Consequences, each pinned in
+// __tests__/stock-preparation-bom-read-concurrency.test.cjs:
+//
+//   * SAME ANSWERS, SAME ORDER. A read-ahead keeps its per-page stats privately; the claim appends
+//     them to the walk's `readStats` through the same `assertReadBudget`, i.e. in WALK order, not in
+//     arrival order. For a source that answers one read the same way within one run (the property
+//     the serial walk already relies on), rows, errors, rowErrors, missingComponents, the summary,
+//     the evidence projection and the dry-run revision come out byte-identical to the serial walk —
+//     on the abort paths too (cycle, maxRows, maxDepth, maxReadCount, a failed read), because the
+//     walk that aborts is the same walk. The one thing outside that statement is `maxElapsedMs`,
+//     which is a clock and was never deterministic.
+//   * A CLAIM IS POSITIONAL AND CHECKED. The walk passes back the entry it was handed for this
+//     position, and the entry is used only if its key (object + normalized filters) is exactly the
+//     read the walk is about to issue. A read-ahead rule that drifted from the walk therefore costs a
+//     wasted query and a direct read — never a different answer.
+//   * CONCURRENCY 1 IS TODAY'S WALK: no limiter and no read-ahead, every read is the walk's own
+//     `readAll`, through a wrapper that only counts (same reads, same order — pinned). An expansion
+//     that is not handed `readConcurrency` at all (every caller that predates the knob, the large-BOM
+//     background lane included) gets no engine whatsoever.
+//   * THE COST, STATED. A read-ahead is wasted only when the walk stops early (a cycle, a cap, a
+//     failed read) and never reaches reads that were already issued for it — real queries the serial
+//     walk would not have made. They are BOUNDED: read-aheads are issued in the walk's own depth-first
+//     order and never run more than READ_AHEAD_LEAD_PER_SLOT x `concurrency` queries ahead of what
+//     the walk has consumed (single-page reads; a multi-page read finishes its pages) — so a run that
+//     stops early, on `maxReadCount` included, issues at most that many queries more than the serial
+//     walk would have; none starts once the walk has returned (it returns at its first global error);
+//     queued read-aheads are dropped as the expansion returns and in-flight ones ask for no further
+//     page. A run with no global error has nothing in flight by then; a run stopped early does not
+//     wait for its in-flight read-aheads — they finish in the background and are discarded (see
+//     `close`). And they are COUNTED:
+//     `readPhase.queriesIssued` is every adapter call, `summary.readCount` stays the walk's own count,
+//     and on a run with no global error the two are equal by design (pinned per fixture).
+//   * WHAT IT DOES NOT TOUCH: the query shape (one equality-filtered read per call; the host adapter
+//     parameterises it), the read-only gates, the K3 boundary, and the host's connection pool (the
+//     mssql pool is per data source, `poolConfig.max` default 20 — above this knob's ceiling of 8).
+// ---------------------------------------------------------------------------
+const DEFAULT_READ_CONCURRENCY = 4
+const READ_CONCURRENCY_MIN = 1
+const READ_CONCURRENCY_MAX = 8
+
+// The knob's ONE normalizer: a number (or a numeric string — deploy JSON ships those) is floored and
+// clamped into [1, 8]; anything else is "not set" and takes the default. A CLAMP, deliberately, where
+// the budget caps around it refuse: this value changes how fast the walk reads, never what it reads
+// or what is planned, so refusing it would take the whole action config down (422) over a typo in a
+// performance setting.
+function normalizeReadConcurrency(value, defaultValue = DEFAULT_READ_CONCURRENCY) {
+  let numeric
+  if (typeof value === 'number') numeric = value
+  else if (typeof value === 'string' && value.trim() !== '') numeric = Number(value.trim())
+  else return defaultValue
+  if (!Number.isFinite(numeric)) return defaultValue
+  return Math.min(READ_CONCURRENCY_MAX, Math.max(READ_CONCURRENCY_MIN, Math.floor(numeric)))
+}
+
+// The identity of ONE read: the object and its normalized equality filters, key-sorted.
+// JSON.stringify keeps 1 and '1' apart, exactly as the source's equality would.
+function readKeyOf(object, normalizedFilters) {
+  return JSON.stringify([object, Object.keys(normalizedFilters).sort().map((field) => [field, normalizedFilters[field]])])
+}
+
+// Read-ahead POSITIONS: the walk's depth-first order as an integer path, compared lexicographically
+// (a prefix sorts before its extensions — a node's own reads come before its children's). The
+// read-ahead queue issues in this order, so what it reads early is what the walk will ask for NEXT,
+// not whatever happened to be discovered first. Scheduling only: no answer depends on it.
+function comparePositions(left, right) {
+  const length = Math.min(left.length, right.length)
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1
+  }
+  return left.length - right.length
+}
+
+// How far the read-ahead may run in front of the walk: at most this many queries PER SLOT issued and
+// not yet consumed by the walk (64 at the default width of 4). At the cap the read-ahead PAUSES —
+// queued, not dropped; the walk's own reads still run — and resumes as the walk consumes. It is THE
+// bound on what an early stop (a cycle, a cap, a failed read) can waste, whatever the shape of the
+// BOM. 16 is measured, not guessed: on synthetic field-shaped BOMs of 150–1,200 reads (fan-out up to
+// 40 at the root, depth 5) 8 per slot lost about 28% of the speed-up at width 4 (2.8x instead of
+// 3.9x) and 16 matched an uncapped read-ahead exactly (__tests__/stock-preparation-bom-read-
+// concurrency.test.cjs pins the cap; the PR records the measurement).
+const READ_AHEAD_LEAD_PER_SLOT = 16
+
+// A counting semaphore over LOGICAL reads (`active`); a logical read pages sequentially inside its
+// slot, so at most `concurrency` adapter calls are ever in flight. Two lanes:
+//   URGENT       FIFO. The walk's own reads, and read-aheads the walk is already waiting on. Always
+//                served first, so the walk never queues behind work it may not need.
+//   SPECULATIVE  a min-heap on (position, arrival). Served only while `mayStartSpeculative()`.
+function createReadLimiter(concurrency, { mayStartSpeculative = () => true } = {}) {
+  const urgent = []
+  const heap = []
+  let active = 0
+  let arrivals = 0
+  const before = (left, right) => {
+    const order = comparePositions(left.position, right.position)
+    return order !== 0 ? order < 0 : left.arrival < right.arrival
+  }
+  const place = (task, index) => {
+    heap[index] = task
+    task.heapIndex = index
+  }
+  const siftUp = (index) => {
+    let child = index
+    while (child > 0) {
+      const parent = (child - 1) >> 1
+      if (!before(heap[child], heap[parent])) return
+      const held = heap[parent]
+      place(heap[child], parent)
+      place(held, child)
+      child = parent
+    }
+  }
+  const siftDown = (index) => {
+    let parent = index
+    for (;;) {
+      const left = parent * 2 + 1
+      if (left >= heap.length) return
+      const right = left + 1
+      const first = right < heap.length && before(heap[right], heap[left]) ? right : left
+      if (!before(heap[first], heap[parent])) return
+      const held = heap[parent]
+      place(heap[first], parent)
+      place(held, first)
+      parent = first
+    }
+  }
+  const removeAt = (index) => {
+    const task = heap[index]
+    const last = heap.pop()
+    if (index < heap.length) {
+      place(last, index)
+      siftDown(index)
+      siftUp(index)
+    }
+    task.heapIndex = -1
+    task.queue = null
+    return task
+  }
+  const pump = () => {
+    while (active < concurrency) {
+      let task
+      if (urgent.length > 0) task = urgent.shift()
+      else if (heap.length > 0 && mayStartSpeculative()) task = removeAt(0)
+      else return
+      task.queue = null
+      active += 1
+      const release = () => {
+        active -= 1
+        pump()
+      }
+      let running
+      try {
+        running = task.start()
+      } catch {
+        running = undefined
+      }
+      Promise.resolve(running).then(release, release)
+    }
+  }
+  return {
+    pump,
+    submit(start, { urgent: isUrgent = false, position = [] } = {}) {
+      const task = { start, position, arrival: arrivals, queue: null, heapIndex: -1 }
+      arrivals += 1
+      if (isUrgent) {
+        task.queue = 'urgent'
+        urgent.push(task)
+      } else {
+        task.queue = 'speculative'
+        place(task, heap.length)
+        siftUp(task.heapIndex)
+      }
+      pump()
+      return task
+    },
+    promote(task) {
+      if (!task || task.queue !== 'speculative') return
+      removeAt(task.heapIndex)
+      task.queue = 'urgent'
+      urgent.push(task)
+      pump()
+    },
+    remove(task) {
+      if (!task || task.queue !== 'speculative') return false
+      removeAt(task.heapIndex)
+      return true
+    },
+    dropQueued() {
+      const dropped = heap.splice(0, heap.length)
+      for (const task of dropped) {
+        task.queue = null
+        task.heapIndex = -1
+      }
+      return dropped
+    },
+  }
+}
+
+/**
+ * The engine behind one expansion's reads. `read(object, filters, entry)` is the walk's ONLY read
+ * call; `prefetch(object, filters, position)` is the read-ahead's. See the banner above.
+ *
+ * An entry's outcome promise NEVER rejects — a failed read-ahead resolves `{ stats, error }` and the
+ * error is re-thrown at the claim, where the walk would have met it — so a read-ahead the walk never
+ * claims cannot surface as an unhandled rejection.
+ */
+function createPlmReadAheadEngine({ adapter, concurrency, options, readStats }) {
+  const counters = { issued: 0, inFlight: 0, maxInFlight: 0 }
+  // EVERY adapter call of the run goes through here — the walk's own reads and the read-aheads — so
+  // `queriesIssued` is the number of queries the source actually received, and `maxInFlight` is the
+  // most that were ever open at once (each one holds one pooled connection for its duration).
+  const countingAdapter = {
+    async read(input) {
+      counters.issued += 1
+      counters.inFlight += 1
+      if (counters.inFlight > counters.maxInFlight) counters.maxInFlight = counters.inFlight
+      try {
+        return await adapter.read(input)
+      } finally {
+        counters.inFlight -= 1
+      }
+    },
+  }
+  // The lead: queries issued that the walk has not consumed. A walk read records its page stat BEFORE
+  // it calls the source, so only read-aheads can ever make this positive.
+  const leadCap = READ_AHEAD_LEAD_PER_SLOT * concurrency
+  const limiter = concurrency > 1
+    ? createReadLimiter(concurrency, { mayStartSpeculative: () => counters.issued - readStats.length < leadCap })
+    : null
+  const entries = []
+  let closed = false
+
+  // Checked when a read-ahead is created and again when it would start. Only `closed`: the WASTE bound
+  // is the lead cap above, for every way a walk can stop early. Deliberately NOT here:
+  //   * "the walk recorded a global error" — every loop of the walk stops at its first global error and
+  //     the walk returns straight into `close()` in the same microtask flow, which sets `closed`
+  //     before any slot can free up, so such a test could never change which reads are issued;
+  //   * `maxReadCount` / `maxElapsedMs` — the walk enforces both on its own reads exactly as before;
+  //     past them a read-ahead can add at most the lead cap (64 queries at the default width) on top
+  //     of a budget of thousands, which is what the lead cap already promises for any early stop.
+  function speculationAllowed() {
+    return !closed
+  }
+
+  // The walk's own read with no read-ahead behind it: `readAll` exactly as before, through the urgent
+  // lane when there is a limiter, so the walk plus its read-aheads never exceed `concurrency`.
+  function direct(object, filters) {
+    if (!limiter) return readAll(countingAdapter, object, filters, options, readStats)
+    return new Promise((resolve, reject) => {
+      limiter.submit(() => readAll(countingAdapter, object, filters, options, readStats).then(resolve, reject), { urgent: true })
+    })
+  }
+
+  function prefetch(object, filters, position) {
+    if (!limiter || !speculationAllowed()) return null
+    let normalizedFilters
+    try {
+      normalizedFilters = normalizeFilters(filters)
+    } catch {
+      // The walk's own read will throw the same refusal at the same point; nothing to issue early.
+      return null
+    }
+    const entry = { key: readKeyOf(object, normalizedFilters), state: 'queued', claimed: false, task: null, outcome: null }
+    let settle
+    entry.outcome = new Promise((resolve) => { settle = resolve })
+    entry.drop = () => {
+      entry.state = 'dropped'
+      settle({ dropped: true })
+    }
+    entry.task = limiter.submit(async () => {
+      if (entry.claimed) {
+        // The walk reached this read before it left the queue and is waiting on it: it is no longer
+        // speculative, so it runs as the walk's OWN read — `readAll`, budget-checked page by page
+        // against the walk's count, stats straight into `readStats` — exactly what a direct read does.
+        entry.state = 'running_claimed'
+        try {
+          settle({ walkRead: true, rows: await readAll(countingAdapter, object, filters, options, readStats) })
+        } catch (error) {
+          settle({ walkRead: true, error })
+        }
+        return
+      }
+      if (!speculationAllowed()) {
+        entry.state = 'skipped'
+        settle({ skipped: true })
+        return
+      }
+      entry.state = 'running'
+      const stats = []
+      try {
+        // Before every page: once the expansion has returned, a multi-page read-ahead still in flight
+        // does not ask for its next page — no NEW query reaches the source after the return.
+        settle({ stats, rows: await readPages(countingAdapter, object, normalizedFilters, options, stats, refuseAfterClose) })
+      } catch (error) {
+        settle({ stats, error })
+      }
+    }, { position: Array.isArray(position) ? position : [] })
+    entry.task.entry = entry
+    entries.push(entry)
+    return entry
+  }
+
+  async function read(object, filters, entry) {
+    if (!entry || !limiter) return direct(object, filters)
+    // The walk's own validation first, so a refusal lands where `readAll` would have thrown it.
+    const key = readKeyOf(object, normalizeFilters(filters))
+    if (entry.claimed || entry.key !== key) {
+      // Not this read. A guess that has not started is dropped — so nothing can wait on it — and the
+      // walk reads directly, exactly as it would have without a read-ahead.
+      if (!entry.claimed && entry.state === 'queued' && limiter.remove(entry.task)) entry.drop()
+      return direct(object, filters)
+    }
+    entry.claimed = true
+    if (entry.state === 'queued') limiter.promote(entry.task)
+    const outcome = await entry.outcome
+    if (outcome.skipped || outcome.dropped) return direct(object, filters)
+    if (outcome.walkRead) {
+      if (outcome.error) throw outcome.error
+      return outcome.rows
+    }
+    // Replay the read-ahead's pages into the walk's count IN WALK ORDER, through the same budget
+    // check `readAll` runs before every page — a budget the serial walk would have hit on page N is
+    // hit on page N here too, with the same `readStats` before it.
+    for (const stat of outcome.stats) {
+      assertReadBudget(options, readStats, object)
+      readStats.push(stat)
+    }
+    // The walk just consumed what the read-ahead ran ahead with: a paused read-ahead may resume.
+    limiter.pump()
+    if (outcome.error) throw outcome.error
+    return outcome.rows
+  }
+
+  function refuseAfterClose() {
+    if (closed) {
+      throw new StockPreparationBomExpansionError('read-ahead stopped: the expansion has returned', { code: 'read_ahead_closed' })
+    }
+  }
+
+  // Called once, as the expansion returns. Drops every read-ahead still queued (they settle `dropped`
+  // and are never issued) and stops in-flight ones from paging further — and does NOT wait for the
+  // in-flight ones (R67 ③ fix round). Two cases, and only one of them can have anything in flight:
+  //   * a run with no global error consumed every query it issued (`queriesNotConsumed` 0 — pinned),
+  //     so every read-ahead it started has already settled: nothing is in flight, nothing outlives it;
+  //   * a run the walk stopped early (a cycle, a cap, a failed read) may leave read-aheads in flight
+  //     that the walk will never claim. Waiting for them would hold the failed request open for up to
+  //     the source's own per-read timeout (mssql `requestTimeout`, 30 s by default, and `0` = none on a
+  //     dormant deployment) after the error is already known. They complete in the background and are
+  //     discarded. Their outcome promises never reject, so nothing surfaces as an unhandled rejection.
+  // The counters are final here either way: no new adapter call can start after `closed`.
+  async function close() {
+    closed = true
+    if (limiter) {
+      for (const task of limiter.dropQueued()) task.entry.drop()
+    }
+  }
+
+  // VALUES-FREE by construction: five integers.
+  function report(wallMs) {
+    return {
+      readConcurrency: concurrency,
+      maxReadsInFlight: counters.maxInFlight,
+      queriesIssued: counters.issued,
+      queriesNotConsumed: counters.issued - readStats.length,
+      wallMs: Number.isFinite(wallMs) && wallMs > 0 ? Math.round(wallMs) : 0,
+    }
+  }
+
+  return { concurrent: Boolean(limiter), leadCap, read, prefetch, close, report }
 }
 
 function readField(row, field) {
@@ -1013,6 +1494,74 @@ function selectOrderRootCandidates(candidates, rules) {
       otherCandidatesDropped: droppedCount - (mains.length - 1),
     }),
   }
+}
+
+/**
+ * Batch-refresh step 2b — WHY each candidate was kept or dropped, one label per candidate, aligned
+ * with `candidates`. PURE, and it does NOT decide: the decision is read off `result.selected` (what
+ * `selectOrderRootCandidates` actually returned, by object identity) and this function only names
+ * the rule that branch of the selector applied, plus the candidates the decision was taken against
+ * (`related`, as indexes into `candidates`). If the label it derives disagrees with the real
+ * decision — the selector changed and this did not — the rule is `unexplained`, never a guess.
+ *
+ * Rules: `root_selection_disabled`; no 总图: `no_main_drawing_keep_all` (dash rule off),
+ * `dash_descendant` (related = EVERY dash parent among the candidates, not just the first) or
+ * `not_dash_descendant`; with 总图: `main_drawing_chosen` (related = the 总图 lines not chosen),
+ * `main_drawing_not_chosen` (related = the chosen one; `ruleDetail` says whether it is the SAME part
+ * — a second order line for the chosen 总图 is dropped today because the keep-set holds one object —
+ * and whether it lost on a lower version or a tie), `sheet_metal`, `not_main_or_sheet_metal`.
+ */
+function explainRootSelection(candidates, result, rules) {
+  const list = Array.isArray(candidates) ? candidates : []
+  const selected = new Set(result && Array.isArray(result.selected) ? result.selected : [])
+  const decisionOf = (candidate) => (selected.has(candidate) ? 'selected' : 'dropped')
+  const label = (candidate, rule, impliedKeep, related = [], ruleDetail = {}) => {
+    const decision = decisionOf(candidate)
+    const consistent = impliedKeep === (decision === 'selected')
+    return { decision, rule: consistent ? rule : 'unexplained', related, ruleDetail }
+  }
+  if (!rules || rules.enabled !== true) {
+    return list.map((candidate) => label(candidate, 'root_selection_disabled', true))
+  }
+  const mainIndexes = []
+  list.forEach((candidate, index) => {
+    if (hasMainDrawingShape(candidate.componentCode, rules)) mainIndexes.push(index)
+  })
+  if (mainIndexes.length === 0) {
+    if (rules.dropDashDescendants !== true) {
+      return list.map((candidate) => label(candidate, 'no_main_drawing_keep_all', true))
+    }
+    return list.map((candidate, j) => {
+      const parents = []
+      for (let i = 0; i < list.length; i += 1) {
+        if (i === j) continue
+        if (list[i].componentSourceId === candidate.componentSourceId) continue
+        if (dashHierarchyRelationship(list[i].componentCode, candidate.componentCode) === 1) parents.push(i)
+      }
+      return parents.length > 0
+        ? label(candidate, 'dash_descendant', false, parents)
+        : label(candidate, 'not_dash_descendant', true)
+    })
+  }
+  // Same tie rule as the selector: the first 总图 with the highest version wins.
+  let bestIndex = mainIndexes[0]
+  for (const index of mainIndexes.slice(1)) {
+    if (compareSourceVersion(list[index].sourceVersion, list[bestIndex].sourceVersion) > 0) bestIndex = index
+  }
+  const best = list[bestIndex]
+  return list.map((candidate, index) => {
+    if (index === bestIndex) {
+      return label(candidate, 'main_drawing_chosen', true, mainIndexes.filter((other) => other !== bestIndex))
+    }
+    if (mainIndexes.includes(index)) {
+      return label(candidate, 'main_drawing_not_chosen', false, [bestIndex], {
+        sameComponentAsChosen: candidate.componentSourceId === best.componentSourceId,
+        versionAgainstChosen: compareSourceVersion(candidate.sourceVersion, best.sourceVersion) < 0 ? 'lower' : 'tie',
+      })
+    }
+    if (hasSheetMetalShape(candidate.componentCode, rules)) return label(candidate, 'sheet_metal', true)
+    return label(candidate, 'not_main_or_sheet_metal', false)
+  })
 }
 
 /**
@@ -1554,7 +2103,31 @@ function requireNormalizedExtFieldMapping(extFieldMapping) {
   return extFieldMapping
 }
 
+// R67 ③ — the public entry point. The walk below is the expansion; this wrapper only guarantees that
+// the read-ahead engine (when the caller opted in with `readConcurrency`) is CLOSED on every exit —
+// a return, an early failure, a throw — before the result is handed back, and then mounts the
+// values-free `readPhase` stanza beside the result's other keys. NOT inside `summary`: the summary is
+// what evidence and the large-BOM job record project, and `wallMs` is a clock reading, so putting it
+// there would make two dry-runs of an unchanged project differ.
 async function expandPlmProjectBom(input = {}) {
+  const run = {}
+  let result
+  try {
+    result = await walkPlmProjectBom(input, run)
+  } finally {
+    if (run.readEngine) await run.readEngine.close()
+  }
+  if (run.readEngine) result.readPhase = run.readEngine.report(run.now() - run.startedAt)
+  // Batch-refresh step 2b — OPT-IN demand evidence, mounted beside `readPhase` and for the same
+  // reason NOT inside `summary` (or `rows`, or anything `summarizeBomExpansionForEvidence` projects):
+  // every revision, token, ledger fingerprint and artifact hash reads those, and none reads the
+  // expansion object whole. Absent request => no recorder => no key at all. Runs on every return
+  // path the walk has (failureResult and not_found included); `finalize` cannot throw.
+  if (run.demand) result.demandEvidence = run.demand.finalize({ projectNo: run.projectNo, result })
+  return result
+}
+
+async function walkPlmProjectBom(input, run) {
   const sourceAdapter = requireSourceAdapter(input.sourceAdapter)
   const projectNo = typeof input.projectNo === 'string' ? input.projectNo.trim() : ''
   if (!projectNo) {
@@ -1599,6 +2172,18 @@ async function expandPlmProjectBom(input = {}) {
       ROW_ERROR_LIMIT,
       ROW_ERROR_LIMIT_CEILING,
     ),
+  }
+  // Batch-refresh step 2b — the demand-evidence recorder, or `null` when the caller did not ask
+  // (every existing caller). Every `if (demand)` line below is a no-op on `null`, and a present
+  // recorder is guarded: its hooks return nothing, swallow their own faults and never read.
+  const demand = demandEvidenceCapture.openDemandEvidenceCapture(input.demandEvidence, {
+    plan,
+    rootSelection,
+    explainRootSelection,
+  })
+  if (demand) {
+    run.demand = demand
+    run.projectNo = projectNo
   }
   const readStats = []
   const errors = []
@@ -1645,7 +2230,204 @@ async function expandPlmProjectBom(input = {}) {
   const missingComponentParents = new Map()
   const missingComponentIds = new Set()
 
-  const read = (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
+  // R67 ③ — OPT-IN. `readConcurrency` absent => no engine and the literal pre-R67 `read` below.
+  // Present => clamped by `normalizeReadConcurrency` (1–8, non-numeric => 4) and every read of the run
+  // goes through one engine; 1 is the serial walk with counters, >1 adds the read-ahead.
+  const readEngine = input.readConcurrency === undefined
+    ? null
+    : createPlmReadAheadEngine({
+      adapter: sourceAdapter,
+      concurrency: normalizeReadConcurrency(input.readConcurrency),
+      options,
+      readStats,
+    })
+  if (readEngine) {
+    run.readEngine = readEngine
+    run.now = () => options.now()
+    run.startedAt = options.now()
+  }
+  const read = readEngine
+    ? (object, filters, entry) => readEngine.read(object, filters, entry)
+    : (object, filters) => readAll(sourceAdapter, object, filters, options, readStats)
+  // R67 ③ — THE READ-AHEAD RULES. Each MIRRORS the walk step whose reads it issues early (the same
+  // pre-checks, in the same order) and each is ADVISORY: the walk claims an entry only when its key is
+  // exactly the read it is about to make, so a rule that drifted costs a query, never an answer.
+  // `readAhead` is false on every serial run, so none of these is ever called there.
+  //
+  // POSITIONS (scheduling only, see `comparePositions`): order-module read-aheads [0, n] in creation
+  // order; selected root i [1, i]; a node at P reads its head at [P, 0], head k's detail list at
+  // [P, 1, k, 0], that list's child j's part at [P, 1, k, 1, j, 0], and child j's own reads under
+  // [P, 1, k, 1, j, 1]; a sibling set the walk had to start itself (no node read-ahead) [2, n].
+  const readAhead = Boolean(readEngine && readEngine.concurrent)
+  let orderModulePositions = 0
+  let walkStartedPositions = 0
+  // The bomHead read for a component — ONE definition, used by `expandChildren` itself and by the
+  // read-ahead, so the two cannot build different filters for the same node.
+  function bomHeadFiltersFor(componentSourceId, sourceVersion) {
+    const filters = { [plan.bomHead.parentPartField]: componentSourceId }
+    if (plan.bomHead.versionField && !isBlank(sourceVersion)) {
+      filters[plan.bomHead.versionField] = sourceVersion
+    }
+    return filters
+  }
+  // A node the walk is going to descend into, described by exactly what `expandChildren` reads off
+  // its row: the component id and version (its bomHead filter), its 图号 (the parent half of its
+  // children's dedupe key), its depth (the max_depth refusal) and its path (the cycle refusal).
+  function nodeInfoOf(row, pathTokens, position) {
+    return {
+      componentSourceId: row.componentSourceId,
+      sourceVersion: row.sourceVersion,
+      componentCode: row.componentCode,
+      depth: row.depth,
+      pathTokens,
+      position,
+    }
+  }
+  // A node: its bomHead read now; once that answers, one detail-list read per active head with a bom
+  // id (unless `expandChildren` would refuse the node for depth); once a detail list answers, that
+  // head's children (`readAheadSiblings`). The children of head k are deduped AFTER those of heads
+  // 0..k-1 and against the same set — `expandChildren` keeps ONE dedupe set per parent across all of
+  // its heads — which is what `previous` sequences.
+  function readAheadNode(info) {
+    const head = readEngine.prefetch(plan.bomHead.object, bomHeadFiltersFor(info.componentSourceId, info.sourceVersion), info.position.concat(0))
+    if (!head) return null
+    const heads = head.outcome.then((outcome) => {
+      if (!outcome || outcome.error || !Array.isArray(outcome.rows) || info.depth + 1 > options.maxDepth) return []
+      const keys = new Set()
+      let previous = Promise.resolve()
+      return outcome.rows
+        .filter((row) => isActiveBomHead(row, plan.bomHead.activeField))
+        .map((row, headIndex) => {
+          const bomId = readField(row, plan.bomHead.bomIdField)
+          if (isBlank(bomId)) return undefined
+          const detail = readEngine.prefetch(
+            plan.bomDetail.object,
+            { [plan.bomDetail.bomParentField]: bomId },
+            info.position.concat(1, headIndex, 0),
+          )
+          if (!detail) return undefined
+          const after = previous
+          const siblings = detail.outcome.then((detailOutcome) => {
+            if (!detailOutcome || detailOutcome.error || !Array.isArray(detailOutcome.rows) || detailOutcome.rows.length === 0) return null
+            return readAheadSiblings(info, detailOutcome.rows, keys, after, info.position.concat(1, headIndex, 1))
+          }).catch(() => null)
+          previous = siblings.then((created) => (created ? created.decided : after))
+          return { detail, siblings }
+        })
+    }).catch(() => [])
+    return { head, heads, position: info.position }
+  }
+  // One head's children: every child's part read now (the walk's own pre-checks, stopping where its
+  // cycle refusal would stop the run), then — in detail order, after `chainStart`, against `keys` —
+  // the node read-ahead of each child the walk will actually descend into. A dedupe-collapsed, missing
+  // or ambiguous part gets none, which is what keeps a run with no global error waste-free.
+  function readAheadSiblings(info, details, keys, chainStart, position) {
+    const nextDepth = info.depth + 1
+    const parts = []
+    const nodes = []
+    let live = true
+    let chain = Promise.resolve(chainStart)
+    for (let index = 0; index < details.length; index += 1) {
+      const detail = details[index]
+      const childSourceId = toKey(readField(detail, plan.bomDetail.componentIdField))
+      if (childSourceId === null) continue
+      if (info.pathTokens.includes(childSourceId)) break
+      const qty = parseQuantity(readField(detail, plan.bomDetail.quantityField), {
+        field: plan.bomDetail.quantityField,
+        depth: nextDepth,
+        relation: 'child',
+      })
+      if (!qty.ok) continue
+      const part = readEngine.prefetch(plan.part.object, { [plan.part.idField]: childSourceId }, position.concat(index, 0))
+      if (!part) break
+      parts[index] = part
+      chain = chain.then(async () => {
+        if (!live) return null
+        const outcome = await part.outcome
+        if (!outcome || outcome.error || !Array.isArray(outcome.rows)) {
+          // The walk throws on this part (or speculation stopped): nothing after it gets a read-ahead.
+          live = false
+          return null
+        }
+        const candidates = matchesByField(outcome.rows, plan.part.idField, childSourceId)
+        if (candidates.length !== 1) return null
+        const partRow = candidates[0]
+        const dedupeKey = siblingDedupeKey({
+          parentComponentCode: info.componentCode,
+          componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+          nameAndSpec: plan.part.nameField ? readField(partRow, plan.part.nameField) : undefined,
+          material: plan.part.materialField ? readField(partRow, plan.part.materialField) : undefined,
+          rawQuantity: qty.value,
+        })
+        if (keys.has(dedupeKey)) return null
+        keys.add(dedupeKey)
+        const componentSourceId = toKey(readField(partRow, plan.part.idField))
+        if (componentSourceId === null) return null
+        return readAheadNode({
+          componentSourceId,
+          sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
+          componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+          depth: nextDepth,
+          pathTokens: info.pathTokens.concat(childSourceId),
+          position: position.concat(index, 1),
+        })
+      }).catch(() => {
+        live = false
+        return null
+      })
+      nodes[index] = chain
+    }
+    // `decided` settles once every dedupe decision above is made — the next head's chain starts there.
+    return { part: (index) => parts[index], node: (index) => nodes[index], decided: chain }
+  }
+  // The sibling set of a node that had no read-ahead (or whose head's read-ahead produced none): the
+  // walk starts it itself, against `siblingKeys` as the walk holds it at this point.
+  function readAheadSiblingsFromWalk(parentRow, pathTokens, ahead, headIndex, details, siblingKeys) {
+    const nodePosition = ahead ? ahead.position : [2, walkStartedPositions++]
+    return readAheadSiblings(
+      nodeInfoOf(parentRow, pathTokens, nodePosition),
+      details,
+      new Set(siblingKeys),
+      undefined,
+      nodePosition.concat(1, headIndex, 1),
+    )
+  }
+  // The order module's two fan-outs: every order head's detail list, then every order line's part.
+  function readAheadOrderDetails(orderHeads) {
+    return orderHeads.map((orderHead) => {
+      const orderId = readField(orderHead, plan.orderHead.idField)
+      if (isBlank(orderId)) return undefined
+      return readEngine.prefetch(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId }, [0, orderModulePositions++]) || undefined
+    })
+  }
+  function readAheadRootParts(details) {
+    return details.map((detail) => {
+      const componentSourceId = toKey(readField(detail, plan.orderDetail.componentIdField))
+      if (componentSourceId === null) return undefined
+      const qty = parseQuantity(readField(detail, plan.orderDetail.quantityField), {
+        field: plan.orderDetail.quantityField,
+        depth: 0,
+        relation: 'root',
+      })
+      if (!qty.ok) return undefined
+      return readEngine.prefetch(plan.part.object, { [plan.part.idField]: componentSourceId }, [0, orderModulePositions++]) || undefined
+    })
+  }
+  // The selected order roots, all at once: root selection already decided which ones the walk expands.
+  function readAheadRoots(candidates) {
+    return candidates.map((candidate, candidateIndex) => {
+      const componentSourceId = toKey(readField(candidate.partRow, plan.part.idField))
+      if (componentSourceId === null) return undefined
+      return readAheadNode({
+        componentSourceId,
+        sourceVersion: candidate.sourceVersion,
+        componentCode: candidate.componentCode,
+        depth: 0,
+        pathTokens: candidate.pathTokens,
+        position: [1, candidateIndex],
+      }) || undefined
+    })
+  }
   const addGlobalError = (type, details = {}) => {
     errors.push({ type, ...details })
   }
@@ -1803,15 +2585,21 @@ async function expandPlmProjectBom(input = {}) {
   // SOURCE DATA defect nobody on the floor can fix by creating a part, so naming the part would put a
   // customer value on the wire for no operator action — and every value-bearing key is a leak surface
   // that has to earn its keep.
-  async function readPart(componentSourceId, depth, locus = {}) {
-    const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId })
+  // Batch-refresh step 2b: which way the LAST `readPart` went, for the demand recorder only (a read
+  // that returns `undefined` is either a missing or an ambiguous part, and the evidence names which).
+  let lastPartOutcome
+  async function readPart(componentSourceId, depth, locus = {}, entry) {
+    lastPartOutcome = undefined
+    const matches = await read(plan.part.object, { [plan.part.idField]: componentSourceId }, entry)
     const candidates = matchesByField(matches, plan.part.idField, componentSourceId)
     if (candidates.length > 1) {
+      lastPartOutcome = 'part_ambiguous'
       addRowError({ type: 'ambiguous_component', field: plan.part.idField, depth })
       return undefined
     }
     const row = candidates[0]
     if (!row) {
+      lastPartOutcome = 'part_missing'
       addRowError({ type: 'missing_component', field: plan.part.idField, depth })
       addMissingComponent({
         componentSourceId,
@@ -1825,7 +2613,7 @@ async function expandPlmProjectBom(input = {}) {
     return row
   }
 
-  async function expandChildren(parentRow, pathTokens) {
+  async function expandChildren(parentRow, pathTokens, ahead) {
     if (errors.length > 0) return
     const parentSourceId = parentRow.componentSourceId
     const nextDepth = parentRow.depth + 1
@@ -1839,13 +2627,10 @@ async function expandPlmProjectBom(input = {}) {
     // 去重掉的子件连同它的子树一起不展开 —— 老系统也是这样(重复节点整个不进 `iterHandle`),
     // 而且它的子树会在胜出的那条兄弟下面原样展开一遍。
     const siblingKeys = new Set()
-    const headFilters = { [plan.bomHead.parentPartField]: parentSourceId }
-    if (plan.bomHead.versionField && !isBlank(parentRow.sourceVersion)) {
-      headFilters[plan.bomHead.versionField] = parentRow.sourceVersion
-    }
+    const headFilters = bomHeadFiltersFor(parentSourceId, parentRow.sourceVersion)
     let heads
     try {
-      heads = (await read(plan.bomHead.object, headFilters)).filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
+      heads = (await read(plan.bomHead.object, headFilters, ahead && ahead.head)).filter((head) => isActiveBomHead(head, plan.bomHead.activeField))
     } catch (err) {
       addReadError(err, plan.bomHead.object)
       return
@@ -1854,7 +2639,18 @@ async function expandPlmProjectBom(input = {}) {
       addGlobalError('max_depth_exceeded', { maxDepth: options.maxDepth, parentDepth: parentRow.depth })
       return
     }
-    for (const head of heads) {
+    // R67 ③ — what this node's read-ahead issued off this very head read: one slot per active head, in
+    // this order, each `{ detail, siblings }` (`undefined` where there is none).
+    //
+    // LIVENESS. Every read-ahead promise this function awaits — `ahead.heads`, `headAhead.siblings`,
+    // `siblingAheads.node(i)` — depends only on entries the walk has ALREADY claimed (this node's head,
+    // this head's detail list, the parts of the children before `i`, and the same for earlier heads),
+    // and a claimed entry runs on the urgent lane, which the lead cap never pauses; a wrong guess is
+    // dropped at the claim. Awaiting read-ahead state the walk did not claim could wait forever — the
+    // concurrency suite's virtual source fails such a run with a deadlock error rather than hanging.
+    const headAheads = ahead ? await ahead.heads : undefined
+    for (const [headIndex, head] of heads.entries()) {
+      const headAhead = headAheads ? headAheads[headIndex] : undefined
       if (errors.length > 0) return
       const bomId = readField(head, plan.bomHead.bomIdField)
       if (isBlank(bomId)) {
@@ -1863,7 +2659,7 @@ async function expandPlmProjectBom(input = {}) {
       }
       let details
       try {
-        details = await read(plan.bomDetail.object, { [plan.bomDetail.bomParentField]: bomId })
+        details = await read(plan.bomDetail.object, { [plan.bomDetail.bomParentField]: bomId }, headAhead && headAhead.detail)
       } catch (err) {
         addReadError(err, plan.bomDetail.object)
         return
@@ -1876,7 +2672,15 @@ async function expandPlmProjectBom(input = {}) {
         })
         continue
       }
-      for (const detail of details) {
+      // R67 ③ — this head's children, read ahead: the ones the node's read-ahead already started, or —
+      // when there were none — started now, against `siblingKeys` as the walk holds it at this point
+      // (every earlier head's children already deduped), which is what the walk will test against.
+      let siblingAheads
+      if (readAhead) {
+        siblingAheads = (headAhead && await headAhead.siblings)
+          || readAheadSiblingsFromWalk(parentRow, pathTokens, ahead, headIndex, details, siblingKeys)
+      }
+      for (const [detailIndex, detail] of details.entries()) {
         if (errors.length > 0) return
         const childSourceId = toKey(readField(detail, plan.bomDetail.componentIdField))
         if (childSourceId === null) {
@@ -1901,7 +2705,7 @@ async function expandPlmProjectBom(input = {}) {
           parentSourceId,
           bomId,
           path: makePath(childTokens),
-        })
+        }, siblingAheads && siblingAheads.part(detailIndex))
         if (!partRow) continue
         // 键取的是老系统那四样,读的是 PART 行(图号/名称及规格/材质)+ 父件图号 —— 和老系统
         // `info.getParentComponentCode()+info.getComponentCode()+info.getNameAndStandard()+
@@ -1939,7 +2743,7 @@ async function expandPlmProjectBom(input = {}) {
         }
         if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
         if (!pushRow(rowResult.row)) return
-        await expandChildren(rowResult.row, childTokens)
+        await expandChildren(rowResult.row, childTokens, siblingAheads ? await siblingAheads.node(detailIndex) : undefined)
       }
     }
   }
@@ -1960,7 +2764,8 @@ async function expandPlmProjectBom(input = {}) {
    *   hop would adopt every folder node in the catalog as this project's child and then read other
    *   projects' BOM heads under this project's authorization, with `dataScopeRef` still naming the
    *   one project the request asked for. The reads `expandChildren` makes for each discovered root
-   *   are NOT re-filtered — see the banner: they are the order path's reads, shared verbatim.
+   *   are the order path's reads, shared verbatim; the page loop holds their rows to their own
+   *   filter (see the banner and `readPages`).
    *
    *   TERMINATION, and the difference between a LOOP and a RE-VISIT. These are two different facts
    *   and they get two different answers:
@@ -1978,6 +2783,7 @@ async function expandPlmProjectBom(input = {}) {
    *     first time) and COUNTED as `nodesSkippedAlreadyVisited`. Refusing it would kill the entire
    *     pull — the ALREADY-COMPLETED order path included — over a perfectly well-formed directory.
    */
+  const subtreeRootNodeIds = new Map()
   async function discoverSubtreeRoots(seedPathIds, subtree, counters) {
     // Membership is decided AT ENQUEUE, not at dequeue. Deciding it at dequeue is functionally
     // identical but lets one node enter the queue once per PARENT EDGE pointing at it, so a
@@ -2025,6 +2831,8 @@ async function expandPlmProjectBom(input = {}) {
             return null
           }
           roots.push(rootSourceId)
+          // Batch-refresh step 2b: the folder node a subtree root hangs off, for the recorder only.
+          if (demand) subtreeRootNodeIds.set(rootSourceId, nodeId)
         }
       }
 
@@ -2076,32 +2884,43 @@ async function expandPlmProjectBom(input = {}) {
       if (errors.length > 0) break
       const pathId = readField(pathRow, plan.pathExAttr.pathIdField)
       if (isBlank(pathId)) {
+        if (demand) demand.pathNode(pathId, 'missing_path_id')
         addRowError({ type: 'missing_path_id', field: plan.pathExAttr.pathIdField, depth: 0 })
         continue
       }
       const pathInfoMatches = await read(plan.pathInfo.object, { [plan.pathInfo.idField]: pathId })
       const pathInfoCandidates = matchesByField(pathInfoMatches, plan.pathInfo.idField, pathId)
       if (pathInfoCandidates.length > 1) {
+        if (demand) demand.pathNode(pathId, 'ambiguous_path')
         addRowError({ type: 'ambiguous_path', field: plan.pathInfo.idField, depth: 0 })
         continue
       }
       if (!pathInfoCandidates[0]) {
+        if (demand) demand.pathNode(pathId, 'missing_path')
         addRowError({ type: 'missing_path', field: plan.pathInfo.idField, depth: 0 })
         continue
       }
+      if (demand) demand.pathNode(pathId, 'ok')
       const orderHeads = await read(plan.orderHead.object, { [plan.orderHead.pathIdField]: pathId })
-      for (const orderHead of orderHeads) {
+      if (demand) demand.orderHeadsRead(orderHeads.length)
+      const orderDetailAheads = readAhead ? readAheadOrderDetails(orderHeads) : undefined
+      for (const [orderHeadIndex, orderHead] of orderHeads.entries()) {
         if (errors.length > 0) break
         const orderId = readField(orderHead, plan.orderHead.idField)
+        // The order-head id: read here and, before step 2b, used only as the detail filter below.
+        if (demand) demand.orderHead(orderId)
         if (isBlank(orderId)) {
           addRowError({ type: 'missing_order_id', field: plan.orderHead.idField, depth: 0 })
           continue
         }
-        const details = await read(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId })
-        for (const detail of details) {
+        const details = await read(plan.orderDetail.object, { [plan.orderDetail.orderIdField]: orderId }, orderDetailAheads && orderDetailAheads[orderHeadIndex])
+        if (demand) demand.orderLinesRead(details.length)
+        const rootPartAheads = readAhead ? readAheadRootParts(details) : undefined
+        for (const [detailIndex, detail] of details.entries()) {
           if (errors.length > 0) break
           const componentSourceId = toKey(readField(detail, plan.orderDetail.componentIdField))
           if (componentSourceId === null) {
+            if (demand) demand.orderLine({ detail, componentSourceId })
             addRowError({ type: 'missing_component_source_id', field: plan.orderDetail.componentIdField, depth: 0 })
             continue
           }
@@ -2110,6 +2929,8 @@ async function expandPlmProjectBom(input = {}) {
             depth: 0,
             relation: 'root',
           })
+          // Before the quantity refusal, so a line excluded for its quantity is still observed.
+          if (demand) demand.orderLine({ detail, componentSourceId, quantity: qty })
           if (!qty.ok) {
             addRowError(qty.error)
             continue
@@ -2121,11 +2942,14 @@ async function expandPlmProjectBom(input = {}) {
             parentSourceId: null,
             bomId: null,
             path: makePath(pathTokens),
-          })
-          if (!partRow) continue
+          }, rootPartAheads && rootPartAheads[detailIndex])
+          if (!partRow) {
+            if (demand) demand.orderLinePart(lastPartOutcome)
+            continue
+          }
           // PHASE 1 ends here: a candidate, not yet a row. 图号/版本 are read through the read
           // plan's declared part slots — the same two values 老系统 selects roots by.
-          rootCandidates.push({
+          const candidate = {
             componentSourceId,
             componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
             sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
@@ -2133,7 +2957,9 @@ async function expandPlmProjectBom(input = {}) {
             rawQuantity: qty.value,
             sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
             pathTokens,
-          })
+          }
+          rootCandidates.push(candidate)
+          if (demand) demand.orderLinePart('found', candidate)
         }
       }
     }
@@ -2147,10 +2973,15 @@ async function expandPlmProjectBom(input = {}) {
   const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
   rootsFilteredOut = rootSelectionResult.droppedCount
   rootSelectionReport = rootSelectionResult.report
+  // Batch-refresh step 2b — the decision per candidate, labelled by `explainRootSelection` (pure,
+  // and it reads the decision off this result rather than re-deciding).
+  if (demand) demand.rootSelection(rootCandidates, rootSelectionResult)
 
   // PHASE 3 — expansion, in candidate (read) order. Byte-identical to the pre-F1c loop body.
   try {
-    for (const candidate of rootSelectionResult.selected) {
+    // R67 ③ — every selected root's BOM head (and detail lists) read ahead at once.
+    const rootAheads = readAhead ? readAheadRoots(rootSelectionResult.selected) : undefined
+    for (const [candidateIndex, candidate] of rootSelectionResult.selected.entries()) {
       if (errors.length > 0) break
       const rowResult = rowFromPart(plan, {
         projectNo,
@@ -2165,11 +2996,14 @@ async function expandPlmProjectBom(input = {}) {
         extFieldMapping,
       })
       if (rowResult.error) {
+        if (demand) demand.rootRow(candidate, false)
         addRowError(rowResult.error)
         continue
       }
       if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
-      if (!pushRow(rowResult.row)) break
+      const pushed = pushRow(rowResult.row)
+      if (demand) demand.rootRow(candidate, pushed)
+      if (!pushed) break
       // The ONLY line the order loop gained, and it is a no-op unless the optional block is
       // configured. Counted HERE, where an order root is actually produced, rather than
       // re-derived later from `rows`: the subtree segment does not run on every exit path (an
@@ -2177,7 +3011,7 @@ async function expandPlmProjectBom(input = {}) {
       // roots for a run that produced several — the one number `rootQuantitySource` exists to
       // get right.
       if (subtreeCounters) subtreeCounters.rootQuantitySource.orderDetail += 1
-      await expandChildren(rowResult.row, candidate.pathTokens)
+      await expandChildren(rowResult.row, candidate.pathTokens, rootAheads && rootAheads[candidateIndex])
     }
   } catch (err) {
     const bounded = readLimitErrorDetails(err)
@@ -2222,9 +3056,11 @@ async function expandPlmProjectBom(input = {}) {
         for (const rootSourceId of discovered) {
           if (errors.length > 0) break
           if (expandedComponentIds.has(rootSourceId)) {
+            if (demand) demand.subtreeRoot(rootSourceId, subtreeRootNodeIds.get(rootSourceId), true)
             subtreeCounters.rootsSkippedAlreadyExpanded += 1
             continue
           }
+          if (demand) demand.subtreeRoot(rootSourceId, subtreeRootNodeIds.get(rootSourceId), false)
           const pathTokens = [rootSourceId]
           // W3a: the SUBTREE root, and it is a root in exactly the sense the order path's root is —
           // no parent above it, no BOM head that named it (the folder walk found it, not a BOM). Same
@@ -2237,7 +3073,16 @@ async function expandPlmProjectBom(input = {}) {
             bomId: null,
             path: makePath(pathTokens),
           })
-          if (!partRow) continue
+          if (!partRow) {
+            if (demand) demand.subtreeRootPart(lastPartOutcome)
+            continue
+          }
+          if (demand) {
+            demand.subtreeRootPart('found', {
+              componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
+              sourceVersion: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
+            })
+          }
           const rowResult = rowFromPart(plan, {
             projectNo,
             parentSourceId: null,
@@ -2250,11 +3095,14 @@ async function expandPlmProjectBom(input = {}) {
             extFieldMapping,
           })
           if (rowResult.error) {
+            if (demand) demand.subtreeRootRow(false)
             addRowError(rowResult.error)
             continue
           }
           if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
-          if (!pushRow(rowResult.row)) break
+          const pushed = pushRow(rowResult.row)
+          if (demand) demand.subtreeRootRow(pushed)
+          if (!pushed) break
           expandedComponentIds.add(rowResult.componentSourceId)
           subtreeCounters.rootsExpanded += 1
           subtreeCounters.rootQuantitySource.subtreeDefault += 1
@@ -2497,6 +3345,7 @@ module.exports = {
   ROW_ERROR_LIMIT,
   ROW_ERROR_LIMIT_CEILING,
   READ_CURSOR_BROKEN_ERROR_TYPE,
+  READ_ROW_MISMATCH_ERROR_TYPE,
   SUBTREE_CYCLE_DETECTED_ERROR_TYPE,
   SUBTREE_NODE_LIMIT_EXCEEDED_ERROR_TYPE,
   SUBTREE_ROOT_LIMIT_EXCEEDED_ERROR_TYPE,
@@ -2509,6 +3358,11 @@ module.exports = {
   DEFAULT_ROOT_SELECTION,
   ROOT_SELECTION_KEYS,
   ROOT_SELECTION_SHEET_METAL_MATCH_MODES,
+  // R67 ③ — the read-ahead knob: default, clamp bounds and the one normalizer the action config uses.
+  DEFAULT_READ_CONCURRENCY,
+  READ_CONCURRENCY_MIN,
+  READ_CONCURRENCY_MAX,
+  normalizeReadConcurrency,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   // PUBLIC because the根选择 rules are DEPLOY CONFIG, not an internal: the action-config normalizer
@@ -2529,6 +3383,14 @@ module.exports = {
     makePath,
     parseQuantity,
     readAll,
+    readPages,
+    readKeyOf,
+    createReadLimiter,
+    createPlmReadAheadEngine,
+    comparePositions,
+    READ_AHEAD_LEAD_PER_SLOT,
+    // R67 ③ fix round 2 — the one row/filter comparison, so its rule can be pinned case by case.
+    sameFilterValue,
     readField,
     toKey,
     nonNegativeInteger,
@@ -2545,6 +3407,8 @@ module.exports = {
     // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
     // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
     selectOrderRootCandidates,
+    // Batch-refresh step 2b — the per-candidate label of what `selectOrderRootCandidates` decided.
+    explainRootSelection,
     hasMainDrawingShape,
     hasSheetMetalShape,
     makeRootSelectionReport,

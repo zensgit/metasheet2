@@ -79,6 +79,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
   'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
   'plugins/plugin-attendance/lib/attendance-calendar-settings-writer.cjs',
+  // Import day selection resolves rule/shift context before the frozen import plan.
+  'plugins/plugin-attendance/lib/attendance-import-calendar.cjs',
+  'plugins/plugin-attendance/lib/attendance-daily-calendar.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-calendar-day.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
   'plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs',
@@ -188,6 +191,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/index.cjs',
   'plugins/plugin-attendance/lib/attendance-fixed-schedule-self-route-identity.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
+  // The editor projects persisted schedule facts and canonical posture.
+  // Keep both W6 aggregate bans active; no not-calculation-path exclusion.
+  'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-editor-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
   // Import identity resolution selects the employee whose frozen context is built.
@@ -212,6 +218,23 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',
+  // Settlement coordination (P1-1): key, quota, prober, coordinator, port, CLI and context.
+  // None consumes the W6 aggregate; both aggregate bans apply, with no carve-out.
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-backoff.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-budget.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-capacity.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-cli.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-clock.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-context.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-handover.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-key.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-ledger.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-port.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-prober.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-quota.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-semaphore.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordination-statements.ts',
+  'packages/core-backend/src/attendance/coordination/settlement-coordinator.ts',
 ] as const)
 
 /**

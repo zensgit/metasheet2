@@ -44,6 +44,7 @@ import {
   clampErrorCode,
   clampToken,
 } from './projectSync'
+import { parseStockPrepPullBatchOutcome, type StockPrepPullBatchOutcome } from './pullBatch'
 import { apiFetch } from '../../../utils/api'
 import { buildQueryString, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
 
@@ -106,8 +107,19 @@ export interface StockPreparationLargeBomPullState {
   manualConfirmCount: number
   /** Clamped server error code, for `stockPrepErrorPlain` — never a raw message. */
   errorCode: string | null
+  /**
+   * The server's clamped `details.reason` beside the code (PR #6501 round 6, N1): the large lane reads a
+   * few codes differently per reason (a superseded plan that is a STALE expansion vs. one left over from
+   * an OLD version). `null` when the refusal carried none.
+   */
+  errorReason: string | null
   /** True once the checkpoint apply reaches `succeeded` or `partial` — rows are in the sheet. */
   imported: boolean
+  /**
+   * 批次标识 BI-3 (P-6): the LAST chunk answer's `pullBatch` (the job's running total), clamped; `null` while none was
+   * answered — on every job while the switch is off (the server sends no key).
+   */
+  pullBatch: StockPrepPullBatchOutcome | null
 }
 
 function initialState(): StockPreparationLargeBomPullState {
@@ -121,7 +133,9 @@ function initialState(): StockPreparationLargeBomPullState {
     applyCounts: null,
     manualConfirmCount: 0,
     errorCode: null,
+    errorReason: null,
     imported: false,
+    pullBatch: null,
   }
 }
 
@@ -180,6 +194,8 @@ export interface StockPreparationLargeBomApplyJob {
   jobId?: string
   status?: string
   counts?: Record<string, number>
+  /** 批次标识 BI-3: a chunk run's `largeChunkAnswerOf` (ON only). Untyped at the boundary: `parseStockPrepPullBatchOutcome`. */
+  pullBatch?: unknown
 }
 
 export interface StockPreparationLargeBomJobApi {
@@ -195,6 +211,11 @@ export { StockPreparationProjectSyncCallError }
 
 function codeOfLargeBomError(error: unknown): string | null {
   return error instanceof StockPreparationProjectSyncCallError ? error.code : null
+}
+
+/** The clamped `details.reason` the call error carried (round 6, N1) — `null` when none. */
+function reasonOfLargeBomError(error: unknown): string | null {
+  return error instanceof StockPreparationProjectSyncCallError ? error.detailReason : null
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +265,7 @@ export async function runStockPreparationLargeBomPull(
     return state
   }
   function fail(error: unknown): StockPreparationLargeBomPullState {
-    return emit({ phase: 'failed', errorCode: codeOfLargeBomError(error) })
+    return emit({ phase: 'failed', errorCode: codeOfLargeBomError(error), errorReason: reasonOfLargeBomError(error) })
   }
 
   // ---- start the expansion job ---------------------------------------------------------------
@@ -338,7 +359,11 @@ export async function runStockPreparationLargeBomPull(
       return fail(error)
     }
     const nextStatus = clampToken(applyJob.status, STOCK_PREPARATION_LARGE_BOM_APPLY_STATUSES)
-    emit({ applyStatus: nextStatus, applyCounts: largeBomApplyCountsOf(applyJob.counts) })
+    emit({
+      applyStatus: nextStatus,
+      applyCounts: largeBomApplyCountsOf(applyJob.counts),
+      pullBatch: parseStockPrepPullBatchOutcome(applyJob.pullBatch) ?? state.pullBatch,
+    })
     if (!APPLY_NON_TERMINAL.has(nextStatus)) break
     if (isCancelled()) return state
     await wait(intervalMs)
@@ -367,8 +392,16 @@ async function readEnvelope<T>(response: Response | undefined, route: string): P
     ? payload as IntegrationApiEnvelope<T>
     : null
   if (!response?.ok || envelope?.ok === false) {
+    const details = envelope?.error && typeof envelope.error === 'object'
+      ? (envelope.error as { details?: unknown }).details
+      : undefined
+    const detailRecord = details && typeof details === 'object' && !Array.isArray(details)
+      ? details as { reason?: unknown; partial?: unknown }
+      : {}
     throw new StockPreparationProjectSyncCallError(status, route, {
       code: clampErrorCode(envelope?.error?.code),
+      detailReason: typeof detailRecord.reason === 'string' ? detailRecord.reason : null,
+      detailPartial: detailRecord.partial,
     })
   }
   if (!envelope || envelope.ok !== true) {

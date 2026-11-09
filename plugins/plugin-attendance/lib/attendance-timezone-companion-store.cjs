@@ -2,6 +2,32 @@
 
 const { canonicalContextFingerprint } = require('./attendance-timezone-runtime.cjs')
 
+// Only a freshly computed default-only frame may target a date that already has
+// one active, calculation-untracked record in the same zone and no companion.
+function isPreCompanionLegacyTarget(frame, prior) {
+  return prior.length === 1 && prior[0].current_calculation_id === null
+    && prior[0].timezone === frame.timezone
+    && frame.legacyRecordId === undefined && frame.legacyFrozenCalculationId === undefined
+    && frame.timezoneContext?.mode === 'default_only'
+    && frame.identity?.source !== 'legacy_repair' && frame.identity?.source !== 'frozen_v2'
+}
+
+// Admission also needs the persisted calculation posture to be legacy (no rollout
+// row, or state legacy): in shadow/authoritative a write would append an immutable
+// snapshot from today's rule, or move the record's current calculation, so the old
+// date stays on the controlled repair path. Checked only after the pure test passes,
+// so every other case issues exactly the queries it did before.
+async function admitsPreCompanionLegacyTarget(trx, orgId, frame, prior) {
+  if (!isPreCompanionLegacyTarget(frame, prior)) return false
+  const rows = await trx.query('SELECT state FROM attendance_calculation_rollout_state WHERE org_id=$1',[orgId])
+  return rows.length === 0 || (rows.length === 1 && rows[0].state === 'legacy')
+}
+
+// The fingerprint carries no org or user; key the unfrozen marker by the full target.
+function targetKey(frame) {
+  return JSON.stringify([frame.orgId,frame.userId,frame.workDate,frame.fingerprint])
+}
+
 function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenContext, validateFrozenAttribution }) {
   function fail(code, status = 409) { throw new HttpError(status, code, code) }
   function restore(row) {
@@ -21,6 +47,7 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
     return revive(frame)
   }
   const verifiedTargets = new WeakMap()
+  const unboundTargets = new WeakMap()
   async function readEligibleOpen(trx, { orgId, userId, occurredAt }) {
     const rows = await trx.query(`SELECT c.*
       FROM attendance_timezone_context_companions c
@@ -137,19 +164,26 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
     if (rows.length === 1 && rows[0].context_fingerprint !== frame.fingerprint) {
       fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT')
     }
+    let unbound = false
     if (rows.length === 0) {
-      const prior = await trx.query(`SELECT id,current_calculation_id FROM attendance_records
+      const prior = await trx.query(`SELECT id,timezone,current_calculation_id FROM attendance_records
         WHERE org_id=$1 AND user_id=$2 AND work_date=$3 AND visibility_state='active'`,[frame.orgId,frame.userId,frame.workDate])
-      // A pre-companion freeze cannot be rebound from today's mutable rule/version.
       if (prior.length && !(prior.length === 1 && prior[0].id === frame.legacyRecordId
         && prior[0].current_calculation_id === frame.legacyFrozenCalculationId)) {
-        fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED')
+        // A pre-companion freeze cannot be rebound from today's mutable rule/version.
+        // With multi-timezone OFF, an untracked pre-upgrade record in the same zone
+        // keeps its pre-upgrade behaviour: computed now, and never frozen.
+        unbound = await admitsPreCompanionLegacyTarget(trx, frame.orgId, frame, prior)
+        if (!unbound) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED')
       }
     }
     verifiedTargets.set(trx,frame.fingerprint)
+    if (unbound) unboundTargets.set(trx,targetKey(frame))
+    else unboundTargets.delete(trx)
   }
   async function bindFirst(trx, frame, { calculationId = null } = {}) {
     if (verifiedTargets.get(trx) !== frame.fingerprint) fail('ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED',503)
+    if (unboundTargets.get(trx) === targetKey(frame)) return
     const existing = await trx.query(
       'SELECT record_id FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3',
       [frame.orgId,frame.userId,frame.workDate],
@@ -180,4 +214,4 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
   return { readLegacyFrozenV2, readEligibleLegacyRepair, readEligibleOpen, readForWorkDate, readForWorkDates, assertTarget, bindFirst }
 }
 
-module.exports = { createAttendanceTimezoneCompanionStore }
+module.exports = { createAttendanceTimezoneCompanionStore, isPreCompanionLegacyTarget, admitsPreCompanionLegacyTarget }

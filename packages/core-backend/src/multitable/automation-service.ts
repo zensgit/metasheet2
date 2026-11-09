@@ -32,6 +32,8 @@ import {
   type InboundWebhookRejectReason,
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
+import { checkWebhookTargetUrlShape } from './webhook-ssrf-guard'
+import { classifyWebhookRefusal, WEBHOOK_TARGET_REJECTED } from './webhook-refusal-class'
 import { DurableSinkBusyError, isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
@@ -135,6 +137,7 @@ import {
   loadStockPreparationOverviewSheetIds,
   type StockPreparationOverviewQueryFn,
 } from './stock-preparation-overview-contract'
+import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import type { Database } from '../db/types'
 
 const logger = new Logger('AutomationService')
@@ -159,6 +162,8 @@ export type AutomationRuleValidationCode =
   | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
   // S3 fix round 2 (F2): an approval result write-back whose literal target sheet is the read-only overview.
   | typeof STOCK_PREP_OVERVIEW_READ_ONLY_CODE
+  // S0-a: a send_webhook target that can never be sent (http, internal name / IP literal, malformed).
+  | typeof WEBHOOK_TARGET_REJECTED
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -4458,6 +4463,13 @@ export class AutomationService {
       if ((await loadStockPreparationOverviewSheetIds(query as StockPreparationOverviewQueryFn, [sheetId])).size > 0) {
         throw new Error(STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL)
       }
+      // 备料 option B (human-write-lock.ts): the same sink never writes a human-write-locked (PLM-system) column —
+      // the rule's author mapped status / approver / completed-at onto it, which only the PLM pull may write. Read
+      // inside the fenced transaction; throws (→ `backwriteSkipped` with the fixed closed-code sentence, rolled
+      // back, nothing written or announced), exactly like the overview refusal above.
+      if ((await findHumanWriteLockedFieldIds(query, sheetId, Object.keys(patch))).length > 0) {
+        throw new Error(HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL)
+      }
       // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
       // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
       // unless the conversion flag AND the writer fence are both on.
@@ -5441,6 +5453,57 @@ export async function preflightAutomationConditionFields(
     }
     throw error
   }
+}
+
+/** How deep the save-time webhook walk follows nested branch actions (the save shape nests at most two). */
+const NESTED_ACTION_DEPTH_LIMIT = 6
+
+/**
+ * S0-a — EARLY error for a `send_webhook` target at rule save. NOT the boundary: the executor checks every
+ * real send (each attempt, pinned to the approved address). This only refuses, from the URL alone and
+ * without DNS, a target the send-time check would always refuse — http, an internal name, an internal IP
+ * literal, a malformed URL — so the author learns at save instead of on every run.
+ *
+ * Walks the same action tree the save path accepts: `actions[i]`, the legacy `actionType`/`actionConfig`
+ * pair (must be the EFFECTIVE pair on PATCH, like the condition preflight), and actions nested in
+ * `branches[j].actions` / `defaultBranch.actions` / `actions` under a config. A missing / empty URL is left to
+ * the executor's own "Webhook URL is required" step failure. The message names the closed-set refusal class
+ * and the request path, never the URL.
+ */
+export function preflightAutomationWebhookTargets(input: AutomationConditionPreflightActions): void {
+  const checkUrl = (url: unknown, path: string): void => {
+    if (url === undefined || url === null || url === '') return
+    const shape = checkWebhookTargetUrlShape(url)
+    if (shape.ok) return
+    const refusal = classifyWebhookRefusal(url, (shape as { reason?: string }).reason)
+    throw new AutomationRuleValidationError(
+      `send_webhook target refused (${refusal.refusalClass}) at ${path}`,
+      WEBHOOK_TARGET_REJECTED,
+    )
+  }
+  const visitActions = (list: unknown, path: string, depth: number): void => {
+    if (!Array.isArray(list)) return
+    list.forEach((action, index) => visitAction(action, `${path}[${index}]`, depth))
+  }
+  const visitConfig = (config: unknown, path: string, depth: number): void => {
+    if (!isRecord(config) || depth > NESTED_ACTION_DEPTH_LIMIT) return
+    if (Array.isArray(config.branches)) {
+      config.branches.forEach((branch, index) => {
+        if (isRecord(branch)) visitActions(branch.actions, `${path}.branches[${index}].actions`, depth + 1)
+      })
+    }
+    if (isRecord(config.defaultBranch)) visitActions(config.defaultBranch.actions, `${path}.defaultBranch.actions`, depth + 1)
+    visitActions(config.actions, `${path}.actions`, depth + 1)
+  }
+  const visitAction = (action: unknown, path: string, depth: number): void => {
+    if (!isRecord(action)) return
+    const config = isRecord(action.config) ? action.config : undefined
+    if (action.type === 'send_webhook') checkUrl(config?.url, `${path}.config.url`)
+    visitConfig(config, `${path}.config`, depth)
+  }
+  visitActions(input.actions ?? [], 'actions', 0)
+  if (input.actionType === 'send_webhook') checkUrl(input.actionConfig?.url, 'actionConfig.url')
+  else visitConfig(input.actionConfig, 'actionConfig', 0)
 }
 
 /** What the PATCH route learns from the update preflight, beyond the normalized input (#4b). */

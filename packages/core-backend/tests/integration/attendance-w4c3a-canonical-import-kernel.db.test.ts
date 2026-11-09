@@ -639,7 +639,8 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
         await setup('INSERT INTO delayed_plan_commit VALUES (1)')
         if (adapted) {
           await createAttendanceLegacyPlanCommitConnectionV1(client).query('COMMIT')
-          expect((await client.query('SELECT n FROM delayed_plan_commit')).rows).toEqual([{ n: 1 }])
+          // Only COMMIT is measured against the 40 ms read timer; the read-back has the fixture budget.
+          expect((await setup('SELECT n FROM delayed_plan_commit')).rows).toEqual([{ n: 1 }])
         } else {
           await expect(client.query('COMMIT')).rejects.toThrow('Query read timeout')
         }
@@ -670,7 +671,16 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
         AFTER INSERT ON pool_delayed_commit DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW EXECUTE FUNCTION pg_temp.pool_delay_commit()`)
       await setup("SET statement_timeout = '40ms'")
-      const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
+      // Only COMMIT is measured against the pool-shaped 40 ms read timer, and only the adapter may
+      // lift it, so COMMIT reaches the client exactly as the adapter sends it. Every other statement
+      // (the runner's idle probe, BEGIN and set_config, this case's reads and INSERT) gets the
+      // fixture budget: a stall on a statement the case does not measure must not fail it.
+      const budgeted = {
+        query: (text: unknown, values?: unknown[]) => (typeof text === 'string' && text !== 'COMMIT'
+          ? client.query({ text, values, query_timeout: 1000 })
+          : client.query(text as string, values)),
+      } as unknown as Pick<PoolClient, 'query'>
+      const connection = createAttendanceLegacyPlanCommitConnectionV1(budgeted)
       await runAttendanceResultOperationTransactionV1(connection, async (transaction) => {
         expect(transaction).toBe(connection)
         expect((await transaction.query(
@@ -678,8 +688,8 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
         )).rows).toEqual([{ setting: '180000' }])
         await transaction.query('INSERT INTO pool_delayed_commit VALUES (1)')
       })
-      expect((await client.query('SELECT n FROM pool_delayed_commit')).rows).toEqual([{ n: 1 }])
-      expect((await client.query(
+      expect((await setup('SELECT n FROM pool_delayed_commit')).rows).toEqual([{ n: 1 }])
+      expect((await setup(
         "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
       )).rows).toEqual([{ setting: '40' }])
     } finally {

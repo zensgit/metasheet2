@@ -4,6 +4,10 @@
  * remembered per browser in localStorage, and a storage that throws or holds garbage falls back to
  * the default without breaking the page. The mocks and helpers are the ones tasks-list-view.spec.ts
  * uses; storage is cleared before and after every cell so a remembered choice cannot leak.
+ *
+ * The `search|` cells at the end cover the title search box beside the switch: the debounce, what a
+ * read carries, what clearing restores, and that a late answer or action cannot paint over a newer
+ * query. The debounce runs on fake timers there and only there.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
@@ -60,6 +64,9 @@ vi.mock('../src/tasks/tasksContext', () => ({
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h.listTasks,
   getTask: h.getTask,
+  // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
+  // which the page reads as "no names" and leaves the ids as they are.
+  getTaskPeople: vi.fn(),
   listComments: h.listComments,
   createTask: h.createTask,
   completeTask: h.completeTask,
@@ -98,6 +105,7 @@ vi.mock('../src/composables/useLocale', () => ({
 
 import TasksView from '../src/views/tasks/TasksView.vue'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
+import { TASK_SEARCH_DEBOUNCE_MS, TASK_SEARCH_MAX_LENGTH, taskSearchTerm, titleHoldsTaskSearch } from '../src/tasks/tasksSearch'
 
 let app: App | null = null
 let host: HTMLElement | null = null
@@ -495,6 +503,8 @@ describe('G2-core status switch — late action result after switching status (l
     expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
     expect(h.listTasks).toHaveBeenCalledTimes(2)
     expect(el.textContent).toContain('Done Item')
+    // The create belongs to the page it started on: no hidden-by-filter notice on the page now showing.
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
   })
 })
 
@@ -623,10 +633,10 @@ describe('G2-core status switch — with the all-mode row link and the create du
     expect(rowActions(el)).toEqual({ 'All Open': 'detail:在任务详情中完成' })
   })
 
-  // Pinned as it is today: a create while 已完成 is on is sent with its due date, the form is
-  // cleared, and the reload stays under 已完成, so the new (open) task is not in the list until the
-  // switch moves to 未完成 or 全部.
-  it('g2core|fe|6390|a create with a due date while 已完成 is on: sent with the due keys, form cleared, reload stays under 已完成', async () => {
+  // A create while 已完成 is on is sent with its due date, the form is cleared, and the reload
+  // stays under 已完成 (the remembered choice is not switched for the viewer), so the new (open)
+  // task is not in the list: an inline notice says so, and its action moves the switch to 未完成.
+  it('g2core|fe|6390|a create with a due date while 已完成 is on: sent with the due keys, form cleared, reload stays under 已完成, the notice leads to it', async () => {
     h.createTask.mockImplementation(async (body: { title: string; completionMode: 'all' | 'any' }) => {
       rows = [...rows, taskItem({ id: 'n1', title: body.title, status: 'open', completion_mode: body.completionMode })]
       return { kind: 'ok', id: 'n1' }
@@ -656,9 +666,631 @@ describe('G2-core status switch — with the all-mode row link and the create du
     expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('')
     expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).value).toBe('')
     expect(rowActions(el)).toEqual(EXPECTED.done)
+    expect(shown(el, 'tasks-create-hidden-notice')).not.toBeNull()
+    expect(window.localStorage.getItem(KEY)).toBe('done')
 
-    statusButton(el, 'open').click()
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
     await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
+    expect(pressed(el)).toEqual(['open'])
+    expect(window.localStorage.getItem(KEY)).toBe('open')
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
     expect(rowActions(el)).toEqual({ ...EXPECTED.open, 'Fresh Task': 'detail:在任务详情中完成' })
+  })
+})
+
+// A create while 已完成 is on makes a task the reloaded list leaves out (a new task is never
+// completed). The page says so inline, without a dialog and without switching the remembered
+// filter, and always offers the new task's page. In a view that lists the creator's new task
+// (分配给我 / 我创建的 / 任一角色) it also offers the 未完成 switch; in 关注中 / 我委派的, which leave the
+// new task out under any status, it offers only the task's page and does not put the hiding down
+// to the filter alone. Under 未完成 and 全部 nothing is said. The notice goes with the next create
+// (whatever its outcome) and with a status or view switch.
+describe('G2-core status switch — a new task the filter leaves out', () => {
+  type Row = ReturnType<typeof taskItem>
+  let rows: Row[] = []
+  let nextId = 0
+  // Tasks the create form made: the creator is their only assignee and nobody follows them, so the
+  // server leaves them out of 关注中 and 我委派的 under any status. The fake list read does the same.
+  let created = new Set<string>()
+
+  beforeEach(() => {
+    rows = [taskItem({ id: 'd1', title: 'Old Done', status: 'done', completion_mode: 'any' })]
+    nextId = 0
+    created = new Set()
+    h.listTasks.mockImplementation(async (view: string, _page: unknown, status?: 'open' | 'done' | 'all') => {
+      const items = rows.filter((row) =>
+        (status === undefined || status === 'all' || row.status === status)
+        && !((view === 'following' || view === 'delegated') && created.has(row.id)))
+      return { kind: 'ok', items, total: items.length }
+    })
+    h.createTask.mockImplementation(async (body: { title: string; completionMode: 'all' | 'any' }) => {
+      nextId += 1
+      const id = `n${nextId}`
+      created.add(id)
+      rows = [...rows, taskItem({ id, title: body.title, status: 'open', completion_mode: body.completionMode })]
+      return { kind: 'ok', id }
+    })
+  })
+
+  async function create(el: HTMLElement, title: string): Promise<void> {
+    const input = shown(el, 'tasks-create-title') as HTMLInputElement
+    input.value = title
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+  }
+
+  function titles(el: HTMLElement): string[] {
+    return Array.from(el.querySelectorAll('[data-testid="tasks-list-item-link"]')).map((link) => link.textContent?.trim() ?? '')
+  }
+
+  function notice(el: HTMLElement): HTMLElement | null {
+    return shown(el, 'tasks-create-hidden-notice')
+  }
+
+  it('g2core|fe|hidden|under 已完成 a create shows the inline notice with its two ways to the task, and the list stays under 已完成', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    expect(notice(el)).toBeNull()
+    // The live region is on the page before anything is said in it (empty, no text), so the
+    // notice is a change inside an existing polite region rather than a region that appears.
+    const live = shown(el, 'tasks-create-hidden-live')
+    expect(live?.getAttribute('role')).toBe('status')
+    expect(live?.textContent?.trim()).toBe('')
+    await create(el, 'Fresh Task')
+
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+    expect(pressed(el)).toEqual(['done'])
+    expect(titles(el)).toEqual(['Old Done'])
+    const box = notice(el)
+    expect(box).not.toBeNull()
+    // The same region element now carries the notice.
+    expect(shown(el, 'tasks-create-hidden-live')).toBe(live)
+    expect(box?.closest('[role="status"]')).toBe(live)
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(
+      '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+    )
+    expect(shown(el, 'tasks-create-hidden-show-open')?.textContent?.trim()).toBe('查看未完成任务')
+    const link = shown(el, 'tasks-create-hidden-open-task')
+    expect(link?.textContent?.trim()).toBe('打开新任务')
+    expect(link?.getAttribute('to')).toBe('/tasks/n1')
+    // Not a list row: the row walkers above do not see the notice's link.
+    expect(el.querySelectorAll('[data-testid="tasks-list-item-link"]').length).toBe(1)
+  })
+
+  it('g2core|fe|hidden|the notice action switches to 未完成 (remembered), shows the new task and clears the notice', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
+    expect(pressed(el)).toEqual(['open'])
+    expect(window.localStorage.getItem(KEY)).toBe('open')
+    expect(titles(el)).toEqual(['Fresh Task'])
+    expect(notice(el)).toBeNull()
+    // The pressed button went away with the notice: focus is on the 未完成 switch, not the page body.
+    expect(document.activeElement).toBe(statusButton(el, 'open'))
+  })
+
+  it('g2core|fe|hidden|the new task id in the link is encoded as a path segment', async () => {
+    h.createTask.mockResolvedValueOnce({ kind: 'ok', id: 'a/b c' })
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Odd Id')
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/a%2Fb%20c')
+  })
+
+  it.each(['created', 'any_role'] as const)('g2core|fe|hidden|in the %s view under 已完成 the notice offers the 未完成 switch, which shows the new task', async (view) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+    await flush()
+    await create(el, 'Fresh Task')
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'done')
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(
+      '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+    )
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+
+    ;(shown(el, 'tasks-create-hidden-show-open') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'open')
+    expect(titles(el)).toContain('Fresh Task')
+    expect(notice(el)).toBeNull()
+  })
+
+  it.each(['following', 'delegated'] as const)('g2core|fe|hidden|in the %s view under 已完成 the notice offers only the new task\'s page, not the 未完成 switch', async (view) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+    await flush()
+    await create(el, 'Fresh Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith(view, undefined, 'done')
+    expect(titles(el)).toEqual(['Old Done'])
+    expect(notice(el)?.closest('[role="status"]')?.getAttribute('data-testid')).toBe('tasks-create-hidden-live')
+    expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+    expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+    const link = shown(el, 'tasks-create-hidden-open-task')
+    expect(link?.textContent?.trim()).toBe('打开新任务')
+    expect(link?.getAttribute('to')).toBe('/tasks/n1')
+    expect(pressed(el)).toEqual(['done'])
+    expect(window.localStorage.getItem(KEY)).toBe('done')
+  })
+
+  it.each(['open', 'all'] as const)('g2core|fe|hidden|under %s a create shows the new task in the list and no notice', async (status) => {
+    window.localStorage.setItem(KEY, status)
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, status)
+    expect(titles(el)).toContain('Fresh Task')
+    expect(notice(el)).toBeNull()
+  })
+
+  it.each(['open', 'all'] as const)('g2core|fe|hidden|switching from 已完成 to %s clears the notice', async (status) => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+    statusButton(el, status).click()
+    await flush()
+    expect(notice(el)).toBeNull()
+    expect(titles(el)).toContain('Fresh Task')
+  })
+
+  it('g2core|fe|hidden|switching the view clears the notice (the status stays 已完成)', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'done')
+    expect(notice(el)).toBeNull()
+  })
+
+  it('g2core|fe|hidden|the next create clears the notice: a failed one shows only its error', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    h.createTask.mockResolvedValueOnce({ kind: 'error', status: 500 })
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(2)
+    expect(notice(el)).toBeNull()
+    expect(shown(el, 'tasks-create-error')?.textContent?.trim()).toBe('创建任务失败，请稍后重试')
+  })
+
+  it('g2core|fe|hidden|the next create clears the notice: one stopped by the due-date pre-check shows only that message', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'Fresh Task')
+    expect(notice(el)).not.toBeNull()
+
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const due = shown(el, 'tasks-create-due-date') as HTMLInputElement
+    due.value = '2031-03-04'
+    due.dispatchEvent(new Event('input'))
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+    expect(notice(el)).toBeNull()
+  })
+
+  it('g2core|fe|hidden|a second create under 已完成 points the notice at the newest task', async () => {
+    window.localStorage.setItem(KEY, 'done')
+    const el = await mountReady()
+    await create(el, 'First Task')
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    await create(el, 'Second Task')
+    expect(h.createTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n2')
+    expect(el.querySelectorAll('[data-testid="tasks-create-hidden-notice"]').length).toBe(1)
+  })
+})
+
+describe('title search on the list page', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function box(el: HTMLElement): HTMLInputElement {
+    const input = shown(el, 'tasks-search-input') as HTMLInputElement | null
+    if (!input) throw new Error('no search input')
+    return input
+  }
+
+  async function type(el: HTMLElement, text: string): Promise<void> {
+    box(el).value = text
+    box(el).dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  async function elapse(ms: number = TASK_SEARCH_DEBOUNCE_MS): Promise<void> {
+    vi.advanceTimersByTime(ms)
+    await flush()
+  }
+
+  async function search(el: HTMLElement, text: string): Promise<void> {
+    await type(el, text)
+    await elapse()
+  }
+
+  function titles(el: HTMLElement): string[] {
+    return Array.from(el.querySelectorAll('[data-testid="tasks-list-item-link"]')).map((link) => link.textContent?.trim() ?? '')
+  }
+
+  it('search|fe|the box is named and limited, and an unsearched page reads with three arguments', async () => {
+    const el = await mountReady()
+    expect(box(el).getAttribute('aria-label')).toBe('按标题搜索任务')
+    expect(box(el).getAttribute('maxlength')).toBe(String(TASK_SEARCH_MAX_LENGTH))
+    expect(h.listTasks.mock.calls).toEqual([['assigned', undefined, 'open']])
+  })
+
+  it('search|fe|debounce: no read until the window closes, then one read carrying the text', async () => {
+    const el = await mountReady()
+    await type(el, 'alpha')
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    await elapse(TASK_SEARCH_DEBOUNCE_MS - 1)
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    await elapse(1)
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+  })
+
+  it('search|fe|debounce: a burst of typing is one read of the last text', async () => {
+    const el = await mountReady()
+    await type(el, 'a')
+    await elapse(TASK_SEARCH_DEBOUNCE_MS - 1)
+    await type(el, 'al')
+    await elapse(TASK_SEARCH_DEBOUNCE_MS - 1)
+    await type(el, 'alp')
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    await elapse()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alp')
+  })
+
+  it('search|fe|an unfinished IME composition is not searched; its end is', async () => {
+    const el = await mountReady()
+    box(el).dispatchEvent(new Event('compositionstart'))
+    await type(el, 'zhong')
+    await elapse()
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    box(el).value = '中'
+    box(el).dispatchEvent(new Event('compositionend'))
+    await flush()
+    await elapse()
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', '中')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  it('search|fe|the text is trimmed, and a change only in edge blanks reads nothing', async () => {
+    const el = await mountReady()
+    await search(el, '  alpha ')
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+    await search(el, 'alpha   ')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  it('search|fe|blanks alone on an unsearched page read nothing', async () => {
+    const el = await mountReady()
+    await search(el, '    ')
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['leading U+200B', '\u200Balpha'],
+    ['trailing U+200D', 'alpha\u200D'],
+    ['leading U+FEFF', '\uFEFFalpha'],
+    ['leading U+0085', '\u0085alpha'],
+  ])('search|fe|a %s is not part of the term: the read carries the text, and a change only in it reads nothing', async (_label, pasted) => {
+    const el = await mountReady()
+    await search(el, pasted)
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+    await search(el, 'alpha')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+  })
+
+  it('search|fe|nothing but zero-width marks reads as no search: no read when unsearched, the whole list otherwise', async () => {
+    const el = await mountReady()
+    await search(el, '\u200B')
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    await search(el, 'alpha')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    await type(el, '\u200B\uFEFF')
+    expect(h.listTasks).toHaveBeenCalledTimes(3)
+    expect(h.listTasks.mock.calls.at(-1)).toEqual(['assigned', undefined, 'open'])
+  })
+
+  it('search|fe|clearing restores the whole list at once, with the three-argument read', async () => {
+    h.listTasks.mockImplementation(async (_view: string, _page: unknown, _status: unknown, q?: string) => ({
+      kind: 'ok',
+      items: q ? [taskItem({ id: 't1', title: 'Match' })] : [taskItem({ id: 't1', title: 'Match' }), taskItem({ id: 't2', title: 'Other' })],
+    }))
+    const el = await mountReady()
+    await search(el, 'mat')
+    await flush(12)
+    expect(titles(el)).toEqual(['Match'])
+    await type(el, '')
+    await flush(12)
+    expect(h.listTasks.mock.calls.at(-1)).toEqual(['assigned', undefined, 'open'])
+    expect(titles(el)).toEqual(['Match', 'Other'])
+    await elapse()
+    expect(h.listTasks).toHaveBeenCalledTimes(3)
+  })
+
+  it('search|fe|clearing inside the window drops the waiting read', async () => {
+    const el = await mountReady()
+    await type(el, 'alpha')
+    await type(el, '')
+    await elapse()
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it('search|fe|a slow answer for the older text cannot paint over the newer one', async () => {
+    const slow = deferred<{ kind: 'ok'; items: ReturnType<typeof taskItem>[] }>()
+    const el = await mountReady()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    h.listTasks.mockReset()
+      .mockReturnValueOnce(slow.promise)
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 'n1', title: 'Newer Match' })] })
+    await search(el, 'ol')
+    await search(el, 'new')
+    expect(titles(el)).toEqual(['Newer Match'])
+    slow.resolve({ kind: 'ok', items: [taskItem({ id: 'o1', title: 'Older Match' })] })
+    await flush()
+    expect(titles(el)).toEqual(['Newer Match'])
+  })
+
+  it('search|fe|a slow answer for the older text cannot paint over the list restored by clearing', async () => {
+    const slow = deferred<{ kind: 'ok'; items: ReturnType<typeof taskItem>[] }>()
+    const el = await mountReady()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    h.listTasks.mockReset()
+      .mockReturnValueOnce(slow.promise)
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 'w1', title: 'Whole List' })] })
+    await search(el, 'ol')
+    await type(el, '')
+    expect(titles(el)).toEqual(['Whole List'])
+    slow.resolve({ kind: 'ok', items: [taskItem({ id: 'o1', title: 'Older Match' })] })
+    await flush()
+    expect(titles(el)).toEqual(['Whole List'])
+  })
+
+  it('search|fe|the text stays across view and status switches, and those reads carry it', async () => {
+    const el = await mountReady()
+    await search(el, 'alpha')
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'open', 'alpha')
+    statusButton(el, 'done').click()
+    await flush()
+    expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'done', 'alpha')
+    expect(box(el).value).toBe('alpha')
+  })
+
+  it('search|fe|a reload after a row action stays under the text', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', completion_mode: 'any' })] })
+    h.completeTask.mockResolvedValue({ kind: 'ok' })
+    const el = await mountReady()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    await search(el, 'task')
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h.completeTask).toHaveBeenCalledWith('t1')
+    expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'open', 'task')
+  })
+
+  it('search|fe|a row action settling after a new query shows no banner and does not reload', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
+    const pendingComplete = deferred<{ kind: 'error'; status: number }>()
+    h.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountReady()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    await search(el, 'task')
+    const reads = h.listTasks.mock.calls.length
+    pendingComplete.resolve({ kind: 'error', status: 500 })
+    await flush()
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(h.listTasks).toHaveBeenCalledTimes(reads)
+  })
+
+  it('search|fe|an empty answer says no title matches, not that there are no tasks', async () => {
+    const el = await mountReady()
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无未完成任务')
+    await search(el, 'nothing')
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('当前筛选下没有标题匹配的任务')
+    await type(el, '')
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无未完成任务')
+  })
+
+  it('search|fe|the no-match text changes inside a live region that stays on the page', async () => {
+    const pending = deferred<{ kind: 'ok'; items: never[] }>()
+    const el = await mountReady()
+    const live = shown(el, 'tasks-list-empty-live')
+    expect(live?.getAttribute('role')).toBe('status')
+    h.listTasks.mockReturnValueOnce(pending.promise)
+    await search(el, 'nothing')
+    expect(shown(el, 'tasks-list-loading')).not.toBeNull()
+    expect(shown(el, 'tasks-list-empty')).toBeNull()
+    expect(shown(el, 'tasks-list-empty-live')).toBe(live)
+    expect(live?.textContent?.trim()).toBe('')
+    pending.resolve({ kind: 'ok', items: [] })
+    await flush()
+    expect(shown(el, 'tasks-list-empty-live')).toBe(live)
+    expect(shown(el, 'tasks-list-empty')?.closest('[role="status"]')).toBe(live)
+    expect(live?.textContent?.trim()).toBe('当前筛选下没有标题匹配的任务')
+  })
+
+  it('search|fe|a refused text reads as such; any other failure keeps the generic line', async () => {
+    const el = await mountReady()
+    h.listTasks.mockResolvedValue({ kind: 'error', status: 422 })
+    await search(el, 'refused')
+    expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('搜索内容无效，请修改后重试')
+    expect(shown(el, 'tasks-list-error')?.getAttribute('role')).toBe('alert')
+    h.listTasks.mockResolvedValue({ kind: 'error', status: 500 })
+    await search(el, 'alpha')
+    expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('加载任务失败，请稍后重试')
+  })
+
+  it('search|fe|a 422 answered to an unsearched read keeps the ordinary load-failed message', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'error', status: 422 })
+    const el = await mountReady()
+    expect(h.listTasks.mock.calls).toEqual([['assigned', undefined, 'open']])
+    expect(shown(el, 'tasks-list-error')?.textContent?.trim()).toBe('加载任务失败，请稍后重试')
+  })
+
+  it('search|fe|the box keeps its element and focus while the rows reload', async () => {
+    const el = await mountReady()
+    const input = box(el)
+    input.focus()
+    await search(el, 'alpha')
+    expect(box(el)).toBe(input)
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('search|fe|unmounting inside the window drops the waiting read', async () => {
+    const el = await mountReady()
+    await type(el, 'alpha')
+    app?.unmount()
+    host?.remove()
+    app = null
+    await elapse()
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+  })
+
+  describe('a new task the search leaves out', () => {
+    async function create(el: HTMLElement, title: string): Promise<void> {
+      const input = shown(el, 'tasks-create-title') as HTMLInputElement
+      input.value = title
+      input.dispatchEvent(new Event('input'))
+      await flush()
+      ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      await flush()
+    }
+
+    beforeEach(() => {
+      h.createTask.mockResolvedValue({ kind: 'ok', id: 'n1' })
+    })
+
+    it('search|fe|hidden|a title without the text gets the notice with the task\'s page and no status switch', async () => {
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前搜索条件下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+      expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+    })
+
+    it.each([
+      ['assigned', 'open'],
+      ['created', 'all'],
+      ['any_role', 'open'],
+    ] as const)('search|fe|hidden|in the %s view under %s, where only the search leaves it out, the notice names the search; clearing the search ends it', async (view, status) => {
+      window.localStorage.setItem(KEY, status)
+      const el = await mountReady()
+      ;(shown(el, `tasks-view-switch-${view}`) as HTMLButtonElement).click()
+      await flush()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前搜索条件下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      await type(el, '')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
+    it.each(['open', 'done'] as const)('search|fe|hidden|in 我委派的 under %s the view\'s copy stands over the search\'s, and clearing the search keeps it', async (status) => {
+      window.localStorage.setItem(KEY, status)
+      const el = await mountReady()
+      ;(shown(el, 'tasks-view-switch-delegated') as HTMLButtonElement).click()
+      await flush()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      await type(el, '')
+      expect(h.listTasks.mock.calls.at(-1)).toEqual(['delegated', undefined, status])
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
+      expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    })
+
+    it('search|fe|hidden|under 已完成 a title without the text keeps the status copy and its switch, and clearing the search keeps them', async () => {
+      window.localStorage.setItem(KEY, 'done')
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      const statusCopy = '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。'
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(statusCopy)
+      expect(shown(el, 'tasks-create-hidden-show-open')).not.toBeNull()
+      await type(el, '')
+      expect(h.listTasks.mock.calls.at(-1)).toEqual(['assigned', undefined, 'done'])
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(statusCopy)
+      expect(shown(el, 'tasks-create-hidden-show-open')).not.toBeNull()
+      expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
+    })
+
+    it('search|fe|hidden|a pasted leading zero-width mark in the box does not make the notice contradict the list', async () => {
+      const el = await mountReady()
+      await search(el, '\u200Balpha')
+      await create(el, 'Alpha plan')
+      expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open', 'alpha')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
+    it('search|fe|hidden|a title holding the text, in any case, gets no notice', async () => {
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'The ALPHA plan')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
+    it('search|fe|hidden|under 已完成 a title holding the text keeps the status notice and its switch', async () => {
+      window.localStorage.setItem(KEY, 'done')
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'Alpha plan')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-show-open')).not.toBeNull()
+    })
+
+    it('search|fe|hidden|a new query clears the notice', async () => {
+      const el = await mountReady()
+      await search(el, 'alpha')
+      await create(el, 'Beta plan')
+      expect(shown(el, 'tasks-create-hidden-notice')).not.toBeNull()
+      await search(el, 'beta')
+      expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
+    })
+
+    it('search|fe|hidden|the match rule ignores case and composition form', () => {
+      expect(titleHoldsTaskSearch('The ALPHA plan', 'alpha')).toBe(true)
+      expect(titleHoldsTaskSearch('café menu', 'café')).toBe(true)
+      expect(titleHoldsTaskSearch('100% done', '%')).toBe(true)
+      expect(titleHoldsTaskSearch('snakeXcase', '_')).toBe(false)
+      expect(titleHoldsTaskSearch('\u200BAlpha plan', '\u200Balpha\u0085')).toBe(true)
+      expect(taskSearchTerm(' \u200B\uFEFF\u0085 ')).toBe('')
+    })
   })
 })

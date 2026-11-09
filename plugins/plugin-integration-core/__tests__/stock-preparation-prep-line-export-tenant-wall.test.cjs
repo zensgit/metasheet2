@@ -73,6 +73,11 @@ const {
   physicalFieldId,
   physicalRow,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+// Batch-refresh step 4 PR-5: the export is a FORMAL surface and consults the REAL refresh governance (over the
+// kit's empty step-4 tables => not governed: today's rows, audit row and workbook) and reads the sheet's lock
+// generation around the read. Both are required (501 by name without them), so every mount wires them.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 
 const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const EXPORT_PATH = '/api/integration/stock-preparation/prep-lines/export'
@@ -249,7 +254,8 @@ function mount({ boundSheet = HAND_BOUND_SHEET, objectId, registry = { [HAND_BOU
       return { member: (MEMBERSHIPS[input && input.userId] || []).includes(input && input.tenantId) }
     },
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, recordsReads, registryCalls, deriveCalls, directoryCalls, auditAppends, xlsxCalls }
 }
 

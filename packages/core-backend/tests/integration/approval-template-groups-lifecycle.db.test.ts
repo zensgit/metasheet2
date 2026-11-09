@@ -1634,8 +1634,9 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   // COUNTEREXAMPLE to that retracted claim: it reaches `approvalTemplateAdminGuard` ONLY through
   // `rbacGuardAny`'s DB-side `isAdmin(userId)` fallback (`rbac/service.ts`: a `user_roles` row with
   // `role_id = 'admin'`) — its dev-token carries `roles=user, perms=` (no admin/manager claim at
-  // all), so `resolveApprovalTemplateVisibilityActor` (which reads ONLY `req.user`, never the DB)
-  // computes `isTemplateManager: false` for it. If the retracted comment's claim had been true,
+  // all), so `resolveApprovalTemplateVisibilityActor` (whose `isTemplateManager` reads ONLY the
+  // `req.user` claims, never the DB — only its `roles` field adds stored role ids) computes
+  // `isTemplateManager: false` for it. If the retracted comment's claim had been true,
   // no such actor could exist. Positive control (the dept-scoped template) proves the guard
   // genuinely let this actor through (a failed guard would 403 on EVERY sub-case, including this
   // one) rather than the endpoint being unreachable for some other reason.
@@ -1710,7 +1711,7 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     const mgrReq = {
       user: { id: mgrUserId, role: 'user', roles: ['user'], permissions: MGR_PERMS },
     } as unknown as Request
-    const mgrActor = resolveApprovalTemplateVisibilityActor(mgrReq)
+    const mgrActor = await resolveApprovalTemplateVisibilityActor(mgrReq)
     expect(mgrActor?.isTemplateManager).toBe(true)
 
     // Negative control: drop the ONE permission code that satisfies a derivation leg — isolates
@@ -1718,7 +1719,7 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     const plainReq = {
       user: { id: `${mgrUserId}-plain`, role: 'user', roles: ['user'], permissions: ['approvals:read'] },
     } as unknown as Request
-    const plainActor = resolveApprovalTemplateVisibilityActor(plainReq)
+    const plainActor = await resolveApprovalTemplateVisibilityActor(plainReq)
     expect(plainActor?.isTemplateManager).toBe(false)
   })
 
@@ -2003,7 +2004,7 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
           department: deptId,
         },
       } as unknown as Request
-      const routeActor = resolveApprovalTemplateVisibilityActor(fakeReq)
+      const routeActor = await resolveApprovalTemplateVisibilityActor(fakeReq)
       expect(routeActor).toBeDefined()
       expect(Object.keys(routeActor!).sort()).toEqual(expectedKeys)
 

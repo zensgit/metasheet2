@@ -571,3 +571,6 @@ describe('ApprovalDetailView 催一下 (WP3 slice 1)', () => {
     expect(button).toBeNull()
   })
 })
+
+// Preload after all eager mock dependencies initialize; keep mount imports unchanged.
+await import('../src/views/approval/ApprovalCenterView.vue')

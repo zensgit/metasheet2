@@ -28,6 +28,11 @@ function answerFor(sql: string, params: unknown[]): { rows: unknown[]; rowCount:
     const ids = (params[0] as string[]) ?? []
     return { rows: ids.filter((id) => id === OVERVIEW).map((id) => ({ id })), rowCount: 0 }
   }
+  // The resolvers' combined stamp statement (grid-export closure, review round 1 fix 2): same overview answer.
+  if (text.startsWith('SELECT id, ((to_jsonb(meta_sheets) ->> \'system_kind\') = $2) AS stock_prep_overview,')) {
+    const ids = (params[0] as string[]) ?? []
+    return { rows: ids.filter((id) => id === OVERVIEW).map((id) => ({ id, stock_prep_overview: true, grid_export_closed: false })), rowCount: 0 }
+  }
   if (/^SELECT perm_code FROM spreadsheet_permissions/i.test(text)) return { rows: [{ perm_code: 'spreadsheet:read' }], rowCount: 1 }
   return { rows: [], rowCount: 0 }
 }

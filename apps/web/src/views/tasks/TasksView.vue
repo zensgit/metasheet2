@@ -47,6 +47,21 @@
                 {{ t.detailRemindLabel }}{{ detailResult.task.remindAt ? formatViewerInstant(detailResult.task.remindAt, undefined, viewerLocale) : t.noReminder }}
               </p>
             </template>
+            <!-- Package 2 (S-G2): the record this task was dispatched from, for a task that has one. The
+                 link is built from the ids alone (tasks/taskSourceLink.ts) and resolved by the router;
+                 nothing is read from the record here, and the record page decides whether the viewer
+                 may open it. Without a usable link the row shows without one. A task dispatched before
+                 the structured source keeps the line its description already holds. -->
+            <p v-if="detailResult.task.source" class="tasks-view__detail-source" data-testid="tasks-detail-source">
+              {{ t.detailSourceLabel }}<router-link
+                v-if="detailSourceLink"
+                :to="detailSourceLink"
+                data-testid="tasks-detail-source-link"
+              >{{ t.detailSourceRecord }}</router-link><span
+                v-else
+                data-testid="tasks-detail-source-plain"
+              >{{ t.detailSourceRecord }}</span>
+            </p>
 
             <ul class="tasks-view__detail-assignees" data-testid="tasks-detail-assignees">
               <li
@@ -55,7 +70,12 @@
                 class="tasks-view__detail-assignee"
                 data-testid="tasks-detail-assignee"
               >
-                <span class="tasks-view__detail-assignee-id">{{ assignee.userId }}</span>
+                <span class="tasks-view__detail-assignee-id">{{ personName(assignee.userId) }}</span>
+                <span
+                  v-if="isDeactivatedPerson(assignee.userId)"
+                  class="tasks-view__person-inactive"
+                  data-testid="tasks-detail-person-inactive"
+                >{{ t.memberInactiveMark }}</span>
                 <span class="tasks-view__detail-assignee-status" data-testid="tasks-detail-assignee-status">
                   {{ assignee.completedAt ? fmt.completedAt(formatViewerInstant(assignee.completedAt, undefined, viewerLocale)) : t.assigneeNotDone }}
                 </span>
@@ -69,7 +89,24 @@
               </li>
             </ul>
 
-            <form v-if="canManageTaskMembers" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
+            <!-- Package 1b: people are picked by name; the user-id form stays as the secondary entry,
+                 folded until it is asked for. -->
+            <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+              <button
+                type="button"
+                data-testid="tasks-detail-pick-assignee"
+                :disabled="detailActionPending"
+                @click="openPicker($event, 'assignee')"
+              >{{ t.pickAssignee }}</button>
+              <button
+                type="button"
+                class="tasks-view__link-button"
+                data-testid="tasks-detail-add-assignee-by-id-toggle"
+                :aria-expanded="addAssigneeByIdOpen ? 'true' : 'false'"
+                @click="addAssigneeByIdOpen = !addAssigneeByIdOpen"
+              >{{ t.addByIdToggle }}</button>
+            </div>
+            <form v-if="canManageTaskMembers" v-show="addAssigneeByIdOpen" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
               <input
                 v-model="newAssigneeId"
                 type="text"
@@ -254,7 +291,12 @@
               <h3>{{ t.followersHeading }}</h3>
               <ul v-if="followersState !== null" data-testid="tasks-detail-followers">
                 <li v-for="followerId in followersState" :key="followerId" data-testid="tasks-detail-follower">
-                  <span>{{ followerId }}</span>
+                  <span>{{ personName(followerId) }}</span>
+                  <span
+                    v-if="isDeactivatedPerson(followerId)"
+                    class="tasks-view__person-inactive"
+                    data-testid="tasks-detail-person-inactive"
+                  >{{ t.memberInactiveMark }}</span>
                   <button
                     v-if="canManageTaskMembers"
                     type="button"
@@ -267,7 +309,22 @@
               <p v-else class="tasks-view__message" data-testid="tasks-detail-followers-unknown">
                 {{ t.followersUnknown }}
               </p>
-              <form v-if="canManageTaskMembers" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
+              <div v-if="canManageTaskMembers" class="tasks-view__member-pick">
+                <button
+                  type="button"
+                  data-testid="tasks-detail-pick-follower"
+                  :disabled="detailActionPending"
+                  @click="openPicker($event, 'follower')"
+                >{{ t.pickFollower }}</button>
+                <button
+                  type="button"
+                  class="tasks-view__link-button"
+                  data-testid="tasks-detail-add-follower-by-id-toggle"
+                  :aria-expanded="addFollowerByIdOpen ? 'true' : 'false'"
+                  @click="addFollowerByIdOpen = !addFollowerByIdOpen"
+                >{{ t.addByIdToggle }}</button>
+              </div>
+              <form v-if="canManageTaskMembers" v-show="addFollowerByIdOpen" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
                 <input
                   v-model="newFollowerId"
                   type="text"
@@ -291,6 +348,15 @@
                 {{ codeMessage(followerError, t) }}
               </p>
             </section>
+
+            <TaskPeoplePicker
+              v-if="canManageTaskMembers"
+              :visible="pickerMode !== null"
+              :mode="pickerMode ?? 'assignee'"
+              :before-request="peopleIdentityHolds"
+              @confirm="onPickerConfirm"
+              @close="pickerMode = null"
+            />
 
             <!-- M3 §3.6: comments. Tombstones render as 已删除; edit/delete gated by
                  `canEditOwnComment` (own-comment only — see the script for the "id unavailable"
@@ -452,7 +518,7 @@
                  option stays enabled (only `aria-pressed` marks it), so keyboard focus stays on it
                  after activation and screen-reader focus mode can reach it; `switchStatus` makes
                  pressing it again a no-op. -->
-            <nav class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
+            <nav ref="statusSwitcherRef" class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
               <button
                 v-for="statusOption in STATUS_FILTERS"
                 :key="statusOption.value"
@@ -463,6 +529,19 @@
                 @click="switchStatus(statusOption.value)"
               >{{ t[statusOption.labelKey] }}</button>
             </nav>
+            <!-- Title search, on top of the view and the status above. The box stays on the page while
+                 the rows below reload, so typing keeps its focus. -->
+            <div class="tasks-view__search">
+              <input
+                v-model="searchInput"
+                type="search"
+                class="tasks-view__search-input"
+                data-testid="tasks-search-input"
+                :maxlength="TASK_SEARCH_MAX_LENGTH"
+                :placeholder="t.searchPlaceholder"
+                :aria-label="t.searchLabel"
+              />
+            </div>
 
             <form class="tasks-view__create" data-testid="tasks-create-form" @submit.prevent="onCreate">
               <input
@@ -514,6 +593,42 @@
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
+            <!-- A create the server took while 已完成 is on: the new task is not completed, so the
+                 reloaded list leaves it out. Say so inline, without switching the filter for the
+                 viewer (it is their remembered choice). The new task's page is always offered.
+                 The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
+                 我委派的 the view leaves it out under any status, so the copy does not put it down
+                 to the filter alone. The search is named only when the view and status would
+                 otherwise list the new task, with the task's page only; when the view or status also
+                 leaves it out, their copy stands. Cleared by the next create, a status or view
+                 switch, and a route change. A search change drops only the search's reason, so a
+                 task the status or view still leaves out keeps its notice.
+                 The role="status" region is always mounted and only its content comes and goes: a
+                 polite live region that enters the page together with its text is not reliably
+                 announced, while a change inside an existing one is. Empty, it takes no space. -->
+            <div data-testid="tasks-create-hidden-live" role="status">
+              <div
+                v-if="createdHidden !== null"
+                class="tasks-view__created-hidden"
+                data-testid="tasks-create-hidden-notice"
+              >
+                <span data-testid="tasks-create-hidden-text">{{
+                  createdHidden.bySearch && createdHidden.viewLists && !createdHidden.byStatus
+                    ? t.createdHiddenBySearch
+                    : createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                }}</span>
+                <button
+                  v-if="createdHidden.viewLists && createdHidden.byStatus"
+                  type="button"
+                  data-testid="tasks-create-hidden-show-open"
+                  @click="onShowOpenFromNotice"
+                >{{ t.createdHiddenShowOpen }}</button>
+                <router-link
+                  :to="`/tasks/${encodeURIComponent(createdHidden.id)}`"
+                  data-testid="tasks-create-hidden-open-task"
+                >{{ t.createdHiddenOpenTask }}</router-link>
+              </div>
+            </div>
             <!-- Complete/reopen results other than ok/org_missing (forbidden / not_found / error) used
                  to be silently dropped — the click just did nothing, with no way to tell "it worked" from
                  "it failed". This surfaces the failure WITHOUT clearing the list, so the row the action
@@ -533,7 +648,8 @@
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
-              :rows-filtered="currentStatus !== 'all'"
+              :rows-filtered="currentStatus !== 'all' || activeSearch !== ''"
+              :rows-searched="activeSearch !== ''"
               :rows-truncated="listResult.truncated"
               :reload-items="reloadListQuietly"
               @org-missing="onListsOrgMissing"
@@ -593,15 +709,19 @@
                 >{{ t.reopen }}</button>
               </li>
             </ul>
-            <p v-else-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
-              {{ currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
-            </p>
             <p v-else-if="listResult.kind === 'error'" class="tasks-view__message" data-testid="tasks-list-error" role="alert">
-              {{ t.listLoadFailed }}
+              {{ listResult.invalidSearch === true ? t.searchInvalid : t.listLoadFailed }}
             </p>
-            <p v-else class="tasks-view__message" data-testid="tasks-list-loading">
+            <p v-else-if="listResult.kind === 'loading'" class="tasks-view__message" data-testid="tasks-list-loading">
               {{ t.loading }}
             </p>
+            <!-- The empty line, including the search's no-match text, is said in an always-mounted
+                 polite region, for the same reason as the created-task notice above. -->
+            <div data-testid="tasks-list-empty-live" role="status">
+              <p v-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
+                {{ activeSearch !== '' ? t.listEmptySearch : currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
+              </p>
+            </div>
           </div>
         </div>
       </template>
@@ -634,8 +754,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
@@ -652,6 +773,7 @@ import {
   deleteTask,
   editComment,
   getTask,
+  getTaskPeople,
   leaveTask,
   listAllTaskLists,
   listComments,
@@ -669,15 +791,24 @@ import {
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskPerson,
   type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
+import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
+import { taskSourceRecordPath } from '../../tasks/taskSourceLink'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
-import { readTaskStatusFilter, writeTaskStatusFilter } from '../../tasks/tasksStatusFilter'
+import {
+  readTaskStatusFilter,
+  statusFilterHidesNewTask,
+  viewListsNewTask,
+  writeTaskStatusFilter,
+} from '../../tasks/tasksStatusFilter'
+import { TASK_SEARCH_DEBOUNCE_MS, TASK_SEARCH_MAX_LENGTH, taskSearchTerm, titleHoldsTaskSearch } from '../../tasks/tasksSearch'
 import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
@@ -695,6 +826,7 @@ import {
   type EditorState,
   type TaskDraft,
 } from '../../tasks/tasksDraft'
+import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../../tasks/TaskPeoplePicker.vue'
 import TaskDetailEditor from './TaskDetailEditor.vue'
 import TaskDetailLists, { type DetailListsError, type MyListsState } from './TaskDetailLists.vue'
 import TaskListsSidebar from './TaskListsSidebar.vue'
@@ -742,6 +874,19 @@ const STATUS_FILTERS: Array<{ value: TaskStatusFilter; labelKey: keyof TasksText
 
 const currentStatus = ref<TaskStatusFilter>(readTaskStatusFilter())
 
+// Title search. `searchInput` is the box; `activeSearch` is its normalized text, the term the server
+// searches for, which the list reads under behind a debounce (see `watch(searchInput, ...)`). Kept across view and status switches and across
+// a visit to a task's page, like the view and status; not remembered per browser.
+const searchInput = ref('')
+const activeSearch = ref('')
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearSearchTimer(): void {
+  if (searchTimer === null) return
+  clearTimeout(searchTimer)
+  searchTimer = null
+}
+
 type ListRenderState =
   | { kind: 'loading' }
   // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
@@ -749,7 +894,10 @@ type ListRenderState =
   // filter leaves out).
   | { kind: 'ok'; items: TaskListItem[]; truncated: boolean }
   | { kind: 'empty' }
-  | { kind: 'error' }
+  // `invalidSearch`: the server refused the search text (only text the box cannot rule out itself,
+  // such as a paste that normalizes to more than the limit), so the viewer can act on it unlike a
+  // failed read.
+  | { kind: 'error'; invalidSearch?: boolean }
 
 const listResult = ref<ListRenderState>({ kind: 'loading' })
 
@@ -761,6 +909,11 @@ type DetailRenderState =
   | { kind: 'error' }
 
 const detailResult = ref<DetailRenderState>({ kind: 'loading' })
+// Package 2 (S-G2): the app path of the source record, or `null` (no source, or no link can be built).
+const detailSourceLink = computed<string | null>(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && state.task.source ? taskSourceRecordPath(state.task.source) : null
+})
 
 const orgMissingFromAction = ref(false)
 
@@ -789,6 +942,15 @@ const createErrorInvalidTitle = ref(false)
 // looks up), so no form input reaches that code; the date codes can come back for a due date the
 // pre-check let through.
 const createErrorCode = ref<string | null>(null)
+// The task the last create made when the status filter it was made under leaves it out of the
+// list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
+// whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
+// only then does switching the status filter reach it.
+// `byStatus`: the status filter leaves it out. `bySearch`: the new title does not hold the active
+// search text. Each reason is fixed at create time; a search change drops only `bySearch`.
+const createdHidden = ref<{ id: string; viewLists: boolean; byStatus: boolean; bySearch: boolean } | null>(null)
+// The status switch's nav, for moving focus after the notice's action removes the notice.
+const statusSwitcherRef = ref<HTMLElement | null>(null)
 
 // ---------------------------------------------------------------------------------------------
 // M3 (backend contract §3.1, §3.3-§3.7): subtasks, membership, followers, comments, delete.
@@ -826,6 +988,39 @@ const canLeaveCurrentTask = computed(() => {
 })
 const newFollowerId = ref('')
 const followerError = ref<string | null>(null)
+// Package 1b: the people picker, the folded user-id forms, and the names on the task
+// (`GET /api/tasks/:id/people`). The names are kept only from an `ok` answer; anything else leaves
+// the ids as they are.
+const pickerMode = ref<TaskPeoplePickerMode | null>(null)
+const addAssigneeByIdOpen = ref(false)
+const addFollowerByIdOpen = ref(false)
+const taskPeople = shallowRef<Map<string, TaskPerson> | null>(null)
+let taskPeopleGeneration = 0
+// The identity (`readDispatchIdentity`: the user and org a request would carry, read the way the
+// record dispatch dialog reads it) the names and the picker's rows on screen belong to. When another
+// one is seen — a storage change from another tab, a session switch in this tab, right before a
+// picker search, or when a names answer lands — the names are dropped, a names read still out is
+// dropped with them, the picker closes, and the page holds the new identity from then on (the next
+// detail read loads that account's names). A token refresh for the same user and org is not a
+// change. Client-side and compared for equality only; the server checks every request.
+let peopleIdentity = readDispatchIdentity()
+// How many times another identity has been seen (each time `peopleIdentityHolds` takes a new one). A
+// batch of picked people is bound to the count it started under, so a switch away and back during
+// the batch still ends it: coming back to the starting identity does not resume the writes.
+let peopleIdentitySwitches = 0
+
+/** `true` while the identity a request would carry is the one the names belong to; otherwise drops
+ *  the names and closes the picker (see above), takes the new identity and answers `false`. */
+function peopleIdentityHolds(): boolean {
+  const current = readDispatchIdentity()
+  if (current === peopleIdentity) return true
+  peopleIdentity = current
+  peopleIdentitySwitches += 1
+  taskPeople.value = null
+  taskPeopleGeneration += 1
+  pickerMode.value = null
+  return false
+}
 
 // Row-level abilities from the detail body (contract §3.2). `false` hides the controls the server
 // would answer with its uniform 404; an absent flag (an older body) leaves them visible, and the
@@ -970,11 +1165,24 @@ let listGeneration = 0
 // an await means the response belongs to a page the viewer isn't looking at anymore.
 let listPageToken = 0
 
+/** The list read both loaders make. Without search text the call keeps its three arguments, so the
+ *  request is the one the page sent before search existed. */
+function readList(): ReturnType<typeof listTasks> {
+  const q = activeSearch.value
+  return q === ''
+    ? listTasks(currentView.value, undefined, currentStatus.value)
+    : listTasks(currentView.value, undefined, currentStatus.value, q)
+}
+
+function failedListState(result: { kind: string; status?: number }): ListRenderState {
+  return { kind: 'error', invalidSearch: result.kind === 'error' && result.status === 422 && activeSearch.value !== '' }
+}
+
 async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
   listResult.value = { kind: 'loading' }
-  const result = await listTasks(currentView.value, undefined, currentStatus.value)
+  const result = await readList()
   if (mine !== listGeneration) return
 
   if (result.kind === 'ok') {
@@ -991,7 +1199,7 @@ async function loadList(): Promise<void> {
   // 'predicate_error' | 'forbidden' | 'not_found' | 'error': all render as the same discriminable
   // failure state (distinct from 'empty' — an empty 200 and a failed load must never look the
   // same), but 'predicate_error' specifically must NOT set `orgMissingFromAction`.
-  listResult.value = { kind: 'error' }
+  listResult.value = failedListState(result)
 }
 
 /** M4 (design §4.6, `[fe-40]`): the list re-read in place for the assigned view's grouping board
@@ -1001,7 +1209,7 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
-  const result = await listTasks(currentView.value, undefined, currentStatus.value)
+  const result = await readList()
   if (mine !== listGeneration) return
   if (result.kind === 'ok') {
     listResult.value =
@@ -1014,7 +1222,7 @@ async function reloadListQuietly(): Promise<void> {
     orgMissingFromAction.value = true
     return
   }
-  listResult.value = { kind: 'error' }
+  listResult.value = failedListState(result)
 }
 
 // Same out-of-order-resolution discipline as `listGeneration` above, for the detail read: a
@@ -1030,6 +1238,34 @@ async function loadDetail(id: string): Promise<void> {
   if (mine !== detailGeneration) return
   detailResult.value = result.kind === 'ok' ? { kind: 'ok', task: result.task } : { kind: result.kind }
   if (result.kind === 'ok' && result.task.followers !== undefined) followersState.value = result.task.followers
+  if (result.kind === 'ok') void loadTaskPeople(id)
+}
+
+/** Package 1b: the names on the task. Read after every detail read; only an `ok` answer for the
+ *  task still on screen is kept. A failure, a thrown call or any other answer changes nothing. */
+async function loadTaskPeople(id: string): Promise<void> {
+  // Asked under the identity held from here on: one seen to differ now is taken first.
+  peopleIdentityHolds()
+  taskPeopleGeneration += 1
+  const mine = taskPeopleGeneration
+  let result: Awaited<ReturnType<typeof getTaskPeople>> | undefined
+  try {
+    result = await getTaskPeople(id)
+  } catch {
+    return
+  }
+  if (mine !== taskPeopleGeneration || taskId.value !== id) return
+  // An answer that lands under another identity than the one it was asked under is dropped.
+  if (!peopleIdentityHolds()) return
+  if (result && result.kind === 'ok') taskPeople.value = result.people
+}
+
+function personName(userId: string): string {
+  return taskPeople.value?.get(userId)?.name || userId
+}
+
+function isDeactivatedPerson(userId: string): boolean {
+  return taskPeople.value?.get(userId)?.status === 'inactive'
 }
 
 /** M3: a SECOND read the detail page needs — `GET /api/tasks/:id` (`loadDetail` above) does not
@@ -1063,6 +1299,7 @@ async function enterDetail(id: string): Promise<void> {
 function switchView(view: TaskView): void {
   if (view === currentView.value) return
   listPageToken += 1
+  createdHidden.value = null
   currentView.value = view
   void loadList()
 }
@@ -1072,9 +1309,46 @@ function switchView(view: TaskView): void {
 function switchStatus(status: TaskStatusFilter): void {
   if (status === currentStatus.value) return
   listPageToken += 1
+  createdHidden.value = null
   currentStatus.value = status
   writeTaskStatusFilter(status)
   void loadList()
+}
+
+/** Same page-moved-on discipline as `switchStatus`. The page reads from the first row (it sends no
+ *  offset), so a new query always starts there. */
+function applySearch(q: string): void {
+  if (q === activeSearch.value) return
+  listPageToken += 1
+  const hidden = createdHidden.value
+  createdHidden.value = hidden !== null && (hidden.byStatus || !hidden.viewLists) ? { ...hidden, bySearch: false } : null
+  activeSearch.value = q
+  void loadList()
+}
+
+// `v-model` on the box does not update during an IME composition, so unfinished pinyin is not
+// searched. Clearing the box, or leaving nothing in it but blanks and zero-width marks, restores the
+// list at once; text that normalizes to the active query reads nothing.
+watch(searchInput, (raw) => {
+  clearSearchTimer()
+  const q = taskSearchTerm(raw)
+  if (q === '') {
+    applySearch('')
+    return
+  }
+  if (q === activeSearch.value) return
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    applySearch(q)
+  }, TASK_SEARCH_DEBOUNCE_MS)
+})
+
+/** The hidden-by-filter notice's action: the same switch as pressing 未完成. The notice (and the
+ *  button that was pressed) goes away, so focus moves to the 未完成 button it pressed for the
+ *  viewer instead of falling back to the page body. */
+function onShowOpenFromNotice(): void {
+  switchStatus('open')
+  void focusAfterSwap(() => statusSwitcherRef.value, 'tasks-status-switch-open')
 }
 
 /** After a create the server took: the title and the due fields are emptied (the mode stays). */
@@ -1087,6 +1361,7 @@ function clearCreateForm(): void {
 async function onCreate(): Promise<void> {
   const title = newTitle.value.trim()
   if (!title || creating.value) return
+  createdHidden.value = null
   createErrorVisible.value = false
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
@@ -1117,6 +1392,13 @@ async function onCreate(): Promise<void> {
     if (result.kind === 'ok') {
       clearCreateForm()
       notifyTasksChanged()
+      // Decided from the filter and the search text alone (a new task is never completed), not from
+      // the reloaded rows.
+      const bySearch = activeSearch.value !== '' && !titleHoldsTaskSearch(title, activeSearch.value)
+      const byStatus = statusFilterHidesNewTask(currentStatus.value)
+      if (bySearch || byStatus) {
+        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value), byStatus, bySearch }
+      }
       await loadList()
     } else if (result.kind === 'org_missing') {
       orgMissingFromAction.value = true
@@ -1366,6 +1648,73 @@ async function onAddAssignee(): Promise<void> {
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** Package 1b: the picker's people, added one at a time through the same write as the user-id form,
+ *  in the order they were ticked; the first failure stops the rest and shows next to the form.
+ *  The batch belongs to the identity the picker's rows were read under (see `peopleIdentityHolds`):
+ *  one seen to differ right before a write (the first included) or when an answer lands, or a switch
+ *  away and back in between, ends it there: the rest is not sent and that answer is not applied. */
+async function addPickedMembers(kind: TaskPeoplePickerMode, userIds: string[]): Promise<void> {
+  const id = taskId.value
+  if (!id || userIds.length === 0 || detailActionPending.value) return
+  const switchesAtStart = peopleIdentitySwitches
+  const batchIdentityHolds = () => peopleIdentityHolds() && peopleIdentitySwitches === switchesAtStart
+  const setError = (code: string | null) => {
+    if (kind === 'assignee') membershipError.value = code
+    else followerError.value = code
+  }
+  setError(null)
+  actionErrorKind.value = null
+  const token = ++detailActionToken
+  detailActionPending.value = true
+  let added = false
+  let failed = false
+  try {
+    for (const userId of userIds) {
+      if (!batchIdentityHolds()) {
+        if (added) notifyTasksChanged()
+        return
+      }
+      const result = kind === 'assignee' ? await addAssignee(id, userId) : await addFollower(id, userId)
+      if (token !== detailActionToken) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      // A write that went through is still announced (the counts are read again under whoever is
+      // signed in now); nothing from the answer reaches the page and the detail is not read again.
+      if (!batchIdentityHolds()) {
+        if (added || result.kind === 'ok') notifyTasksChanged()
+        return
+      }
+      if (result.kind !== 'ok') {
+        applyDetailFailure(result, (code) => setError(code))
+        failed = true
+        break
+      }
+      added = true
+      if (kind === 'follower' && 'followers' in result.task) followersState.value = result.task.followers
+    }
+    if (!added) return
+    if (!failed) orgMissingFromAction.value = false
+    notifyTasksChanged()
+    await loadDetail(id)
+  } finally {
+    if (token === detailActionToken) detailActionPending.value = false
+  }
+}
+
+/** A pick button: focused first (a click does not focus a button in macOS Safari), so the picker hands
+ *  focus back to it on close. */
+function openPicker(event: MouseEvent, mode: TaskPeoplePickerMode): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  pickerMode.value = mode
+}
+
+function onPickerConfirm(picked: TaskPeoplePicked): void {
+  const kind = pickerMode.value
+  pickerMode.value = null
+  if (kind) void addPickedMembers(kind, picked.ids)
 }
 
 async function onRemoveAssignee(userId: string): Promise<void> {
@@ -1902,8 +2251,17 @@ const unsubscribeLists = onListsChanged(() => {
   if (contextState.value?.state === 'ready' && taskId.value) void loadMyLists()
 })
 
+// The names' identity (see `peopleIdentityHolds`): checked on a session switch in this tab and on a
+// storage change from another tab, which this tab is not otherwise told about.
+const stopPeopleSessionSwitch = onAuthSessionSwitch(() => { peopleIdentityHolds() })
+const onPeopleStorage = () => { peopleIdentityHolds() }
+if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleStorage)
+
 onBeforeUnmount(() => {
   unsubscribeLists()
+  stopPeopleSessionSwitch()
+  if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)
+  clearSearchTimer()
 })
 
 /** The lists sidebar's read or create, or a grouping-board write, reported no org selected: the
@@ -1990,6 +2348,11 @@ watch(taskId, (id) => {
   // what's showing, so a list action still in flight from before this navigation must be treated
   // as stale too.
   listPageToken += 1
+  createdHidden.value = null
+  // Text still waiting on the debounce is taken as typed: no read now (the viewer left the list), and
+  // the list this route edge or the way back loads reads under what the box shows.
+  clearSearchTimer()
+  activeSearch.value = taskSearchTerm(searchInput.value)
   // A list READ still in flight from before this navigation is stale too: bump the generation so
   // its late result (including a late org_missing) cannot paint over the page now showing.
   listGeneration += 1
@@ -2009,6 +2372,11 @@ watch(taskId, (id) => {
   followersState.value = null
   newFollowerId.value = ''
   followerError.value = null
+  pickerMode.value = null
+  addAssigneeByIdOpen.value = false
+  addFollowerByIdOpen.value = false
+  taskPeople.value = null
+  taskPeopleGeneration += 1
   newCommentBody.value = ''
   commentError.value = null
   editingCommentId.value = null
@@ -2044,6 +2412,28 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.tasks-view__member-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.tasks-view__link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ms-color-primary, #409eff);
+  cursor: pointer;
+}
+
+.tasks-view__person-inactive {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
 .tasks-view {
   padding: 24px;
 }
@@ -2060,6 +2450,15 @@ onMounted(async () => {
   margin: 4px 0;
   font-size: 0.9em;
   color: var(--el-text-color-secondary, #666);
+}
+
+/* A confirmation, not a helper line: normal text size and colour, unlike .tasks-view__note. */
+.tasks-view__created-hidden {
+  margin: 4px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .tasks-view__create-due {
@@ -2109,6 +2508,16 @@ onMounted(async () => {
   margin: 12px 0;
 }
 
+.tasks-view__search {
+  margin: 12px 0;
+}
+
+.tasks-view__search-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 320px;
+}
+
 .tasks-view__create {
   display: flex;
   gap: 8px;
@@ -2127,5 +2536,73 @@ onMounted(async () => {
   gap: 12px;
   padding: 8px 0;
   border-bottom: 1px solid var(--el-border-color-lighter, #eee);
+}
+
+/* Up to 960px. Above that width none of these rules apply.
+   - Long words in block text (titles, descriptions, comment bodies) break instead of widening the
+     page; `break-word` leaves min-content sizes alone, so labels in flex rows keep their words.
+   - The view switcher, the status switcher and the create form wrap, and the create controls,
+     the detail's completion-mode select and its comment textareas are capped at their container.
+   - The home's main column (beside the lists sidebar above 720px) is too narrow for a long title
+     plus status, due date and action on one line, so the task rows wrap: the title starts at 10em
+     and grows up to its own width, and whatever does not fit after it moves to the next line, so
+     the status, due date and action keep their own widths instead of being squeezed. The same rule
+     keeps the title on the drag handle's line in the assigned view's group boards. Titles and
+     assignee ids may break anywhere. */
+@media (max-width: 960px) {
+  .tasks-view {
+    overflow-wrap: break-word;
+  }
+
+  .tasks-view__detail-assignee-id {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-view__switcher,
+  .tasks-view__create {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__create select,
+  .tasks-view__create input,
+  .tasks-view__completion-mode-switch select,
+  .tasks-view__detail textarea {
+    max-width: 100%;
+  }
+
+  .tasks-view__item {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__item-title {
+    flex: 1 1 10em;
+    min-width: 0;
+    max-width: max-content;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Narrow screens (the one-column rule is the existing one above): tighter page padding, assignee
+   rows that wrap their status and remove button under the user id, and the create title on a row
+   of its own so the completion mode, date, time and create button wrap beneath it instead of
+   squeezing it. */
+@media (max-width: 720px) {
+  .tasks-view {
+    padding: 16px;
+  }
+
+  .tasks-view__create {
+    align-items: center;
+  }
+
+  .tasks-view__detail-assignee {
+    flex-wrap: wrap;
+  }
+
+  .tasks-view__create-title {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
 }
 </style>

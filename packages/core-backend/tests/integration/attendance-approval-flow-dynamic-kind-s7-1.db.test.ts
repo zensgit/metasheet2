@@ -295,17 +295,19 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     { label: 'unmodeled dynamic param (dept_head + target)', steps: [{ kind: 'dept_head', target: 'x' }], code: 'APPROVAL_STEP_PARAMS_INVALID' },
   ]
 
-  for (const c of shapeCases) {
+  // Names carry the case index, not a short random draw: two cases share a code, and the UPDATE seeds
+  // stay until afterAll under the (org_id, request_type, name) unique index.
+  for (const [caseIndex, c] of shapeCases.entries()) {
     it(`CREATE rejects ${c.label} → 422 ${c.code}`, async () => {
       setFlag(false)
-      const res = await createFlow(c.steps, `s7-1-create-${c.code}-${runSuffix}-${Math.random().toString(36).slice(2, 6)}`)
+      const res = await createFlow(c.steps, `s7-1-create-${c.code}-${runSuffix}-${caseIndex}`)
       expect(res.status, res.raw).toBe(422)
       expect(errorCode(res)).toBe(c.code)
     })
 
     it(`UPDATE rejects ${c.label} → 422 ${c.code}`, async () => {
       setFlag(false)
-      const flowId = await seedStaticFlowRow(`s7-1-update-${c.code}-${runSuffix}-${Math.random().toString(36).slice(2, 6)}`)
+      const flowId = await seedStaticFlowRow(`s7-1-update-${c.code}-${runSuffix}-${caseIndex}`)
       const res = await updateFlow(flowId, c.steps)
       expect(res.status, res.raw).toBe(422)
       expect(errorCode(res)).toBe(c.code)

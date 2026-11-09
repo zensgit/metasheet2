@@ -249,6 +249,21 @@ async function invokeRoute(
   return res
 }
 
+function expectScopeWriteSerialized(userId: string, writeSqlIncludes: string): void {
+  expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), userId)
+  const roleReads = pgMocks.query.mock.calls
+    .map((call, index) => ({ index, sql: String(call[0]) }))
+    .filter((call) => call.sql.includes('FROM user_roles'))
+  const writeIndex = pgMocks.query.mock.calls.findIndex((call) => String(call[0]).includes(writeSqlIncludes))
+  expect(roleReads.length).toBeGreaterThanOrEqual(2)
+  expect(writeIndex).toBeGreaterThan(roleReads[1].index)
+  const lockAt = namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mock.invocationCallOrder[0]
+  const roleAt = pgMocks.query.mock.invocationCallOrder[roleReads[1].index]
+  const writeAt = pgMocks.query.mock.invocationCallOrder[writeIndex]
+  expect(lockAt).toBeLessThan(roleAt)
+  expect(roleAt).toBeLessThan(writeAt)
+}
+
 describe('admin-users routes', () => {
   beforeEach(() => {
     vi.unstubAllEnvs()
@@ -374,6 +389,7 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect(String(pgMocks.query.mock.calls[1]?.[0])).toContain('ORDER BY created_at DESC, id ASC')
     expect(response.body).toMatchObject({
       ok: true,
       data: {
@@ -387,6 +403,7 @@ describe('admin-users routes', () => {
       id: 'user-1',
       email: 'alpha@example.com',
       mobile: '13800138000',
+      roleIds: [],
       dingtalkLoginEnabled: true,
       dingtalkGrantUpdatedAt: '2026-03-13T00:05:00.000Z',
       dingtalkGrantUpdatedBy: 'Admin One',
@@ -516,6 +533,42 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data.items).toEqual([])
     expect((response.body as Record<string, any>).data.pinUserId).toBe('missing-user')
     expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(false)
+  })
+
+  it('filters and pages the user list on the server without an unbounded load', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [{ c: 11 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users', {
+      query: {
+        page: '2',
+        pageSize: '20',
+        role: 'auditor',
+        accountStatus: 'active',
+        listFilter: 'platform-admin',
+        sort: 'name',
+        dir: 'asc',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const countSql = String(pgMocks.query.mock.calls[0]?.[0])
+    const listSql = String(pgMocks.query.mock.calls[1]?.[0])
+    expect(countSql).toContain('role = $1')
+    expect(countSql).toContain('is_active IS TRUE')
+    expect(countSql).toContain("role = 'admin'")
+    expect(listSql).toContain('ORDER BY name ASC NULLS LAST, id ASC')
+    expect(listSql).toContain('LIMIT $2 OFFSET $3')
+    expect(listSql).not.toContain('LIMIT 10000')
+    expect(String(pgMocks.query.mock.calls[1]?.[1])).not.toContain('10000')
+    expect(pgMocks.query.mock.calls[0]?.[1]).toEqual(['auditor'])
+    expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['auditor', 20, 20])
+    expect((response.body as Record<string, any>).data).toMatchObject({ page: 2, pageSize: 20, total: 11 })
   })
 
   it('rejects non-admin requests', async () => {
@@ -2232,6 +2285,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -2272,6 +2326,38 @@ describe('admin-users routes', () => {
       resourceType: 'delegated-admin-scope',
       resourceId: 'user-2:crm:dept-1',
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
+  })
+
+  it('refuses a department scope assign when the role is gone under the admission lock', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'plugin-admin@example.com',
+          name: 'Plugin Admin',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_DELEGATION_NAMESPACE_NOT_HELD')
+    expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), 'user-2')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
   })
 
   it('creates an organization scope template', async () => {
@@ -2435,6 +2521,7 @@ describe('admin-users routes', () => {
         rows: [{ role_id: 'crm_admin' }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'group-1' }] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2469,6 +2556,7 @@ describe('admin-users routes', () => {
       resourceType: 'delegated-admin-group-scope',
       resourceId: 'user-2:crm:group:group-1',
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_member_groups')
   })
 
   it('applies template member groups to a delegated admin namespace', async () => {
@@ -2512,6 +2600,7 @@ describe('admin-users routes', () => {
           member_count: 2,
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -2543,6 +2632,7 @@ describe('admin-users routes', () => {
         memberGroupCount: 1,
       }),
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_member_groups')
   })
 
   it('adds a department to a scope template', async () => {
@@ -2643,6 +2733,7 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2679,6 +2770,7 @@ describe('admin-users routes', () => {
         mode: 'replace',
       }),
     }))
+    expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
   })
 
   it('updates dingtalk grant and records an audit entry', async () => {
@@ -3148,6 +3240,8 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ is_sign_in_admin: false }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -3398,6 +3492,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
     pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -3413,6 +3508,7 @@ describe('admin-users routes', () => {
           updated_at: '2026-03-12T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ is_sign_in_admin: false }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -3454,6 +3550,39 @@ describe('admin-users routes', () => {
       String(call[0]).includes('UPDATE directory_deprovision_effects'))).toBe(true)
     expect(pgMocks.query.mock.calls.some((call) =>
       String(call[0]).includes('access_generation = COALESCE'))).toBe(true)
+  })
+
+  it('refuses to disable the last sign-in platform admin', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: true }] }
+      if (text.includes('COUNT(*)')) return { rows: [{ c: 0 }] }
+      if (text.includes('FOR UPDATE')) {
+        return {
+          rows: [{
+            id: 'admin-2',
+            email: 'other@example.com',
+            name: '另一位',
+            role: 'admin',
+            is_active: true,
+            activation_status: 'activated',
+            access_generation: 0,
+            is_admin: true,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/status', {
+      params: { userId: 'admin-2' },
+      body: { isActive: false },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('LAST_PLATFORM_ADMIN')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('SET is_active'))).toBe(false)
   })
 
   it('creates a user with preset-driven onboarding metadata', async () => {
@@ -4227,9 +4356,26 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('deleted_at IS NULL')
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('purged_at IS NULL')
     expect((response.body as Record<string, any>).data.temporaryPassword).toBe('TempPass9A')
     expect(bcryptMocks.hash).toHaveBeenCalledWith('TempPass9A', 10)
     expect(auditMocks.auditLog).toHaveBeenCalled()
+  })
+
+  it('does not reset a password for a recycled profile', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/reset-password', {
+      params: { userId: 'user-gone' },
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('deleted_at IS NULL')
+    expect(String(pgMocks.query.mock.calls[0]?.[0])).toContain('purged_at IS NULL')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('password_hash'))).toBe(false)
   })
 
   it('revokes all sessions for a user', async () => {

@@ -56,6 +56,15 @@ const { registerIntegrationRoutes } = require(`${PLUGIN_LIB}/http-routes.cjs`) a
   }) => void
 }
 const EXPORT_ROUTE = 'GET /api/integration/stock-preparation/prep-lines/export'
+// Batch-refresh step 4 PR-5: the export is a FORMAL surface — it consults the REAL refresh governance (the project
+// write lock, the continuation store and PR B's registry reads over the SAME migrated database; these tenants hold
+// no step-4 row, so every project here is not governed and exports as before) and brackets its read with the
+// sheet's lock generation. Both services are required by name (501 without them), so the mount wires the real ones.
+const { createDb } = require(`${PLUGIN_LIB}/db.cjs`) as { createDb: (input: { database: unknown }) => unknown }
+const { createStockPreparationProjectWriteLock } = require(`${PLUGIN_LIB}/stock-preparation-project-write-lock.cjs`) as { createStockPreparationProjectWriteLock: (input: { db: unknown }) => unknown }
+const { createStockPreparationContinuationStore } = require(`${PLUGIN_LIB}/stock-preparation-continuation-store.cjs`) as { createStockPreparationContinuationStore: (input: { db: unknown }) => unknown }
+const { createStockPreparationProjectTargetStore } = require(`${PLUGIN_LIB}/stock-preparation-project-target-store.cjs`) as { createStockPreparationProjectTargetStore: (input: { db: unknown }) => unknown }
+const { createStockPreparationRefreshGovernance } = require(`${PLUGIN_LIB}/stock-preparation-refresh-governance.cjs`) as { createStockPreparationRefreshGovernance: (input: Record<string, unknown>) => unknown }
 const {
   buildStockPreparationTargetDescriptor,
   sandboxStockPreparationTemplate,
@@ -224,10 +233,50 @@ describeIfDatabase('prep-line export tenant wall (real registry, real records, r
     return createPluginScopedMultitableApi(raw as never, PLUGIN_NAME, {})
   }
 
+  // PR-5: the host's plugin database binding shape (src/index.ts `database`: autocommit `query` on the pool, each
+  // `transaction` on its own client), so the lock, the continuation store and the registry reads run as in production.
+  function hostLikeDb() {
+    return createDb({
+      database: {
+        query: async (sql: string, params?: unknown[]) => (await pool.query(sql, params)).rows,
+        transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+          const client = await pool.connect()
+          try {
+            await client.query('BEGIN')
+            const result = await callback({
+              query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows,
+              commit: async () => {},
+              rollback: async () => {},
+            })
+            await client.query('COMMIT')
+            return result
+          } catch (error) {
+            await client.query('ROLLBACK').catch(() => {})
+            throw error
+          } finally {
+            client.release()
+          }
+        },
+      },
+    })
+  }
+
+  function refreshServices() {
+    const continuationStore = createStockPreparationContinuationStore({ db: hostLikeDb() })
+    const projectWriteLock = createStockPreparationProjectWriteLock({ db: hostLikeDb() })
+    const governance = createStockPreparationRefreshGovernance({
+      continuationStore,
+      projectTargetStore: createStockPreparationProjectTargetStore({ db: hostLikeDb() }),
+      projectWriteLock,
+    })
+    return { stockPreparationProjectWriteLock: projectWriteLock, stockPreparationContinuationStore: continuationStore, stockPreparationRefreshGovernance: governance }
+  }
+
   function mountExport(target: Record<string, unknown>) {
     const auditAppends: unknown[] = []
     const xlsxCalls: unknown[] = []
     const services = {
+      ...refreshServices(),
       externalSystemRegistry: inert(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
       adapterRegistry: inert(['createAdapter', 'listAdapterKinds']),
       pipelineRegistry: inert(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),

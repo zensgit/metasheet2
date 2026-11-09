@@ -22,6 +22,7 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  "packages/mssql-readonly-utils"
   # The packaged migration runner resolves compiled TS migrations from dist,
   # source SQL migrations from src/db/migrations, and legacy SQL bridge
   # migrations from packages/core-backend/migrations.
@@ -54,6 +55,7 @@ REQUIRED_PATHS=(
   "package.json"
   "pnpm-lock.yaml"
   "pnpm-workspace.yaml"
+  "vendor/xlsx-0.20.3.tgz"
   "docs/deployment/attendance-windows-onprem-easy-start-20260306.md"
   "docs/deployment/attendance-onprem-package-layout-20260306.md"
   "docs/deployment/attendance-windows-onprem-no-docker-20260306.md"

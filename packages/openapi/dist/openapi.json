@@ -651,6 +651,187 @@
           }
         }
       },
+      "SecurityActionError": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "UNAUTHORIZED",
+                  "PASSWORD_CHANGE_REQUIRED",
+                  "SECURITY_ACTION_SESSION_REQUIRED",
+                  "SECURITY_ACTION_PURPOSE_UNAVAILABLE",
+                  "SECURITY_ACTION_METHOD_UNAVAILABLE",
+                  "SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED",
+                  "SECURITY_ACTION_ASSURANCE_INSUFFICIENT",
+                  "SECURITY_ACTION_CONNECTION_NOT_PERMITTED",
+                  "SECURITY_ACTION_CREDENTIAL_REJECTED",
+                  "SECURITY_ACTION_ORG_CONTEXT_REQUIRED",
+                  "SECURITY_ACTION_TARGET_CONFLICT",
+                  "SECURITY_ACTION_STATE_CHANGED",
+                  "SECURITY_ACTION_INVALID_REQUEST",
+                  "SECURITY_ACTION_RATE_LIMITED",
+                  "SECURITY_ACTION_UNAVAILABLE",
+                  "SECURITY_ACTION_PROOF_UNAVAILABLE"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "object",
+                "description": "Closed-set values only; never a request value.",
+                "properties": {
+                  "nextStep": {
+                    "type": "string",
+                    "enum": [
+                      "admin_assisted_local_credential"
+                    ]
+                  },
+                  "retryAfter": {
+                    "type": "integer"
+                  },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "DirectoryIntegrationCapability": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "governance",
+          "effective",
+          "reason",
+          "anchor"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "governance": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "legacy",
+              "gated",
+              "unsupported"
+            ],
+            "description": "Null when the provider is not registered"
+          },
+          "effective": {
+            "nullable": true,
+            "type": "boolean",
+            "description": "Set only where governance is gated; null means the stored state does not govern the capability"
+          },
+          "reason": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "switch_off",
+              "schema_unavailable",
+              "org_mismatch",
+              "state_mismatch",
+              "provider_not_registered",
+              "governed_by_legacy_path",
+              "unsupported",
+              "implementation_missing",
+              "not_enabled",
+              "integration_inactive",
+              "scope_changed"
+            ]
+          },
+          "anchor": {
+            "type": "object",
+            "required": [
+              "bound",
+              "matchesCurrent"
+            ],
+            "properties": {
+              "bound": {
+                "type": "boolean"
+              },
+              "matchesCurrent": {
+                "type": "boolean",
+                "nullable": true
+              }
+            }
+          },
+          "legacy": {
+            "type": "object",
+            "description": "Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only",
+            "additionalProperties": true
+          }
+        }
+      },
+      "DirectoryIntegrationCapabilities": {
+        "type": "object",
+        "required": [
+          "integrationId",
+          "provider",
+          "integrationStatus",
+          "revision",
+          "updatedAt",
+          "capabilities"
+        ],
+        "properties": {
+          "integrationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "integrationStatus": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero while the integration has no capability row"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "capabilities": {
+            "type": "object",
+            "required": [
+              "directory",
+              "login",
+              "notification"
+            ],
+            "properties": {
+              "directory": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              },
+              "login": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              },
+              "notification": {
+                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+              }
+            }
+          }
+        }
+      },
       "DirectErrorResponse": {
         "type": "object",
         "properties": {
@@ -14359,6 +14540,244 @@
             "type": "boolean"
           }
         }
+      },
+      "AttendanceFixedScheduleConfigSave": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shiftId",
+          "startDate",
+          "endDate"
+        ],
+        "properties": {
+          "shiftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "orgId": {
+            "type": "string",
+            "description": "Must equal the authenticated organization when supplied."
+          },
+          "expectedConfigRevision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Zero expects absence; positive values require an exact saved revision. Omitted retains legacy unconditional save."
+          }
+        }
+      },
+      "AttendanceFixedScheduleDesired": {
+        "type": "object",
+        "nullable": true,
+        "additionalProperties": false,
+        "required": [
+          "shiftId",
+          "startDate",
+          "endDate",
+          "revision"
+        ],
+        "properties": {
+          "shiftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "AttendanceFixedScheduleSavedConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "orgId",
+          "groupId",
+          "shiftId",
+          "startDate",
+          "endDate",
+          "revision",
+          "updatedBy",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shiftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "updatedBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AttendanceFixedScheduleEditor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "groupId",
+          "state",
+          "reasonCodes",
+          "desired",
+          "drift",
+          "referenceEligibility"
+        ],
+        "properties": {
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "not_configured",
+              "configuration_changed",
+              "pending_apply",
+              "effective"
+            ]
+          },
+          "reasonCodes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "NO_DESIRED_CONFIG",
+                "NO_TARGET_MEMBERS",
+                "DIFFERENT_MANAGED_KEY_ACTIVE",
+                "TARGET_MEMBER_MISSING",
+                "NON_MEMBER_TARGET_ACTIVE",
+                "DUPLICATE_MATCHING_ASSIGNMENT",
+                "ASSIGNMENT_VALUE_MISMATCH",
+                "UNPUBLISHED_MANAGED_ROW",
+                "EFFECTIVE"
+              ]
+            }
+          },
+          "desired": {
+            "$ref": "#/components/schemas/AttendanceFixedScheduleDesired"
+          },
+          "drift": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "managedSets"
+            ],
+            "properties": {
+              "managedSets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "shiftId",
+                    "startDate",
+                    "endDate",
+                    "producerKey",
+                    "rowCount"
+                  ],
+                  "properties": {
+                    "shiftId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "startDate": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "endDate": {
+                      "type": "string",
+                      "format": "date",
+                      "nullable": true
+                    },
+                    "producerKey": {
+                      "type": "string"
+                    },
+                    "rowCount": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "referenceEligibility": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": false,
+            "required": [
+              "shiftId",
+              "allowed",
+              "reasonCode"
+            ],
+            "properties": {
+              "shiftId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "allowed": {
+                "type": "boolean"
+              },
+              "reasonCode": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED",
+                  null
+                ]
+              }
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -14663,6 +15082,99 @@
     }
   },
   "paths": {
+    "/api/admin/directory/integration-capabilities/{integrationId}": {
+      "get": {
+        "summary": "Show the capability state of one directory integration",
+        "description": "Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.",
+        "operationId": "getDirectoryIntegrationCapabilities",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "integrationId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capability state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/DirectoryIntegrationCapabilities"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the integration does not exist (DIRECTORY_NOT_FOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/plugins": {
       "get": {
         "summary": "List plugins (admin)",
@@ -17292,6 +17804,241 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{groupId}/fixed-schedule/editor": {
+      "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Read fixed schedule editor configuration and candidate reference eligibility",
+        "description": "Uses the existing fixed schedule preview actor, organization and group-manager authorization. The authenticated organization is authoritative. Eligibility is advisory and does not grant write permission; apply and rebuild recheck their existing authorization and canonical posture. An absent shiftId selects the saved desired shift, or returns null eligibility when unconfigured. No coverage counts or raw member identifiers are returned. Unreadable segment or posture state fails closed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "shiftId",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Desired configuration, old managed sets and candidate reference eligibility",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceFixedScheduleEditor"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid group or candidate shift identifier"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Actor",
+            "organization selector or group preview authority rejected": null
+          },
+          "404": {
+            "description": "Group or selected shift not found in authenticated organization"
+          },
+          "503": {
+            "description": "Fixed schedule",
+            "persisted segment or canonical posture state unavailable": null
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{groupId}/fixed-schedule/config": {
+      "x-plugin": "plugin-attendance",
+      "put": {
+        "summary": "Save fixed schedule desired configuration",
+        "description": "Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceFixedScheduleConfigSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved desired configuration and authoritative revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceFixedScheduleSavedConfig"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid date window",
+            "identifier or revision": null
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Actor",
+            "organization or dispatch authority rejected": null
+          },
+          "404": {
+            "description": "Group or shift not found in authenticated organization"
+          },
+          "409": {
+            "description": "ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry"
+          },
+          "503": {
+            "description": "Attendance tables unavailable"
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{groupId}/fixed-schedule/config/update": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Save fixed schedule desired configuration through the POST update alias",
+        "description": "Uses the identical handler, authorization, validation, revision checks and response as PUT config.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceFixedScheduleConfigSave"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved desired configuration and authoritative revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceFixedScheduleSavedConfig"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid date window",
+            "identifier or revision": null
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Actor",
+            "organization or dispatch authority rejected": null
+          },
+          "404": {
+            "description": "Group or shift not found in authenticated organization"
+          },
+          "409": {
+            "description": "ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry"
+          },
+          "503": {
+            "description": "Attendance tables unavailable"
           }
         }
       }
@@ -28884,6 +29631,216 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/auth/security-actions/verify": {
+      "post": {
+        "summary": "Re-verify the signed-in user for one security action",
+        "description": "Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'. Returns a 300-second single-use proof bound to the session, the authenticated organization, the purpose and the target. A purpose whose prerequisites are not delivered is refused before any data is read. Before authentication the route gives no answer of its own. Responses are not cacheable.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "purpose",
+                  "connectionId",
+                  "method",
+                  "password"
+                ],
+                "properties": {
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "external_identity_bind",
+                      "external_identity_unbind",
+                      "login_grant_enable",
+                      "login_grant_disable"
+                    ]
+                  },
+                  "connectionId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "targetIdentityId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Required for every purpose except external_identity_bind, and refused for it."
+                  },
+                  "expectedBindingRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Present exactly when targetIdentityId is present."
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "local_password"
+                    ]
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "clientBindingDigest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A single-use proof was issued",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "proof": {
+                          "type": "string",
+                          "description": "Opaque; present only in this response body."
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "enum": [
+                            "external_identity_bind",
+                            "external_identity_unbind",
+                            "login_grant_enable",
+                            "login_grant_disable"
+                          ]
+                        },
+                        "connectionId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "method": {
+                          "type": "string",
+                          "enum": [
+                            "local_password"
+                          ]
+                        },
+                        "assurance": {
+                          "type": "string",
+                          "enum": [
+                            "local_password"
+                          ]
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "ttlSeconds": {
+                          "type": "integer",
+                          "enum": [
+                            300
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused (purpose unavailable, method unavailable, policy refusal or rejected credential)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Organization context, target or state conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request does not satisfy the closed schema; details.fields names schema fields or the fixed entry _unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-user failure limit reached; Retry-After carries details.retryAfter",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityActionError"
+                }
+              }
+            }
           }
         }
       }

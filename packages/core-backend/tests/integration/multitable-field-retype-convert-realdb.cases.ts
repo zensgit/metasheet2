@@ -1447,7 +1447,7 @@ export function defineFieldRetypeConvertRealDbCases(): void {
     })
 
     // ── the realtime (Yjs) path, end to end (ADR 增补 C) ──────────────────────────────────────────────────
-    test('realtime: an edit refused FIELD_SCHEMA_CHANGED on the bridge is no longer dropped in silence — the editors are told, the document and its persisted state are gone, the cell holds what the conversion wrote', async () => {
+    test.each([false, true])('realtime: an edit refused FIELD_SCHEMA_CHANGED on the bridge is no longer dropped in silence — the editors are told, the document and its persisted state are gone, the cell holds what the conversion wrote (delayed persistence: %s)', async (delayPersistence) => {
       const column = await seedColumn([])
       const F = column.fieldId
       const R = column.rec(1)
@@ -1460,11 +1460,33 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       setYjsInvalidatorForRoutes(null)
       const stack = await startCollab()
       const editors: Editor[] = []
+      const persistenceHolder = delayPersistence ? await poolManager.get().getInternalPool().connect() : null
+      let persistenceHeld = false
       try {
         const first = await openEditor(stack, R, F)
         const second = await openEditor(stack, R, F)
         editors.push(first, second)
         expect([first.cell(), second.cell()]).toEqual(['VAL-ORIG', 'VAL-ORIG'])
+        if (persistenceHolder) {
+          await persistenceHolder.query('BEGIN')
+          persistenceHeld = true
+          // Block real INSERTs, but allow yjsRows to observe the not-yet-persisted state.
+          await persistenceHolder.query('LOCK TABLE meta_record_yjs_updates IN SHARE MODE')
+        }
+        const persistedRows = async (): Promise<number> => {
+          const rows = await yjsRows(R)
+          if (persistenceHolder && persistenceHeld) {
+            const holderPid = Number((await persistenceHolder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+            const persistencePid = await backendParkedBehind(holderPid, 'row', 'Yjs persistence')
+            const blocked = await q('SELECT query FROM pg_stat_activity WHERE pid = $1', [persistencePid])
+            expect((blocked.rows[0] as { query: string }).query).toMatch(/insert into "meta_record_yjs_updates"/i)
+            expect(rows).toBe(0)
+            // Release only AFTER the first read: a one-shot read deterministically misses this INSERT.
+            await persistenceHolder.query('ROLLBACK')
+            persistenceHeld = false
+          }
+          return rows
+        }
         // string → select: R already holds its option text, the conversion does not rewrite it
         const token = await previewToken(F, 'select')
 
@@ -1479,7 +1501,12 @@ export function defineFieldRetypeConvertRealDbCases(): void {
           async () => {
             // the edit is in the shared document, in front of both editors, and persisted — and not in the database
             expect([first.cell(), second.cell()]).toEqual(['VAL-ORIG edited', 'VAL-ORIG edited'])
-            persistedWhileParked = await yjsRows(R)
+            // The bridge fence and fire-and-forget Yjs persistence are independent: wait for BOTH
+            // before releasing the conversion, so invalidation has real persisted state to purge.
+            await until('the parked edit to be persisted', async () => {
+              persistedWhileParked = await persistedRows()
+              return persistedWhileParked >= 1
+            })
             expect((await cellState(R, F)).value).toBe('VAL-ORIG')
           },
         )
@@ -1508,6 +1535,8 @@ export function defineFieldRetypeConvertRealDbCases(): void {
         editors.push(reopened)
         expect(reopened.cell()).toBe('VAL-ORIG')
       } finally {
+        if (persistenceHeld) await persistenceHolder!.query('ROLLBACK')
+        persistenceHolder?.release()
         for (const editor of editors) editor.close()
         await stack.close()
         setYjsInvalidatorForRoutes(routesInvalidator)

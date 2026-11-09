@@ -15,7 +15,7 @@ export type MetaApiTokenLabelKey =
   | 'token.meta.created' | 'token.meta.lastUsed' | 'token.meta.expires'
   | 'token.scope.none' | 'token.scope.read' | 'token.scope.write' | 'token.scope.admin'
   | 'token.scope.records-read' | 'token.scope.records-write' | 'token.scope.fields-read'
-  | 'token.scope.comments-read' | 'token.scope.comments-write' | 'token.scope.webhooks-manage'
+  | 'token.scope.comments-read' | 'token.scope.comments-write'
   | 'token.action.copy' | 'token.action.copied' | 'token.action.copyFailed' | 'token.action.create'
   | 'token.action.rotate' | 'token.action.revoke'
   | 'webhook.newTitle' | 'webhook.editTitle' | 'webhook.name'
@@ -27,7 +27,10 @@ export type MetaApiTokenLabelKey =
   | 'webhook.action.create' | 'webhook.action.update' | 'webhook.action.edit'
   | 'webhook.action.enable' | 'webhook.action.disable' | 'webhook.action.deliveries'
   | 'webhook.delivery.recent' | 'webhook.delivery.ok' | 'webhook.delivery.fail'
-  | 'webhook.delivery.retries'
+  | 'webhook.delivery.pending' | 'webhook.delivery.attempts'
+  | 'webhook.meta.sheet' | 'webhook.meta.sheetCurrent' | 'webhook.meta.unbound'
+  | 'webhook.form.boundTo' | 'webhook.action.bind'
+  | 'webhook.notice.manageRequired' | 'webhook.notice.enableInBoundSheet' | 'webhook.notice.bindFirst'
   | 'webhook.retry.section' | 'webhook.retry.maxRetries'
   | 'webhook.retry.maxRetriesHint' | 'webhook.retry.baseDelay'
   | 'webhook.retry.baseDelayHint' | 'webhook.retry.maxDelay'
@@ -104,7 +107,6 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'token.scope.fields-read': { en: 'Fields: read', zh: '字段：读取' },
   'token.scope.comments-read': { en: 'Comments: read', zh: '评论：读取' },
   'token.scope.comments-write': { en: 'Comments: write', zh: '评论：写入' },
-  'token.scope.webhooks-manage': { en: 'Webhooks: manage', zh: 'Webhook：管理' },
   'token.action.copy': { en: 'Copy', zh: '复制' },
   'token.action.copied': { en: 'Copied!', zh: '已复制！' },
   'token.action.copyFailed': { en: 'Copy failed: select it manually', zh: '复制失败，请手动选择复制' },
@@ -137,7 +139,16 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'webhook.delivery.recent': { en: 'Recent Deliveries', zh: '最近投递' },
   'webhook.delivery.ok': { en: 'OK', zh: '成功' },
   'webhook.delivery.fail': { en: 'FAIL', zh: '失败' },
-  'webhook.delivery.retries': { en: 'Retries', zh: '重试次数' },
+  'webhook.delivery.pending': { en: 'PENDING', zh: '等待中' },
+  'webhook.delivery.attempts': { en: 'Attempts', zh: '尝试次数' },
+  'webhook.meta.sheet': { en: 'Sheet', zh: '数据表' },
+  'webhook.meta.sheetCurrent': { en: 'This sheet', zh: '当前数据表' },
+  'webhook.meta.unbound': { en: 'Not bound to a sheet', zh: '未绑定数据表' },
+  'webhook.form.boundTo': { en: 'Bound to: this sheet', zh: '绑定到：当前数据表' },
+  'webhook.action.bind': { en: 'Bind to this sheet', zh: '绑定到当前数据表' },
+  'webhook.notice.manageRequired': { en: 'You do not have permission to manage automation in this sheet.', zh: '没有在此表管理自动化的权限。' },
+  'webhook.notice.enableInBoundSheet': { en: 'Enable it from the sheet it is bound to.', zh: '请在该数据表中开启。' },
+  'webhook.notice.bindFirst': { en: 'Bind it to a sheet first.', zh: '请先绑定数据表。' },
   'webhook.retry.section': { en: 'Retry policy (optional)', zh: '重试策略（可选）' },
   'webhook.retry.maxRetries': { en: 'Max retries', zh: '最大重试次数' },
   'webhook.retry.maxRetriesHint': { en: '0–10 (default 3)', zh: '0–10（默认 3）' },
@@ -256,7 +267,6 @@ const API_SCOPE_LABEL_KEY: Record<string, MetaApiTokenLabelKey> = {
   'fields:read': 'token.scope.fields-read',
   'comments:read': 'token.scope.comments-read',
   'comments:write': 'token.scope.comments-write',
-  'webhooks:manage': 'token.scope.webhooks-manage',
 }
 
 export function apiScopeLabel(scope: string, isZh: boolean): string {
@@ -304,6 +314,13 @@ export function apiDingTalkToggleLabel(enabled: boolean, isZh: boolean): string 
 
 export function apiDeliveryResultLabel(success: boolean, isZh: boolean): string {
   return apiTokenLabel(success ? 'webhook.delivery.ok' : 'webhook.delivery.fail', isZh)
+}
+
+/** Webhook delivery history: three states, pending shown as its own state (not as a failure). */
+export function apiWebhookDeliveryStatusLabel(status: string, isZh: boolean): string {
+  if (status === 'success') return apiTokenLabel('webhook.delivery.ok', isZh)
+  if (status === 'pending') return apiTokenLabel('webhook.delivery.pending', isZh)
+  return apiTokenLabel('webhook.delivery.fail', isZh)
 }
 
 export function apiDingTalkScopeLabel(

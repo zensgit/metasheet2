@@ -369,6 +369,63 @@ describe('Multitable context API', () => {
     })
   })
 
+  // R68 (#6454 judge note): a sheet whose human-write-locked column is ALSO required by its own validation rule
+  // can never take a person-created record, so /context says so (`recordCreateBlockedByLock: true`) and the web
+  // hides its create / duplicate entries. Sent only when true and only to an actor who could otherwise create.
+  test('reports recordCreateBlockedByLock only for a locked + required column and an actor who can create', async () => {
+    let fieldRows: any[] = []
+    const contextApp = async (tokenPerms: string[]) => (await createApp({
+      tokenPerms,
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          return { rows: [{ id: 'sheet_lock', base_id: 'base_lock', name: 'Sheet', description: null }] }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          return { rows: [{ id: 'base_lock', name: 'Base', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'workspace_1' }] }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          return { rows: [{ id: 'sheet_lock', base_id: 'base_lock', name: 'Sheet', description: null }] }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          return { rows: [{ id: 'view_grid', sheet_id: 'sheet_lock', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_lock'])
+          return { rows: fieldRows }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })).app
+    const lockedRequired = { id: 'fld_plm', name: 'PLM', type: 'string', property: { humanWriteLock: 'plm_system', validation: [{ type: 'required' }] }, order: 1 }
+    const human = { id: 'fld_note', name: 'Note', type: 'string', property: {}, order: 2 }
+    const load = async (app: express.Express) =>
+      (await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_lock' }).expect(200)).body.data
+
+    const writer = await contextApp(['multitable:read', 'multitable:write'])
+    fieldRows = [lockedRequired, human]
+    const blocked = await load(writer)
+    expect(blocked.capabilities.canCreateRecord).toBe(true)
+    expect(blocked.capabilities.recordCreateBlockedByLock).toBe(true)
+    expect(blocked.fieldPermissions.fld_plm).toEqual({ visible: true, readOnly: true })
+    expect(blocked.fieldPermissions.fld_note).toEqual({ visible: true, readOnly: false })
+
+    // Locked but not required, and required but not locked: a person can still create → key ABSENT.
+    fieldRows = [{ ...lockedRequired, property: { humanWriteLock: 'plm_system' } }, human]
+    expect((await load(writer)).capabilities).not.toHaveProperty('recordCreateBlockedByLock')
+    fieldRows = [{ ...lockedRequired, property: { validation: [{ type: 'required' }] } }, human]
+    expect((await load(writer)).capabilities).not.toHaveProperty('recordCreateBlockedByLock')
+
+    // A reader cannot create anyway → no extra signal for them.
+    const reader = await contextApp(['multitable:read'])
+    fieldRows = [lockedRequired, human]
+    const readerData = await load(reader)
+    expect(readerData.capabilities.canCreateRecord).toBe(false)
+    expect(readerData.capabilities).not.toHaveProperty('recordCreateBlockedByLock')
+  })
+
   test('derives multitable capabilities from req.user role and permissions when token roles/perms are absent', async () => {
     const { app } = await createApp({
       requestRole: 'admin',

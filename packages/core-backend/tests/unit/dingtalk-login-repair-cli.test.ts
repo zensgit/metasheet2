@@ -1,0 +1,855 @@
+/** Login repair CLI policy: client-timeout gate, fixed refusal codes, exit statuses. No database. */
+import { spawn } from 'node:child_process'
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { createServer, type Server, type Socket } from 'node:net'
+import { tmpdir } from 'node:os'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Pool } from 'pg'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS,
+  REPAIR_CLI_QUERY_TIMEOUT_MAX_MS,
+  classifyRepairFailure,
+  guardRepairProcess,
+  readPoolConnection,
+  resolveEffectiveRepairTimeout,
+  resolveRepairClientTimeout,
+  runRepairCli,
+  type RepairEffectiveConnection,
+  type RepairMain,
+} from '../../src/auth/dingtalk-identity-repair-cli'
+import {
+  REPAIR_CLI_CODES,
+  REPAIR_REFUSAL_CODES,
+} from '../../src/auth/dingtalk-identity-repair-codes'
+
+const backendRoot = fileURLToPath(new URL('../..', import.meta.url))
+const source = (relative: string) => readFile(path.join(backendRoot, relative), 'utf8')
+const entry = path.join(backendRoot, 'scripts/dingtalk-login-repair.ts')
+const tsxLoader = createRequire(import.meta.url).resolve('tsx')
+
+describe('resolveRepairClientTimeout', () => {
+  it.each([
+    [{}, { ok: true, value: 45000, floor: 45000, explicit: false }],
+    [{ DB_QUERY_TIMEOUT: '' }, { ok: true, value: 45000, floor: 45000, explicit: false }],
+    [{ DB_QUERY_TIMEOUT: '   ' }, { ok: true, value: 45000, floor: 45000, explicit: false }],
+    [{ DB_QUERY_TIMEOUT: '60000' }, { ok: true, value: 60000, floor: 45000, explicit: true }],
+    [{ DB_QUERY_TIMEOUT: '45000' }, { ok: true, value: 45000, floor: 45000, explicit: true }],
+    [{ DB_STATEMENT_TIMEOUT: '40000' }, { ok: true, value: 55000, floor: 55000, explicit: false }],
+    [{ DB_STATEMENT_TIMEOUT: '40000', DB_QUERY_TIMEOUT: '55000' }, { ok: true, value: 55000, floor: 55000, explicit: true }],
+    [{ DB_STATEMENT_TIMEOUT: '40000', DB_QUERY_TIMEOUT: '54999' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_QUERY_TIMEOUT: '44999' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_QUERY_TIMEOUT: '30000' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_QUERY_TIMEOUT: 'abc' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_QUERY_TIMEOUT: '-1' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_QUERY_TIMEOUT: '0' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    // parseInt('1e9') is 1, exactly what the pool would hold.
+    [{ DB_QUERY_TIMEOUT: '1e9' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_STATEMENT_TIMEOUT: 'x' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    [{ DB_STATEMENT_TIMEOUT: '-5' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' }],
+    // Upper bound: Node arms a larger setTimeout delay as 1 ms, so pg's read timer would fire at once.
+    [{ DB_QUERY_TIMEOUT: '2147483647' }, { ok: true, value: 2147483647, floor: 45000, explicit: true }],
+    [{ DB_QUERY_TIMEOUT: '2147483648' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_QUERY_TIMEOUT: '9999999999' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    // PostgreSQL's own maximum statement_timeout: the floor (budget + 15 s) cannot be armed.
+    [{ DB_STATEMENT_TIMEOUT: '2147483647' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_STATEMENT_TIMEOUT: '2147468648' }, { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' }],
+    [{ DB_STATEMENT_TIMEOUT: '2147468647' }, { ok: true, value: 2147483647, floor: 2147483647, explicit: false }],
+    [
+      { DB_STATEMENT_TIMEOUT: '2147483647', DB_QUERY_TIMEOUT: '2147483647' },
+      { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH' },
+    ],
+  ] as const)('%j', (env, expected) => {
+    expect(resolveRepairClientTimeout({ ...env })).toEqual(expected)
+  })
+
+  it('the floor is never below 45 seconds, and no accepted value exceeds the largest delay Node can arm', () => {
+    expect(REPAIR_CLI_QUERY_TIMEOUT_FLOOR_MS).toBe(45000)
+    expect(REPAIR_CLI_QUERY_TIMEOUT_MAX_MS).toBe(2 ** 31 - 1)
+    expect(resolveRepairClientTimeout({ DB_STATEMENT_TIMEOUT: '1000' })).toMatchObject({ floor: 45000 })
+  })
+})
+
+describe('classifyRepairFailure', () => {
+  const registered = [...REPAIR_REFUSAL_CODES, ...REPAIR_CLI_CODES].filter((c) => c !== 'REPAIR_LOCK_BUSY')
+  it.each(registered)('%s prints itself with exit 1', (code) => {
+    expect(classifyRepairFailure(new Error(code))).toEqual({ code, exit: 1 })
+  })
+  it('lock busy exits 75', () => {
+    expect(classifyRepairFailure(new Error('REPAIR_LOCK_BUSY'))).toEqual({ code: 'REPAIR_LOCK_BUSY', exit: 75 })
+  })
+  it('a pg client read timeout exits 69', () => {
+    expect(classifyRepairFailure(new Error('Query read timeout'))).toEqual({ code: 'REPAIR_CLIENT_TIMEOUT', exit: 69 })
+  })
+  it('a server statement cancel outside the lock phase is REPAIR_STATEMENT_TIMEOUT', () => {
+    expect(classifyRepairFailure({ code: '57014' })).toEqual({ code: 'REPAIR_STATEMENT_TIMEOUT', exit: 1 })
+    expect(
+      classifyRepairFailure(Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })),
+    ).toEqual({ code: 'REPAIR_STATEMENT_TIMEOUT', exit: 1 })
+  })
+  it.each([
+    new Error('REPAIR_LOCK_BUSY: pid 1'),
+    new Error(' REPAIR_LOCK_BUSY'),
+    new Error('canceling statement due to lock timeout'),
+    Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }),
+    Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+    new Error('user 123 not found'),
+    new Error('Query read timeout after 45000ms'),
+    'REPAIR_LOCK_BUSY',
+    null,
+    undefined,
+    42,
+  ])('anything else is the generic code with exit 1: %s', (e) => {
+    expect(classifyRepairFailure(e)).toEqual({ code: 'DINGTALK_LOGIN_REPAIR_REFUSED', exit: 1 })
+  })
+})
+
+/** What a pool built like connection-pool.ts's main pool hands every client (pool options plus the URL). */
+const viaPool = (url: string, options: Record<string, unknown> = {}) => {
+  const pool = new Pool({ connectionString: url, query_timeout: 45000, statement_timeout: 30000, ...options })
+  return { pool, connection: readPoolConnection(pool as unknown as Parameters<typeof readPoolConnection>[0]) }
+}
+const BASE = 'postgresql://synthetic@127.0.0.1:9/synthetic'
+
+describe('resolveEffectiveRepairTimeout on the parameters pg derives for the pool', () => {
+  it('the plain case: no URL parameters, the pool options are what every connection uses', () => {
+    const { connection } = viaPool(BASE)
+    expect(connection).toEqual({ queryTimeout: 45000, startup: expect.objectContaining({ statement_timeout: '30000' }) })
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({
+      ok: true,
+      clientQueryTimeoutMs: 45000,
+      serverStatementTimeoutMs: 30000,
+      floor: 45000,
+    })
+  })
+
+  it('a URL query_timeout below the floor replaces the pool option and refuses, although the pool options still say 45000', () => {
+    const { pool, connection } = viaPool(BASE + '?query_timeout=1000')
+    // The value the earlier gate read: it would have passed.
+    expect((pool as unknown as { options: { query_timeout: unknown } }).options.query_timeout).toBe(45000)
+    expect(connection.queryTimeout).toBe('1000')
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  it.each([
+    ['?query_timeout=2147483648', 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH'],
+    ['?query_timeout=9999999999', 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH'],
+    // Node arms these as 1 ms ("0" is a truthy string to pg), or pg arms no timer at all (empty).
+    ['?query_timeout=0', 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+    ['?query_timeout=abc', 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+    ['?query_timeout=', 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+    ['?query_timeout=-1', 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+  ] as const)('a URL client timeout outside the range (%s) refuses with %s', (query, code) => {
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + query).connection)).toEqual({ ok: false, code })
+  })
+
+  it('the largest delay Node arms as given is accepted from the URL and reported as that number', () => {
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?query_timeout=2147483647').connection)).toMatchObject({
+      ok: true,
+      clientQueryTimeoutMs: 2147483647,
+    })
+  })
+
+  it('a URL statement_timeout raises the floor: the preset 45000 refuses, a client timeout above the new floor passes', () => {
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=60000').connection)).toEqual({
+      ok: false,
+      code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW',
+    })
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=60000', { query_timeout: 74999 }).connection)).toEqual({
+      ok: false,
+      code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW',
+    })
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=60000&query_timeout=75000').connection)).toEqual({
+      ok: true,
+      clientQueryTimeoutMs: 75000,
+      serverStatementTimeoutMs: 60000,
+      floor: 75000,
+    })
+    // pg sends String(parseInt('60s', 10)): the server gets 60 ms, not 60 s.
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=60s').connection)).toMatchObject({
+      ok: true,
+      serverStatementTimeoutMs: 60,
+      floor: 45000,
+    })
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + '?statement_timeout=2147483647').connection)).toEqual({
+      ok: false,
+      code: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH',
+    })
+  })
+
+  it.each([
+    // 0 disables the server budget; an empty value sends none (server or role default, unknown here).
+    ['?statement_timeout=0'],
+    ['?statement_timeout='],
+    ['?statement_timeout=x'],
+  ])('a URL statement_timeout that leaves no known server budget (%s) refuses', (query) => {
+    expect(resolveEffectiveRepairTimeout(viaPool(BASE + query).connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  /** Every options spelling below, with what PostgreSQL 15 applied for it when no startup statement_timeout was sent. */
+  const OPTIONS_SPELLINGS = [
+    '-c statement_timeout=60000',
+    '-cstatement_timeout=1min',
+    '--statement_timeout=60000',
+    '--statement-timeout=60s',
+    '-c STATEMENT_TIMEOUT=60000',
+    '-c statement\\_timeout=60000',
+    '-c statement_timeout=1h',
+    '-c statement_timeout=0',
+    '-c statement_timeout=1.5min',
+    '-c statement_timeout=abc',
+    '-c lock_timeout=1s',
+    // Combined short options: -e then -c with the next word; the server applies 90 s or disables the budget.
+    '-ec statement_timeout=90000',
+    '-ecstatement_timeout=90000',
+    '-c statement_timeout=1 -ec statement_timeout=90000',
+    '-c statement_timeout=60000 -ec statement_timeout=0',
+    '-c x.y=1 --statement_timeout=60000 -ec statement_timeout=0',
+    '-c statement_timeout=1 -c statement_timeout=60000',
+  ] as const
+  const withOptions = (text: string) => '&options=' + encodeURIComponent(text)
+
+  it.each(OPTIONS_SPELLINGS)(
+    'no startup statement_timeout: options %j never set the budget, so the gate refuses whatever the client timeout',
+    (text) => {
+      const sent = viaPool(BASE + '?statement_timeout=' + withOptions(text), { query_timeout: 75000 }).connection
+      expect(sent.startup).not.toHaveProperty('statement_timeout')
+      expect(sent.startup).toEqual(expect.objectContaining({ options: text }))
+      for (const query of [45000, 75000, 2147483647])
+        expect({ query, r: resolveEffectiveRepairTimeout({ ...sent, queryTimeout: query }) }).toEqual({
+          query,
+          r: { ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' },
+        })
+    },
+  )
+
+  it.each(OPTIONS_SPELLINGS)(
+    'an explicit startup statement_timeout decides over options %j (the server applies options first, then the startup parameters)',
+    (text) => {
+      const r = viaPool(BASE + '?options=' + encodeURIComponent(text))
+      expect(r.connection.startup).toEqual(expect.objectContaining({ statement_timeout: '30000', options: text }))
+      expect(resolveEffectiveRepairTimeout(r.connection)).toEqual({ ok: true, clientQueryTimeoutMs: 45000, serverStatementTimeoutMs: 30000, floor: 45000 })
+      // A larger startup value raises the floor whatever options say.
+      const raised = viaPool(BASE + '?statement_timeout=60000' + withOptions(text)).connection
+      expect(resolveEffectiveRepairTimeout(raised)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+      expect(resolveEffectiveRepairTimeout({ ...raised, queryTimeout: 75000 })).toEqual({
+        ok: true,
+        clientQueryTimeoutMs: 75000,
+        serverStatementTimeoutMs: 60000,
+        floor: 75000,
+      })
+    },
+  )
+
+  it.each([
+    ['no statement_timeout in the pool options or the URL', '', { statement_timeout: undefined, query_timeout: 2147483647 }],
+    ['pool statement_timeout 0', '', { statement_timeout: 0, query_timeout: 2147483647 }],
+    ['URL statement_timeout empty', '?statement_timeout=&query_timeout=2147483647', {}],
+    ['URL statement_timeout 0 (pg sends "0": disabled)', '?statement_timeout=0&query_timeout=2147483647', {}],
+    ['URL statement_timeout -5 (pg sends "-5")', '?statement_timeout=-5&query_timeout=2147483647', {}],
+    ['URL statement_timeout non-numeric (pg sends "NaN")', '?statement_timeout=abc&query_timeout=2147483647', {}],
+  ] as const)('a startup statement_timeout that is not strictly readable refuses: %s', (_label, query, options) => {
+    const { connection } = viaPool(BASE + query, options)
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  it('PGOPTIONS reaches the startup options but never sets the budget either', () => {
+    const before = process.env.PGOPTIONS
+    process.env.PGOPTIONS = '-c statement_timeout=60000'
+    try {
+      const sent = viaPool(BASE + '?statement_timeout=', { query_timeout: 75000 }).connection
+      expect(sent.startup).toEqual(expect.objectContaining({ options: '-c statement_timeout=60000' }))
+      expect(resolveEffectiveRepairTimeout(sent)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+      // With pg's own startup parameter present, the options budget is ignored as the server ignores it.
+      expect(resolveEffectiveRepairTimeout(viaPool(BASE).connection)).toMatchObject({ ok: true, serverStatementTimeoutMs: 30000 })
+    } finally {
+      if (before === undefined) delete process.env.PGOPTIONS
+      else process.env.PGOPTIONS = before
+    }
+  })
+
+  it.each([
+    // A NUL ends the field on the wire; the rest becomes a startup key the server applies after pg's own.
+    ['options', BASE + '?options=' + encodeURIComponent('-c x.y=1\0statement_timeout\u000090000'), {}],
+    ['options (after a readable -c setting)', BASE + '?options=' + encodeURIComponent('-c statement_timeout=1 -c x.y=1\0statement_timeout\u000090000'), {}],
+    ['options (disabling)', BASE + '?options=' + encodeURIComponent('-c x.y=1\0statement_timeout\u00000'), {}],
+    ['application_name', BASE + '?application_name=' + encodeURIComponent('a\0statement_timeout\u000090000'), {}],
+    ['fallback_application_name', BASE, { fallback_application_name: 'a\0b' }],
+    ['user', 'postgresql://' + encodeURIComponent('u\0statement_timeout\u000090000') + '@127.0.0.1:9/synthetic', {}],
+    ['database', 'postgresql://synthetic@127.0.0.1:9/' + encodeURIComponent('d\0statement_timeout\u000090000'), {}],
+  ] as const)('a NUL inside the startup field %s refuses although the inspected statement_timeout reads 30000', (_field, url, options) => {
+    const { connection } = viaPool(url, options)
+    expect(connection.startup).toEqual(expect.objectContaining({ statement_timeout: '30000' }))
+    expect(Object.values(connection.startup as Record<string, string>).some((v) => v.includes('\0'))).toBe(true)
+    expect(resolveEffectiveRepairTimeout(connection)).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  it.each([
+    [{ user: 'u', database: 'd', statement_timeout: '30000\u000090000' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', 'statement_timeout\0x': '1' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', lock_timeout: '5000\0' }],
+    [{ user: 'u', database: 'd', statement_timeout: '30000', replication: '\0' }],
+  ])('a NUL in any startup key or value refuses: %j', (startup) => {
+    expect(resolveEffectiveRepairTimeout({ queryTimeout: 2147483647, startup })).toEqual({ ok: false, code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW' })
+  })
+
+  it.each([
+    [null],
+    [undefined],
+    [{ queryTimeout: 45000, startup: null }],
+    [{ queryTimeout: 45000, startup: { statement_timeout: '30000', options: 7 } }],
+    [{ queryTimeout: { valueOf: () => 45000 }, startup: { statement_timeout: '30000' } }],
+    [{ queryTimeout: Number.NaN, startup: { statement_timeout: '30000' } }],
+    [{ queryTimeout: 45000, startup: { statement_timeout: 'NaN' } }],
+  ] as const)('a connection description it cannot read refuses: %j', (connection) => {
+    expect(resolveEffectiveRepairTimeout(connection as unknown as RepairEffectiveConnection)).toEqual({
+      ok: false,
+      code: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW',
+    })
+  })
+})
+
+describe('runRepairCli', () => {
+  /** A connection description as readPoolConnection returns it, with the server budget at the 30 s default. */
+  const conn = (queryTimeout: unknown, statement: unknown = '30000'): RepairEffectiveConnection => ({
+    queryTimeout,
+    startup: { user: 'u', database: 'd', statement_timeout: statement },
+  })
+  const harness = (main: Partial<RepairMain> | Error, env: NodeJS.ProcessEnv = {}) => {
+    const out: string[] = [],
+      err: string[] = []
+    const load = vi.fn(async () => {
+      if (main instanceof Error) throw main
+      return { effectiveConnection: () => conn(45000), run: async () => ({ ok: true }), ...main } as RepairMain
+    })
+    return {
+      env,
+      out,
+      err,
+      load,
+      go: (argv: string[] = ['preview', 'x']) =>
+        runRepairCli(argv, env, { load, stdout: (s) => out.push(s), stderr: (s) => err.push(s) }),
+    }
+  }
+
+  it('an explicit low value refuses before loading the module that constructs the pool', async () => {
+    const h = harness({}, { DB_QUERY_TIMEOUT: '10000' })
+    expect(await h.go()).toBe(1)
+    expect(h.load).not.toHaveBeenCalled()
+    expect(h.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_LOW'])
+    expect(h.out).toEqual([])
+    expect(h.env.DB_QUERY_TIMEOUT).toBe('10000')
+  })
+
+  it('presets the floor when unset, before loading, and never overrides an explicit value', async () => {
+    let seen: string | undefined
+    const h = harness({}, {})
+    h.load.mockImplementationOnce(async () => {
+      seen = h.env.DB_QUERY_TIMEOUT
+      return { effectiveConnection: () => conn(45000), run: async () => ({}) }
+    })
+    expect(await h.go()).toBe(0)
+    expect(seen).toBe('45000')
+    const explicit = harness({ effectiveConnection: () => conn(90000) }, { DB_QUERY_TIMEOUT: '90000' })
+    expect(await explicit.go()).toBe(0)
+    expect(explicit.env.DB_QUERY_TIMEOUT).toBe('90000')
+  })
+
+  it('refuses when the pool does not actually hold the floor, before running anything', async () => {
+    for (const effective of [30000, null, Number.NaN, '1000', '', false]) {
+      const run = vi.fn(async () => ({}))
+      const h = harness({ effectiveConnection: () => conn(effective), run })
+      expect(await h.go()).toBe(1)
+      expect(run).not.toHaveBeenCalled()
+      expect(h.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_LOW'])
+    }
+  })
+
+  it('refuses when the pool holds a value above the largest delay Node can arm, before running anything', async () => {
+    for (const effective of [2147483648, 9999999999, Number.POSITIVE_INFINITY, '2147483648']) {
+      const run = vi.fn(async () => ({}))
+      const h = harness({ effectiveConnection: () => conn(effective), run })
+      expect(await h.go()).toBe(1)
+      expect(run).not.toHaveBeenCalled()
+      expect(h.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_HIGH'])
+    }
+  })
+
+  it('a load failure prints only the generic code', async () => {
+    const h = harness(new Error('Cannot find module /secret/path'))
+    expect(await h.go()).toBe(1)
+    expect(h.err).toEqual(['DINGTALK_LOGIN_REPAIR_REFUSED'])
+  })
+
+  it('success prints the result with the effective client timeout', async () => {
+    const h = harness({ effectiveConnection: () => conn(45000), run: async () => ({ digest: 'd' }) })
+    expect(await h.go()).toBe(0)
+    expect(h.out.map((s) => JSON.parse(s))).toEqual([{ digest: 'd', clientQueryTimeoutMs: 45000 }])
+    expect(h.err).toEqual([])
+  })
+
+  it('the floor comes from the server budget every connection gets, not from DB_STATEMENT_TIMEOUT alone', async () => {
+    // The environment says 30 s (floor 45 s), the connection says 60 s (floor 75 s).
+    const run = vi.fn(async () => ({}))
+    const low = harness({ effectiveConnection: () => conn(45000, '60000'), run })
+    expect(await low.go()).toBe(1)
+    expect(low.err).toEqual(['REPAIR_CLIENT_TIMEOUT_TOO_LOW'])
+    expect(run).not.toHaveBeenCalled()
+    const ok = harness({ effectiveConnection: () => conn('75000', '60000'), run: async () => ({ digest: 'd' }) })
+    expect(await ok.go()).toBe(0)
+    // The reported value is the one the connection uses, as a number.
+    expect(ok.out.map((s) => JSON.parse(s))).toEqual([{ digest: 'd', clientQueryTimeoutMs: 75000 }])
+  })
+
+  it.each([
+    [new Error('REPAIR_LOCK_BUSY'), 'REPAIR_LOCK_BUSY', 75],
+    [new Error('Query read timeout'), 'REPAIR_CLIENT_TIMEOUT', 69],
+    [Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }), 'REPAIR_STATEMENT_TIMEOUT', 1],
+    [new Error('REPAIR_SNAPSHOT_CHANGED'), 'REPAIR_SNAPSHOT_CHANGED', 1],
+    [new Error('duplicate key value violates unique constraint "x" Key (id)=(abc)'), 'DINGTALK_LOGIN_REPAIR_REFUSED', 1],
+  ] as const)('a run failure prints one fixed code: %s', async (e, code, exit) => {
+    const h = harness({ run: async () => Promise.reject(e) })
+    expect(await h.go()).toBe(exit)
+    expect(h.err).toEqual([code])
+    expect(h.out).toEqual([])
+  })
+})
+
+describe('guardRepairProcess', () => {
+  const fakeProcess = () => {
+    const written: Array<[string, string]> = []
+    const exits: number[] = []
+    const listeners = new Map<string, (e: unknown) => void>()
+    const stream = (name: string) => ({
+      write: (chunk: unknown, ...rest: unknown[]) => {
+        written.push([name, String(chunk)])
+        const cb = rest.find((a) => typeof a === 'function') as (() => void) | undefined
+        if (cb) queueMicrotask(cb)
+        return true
+      },
+    })
+    const proc = {
+      stdout: stream('stdout'),
+      stderr: stream('stderr'),
+      on: (event: 'uncaughtException' | 'unhandledRejection', l: (e: unknown) => void) => listeners.set(event, l),
+      exit: (code: number) => {
+        exits.push(code)
+      },
+    }
+    return { proc, written, exits, listeners }
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  it('discards every other writer and prints only the recorded line, then exits once', async () => {
+    const f = fakeProcess()
+    const io = guardRepairProcess(f.proc)
+    const callback = vi.fn()
+    expect(f.proc.stdout.write('warn: Slow query: 9ms - SELECT * FROM users WHERE id=$1\n', callback)).toBe(true)
+    f.proc.stderr.write('Error: Connection terminated unexpectedly\n    at /abs/path/client.js:136:73\n')
+    await settle()
+    expect(callback).toHaveBeenCalledTimes(1)
+    io.stdout('{"digest":"d"}')
+    io.stdout('{"second":true}')
+    io.exit(0)
+    io.exit(1)
+    await settle()
+    expect(f.written).toEqual([['stdout', '{"digest":"d"}\n']])
+    expect(f.exits).toEqual([0])
+  })
+
+  it('an uncaught exception or unhandled rejection prints one fixed code instead of the trace', async () => {
+    for (const [event, e, code, status] of [
+      ['uncaughtException', new Error('Connection terminated unexpectedly'), 'DINGTALK_LOGIN_REPAIR_REFUSED', 1],
+      ['unhandledRejection', new Error('Query read timeout'), 'REPAIR_CLIENT_TIMEOUT', 69],
+      ['uncaughtException', 'not an error', 'DINGTALK_LOGIN_REPAIR_REFUSED', 1],
+    ] as const) {
+      const f = fakeProcess()
+      const io = guardRepairProcess(f.proc)
+      f.listeners.get(event)!(e)
+      // The awaited run fails afterwards with the same root cause: nothing more is printed.
+      io.stderr('DINGTALK_LOGIN_REPAIR_REFUSED')
+      io.exit(1)
+      f.listeners.get(event)!(e)
+      await settle()
+      expect(f.written).toEqual([['stderr', code + '\n']])
+      expect(f.exits).toEqual([status])
+    }
+  })
+
+  it('a decision already recorded by the run is not replaced by a later crash', async () => {
+    const f = fakeProcess()
+    const io = guardRepairProcess(f.proc)
+    io.stderr('REPAIR_LOCK_BUSY')
+    f.listeners.get('uncaughtException')!(new Error('Connection terminated unexpectedly'))
+    io.exit(75)
+    await settle()
+    expect(f.written).toEqual([['stderr', 'REPAIR_LOCK_BUSY\n']])
+    expect(f.exits).toEqual([75])
+  })
+
+  it('exits without writing when nothing was recorded', async () => {
+    const f = fakeProcess()
+    guardRepairProcess(f.proc).exit(0)
+    await settle()
+    expect(f.written).toEqual([])
+    expect(f.exits).toEqual([0])
+  })
+
+  it('the entry installs the guard before anything is loaded and routes every outcome through it', async () => {
+    const text = await source('scripts/dingtalk-login-repair.ts')
+    const guard = text.indexOf('guardRepairProcess(process)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(text.indexOf('runRepairCli(process.argv'))
+    expect(text).toMatch(/\.then\(io\.exit,\s*io\.crash\)/)
+    expect(text).not.toMatch(/console\.|process\.exit\(|process\.(stdout|stderr)\.write/)
+  })
+})
+
+describe('code lists and import boundaries', () => {
+  const literals = (text: string) =>
+    new Set([...text.matchAll(/'((?:DINGTALK_[A-Z_]+_REFUSED)|(?:REPAIR_[A-Z_]+))'/g)].map((m) => m[1]))
+  const staticImports = (text: string) => [
+    ...[...text.matchAll(/^\s*import\s[^;]*?from\s+'([^']+)'/gms)].map((m) => m[1]),
+    ...[...text.matchAll(/^\s*import\s+'([^']+)'/gm)].map((m) => m[1]),
+    ...[...text.matchAll(/\brequire\(\s*'([^']+)'\s*\)/g)].map((m) => m[1]),
+  ]
+
+  it('the two lists are disjoint and duplicate-free', () => {
+    const all = [...REPAIR_REFUSAL_CODES, ...REPAIR_CLI_CODES]
+    expect(new Set(all).size).toBe(all.length)
+  })
+
+  it('every refusal literal in the repair module is registered, and every registered module code is used there', async () => {
+    const used = literals(await source('src/auth/dingtalk-identity-repair.ts'))
+    expect([...used].filter((c) => !(REPAIR_REFUSAL_CODES as readonly string[]).includes(c))).toEqual([])
+    expect(REPAIR_REFUSAL_CODES.filter((c) => !used.has(c))).toEqual([])
+    expect(REPAIR_CLI_CODES.filter((c) => used.has(c))).toEqual([])
+  })
+
+  it('every code the CLI files name is printable, and every CLI code is produced by a CLI file', async () => {
+    const texts = await Promise.all(
+      ['src/auth/dingtalk-identity-repair-cli.ts', 'scripts/dingtalk-login-repair-main.ts', 'scripts/dingtalk-login-repair.ts'].map(source),
+    )
+    const used = new Set(texts.flatMap((t) => [...literals(t)]))
+    const printable = new Set<string>([...REPAIR_REFUSAL_CODES, ...REPAIR_CLI_CODES])
+    expect([...used].filter((c) => !printable.has(c))).toEqual([])
+    expect(REPAIR_CLI_CODES.filter((c) => !used.has(c))).toEqual([])
+  })
+
+  it('the entry and the policy module cannot construct the pool before the timeout gate', async () => {
+    const entryText = await source('scripts/dingtalk-login-repair.ts')
+    expect(staticImports(entryText)).toEqual(['../src/auth/dingtalk-identity-repair-cli'])
+    expect([...entryText.matchAll(/\bimport\(\s*'([^']+)'\s*\)/g)].map((m) => m[1])).toEqual(['./dingtalk-login-repair-main'])
+    expect(entryText).not.toMatch(/\bawait\s+import\(/)
+    expect(staticImports(await source('src/auth/dingtalk-identity-repair-cli.ts'))).toEqual(['./dingtalk-identity-repair-codes'])
+    expect(staticImports(await source('src/auth/dingtalk-identity-repair-codes.ts'))).toEqual([])
+    // The body module is where the pool is first evaluated.
+    expect(staticImports(await source('scripts/dingtalk-login-repair-main.ts'))).toEqual(
+      expect.arrayContaining(['../src/auth/dingtalk-identity-repair', '../src/integration/db/connection-pool']),
+    )
+  })
+})
+
+describe('entry process (child, no database)', () => {
+  let dir = ''
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'login-repair-cli-'))
+  })
+  afterAll(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true })
+  })
+  /** Explicit env only: nothing from the test runner (e.g. DB_QUERY_TIMEOUT) leaks into the child. */
+  /** An `undefined` in `extra` removes that variable from the child's environment. */
+  const spawnEntry = (args: string[], extra: Record<string, string | undefined> = {}) =>
+    new Promise<{ code: number | null; stdout: string; stderr: string; ms: number }>((resolve, reject) => {
+      const started = Date.now()
+      const env: Record<string, string | undefined> = {
+        PATH: process.env.PATH ?? '',
+        NODE_ENV: 'test',
+        TSX_DISABLE_CACHE: '1',
+        // Nothing listens here: any connection attempt would fail and print the generic code.
+        DATABASE_URL: 'postgresql://synthetic@127.0.0.1:9/synthetic',
+        ...extra,
+      }
+      for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k]
+      const child = spawn(process.execPath, ['--import', tsxLoader, entry, ...args], {
+        cwd: backendRoot,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = '',
+        stderr = ''
+      child.stdout.on('data', (d) => (stdout += d))
+      child.stderr.on('data', (d) => (stderr += d))
+      child.on('error', reject)
+      child.on('close', (code) => resolve({ code, stdout, stderr, ms: Date.now() - started }))
+    })
+  const privateFile = async (name: string, body: string, mode = 0o600) => {
+    const file = path.join(dir, name)
+    await writeFile(file, body)
+    // chmod after the write: the process umask cannot widen or narrow the intended mode.
+    await chmod(file, mode)
+    return file
+  }
+
+  it('an explicit DB_QUERY_TIMEOUT below the floor refuses without loading or connecting', async () => {
+    const r = await spawnEntry(['preview', path.join(dir, 'nonexistent.json')], { DB_QUERY_TIMEOUT: '10000' })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW\n' })
+    expect(r.ms).toBeLessThan(10000)
+  }, 30000)
+
+  it('an unparsable DB_STATEMENT_TIMEOUT refuses the same way', async () => {
+    const r = await spawnEntry(['preview', path.join(dir, 'nonexistent.json')], { DB_STATEMENT_TIMEOUT: 'x' })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_LOW\n' })
+  }, 30000)
+
+  it.each([
+    [{ DB_STATEMENT_TIMEOUT: '2147483647' }],
+    [{ DB_QUERY_TIMEOUT: '2147483648' }],
+    [{ DB_QUERY_TIMEOUT: '9999999999' }],
+  ])('a client timeout above 2^31-1 ms (%j) refuses without loading or connecting', async (extra) => {
+    const r = await spawnEntry(['preview', path.join(dir, 'nonexistent.json')], extra)
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH\n' })
+    expect(r.ms).toBeLessThan(10000)
+  }, 30000)
+
+  it('the largest client timeout Node can arm is accepted by the post-load assertion', async () => {
+    const r = await spawnEntry(['nonsense'], { DB_QUERY_TIMEOUT: '2147483647' })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
+  it('with DB_QUERY_TIMEOUT unset the dynamically loaded pool holds the preset (the assertion runs before argv validation)', async () => {
+    const r = await spawnEntry(['nonsense'])
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
+  // The documented invocation itself is run through pnpm in the real-database CLI cases.
+  it('every operator command in the doc runs through `pnpm --silent`, the flag before the script name', async () => {
+    const doc = await readFile(path.join(backendRoot, '../../docs/development/dingtalk-login-identity-repair-20261102.md'), 'utf8')
+    const blocks = [...doc.matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1])
+    const commands = blocks.flatMap((b) => b.split('\n')).filter((l) => l.includes('ops:dingtalk-login-repair'))
+    expect(commands.length).toBeGreaterThanOrEqual(7)
+    for (const line of commands) expect(line).toMatch(/^pnpm --silent ops:dingtalk-login-repair [a-z-]+ /)
+    // The script exists only in this package: from the repository root pnpm exits 254 without running anything.
+    for (const block of blocks.filter((b) => b.includes('ops:dingtalk-login-repair')))
+      expect(block.split('\n')[0]).toBe('cd packages/core-backend')
+  })
+
+  it('the pool warning for an unset DATABASE_URL (non-production) does not reach stdout or stderr', async () => {
+    const r = await spawnEntry(['nonsense'], { DATABASE_URL: undefined })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
+  it('an explicit value at the floor is accepted by the same post-load assertion', async () => {
+    const r = await spawnEntry(['nonsense'], { DB_QUERY_TIMEOUT: '45000' })
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'REPAIR_INPUT_INVALID\n' })
+  }, 30000)
+
+  describe('DATABASE_URL parameters decide, not the pool options (a listener that counts connections and closes them)', () => {
+    let server: Server | null = null
+    let connections = 0
+    let url = ''
+    const platform = {
+      DINGTALK_CORP_ID: 'synthetic-corp',
+      DINGTALK_CLIENT_ID: 'synthetic-app',
+      DINGTALK_CLIENT_SECRET: 'unused',
+      DINGTALK_REDIRECT_URI: 'https://example.test/callback',
+      ENCRYPTION_KEY: 'synthetic-cli-key-'.repeat(4),
+      ENCRYPTION_SALT: 'synthetic-cli-salt-'.repeat(2),
+    }
+    beforeAll(async () => {
+      server = createServer((socket: Socket) => {
+        connections++
+        socket.destroy()
+      })
+      await new Promise<void>((r) => server!.listen(0, '127.0.0.1', () => r()))
+      url = `postgresql://synthetic@127.0.0.1:${(server.address() as { port: number }).port}/synthetic`
+    })
+    afterAll(async () => {
+      if (server) await new Promise<void>((r) => server!.close(() => r()))
+    })
+    const recoveryInput = () =>
+      privateFile(
+        'url-recovery-' + Math.random().toString(16).slice(2) + '.json',
+        JSON.stringify({ id: 'synthetic-id', actorId: 'synthetic-admin', actorPassword: 'p' }),
+      )
+
+    it('positive control: the same recovery preview without URL timeout parameters connects (and fails on the closed socket)', async () => {
+      const before = connections
+      const r = await spawnEntry(['rollback-preview', await recoveryInput()], { ...platform, DATABASE_URL: url })
+      expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'DINGTALK_LOGIN_REPAIR_REFUSED\n' })
+      expect(connections).toBeGreaterThan(before)
+    }, 30000)
+
+    it.each([
+      ['?query_timeout=1000', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?query_timeout=', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?query_timeout=2147483648', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH'],
+      ['?query_timeout=9999999999', { DB_QUERY_TIMEOUT: '60000' }, 'REPAIR_CLIENT_TIMEOUT_TOO_HIGH'],
+      // The preset 45000 is below the floor the URL's server budget needs (75000).
+      ['?statement_timeout=60000', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?statement_timeout=60000', { DB_QUERY_TIMEOUT: '74999' }, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=60000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      // No startup statement_timeout: combined short options would give the server 90 s or no budget at all.
+      ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=1 -ec statement_timeout=90000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?statement_timeout=&options=' + encodeURIComponent('-c statement_timeout=60000 -ec statement_timeout=0'), { DB_QUERY_TIMEOUT: '75000' }, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?statement_timeout=0', {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      // A NUL in a startup field: the inspected statement_timeout reads 30000, the server would apply 90000.
+      ['?options=' + encodeURIComponent('-c statement_timeout=1 -c x.y=1\0statement_timeout\u000090000'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+      ['?application_name=' + encodeURIComponent('a\0b'), {}, 'REPAIR_CLIENT_TIMEOUT_TOO_LOW'],
+    ] as const)('URL %s (env %j) refuses with %s before any connection', async (query, extra, code) => {
+      const before = connections
+      const r = await spawnEntry(['rollback-preview', await recoveryInput()], { ...platform, ...extra, DATABASE_URL: url + query })
+      expect(r).toMatchObject({ code: 1, stdout: '', stderr: code + '\n' })
+      expect(connections).toBe(before)
+    }, 30000)
+
+    it('a client timeout at or above the floor the URL sets passes the gate (and then connects)', async () => {
+      for (const [query, extra] of [
+        ['?statement_timeout=60000', { DB_QUERY_TIMEOUT: '75000' }],
+        ['?statement_timeout=60000&query_timeout=75000', {}],
+        ['?query_timeout=60000', {}],
+        // The startup statement_timeout (30000 from the pool) decides; options are not read for the budget.
+        ['?options=' + encodeURIComponent('-c statement_timeout=1 -ec statement_timeout=90000'), {}],
+      ] as const) {
+        const before = connections
+        const r = await spawnEntry(['rollback-preview', await recoveryInput()], { ...platform, ...extra, DATABASE_URL: url + query })
+        expect({ query, ...r, ms: 0 }).toEqual({ query, code: 1, stdout: '', stderr: 'DINGTALK_LOGIN_REPAIR_REFUSED\n', ms: 0 })
+        expect(connections).toBeGreaterThan(before)
+      }
+    }, 60000)
+  })
+
+  it('a module refusal code passes through unchanged (a proof that is not an encrypted envelope)', async () => {
+    const file = await privateFile('plain-proof.json', JSON.stringify({ proof: 'synthetic-plain-proof' }))
+    const r = await spawnEntry(['preview', file])
+    expect(r).toMatchObject({ code: 1, stdout: '', stderr: 'DINGTALK_IDENTITY_REPAIR_REFUSED\n' })
+  }, 30000)
+
+  it('private-file, JSON and field validation print only REPAIR_INPUT_INVALID', async () => {
+    const valid = JSON.stringify({ proof: 'synthetic-proof' })
+    const target = await privateFile('ok.json', valid)
+    const cases: string[][] = [
+      ['preview', await privateFile('world-readable.json', valid, 0o644)],
+      ['preview', await privateFile('group-readable.json', valid, 0o640)],
+      ['preview', await privateFile('wrong-fields.json', JSON.stringify({ proof: 'p', extra: 'x' }))],
+      ['preview', await privateFile('empty-field.json', JSON.stringify({ proof: '' }))],
+      ['preview', await privateFile('array.json', JSON.stringify(['synthetic-proof']))],
+      ['preview', await privateFile('not-json.json', '{proof:')],
+      ['apply', await privateFile('apply-missing.json', valid)],
+      ['preview', path.join(dir, 'missing.json')],
+      ['preview', dir],
+      ['preview', target, 'unexpected-output'],
+      ['verify', target],
+    ]
+    const link = path.join(dir, 'link.json')
+    await symlink(target, link)
+    cases.push(['preview', link])
+    for (const args of cases) {
+      const r = await spawnEntry(args)
+      expect({ args: args.map((a) => path.basename(a)), ...r, ms: 0 }).toEqual({
+        args: args.map((a) => path.basename(a)),
+        code: 1,
+        stdout: '',
+        stderr: 'REPAIR_INPUT_INVALID\n',
+        ms: 0,
+      })
+    }
+  }, 120000)
+
+  // Platform configuration the module's scope() needs; nothing listens at DATABASE_URL (port 9).
+  const reanchorEnv = {
+    DINGTALK_CORP_ID: 'synthetic-corp',
+    DINGTALK_CLIENT_ID: 'synthetic-app',
+    DINGTALK_CLIENT_SECRET: 'unused',
+    DINGTALK_REDIRECT_URI: 'https://example.test/callback',
+    ENCRYPTION_KEY: 'synthetic-cli-key-'.repeat(4),
+    ENCRYPTION_SALT: 'synthetic-cli-salt-'.repeat(2),
+  }
+  const exists = (file: string) =>
+    readFile(file).then(
+      () => true,
+      () => false,
+    )
+
+  it('the re-anchor verbs take exact field sets: other sets, an empty code, a missing or extra output path print only REPAIR_INPUT_INVALID and create no file', async () => {
+    const request = { id: 'r', actorId: 'a', actorPassword: 'p', approverId: 'b' }
+    const out = () => path.join(dir, 'reanchor-out-' + Math.random().toString(16).slice(2) + '.json')
+    const outputs: string[] = []
+    const withOut = (verb: string, file: string) => {
+      const o = out()
+      outputs.push(o)
+      return [verb, file, o]
+    }
+    const cases: string[][] = [
+      withOut('reanchor-request', await privateFile('rq-3.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p' }))),
+      withOut('reanchor-request', await privateFile('rq-6.json', JSON.stringify({ ...request, code: 'c', extra: 'x' }))),
+      withOut('reanchor-request', await privateFile('rq-empty-code.json', JSON.stringify({ ...request, code: '' }))),
+      withOut('reanchor-request', await privateFile('rq-other-5th.json', JSON.stringify({ ...request, digest: 'd' }))),
+      withOut('reanchor-request', await privateFile('rq-number.json', JSON.stringify({ ...request, approverId: 7 }))),
+      withOut('reanchor-request', await privateFile('rq-open.json', JSON.stringify(request), 0o644)),
+      ['reanchor-request', await privateFile('rq-no-out.json', JSON.stringify(request))],
+      // The recovery-preview field set is not a re-anchor preview, and a re-anchor preview takes no output path.
+      ['reanchor-preview', await privateFile('rp-recovery-set.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p' }))],
+      withOut('reanchor-preview', await privateFile('rp-ok.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p' }))),
+      ['reanchor', await privateFile('ra-no-confirm.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p', digest: 'd' }))],
+      ['reanchor', await privateFile('ra-recovery-set.json', JSON.stringify({ id: 'r', actorId: 'a', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }))],
+      withOut('reanchor', await privateFile('ra-ok.json', JSON.stringify({ request: 'q', actorId: 'a', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }))),
+    ]
+    for (const args of cases) {
+      const r = await spawnEntry(args, reanchorEnv)
+      expect({ args: args.map((a) => path.basename(a)), ...r, ms: 0 }).toEqual({
+        args: args.map((a) => path.basename(a)),
+        code: 1,
+        stdout: '',
+        stderr: 'REPAIR_INPUT_INVALID\n',
+        ms: 0,
+      })
+    }
+    for (const o of outputs) expect({ o: path.basename(o), exists: await exists(o) }).toEqual({ o: path.basename(o), exists: false })
+  }, 180000)
+
+  it('reanchor-request with four or five fields reaches the module: one administrator in both roles refuses before any database work and writes no file', async () => {
+    const base = { id: 'r', actorId: 'same-admin', actorPassword: 'p', approverId: 'same-admin' }
+    for (const [name, body] of [
+      ['rq-4.json', base],
+      ['rq-5.json', { ...base, code: 'synthetic-code' }],
+    ] as const) {
+      const o = path.join(dir, 'reanchor-request-' + name)
+      const r = await spawnEntry(['reanchor-request', await privateFile(name, JSON.stringify(body)), o], reanchorEnv)
+      expect({ name, ...r, ms: 0 }).toEqual({ name, code: 1, stdout: '', stderr: 'REPAIR_DUAL_CONTROL_REQUIRED\n', ms: 0 })
+      expect(await exists(o)).toBe(false)
+    }
+  }, 60000)
+
+  it('reanchor-preview and reanchor with a request that is not a sealed envelope print REPAIR_PROOF_INVALID (not routed to the recovery preview)', async () => {
+    for (const [verb, body] of [
+      ['reanchor-preview', { request: 'synthetic-plain-request', actorId: 'b', actorPassword: 'p' }],
+      ['reanchor', { request: 'synthetic-plain-request', actorId: 'b', actorPassword: 'p', digest: 'd', confirm: 'reanchor' }],
+    ] as const) {
+      const r = await spawnEntry([verb, await privateFile(verb + '-plain.json', JSON.stringify(body))])
+      expect({ verb, ...r, ms: 0 }).toEqual({ verb, code: 1, stdout: '', stderr: 'REPAIR_PROOF_INVALID\n', ms: 0 })
+    }
+  }, 60000)
+
+  it('the doc lists exactly one command for each of the ten verbs', async () => {
+    const doc = await readFile(path.join(backendRoot, '../../docs/development/dingtalk-login-identity-repair-20261102.md'), 'utf8')
+    const verbs = [...doc.matchAll(/^pnpm --silent ops:dingtalk-login-repair ([a-z-]+) /gm)].map((m) => m[1])
+    expect(verbs.sort()).toEqual(
+      [
+        'verify',
+        'preview',
+        'apply',
+        'rollback-preview',
+        'rollback',
+        'release-preview',
+        'release',
+        'reanchor-request',
+        'reanchor-preview',
+        'reanchor',
+      ].sort(),
+    )
+  })
+})

@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, not the mapper.
 //
 // stock-preparation-ext-field-mapping.test.cjs already pins what the mapper DOES. This suite pins
@@ -29,6 +33,7 @@
 // literals are schema ids, frozen reason tokens and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -249,6 +254,8 @@ function adapterReadyRow(input = {}) {
 
 function baseServices(sourceAdapter) {
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the
@@ -314,17 +321,17 @@ function mount({ config = {}, sourceAdapter, records, provisioning } = {}) {
       },
       multitable: {
         provisioning: provisioning || createProvisioning(),
-        records: records ? records.api : createRecordsApi().api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records ? records.api : createRecordsApi().api),
       },
     },
     // `durable: true` is what the large-BOM job store demands before it accepts a job; the
     // small-BOM token/policy store ignores the flag entirely.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config,
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(sourceAdapter || createSourceAdapter()),
+    services: withRefreshGovernance(baseServices(sourceAdapter || createSourceAdapter())),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context }
@@ -378,7 +385,7 @@ async function absentConfigIsInertAndUnchanged() {
     records,
   })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, ADMIN_USER) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.equal('extFieldMapping' in res.body.data.evidence, false, 'evidence gains no key when no mapping is configured')
@@ -437,7 +444,7 @@ async function configuredMappingReachesTheWrittenRecord() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   assert.equal(dry.body.data.status, 'ready')
 
@@ -641,7 +648,7 @@ async function oneUnparseableCellDoesNotCostTheRow() {
     records,
   })
 
-  const dry = await routeDryRun(routes)
+  const dry = await routeDryRun(routes, ADMIN_USER) // review round 1: see above
   assert.equal(dry.statusCode, 200, JSON.stringify(dry.body))
   // The refusal reaches the values-free summary as a frozen type token, never as the cell.
   assert.ok(dry.body.data.evidence.expansion.errorTypes.includes('SOURCE_VALUE_NOT_A_NUMBER'))

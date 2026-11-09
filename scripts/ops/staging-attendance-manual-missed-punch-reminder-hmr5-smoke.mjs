@@ -304,8 +304,7 @@ async function resolveTokens() {
     adminToken = await mintToken(USERS.admin, { roles: 'admin', perms: 'attendance:admin,attendance:read,attendance:write' })
     console.log('  minted admin dev-token')
   } else {
-    const subject = jwtSubject(adminToken)
-    if (subject != null) console.log(`  using supplied admin token (subject ${subject})`)
+    console.log('  using supplied admin token')
   }
   if (scopedToken) {
     // Requests are attributed to the token subject (payload.actorUserId); a mismatched supplied token

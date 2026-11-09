@@ -233,7 +233,7 @@ check('C-06 (R1) the three snapshot-driven large-BOM routes refuse a stale job t
       const at = body.search(new RegExp(`assertLargeBomJobTargetMatchesProjectTarget\\(\\s*${escaped},`))
       assert.notEqual(at, -1, `${handler}: checks ${target} against the registry`)
       // ...before the field probe, the existing-row / foreign-row reads and the write gate.
-      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(']) {
+      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(', 'prepareLargePlanPullBatch(', 'assertLargeApprovePullBatch(']) {
         const ioAt = body.indexOf(io)
         if (ioAt !== -1) assert.ok(at < ioAt, `${handler}: the staleness check on ${target} precedes ${io}`)
       }
@@ -440,6 +440,111 @@ check('C-13 (S3 fix round 1) the four S3 routes: gate → switch before any IO; 
   assert.match(ensureBody, /ensureProjectOverviewAndGrant\(\{ audit, tenantId, projectId: targetProjectId, actor \}\)/, 'ensure: the shared provisioning + G1 READ leg, on the scope-derived staging project')
   const helper = CODE.slice(CODE.indexOf('  async function ensureProjectOverviewAndGrant('), CODE.indexOf('  async function ensureProjectOverviewBestEffort('))
   assert.match(helper, /roleIds: resolveProjectSheetGrantRoleIds\(process\.env\)/, 'the overview READ grant: roles from server config, never the request')
+})
+
+// C-14 (人工补充行 B4, ADR adr-stock-prep-manual-rows-20261030 §4; register R-68) THE PER-SHEET SWITCH: both handlers
+// are ADMIN → switch first; the tenant from the host-vouched scope and the staging project from it (no request
+// projectId); the SET's typed confirmation is pure and precedes the scope; the write happens ONLY inside the registry's
+// locked re-check, ONLY through the switch library (whose one host write is a one-key provisioning patch — never raw
+// SQL), and the one audit row (088's project_fields_update, a closed mode) follows it; the READ writes nothing.
+check('C-14 (B4) the switch routes: READ = PULL gate, SET = ADMIN gate → switch before any IO; scope-derived tenant and staging; the SET writes one key-column property through the provisioning port inside the locked re-check, then audits', () => {
+  const bodyOf = (handler) => {
+    const start = CODE.indexOf(`    async ${handler}(req, res) {`)
+    assert.notEqual(start, -1, `${handler} exists`)
+    return CODE.slice(start, CODE.indexOf('\n    },', start))
+  }
+  // B4 fix round 1 (OQ4): the READ is the PULL tier (the reminder is for the people who pull); the SET stays ADMIN (OQ6).
+  const GATES = { stockPreparationProjectManualRowsGet: 'STOCK_PREP_PULL', stockPreparationProjectManualRowsSet: 'STOCK_PREP_ADMIN' }
+  for (const [handler, gate] of Object.entries(GATES)) {
+    const body = bodyOf(handler)
+    assert.match(body, new RegExp(`^ {4}async [A-Za-z]+\\(req, res\\) \\{\\n {6}const user = requireAccess\\(req, ${gate}\\)\\n {6}requireProjectSheetsEnabled\\(\\)\\n`), `${handler}: the ${gate} gate is the first statement and the switch the second`)
+    assert.ok(body.indexOf('await ') > body.indexOf('requireProjectSheetsEnabled()'), `${handler}: no IO before the switch`)
+    assert.match(body, /resolveOperatorValueScope\(\{/, `${handler}: tenant from the host-vouched scope`)
+    const staging = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+    assert.deepEqual(staging, ['resolveIntegrationStagingProjectId(scope.tenantId, undefined)'], `${handler}: the staging project is derived once, from the scope, with no request projectId`)
+    for (const forbidden of ['resolveTenantId(', 'user.tenantId', 'input.projectId', 'body.projectId', '.query(', 'UPDATE ', 'patchObjectFieldProperty(']) {
+      assert.ok(!body.includes(forbidden), `${handler}: must not reach ${forbidden}`)
+    }
+  }
+  const getBody = bodyOf('stockPreparationProjectManualRowsGet')
+  for (const forbidden of ['setManualRowsPolicy(', 'audit.append(', 'withActiveRowLocked(', 'requireStockPreparationAudit()']) {
+    assert.ok(!getBody.includes(forbidden), `the READ writes nothing (${forbidden})`)
+  }
+  assert.match(getBody, /readManualRowsLastPull\(\{ store: context\.storage, sheetId: row\.sheetId \}\)/, 'the reminder is read from the plugin\'s own storage, keyed by the REGISTRY row\'s sheet')
+  assert.match(getBody, /callerMaySet: hasPermission\(user, STOCK_PREP_ADMIN\)/, 'the READ offers `may.set` only to the caller the SET gate would admit')
+  const setBody = bodyOf('stockPreparationProjectManualRowsSet')
+  const supportedAt = setBody.indexOf('if (!manualRowsSupportedOnObject(registered.objectId)) {')
+  assert.ok(supportedAt !== -1 && supportedAt < setBody.indexOf('store.withActiveRowLocked('), 'a sheet the host never offers manual rows on is refused before the sheet is touched')
+  const requestAt = setBody.indexOf('stockPreparationManualRowsSwitchRequest(req)')
+  const scopeAt = setBody.indexOf('resolveOperatorValueScope({')
+  const lockAt = setBody.indexOf('store.withActiveRowLocked(')
+  const writeAt = setBody.indexOf('setManualRowsPolicy(')
+  const appendAt = setBody.indexOf('audit.append(')
+  assert.ok(requestAt !== -1 && scopeAt !== -1 && requestAt < scopeAt, 'the typed confirmation and the closed policy are checked (pure) before the scope and every await')
+  assert.ok(lockAt !== -1 && writeAt > lockAt, 'the write runs inside the registry\'s locked re-check')
+  assert.equal((setBody.match(/setManualRowsPolicy\(/g) || []).length, 1, 'exactly one write call')
+  assert.match(setBody, /objectId: locked\.objectId, policy \}\)/, 'the write is addressed by the LOCKED registry row\'s objectId, never the request')
+  assert.ok(appendAt > writeAt, 'the audit row follows the write')
+  assert.match(setBody, /if \(change\.written\) \{\s*await audit\.append\(\{[\s\S]*?action: STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION,[\s\S]*?mode: STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES\[policy\],/, 'ONE row, 088\'s project_fields_update, a closed mode, only when written')
+  const unconfirmedAt = setBody.indexOf('if (change.unconfirmed) throw manualRowsSwitchUnconfirmedError(change.unconfirmed)')
+  assert.ok(unconfirmedAt > appendAt, 'an unconfirmed write is AUDITED before it answers 500 — a landed switch change is never left unaudited')
+  assert.match(setBody, /confirmed: change\.unconfirmed === null,/, 'the row says whether the read-back confirmed the write')
+  assert.match(CODE, /const STOCK_PREPARATION_MANUAL_ROWS_AUDIT_MODES = Object\.freeze\(\{\s*allowed: 'manual_rows_allowed',\s*disabled: 'manual_rows_disabled',\s*\}\)/, 'the two closed audit modes')
+  // The library: its ONE host write is the one-key patch of the key column; it has no SQL of its own.
+  const LIB_CODE = stripComments(fs.readFileSync(path.join(LIB, 'stock-preparation-manual-rows.cjs'), 'utf8'))
+  assert.equal((LIB_CODE.match(/patchObjectFieldProperty\(/g) || []).length, 1, 'the switch library has exactly one provisioning write')
+  assert.match(LIB_CODE, /port\.patchObjectFieldProperty\(\{\s*projectId,\s*objectId,\s*fieldId: MANUAL_ROWS_KEY_FIELD_ID,\s*propertyPatch: \{ \[MANUAL_ROWS_POLICY_PROPERTY_KEY\]: policy \},\s*\}\)/, 'one key, the switch, on the key column — never the lock or the stanza')
+  for (const forbidden of ['.query(', 'UPDATE ', 'INSERT ', 'DELETE ']) {
+    assert.ok(!LIB_CODE.includes(forbidden), `the switch library has no raw SQL (${forbidden})`)
+  }
+})
+
+// C-15 (批次标识 BI-2, register R-65) BORN READY in the create handler: exactly one call, on the CREATE leg only — after the
+// packs are installed onto the just-provisioned sheet and BEFORE it is registered (no pull lane can resolve an
+// unregistered project, so the empty read is stable) — and the response key only when the birth answered; the replay
+// leg never births. The deps builder reads the switch FIRST and answers null while off (the create is then IO-identical).
+check('C-15 (BI-2) create: bornReadyBestEffort( lies after installPacks(createPlan and before store.create(; the replay leg has none; OFF answers null before any IO', () => {
+  const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
+  assert.equal((body.match(/bornReadyBestEffort\(/g) || []).length, 1, 'one birth call')
+  const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
+  const birthAt = body.indexOf('pullBatchInstall.bornReadyBestEffort(pullBatchBirthDepsFor({ tenantId, projectNo, provisioned, createPlan, actor }))')
+  const registerAt = body.indexOf('registered = await store.create({')
+  assert.ok(installAt !== -1 && birthAt > installAt && birthAt < registerAt, 'after the pack install, before the register')
+  const replayStart = body.indexOf('const healed = await store.withActiveRowLocked(')
+  const replayEnd = body.indexOf('} else {', replayStart)
+  assert.ok(replayStart !== -1 && !body.slice(replayStart, replayEnd).includes('bornReady'), 'the replay leg never births')
+  assert.match(body, /\.\.\.\(provisioned && provisioned\.pullBatchBand \? \{ pullBatchBand: provisioned\.pullBatchBand \} : \{\}\),/, 'the answer key only when the birth answered')
+  const builderStart = CODE.indexOf('  function pullBatchBirthDepsFor(')
+  const builder = CODE.slice(builderStart, CODE.indexOf('\n  }\n', builderStart))
+  const switchAt = builder.indexOf('if (!pullBatchLanes.stockPrepPullBatchEnabled() || !provisioned) return null')
+  assert.ok(switchAt !== -1, 'the switch is read first')
+  for (const io of ['getMultitableRecordsApi(', 'stockPreparationPullBatchStore', 'pullBatchAuditWithinFor(', 'context.api']) {
+    const at = builder.indexOf(io)
+    assert.ok(at === -1 || at > switchAt, `${io} only after the switch`)
+  }
+})
+
+// C-16 (BI-2) THE INSTALL ROUTE: ADMIN gate → the project-sheets switch → the closed body (pure) → the pull-batch switch for
+// install / abort → the typed project number, all before any await; the WRITE lookup carries projectNo; the resolved
+// target is walled to the tenant; the handler never derives a tenant from the request.
+check('C-16 (BI-2) the install route: gate → switch → pure body → pull-batch switch → typed confirmation before any await; a write lookup walled to the tenant', () => {
+  const start = CODE.indexOf('    async stockPreparationProjectPullBatchInstall(req, res) {')
+  assert.notEqual(start, -1, 'the handler exists in the 4-space shape')
+  const body = CODE.slice(start, CODE.indexOf('\n    },', start))
+  const gateAt = body.indexOf('requireAccess(req, STOCK_PREP_ADMIN)')
+  const switchAt = body.indexOf('requireProjectSheetsEnabled()')
+  const bodyAt = body.indexOf('pullBatchInstall.normalizePullBatchInstallBody(requestBody(req))')
+  const offAt = body.indexOf("throw new HttpRouteError(409, 'STOCK_PREP_PULL_BATCH_DISABLED'")
+  const confirmAt = body.indexOf('body.confirmProjectNo !== projectNo')
+  const firstAwait = body.indexOf('await ')
+  assert.ok(gateAt === body.indexOf('const user = ') + 'const user = '.length, 'the ADMIN gate is the first statement')
+  assert.ok(gateAt < switchAt && switchAt < bodyAt && bodyAt < offAt && offAt < confirmAt, 'the order')
+  assert.ok(firstAwait > confirmAt, 'no IO before the switch, the body and the typed confirmation')
+  assert.match(body, /targetPurpose: 'write',/, 'a WRITE lookup')
+  assert.match(body, /await assertResolvedProjectTargetTenancy\(action, tenantId\)/, 'the tenant wall (awaited)')
+  assert.ok(!body.includes('resolveTenantId('), 'never a request-derived tenant')
+  assert.ok(!body.includes('resolveIntegrationStagingProjectId('), 'the staging project is derived in the deps helper, never inline')
 })
 
 if (failed) {

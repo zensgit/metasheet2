@@ -40,6 +40,19 @@ export const TASKS_ZH = {
   create: '创建',
   createInvalidTitle: '标题为空或包含无法保存的字符',
   createFailed: '创建任务失败，请稍后重试',
+  // after a create while 已完成 is on: the new task is not completed, so this filter hides it
+  createdHiddenByFilter: '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
+  // the same, in a view that leaves the new task out under any status (关注中 / 我委派的)
+  createdHiddenByViewAndFilter: '任务已创建。当前视图和筛选下，列表中不显示它。',
+  createdHiddenShowOpen: '查看未完成任务',
+  createdHiddenOpenTask: '打开新任务',
+  // the same, when the new task's title does not hold the search text
+  createdHiddenBySearch: '任务已创建。当前搜索条件下，列表中不显示它。',
+  // the list page's title search
+  searchLabel: '按标题搜索任务',
+  searchPlaceholder: '搜索任务标题',
+  searchInvalid: '搜索内容无效，请修改后重试',
+  listEmptySearch: '当前筛选下没有标题匹配的任务',
   listEmpty: '暂无任务',
   // G2-core: the empty line names the status filter it was read under.
   listEmptyOpen: '暂无未完成任务',
@@ -103,6 +116,22 @@ export const TASKS_ZH = {
   followersUnknown: '关注人列表在有变更后才会显示',
   addFollowerPlaceholder: '添加关注人（用户ID）',
   addFollower: '添加关注人',
+  // Package 1b — the people picker (TaskPeoplePicker.vue) and the names on the detail page.
+  pickAssignee: '选择负责人',
+  pickFollower: '选择关注人',
+  addByIdToggle: '按用户 ID 添加',
+  peopleSearchLabel: '搜索人员',
+  peopleSearchPlaceholder: '输入姓名或用户 ID',
+  peopleTypeToSearch: '输入姓名开始搜索',
+  peopleRefineSearch: '匹配的人员较多，请输入更完整的姓名',
+  peopleNoMatch: '没有匹配的人员',
+  peopleCannotUseTasks: '还不能使用任务',
+  peopleCannotUseTasksHint: '需管理员为其开通任务权限后才能被指派',
+  peopleLoadFailed: '加载人员失败，请稍后重试',
+  peopleRateLimited: '搜索过于频繁，请稍后再试',
+  peopleSelectedLabel: '已选人数：',
+  peopleConfirm: '确定',
+  memberInactiveMark: '已停用',
   leave: '退出关注',
   commentsHeading: '评论',
   commentsLoadFailed: '加载评论失败，请稍后重试',
@@ -155,6 +184,9 @@ export const TASKS_ZH = {
   noDescription: '无描述',
   detailRemindLabel: '提醒：',
   noReminder: '不提醒',
+  // /tasks/:id — package 2: the record a dispatched task came from (a link when one can be built)
+  detailSourceLabel: '来源：',
+  detailSourceRecord: '多维表记录',
 
   // /tasks/:id — the editor (design §4.3, §7.2, §7.3). The submit button reads `save`.
   // RULED(2026-10-07): [R03] — editing through one PATCH, with a review prompt after a 409.
@@ -359,6 +391,13 @@ export const TASKS_ZH = {
   codeInvalidMember: '无效的用户',
   codeInvalidRole: '无效的角色',
   codeInactiveOrgMember: '该用户不在当前组织或已停用',
+  // Task create and assignee adds: the named person cannot use the task feature yet.
+  codeAssigneeTaskAccessRequired: '对方还不能使用任务功能，请管理员先为其开通任务权限。',
+  // Package 2, a create sent from a multitable record (the task page never sends a source). Each says
+  // only that this request created nothing.
+  codeInvalidSource: '来源记录信息无效，这次没有创建任务',
+  codeInvalidDispatchKey: '派发标识无效，这次没有创建任务',
+  codeSourceNotReadable: '无法确认来源记录，这次没有创建任务',
   codeOwnerMustTransfer: '请先转让所有权',
   codeCreatedByImmutable: '清单创建人不能被移除',
   codeTargetNotMember: '对方不是清单成员',
@@ -388,6 +427,15 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   create: 'Create',
   createInvalidTitle: 'The title is empty or contains characters that cannot be saved',
   createFailed: 'Could not create the task. Please try again later.',
+  createdHiddenByFilter: 'Task created. It is not completed yet, so the current "Completed" filter does not show it.',
+  createdHiddenByViewAndFilter: 'Task created. The current view and filter do not show it.',
+  createdHiddenShowOpen: 'Show tasks not completed',
+  createdHiddenOpenTask: 'Open the new task',
+  createdHiddenBySearch: 'Task created. The current search does not show it.',
+  searchLabel: 'Search tasks by title',
+  searchPlaceholder: 'Search task titles',
+  searchInvalid: 'This search cannot be used. Please change it and try again.',
+  listEmptySearch: 'No task titles match under the current filter',
   listEmpty: 'No tasks yet',
   listEmptyOpen: 'No incomplete tasks',
   listEmptyDone: 'No completed tasks',
@@ -441,6 +489,21 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   followersUnknown: 'The follower list appears after a change is made',
   addFollowerPlaceholder: 'Add follower (user ID)',
   addFollower: 'Add follower',
+  pickAssignee: 'Choose assignees',
+  pickFollower: 'Choose followers',
+  addByIdToggle: 'Add by user ID',
+  peopleSearchLabel: 'Search people',
+  peopleSearchPlaceholder: 'Name or user ID',
+  peopleTypeToSearch: 'Type a name to search',
+  peopleRefineSearch: 'Many people match. Type more of the name.',
+  peopleNoMatch: 'No one matches',
+  peopleCannotUseTasks: "Can't use tasks yet",
+  peopleCannotUseTasksHint: 'An administrator must give them task access before they can be assigned',
+  peopleLoadFailed: 'Could not load people. Try again later.',
+  peopleRateLimited: 'Too many searches. Try again in a moment.',
+  peopleSelectedLabel: 'Selected: ',
+  peopleConfirm: 'Confirm',
+  memberInactiveMark: 'deactivated',
   leave: 'Unfollow',
   commentsHeading: 'Comments',
   commentsLoadFailed: 'Could not load comments. Please try again later.',
@@ -485,6 +548,8 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   noDescription: 'No description',
   detailRemindLabel: 'Reminder: ',
   noReminder: 'No reminder',
+  detailSourceLabel: 'Source: ',
+  detailSourceRecord: 'Multitable record',
 
   editorHeading: 'Edit task',
   editorTitleLabel: 'Title',
@@ -647,6 +712,10 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   codeInvalidMember: 'Invalid user',
   codeInvalidRole: 'Invalid role',
   codeInactiveOrgMember: 'This user is not in the current organization or has been deactivated',
+  codeAssigneeTaskAccessRequired: "This person can't use tasks yet. Ask an administrator to give them task access.",
+  codeInvalidSource: 'The source record details are not valid, so no task was created this time',
+  codeInvalidDispatchKey: 'The dispatch identifier is not valid, so no task was created this time',
+  codeSourceNotReadable: 'The source record could not be confirmed, so no task was created this time',
   codeOwnerMustTransfer: 'Transfer ownership first',
   codeCreatedByImmutable: 'The list creator cannot be removed',
   codeTargetNotMember: 'That user is not a member of the list',
@@ -694,6 +763,7 @@ export const TASKS_FMT_ZH = {
   groupsDeletePrompt: (name: string): string => `确认删除分组「${name}」？其中的任务将回到默认分组`,
   /** G2-core (design §4.1): placed tasks the status filter leaves out; moves still count them. */
   groupsHiddenByFilter: (count: number): string => `另有 ${count} 项已分组任务不在当前状态筛选中，未显示`,
+  groupsHiddenBySearch: (count: number): string => `另有 ${count} 项已分组任务不在当前搜索结果中，未显示`,
 }
 
 export type TasksFmt = typeof TASKS_FMT_ZH
@@ -722,6 +792,8 @@ export const TASKS_FMT_EN: { [K in keyof TasksFmt]: (...args: Parameters<TasksFm
   groupsRenameNamed: (name) => `Rename group "${name}"`,
   groupsDeleteNamed: (name) => `Delete group "${name}"`,
   groupsDeletePrompt: (name) => `Delete group "${name}"? Its tasks go back to the default group.`,
+  groupsHiddenBySearch: (count) =>
+    count === 1 ? '1 more grouped task is not in the current search results and is not shown' : `${count} more grouped tasks are not in the current search results and are not shown`,
   groupsHiddenByFilter: (count) =>
     count === 1
       ? '1 grouped task is outside the status filter and not shown'
@@ -763,6 +835,10 @@ export const TASKS_CODE_KEYS = {
   INVALID_MEMBER: 'codeInvalidMember',
   INVALID_ROLE: 'codeInvalidRole',
   INACTIVE_ORG_MEMBER: 'codeInactiveOrgMember',
+  ASSIGNEE_TASK_ACCESS_REQUIRED: 'codeAssigneeTaskAccessRequired',
+  INVALID_SOURCE: 'codeInvalidSource',
+  INVALID_DISPATCH_KEY: 'codeInvalidDispatchKey',
+  SOURCE_NOT_READABLE: 'codeSourceNotReadable',
   OWNER_MUST_TRANSFER: 'codeOwnerMustTransfer',
   CREATED_BY_IMMUTABLE: 'codeCreatedByImmutable',
   TARGET_NOT_MEMBER: 'codeTargetNotMember',

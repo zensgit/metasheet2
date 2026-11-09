@@ -11,6 +11,8 @@
 // Substrate: support/stock-preparation-project-sheet-harness.cjs (real routes, real stores, real
 // installer, the shared field-permission invariant port; fake host with real per-object field sets).
 //
+//   PK-00 THE HARNESS'S RECORDS SURFACE filters as the host does (equality on String(), null = key
+//         absent, a list = any element) and pages with limit / offset (step-4 review follow-ups, item 11).
 //   PK-01 CREATE with a pack carrying ALL FOUR kinds (ext columns, an option set, a role view, column
 //         write policies) and the port wired: every host and port WRITE addresses the project object
 //         / sheet, never the env one; the ledger records the pack on the project object; the registry
@@ -67,6 +69,7 @@ const {
   TEMPLATE_FIELD_IDS,
   clone,
   makeProvisioning,
+  makeRecordsApi,
   seedObject,
   mountProjectSheetRoutes,
   call,
@@ -150,8 +153,12 @@ const hostWrites = (h) => h.provisioning.calls.filter((c) => WRITE_CALLS.has(c[0
 // stock-preparation-project-targets.cjs `provisionProjectSheet`) — that write is the create path's, not the
 // installer's, so it is not counted as an install write here.
 const CONTRACT_OPTION_FIELD_IDS = new Set(['lastPlmRefreshDecision'])
+// B (awaiting owner): provisioning also marks the template's plm_system columns read-only for people
+// (`markProjectSheetPlmSystemColumns`, one patch per column) — the create path's write too, never the
+// installer's: a pack only ever patches its own `ext_` columns, none of which is a template column.
+const PLM_LOCK_FIELD_IDS = new Set(require(path.join(LIB, 'stock-preparation-project-targets.cjs')).PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS)
 const installerWrites = (h) => h.provisioning.calls.filter((c) => c[0] === 'ensureMissingObjectFields'
-  || (c[0] === 'patchObjectFieldProperty' && !CONTRACT_OPTION_FIELD_IDS.has(c[2])))
+  || (c[0] === 'patchObjectFieldProperty' && !CONTRACT_OPTION_FIELD_IDS.has(c[2]) && !PLM_LOCK_FIELD_IDS.has(c[2])))
 const provisionedProjectObjects = (h) => [...h.provisioning.objects.keys()].filter((key) => key.includes('plm_stock_preparation_sandbox_p_'))
 
 /**
@@ -168,6 +175,41 @@ function registerWithoutPack(h, extraFieldIds = []) {
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+// Step-4 review follow-ups (item 11): THE HARNESS'S RECORDS SURFACE FILTERS AS THE HOST DOES
+// (packages/core-backend/src/multitable/query-service.ts `queryRecords`): `data ->> k = String(v)`, a `null`
+// filter matches only rows WITHOUT the key, a value list matches any element, then OFFSET / LIMIT. Before, it
+// answered every row of the sheet whatever the filter said, so a reader that trusted the host's filter (the
+// export's main-row read, `readExistingStockPreparationRows`) was never tested against a sheet holding other
+// projects' rows.
+test('PK-00 the harness records surface honours filters (host semantics) and limit / offset', async () => {
+  const records = makeRecordsApi()
+  const seed = (sheetId, data) => records.createRecord({ sheetId, data })
+  await seed('sheet_pk00_a', { projectNo: 'PRJ-PK00-ONE', idempotencyKey: 'k1', qty: 2 })
+  await seed('sheet_pk00_a', { projectNo: 'PRJ-PK00-TWO', idempotencyKey: 'k2', qty: 3 })
+  await seed('sheet_pk00_a', { projectNo: 'PRJ-PK00-ONE', idempotencyKey: 'k3', qty: 4, note: 'n' })
+  await seed('sheet_pk00_a', { idempotencyKey: 'k4', note: null })
+  await seed('sheet_pk00_b', { projectNo: 'PRJ-PK00-ONE', idempotencyKey: 'k5' })
+  const keysOf = (rows) => rows.map((row) => row.data.idempotencyKey)
+
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a' })), ['k1', 'k2', 'k3', 'k4'], 'no filter: the sheet\'s rows only')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-ONE' } })), ['k1', 'k3'], 'a project filter: that project\'s rows of that sheet only')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-ONE', idempotencyKey: 'k3' } })), ['k3'], 'filters are a conjunction')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: 2 } })), ['k1'], 'String() coercion, as the host\'s ->> text comparison')
+  // PR-7b (#6571 review correction 3): the coercion leg that DISCRIMINATES — a STRING filter on NUMERIC data matches
+  // (the host compares `data ->> k` text with String(v)); a strict `===` reads it as nothing.
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: '2' } })), ['k1'], 'a string filter on numeric data: String() on the row side too')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: ['3', 4] } })), ['k2', 'k3'], 'a mixed list on numeric data: any element, compared as text')
+  assert.deepEqual(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { qty: '2.0' } }), [], 'text, not numeric, equality (2 is "2", never "2.0")')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: null } })), ['k4'], 'a null filter: only rows without the key')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { note: null } })), ['k1', 'k2'], 'an explicit JSON null is not an absent key (data -> k IS NULL)')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: ['PRJ-PK00-TWO', 'PRJ-PK00-ONE'] } })), ['k1', 'k2', 'k3'], 'a value list: any element')
+  assert.deepEqual(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: [] } }), [], 'an empty list matches nothing')
+  assert.deepEqual(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-NONE' } }), [], 'a value no row has: nothing')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', limit: 2, offset: 0 })), ['k1', 'k2'], 'limit')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', limit: 2, offset: 2 })), ['k3', 'k4'], 'offset + limit')
+  assert.deepEqual(keysOf(await records.queryRecords({ sheetId: 'sheet_pk00_a', filters: { projectNo: 'PRJ-PK00-ONE' }, limit: 1, offset: 1 })), ['k3'], 'the filter applies before the page')
+})
 
 test('PK-01 create: a pack with ALL FOUR kinds lands on the PROJECT object only, ledgered there, registered AFTER the install, audited values-free', async () => {
   const port = createWriteScopePort({ knownRoleIds: [ROLE_FLOOR, ROLE_PULLER] })

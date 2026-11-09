@@ -10,10 +10,19 @@ import {
   deriveRecordPermissions,
   deriveViewPermissions,
   type FieldPermissionScope,
-  isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
+  isFieldReadOnlyForPeople,
   isFieldWriteForbidden,
 } from '../multitable/permission-derivation'
+import {
+  carryHumanWriteLock,
+  hasHumanWriteLockedRequiredField,
+  humanWriteLockRefusalBody,
+  isFieldHumanWriteLocked,
+  listHumanWriteLockedFieldIds,
+  stripHumanWriteLockKey,
+  withHumanWriteLockKey,
+} from '../multitable/human-write-lock'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
@@ -130,6 +139,10 @@ import {
   loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
+import {
+  GRID_EXPORT_CLOSED_REFUSAL,
+  GRID_EXPORT_CLOSURE_CONTEXT_MARKER,
+} from '../multitable/sheet-grid-export-closure'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
 // bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
 import {
@@ -143,6 +156,59 @@ import {
   resolvePeopleSheetReadBound,
 } from '../multitable/people-sheet-read-bound'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
+import {
+  isPluginMaintainedRowSheet,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY,
+  RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS,
+} from '../multitable/record-duplicate-guard'
+import {
+  applyManualSupplementMarks,
+  applyPlmRowDeleteBlocks,
+  PlmRowDeleteRefusedError,
+  plmRowDeleteRefusedBody,
+  PlmRowRestoreRefusedError,
+  plmRowRestoreRefusedBody,
+  resolvePlmRowDeleteBlockedIds,
+  resolvePlmRowDisplay,
+  withManualSupplementMark,
+  withPlmRowDeleteBlock,
+  fieldsCarryExactStockPreparationStanza,
+  type PlmRowDisplay,
+} from '../multitable/plm-row-delete-guard'
+import {
+  carryManualRowPolicy,
+  isClearingManualRowValue,
+  isManualSupplementRow,
+  stripManualRowPolicyKey,
+  withManualRowPolicyKey,
+} from '../multitable/stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
+import {
+  assertManualRowEditInTransaction,
+  assertManualRowsAllowed,
+  liftManualRowFillableLocks,
+  loadManualRowsVerdict,
+  manualRowCopyRule,
+  mintManualRowCreateExtension,
+  resolveGenericCreateRefusal,
+  resolveManualRowsContextBlock,
+  STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE,
+  StockPrepManualRowsRefusedError,
+  stockPrepProjectSheetsEnabledForManualRows,
+  type ManualRowCreateOrigin,
+  type ManualRowsContextBlock,
+  type ManualRowsSheet,
+} from '../multitable/stock-preparation-manual-rows-gate'
+import { resolveBomRelationsContextBlock, type BomRelationsContextBlock } from '../multitable/stock-preparation-bom-relations-context'
+import {
+  VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE,
+  VIEWER_FILTER_INVALID_MESSAGE,
+  VIEWER_FILTER_QUERY_PARAM,
+  composeViewerFilter,
+  parseViewerFilterParam,
+  viewerFilterFieldsPermitted,
+} from '../multitable/viewer-filter'
+import { isApiTokenBearer } from '../multitable/oapi-read-allowlist'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
@@ -259,6 +325,15 @@ import {
   loadEntityConfigSnapshot,
   applyConfigRevert,
 } from '../multitable/config-restore'
+import {
+  FIELD_CHANGED_CONCURRENTLY_CODE,
+  FieldChangedConcurrentlyError,
+  PATCH_FIELD_LOCKED_REREAD_SQL,
+  PATCH_FIELD_READ_SQL,
+  fieldRowChangedSince,
+  snapshotFieldRowForRecheck,
+  withFieldRowRecheckRetry,
+} from '../multitable/field-row-write-guard'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -386,6 +461,7 @@ import {
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
   preflightAutomationRuleUpdate,
+  preflightAutomationWebhookTargets,
   preflightDingTalkAutomationCreate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
@@ -395,7 +471,7 @@ import { createRecoveryArchiveWorkerRecordEvents, enqueueRecoveryMutationEvent }
 import type { RecoveryArchiveWorkerApplyCallbacks } from '../multitable/recovery-archive-async-restore'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
-import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
+import { listAutomationDingTalkPersonDeliveries, parseDingTalkPersonDeliveryStatusFilter } from '../multitable/dingtalk-person-delivery-service'
 import {
   publishMultitableSheetRealtime as publishMultitableSheetRealtimeShared,
   type MultitableSheetRealtimePayload as SharedRealtimePayload,
@@ -2594,9 +2670,22 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   // they special-case — which is exactly why the rule must live OUTSIDE the per-type switch and be SHARED.
   // It applies the same imported function, never a second copy: two independent copies of this rule is
   // precisely how the inconsistency survived in the first place.
-  return withLayer2VisibilityKeys(
-    withFieldRequiredWhenRule(
-      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The human write lock joins the same cross-cutting chain (shared `withHumanWriteLockKey`): this is the
+  // READ serializer too, and a dropped lock fails open. The person field-WRITE entry strips it again
+  // (`normalizeFieldWriteInput`), so keeping it here never lets a person set it.
+  //
+  // The manual-rows switch (shared `withManualRowPolicyKey`, stock-preparation-manual-rows.ts) likewise: a present
+  // value that is not 'allowed' reads as 'disabled' here too, and the person field-write entry strips / carries it.
+  return withManualRowPolicyKey(
+    withHumanWriteLockKey(
+      withLayer2VisibilityKeys(
+        withFieldRequiredWhenRule(
+          withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+          property,
+        ),
+        property,
+      ),
       property,
     ),
     property,
@@ -5115,7 +5204,8 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       const property = normalizeJson(field.property)
       const base: FieldMutationGuard = {
         type: field.type,
-        readOnly: isFieldAlwaysReadOnly(field),
+        // Person write spine: always-read-only OR the human write lock (human-write-lock.ts).
+        readOnly: isFieldReadOnlyForPeople(field),
         hidden: isFieldPermissionHidden(field),
         // #16/P2: carry property so RecordWriteService.validateChanges' isPersonSingleRecord(property)
         // sees limitSingleRecord — without it a multiSelect person is wrongly rejected as single.
@@ -5139,7 +5229,7 @@ function filterVisiblePropertyFields(fields: UniverMetaField[]): UniverMetaField
   return fields.filter((field) => !isFieldPermissionHidden(field))
 }
 
-function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
+export function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>): Record<string, unknown> {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
@@ -5325,6 +5415,24 @@ export async function loadReadableRecordFieldIds(
 ): Promise<Set<string>> {
   const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
   return maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
+}
+
+/**
+ * The same read-path field mask as {@link loadReadableRecordFieldIds}, for a caller that has no request: the
+ * access snapshot (read from the database by the caller) stands in for the request on every step, including
+ * the formula-taint chokepoint's foreign-sheet readability. Used by subscription webhook delivery, which
+ * filters each delivered value map with `filterRecordDataByFieldIds` over this set.
+ *
+ * FAIL CLOSED: no user / no sheet → EMPTY set.
+ */
+export async function loadReadableRecordFieldIdsForAccess(
+  query: QueryFn,
+  sheetId: string,
+  access: ResolvedRequestAccess,
+  capabilities: MultitableCapabilities,
+): Promise<Set<string>> {
+  const baseAllowed = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+  return maskStoredRecordFieldIds(undefined, query, sheetId, undefined, baseAllowed, access)
 }
 
 /**
@@ -6254,7 +6362,12 @@ async function normalizeFieldWriteInput(
   void query
   return {
     type: requestedType as UniverMetaField['type'],
-    property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
+    // The PERSON field-write entry (POST /fields, PATCH /fields/:fieldId): a person can never set the human
+    // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
+    // so a person can never clear it either. Only plugin provisioning writes it. The manual-rows switch
+    // (stock-preparation-manual-rows.ts) follows the same rule: stripped here, the STORED value carried by PATCH.
+    // The pull-batch band marker (stock-preparation-pull-batch-band.ts, R-65) too: a person can never forge a band.
+    property: stripPullBatchBandMarker(stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)))),
   }
 }
 
@@ -8254,6 +8367,189 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
 }
 
+// ── 人工补充行 (manual supplementary rows; ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4, slice B2) ─────────
+//
+// Three session-only routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy (复制为新行)
+// and PATCH /records/:recordId/manual-fields (修改 the six fillable columns). The gate, the registry reads and the
+// create extension live in multitable/stock-preparation-manual-rows-gate.ts; these helpers are the route half.
+
+/** A field-level refusal of a manual-row route, mapped to its HTTP body by `sendManualRowWriteError`. */
+class ManualRowFieldRefusalError extends Error {
+  constructor(readonly kind: 'plm_system' | 'not_writable', readonly fieldIds: string[]) {
+    super(kind === 'plm_system' ? 'Field(s) written by the server on a manual row' : 'Field(s) not writable for this user')
+    this.name = 'ManualRowFieldRefusalError'
+  }
+}
+
+/**
+ * The layer-3 per-subject field-WRITE gate of the manual-row create (ADR §3.2 「逐人字段权限照常生效」), on the fields
+ * with the lock lifted from the six fillable columns ONLY. Before it, the closed-code refusal: a submitted column the
+ * server writes on a manual row (stamps, identity / RUN, lineage) or that keeps its PLM lock answers
+ * FIELD_READONLY_PLM_SYSTEM — for visible fields only, caller-submitted ids only (no existence oracle). Then the
+ * per-subject gate (`isFieldWriteForbidden`, the shared W1-3 predicate). Throws; writes nothing.
+ */
+function assertManualRowCreateFieldsWritable(
+  fields: UniverMetaField[],
+  sheet: ManualRowsSheet,
+  capabilities: MultitableCapabilities,
+  fieldScopeMap: Map<string, FieldPermissionScope>,
+  submittedFieldIds: string[],
+): void {
+  const lifted = liftManualRowFillableLocks(fields, sheet)
+  const liftedById = new Map(lifted.map((field) => [field.id, field]))
+  const manualCreateFieldPermissions = deriveFieldPermissions(filterVisiblePropertyFields(lifted), capabilities, {
+    allowCreateOnly: true,
+    fieldScopeMap,
+  })
+  const submitted = [...new Set(submittedFieldIds)]
+  const serverWrittenFieldIds = submitted.filter((fid) => manualCreateFieldPermissions[fid]?.visible === true
+    && (sheet.derived.neverWritten.has(fid) || isFieldHumanWriteLocked(liftedById.get(fid))))
+  if (serverWrittenFieldIds.length > 0) throw new ManualRowFieldRefusalError('plm_system', serverWrittenFieldIds)
+  const forbiddenWriteFieldIds = submitted.filter((fid) => isFieldWriteForbidden(manualCreateFieldPermissions[fid]))
+  if (forbiddenWriteFieldIds.length > 0) throw new ManualRowFieldRefusalError('not_writable', forbiddenWriteFieldIds)
+}
+
+/**
+ * THE one RecordService.createRecord call of the two manual-row create routes (GW7 census: one site). Gate (§3.2
+ * conditions 2–6 on the loaded fields), field gate, then the create with the actor's OWN capabilities and a minted
+ * manual-row extension (conditions 3, 4, 6 run again inside the create transaction), then the create echo through the
+ * layer-2 ∧ layer-3 read mask, as POST /records does.
+ */
+async function createManualSupplementRow(
+  req: Request,
+  pool: ReturnType<typeof poolManager.get>,
+  input: {
+    sheetId: string
+    access: ResolvedRequestAccess
+    capabilities: MultitableCapabilities
+    data: Record<string, unknown>
+    origin: ManualRowCreateOrigin
+    fields?: UniverMetaField[]
+    sheet?: ManualRowsSheet
+    fieldScopeMap?: Map<string, FieldPermissionScope>
+  },
+): Promise<{ id: string; version: number; data: Record<string, unknown> }> {
+  const query = pool.query.bind(pool)
+  const fields = input.fields ?? await loadFieldsForSheet(query, input.sheetId)
+  const sheet = input.sheet
+    ?? assertManualRowsAllowed(await loadManualRowsVerdict(query, input.sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows()))
+  const fieldScopeMap = input.fieldScopeMap ?? await loadFieldPermissionScopeMap(query, input.sheetId, input.access.userId)
+  assertManualRowCreateFieldsWritable(fields, sheet, input.capabilities, fieldScopeMap, Object.keys(input.data))
+
+  const recordService = new RecordService(pool, eventBus)
+  // A-min-create (#2255): the new row's same-record formula-over-lookup, as on POST /records.
+  recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
+  const result = await recordService.createRecord({
+    sheetId: input.sheetId,
+    capabilities: input.capabilities,
+    actorId: getRequestActorId(req),
+    data: input.data,
+    manualRow: mintManualRowCreateExtension(sheet, input.origin),
+  })
+
+  // Create echo — the layer-2 ∧ layer-3 READ mask of POST /records (F4), over the same fields.
+  const visiblePropertyFields = filterVisiblePropertyFields(fields)
+  const echoFieldPermissions = deriveFieldPermissions(visiblePropertyFields, input.capabilities, { hiddenFieldIds: [], fieldScopeMap })
+  const allowedFieldIds = await maskStoredRecordFieldIds(
+    req,
+    query,
+    input.sheetId,
+    visiblePropertyFields,
+    new Set(visiblePropertyFields.filter((field) => echoFieldPermissions[field.id]?.visible !== false).map((field) => field.id)),
+  )
+  return { id: result.recordId, version: result.version, data: filterRecordDataByFieldIds(result.data, allowedFieldIds) }
+}
+
+/**
+ * 「复制为新行」's payload (ADR §3.3): the whitelist (`manualRowCopyRule`) and, for every copied column, READ on the
+ * source column (layer-2 ∧ layer-3 visibility, formula taint through the read chokepoint) AND the create-time WRITE bit
+ * with the lock lifted from the six fillable columns only. Lineage, 进度与回复, identity / RUN and the stamps are never
+ * copied; the server stamps the new row's own 项目号, key and 有效. Forward-link values come from meta_links (the
+ * duplicate route's overlay). An empty source cell is not copied.
+ */
+async function buildManualRowCopyData(
+  req: Request,
+  query: QueryFn,
+  input: {
+    sheetId: string
+    recordId: string
+    sourceData: Record<string, unknown>
+    fields: UniverMetaField[]
+    sheet: ManualRowsSheet
+    capabilities: MultitableCapabilities
+    fieldScopeMap: Map<string, FieldPermissionScope>
+  },
+): Promise<Record<string, unknown>> {
+  const visible = filterVisiblePropertyFields(liftManualRowFillableLocks(input.fields, input.sheet))
+  const readPermissions = deriveFieldPermissions(visible, input.capabilities, { hiddenFieldIds: [], fieldScopeMap: input.fieldScopeMap })
+  const copyWritePermissions = deriveFieldPermissions(visible, input.capabilities, { allowCreateOnly: true, fieldScopeMap: input.fieldScopeMap })
+  const readableFieldIds = await maskStoredRecordFieldIds(
+    req,
+    query,
+    input.sheetId,
+    visible,
+    new Set(visible.filter((field) => readPermissions[field.id]?.visible !== false).map((field) => field.id)),
+  )
+  const sourceData: Record<string, unknown> = { ...input.sourceData }
+  const relationalLinkFields = input.fields
+    .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
+    .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
+  if (relationalLinkFields.length > 0) {
+    const linkValuesByRecord = await loadLinkValuesByRecord(query, [input.recordId], relationalLinkFields)
+    for (const { fieldId } of relationalLinkFields) sourceData[fieldId] = linkValuesByRecord.get(input.recordId)?.get(fieldId) ?? []
+  }
+  const copyData: Record<string, unknown> = {}
+  for (const field of visible) {
+    if (manualRowCopyRule(field, input.sheet) !== 'read_write') continue
+    if (!readableFieldIds.has(field.id) || isFieldWriteForbidden(copyWritePermissions[field.id])) continue
+    const value = sourceData[field.id]
+    if (value === null || value === undefined) continue
+    copyData[field.id] = value
+  }
+  return copyData
+}
+
+/** The three routes' refusal mapping (null = not one of theirs; the route answers 500). */
+function sendManualRowWriteError(res: Response, err: unknown): Response | null {
+  if (err instanceof StockPrepManualRowsRefusedError) return res.status(err.status).json(err.body())
+  if (err instanceof ManualRowFieldRefusalError) {
+    return err.kind === 'plm_system'
+      ? res.status(403).json(humanWriteLockRefusalBody(err.fieldIds))
+      : sendForbidden(res, `Field(s) not writable for this user: ${err.fieldIds.join(', ')}`)
+  }
+  if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
+  const writerFenceResponse = sendWriterFenceConflict(res, err)
+  if (writerFenceResponse) return writerFenceResponse
+  if (isRecordCreateValidationError(err)) {
+    return res.status(422).json({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Record validation failed', fieldErrors: normalizeRecordCreateFieldErrors(err.fieldErrors) },
+    })
+  }
+  if (err instanceof RecordServiceFieldForbiddenError || err instanceof ServiceFieldForbiddenError) {
+    return res.status(403).json({ ok: false, error: { code: err.code, message: err.message } })
+  }
+  if (err instanceof RecordServiceVersionConflictError || err instanceof ServiceVersionConflictError) {
+    return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: err.message, serverVersion: err.serverVersion } })
+  }
+  if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
+    return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
+  }
+  if (err instanceof ValidationError) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+  if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError || err instanceof NotFoundError) {
+    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+  }
+  if (err instanceof RecordServicePermissionError || err instanceof PermissionError) return sendForbidden(res, err.message)
+  const hint = getDbNotReadyMessage(err)
+  if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+  return null
+}
+
+/** The manual-row routes accept session requests only (ADR §3.2); an `mst_` token never reaches them. */
+function sendManualRowsSessionOnly(res: Response): Response {
+  return res.status(401).json({ ok: false, error: { code: 'SESSION_REQUIRED', message: 'This route accepts session requests only' } })
+}
+
 export interface UniverMetaRouterOptions {
   readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
   readonly recoveryArchiveDatabaseRuntime?: RecoveryArchiveRouterDatabaseRuntime
@@ -9468,6 +9764,58 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           canCopySheet = false
         }
       }
+      // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): on a P_reg sheet (registered project sheet with a
+      // plugin registry row), for an actor who can create, edit or delete records, the manual-row block — its state
+      // (allowed / disabled / unavailable + reason), the six fillable column ids and the create's required ids. Every
+      // other sheet and actor gets no key (the body is byte-identical); a sheet without the exact stanza issues no
+      // statement. Never 500s the load: a registry that cannot be read is `unavailable/registry_unreadable` (fail
+      // closed — the web hides its generic create entries); a thrown lookup fails closed the same way.
+      let manualRowsBlock: ManualRowsContextBlock | null = null
+      if (effectiveSheetId && (capabilities.canCreateRecord === true || capabilities.canEditRecord === true || capabilities.canDeleteRecord === true)) {
+        try {
+          manualRowsBlock = await resolveManualRowsContextBlock(pool.query.bind(pool), effectiveSheetId, activeFields)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: manual-rows probe failed; failing closed to unavailable',
+            { reason: 'manual_rows_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          manualRowsBlock = { state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] }
+        }
+      }
+      // 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): on a stock-preparation main-template sheet,
+      // the physical ids of the five columns the drawer's two viewer-only filters use — for EVERY reader (these are
+      // read-only buttons), and only when each column exists with the plugin's stanza and this actor may read it
+      // (multitable/stock-preparation-bom-relations-context.ts). Every other sheet gets no key and issues no extra
+      // query (the stanza pre-check is in memory). A thrown registry read fails closed to no block, values-free log.
+      let bomRelationsBlock: BomRelationsContextBlock | null = null
+      if (effectiveSheetId && capabilities.canRead === true && fieldsCarryExactStockPreparationStanza(activeFields)) {
+        try {
+          bomRelationsBlock = await resolveBomRelationsContextBlock(pool.query.bind(pool), effectiveSheetId, activeFields, allowedFieldIds)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: bom-relations probe failed; failing closed to no block',
+            { reason: 'bom_relations_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          bomRelationsBlock = null
+        }
+      }
+      // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
+      // plugin maintains (multitable/record-duplicate-guard.ts); tell the web so the drawer's duplicate entry is
+      // shown disabled with the reason. Only for an actor who could otherwise create. The namespace half runs
+      // in memory over `activeFields`, so an ordinary sheet issues no statement and its capabilities stay
+      // byte-identical. A thrown registry probe fails CLOSED to true (display only — the route decides).
+      let recordDuplicateBlocked = false
+      if (capabilities.canCreateRecord === true && effectiveSheetId) {
+        try {
+          recordDuplicateBlocked = await isPluginMaintainedRowSheet(pool.query.bind(pool), effectiveSheetId, activeFields)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: plugin-maintained-rows probe failed for recordDuplicateBlocked; failing closed to true',
+            { reason: 'plugin_maintained_rows_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          recordDuplicateBlocked = true
+        }
+      }
       // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
       // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
       let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
@@ -9545,6 +9893,31 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             canDeleteSheet,
             // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
             canCopySheet,
+            // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): sent ONLY on a P_reg sheet to an actor who can
+            // create, edit or delete (see `manualRowsBlock` above); the manual-row routes re-gate on their own.
+            ...(manualRowsBlock ? { stockPreparationManualRows: manualRowsBlock } : {}),
+            // 备料 「查看子件」 / 「查看所有使用位置」: sent ONLY on a stock-preparation main-template sheet (see
+            // `bomRelationsBlock` above). Field ids only; the buttons narrow GET /view with `viewerFilter`, never a write.
+            ...(bomRelationsBlock ? { stockPreparationBomRelations: bomRelationsBlock } : {}),
+            // Customer feedback 2026-10-27: sent ONLY when true (see `recordDuplicateBlocked` above); the
+            // duplicate route answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET on its own.
+            ...(recordDuplicateBlocked ? { recordDuplicateBlocked: true } : {}),
+            // R68 (#6454 judge note): a sheet with a human-write-locked column that is ALSO required by its own
+            // validation rule (the 备料 project sheet's PLM columns) can never take a person-created record:
+            // empty fails the rule, filled is a locked write. Sent ONLY when true and only to an actor who could
+            // otherwise create, so every other sheet's capabilities object is unchanged; the web hides its
+            // create / duplicate entries on it. Display-only: the create routes keep their own refusals.
+            ...(capabilities.canCreateRecord === true && hasHumanWriteLockedRequiredField(activeFields)
+              ? { recordCreateBlockedByLock: true }
+              : {}),
+            // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the effective sheet is stamped
+            // closed for generic grid export — `canExport` above is already false (the shared resolver's clamp).
+            // Sent ONLY on such a sheet, so every other sheet's capabilities object is byte-identical; the
+            // workbench renders its export buttons disabled with the reason and re-checks before it builds a
+            // selected-rows file in the browser. Display only: the export route refuses on its own.
+            ...(effectiveSheetResolution?.gridExportClosed === true
+              ? { gridExportClosure: GRID_EXPORT_CLOSURE_CONTEXT_MARKER }
+              : {}),
           },
           capabilityOrigin,
           fieldPermissions,
@@ -11799,7 +12172,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
           return fieldRetypeConversionRestoreRefusal()
         }
-        const snapshot = await loadEntityConfigSnapshot(query, rev)
+        // A field snapshot is read under the row lock (FOR NO KEY UPDATE) and held until commit: the identity/drift
+        // checks below compare it, and applyConfigRevert writes over it, so a field write committed in between would be
+        // overwritten without CONFIG_DRIFT. Fence → this one row → UPDATE → revision: no wait on another field row.
+        const snapshot = await loadEntityConfigSnapshot(query, rev, { lockField: true })
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
         // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
@@ -14414,17 +14790,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // for BOTH the pre-commit cap check and the post-commit chunked recompute (B3) so the
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
-      const updated = await pool.transaction(async ({ query }) => {
+      // Lost-update guard (multitable/field-row-write-guard.ts): the UPDATE below writes every column from the read
+      // just below, so the row is re-read under the row lock right before it and compared. A concurrent change of
+      // name, type or property rolls the attempt back and the whole transaction runs once more on fresh data
+      // (validation included); a second conflict answers 409 FIELD_CHANGED_CONCURRENTLY.
+      const updated = await withFieldRowRecheckRetry(() => pool.transaction(async ({ query }) => {
+        // Per-attempt state: a rolled-back attempt must not leak its recompute snapshot into the next one.
+        sheetId = ''
+        bulkRecomputeRecordIds = null
         // Fence before re-reading the field: recovery hashes and applies against one schema
         // generation, while field retype/property/order writes serialize outside that window.
         await fenceWriterEntry(query, preflightSheetId)
-        const existing = await query(
-          'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
-          [fieldId],
-        )
+        // Unlocked on purpose: locking here would hold the row through validation and the sibling shift below, and the
+        // web client's shared column drag (one PATCH per field, all at once) would deadlock on it.
+        const existing = await query(PATCH_FIELD_READ_SQL, [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
 
         const row = (existing as any).rows[0]
+        // What this attempt validates, deep-copied before any validation code can touch it (compared under the lock).
+        const validated = snapshotFieldRowForRecheck(row)
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
         const currentType = mapFieldType(String(row.type))
@@ -14432,12 +14816,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
         const requestedType = parsed.data.type ?? mapFieldType(String(row.type))
-        const { type: nextType, property: nextProperty } = await normalizeFieldWriteInput(
+        const { type: nextType, property: normalizedNextProperty } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
           sheetId,
           requestedType,
           typeof parsed.data.property !== 'undefined' ? parsed.data.property : row.property,
         )
+        // Human write lock: the STORED value wins over the body, whatever the body said (set, cleared,
+        // changed or omitted). No administrator override — only plugin provisioning changes it. The manual-rows
+        // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
+        // writes it).
+        // The pull-batch band marker likewise (R-65): a body without it can never drop it, a body with it never sets it.
+        const nextProperty = carryPullBatchBandMarker(row.property, carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty)))
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
@@ -14614,14 +15004,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           }
         }
 
-        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : currentOrder
+        // Lost-update guard: the locked re-read, one statement before the UPDATE. It sits after the sibling shift, so
+        // the row is first locked where the UPDATE used to lock it (no new lock-order edge); FOR NO KEY UPDATE is the
+        // lock the UPDATE itself takes, so FK child inserts (links, attachments, auto-number) are never blocked by it.
+        const lockedRes = await query(PATCH_FIELD_LOCKED_REREAD_SQL, [fieldId])
+        const locked = (lockedRes as any).rows?.[0]
+        if (!locked) throw new NotFoundError(`Field not found: ${fieldId}`)
+        if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
+        // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
+        // be dropped by a stale read even if the compare were weakened.
+        const writeProperty = carryPullBatchBandMarker(locked.property, carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty)))
+        // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
+        // keeps the row's CURRENT order instead of writing back the one it read.
+        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)
 
         const update = await query(
           `UPDATE meta_fields
            SET name = $2, type = $3, property = $4::jsonb, "order" = $5, updated_at = now()
            WHERE id = $1
            RETURNING id, name, type, property, "order"`,
-          [fieldId, nextName, nextType, JSON.stringify(nextProperty), nextOrder],
+          [fieldId, nextName, nextType, JSON.stringify(writeProperty), nextOrder],
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
@@ -14643,8 +15045,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         // T9-R1: record the field update — only the CHANGED config keys; a no-op (nothing changed) records nothing.
+        // `before` is the LOCKED row: a sibling's shift that moved this row between the two reads is already recorded
+        // by recordFieldOrderShifts and is not this PATCH's change (reverting it must not restore the stale order).
         const updateDiff = fieldUpdateDiff(
-          { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) },
+          { name: String(locked.name), type: String(locked.type), property: locked.property, order: Number(locked.order) },
           { name: String(updatedRow.name), type: String(updatedRow.type), property: updatedRow.property, order: Number(updatedRow.order) },
         )
         if (updateDiff) {
@@ -14656,7 +15060,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         return serializeFieldRow(updatedRow)
-      })
+      }))
 
       invalidateFieldCache(sheetId)
 
@@ -14718,6 +15122,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // fence-then-block-checked; a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS.
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      // Lost-update guard: the field changed under BOTH attempts (field-row-write-guard.ts). Values-free; nothing written.
+      if (err instanceof FieldChangedConcurrentlyError) {
+        return res.status(409).json({ ok: false, error: { code: FIELD_CHANGED_CONCURRENTLY_CODE, message: err.message } })
       }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
@@ -16657,6 +17065,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+        // 人工补充行 B3 (ADR §3.1): the xlsx import is a generic create too — on a registered project sheet it is refused
+        // here, by state, before any row reaches createRecord (the same verdict POST /records and /context use).
+        const genericCreateRefusal = await resolveGenericCreateRefusal(pool.query.bind(pool), sheetId, fields)
+        if (genericCreateRefusal) return res.status(genericCreateRefusal.status).json(genericCreateRefusal.body())
         const rawMapping = parseJsonFormField(req.body.mapping, 'mapping')
         const columnMapping = normalizeXlsxColumnMapping(rawMapping, parsed.headers, fields)
         if (Object.keys(columnMapping.mapping).length === 0) {
@@ -16772,11 +17184,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // not a page, not the unfiltered sheet), in the view's sort order.
       let view: SharedMultitableViewConfig | null = null
 
-      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness, gridExportClosed } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
-      if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+      if (!capabilities.canRead) return sendForbidden(res)
+      // 备料分批拉取第一期 step 3 (multitable/sheet-grid-export-closure.ts): the resolver already turned
+      // `canExport` off on a sheet stamped closed for generic grid export (xlsx AND csv — the format branch is far
+      // below). A READER of such a sheet is told why (values-free, fixed copy); a non-reader got the plain 403 one
+      // line above and learns nothing. Every other `canExport: false` keeps the plain 403, in today's order.
+      // Review round 1: on a CLOSED sheet liveness answers first — a reader of a soft-deleted (or vanished) stamped
+      // sheet gets the same values-free SHEET_DELETED / NOT_FOUND any reader gets, not the closure 403; the closure
+      // refusal is reserved for a live sheet. The caller already passed canRead, so no existence oracle opens.
+      if (!capabilities.canExport) {
+        if (!gridExportClosed) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+        return res.status(403).json(GRID_EXPORT_CLOSED_REFUSAL)
+      }
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
       // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared
@@ -17109,6 +17533,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
     const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
+    // Viewer filter parity with GET /view (multitable/viewer-filter.ts): the footer must total the rows the grid shows.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     // A5 full-column scale stats: optional CSV of field ids the caller wants numeric min/max/count for
     // (conditional-formatting scale endpoints — data-bar denominator + color-scale gradient bounds, computed
     // over the WHOLE filtered column, not the client page). ABSENT (or empty) → `stats` is OMITTED from the
@@ -17175,11 +17601,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)]))
-      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      const storedFilterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
 
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const selectionFieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
       const selectableFieldIds = new Set(visibleFields.filter((field) => selectionFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      // Viewer filter: same refusals as GET /view, gated by the same selection set this route prunes its stored
+      // filter with; composed for this read only.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, selectableFieldIds, filterFieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
       const selectableFields = visibleFields.filter((field) => selectableFieldIds.has(field.id))
 
       // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
@@ -17487,6 +17924,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const seed = req.query.seed === 'true'
     const includeLinkSummaries = req.query.includeLinkSummaries === 'true'
     const search = normalizeSearchTerm(req.query.search)
+    // Viewer filter (multitable/viewer-filter.ts): a per-request AND onto the stored filter, never stored. Parsed
+    // here, refused with a fixed message after the read gate, field-gated once allowedFieldIds is known below.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
     const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : undefined
     // #5807: `let`, not `const` — a bounded (People) sheet re-clamps both to its window right after the
@@ -17533,7 +17973,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       offset = boundedWindow.offset
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
-      if (seed) {
+      // A LIVE sheet is re-seeded only by someone who could add those columns and rows by hand. The seed
+      // writes six fields with fresh ids and five demo records, so on a live sheet it is a schema write and
+      // a record write, not a read; behind the canRead gate above alone, any reader (an `mst_` token
+      // included) could add columns and rows to a sheet whose field management is refused to them — e.g. a
+      // registered stock-preparation project sheet, where only platform admins manage fields (owner option
+      // B, 2026-10-29). Materializing an ABSENT sheet is unchanged.
+      const seedMayWriteLive = seed && sheetLiveness === 'live' && capabilities.canManageFields && capabilities.canCreateRecord
+      if (seedMayMaterialize || seedMayWriteLive) {
         await createSeededSheet({ sheetId, name: `Seed ${sheetId}` })
       }
 
@@ -17587,9 +18034,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const ignoredFilterFieldIds = collectLeafConditions(rawFilterInfo)
         .filter((condition) => !fieldTypeById.has(condition.fieldId))
         .map((c) => c.fieldId)
-      const filterInfo = rawFilterInfo
+      const storedFilterInfo = rawFilterInfo
         ? pruneFilterNode(rawFilterInfo, (condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
         : null
+      // Viewer filter: refused (one fixed message, no field named) when malformed or when a condition names a field
+      // the caller may not filter on — the SAME allowedFieldIds the stored filter is pruned by (layer-2 ∧ layer-3;
+      // view-hidden columns ARE filterable, layer-1 is display-only here). Composed for the row selection only:
+      // the response's `view` below is still serialised from `viewConfig`, so the narrowing is never echoed back
+      // as the view's own filter and nothing is written.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, allowedFieldIds, fieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
 
       if (ignoredSortFieldIds.length > 0) {
         warnings.push(`排序字段不存在，已忽略: ${ignoredSortFieldIds.join(', ')}`)
@@ -17880,6 +18341,24 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         relationalLinkFields,
         linkValuesByRecord,
       )
+      // R-66 ① (plm-row-delete-guard.ts): which page rows are PLM rows the delete routes refuse for everyone, and —
+      // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.5 / §3.7, OQ3) — which are manual rows (E exempts them; M
+      // marks them `manualSupplement` for EVERY actor who can read them). From the rows' UNFILTERED data (a
+      // field-permission-hidden key column still identifies the row; the route refuses regardless), in memory over
+      // `fields`; one registry statement on an exact-stanza sheet only and a creator statement only for the page's
+      // `manual:`-keyed rows. An actor who cannot delete needs the marks only: no statement at all unless the page holds
+      // such a row. A failed probe fails CLOSED to "blocked, not manual" (display only).
+      const plmRowDisplay: PlmRowDisplay = await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, rows, {
+        loadCreators: (recordIds) => loadRecordCreatorMap(pool.query.bind(pool), sheetId, recordIds),
+        onProbeError: (err) => {
+          console.error(
+            '[univer-meta] view: PLM-row probe failed for rowActionOverrides; failing closed to blocked',
+            { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+          )
+        },
+        onlyManualMarks: !capabilities.canDeleteRecord,
+      })
+      const plmDeleteBlockedIds = capabilities.canDeleteRecord ? plmRowDisplay.blockedIds : new Set<string>()
       for (const row of rows) {
         row.data = filterRecordDataByFieldIds(row.data, allowedFieldIds)
       }
@@ -17949,14 +18428,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             allowedFieldIds,
           )
         : undefined
-      const rowActionOverrides = buildRowActionOverrides(
+      const defaultRowActions = deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole)
+      // R-66 ①: a PLM row the actor could otherwise delete gets `canDelete: false` + `deleteBlockedReason` through
+      // the existing per-row channel (no /context key; every other row / sheet stays byte-identical). A manual row
+      // additionally carries `manualSupplement: true` (ADR §3.7) through the same channel.
+      const rowActionOverrides = applyManualSupplementMarks(
+        applyPlmRowDeleteBlocks(
+          buildRowActionOverrides(
+            rows,
+            requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
+              ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
+              : new Map(),
+            capabilities,
+            sheetScope,
+            access,
+          ),
+          rows,
+          plmDeleteBlockedIds,
+          defaultRowActions,
+        ),
         rows,
-        requiresOwnWriteRowPolicy(sheetScope, access.isAdminRole)
-          ? await loadRecordCreatorMap(pool.query.bind(pool), sheetId, rows.map((row) => row.id))
-          : new Map(),
-        capabilities,
-        sheetScope,
-        access,
+        plmRowDisplay.manualIds,
+        defaultRowActions,
       )
       // Per-row unlock gate (decision b): compute `canUnlock` server-side for the LOCKED rows so the
       // grid/drawer can show the unlock action without the client ever seeing `created_by`. The owner
@@ -17983,7 +18476,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
           fieldScopeMap,
         }),
-        rowActions: deriveDefaultRowActions(capabilities, sheetScope, access.isAdminRole),
+        rowActions: defaultRowActions,
         ...(rowActionOverrides ? { rowActionOverrides } : {}),
         ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities, viewScopeMap) } : {}),
       }
@@ -18141,8 +18634,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         readableFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, readableFieldIds)
       }
       const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], effectiveCapabilities, viewScopeMap) : {}
+      // R-66 ① (plm-row-delete-guard.ts): an existing PLM row the actor could otherwise delete answers canDelete=false
+      // + deleteBlockedReason, like GET /view. `record.data` is still unfiltered here. Public forms never delete. The
+      // record carries its row identity (`id` and `createdBy`, read above), which lets the amended ① exempt a
+      // `manual:`-keyed row with a creator (ADR adr-stock-prep-manual-rows-20261030 §3.5). The form itself is unchanged
+      // (OQ7): no mark here.
       const rowActions = record
-        ? deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy)
+        ? withPlmRowDeleteBlock(
+            deriveRecordRowActions(effectiveCapabilities, effectiveSheetScope, effectiveAccess, record.createdBy),
+            effectiveCapabilities.canDeleteRecord
+              && (await resolvePlmRowDeleteBlockedIds(pool.query.bind(pool), sheetId, fields, [record], (err) => {
+                console.error(
+                  '[univer-meta] form-context: PLM-row probe failed for rowActions; failing closed to blocked',
+                  { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+                )
+              })).has(record.id),
+          )
         : deriveRecordRowActions({
             ...effectiveCapabilities,
             canEditRecord: effectiveCapabilities.canCreateRecord,
@@ -18988,6 +19495,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // body echoed the resolved sheet id back, which is exactly the value the move above removes.
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
+      // Human write lock (human-write-lock.ts): a PLM-system column answers its own closed code, before the
+      // generic refusal below (which would refuse it too — `deriveFieldPermissions` marks it read-only).
+      // Only for fields this caller can SEE, so the code is never an existence oracle; the ids are the
+      // caller's own submitted keys.
+      const humanLockedFieldIds = listHumanWriteLockedFieldIds(
+        patchContext.fields,
+        Object.keys(parsed.data.data ?? {}),
+        (fid) => patchContext.fieldPermissions[fid]?.visible === true,
+      )
+      if (humanLockedFieldIds.length > 0) {
+        return res.status(403).json(humanWriteLockRefusalBody(humanLockedFieldIds))
+      }
       const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
         isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
       )
@@ -19415,7 +19934,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         fieldScopeMap,
       })
       const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities, viewScopeMap) : {}
-      const rowActions = deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy)
+      // R-66 ① (plm-row-delete-guard.ts): same per-row PLM block as GET /view, from the row's UNFILTERED stored data
+      // (`record.data` was field-masked above), with the row identity (ADR adr-stock-prep-manual-rows-20261030 §3.5);
+      // a manual row also carries `manualSupplement: true` for every actor who can read it (§3.7, OQ3). An actor who
+      // cannot delete issues no statement unless this row's key is a `manual:` prefix key.
+      const recordPlmDisplay: PlmRowDisplay = await resolvePlmRowDisplay(pool.query.bind(pool), sheetId, fields, [{ id: record.id, data: normalizeJson(row.data), createdBy: record.createdBy ?? null }], {
+        onProbeError: (err) => {
+          console.error(
+            '[univer-meta] record: PLM-row probe failed for rowActions; failing closed to blocked',
+            { reason: 'plm_row_probe_failed', ...describeLivenessLookupError(err) },
+          )
+        },
+        onlyManualMarks: !capabilities.canDeleteRecord,
+      })
+      const rowActions = withManualSupplementMark(
+        withPlmRowDeleteBlock(
+          deriveRecordRowActions(capabilities, sheetScope, access, record.createdBy),
+          capabilities.canDeleteRecord && recordPlmDisplay.blockedIds.has(record.id),
+        ),
+        recordPlmDisplay.manualIds.has(record.id),
+      )
       // Per-row unlock gate (decision b) for the drawer's lock/unlock action. `created_by` is already
       // resolved on `record` here, so no extra read is needed. Only meaningful while locked.
       if (record.locked) {
@@ -20168,6 +20706,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.1): on a registered project sheet (P_reg) a generic
+      // create is refused HERE, before createRecord, by the sheet's manual-rows state — 409 (503 when a registry cannot
+      // be read) with the §3.1 code and text; only `allowed` points at 「新增人工补充行」. Session and mst_ tokens both
+      // land here. Asked only for an actor who can create (anyone else keeps createRecord's own 403). Every other sheet
+      // keeps its old answer; a sheet id outside the plugin-derived shape issues no statement for it.
+      if (capabilities.canCreateRecord === true) {
+        const genericCreateRefusal = await resolveGenericCreateRefusal(
+          pool.query.bind(pool),
+          sheetId,
+          () => loadFieldsForSheet(pool.query.bind(pool), sheetId),
+        )
+        if (genericCreateRefusal) return res.status(genericCreateRefusal.status).json(genericCreateRefusal.body())
+      }
       const recordService = new RecordService(pool, eventBus)
       // A-min-create (#2255): compute the new record's same-record formula-over-lookup on create.
       recordService.setFormulaRecalcHook((q, sid, ids) => recalcNewRecordFormulas(req, q, sid, ids))
@@ -20314,6 +20865,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
 
+      // Customer feedback 2026-10-27: no generic copy on a sheet whose rows the stock-preparation plugin
+      // maintains — the copy would clone the row's idempotency key / PLM identity and hold every later pull
+      // (multitable/record-duplicate-guard.ts). After the read gate, so a non-reader learns nothing; before
+      // any write. An ordinary sheet issues no extra statement here.
+      if (await isPluginMaintainedRowSheet(pool.query.bind(pool), sheetId, fields)) {
+        return res.status(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_STATUS).json(RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET_BODY)
+      }
+
       // Overlay forward-link values from meta_links onto a working copy of the source data (mirror/derived
       // link fields are isFieldAlwaysReadOnly → stripped below regardless, so only forward links matter).
       const sourceData: Record<string, unknown> = { ...normalizeJson(sourceRow.data) }
@@ -20412,6 +20971,240 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  // 人工补充行 — 新增 (ADR adr-stock-prep-manual-rows-20261030 §3.2). Session requests only. Body `{ data: { <physical
+  // field id>: value } }`. Condition 1 (canCreateRecord) on the actor's OWN capabilities here; conditions 2–6 before any
+  // write in createManualSupplementRow, and 3, 4, 6 again inside the create transaction.
+  router.post('/sheets/:sheetId/manual-rows', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isApiTokenBearer(req.headers.authorization)) return sendManualRowsSessionOnly(res)
+    const parsed = z.object({ data: z.record(z.unknown()).optional() }).safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canCreateRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      const record = await createManualSupplementRow(req, pool, {
+        sheetId,
+        access,
+        capabilities,
+        data: parsed.data.data ?? {},
+        origin: 'create',
+      })
+      return res.json({ ok: true, data: { record } })
+    } catch (err) {
+      const refusal = sendManualRowWriteError(res, err)
+      if (refusal) return refusal
+      console.error('[univer-meta] create manual row failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create manual row' } })
+    }
+  })
+
+  // 人工补充行 — 复制为新行 (ADR §3.3). Session requests only. The source row must be readable at record level by the
+  // actor (the duplicate route's gate); the new row is created on the SAME sheet through the same extension as 新增,
+  // from the whitelisted columns the actor can read (and, for every copied column, write) — never the lineage pair
+  // (OQ5), 进度与回复, identity / RUN or the stamps. Its own key, 项目号 and 有效 are stamped by the server.
+  router.post('/records/:recordId/manual-copy', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    if (isApiTokenBearer(req.headers.authorization)) return sendManualRowsSessionOnly(res)
+    const parsed = z.object({ sheetId: z.string().min(1).optional() }).safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool)
+      const sourceLookup = parsed.data.sheetId
+        ? await pool.query('SELECT id, sheet_id, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, parsed.data.sheetId])
+        : await pool.query('SELECT id, sheet_id, data FROM meta_records WHERE id = $1', [recordId])
+      const sourceRow: any = sourceLookup.rows[0]
+      if (!sourceRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      const sheetId = String(sourceRow.sheet_id)
+      // Source-read authorization (canRead + record-level permissions + liveness); its capabilities are the ONE
+      // capability object of this request — the create gate below reads the same object.
+      const readable = await requireRecordReadable(req, query, sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities } = readable
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canCreateRecord) return sendForbidden(res)
+
+      const fields = await loadFieldsForSheet(query, sheetId)
+      const sheet = assertManualRowsAllowed(await loadManualRowsVerdict(query, sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows()))
+      const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+      const data = await buildManualRowCopyData(req, query, {
+        sheetId,
+        recordId,
+        sourceData: normalizeJson(sourceRow.data),
+        fields,
+        sheet,
+        capabilities,
+        fieldScopeMap,
+      })
+      const record = await createManualSupplementRow(req, pool, { sheetId, access, capabilities, data, origin: 'copy', fields, sheet, fieldScopeMap })
+      return res.json({ ok: true, data: { record } })
+    } catch (err) {
+      const refusal = sendManualRowWriteError(res, err)
+      if (refusal) return refusal
+      console.error('[univer-meta] copy manual row failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to copy as a manual row' } })
+    }
+  })
+
+  // 人工补充行 — 修改 the six fillable columns of a MANUAL row (ADR §3.4). Session requests only. Every other column
+  // keeps going through /patch (which is NOT changed: no per-row exemption there). Preconditions: the row satisfies M
+  // and its key column is locked (re-checked inside the write transaction), canEditRecord, the row policy and the record
+  // lock (RecordWriteService.patchRecords enforces both), every submitted column is one of the six, 名称 / 总用量 are not
+  // cleared, and the actor's per-subject field permissions allow the write. The write is patchRecords on this one
+  // record, with a field-guard map that drops ONLY the lock-induced read-only of the six. An archived project, the
+  // deployment switch and the per-sheet switch do not stop an edit (§4, §6).
+  router.patch('/records/:recordId/manual-fields', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    if (isApiTokenBearer(req.headers.authorization)) return sendManualRowsSessionOnly(res)
+    const parsed = z.object({
+      sheetId: z.string().min(1).optional(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+      data: z.record(z.unknown()),
+    }).safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const changes = parsed.data.data
+    const submittedFieldIds = Object.keys(changes)
+    if (submittedFieldIds.length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'data must name at least one field' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool)
+      const recordLookup = parsed.data.sheetId
+        ? await pool.query('SELECT id, sheet_id, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, parsed.data.sheetId])
+        : await pool.query('SELECT id, sheet_id, data, created_by FROM meta_records WHERE id = $1', [recordId])
+      const recordRow: any = recordLookup.rows[0]
+      if (!recordRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      const sheetId = String(recordRow.sheet_id)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      const fields = await loadFieldsForSheet(query, sheetId)
+      const sheet = assertManualRowsAllowed(await loadManualRowsVerdict(query, sheetId, fields, 'edit'))
+      if (!isManualSupplementRow({
+        objectId: sheet.hostObjectId,
+        createdBy: recordRow.created_by,
+        recordId: recordRow.id,
+        key: normalizeJson(recordRow.data)[sheet.derived.key],
+      })) {
+        throw new StockPrepManualRowsRefusedError('not_manual_row')
+      }
+      const fillable = new Set(sheet.derived.fillable)
+      const notFillableFieldIds = [...new Set(submittedFieldIds)].filter((fid) => !fillable.has(fid))
+      if (notFillableFieldIds.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE,
+            message: '这个入口只修改人工补充行的图号、名称、规格、材料、用量和总用量；其他列请照常编辑。',
+            fieldIds: notFillableFieldIds,
+          },
+        })
+      }
+      const fieldNameById = new Map(fields.map((field) => [field.id, field.name]))
+      const clearedFieldErrors = Object.fromEntries(sheet.derived.notClearable
+        .filter((fid) => Object.prototype.hasOwnProperty.call(changes, fid) && isClearingManualRowValue(changes[fid]))
+        .map((fid) => [fid, `${fieldNameById.get(fid) ?? fid} is required`]))
+      if (Object.keys(clearedFieldErrors).length > 0) {
+        return res.status(422).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Record validation failed', fieldErrors: clearedFieldErrors } })
+      }
+
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
+      // Layer-3 per-subject field-WRITE gate (parity with PATCH /records), on the fields with the lock lifted from the
+      // six only — every other restriction of these columns stays.
+      const liftedFields = liftManualRowFillableLocks(patchContext.fields, sheet)
+      const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+      const manualEditFieldPermissions = deriveFieldPermissions(filterVisiblePropertyFields(liftedFields), capabilities, {
+        hiddenFieldIds: [],
+        fieldScopeMap,
+      })
+      const forbiddenWriteFieldIds = [...new Set(submittedFieldIds)].filter((fid) => isFieldWriteForbidden(manualEditFieldPermissions[fid]))
+      if (forbiddenWriteFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+      }
+      // The field-guard map: the general one, with ONLY the six fillable entries rebuilt from the lock-lifted fields.
+      const fieldById = new Map(patchContext.fieldById)
+      for (const [fieldId, guard] of buildFieldMutationGuardMap(liftedFields.filter((field) => fillable.has(field.id)))) {
+        fieldById.set(fieldId, guard)
+      }
+
+      const recordWriteService = new RecordWriteService(pool, eventBus, createRecordWriteHelpers(req, pool))
+      if (yjsInvalidator) {
+        recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
+      const manualRowRecheck = async (txQuery: QueryFn): Promise<void> => {
+        await assertManualRowEditInTransaction(txQuery, sheet, recordId)
+      }
+      const result = await recordWriteService.patchRecords({
+        sheetId,
+        changesByRecord: new Map([[recordId, submittedFieldIds.map((fieldId) => ({
+          fieldId,
+          value: changes[fieldId],
+          expectedVersion: parsed.data.expectedVersion,
+        }))]]),
+        actorId: getRequestActorId(req),
+        fields: patchContext.fields,
+        visiblePropertyFields: patchContext.readableEchoFields,
+        visiblePropertyFieldIds: patchContext.readableEchoFieldIds,
+        attachmentFields: patchContext.attachmentFields,
+        fieldById,
+        capabilities,
+        sheetScope,
+        access,
+        preWriteGuard: manualRowRecheck,
+      })
+      return res.json({
+        ok: true,
+        data: {
+          updated: result.updated,
+          ...(result.records ? { records: result.records } : {}),
+          ...(result.batchId ? { batchId: result.batchId } : {}),
+        },
+      })
+    } catch (err) {
+      const refusal = sendManualRowWriteError(res, err)
+      if (refusal) return refusal
+      console.error('[univer-meta] patch manual fields failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update manual row fields' } })
+    }
+  })
+
   router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), apiTokenWriteRateLimit, oapiScopeGuard, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
@@ -20455,6 +21248,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
+      // R-66 ① (plm-row-delete-guard.ts): a PLM row of a stock-preparation template sheet — refused for everyone,
+      // admins included; values-free (no sheet / record / key in the body).
+      if (err instanceof PlmRowDeleteRefusedError) {
+        return res.status(err.status).json(plmRowDeleteRefusedBody(err.reason))
+      }
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -20616,6 +21414,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
+      // R-66 (plm-row-delete-guard.ts): a live row already holds this deleted PLM row's key (or the key column is
+      // unresolvable) — restoring would make two rows per key and hold every later pull. Values-free.
+      if (err instanceof PlmRowRestoreRefusedError) {
+        return res.status(err.status).json(plmRowRestoreRefusedBody(err.reason))
+      }
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
@@ -21107,6 +21910,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
       // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
       // W1-3 LOCK-F2: shared predicate (`isFieldWriteForbidden`), same invariant as before.
+      //
+      // Human write lock first (human-write-lock.ts): a range paste / fill touching a PLM-system column is
+      // refused WHOLE with its own closed code — nothing in the batch is written (the per-column skip is the
+      // grid planner's job, not this route's). Visible fields only, caller-submitted ids only.
+      const humanLockedFieldIds = listHumanWriteLockedFieldIds(
+        fields,
+        parsed.data.changes.map((c) => c.fieldId),
+        (fid) => fieldPermissions[fid]?.visible === true,
+      )
+      if (humanLockedFieldIds.length > 0) {
+        return res.status(403).json(humanWriteLockRefusalBody(humanLockedFieldIds))
+      }
       const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) =>
         isFieldWriteForbidden(fieldPermissions[fid]),
       )
@@ -21310,6 +22125,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
+      // S0-a: early error for a send_webhook target the send-time check would always refuse (no DNS here;
+      // the boundary is the per-send check in the executor).
+      preflightAutomationWebhookTargets(parsed)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
       // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
       await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
@@ -21365,6 +22183,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
       const input = preflight.input
+      // S0-a: early error for a send_webhook target, on the EFFECTIVE action pair (request ?? stored) — a
+      // PATCH that only re-types a rule to send_webhook would otherwise make a stored target live unchecked.
+      // A PATCH that does not touch the action tree (rename / enable / disable) is not blocked.
+      preflightAutomationWebhookTargets({
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
       // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
       // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
       // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
@@ -21446,7 +22272,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
-      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      // 客户反馈 2026-10-21 item 1 (review round 2): optional server-side status filter (fixed value set,
+      // parameterized), so the run log's link to skipped deliveries is not limited to the latest page.
+      const status = parseDingTalkPersonDeliveryStatusFilter(req.query.status)
+      if (status === null) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'status must be one of success, failed, skipped, outcome_unknown' } })
+      }
+      const deliveries = status
+        ? await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit, { status })
+        : await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

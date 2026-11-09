@@ -1,0 +1,318 @@
+{
+  "_meta": {
+    "allowlistVersion": 1,
+    "baseMainSha": "7363f2d570707c075e6a5e22687613bf4d2eba4a",
+    "rule": "A change that only adds a key updates this allowlist and the goldens in the same change; any other difference is a behavior change."
+  },
+  "calls": [
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u1",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u2",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        50,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u3",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u4",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u6",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u8",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u5",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u7",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u10",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u11",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u12",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u9",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    }
+  ],
+  "preview": {
+    "accountsSeen": 12,
+    "adminUnboundHeldCount": 1,
+    "autoAdmissionCandidateCount": 4,
+    "autoAdmissionExcludedCount": 0,
+    "autoAdmissionMode": "auto_for_scoped_departments",
+    "autoAdmissionSkippedMissingEmailCount": 0,
+    "departmentsSeen": 5,
+    "integrationId": "<integration-id>",
+    "integrationName": "a0g-int-c",
+    "sampledDeactivations": [
+      {
+        "externalUserId": "a0g-old1",
+        "linked": true,
+        "name": "Old One"
+      }
+    ],
+    "sampledNewAccounts": [
+      {
+        "externalUserId": "a0g-u1",
+        "name": "User 1"
+      },
+      {
+        "externalUserId": "a0g-u2",
+        "name": "User 2"
+      },
+      {
+        "externalUserId": "a0g-u3",
+        "name": "User 3"
+      },
+      {
+        "externalUserId": "a0g-u4",
+        "name": "User 4"
+      },
+      {
+        "externalUserId": "a0g-u6",
+        "name": "User 6"
+      },
+      {
+        "externalUserId": "a0g-u8",
+        "name": "User 8"
+      },
+      {
+        "externalUserId": "a0g-u5",
+        "name": "User 5"
+      },
+      {
+        "externalUserId": "a0g-u7",
+        "name": "User 7"
+      }
+    ],
+    "wouldCreateAccounts": 8,
+    "wouldDeactivateAccounts": 1,
+    "wouldDeactivateLinkedAccounts": 1
+  }
+}

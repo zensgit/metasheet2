@@ -7,6 +7,8 @@ import type supertest from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { tasksRouter } from '../../src/routes/tasks'
+import { listUserPermissions } from '../../src/rbac/service'
+import { TASK_ACCESS_CODES, holdsTaskCode } from '../../src/services/task-member-access'
 import {
   startTasksListener,
   tasksClient,
@@ -229,7 +231,8 @@ describe('tasks auth gate', () => {
   ]
 
   // The 30 M4 (PR-3a) routes, design §3 and §10.7: PATCH /api/tasks/:id (S4), task settings (S3),
-  // lists (S5), list members (S6), list items (S7), groups in both scopes (S8). Writes take
+  // lists (S5), list members (S6), list items (S7), groups in both scopes (S8); and the two people
+  // reads of task usability package 1b, which share the table's no-org and 2/16 cells. Writes take
   // tasks:write and answer 422 ORG_MISSING without an org; reads take tasks:read and answer 404
   // without an org, except the three collections marked `collection`, which answer the degraded
   // body without `total` (design §3, RULED(2026-10-07): [R18] no route here takes tasks:admin).
@@ -289,6 +292,11 @@ describe('tasks auth gate', () => {
     { label: 'PUT /api/task-groups/items/:taskId', code: 'write', method: 'put', path: (c) => `/api/task-groups/items/${c.taskId}`, body: () => ({ groupId: null, position: 0 }), needs: ['task'] },
     { label: 'PATCH /api/task-groups/:groupId', code: 'write', method: 'patch', path: (c) => `/api/task-groups/${c.userGroupId}`, body: () => ({ name: '改名' }), needs: ['userGroup'] },
     { label: 'DELETE /api/task-groups/:groupId', code: 'write', method: 'delete', path: (c) => `/api/task-groups/${c.userGroupId}`, needs: ['userGroup'] },
+    // Task usability package 1b: the people directory (a write-code read: it feeds the assignee and
+    // follower writes, so a missing org answers as they do) and the people on one task. No query
+    // string: without a term the directory answers its 200 "type a name" marker.
+    { label: 'GET /api/tasks/people', code: 'write', method: 'get', path: () => '/api/tasks/people' },
+    { label: 'GET /api/tasks/:id/people', code: 'read', method: 'get', path: (c) => `/api/tasks/${c.taskId}/people`, needs: ['task'] },
   ]
 
   /** The no-org answer of an M4 route, as the exact response text (design §3, [own-19]). */
@@ -699,11 +707,15 @@ describe('tasks auth gate', () => {
     // `bare` is an assignee (not just permitted by RBAC) so the 200 control
     // isolates the admission cell — without this, a task-level `edit` 404
     // would be indistinguishable from an RBAC 403 in the assertions below.
+    // POST /api/tasks names only people who can use tasks as assignees, and
+    // `bare` cannot until its task access is enabled below, so its assignee
+    // row is written with SQL (as in the gate 1 cell above).
     const created = await app()
       .post('/api/tasks')
       .set('Authorization', `Bearer ${token()}`)
-      .send({ title: '备料复核', assignees: [userId, bare] })
+      .send({ title: '备料复核', assignees: [userId] })
     expect(created.status).toBe(200)
+    await db.query('INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)', [created.body.id, bare, userId])
 
     const denied = await app()
       .post(`/api/tasks/${created.body.id}/followers`)
@@ -723,7 +735,7 @@ describe('tasks auth gate', () => {
     // id first, and again at the end of this cell and in the afterAll sweep.
     await db.query('DELETE FROM user_orgs WHERE user_id = $1', ['usr_follow_target'])
     await db.query('DELETE FROM users WHERE id = $1', ['usr_follow_target'])
-    await seedOrgMembers(orgId, ['usr_follow_target'])
+    await seedOrgMembers(orgId, ['usr_follow_target'], { taskAccess: false })
     const allowed = await app()
       .post(`/api/tasks/${created.body.id}/followers`)
       .set('Authorization', `Bearer ${bareToken}`)
@@ -822,6 +834,157 @@ describe('tasks auth gate', () => {
       const ctx = await seedM3(server, route, users.control.bearer, users.control.userId)
       const allowed = await m3Request(server, route, ctx, users.control.bearer)
       expect(allowed.status, route.label).toBe(200)
+    })
+
+    // An assignee someone else names must be able to use tasks: an active org member without task
+    // access is the 422 on both write points, byte for byte; M3_TARGET (seeded with task access in
+    // the file's beforeAll) is the 200 control on both.
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 422 ASSIGNEE_TASK_ACCESS_REQUIRED for a member without task access, 200 for one with it', async () => {
+      const server = app()
+      const bearer = `Bearer ${users.control.bearer}`
+      const without = `usr_tasks_m3noaccess_${stamp}`
+      await seedOrgMembers(orgId, [without], { taskAccess: false })
+      const refusedText = JSON.stringify({ error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } })
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+
+      const addRefused = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: without })
+      expect(addRefused.status).toBe(422)
+      expect(addRefused.text).toBe(refusedText)
+      const createRefused = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, without] })
+      expect(createRefused.status).toBe(422)
+      expect(createRefused.text).toBe(refusedText)
+
+      const addAllowed = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: M3_TARGET })
+      expect(addAllowed.status, addAllowed.text).toBe(200)
+      const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, M3_TARGET] })
+      expect(createAllowed.status, createAllowed.text).toBe(200)
+    })
+
+    // The administrator read of the assignee test (task-member-access.ts), with token trust off: three
+    // active org members, none holding a task code nor task access enabled. Every id carries `stamp`;
+    // the file's sweep removes them (the `admin` row in user_roles goes with `user_id LIKE`; the
+    // `admin` role itself is never touched).
+    // - a member whose only role is a non-admin role with one unrelated code, `users.role` 'user':
+    //   422 on both write points, byte for byte, and nothing written;
+    // - a member holding the `admin` role in user_roles, `users.role` 'user': 200 on both write points;
+    // - a member whose `users.role` is 'admin', with no role rows: 200 on both write points.
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 422 ASSIGNEE_TASK_ACCESS_REQUIRED for a member whose only role is not admin and carries no task code, nothing written', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const plain = `usr_tasks_m3plainrole_${stamp}`
+      const plainRole = `tasks_m3plainrole_${stamp}`
+      await seedOrgMembers(orgId, [plain], { taskAccess: false })
+      await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [plainRole, plainRole])
+      await db.query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'attendance:read')`, [plainRole])
+      await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [plain, plainRole])
+      const seeded = await db.query('SELECT role FROM users WHERE id = $1', [plain])
+      expect(seeded.rows[0]?.role).toBe('user')
+      const refusedText = JSON.stringify({ error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } })
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+      const eventsBefore = await db.query('SELECT count(*)::int AS n FROM task_events WHERE task_id = $1', [taskId])
+
+      const addRefused = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: plain })
+      expect(addRefused.status).toBe(422)
+      expect(addRefused.text).toBe(refusedText)
+      const eventsAfter = await db.query('SELECT count(*)::int AS n FROM task_events WHERE task_id = $1', [taskId])
+      expect(eventsAfter.rows[0]?.n).toBe(eventsBefore.rows[0]?.n)
+
+      const tasksBefore = await db.query('SELECT count(*)::int AS n FROM tasks WHERE org_id = $1', [orgId])
+      const createRefused = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, plain] })
+      expect(createRefused.status).toBe(422)
+      expect(createRefused.text).toBe(refusedText)
+      const tasksAfter = await db.query('SELECT count(*)::int AS n FROM tasks WHERE org_id = $1', [orgId])
+      expect(tasksAfter.rows[0]?.n).toBe(tasksBefore.rows[0]?.n)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [plain])
+      expect(assigned.rows[0]?.n).toBe(0)
+    })
+
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 200 for a member holding the admin role in user_roles, with no task code and users.role not admin', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const rbacAdmin = `usr_tasks_m3rbacadmin_${stamp}`
+      await seedOrgMembers(orgId, [rbacAdmin], { taskAccess: false })
+      await db.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')`, [rbacAdmin])
+      const seeded = await db.query('SELECT role FROM users WHERE id = $1', [rbacAdmin])
+      expect(seeded.rows[0]?.role).toBe('user')
+      // Only the administrator read can let this member through: the `admin` role carries no task
+      // code on this database.
+      const adminCodes = await db.query(`SELECT permission_code FROM role_permissions WHERE role_id = 'admin'`)
+      const codes = adminCodes.rows.map((row) => String(row.permission_code))
+      expect(TASK_ACCESS_CODES.some((code) => holdsTaskCode(codes, code)), codes.join(',')).toBe(false)
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+
+      const addAllowed = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: rbacAdmin })
+      expect(addAllowed.status, addAllowed.text).toBe(200)
+      const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, rbacAdmin] })
+      expect(createAllowed.status, createAllowed.text).toBe(200)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [rbacAdmin])
+      expect(assigned.rows[0]?.n).toBe(2)
+    })
+
+    it('POST /api/tasks/:id/assignees and POST /api/tasks: 200 for a member whose users.role is admin, with no role rows and no task code', async () => {
+      const server = app()
+      const db = poolManager.get()
+      const bearer = `Bearer ${users.control.bearer}`
+      const columnAdmin = `usr_tasks_m3columnadmin_${stamp}`
+      await seedOrgMembers(orgId, [columnAdmin], { taskAccess: false })
+      await db.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [columnAdmin])
+      const roleRows = await db.query('SELECT count(*)::int AS n FROM user_roles WHERE user_id = $1', [columnAdmin])
+      expect(roleRows.rows[0]?.n).toBe(0)
+      // Only the administrator read can let this member through: the member holds no task code.
+      const memberCodes = await listUserPermissions(columnAdmin, (sql, params) => db.query(sql, params))
+      expect(TASK_ACCESS_CODES.some((code) => holdsTaskCode(memberCodes, code)), memberCodes.join(',')).toBe(false)
+      const created = await server.post('/api/tasks').set('Authorization', bearer).send({ title: '备料复核', assignees: [users.control.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+
+      const addAllowed = await server.post(`/api/tasks/${taskId}/assignees`).set('Authorization', bearer).send({ userId: columnAdmin })
+      expect(addAllowed.status, addAllowed.text).toBe(200)
+      const createAllowed = await server.post('/api/tasks').set('Authorization', bearer)
+        .send({ title: '备料复核', assignees: [users.control.userId, columnAdmin] })
+      expect(createAllowed.status, createAllowed.text).toBe(200)
+      const assigned = await db.query('SELECT count(*)::int AS n FROM task_assignees WHERE user_id = $1', [columnAdmin])
+      expect(assigned.rows[0]?.n).toBe(2)
+    })
+
+    // Package 1b, with token trust off: the people directory gives the picker the answer the assignee
+    // write gives (the cell above). Exact-id terms, so other people of the org do not matter.
+    it('GET /api/tasks/people: a member without task access is offered and marked, M3_TARGET is offered as usable, an inactive member and a member of another org are not offered', async () => {
+      const server = app()
+      const bearer = `Bearer ${users.control.bearer}`
+      const without = `usr_tasks_m3pickbare_${stamp}`
+      const inactive = `usr_tasks_m3pickoff_${stamp}`
+      const foreign = `usr_tasks_m3pickfrn_${stamp}`
+      await seedOrgMembers(orgId, [without], { taskAccess: false })
+      await seedOrgMembers(orgId, [inactive], { active: false })
+      await seedOrgMembers(`org_tasks_auth_pickfrn_${stamp}`, [foreign])
+      type Item = { id: string; canUseTasks: boolean }
+      const search = async (term: string): Promise<Array<[string, boolean]>> => {
+        const response = await server.get(`/api/tasks/people?q=${encodeURIComponent(term)}`).set('Authorization', bearer)
+        expect(response.status, response.text).toBe(200)
+        return (response.body.items as Item[]).map((item): [string, boolean] => [item.id, item.canUseTasks])
+      }
+      expect(await search(without)).toEqual([[without, false]])
+      expect(await search(M3_TARGET)).toEqual([[M3_TARGET, true]])
+      expect(await search(inactive)).toEqual([])
+      expect(await search(foreign)).toEqual([])
+      const ids = [without, M3_TARGET, inactive, foreign].map(encodeURIComponent).join(',')
+      const resolved = await server.get(`/api/tasks/people?ids=${ids}`).set('Authorization', bearer)
+      expect(resolved.status, resolved.text).toBe(200)
+      expect((resolved.body.items as Item[]).map((item): [string, boolean] => [item.id, item.canUseTasks]))
+        .toEqual([[without, false], [M3_TARGET, true]])
     })
   })
 
@@ -1225,7 +1388,7 @@ describe('tasks auth gate', () => {
 
   // Gates 1 / 2 / 16, route population (design §10.7). The routes `tasksRouter()` registers, as
   // "METHOD path", equal the union of P0A_ROUTES, M3_ROUTES and M4_ROUTES: 8 + 13 + 30 = 51 at the
-  // end of PR-3a. Every route is registered directly on the factory's router, so each stack layer
+  // end of PR-3a, 8 + 13 + 32 = 53 with the two people reads of package 1b. Every route is registered directly on the factory's router, so each stack layer
   // carries one route; any other layer (a nested router, a middleware) fails the comparison.
   // Each M3 and M4 row is also bound to its label through the request the per-route cells send:
   // the row's method and its path with the placeholder ids are resolved the way Express
@@ -1248,7 +1411,7 @@ describe('tasks auth gate', () => {
     const tables = [...P0A_ROUTES, ...M3_ROUTES.map((route) => route.label), ...M4_ROUTES.map((route) => route.label)]
     expect(new Set(tables).size, 'a route appears twice in the tables').toBe(tables.length)
     expect(new Set(registered).size, 'the router registers a route twice').toBe(registered.length)
-    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 30])
+    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 32])
     expect([...registered].sort()).toEqual([...tables].sort())
     const dispatchedTo = (method: string, url: string): string => {
       const layer = stack.find((candidate) => candidate.route?.methods[method] === true && candidate.match(url))

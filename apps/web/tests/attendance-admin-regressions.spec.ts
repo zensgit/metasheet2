@@ -994,10 +994,11 @@ describe('Attendance admin regressions', () => {
         writes.push({ url, method, body })
         return jsonResponse(201, { ok: true, data: { shift: { id: 'shift-created', ...body } } })
       }
-      if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'PUT') {
+      if (/^\/api\/attendance\/shifts\/[^/]+\/update$/.test(url) && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         writes.push({ url, method, body })
-        return jsonResponse(200, { ok: true, data: { shift: { id: url.split('/').pop(), ...body } } })
+        const id = url.slice('/api/attendance/shifts/'.length, -'/update'.length)
+        return jsonResponse(200, { ok: true, data: { shift: { id, ...body } } })
       }
       if (/^\/api\/attendance\/shifts\/[^/]+$/.test(url) && method === 'DELETE') {
         writes.push({ url, method, body: {} })
@@ -1071,8 +1072,8 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({
-      url: '/api/attendance/shifts/shift-split',
-      method: 'PUT',
+      url: '/api/attendance/shifts/shift-split/update',
+      method: 'POST',
       body: {
         name: 'Split shift',
         timezone: 'Asia/Shanghai',
@@ -3015,7 +3016,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-7') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-7/update') && method === 'POST') {
         puts.push({ url, body: JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) })
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -3047,7 +3048,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
 
     expect(puts).toHaveLength(1)
-    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7')
+    expect(puts[0].url).toContain('/api/attendance/scheduler-scopes/scope-7/update')
     // toEqual: no orgId (rides the query) and no isActive (backend merge preserves the flag).
     expect(puts[0].body).toEqual({
       subjectType: 'role',
@@ -3078,7 +3079,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.includes('/api/attendance/scheduler-scopes/scope-u') && method === 'PUT') {
+      if (url.includes('/api/attendance/scheduler-scopes/scope-u/update') && method === 'POST') {
         puts.push(JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')))
         return jsonResponse(200, { ok: true, data: { ...existing } })
       }
@@ -4012,7 +4013,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         Object.assign(routeGroup, body)
         return jsonResponse(200, { ok: true, data: { ...routeGroup } })
@@ -4101,7 +4102,7 @@ describe('Attendance admin regressions', () => {
         if (listCalls === 1) return oldestList
         return jsonResponse(200, { ok: true, data: { items: [], total: 250, page: 1, pageSize: 200 } })
       }
-      if (url === '/api/attendance/groups/group-a' && method === 'PUT') {
+      if (url === '/api/attendance/groups/group-a/update' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         savedNames.push(String(body.name))
         return jsonResponse(200, { ok: true, data: { ...routeGroup, ...body } })
@@ -5928,6 +5929,14 @@ describe('Attendance admin regressions', () => {
     const previewBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: false, reasonCode: 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED' },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -5952,6 +5961,7 @@ describe('Attendance admin regressions', () => {
             shift: {
               id: 'shift-a',
               name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
               timezone: 'Asia/Shanghai',
               workStartTime: '09:00',
               workEndTime: '18:00',
@@ -6022,6 +6032,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+                segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -6059,10 +6070,13 @@ describe('Attendance admin regressions', () => {
     const weekMatrix = previewPanel!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-week-matrix]')
     expect(weekMatrix).toBeTruthy()
     expect(weekMatrix!.textContent).toContain('Day shift')
-    expect(weekMatrix!.textContent).toContain('09:00-18:00')
+    expect(weekMatrix!.textContent).toContain('08:00-12:00 / 13:00-17:00')
+    expect(shiftSelect!.textContent).toContain('08:00-12:00 / 13:00-17:00')
     expect(weekMatrix!.textContent).toContain('Sun')
     expect(weekMatrix!.textContent).toContain('Rest')
 
+    expect(previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')?.disabled).toBe(true)
+    expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-eligibility]')?.textContent).toContain('cannot apply or rebuild multi-segment')
     const previewButton = previewPanel!.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')
     expect(previewButton).toBeTruthy()
     previewButton!.click()
@@ -6097,6 +6111,7 @@ describe('Attendance admin regressions', () => {
       shift: {
         id: 'shift-a',
         name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
         timezone: 'Asia/Shanghai',
         workStartTime: '09:00',
         workEndTime: '18:00',
@@ -6117,6 +6132,14 @@ describe('Attendance admin regressions', () => {
     }
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6182,6 +6205,7 @@ describe('Attendance admin regressions', () => {
               {
                 id: 'shift-a',
                 name: 'Day shift',
+        segments: [{ startTime: '08:00', endTime: '12:00', endDayOffset: 0 }, { startTime: '13:00', endTime: '17:00', endDayOffset: 0 }],
                 timezone: 'Asia/Shanghai',
                 workStartTime: '09:00',
                 workEndTime: '18:00',
@@ -6230,12 +6254,12 @@ describe('Attendance admin regressions', () => {
       endDate: '2026-06-30',
     }
     expect(previewBodies).toEqual([expectedBody])
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-apply-created]')?.textContent).toContain('1')
     expect(applyButton!.disabled).toBe(true)
     applyButton!.click()
     await flushUi(2)
-    expect(applyBodies).toEqual([expectedBody])
+    expect(applyBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(false)
@@ -6244,6 +6268,9 @@ describe('Attendance admin regressions', () => {
   it('rebuilds and clears managed fixed schedule rows through group routes', async () => {
     const rebuildBodies: unknown[] = []
     const clearBodies: unknown[] = []
+    let captureAssignmentRefresh = false
+    let resolveOldAssignmentRefresh!: (response: Response) => void
+    const oldAssignmentRefresh = new Promise<Response>((resolve) => { resolveOldAssignmentRefresh = resolve })
     const confirmSpy = vi.spyOn(window, 'confirm')
       .mockReturnValueOnce(false)
       .mockReturnValueOnce(true)
@@ -6281,6 +6308,18 @@ describe('Attendance admin regressions', () => {
 
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.startsWith('/api/attendance/assignments?') && captureAssignmentRefresh) {
+        captureAssignmentRefresh = false
+        return oldAssignmentRefresh
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -6399,7 +6438,8 @@ describe('Attendance admin regressions', () => {
       rebuildButton!.click()
       await flushUi(8)
 
-      expect(rebuildBodies).toEqual([expectedBody])
+      await vi.waitFor(() => expect(clearButton!.disabled).toBe(false))
+      expect(rebuildBodies).toEqual([{ ...expectedBody, expectedConfigRevision: 3 }])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-rebuild-created]')?.textContent).toContain('1')
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-deactivated]')?.textContent).toContain('1')
 
@@ -6413,7 +6453,31 @@ describe('Attendance admin regressions', () => {
 
       expect(clearBodies).toEqual([expectedBody])
       expect(previewPanel!.querySelector('[data-attendance-group-fixed-schedule-preview-result]')).toBeNull()
-      expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.')
+      await vi.waitFor(() => expect(container!.textContent).toContain('Cleared 2 managed fixed schedule rows.'))
+      await vi.waitFor(() => expect(rebuildButton!.disabled).toBe(false))
+      captureAssignmentRefresh = true
+      rebuildButton!.click()
+      await vi.waitFor(() => expect(captureAssignmentRefresh).toBe(false))
+      const schedulingGroup = container!.querySelector<HTMLButtonElement>('[data-admin-anchor-group="scheduling"] > button')
+      expect(schedulingGroup).toBeTruthy()
+      expect(schedulingGroup!.getAttribute('aria-expanded')).toBe('false')
+      schedulingGroup!.click()
+      await flushUi(2)
+      const assignmentsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')
+      expect(assignmentsNav).toBeTruthy()
+      assignmentsNav!.click()
+      await flushUi(4)
+      const filter = container!.querySelector<HTMLSelectElement>('#attendance-assignment-publish-status-filter')!
+      filter.value = 'published'
+      filter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(8)
+      resolveOldAssignmentRefresh(jsonResponse(200, { ok: true, data: { items: [{
+        assignment: { ...rebuiltData.created[0], id: 'stale-scope-assignment', userId: 'stale-scope-user' },
+        shift: rebuiltData.shift,
+      }] } }))
+      await flushUi(12)
+      expect(container!.querySelector('[data-attendance-assignment-user-id]')).toBeNull()
+      expect(container!.textContent).not.toContain('stale-scope-user')
       expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
         String(input) === '/api/attendance/assignments' && init?.method === 'POST'
       )).toBe(false)
@@ -6425,6 +6489,14 @@ describe('Attendance admin regressions', () => {
   it('shows a clear-first hint when a managed fixed schedule blocks the selected window', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/editor')) {
+        return jsonResponse(200, { ok: true, data: {
+          groupId: 'group-a', state: 'pending_apply', reasonCodes: ['TARGET_MEMBER_MISSING'],
+          desired: { shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', revision: 3 },
+          drift: { managedSets: [] },
+          referenceEligibility: { shiftId: 'shift-a', allowed: true, reasonCode: null },
+        } })
+      }
       if (url.includes('/api/attendance/rule-sets')) {
         return jsonResponse(200, {
           ok: true,
@@ -7297,7 +7369,7 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url.includes('/api/attendance/schedule-groups/sg-child') && method === 'PUT') {
+      if (url.includes('/api/attendance/schedule-groups/sg-child/update') && method === 'POST') {
         const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}'))
         puts.push(body)
         groups = groups.map(group => group.id === 'sg-child' ? { ...group, ...body } : group)

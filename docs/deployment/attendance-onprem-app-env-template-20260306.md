@@ -43,6 +43,10 @@ cp docker/app.env.attendance-onprem.ready.env docker/app.env
   `openssl rand -hex 32` 生成，两者不要相同。**已有密文的环境改这两个值会让旧密文全部解不开**，
   属于密钥轮转，需要单独的迁移窗口。
 
+钉钉网页登录另需配置服务端 OAuth 变量，目录管理页保存的凭据不会自动用于登录。
+请按[钉钉登录配置说明](./dingtalk-login-configuration.md)补充到实际部署的 `docker/app.env`；
+下方考勤基础模板以及成品模板均不能替代这一步。
+
 ## 2) 推荐模板（考勤专注模式）
 
 ```env

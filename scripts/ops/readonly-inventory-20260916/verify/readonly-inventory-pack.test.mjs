@@ -37,7 +37,7 @@ const FILES = [
   '01-cred06-secret-keys.sql',
   '02-trg04-http-targets.sql',
   '03-adm08-wildcard-permissions.sql',
-  '04-adm13-declared-admins.sql',
+  '04-adm13-declared-admins.sql', '05-trg04-webhook-target-totals.sql', '06-trg04-button-webhook-totals.sql', '07-bpmn-table-totals.sql',
 ]
 
 // ── LAYER 1 — hermetic ──────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ test('every pack file ends with its INVENTORY_RESULT completion statement (F5)',
     assert.match(src, new RegExp(`INVENTORY_RESULT file=${f.replace(/\./g, '\\.')} status=`),
       `${f} must print its own INVENTORY_RESULT line`)
     const tail = src.trimEnd().split('\n').slice(-1)[0]
-    assert.match(tail, /\) p;$/, `${f}'s last statement must be the completion query`)
+    assert.match(tail, /(\) p|END AS inventory_result);$/, `${f}'s last statement must be the completion query`)
   }
 })
 
@@ -266,3 +266,338 @@ test('F7: the guard-derived case table covers every host class at its exact edge
     assert.ok(skipped.has(u), `case table must NOT count ${u}`)
   }
 })
+
+// ── 05 / 06 (2026-11-05): webhook-target totals ─────────────────────────────
+// 05-trg04-webhook-target-totals.sql counts EVERY send_webhook target and
+// subscription in four buckets (url_missing / not_https /
+// https_internal_literal / https_other). It is the same SQL that ran on site
+// on 2026-11-05 under the name 03-webhook-target-totals.sql.
+// 06-trg04-button-webhook-totals.sql counts button fields whose action is
+// send_webhook, in one row of six counts (https_hostname is the number that
+// matters for R81). FILES above makes the preamble / INVENTORY_RESULT /
+// read-only tests cover both.
+// Imported here rather than at the top so the sentinel line numbers that
+// ops-sql-pack-verify.yml cites stay put (import declarations are hoisted).
+import {
+  checkInternalTargetCases,
+  checkWebhookTotalsReadOnly,
+  checkButtonWebhookTotalsReadOnly,
+  runWebhookTotals,
+  runButtonWebhookTotals,
+  withFixture,
+  WEBHOOK_TOTALS_FIXTURE,
+  BUTTON_WEBHOOKS_FIXTURE,
+} from './run-verify.mjs'
+
+const FILE_05 = '05-trg04-webhook-target-totals.sql'
+const FILE_06 = '06-trg04-button-webhook-totals.sql'
+
+/** A pack file's internal-host block: from `WITH atom AS (` through its `\gset`. */
+function hostSetBlock(file) {
+  const src = fs.readFileSync(path.join(PACK, file), 'utf8').replace(/\r\n/g, '\n')
+  const start = src.indexOf('WITH atom AS (')
+  assert.ok(start >= 0, `${file}: no WITH atom AS ( block`)
+  assert.equal(src.indexOf('WITH atom AS (', start + 1), -1, `${file}: more than one WITH atom AS ( block`)
+  const endMarker = '\n\\gset\n'
+  const end = src.indexOf(endMarker, start)
+  assert.ok(end > start, `${file}: the host block has no \\gset`)
+  return src.slice(start, end + endMarker.length)
+}
+
+/** Non-comment source of a pack file (CRLF-normalised). */
+function packCode(file) {
+  const src = fs.readFileSync(path.join(PACK, file), 'utf8').replace(/\r\n/g, '\n')
+  return src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
+}
+
+for (const [tag, file] of [['05', FILE_05], ['06', FILE_06]]) {
+  test(`${tag}: the internal-host regex block is byte-equal to 02 (drift guard)`, () => {
+    const b02 = hostSetBlock('02-trg04-http-targets.sql')
+    const b = hostSetBlock(file)
+    assert.match(b, /AS inv_internal_target_re\n\s*FROM v6\n\\gset\n$/)
+    assert.equal(b, b02, `${tag} must flag exactly the internal hosts 02 flags: copy the block, do not edit it`)
+  })
+
+  test(`${tag}: SET transaction_read_only = on; comes right after \\ir _preamble.sql`, () => {
+    const code = packCode(file).split('\n').filter(l => l.trim() !== '')
+    assert.equal(code[0], '\\ir _preamble.sql', 'the preamble include is the first statement')
+    assert.equal(code[1], 'SET transaction_read_only = on;',
+      'the open transaction (psql -1 / AUTOCOMMIT off) must be made read-only before anything else runs')
+    assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
+  })
+}
+
+/** The last statement of a pack file must be its own INVENTORY_RESULT SELECT. */
+function assertResultIsLast(file) {
+  const code = packCode(file)
+  const lastStmt = code.slice(code.trimEnd().slice(0, -1).lastIndexOf(';') + 1)
+  assert.ok(lastStmt.includes(`SELECT 'INVENTORY_RESULT file=${file} status='`),
+    `${file}: the INVENTORY_RESULT query must be the last statement`)
+}
+
+test('05: values-free selects and the INVENTORY_RESULT query is the last statement', () => {
+  assertResultIsLast(FILE_05)
+  const code = packCode(FILE_05)
+  // Values-free: the two result queries select the flag plus counts, nothing else.
+  for (const flag of ['enabled', 'active']) {
+    const m = code.match(new RegExp(`\\nSELECT s\\.${flag},\\n([\\s\\S]*?)\\n  FROM \\(VALUES \\(true\\), \\(false\\)\\)`))
+    assert.ok(m, `05: no result query keyed on s.${flag}`)
+    for (const line of m[1].split('\n')) {
+      assert.match(line, /^\s+count\(/, `05: the s.${flag} result query may select counts only: ${line.trim()}`)
+    }
+  }
+})
+
+test('06: values-free selects and the INVENTORY_RESULT query is the last statement', () => {
+  assertResultIsLast(FILE_06)
+  const code = packCode(FILE_06)
+  // Values-free: the B1 result query selects counts, nothing else.
+  const m = code.match(/\nSELECT (count\(\*\)[\s\S]*?)\n {2}FROM target;/)
+  assert.ok(m, '06: no B1 result query over `target`')
+  for (const line of m[1].split('\n')) {
+    assert.match(line.trim(), /^count\(/, `06: the B1 result query may select counts only: ${line.trim()}`)
+  }
+})
+
+/** Shared assertions for the one-transaction read-only witness (05 and 06). */
+function assertReadOnlyWitness({ before, single, autocommitOff, control }) {
+  for (const [mode, o] of [['-1', single], ['AUTOCOMMIT=off', autocommitOff]]) {
+    assert.notEqual(o.exit, 0, `${mode}: an injected UPDATE must abort the run`)
+    assert.match(o.stderr, /\b25006\b/, `${mode}: the abort must be read_only_sql_transaction (25006)`)
+    assert.equal(o.result, null, `${mode}: an aborted run must print NO INVENTORY_RESULT line`)
+    assert.equal(o.nameAfter, before, `${mode}: the row must be unchanged`)
+  }
+  // Control: with the SET line replaced by the same UPDATE, the write commits
+  // under -1 even though the preamble set default_transaction_read_only.
+  assert.equal(control.exit, 0, `control run exited ${control.exit}: ${control.stderr}`)
+  assert.match(control.result ?? '', /status=complete/)
+  assert.equal(control.nameAfter, 'witness', 'without the SET, the preamble alone does not stop the write')
+}
+
+// Each DB test builds and drops its own throwaway schema, so one red check
+// cannot take the others down with it.
+const onTotalsFixture = fn => withFixture('inventory_fixture_totals', WEBHOOK_TOTALS_FIXTURE, fn)
+const onButtonsFixture = fn => withFixture('inventory_fixture_buttons', BUTTON_WEBHOOKS_FIXTURE, fn)
+
+if (!DATABASE_URL || !psqlAvailable()) {
+  test('05/06 SYNTHETIC-DB CHECKS SKIPPED — no DATABASE_URL / psql', { skip: true }, () => {})
+} else {
+  test('synthetic PostgreSQL: 05 sorts every target into the four buckets (modern shape)', () => {
+    const r = { totals: onTotalsFixture(runWebhookTotals) }
+    // enabled | webhook_rules | targets | url_missing | not_https | https_internal_literal | https_other
+    assert.deepEqual(r.totals.rules, ['t|10|10|3|3|3|1', 'f|2|3|1|1|0|1'])
+    // active | webhooks | url_missing | not_https | https_internal_literal | https_other
+    assert.deepEqual(r.totals.webhooks, ['t|4|0|1|2|1', 'f|2|1|0|1|0'])
+    assert.equal(r.totals.result,
+      'INVENTORY_RESULT file=05-trg04-webhook-target-totals.sql status=complete scope=automation_rules+multitable_webhooks')
+  })
+
+  test('synthetic PostgreSQL: 05 reports missing columns as incomplete, never as zero', () => {
+    const r = {
+      legacy: withFixture('inventory_fixture_legacy', 'fixture-legacy.sql', runWebhookTotals),
+      modern: withFixture('inventory_fixture_modern', 'fixture-modern.sql', runWebhookTotals),
+      empty: withFixture('inventory_fixture_empty', null, runWebhookTotals),
+    }
+    // fixture-legacy.sql: automation_rules has neither `actions` nor `enabled`.
+    // Its three subscriptions: http (not_https), https public, https [fe80::1].
+    assert.equal(r.legacy.rules, null, 'R1 must be skipped, not printed as zeros')
+    assert.deepEqual(r.legacy.webhooks, ['t|3|0|1|1|1', 'f|0|0|0|0|0'])
+    assert.equal(r.legacy.result,
+      'INVENTORY_RESULT file=05-trg04-webhook-target-totals.sql status=incomplete reason=missing-columns:automation_rules scope=multitable_webhooks-only')
+    // fixture-modern.sql's hand subset also lacks `automation_rules.enabled`, so
+    // its rules are not counted either. Its nine subscriptions: active 8 =
+    // 3 not_https (w-http, w-http-upper, w-internal is http://) + 2 internal
+    // (w-internal-172, w-internal-v6, the same two https rows 02's Q7 counts)
+    // + 3 other (w-https, w-public-172, w-prefix-decoy); inactive 1 = w-http-off.
+    assert.equal(r.modern.rules, null)
+    assert.deepEqual(r.modern.webhooks, ['t|8|0|3|2|3', 'f|1|0|1|0|0'])
+    assert.match(r.modern.result, /status=incomplete reason=missing-columns:automation_rules scope=multitable_webhooks-only$/)
+    // An empty schema: both halves skipped.
+    assert.equal(r.empty.rules, null)
+    assert.equal(r.empty.webhooks, null)
+    assert.match(r.empty.result,
+      /status=incomplete reason=missing-columns:automation_rules\+multitable_webhooks scope=none$/)
+  })
+
+  test('synthetic PostgreSQL: 05 host pattern agrees with every guard-derived case (same table as 02)', () => {
+    // checkInternalTargetCases runs 05 itself, then matches the F7 case table
+    // against 05's own \gset pattern in the same session (asserting each case).
+    const r = onTotalsFixture(s => checkInternalTargetCases(s, FILE_05))
+    assert.equal(r.cases, INTERNAL_TARGET_CASES.length)
+  })
+
+  test('synthetic PostgreSQL: 05 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
+    const r = onTotalsFixture(checkWebhookTotalsReadOnly)
+    assert.equal(r.before, '<null>')
+    assertReadOnlyWitness(r)
+  })
+
+  test('synthetic PostgreSQL: 06 sorts every button webhook into its bucket', () => {
+    const r = onButtonsFixture(runButtonWebhookTotals)
+    // button_webhooks | url_missing | refused_both | https_ip_literal | https_hostname | unclassified
+    // (no other fixture here creates meta_fields; the row breakdown is in the fixture header)
+    assert.deepEqual(r.buttons, ['14|3|4|2|3|2'])
+    assert.equal(r.result, 'INVENTORY_RESULT file=06-trg04-button-webhook-totals.sql status=complete scope=meta_fields')
+  })
+
+  test('synthetic PostgreSQL: 06 reports a missing meta_fields as incomplete, never as zero', () => {
+    const r = withFixture('inventory_fixture_empty', null, runButtonWebhookTotals)
+    assert.equal(r.buttons, null, 'B1 must be skipped, not printed as zeros')
+    assert.equal(r.result,
+      'INVENTORY_RESULT file=06-trg04-button-webhook-totals.sql status=incomplete reason=missing-columns:meta_fields scope=none')
+  })
+
+  test('synthetic PostgreSQL: 06 host pattern agrees with every guard-derived case (same table as 02)', () => {
+    const r = onButtonsFixture(s => checkInternalTargetCases(s, FILE_06))
+    assert.equal(r.cases, INTERNAL_TARGET_CASES.length)
+  })
+
+  test('synthetic PostgreSQL: 06 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
+    const r = onButtonsFixture(checkButtonWebhookTotalsReadOnly)
+    assert.equal(r.before, 'n')
+    assertReadOnlyWitness(r)
+  })
+}
+
+// ── 07 (2026-11-06): row counts of the 11 legacy BPMN tables ────────────────
+// 07-bpmn-table-totals.sql is the BPMN-removal pre-check (owner ruling
+// 2026-11-06: approvals and automation do not use BPMN; runtime and designer
+// are deprecated). It prints one row per bpmn_* table (name + count(*)) and
+// its INVENTORY_RESULT line. FILES above makes the preamble / INVENTORY_RESULT
+// / read-only tests cover it.
+import {
+  runBpmnTableTotals,
+  runBpmnTableTotalsAsLimitedRole,
+  checkBpmnTableTotalsReadOnly,
+  exec,
+  BPMN_TABLES_FIXTURE,
+} from './run-verify.mjs'
+
+const FILE_07 = '07-bpmn-table-totals.sql'
+
+// The tables packages/core-backend/src/db/migrations/zz20251231_create_bpmn_tables.ts
+// creates, in 07's B1 order. Typed here rather than read from the migration so
+// this suite keeps reading nothing outside its own pack directory.
+const BPMN_TABLES = [
+  'bpmn_process_definitions', 'bpmn_process_instances', 'bpmn_activity_instances',
+  'bpmn_user_tasks', 'bpmn_timer_jobs', 'bpmn_message_events', 'bpmn_signal_events',
+  'bpmn_variables', 'bpmn_incidents', 'bpmn_external_tasks', 'bpmn_audit_log',
+]
+
+test('07: SET transaction_read_only = on; comes right after \\ir _preamble.sql', () => {
+  const code = packCode(FILE_07).split('\n').filter(l => l.trim() !== '')
+  assert.equal(code[0], '\\ir _preamble.sql', 'the preamble include is the first statement')
+  assert.equal(code[1], 'SET transaction_read_only = on;',
+    'the open transaction (psql -1 / AUTOCOMMIT off) must be made read-only before anything else runs')
+  assert.equal(code.filter(l => /transaction_read_only/.test(l)).length, 1)
+})
+
+test('07: probe and B1 cover exactly the 11 core bpmn_* tables plus the optional bpmn_deployments, B1 selects only name + count(*), INVENTORY_RESULT is last', () => {
+  assertResultIsLast(FILE_07)
+  const code = packCode(FILE_07)
+
+  // Probe: the IN (...) list is the same 11 names, and the threshold is 11.
+  const probe = code.match(/AND table_name IN \(([\s\S]*?)\)\n\\gset/)
+  assert.ok(probe, '07: no probe over information_schema.tables')
+  const probed = [...probe[1].matchAll(/'([^']+)'/g)].map(m => m[1])
+  assert.deepEqual([...probed].sort(), [...BPMN_TABLES].sort(), '07: the probe must list exactly the 11 tables')
+  assert.match(code, /SELECT :bpmn_tables_present = 11 AS has_all/)
+  assert.match(code, /'complete scope=bpmn_tables:11'/)
+  assert.match(code, /'incomplete reason=missing-tables:' \|\| \(11 - :bpmn_tables_present\)/)
+
+  // B1: values-free. The outer query selects the literal name and the count;
+  // every branch is `SELECT <ord>, '<table>', count(*) FROM <same table>`.
+  const b1 = code.match(/\nSELECT table_name, row_count FROM \(\n([\s\S]*?)\n\) t ORDER BY ord;/)
+  assert.ok(b1, '07: no B1 query of the form SELECT table_name, row_count FROM (...) t ORDER BY ord')
+  const branch = /^\s*(?:UNION ALL )?SELECT\s+(\d+)(?: AS ord)?, '(bpmn_[a-z_]+)'(?: AS table_name)?,\s+count\(\*\)(?:::bigint AS row_count)? FROM (bpmn_[a-z_]+)$/
+  const lines = b1[1].split('\n')
+  assert.equal(lines.length, BPMN_TABLES.length + 1, '07: B1 must have one branch per core table plus the optional slot')
+  assert.equal(lines.pop(), '  :bpmn_deployments_branch', '07: the last B1 line is the optional bpmn_deployments slot')
+  lines.forEach((line, i) => {
+    const m = branch.exec(line)
+    assert.ok(m, `07: B1 branch ${i + 1} may select only its ordinal, its own name and count(*): ${line.trim()}`)
+    assert.equal(Number(m[1]), i + 1, `07: B1 branch ${i + 1} ordinal`)
+    assert.equal(m[2], BPMN_TABLES[i], `07: B1 branch ${i + 1} label`)
+    assert.equal(m[3], m[2], `07: B1 branch ${i + 1} must count the table it names`)
+  })
+
+  // Optional 12th table: its own probe (not part of has_all), and the slot is
+  // either the same values-free branch shape (ordinal 12) or empty plus an \echo.
+  const opt = code.match(/\nSELECT count\(\*\) > 0 AS has_deployments\n([\s\S]*?)\n\\gset\n\\if :has_deployments\n\\set bpmn_deployments_branch '(.*)'\n\\else\n\\set bpmn_deployments_branch ''\n\\echo '(.*)'\n\\endif\n/)
+  assert.ok(opt, '07: no optional bpmn_deployments probe + \\if/\\set/\\echo block')
+  assert.match(opt[1], /table_schema = ANY \(current_schemas\(false\)\)\n\s+AND table_name = 'bpmn_deployments'$/)
+  const m12 = branch.exec(opt[2].replace(/''/g, "'"))
+  assert.ok(m12, `07: the optional branch may select only its ordinal, its name and count(*): ${opt[2]}`)
+  assert.deepEqual([Number(m12[1]), m12[2], m12[3]], [12, 'bpmn_deployments', 'bpmn_deployments'])
+  assert.equal(opt[3], '-- bpmn_deployments not present (optional; only created by legacy 049)')
+  assert.ok(code.indexOf('AS has_deployments') > code.indexOf('AS has_all'))
+  assert.ok(!/has_deployments/.test(code.slice(code.lastIndexOf("SELECT 'INVENTORY_RESULT"))),
+    '07: completeness must not depend on the optional table')
+})
+
+if (!DATABASE_URL || !psqlAvailable()) {
+  test('07 SYNTHETIC-DB CHECKS SKIPPED — no DATABASE_URL / psql', { skip: true }, () => {})
+} else {
+  const onBpmnFixture = fn => withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, fn)
+  const EXPECTED_07_ROWS = [
+    'bpmn_process_definitions|3', 'bpmn_process_instances|2', 'bpmn_activity_instances|0',
+    'bpmn_user_tasks|1', 'bpmn_timer_jobs|0', 'bpmn_message_events|0', 'bpmn_signal_events|0',
+    'bpmn_variables|7', 'bpmn_incidents|0', 'bpmn_external_tasks|0', 'bpmn_audit_log|4',
+  ]
+  const OPTIONAL_07_ROW = 'bpmn_deployments|5'
+  const OPTIONAL_07_ABSENT = '-- bpmn_deployments not present (optional; only created by legacy 049)'
+  const COMPLETE_07 = 'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=complete scope=bpmn_tables:11'
+
+  test('synthetic PostgreSQL: 07 prints the exact count of every bpmn_* table (plain and psql -1)', () => {
+    const r = onBpmnFixture(s => ({ plain: runBpmnTableTotals(s), single: runBpmnTableTotals(s, ['-1']) }))
+    for (const [mode, o] of [['plain', r.plain], ['-1', r.single]]) {
+      assert.deepEqual(o.rows, [...EXPECTED_07_ROWS, OPTIONAL_07_ROW], `${mode}: row counts (11 core + optional)`)
+      assert.equal(o.result, COMPLETE_07, `${mode}: result line`)
+      assert.ok(!o.stdout.includes(OPTIONAL_07_ABSENT), `${mode}: no "not present" line when the table exists`)
+    }
+  })
+
+  test('synthetic PostgreSQL: 07 without the optional bpmn_deployments is still complete', () => {
+    const r = onBpmnFixture(s => {
+      exec(`DROP TABLE "${s}".bpmn_deployments`)
+      return { plain: runBpmnTableTotals(s), single: runBpmnTableTotals(s, ['-1']) }
+    })
+    for (const [mode, o] of [['plain', r.plain], ['-1', r.single]]) {
+      assert.deepEqual(o.rows, EXPECTED_07_ROWS, `${mode}: the 11 core rows only, no bpmn_deployments row`)
+      assert.ok(o.stdout.split(/\r?\n/).includes(OPTIONAL_07_ABSENT), `${mode}: the optional line is printed`)
+      assert.equal(o.result, COMPLETE_07, `${mode}: completeness depends on the 11 core tables only`)
+    }
+  })
+
+  test('synthetic PostgreSQL: 07 reports a missing bpmn_* table as incomplete, never as zero', () => {
+    const r = {
+      oneMissing: onBpmnFixture(s => {
+        exec(`DROP TABLE "${s}".bpmn_signal_events`)
+        return runBpmnTableTotals(s)
+      }),
+      empty: withFixture('inventory_fixture_empty', null, runBpmnTableTotals),
+    }
+    assert.equal(r.oneMissing.rows, null, 'B1 must be skipped, not printed with zeros')
+    assert.match(r.oneMissing.stdout, /B1 skipped/)
+    assert.equal(r.oneMissing.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:1 scope=none')
+    assert.equal(r.empty.rows, null)
+    assert.ok(r.empty.stdout.split(/\r?\n/).includes(OPTIONAL_07_ABSENT))
+    assert.equal(r.empty.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:11 scope=none')
+  })
+
+  test('synthetic PostgreSQL: 07 run by a role that can read one table is incomplete, never zero', () => {
+    const r = onBpmnFixture(s => runBpmnTableTotalsAsLimitedRole(s, ['bpmn_process_definitions']))
+    assert.equal(r.exit, 0, `limited-role run exited ${r.exit}: ${r.stderr}`)
+    assert.equal(r.rows, null, 'no count may be printed for tables the role cannot read')
+    assert.equal(r.result,
+      'INVENTORY_RESULT file=07-bpmn-table-totals.sql status=incomplete reason=missing-tables:10 scope=none')
+  })
+
+  test('synthetic PostgreSQL: 07 stays read-only inside one transaction (psql -X -1, AUTOCOMMIT=off)', () => {
+    const r = onBpmnFixture(checkBpmnTableTotalsReadOnly)
+    assert.equal(r.before, 'fake-def-1')
+    assertReadOnlyWitness(r)
+  })
+}

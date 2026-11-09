@@ -859,3 +859,6 @@ describe('D. no socket outside the badge gate (real App.vue, policy forced on)',
     expect(h_.io).not.toHaveBeenCalled()
   })
 })
+
+// Collect the real shell before timed cases enable fake timers.
+await import('../src/App.vue')

@@ -26,6 +26,8 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   getDingTalkDepartmentDetail: dingtalkMocks.getDingTalkDepartmentDetail,
 }))
 
+import { Logger } from '../../src/core/logger'
+import { requestDingTalkTransportJson } from '../../src/integrations/dingtalk/transport'
 import {
   DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS,
   DIRECTORY_SYNC_LEASE_STALE_MINUTES,
@@ -163,6 +165,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       // getIntegrationRow
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // T2 freeze gate (migrated schema present, no active frozen transfer)
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] }) // to_regclass
       .mockResolvedValueOnce({ rows: [] }) // active frozen-transfer SELECT
       // reclaimStaleDirectorySyncRuns → nothing stale
@@ -183,6 +186,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
   it('carries the active run id so the caller can observe the run in flight', async () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -217,6 +221,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     const requestedRunId = '22222222-2222-4222-8222-222222222222'
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -230,10 +235,10 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
 
     expect(error).toBeInstanceOf(DirectorySyncRunReplayError)
     expect((error as DirectorySyncRunReplayError).runId).toBe(requestedRunId)
-    expect(pgMocks.query.mock.calls[4]?.[1]).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
-    expect(String(pgMocks.query.mock.calls[5]?.[0])).toContain('WHERE id = $1')
-    expect(pgMocks.query.mock.calls[5]?.[1]).toEqual([requestedRunId, 'dir-1'])
-    expect(String(pgMocks.query.mock.calls[6]?.[0])).toContain("status = 'running'")
+    expect(pgMocks.query.mock.calls[5]?.[1]).toEqual(['dir-1', 'admin-1', 'manual', requestedRunId])
+    expect(String(pgMocks.query.mock.calls[6]?.[0])).toContain('WHERE id = $1')
+    expect(pgMocks.query.mock.calls[6]?.[1]).toEqual([requestedRunId, 'dir-1'])
+    expect(String(pgMocks.query.mock.calls[7]?.[0])).toContain("status = 'running'")
     expect(dingtalkMocks.fetchDingTalkAppAccessToken).not.toHaveBeenCalled()
     expect(dingtalkMocks.listDingTalkDepartments).not.toHaveBeenCalled()
   })
@@ -242,6 +247,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
     const requestedRunId = '33333333-3333-4333-8333-333333333333'
     pgMocks.query
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -263,6 +269,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // T2 freeze gate: migrated schema present, no active freeze — both queries must
       // precede reclaim, which must precede claim (indexes below pin that order).
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'stale-run' }] }) // reclaim
@@ -271,16 +278,18 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
 
     await expect(syncDirectoryIntegration('dir-1', 'admin-1', 'manual')).rejects.toBeInstanceOf(DirectorySyncInProgressError)
 
+    // Handover schema probe precedes the existing transfer gate.
+    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('directory_handovers')")
     // Freeze-gate SQL shapes: to_regclass then active frozen-transfer SELECT.
-    expect(String(pgMocks.query.mock.calls[1][0])).toContain("to_regclass('provider_org_transfers')")
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('FROM provider_org_transfers')
-    expect(String(pgMocks.query.mock.calls[2][0])).toContain('freeze_source_sync')
+    expect(String(pgMocks.query.mock.calls[2][0])).toContain("to_regclass('provider_org_transfers')")
+    expect(String(pgMocks.query.mock.calls[3][0])).toContain('FROM provider_org_transfers')
+    expect(String(pgMocks.query.mock.calls[3][0])).toContain('freeze_source_sync')
 
-    const reclaimCall = pgMocks.query.mock.calls[3]
+    const reclaimCall = pgMocks.query.mock.calls[4]
     expect(String(reclaimCall[0])).toContain('UPDATE directory_sync_runs')
     expect(String(reclaimCall[0])).toContain("status = 'running'")
     // Reclaim strictly precedes the claim (and freeze-gate strictly precedes reclaim).
-    expect(String(pgMocks.query.mock.calls[4][0])).toContain('INSERT INTO directory_sync_runs')
+    expect(String(pgMocks.query.mock.calls[5][0])).toContain('INSERT INTO directory_sync_runs')
   })
 
   it('propagates a non-unique-violation insert error unchanged', async () => {
@@ -288,6 +297,7 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
       // Same migrated-schema freeze gate as the lease-conflict path above so this rejection
       // still lands on claim/INSERT rather than the freeze SELECT or reclaim.
+      .mockResolvedValueOnce({ rows: [{ reg: null }] }) // no controlled handover journal
       .mockResolvedValueOnce({ rows: [{ reg: 'provider_org_transfers' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] }) // reclaim
@@ -441,6 +451,100 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       expect(failureWrite).toBeDefined()
       expect(failureWrite?.params?.[0]).toBe(RUN_ID)
       expect(String(failureWrite?.params?.[1])).toContain('lost its lease while still alive')
+    })
+  })
+
+  /**
+   * Roadmap §7.7 per-phase timing + retry stats on the run record. Only the DingTalk client (and
+   * db/pg) is mocked here; the transport is real. So this is the one offline case that drives the
+   * REAL transport retry loop through BOTH of syncDirectoryIntegration's observer wrappers
+   * (department pull and user pull) all the way to the completion write: it turns red if either
+   * pull's retry counters or timing stop reaching `directory_sync_runs.stats`, which the DB tests
+   * (mocked client, zero retries) cannot tell from a clean run.
+   */
+  describe('per-phase timing and retry stats on the completion write (roadmap §7.7)', () => {
+    const PULL_DELAY_MS = 50
+    const jsonResponse = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+    it('writes one retry per pull (flow-control, then HTTP 429) and a measured pull duration into the run stats', async () => {
+      // Full-jitter backoff × 0 ⇒ each retry waits 0 ms, so the pull time below is the two holds alone.
+      const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        const { txCalls } = installFullRunMocks()
+        const departmentFetchFn = vi.fn()
+          .mockResolvedValueOnce(jsonResponse({ errcode: 90018, errmsg: 'flow control' }))
+          .mockResolvedValueOnce(jsonResponse({ errcode: 0, errmsg: 'ok', result: [] }))
+        const userFetchFn = vi.fn()
+          .mockResolvedValueOnce(jsonResponse({ message: 'too many requests' }, 429))
+          .mockResolvedValueOnce(jsonResponse({ errcode: 0, errmsg: 'ok', result: { list: [], has_more: false } }))
+        // Each mocked pull makes one real transport call (rejected once — the flow-control errcode
+        // for departments, HTTP 429 for users — then served) and then holds for a measurable interval.
+        // The root department is always seeded, so the user pull runs once even with no children.
+        dingtalkMocks.listDingTalkDepartments.mockImplementation(async () => {
+          await requestDingTalkTransportJson({
+            input: 'https://example.test/topapi/v2/department/listsub',
+            init: { method: 'POST', body: '{}' },
+            fallbackError: 'department listing failed',
+            kind: 'read',
+            envelope: 'oapi',
+            fetchFn: departmentFetchFn as unknown as typeof fetch,
+          })
+          await new Promise((resolve) => setTimeout(resolve, PULL_DELAY_MS))
+          return []
+        })
+        dingtalkMocks.listDingTalkDepartmentUsers.mockImplementation(async () => {
+          await requestDingTalkTransportJson({
+            input: 'https://example.test/topapi/user/listsimple',
+            init: { method: 'POST', body: '{}' },
+            fallbackError: 'department user listing failed',
+            kind: 'read',
+            envelope: 'oapi',
+            fetchFn: userFetchFn as unknown as typeof fetch,
+          })
+          await new Promise((resolve) => setTimeout(resolve, PULL_DELAY_MS))
+          return { users: [], hasMore: false, nextCursor: null }
+        })
+
+        await syncDirectoryIntegration('dir-1', 'admin-1', 'scheduler')
+
+        expect(dingtalkMocks.listDingTalkDepartmentUsers).toHaveBeenCalledTimes(1)
+        expect(departmentFetchFn).toHaveBeenCalledTimes(2)
+        expect(userFetchFn).toHaveBeenCalledTimes(2)
+        const completion = txCalls.find((call) => call.text.includes("SET status = 'completed'"))
+        const stats = JSON.parse(String(completion?.params?.[1])) as Record<string, unknown>
+        for (const key of [
+          'fetchDurationMs',
+          'applyTransactionMs',
+          'bcryptMsInTransaction',
+          'externalPullRetryCount',
+          'externalPullRetryFlowControlCount',
+          'externalPullRetryHttp429Count',
+          'externalPullRetryNetworkCount',
+          'externalPullRetryOtherCount',
+        ]) {
+          expect(typeof stats[key], key).toBe('number')
+        }
+        // One retry per pull reached the run record, each in its own bucket — so dropping either
+        // pull's observer wrapper cannot pass.
+        expect(stats.externalPullRetryCount).toBe(2)
+        expect(stats.externalPullRetryFlowControlCount).toBe(1)
+        expect(stats.externalPullRetryHttp429Count).toBe(1)
+        expect(stats.externalPullRetryNetworkCount).toBe(0)
+        expect(stats.externalPullRetryOtherCount).toBe(0)
+        // No admission ran (zero users) ⇒ nothing was hashed inside the transaction.
+        expect(stats.bcryptMsInTransaction).toBe(0)
+        // Both pulls were held for PULL_DELAY_MS, so neither a constant 0 nor a single pull's time
+        // can pass (small slack for timer rounding); the per-phase values stay inside the whole-run
+        // window.
+        expect(stats.fetchDurationMs).toBeGreaterThanOrEqual(2 * PULL_DELAY_MS - 10)
+        expect((stats.fetchDurationMs as number) + (stats.applyTransactionMs as number))
+          .toBeLessThanOrEqual(stats.durationMs as number)
+      } finally {
+        randomSpy.mockRestore()
+        warnSpy.mockRestore()
+      }
     })
   })
 

@@ -15,6 +15,21 @@ import type { IntegrationApiEnvelope } from '../workbench'
 
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
 const ERROR_FIELD_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/
+// 备料分批拉取第一期 step 4 PR-7: the server's `details.reason` / `details.status` are closed lower_snake vocabularies
+// (the export gate's `lease_in_flight` / `not_settled`, a refresh status token, …) — carried so the copy can say
+// which state it is. Anything else (a project number, a message fragment) is dropped, never carried.
+const ERROR_DETAIL_TOKEN_PATTERN = /^[a-z][a-z0-9_]{0,47}$/
+
+/** A server `details.reason` / `details.status`, clamped to a lower_snake token; null otherwise. */
+export function clampStockPreparationErrorDetailToken(value: unknown): string | null {
+  return typeof value === 'string' && ERROR_DETAIL_TOKEN_PATTERN.test(value) ? value : null
+}
+
+/** Extra clamped tokens a refusal carries; every existing three-argument construction stays valid. */
+export interface StockPreparationConfirmApiErrorDetail {
+  reason?: unknown
+  status?: unknown
+}
 
 export class StockPreparationConfirmApiError extends Error {
   /** HTTP status of the failed request (e.g. 409 for a stale unit candidate). */
@@ -23,13 +38,19 @@ export class StockPreparationConfirmApiError extends Error {
   code: string
   /** Clamped offending field NAME from error.details.field — null when the error names no field. */
   field: string | null
+  /** PR-7: the clamped `details.reason` token (e.g. `lease_in_flight`), null when absent or not token-shaped. */
+  reason: string | null
+  /** PR-7: the clamped `details.status` token (a refresh status on an export refusal), null otherwise. */
+  refreshStatus: string | null
 
-  constructor(status: number, code: string, field: string | null) {
+  constructor(status: number, code: string, field: string | null, detail: StockPreparationConfirmApiErrorDetail = {}) {
     super(`stock-preparation confirm request failed (${code}${field ? `/${field}` : ''})`)
     this.name = 'StockPreparationConfirmApiError'
     this.status = status
     this.code = code
     this.field = field
+    this.reason = clampStockPreparationErrorDetailToken(detail.reason)
+    this.refreshStatus = clampStockPreparationErrorDetailToken(detail.status)
   }
 }
 
@@ -53,7 +74,7 @@ export async function parseStockPreparationConfirmResponse<T>(response: Response
     const field = typeof details.field === 'string' && ERROR_FIELD_PATTERN.test(details.field)
       ? details.field
       : null
-    throw new StockPreparationConfirmApiError(response.status, code, field)
+    throw new StockPreparationConfirmApiError(response.status, code, field, { reason: details.reason, status: details.status })
   }
   return payload?.data as T
 }

@@ -154,10 +154,15 @@ Flags:
   --help, -h          print this text and exit 0
 
 Exit code is non-zero if any project's dry-run (or apply) failed outright — never for a project that
-was simply skipped as manual_confirm_required, large_bom_bounded, not_found, (without --apply)
-ready-but-not-applied, or — with per-project sheets enabled on the server — project_sheet_absent
-(no 拉取人员 has created that project's sheet yet; this script NEVER creates one) or
-project_sheet_archived.
+was simply skipped as manual_confirm_required, suspended (a governed project's pull waits for a
+拉取人员 to decide its holds on the 拉取待确认 page — at the preview or, if a hold opened in between,
+at the apply), pull_batch_installing (批次标识: the project sheet's batch columns are being installed in an
+owner-approved window — at the preview or at the apply), review_pending (a written content change awaits its review by a 拉取人员 on the
+拉取待确认 page — at the preview or at the apply), large_bom_bounded, not_found, (without --apply)
+ready-but-not-applied, or — with
+per-project sheets enabled on the server — project_sheet_absent (no 拉取人员 has created that
+project's sheet yet; this script NEVER creates one) or project_sheet_archived. A governed project
+whose earlier write did not finish (recovery_pending) IS a failure.
 
 The account behind MS_TOKEN must be allowed to PULL: since S0 (stock-prep:pull) the floor tier
 (read+operate) is refused dry-run and apply, so use a 拉取人员 account (pull+operate+read), a
@@ -482,6 +487,52 @@ function errorCodeOf(envelope) {
     : null
 }
 
+// 批次标识 BI-2 (P2-8): the closed facts the install skip reads — the lock holder's purpose, nothing else.
+const PULL_BATCH_INSTALLING_NOTE = 'the batch columns of this project sheet are being installed (an owner-approved window); nothing was applied'
+function isPullBatchInstallHolder(details) {
+  return Boolean(details) && typeof details === 'object' && details.holderPurpose === 'pull_batch_install'
+}
+
+/** An error envelope's `details` object, or null. Read only by `holdCountOf`, `applyStopFactsOf` and the install skip. */
+function errorDetailsOf(envelope) {
+  const details = envelope && envelope.json && envelope.json.error ? envelope.json.error.details : null
+  return details && typeof details === 'object' && !Array.isArray(details) ? details : null
+}
+
+/**
+ * PR-7: the ONE field a suspended project's record copies — a non-negative integer `holdCount` from the
+ * preview's `refreshHold` stanza or the apply refusal's `details`; anything else is null. Never `kinds`,
+ * never a digest (the values-free rule above).
+ */
+function holdCountOf(source) {
+  const value = source && typeof source === 'object' ? source.holdCount : null
+  return Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * Batch-refresh step 5 PR-9 (register R-77 ⑧): the ONE field a review-pending project's record copies — a
+ * non-negative integer `pendingReviews` from the preview's `refreshReview` stanza or the apply refusal's `details`;
+ * anything else is null. Never `blocksMint` or any other key (the values-free rule above).
+ */
+function pendingReviewsOf(source) {
+  const value = source && typeof source === 'object' ? source.pendingReviews : null
+  return Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * Batch-refresh step 5 PR-8 review fix B1: what an apply REFUSAL says about rows already written — the server's
+ * TRI-STATE `details.partial` (only the literal booleans: `true` = a host write was attempted, rows may have landed;
+ * `false` = none was) and `details.written` (a non-negative integer: rows confirmed written before the stop). A version
+ * fence stop (409 STOCK_PREP_CHANGE_PLAN_STALE, register R-63 ①) can land after rows were written, so the error record
+ * must not read as "nothing happened". Values-free: a boolean and an integer, each copied only when well-formed.
+ */
+function applyStopFactsOf(details) {
+  const out = {}
+  if (details && (details.partial === true || details.partial === false)) out.partial = details.partial
+  if (details && Number.isInteger(details.written) && details.written >= 0) out.written = details.written
+  return out
+}
+
 /**
  * Turns a `postJson` network-layer failure into the ONE string this script will ever report for it.
  * `'timeout'` is a literal fixed string (never composed with anything request-specific) for the
@@ -534,6 +585,23 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
     if (refusal === 'STOCK_PREPARATION_PROJECT_ARCHIVED') {
       return { ...record, action: 'skipped_project_sheet_archived', note: 'the project sheet is archived; restore it before pulling', durationMs: Date.now() - startedAt }
     }
+    // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §9.4 L03): a PILOT project whose BOM exceeded a small-lane cap.
+    // The server refused instead of handing the pull to the large lane, and this script must not either: it is a
+    // FAILURE (exit non-zero), named, so the owner decides — never a skip that looks like a quiet success, and
+    // never a retry of the background channel.
+    if (refusal === 'STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED') {
+      return { ...record, action: 'error', error: refusal, note: 'the pilot project exceeds the small-lane cap and the large lane is refused for pilot projects; the owner must decide — nothing was written', failed: true, durationMs: Date.now() - startedAt }
+    }
+    // 批次标识 BI-2 (register R-65; P2-8): the sheet's batch columns are being installed — the install holds the sheet
+    // write lease, so the dry-run precheck answers WRITE_LOCKED naming the holder's purpose. An owner-approved window,
+    // not a fault: skipped, never applied, exit code unaffected. Any OTHER WRITE_LOCKED stays an error.
+    if (refusal === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && isPullBatchInstallHolder(errorDetailsOf(dryRun))) {
+      return { ...record, action: 'skipped_pull_batch_installing', phase: 'preview', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+    }
+    // Its sibling: the pilot marker could not be read (503) — fail closed, by name.
+    if (refusal === 'STOCK_PREP_PILOT_STATE_UNREADABLE') {
+      return { ...record, action: 'error', error: refusal, note: 'the pilot state of this project could not be read; the pull did not continue', failed: true, durationMs: Date.now() - startedAt }
+    }
   }
   if (!dryRun.ok || dryRun.parseError || !dryRun.json || dryRun.json.ok !== true || !dryRun.json.data) {
     const code = errorCodeOf(dryRun)
@@ -566,11 +634,42 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   if (data.status === 'manual_confirm_required') {
     return { ...record, action: 'skipped_manual_confirm_required', durationMs: Date.now() - startedAt }
   }
+  // Batch-refresh step 4 PR-7 (register R-62 ②): a GOVERNED project whose pull is SUSPENDED — the preview found holds a
+  // 拉取人员 has to decide on the 「拉取待确认」 page first (no token, canApply false). Human work, not a fault: the
+  // same class as manual_confirm_required (recorded, exit code unaffected), never applied. Only the integer hold count
+  // is copied off the values-free `refreshHold` stanza — never its `kinds` map or its digest.
+  if (data.status === 'suspended') {
+    return { ...record, action: 'skipped_suspended', holdCount: holdCountOf(data.refreshHold), note: 'the pull is suspended until a puller decides its holds on the 拉取待确认 page; nothing was applied', durationMs: Date.now() - startedAt }
+  }
+  // Batch-refresh step 4 PR-3a follow-up: a GOVERNED project with an earlier execution that did not finish cleanly
+  // previews `recovery_pending` (no token). A FAILURE by name (exit non-zero), never a quiet skip — nothing applies to
+  // this project until that execution is recovered — with the code a reader can look up instead of "unexpected".
+  if (data.status === 'recovery_pending') {
+    return { ...record, action: 'error', error: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', note: 'an earlier execution of this project did not finish cleanly; it must be recovered (step 6, or the owner runbook until step 6 exists) before any pull applies — nothing was applied', failed: true, durationMs: Date.now() - startedAt }
+  }
+  // Batch-refresh step 5 PR-9 (register R-77 ⑧): a GOVERNED project with a WRITTEN content change awaiting its review
+  // (变更复核, by a 拉取人员 on the 「拉取待确认」 page) previews `review_pending` (no token). Human work, not a fault: the
+  // same class as R-62 ②'s skipped_suspended (recorded, exit code unaffected), never applied. Only the integer count
+  // is copied off the values-free `refreshReview` stanza — never `blocksMint` or anything else in it.
+  if (data.status === 'review_pending') {
+    return { ...record, action: 'skipped_review_pending', pendingReviews: pendingReviewsOf(data.refreshReview), note: 'a written content change awaits its review by a puller on the 拉取待确认 page; nothing was applied', durationMs: Date.now() - startedAt }
+  }
+  // PR-9 (the status tripwire): the server's own `failed` (a computation that produced no applicable plan) is named
+  // too, so the generic branch below is reached ONLY by a status this script does not know — a newer server.
+  if (data.status === 'failed') {
+    return { ...record, action: 'error', error: 'dry-run status: failed', note: 'the preview produced no applicable plan; nothing was applied', failed: true, durationMs: Date.now() - startedAt }
+  }
   if (data.status !== 'ready') {
     return { ...record, action: 'error', error: `unexpected dry-run status: ${data.status}`, failed: true, durationMs: Date.now() - startedAt }
   }
 
   // status === 'ready'
+  // 批次标识 BI-2 (P2-8): the preview's pull-batch stanza says the sheet is being installed (a crashed install past its
+  // lease, or a host without a lease) — the apply would be refused 409; skipped here, never applied. Only the closed
+  // reason is read off the stanza.
+  if (data.pullBatch && typeof data.pullBatch === 'object' && data.pullBatch.reason === 'installing') {
+    return { ...record, action: 'skipped_pull_batch_installing', phase: 'preview', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+  }
   if (!applyFlag) {
     return { ...record, action: 'skipped_dry_run_only', durationMs: Date.now() - startedAt }
   }
@@ -597,10 +696,28 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   }
   if (!apply.ok || apply.parseError || !apply.json || apply.json.ok !== true) {
     const code = errorCodeOf(apply)
+    // PR-7 (R-62 ②): the project became suspended between the preview and the apply (a computation in between
+    // opened a hold). The server refuses before any write (`details.partial: false` by construction), so this is
+    // the same skip as a suspended preview — exit code unaffected. Only the integer hold count is copied.
+    if (code === 'STOCK_PREP_PULL_SUSPENDED') {
+      return { ...record, action: 'skipped_suspended', phase: 'apply', holdCount: holdCountOf(errorDetailsOf(apply)), note: 'the project became suspended between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
+    }
+    // PR-9 (R-77 ⑧): a written change began awaiting its review between the preview and the apply — the server refuses
+    // 409 STOCK_PREP_REFRESH_REVIEW_PENDING before any write (`partial: false` by construction): the same skip.
+    // 批次标识 BI-2 (P2-8): the install began between the preview and the apply — refused before any write (409
+    // INSTALL_IN_PROGRESS, or WRITE_LOCKED held by the install): the same skip.
+    if (code === 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS' || (code === 'STOCK_PREP_PROJECT_WRITE_LOCKED' && isPullBatchInstallHolder(errorDetailsOf(apply)))) {
+      return { ...record, action: 'skipped_pull_batch_installing', phase: 'apply', note: PULL_BATCH_INSTALLING_NOTE, durationMs: Date.now() - startedAt }
+    }
+    if (code === 'STOCK_PREP_REFRESH_REVIEW_PENDING') {
+      return { ...record, action: 'skipped_review_pending', phase: 'apply', pendingReviews: pendingReviewsOf(errorDetailsOf(apply)), note: 'a written content change began awaiting its review between the preview and the apply; nothing was written', durationMs: Date.now() - startedAt }
+    }
     return {
       ...record,
       action: 'error',
       error: code || `apply failed with HTTP ${apply.httpStatus ?? 'unknown'}`,
+      // PR-8 review fix B1: `partial` / `written` of the refusal, when the server reported them (see applyStopFactsOf).
+      ...applyStopFactsOf(errorDetailsOf(apply)),
       failed: true,
       durationMs: Date.now() - startedAt,
     }
@@ -617,6 +734,9 @@ export function summarize(results, applyFlag) {
     mode: applyFlag ? 'apply' : 'dry-run-only',
     applied: count('applied'),
     skippedManualConfirmRequired: count('skipped_manual_confirm_required'),
+    skippedSuspended: count('skipped_suspended'),
+    skippedReviewPending: count('skipped_review_pending'),
+    skippedPullBatchInstalling: count('skipped_pull_batch_installing'),
     skippedLargeBomBounded: count('skipped_large_bom_bounded'),
     skippedNotFound: count('skipped_not_found'),
     skippedDryRunOnly: count('skipped_dry_run_only'),

@@ -28,10 +28,11 @@
 //        archiving frees nothing; restoring at the cap is NOT refused (the row was already counted).
 //   A-08 THE §6 ROUTE TABLE, row by row, on one archived project: create, dry-run, apply, reconcile,
 //        mvp-persist, 大 BOM expansion-start / plan / apply-start / apply-run, conflict-policies save
-//        / delete, 结转 carry/confirm and 交接推进 each refuse 409 STOCK_PREPARATION_PROJECT_ARCHIVED
-//        with no write (no record written, no audit row, no cursor move, no apply-job step, no sheet
-//        provisioned); and 看板, 导出, 交接状态, conflict-policies list and GET target answer EXACTLY
-//        what they answered before the archive.
+//        / delete, 结转 carry/confirm, 交接推进 and (人工补充行 B4) the manual-rows switch SET each refuse 409
+//        STOCK_PREPARATION_PROJECT_ARCHIVED with no write (no record written, no audit row, no cursor move,
+//        no apply-job step, no sheet provisioned, no field property patched); and 看板, 导出, 交接状态,
+//        conflict-policies list and GET target answer EXACTLY what they answered before the archive — GET
+//        target and the switch READ moving only their lifecycle fields (status, archivedAt, may.*).
 //   A-09 confirm 裁决 (the §6 row's first member): with the switch on, confirming a decision whose
 //        ledger row names an archived project is 409 ARCHIVED and the ledger is NOT patched; 录入值回读
 //        still answers; restore → the same confirm succeeds; switch off → the registry is never
@@ -45,6 +46,7 @@
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -97,6 +99,8 @@ const BOARD_PATH = '/api/integration/stock-preparation/projects/:projectNo/board
 const EXPORT_PATH = '/api/integration/stock-preparation/prep-lines/export'
 const CONFIRM_PATH = '/api/integration/stock-preparation/confirmation-decisions/confirm'
 const VALUE_ENTRY_PATH = '/api/integration/stock-preparation/confirmation-decisions/value-entry'
+// 人工补充行 B4 (R-68): the per-sheet switch — its SET is a §6 write row, its READ a read row.
+const MANUAL_ROWS_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'
 const ACTION_ID = PLM_STOCK_PREPARATION_ACTION_ID
 const JOB_SCOPE = Object.freeze({ tenantId: TENANT, workspaceId: 'workspace-default' })
 const MVP_PERSIST_ENV = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
@@ -331,8 +335,21 @@ test('A-07 the 200 cap counts archived rows: a new create is 409 LIMIT; archivin
 })
 
 /** A completed, planned large-BOM job written straight into the route's durable storage. */
+const swlLockLib = require(path.join(__dirname, '..', 'lib', 'stock-preparation-project-write-lock.cjs'))
+
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const at = '2026-10-09T00:00:00.000Z'
+  // Codex review P1-b: a seeded expansion + plan carries what the routes record — the target sheet's write
+  // generation observed from the mounted lock (none when no lock service is wired).
+  const seedLock = h.projectWriteLock
+  const writeObservation = seedLock && target && typeof target.sheetId === 'string'
+    ? swlLockLib.writeObservationFromGeneration(await seedLock.observeGeneration(swlLockLib.sheetWriteScopeKey(target.sheetId)))
+    : null
+  // Batch-refresh step 4 PR-3b: ...and the not-governed verdict the plan route records (its REAL consult over the
+  // mounted governance), which the approval requires.
+  const governanceVerdict = h.refresh && target && typeof target.sheetId === 'string'
+    ? require(path.join(LIB, 'stock-preparation-refresh-lanes.cjs')).largeLaneVerdictOf(await h.refresh.governance.consult({ tenantId: TENANT, projectNo, sheetId: target.sheetId }), 'large_plan')
+    : null
   const job = {
     jobId, ...JOB_SCOPE, actionId: ACTION_ID,
     status: 'completed', authoritative: true, projectNoPresent: true,
@@ -348,17 +365,35 @@ async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }
     budgets: {},
     evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
     createdAt: at, updatedAt: at,
+    ...(writeObservation ? { writeObservation, planWriteObservation: writeObservation } : {}),
+    ...(governanceVerdict ? { governanceVerdict: { ...governanceVerdict } } : {}),
   }
   await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
 }
 
 /** Status + error code: the short form a failure message names (a 200 is `200:ok`). */
 const outcome = (res) => `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
-/** The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. */
+/**
+ * The export's Content-Disposition, split around the ONE wall-clock segment it carries: the route stamps the
+ * filename with the current second (`stockPreparationExportTimestamp()`), so two calls that straddle a second
+ * boundary differ there and nowhere else. Fully anchored: prefix (incl. the sanitized project token) and suffix
+ * stay byte-compared; only `\d{8}T\d{6}Z` is replaced.
+ */
+const EXPORT_DISPOSITION_RE = /^(attachment; filename="stock-prep-[A-Za-z0-9._-]+-)(\d{8}T\d{6}Z)(\.xlsx")$/
+const EXPORT_TIMESTAMP_MASK = '<export-second>'
+const maskExportTimestamp = (headers) => {
+  const value = headers['Content-Disposition']
+  if (typeof value !== 'string' || !EXPORT_DISPOSITION_RE.test(value)) return headers
+  return { ...headers, 'Content-Disposition': value.replace(EXPORT_DISPOSITION_RE, `$1${EXPORT_TIMESTAMP_MASK}$3`) }
+}
+/**
+ * The WHOLE answer — status, JSON body, headers and a streamed body — for "byte-identical" claims. The only
+ * byte not compared is the export filename's seconds timestamp (see EXPORT_DISPOSITION_RE).
+ */
 const fullAnswer = (res) => JSON.stringify({
   status: res.statusCode,
   body: res.body === undefined ? null : res.body,
-  headers: res.headers || {},
+  headers: maskExportTimestamp(res.headers || {}),
   sent: res.sentBuffer === undefined ? null : Buffer.from(res.sentBuffer).toString('base64'),
 })
 
@@ -372,6 +407,8 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
   const previousMvp = process.env[MVP_PERSIST_ENV]
   process.env[MVP_PERSIST_ENV] = 'true'
   const h = mount({
+    // 人工补充行 B4: the switch reads the key column through the host's per-field read port.
+    fieldReads: true,
     configExtras: {
       stockPreparationHandoff: {
         tenantId: TENANT,
@@ -393,12 +430,13 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     await h.records.createRecord({ sheetId, data: { [fid('projectNo')]: PROJECT, [fid('active')]: true, [fid('idempotencyKey')]: 'idem-s4-1' } })
     const projectTarget = { sheetId, objectId, fieldIdMap: {} }
     await seedPlannedExpansionJob(h, { jobId: 'job-s4-apply', target: projectTarget })
-    await seedPlannedExpansionJob(h, { jobId: 'job-s4-plan', target: projectTarget })
     const jobParams = (jobId, applyJobId) => ({ actionId: ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
     // An apply job approved while the project was ACTIVE — the archive must stop its run.
     const approved = await projectSheet.call(h.routes, 'POST', APPLY_START_PATH, { user: PLATFORM_ADMIN, params: jobParams('job-s4-apply'), body: { confirm: { acceptManualConfirmHold: true } }, query: { tenantId: TENANT } })
     assert.equal(approved.statusCode, 202, JSON.stringify(approved.body))
     const applyJobId = approved.body.data.jobId
+    // Expanded AFTER that approval (P1-b: an expansion observed before it would now be stale).
+    await seedPlannedExpansionJob(h, { jobId: 'job-s4-plan', target: projectTarget })
 
     // THE READ ROWS, BEFORE: 看板, 导出, 交接状态, conflict-policies list.
     const reads = {
@@ -412,6 +450,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       before[label] = outcome(res)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (before): the filename has the shape the mask expects')
       beforeFull[label] = fullAnswer(res)
     }
     assert.equal(before.board, '200:ok', `the board answers while active: ${before.board}`)
@@ -420,6 +459,13 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     assert.equal(before.policiesList, '200:ok')
     const targetBefore = await getTarget(h, FLOOR)
     assert.equal(targetBefore.statusCode, 200)
+    // 人工补充行 B4: the switch READ, before (ADMIN; the key column carries no switch yet → allowed by default).
+    const manualRowsRead = () => projectSheet.call(h.routes, 'GET', MANUAL_ROWS_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, query: { tenantId: TENANT } })
+    const switchBefore = await manualRowsRead()
+    assert.equal(switchBefore.statusCode, 200, JSON.stringify(switchBefore.body))
+    assert.equal(switchBefore.body.data.status, 'active')
+    assert.equal(switchBefore.body.data.policy, 'allowed')
+    assert.equal(switchBefore.body.data.may.set, true)
 
     // ARCHIVE.
     const archived = await archive(h, PULLER)
@@ -444,6 +490,8 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
       ['conflict-policies delete', () => projectSheet.call(h.routes, 'DELETE', POLICIES_PATH, { user: PLATFORM_ADMIN, params: { actionId: ACTION_ID }, body: {}, query: { tenantId: TENANT, projectNo: PROJECT } })],
       ['carry confirm', () => projectSheet.call(h.routes, 'POST', CARRY_PATH, { user: PLATFORM_ADMIN, body: { decision: { idempotencyKey: JSON.stringify({ projectNo: PROJECT }) } } })],
       ['handoff advance', () => projectSheet.call(h.routes, 'POST', HANDOFF_ADVANCE_PATH, { user: PLATFORM_ADMIN, body: { projectNo: PROJECT, fromStepKey: 'prep_entry' } })],
+      // 人工补充行 B4 (ADR §4): the switch SET — 「已归档时 POST 回 409」 — with a well-formed, confirmed body.
+      ['manual-rows switch', () => projectSheet.call(h.routes, 'POST', MANUAL_ROWS_PATH, { user: WORKBENCH_ADMIN, params: { projectNo: PROJECT }, body: { confirmProjectNo: PROJECT, policy: 'disabled' } })],
     ]
     for (const [label, run] of writes) {
       const res = await run()
@@ -454,6 +502,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     assert.equal(h.auditAppends.length, auditAfterArchive, 'no write row wrote an audit row')
     assert.equal(recordWrites(), writesBefore, 'no record was created or patched')
     assert.ok(!h.provisioning.calls.some((call) => call[0] === 'ensureObject' || call[0] === 'grantSheetRoleWrite'), 'no sheet provisioned, no grant')
+    assert.ok(!h.provisioning.calls.some((call) => call[0] === 'patchObjectFieldProperty' || call[0] === 'getObjectField'), 'the switch SET read and patched no field property')
     assert.ok(!handoffCalls.includes('advance') && !handoffCalls.includes('claimNotification'), 'the handoff cursor did not move and nobody was notified')
     const applyJob = await h.context.storage.get(largeBomJobs.__internals.checkpointApplyJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, applyJobId }))
     assert.equal(applyJob.status, 'queued', 'the approved apply job did not run a chunk')
@@ -464,6 +513,7 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     for (const [label, run] of Object.entries(reads)) {
       const res = await run()
       assert.equal(outcome(res), before[label], `${label} answers exactly as before the archive`)
+      if (label === 'export') assert.match(res.headers['Content-Disposition'], EXPORT_DISPOSITION_RE, 'export (after): the filename has the shape the mask expects')
       assert.equal(fullAnswer(res), beforeFull[label], `${label}: the whole answer is byte-identical`)
     }
     // GET target still reads; only the lifecycle fields move.
@@ -476,6 +526,16 @@ test('A-08 the §6 route table on one archived project: every write row refuses 
     }
     assert.deepEqual(withoutLifecycle(target.body.data), withoutLifecycle(targetBefore.body.data), 'GET target: only status, archivedAt and may.* change')
     assert.notEqual(target.body.data.archivedAt, targetBefore.body.data.archivedAt)
+    // 人工补充行 B4 (ADR §4 「GET 照常回答」): the switch READ still answers; only status and may.set move.
+    const switchAfter = await manualRowsRead()
+    assert.equal(switchAfter.statusCode, 200, JSON.stringify(switchAfter.body))
+    assert.equal(switchAfter.body.data.status, 'archived')
+    assert.equal(switchAfter.body.data.may.set, false)
+    const withoutSwitchLifecycle = (data) => {
+      const { status: _status, may: _may, ...rest } = data
+      return rest
+    }
+    assert.deepEqual(withoutSwitchLifecycle(switchAfter.body.data), withoutSwitchLifecycle(switchBefore.body.data), 'the switch READ: only status and may.* change')
 
     // RESTORE → the same lane is open again (positive control for every 409 above).
     assert.equal((await restore(h, PULLER)).statusCode, 200)
@@ -602,7 +662,7 @@ function mountLedger({ switchOn = true, registryGetFails = false } = {}) {
   else delete process.env[PROJECT_SHEETS_ENABLED_ENV]
   httpRoutes.registerIntegrationRoutes({
     context: { api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } }, storage: new Map(), config: {} },
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return {

@@ -15,8 +15,9 @@ import { join } from 'node:path'
 //        HEADINGS are not tabs and never became tabs.
 //   R-02 THE THREE GROUPS FILTER PER ITEM, per actor, for all four tiers. Asserted as the exact SET
 //        of visible keys rather than a count, so a tab that silently swaps tier is caught by name.
-//   R-03 深度工具 ▾ FOLDS THE LEGACY TABS, collapsed by default and NOT retired: all seven legacy MVP
-//        keys live inside the disclosure panel, the panel starts `hidden`, and the toggle opens it.
+//   R-03 深度工具 ▾ FOLDS THE LEGACY TABS, collapsed by default: every remaining legacy MVP key lives
+//        inside the disclosure panel, the panel starts `hidden`, and the toggle opens it. (Three of the
+//        original seven, 旧「仪表盘」, 旧「备料行」 and 旧「异常队列」, were retired by the owner on 2026-10-27.)
 //   R-04 THE NARROW-SCREEN FORM IS STILL THE SAME TABLIST. The fold to a horizontal strip is CSS
 //        only — there is no second container and no `v-if` on the nav — which is the R11 lesson from
 //        ApprovalCenterView's conditionally-rendered split container that became a no-op div.
@@ -54,7 +55,7 @@ vi.mock('../src/composables/useLocale', () => ({
  * StockPreparationProjectBoard.spec.ts uses, and the choice matters twice here:
  *   * `stock-prep:admin` really does satisfy `stock-prep:operate` through it, so a workbench admin
  *     sees 【工作】 as well as 【部署与接入】 — a fact an exact-code stub would have hidden; and
- *   * `role:admin` really is the platform admin, so 深度工具's seven legacy tabs appear for exactly
+ *   * `role:admin` really is the platform admin, so 深度工具's legacy tabs appear for exactly
  *     one of the four actors rather than for whoever happens to be handed the literal code.
  */
 function realHasPermission(required: string): boolean {
@@ -102,15 +103,16 @@ const RAIL_SRC = readFileSync(
   'utf8',
 )
 
-/** The seven legacy MVP keys. 折叠, 不下线 — every one of them must still be reachable. */
+/**
+ * The legacy MVP keys still folded into 深度工具 — every one of them must still be reachable.
+ * 旧「仪表盘」(dashboard), 旧「备料行」(prep-line) and 旧「异常队列」(exception-queue) were retired on 2026-10-27
+ * (owner: 「不用就去掉」).
+ */
 const LEGACY_MVP_VIEW_KEYS = [
-  'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
   'material-mapping',
   'unit-conversion',
-  'prep-line',
-  'exception-queue',
 ] as const
 
 interface RailActor {
@@ -147,15 +149,24 @@ const ACTORS: RailActor[] = [
     name: 'stock-prep:admin',
     permissions: ['stock-prep:read', 'stock-prep:admin'],
     roles: [],
-    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help'],
+    // PR-7 (R-62 ①): 拉取待确认 is PULL tier, which `stock-prep:admin` satisfies on the server's ladder.
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'getting-started', 'install', 'ops', 'help'],
   },
   {
-    // 平台管理员 — everything, 深度工具's seven included.
+    // 拉取人员 (pull ∧ operate ∧ read, R-33) — 【工作】 in full INCLUDING 拉取待确认 (PR-7, R-62 ①: the pull code
+    // now re-tiers exactly this one rail item); nothing from 【部署与接入】.
+    name: '拉取人员 (read+operate+pull)',
+    permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull'],
+    roles: [],
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue', 'help'],
+  },
+  {
+    // 平台管理员 — everything, 深度工具's legacy tabs included.
     name: '平台管理员',
     permissions: [],
     roles: ['admin'],
     keys: [
-      'home', 'project-board', 'project-query', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',
@@ -169,7 +180,7 @@ const ACTORS: RailActor[] = [
     permissions: ['integration:admin'],
     roles: [],
     keys: [
-      'home', 'project-board', 'project-query', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue', 'refresh-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',
@@ -448,7 +459,7 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
   // R-03 — 深度工具 ▾: folded, default-collapsed, and nothing retired
   // -------------------------------------------------------------------------
 
-  it('R-03: the seven legacy MVP tabs are INSIDE 深度工具 and it starts collapsed', async () => {
+  it('R-03: the legacy MVP tabs are INSIDE 深度工具 and it starts collapsed', async () => {
     h.roles = ['admin']
     const root = await mountShell()
     const panel = root.querySelector('[data-testid="stock-prep-rail-advanced-panel"]') as HTMLElement
@@ -508,9 +519,9 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(panel.hasAttribute('hidden')).toBe(false)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     // A folded tab is still a tab: clicking it switches the view, exactly as it did on the strip.
-    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('dashboard')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-workspace')
   })
 
   // -------------------------------------------------------------------------
@@ -751,8 +762,8 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     helpTabAgain.focus()
     dispatchArrow(helpTabAgain, 'End')
     await flushUi()
-    // Opened, the seven legacy tabs are reachable — End now lands on the LAST one.
-    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-exception-queue')
+    // Opened, the legacy tabs are reachable — End now lands on the LAST one.
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-unit-conversion')
   })
 
   it('R-05: 深度工具的 disclosure button is a DOM sibling of the tablist, never a descendant of it', async () => {
@@ -798,15 +809,16 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     // `aria-owns` IS THE WHOLE CORRECTNESS ARGUMENT for tabs that live outside their tablist, and it
     // had no assertion at all until this case: delete the attribute and both lanes stayed green.
-    // Closed, it must be ABSENT — `hidden` has already pruned those seven, so claiming them would have
-    // the tablist announce fifteen children of which seven do not exist.
-    expect(tablist.getAttribute('aria-owns'), '收起时不得宣称拥有折叠区的七个 tab').toBeNull()
+    // Closed, it must be ABSENT — `hidden` has already pruned the folded tabs, so claiming them would have
+    // the tablist announce children that do not exist.
+    expect(tablist.getAttribute('aria-owns'), '收起时不得宣称拥有折叠区的 tab').toBeNull()
     toggle.click()
     await flushUi()
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     const owned = String(tablist.getAttribute('aria-owns') ?? '').split(/\s+/).filter(Boolean)
     const advancedIds = [...panel.querySelectorAll('[role="tab"]')].map((tab) => tab.id)
-    expect(advancedIds.length).toBe(7)
+    expect(advancedIds.length).toBe(LEGACY_MVP_VIEW_KEYS.length)
+    expect(advancedIds.length).toBe(4)
     expect(owned).toEqual(advancedIds)
     // Every owned id must actually resolve — a stale id is a dangling reference, not a tab.
     for (const id of owned) expect(root.querySelector(`#${id}`), `${id} must exist`).not.toBeNull()
@@ -839,13 +851,14 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(accessibleText).toContain('今天要处理')
   })
 
-  it('R-05: 每个 tab 都用 aria-labelledby 借组标题的词 —— 折叠区那七个也一样,一条 rail 不许两套命名', async () => {
+  it('R-05: 每个 tab 都用 aria-labelledby 借组标题的词 —— 折叠区那几个也一样,一条 rail 不许两套命名', async () => {
     h.roles = ['admin']
     const root = await mountShell()
     ;(root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement).click()
     await flushUi()
     const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[]
-    expect(tabs.length, '8 常驻 + 7 折叠').toBe(15)
+    // PR-7: 8 -> 9 常驻 (拉取待确认, 【工作】 last). 7 -> 4 折叠: 旧「仪表盘」/旧「备料行」/旧「异常队列」 retired (owner 2026-10-27).
+    expect(tabs.length, '9 常驻 + 4 折叠').toBe(13)
     for (const tab of tabs) {
       const refs = String(tab.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean)
       expect(refs.length, `${tab.dataset.testid} 必须借组标题 + 自己两个 id`).toBe(2)
@@ -854,8 +867,8 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
       expect(groupHeading, `${tab.dataset.testid} 引用的组标题 ${refs[0]} 必须存在`).not.toBeNull()
       expect(groupHeading?.getAttribute('role')).toBe('presentation')
     }
-    // 折叠区那七个借的是【部署与接入】的标题 —— 它们在 manifest 里就挂在那一组下面。
-    const legacy = root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLElement
+    // 折叠区那几个借的是【部署与接入】的标题 —— 它们在 manifest 里就挂在那一组下面。
+    const legacy = root.querySelector('[data-testid="stock-prep-tab-unit-conversion"]') as HTMLElement
     expect(String(legacy.getAttribute('aria-labelledby')).split(/\s+/)[0]).toBe('stock-prep-rail-group-title-deploy')
   })
 

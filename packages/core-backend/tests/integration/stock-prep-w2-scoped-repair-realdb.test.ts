@@ -334,6 +334,12 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 // ---------------------------------------------------------------------------------------------
 import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
 import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
+// Option B (owner 2026-10-29): the transaction-bound resolver, for the project-sheet structure clamp case in S4.
+import { resolveSheetCapabilitiesForUserOnQuery } from '../../src/services/approval-record-link-txn-auth'
+// Option B fix round 1: the GET /view?seed=true door, driven over HTTP against the real router and real DB.
+import express from 'express'
+import supertestRequest from 'supertest'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
 // S3 fix round 1 (R1): the overview's G1 READ port, against real PostgreSQL.
 import { grantStockPreparationOverviewRoleRead } from '../../src/services/stock-preparation-overview-grants'
@@ -754,6 +760,157 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     }
     const gridBefore = await grid()
     expect(gridBefore).toEqual({ liveness: 'live', canRead: true, canCreateRecord: true, canEditRecord: true })
+
+    // Option B (owner 2026-10-29, R-66 ②): on the REAL registered project sheet (real registry row written by the
+    // real claim, real G1 role grant) the floor keeps the whole record plane and notify but no longer manages
+    // fields or views — through the REST resolver and the transaction-bound one. A platform admin keeps both
+    // bits. Controls on real rows: a global manage-schema holder keeps both bits on the UNCLAIMED derived twin (no
+    // registry row) and on the sheet ANOTHER plugin claimed (same project-shaped object id), and is clamped on sheetA.
+    const floorSchema = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: floorUser, permissions: [], isAdminRole: false })
+    expect(floorSchema.capabilities).toMatchObject({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canSendNotification: true,
+      canManageFields: false, canManageViews: false,
+    })
+    expect(floorSchema.stockPrepProjectSheetSchemaClamped).toBe(true)
+    const floorOnTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, floorUser)
+    expect(floorOnTxn.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+    expect(floorOnTxn.stockPrepProjectSheetSchemaClamped).toBe(true)
+    const adminSchema = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: 'u_s4_platform_admin', permissions: [], isAdminRole: true })
+    expect(adminSchema.capabilities).toMatchObject({ canManageFields: true, canManageViews: true })
+    expect('stockPrepProjectSheetSchemaClamped' in adminSchema).toBe(false)
+    const schemaHolder = { userId: `s4schema_${suffix}`, permissions: ['multitable:read', 'multitable:write', 'multitable:manage-schema'], isAdminRole: false }
+    for (const control of [unclaimedSheet, otherPluginSheet]) {
+      const kept = await resolveSheetCapabilitiesForAccess(q as never, control, schemaHolder)
+      expect(kept.capabilities, control).toMatchObject({ canManageFields: true, canManageViews: true })
+      expect('stockPrepProjectSheetSchemaClamped' in kept, control).toBe(false)
+    }
+    const schemaOnProject = await resolveSheetCapabilitiesForAccess(q as never, sheetA, schemaHolder)
+    expect(schemaOnProject.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+
+    // The seed door (fix round 1): `GET /view?seed=true` on a LIVE sheet used to run createSeededSheet behind the
+    // canRead gate alone — six fresh-id fields and five demo records written into the project sheet by the floor.
+    // Now a live re-seed needs canManageFields && canCreateRecord: the floor reads the sheet (200) and the real
+    // field / record / view counts do not move.
+    const structureCounts = async () => {
+      const count = async (table: 'meta_fields' | 'meta_records' | 'meta_views') =>
+        Number(((await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE sheet_id = $1`, [sheetA])).rows[0] as { n: number }).n)
+      return { fields: await count('meta_fields'), records: await count('meta_records'), views: await count('meta_views') }
+    }
+    const seedApp = express()
+    seedApp.use(express.json())
+    seedApp.use((req, _res, next) => {
+      ;(req as unknown as { user: unknown }).user = { id: floorUser, roles: ['member'], perms: [] }
+      next()
+    })
+    seedApp.use('/api/multitable', univerMetaRouter())
+    const countsBeforeSeed = await structureCounts()
+    const seeded = await supertestRequest(seedApp).get('/api/multitable/view').query({ sheetId: sheetA, seed: 'true' })
+    expect(seeded.status, JSON.stringify(seeded.body?.error ?? null)).toBe(200)
+    expect(await structureCounts()).toEqual(countsBeforeSeed)
+
+    // R-66 ③ (owner 2026-10-29, R78): 备料主管理员 manages VIEWS (not fields) on the REAL registered project sheet.
+    // A real role in the stock-prep namespace carrying only `stock-prep:admin` (the stock-prep_admin template's one
+    // code), G1-granted `spreadsheet:write` on sheetA through the real port, its member admitted to the namespace:
+    // the member's REAL effective codes (rbac listUserPermissions on this query — namespace-admission filtered) and
+    // the REAL role rows decide. Views kept, fields clamped, in the REST and the transaction-bound resolver; over
+    // HTTP against the real router, a view is created and deleted while a field create and a sheet rename are
+    // refused. Control on real rows: the same code as a DIRECT user_permissions row on a member of the G1 floor
+    // role who also holds a stock-prep:read role (so the admission filter KEEPS the direct code) stays clamped.
+    const ROLE_SP_ADMIN = `stock-prep_s4adm_${suffix}`
+    const ROLE_SP_READ = `stock-prep_s4read_${suffix}`
+    const spAdminUser = `s4spadmin_${suffix}`
+    const spDirectUser = `s4spdirect_${suffix}`
+    // The same real role and the same real G1 grant, but NO stock-prep admission row / a DISABLED one.
+    const spNoAdmUser = `s4spnoadm_${suffix}`
+    const spOffAdmUser = `s4spoffadm_${suffix}`
+    const s4Users = [spAdminUser, spDirectUser, spNoAdmUser, spOffAdmUser]
+    try {
+      for (const id of s4Users) {
+        await pool.query('INSERT INTO users (id, password_hash, name, username) VALUES ($1, $2, $3, $4)', [id, 'not-a-hash', `S4 ${id.split('_')[0]}`, id])
+      }
+      await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4)', [ROLE_SP_ADMIN, 'S4 备料主管理员', ROLE_SP_READ, 'S4 read'])
+      await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'stock-prep:admin'), ($2, 'stock-prep:read')", [ROLE_SP_ADMIN, ROLE_SP_READ])
+      await scopedApi().provisioning.grantSheetRoleWrite!({ projectId, sheetId: sheetA, objectId: objectA, roleIds: [ROLE_SP_ADMIN], actorId: 'u_s4_pull' })
+      await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $4), ($3, $5)', [spAdminUser, ROLE_SP_ADMIN, spDirectUser, ROLE_A, ROLE_SP_READ])
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'stock-prep:admin')", [spDirectUser])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin'), ($2, 'stock-prep', true, 'platform_admin')", [spAdminUser, spDirectUser])
+      await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $3), ($2, $3)', [spNoAdmUser, spOffAdmUser, ROLE_SP_ADMIN])
+      await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', false, 'platform_admin')", [spOffAdmUser])
+
+      const spAdminCodes = await rbacListUserPermissions(spAdminUser, q as never)
+      expect(spAdminCodes).toEqual(['stock-prep:admin'])
+      const spDirectCodes = await rbacListUserPermissions(spDirectUser, q as never)
+      expect([...spDirectCodes].sort()).toEqual(['stock-prep:admin', 'stock-prep:read'])
+
+      const spAdminRest = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: spAdminUser, permissions: spAdminCodes, isAdminRole: false })
+      expect(spAdminRest.capabilities).toMatchObject({
+        canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+        canManageFields: false, canManageViews: true,
+      })
+      expect(spAdminRest.stockPrepProjectSheetSchemaClamped).toBe(true)
+      const spAdminTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, spAdminUser)
+      expect(spAdminTxn.capabilities).toMatchObject({ canManageFields: false, canManageViews: true })
+      const spDirectRest = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId: spDirectUser, permissions: spDirectCodes, isAdminRole: false })
+      expect(spDirectRest.capabilities).toMatchObject({ canEditRecord: true, canManageFields: false, canManageViews: false })
+      const spDirectTxn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, spDirectUser)
+      expect(spDirectTxn.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
+      // Condition 2 carries the admission rule in every chain: the role holder WITHOUT an enabled stock-prep
+      // admission keeps nothing. REST holds the filtered list (the code is gone); the transaction-bound chain holds
+      // the UNFILTERED list (direct ∪ role ∪ legacy, the code is there) and must refuse on the statement alone; the
+      // REST resolver handed that same unfiltered list refuses the same way.
+      for (const [label, userId] of [['no admission row', spNoAdmUser], ['disabled admission row', spOffAdmUser]] as const) {
+        const filtered = await rbacListUserPermissions(userId, q as never)
+        expect(filtered, label).toEqual([])
+        const restFiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: filtered, isAdminRole: false })
+        expect(restFiltered.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        const txn = await resolveSheetCapabilitiesForUserOnQuery(q as never, sheetA, userId)
+        expect(txn.permissions, label).toEqual(['stock-prep:admin'])
+        expect(txn.capabilities, label).toMatchObject({ canRead: true, canManageFields: false, canManageViews: false })
+        expect(txn.stockPrepProjectSheetSchemaClamped, label).toBe(true)
+        const restUnfiltered = await resolveSheetCapabilitiesForAccess(q as never, sheetA, { userId, permissions: txn.permissions, isAdminRole: false })
+        expect(restUnfiltered.capabilities, label).toMatchObject({ canManageFields: false, canManageViews: false })
+      }
+      // The ordinary-sheet control: on the unclaimed derived twin nothing about ③ applies (no grant there → no views).
+      const spAdminTwin = await resolveSheetCapabilitiesForAccess(q as never, unclaimedSheet, { userId: spAdminUser, permissions: spAdminCodes, isAdminRole: false })
+      expect(spAdminTwin.capabilities).toMatchObject({ canManageFields: false, canManageViews: false })
+      expect('stockPrepProjectSheetSchemaClamped' in spAdminTwin).toBe(false)
+
+      const routeApp = (userId: string, perms: string[]) => {
+        const app = express()
+        app.use(express.json())
+        app.use((req, _res, next) => {
+          ;(req as unknown as { user: unknown }).user = { id: userId, roles: ['member'], perms }
+          next()
+        })
+        app.use('/api/multitable', univerMetaRouter())
+        return app
+      }
+      const spAdminApp = routeApp(spAdminUser, spAdminCodes)
+      const countsBeforeViews = await structureCounts()
+      const createdView = await supertestRequest(spAdminApp).post('/api/multitable/views').send({ sheetId: sheetA, name: 'S4 ③ view' })
+      expect(createdView.status, JSON.stringify(createdView.body?.error ?? null)).toBe(201)
+      const createdViewId = String(createdView.body?.data?.view?.id ?? createdView.body?.data?.id ?? '')
+      expect(createdViewId).not.toBe('')
+      expect((await structureCounts()).views).toBe(countsBeforeViews.views + 1)
+      const field = await supertestRequest(spAdminApp).post('/api/multitable/fields').send({ sheetId: sheetA, name: 'S4 ③ column', type: 'string' })
+      expect(field.status).toBe(403)
+      const rename = await supertestRequest(spAdminApp).patch(`/api/multitable/sheets/${sheetA}`).send({ name: 'S4 ③ renamed' })
+      expect(rename.status).toBe(403)
+      const directView = await supertestRequest(routeApp(spDirectUser, spDirectCodes)).post('/api/multitable/views').send({ sheetId: sheetA, name: 'S4 ③ direct view' })
+      expect(directView.status).toBe(403)
+      const deletedView = await supertestRequest(spAdminApp).delete(`/api/multitable/views/${createdViewId}`)
+      expect(deletedView.status, JSON.stringify(deletedView.body?.error ?? null)).toBe(200)
+      expect(await structureCounts()).toEqual(countsBeforeViews)
+    } finally {
+      await pool.query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [s4Users]).catch(() => {})
+      await pool.query("DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1", [ROLE_SP_ADMIN]).catch(() => {})
+      await pool.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
+      await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_SP_ADMIN, ROLE_SP_READ]]).catch(() => {})
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [s4Users]).catch(() => {})
+    }
+
     const grantsBefore = await permissionRows(sheetA)
     const historyBefore = await revisionCount(sheetA)
     expect(grantsBefore.some((row) => row.subject_type === 'role' && row.subject_id === ROLE_A && row.perm_code === 'spreadsheet:write')).toBe(true)
@@ -1463,8 +1620,8 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 //   * RF-01 (S2) the project-sheet bound is WRITE: a delegated admin holding only `spreadsheet:read`
 //     (or `spreadsheet:write-own`) on a sheet is refused with no row written; `spreadsheet:write' lands;
 //   * RF-02 (S2, S3) a global record-write code without `multitable:manage-schema` is not enough to
-//     hand out `spreadsheet:write`; the sheet decision reads FRESH codes: a code revoked in the
-//     database while still in the 60 s permission memo is not honoured;
+//     hand out `spreadsheet:write`; a committed revocation of both global codes is fresh on the
+//     pool path, the port refuses 403 with no grant callback, and the earlier grant row is unchanged;
 //   * RF-03 (S4) the caller tier is exactly `stock-prep_admin`: another admitted, scoped `_admin`
 //     role of the namespace is 403;
 //   * RF-04 (S4) the platform-admin decision is the DB `admin` role only: legacy `users.is_admin` /
@@ -1731,7 +1888,7 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     expect(await roleRowsOn(SHEET, roleId)).toBe(1)
   })
 
-  it('RF-02 (S2, S3) record write without schema management is not enough; a global write code revoked in the database is not honoured from the permission memo', async () => {
+  it('RF-02 (S2, S3) record write without schema management is not enough; a committed revocation of both global write codes is fresh on the pool path', async () => {
     const roleId = createdRoleIds[createdRoleIds.length - 1]
     await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:write')", [MTW_ROLE])
     await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MTW_ROLE])
@@ -1741,19 +1898,34 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     const refusedRecordOnly = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, recordOnly) }] }))
     expect([refusedRecordOnly.status, refusedRecordOnly.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
     expect(recordOnly).toEqual([])
+    expect(await roleRowsOn(SHEET_GLOBAL, roleId)).toBe(0)
     await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:manage-schema')", [MTW_ROLE])
     // Positive control: write + schema management make the assignment-free sheet writable.
     const ok: string[] = []
     await expect(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, ok) }] }))
       .resolves.toMatchObject({ sheets: [{ sheetId: SHEET_GLOBAL, granted: true }] })
-    // Prime the memo WITH the code, then revoke it in the database only.
-    expect(await rbacListUserPermissions(DELEGATED)).toContain('multitable:write')
+    const grantedRows = (await pool.query(
+      `SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions
+       WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2 ORDER BY perm_code`,
+      [SHEET_GLOBAL, roleId],
+    )).rows
+    expect(grantedRows).toEqual([{ subject_type: 'role', subject_id: roleId, perm_code: 'spreadsheet:write', user_id: null }])
+    const beforeRevoke = await rbacListUserPermissions(DELEGATED)
+    expect(beforeRevoke).toContain('multitable:write')
+    expect(beforeRevoke).toContain('multitable:manage-schema')
     await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [MTW_ROLE])
-    expect(await rbacListUserPermissions(DELEGATED), 'the memo still holds the revoked code').toContain('multitable:write')
+    const afterRevoke = await rbacListUserPermissions(DELEGATED)
+    expect(afterRevoke).not.toContain('multitable:write')
+    expect(afterRevoke).not.toContain('multitable:manage-schema')
     const calls: string[] = []
     const error = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, calls) }] }))
     expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
     expect(calls).toEqual([])
+    expect((await pool.query(
+      `SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions
+       WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2 ORDER BY perm_code`,
+      [SHEET_GLOBAL, roleId],
+    )).rows).toEqual(grantedRows)
     await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [DELEGATED, MTW_ROLE])
   })
 

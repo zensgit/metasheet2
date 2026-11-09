@@ -2349,18 +2349,20 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
   })
 
-  it('legacy record without a companion refuses an HTTP punch with zero business changes', async () => {
+  it('legacy record without a companion in another zone refuses an HTTP punch with zero business changes', async () => {
     const orgId = randomUUID()
     const userId = randomUUID()
     const recordId = randomUUID()
     const workDate = '2026-07-20'
     await insertActiveUser(userId, orgId)
     try {
-      // Preserve the former untracked-history boundary as its own refusal case.
+      // Preserve the untracked-history boundary as its own refusal case. A same-zone
+      // record keeps its pre-upgrade path while multi-timezone is off, so this one
+      // carries a zone that differs from the org default (UTC), same local date.
       await pool.query(
         `INSERT INTO attendance_records
            (id, user_id, org_id, work_date, timezone, first_in_at, status, is_workday, projection_owner)
-         VALUES ($1, $2, $3, $4, 'UTC', '2026-07-20T09:00:00.000Z', 'partial', true, 'legacy_untracked')`,
+         VALUES ($1, $2, $3, $4, 'America/New_York', '2026-07-20T09:00:00.000Z', 'partial', true, 'legacy_untracked')`,
         [recordId, userId, orgId, workDate],
       )
       const snapshot = async () => {

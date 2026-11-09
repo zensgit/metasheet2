@@ -1,8 +1,8 @@
-import { copyText, readClipboardText } from '../../utils/clipboard'
+import { canReadClipboardText, copyText, readClipboardText } from '../../utils/clipboard'
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import type { MetaField, MetaRecord } from '../types'
 import {
-  parseClipboardMatrix, planRangeFill, planRangePaste, rangeContains, rangeFromPoints,
+  parseClipboardMatrix, planRangeFillWithSkips, planRangePasteWithSkips, rangeContains, rangeFromPoints,
   serializeClipboardMatrix, cloneRangeValue, type CellPoint, type CellRange, type FillMode, type RangeChange,
 } from '../utils/grid-range-fill'
 
@@ -49,6 +49,9 @@ export function useGridRangeSelection(options: Options) {
     clear()
   }, { flush: 'sync' })
   watch(options.editing, editing => { if (editing) clear() })
+  // PASTE_BUSY only describes the operation that was running; an operation that ends without a status
+  // of its own (e.g. nothing to write) must not leave it on screen.
+  watch(busy, isBusy => { if (!isBusy && status.value === 'PASTE_BUSY') status.value = '' })
 
   function valid(point: CellPoint) {
     return point.row >= 0 && point.col >= 0 && point.row < options.rows().length && point.col < options.fields().length
@@ -103,8 +106,13 @@ export function useGridRangeSelection(options: Options) {
       'INVALID_VALUE', 'INCOMPATIBLE_TYPE', 'INVALID_SERIES', 'RANGE_STALE', 'RANGE_READ_ONLY', 'RANGE_BUSY'].includes(code)
       ? code : 'FAILED'
   }
-  async function commit(changes: RangeChange[], context: string) {
-    if (!changes.length) return
+  // `skippedLockedCells`: destination cells in human-write-locked (PLM-system) columns the planner left alone.
+  // Nothing else to write → say so (READ_ONLY_PLM_SYSTEM); a write that also skipped some → DONE_PLM_SKIPPED.
+  async function commit(changes: RangeChange[], context: string, skippedLockedCells = 0) {
+    if (!changes.length) {
+      if (skippedLockedCells > 0 && options.contextKey() === context) status.value = 'READ_ONLY_PLM_SYSTEM'
+      return
+    }
     try {
       await options.commit(changes)
     } catch (error) {
@@ -116,7 +124,7 @@ export function useGridRangeSelection(options: Options) {
       throw error
     }
     // A successful projection can change row versions and clear selection; do not label it stale.
-    if (options.contextKey() === context) status.value = 'DONE'
+    if (options.contextKey() === context) status.value = skippedLockedCells > 0 ? 'DONE_PLM_SKIPPED' : 'DONE'
   }
   async function pointerUp(event: MouseEvent) {
     if (event.button !== 0) return
@@ -134,9 +142,9 @@ export function useGridRangeSelection(options: Options) {
     if (pending.kind !== 'fill' || !target) return
     busy.value = true
     try {
-      const changes = planRangeFill({ rows: pending.rows, fields: options.fields(), source: pending.source,
+      const plan = planRangeFillWithSkips({ rows: pending.rows, fields: options.fields(), source: pending.source,
         target, mode: pending.mode, canWrite: options.canWrite })
-      await commit(changes, options.contextKey())
+      await commit(plan.changes, options.contextKey(), plan.skippedLockedCells)
     } catch (error) {
       if (pending.signature === signature.value) reportError(error)
     } finally { busy.value = false }
@@ -156,7 +164,31 @@ export function useGridRangeSelection(options: Options) {
       if (epoch === generation && before === signature.value) status.value = ok ? 'COPIED' : 'CLIPBOARD'
     } finally { busy.value = false }
   }
+  // Toolbar "Paste range" button: a click is not a paste gesture, so the only way to read is the async
+  // Clipboard API. Without it (plain-HTTP deployment) say so and point at the keyboard shortcut, whose
+  // native paste event CAN read there (see pasteText) — instead of a generic failure.
   async function paste() {
+    if (!enabled.value || busy.value || options.editing() || !selection.value) return
+    if (!canReadClipboardText()) {
+      status.value = 'CLIPBOARD_USE_SHORTCUT'
+      // Hand focus back to the grid, so the Ctrl+V the message asks for lands on the grid's paste
+      // listener and not on this button (a descendant control the grid deliberately ignores).
+      options.root.value?.focus({ preventScroll: true })
+      return
+    }
+    await pasteFrom(readClipboardText)
+  }
+  // Keyboard paste: the text already read from the native paste event. Same pipeline as the button.
+  // The paste event is already preventDefault-ed by the caller, so every "not now" says why.
+  function pasteText(text: string, focus: CellPoint) {
+    if (!enabled.value || options.editing()) return false
+    if (busy.value) { status.value = 'PASTE_BUSY'; return true }
+    if (!selection.value) select(focus)
+    if (!selection.value) { status.value = 'PASTE_NO_TARGET'; return true }
+    void pasteFrom(() => Promise.resolve(text))
+    return true
+  }
+  async function pasteFrom(read: () => Promise<string>) {
     if (!enabled.value || busy.value || options.editing() || !selection.value) return
     const target = { ...selection.value }
     const rows = snapshotRows()
@@ -165,14 +197,21 @@ export function useGridRangeSelection(options: Options) {
     const context = options.contextKey()
     busy.value = true
     try {
-      const text = await readClipboardText()
+      const text = await read()
       if (epoch !== generation || before !== signature.value || !enabled.value || options.editing()) {
         status.value = 'STALE'
         return
       }
-      const changes = planRangePaste({ rows, fields: options.fields(), target,
+      // An empty read (empty clipboard, or only an image / only HTML) would parse as one empty cell and
+      // tile it over the whole selection: up to 1,000 cells cleared, and range writes cannot be undone.
+      // Write nothing and say why. Same rule for the button and for keyboard paste.
+      if (text === '') {
+        status.value = 'CLIPBOARD_EMPTY'
+        return
+      }
+      const plan = planRangePasteWithSkips({ rows, fields: options.fields(), target,
         matrix: parseClipboardMatrix(text), canWrite: options.canWrite })
-      await commit(changes, context)
+      await commit(plan.changes, context, plan.skippedLockedCells)
     } catch (error) {
       if (epoch === generation && before === signature.value) reportError(error)
     } finally { busy.value = false }
@@ -180,10 +219,13 @@ export function useGridRangeSelection(options: Options) {
   function keydown(event: KeyboardEvent, focus: CellPoint) {
     if (!enabled.value || options.editing()) return false
     const mod = event.ctrlKey || event.metaKey
-    if (mod && ['c', 'v'].includes(event.key.toLowerCase())) {
+    // Ctrl/Cmd+V is claimed but NOT preventDefault-ed: the browser's own paste event must still fire,
+    // and the grid's paste listener hands its text to pasteText() (works without the async API).
+    if (mod && event.key.toLowerCase() === 'v') return true
+    if (mod && event.key.toLowerCase() === 'c') {
       event.preventDefault()
       if (!selection.value) select(focus)
-      void (event.key.toLowerCase() === 'c' ? copy() : paste())
+      void copy()
       return true
     }
     if (event.key === 'Escape') { clear(); return false }
@@ -214,5 +256,5 @@ export function useGridRangeSelection(options: Options) {
   onMounted(() => { window.addEventListener('mouseup', pointerUp); window.addEventListener('blur', cancelDrag) })
   onBeforeUnmount(() => { clear(); window.removeEventListener('mouseup', pointerUp); window.removeEventListener('blur', cancelDrag) })
   return { enabled, selection, mode, busy, status, clear, select, pointerDown, pointerEnter, startFill,
-    copy, paste, keydown, selected, previewed, handleAt }
+    copy, paste, pasteText, keydown, selected, previewed, handleAt }
 }

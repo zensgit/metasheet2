@@ -592,6 +592,24 @@ describe('PO-MIRROR — the web posture and the plugin\'s `projectOverviewPostur
     {},
     { archived: false, pendingDecisionCount: 0, missingComponentsCount: 0, pulledRowCount: 0 },
     { archived: false },
+    // Batch-refresh step 4 PR-5 (design §11, plan §5.3 U01): the refresh-state branch, every token, both sides.
+    { pulledRowCount: 4, refreshStatus: 'not_governed' },
+    { pulledRowCount: 4, refreshStatus: 'complete', refreshSettled: true },
+    { pulledRowCount: 4, refreshStatus: 'complete' },
+    { pulledRowCount: 4, refreshStatus: 'complete', refreshSettled: false },
+    { pulledRowCount: 4, refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: 3 },
+    { pulledRowCount: 4, refreshStatus: 'pending_confirmation' },
+    { pulledRowCount: 4, refreshStatus: 'confirmed_pending_execution' },
+    { pulledRowCount: 4, refreshStatus: 'executing' },
+    { pulledRowCount: 4, refreshStatus: 'failed_pending_recovery' },
+    { pulledRowCount: 4, refreshStatus: 'executed_pending_settlement' },
+    { pulledRowCount: 4, refreshStatus: 'change_pending_review' },
+    { pulledRowCount: 4, refreshStatus: 'unreadable' },
+    { pulledRowCount: 4, refreshStatus: 'some_future_token' },
+    { pulledRowCount: 0, refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: 1 },
+    { archived: true, pulledRowCount: 4, refreshStatus: 'failed_pending_recovery' },
+    { pendingDecisionCount: 2, pulledRowCount: 4, refreshStatus: 'failed_pending_recovery' },
+    { missingComponentsCount: 1, pulledRowCount: 4, refreshStatus: 'executing' },
   ]
 
   it('drives both with the same inputs and asserts key / zh / en / tone equal', () => {
@@ -604,8 +622,28 @@ describe('PO-MIRROR — the web posture and the plugin\'s `projectOverviewPostur
       expect(pick(web), JSON.stringify(input)).toEqual(pick(server))
       keys.add(web.key)
     }
-    // Anti-vacuity: the matrix reaches all five overview states.
-    expect([...keys].sort()).toEqual(['archived', 'blocked', 'not_pulled', 'pending_decision', 'ready'])
+    // Anti-vacuity: the matrix reaches all six overview states (PR-5 adds the blocked refresh state).
+    expect([...keys].sort()).toEqual(['archived', 'blocked', 'blocked_pull_state', 'not_pulled', 'pending_decision', 'ready'])
+  })
+
+  it('PR-5 (U01 / C04): no unfinished or unreadable refresh state is ever 「可以导出」 on either side, whatever the pulled count; only not_governed and a SETTLED complete are', () => {
+    const blocked = ['pending_confirmation', 'confirmed_pending_execution', 'executing', 'failed_pending_recovery', 'executed_pending_settlement', 'change_pending_review', 'unreadable', 'some_future_token']
+    for (const refreshStatus of blocked) {
+      for (const pulledRowCount of [0, 1, 1200]) {
+        const input = { pulledRowCount, refreshStatus, refreshSettled: true }
+        expect(stockPrepPosture(input).key, JSON.stringify(input)).toBe('blocked_pull_state')
+        expect(backendOverview.projectOverviewPosture(input).key, JSON.stringify(input)).toBe('blocked_pull_state')
+      }
+    }
+    // `complete` without a settlement is 「待核对」, never 「可以导出」 — on both sides, with the same words.
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'complete' })).toEqual({ key: 'blocked_pull_state', zh: '待核对', en: 'Awaiting check', tone: 'warning' })
+    expect(backendOverview.projectOverviewPosture({ pulledRowCount: 9, refreshStatus: 'complete' })).toEqual({ key: 'blocked_pull_state', zh: '待核对', en: 'Awaiting check', tone: 'warning' })
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'complete', refreshSettled: true }).key).toBe('ready')
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'not_governed' }).key).toBe('ready')
+    // The words name the state: 「待确认 N 件」 carries the count, the others their fixed wording.
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: 2 }).zh).toBe('待确认 2 件')
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'unreadable' }).zh).toBe('状态读取失败')
+    expect(stockPrepPosture({ pulledRowCount: 9, refreshStatus: 'change_pending_review' }).zh).toBe('变更待复核')
   })
 
   it('「已归档」 comes FIRST — even over a pending decision, on both sides', () => {

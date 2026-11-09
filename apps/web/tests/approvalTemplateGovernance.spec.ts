@@ -25,6 +25,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import TemplateCenterView from '../src/views/approval/TemplateCenterView.vue'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -403,7 +404,6 @@ describe('TemplateCenterView — B3-08 archive/unarchive', () => {
   })
 
   async function mountView() {
-    const { default: TemplateCenterView } = await import('../src/views/approval/TemplateCenterView.vue')
     const Host = defineComponent({
       setup() {
         return () => h(TemplateCenterView as any)

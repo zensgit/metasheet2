@@ -214,17 +214,19 @@
  * the leave button; a 404 / 403 / any other failure takes the dialog's banner; `ORG_MISSING`
  * switches the page to its guidance block.
  *
- * Focus: the title takes focus on open; Tab and Shift+Tab wrap inside the dialog; Escape and the
- * close button close it (both inert while a write is in flight) and the page puts focus back on
- * the button that opened it. Once a write lands, focus that ended up outside the dialog comes back
- * in (`[fe-48]`): to the control the write started from while it is still there and usable, else
- * to the title. The transfer and leave confirmations swap out the button that opened them
- * (`[fe-49]`): opening one focuses its confirm button, which its prompt describes (the prompt is
- * also a status message); cancelling it focuses the button that comes back.
+ * Focus: the title takes focus on open; Tab and Shift+Tab move through the dialog's controls and
+ * wrap inside it (every Tab is moved by the shared trap, `[fe-12]`, except one the input method
+ * took); Escape and the close button close it (both inert while a write is in flight) and the page
+ * puts focus back on the button that opened it. Once a write lands, focus that ended up outside the
+ * dialog comes back in (`[fe-48]`): to the control the write started from while it is still there
+ * and usable, else to the title. The transfer and leave confirmations swap out the button that
+ * opened them (`[fe-49]`): opening one focuses its confirm button, which its prompt describes (the
+ * prompt is also a status message); cancelling it focuses the button that comes back.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
+import { isInputMethodKey, moveFocusWithin } from '../../tasks/focusTrap'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import {
   addTaskListMember,
@@ -608,44 +610,23 @@ function close(): void {
   emit('close')
 }
 
-const FOCUSABLE = 'button, input, select, textarea, a[href]'
-
-function focusableElements(): HTMLElement[] {
-  const root = dialogRef.value
-  if (!root) return []
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-    (element) => !(element as HTMLButtonElement | HTMLInputElement).disabled,
-  )
-}
-
-// [fe-12] the minimal focus trap: Tab past the last control wraps to the first, Shift+Tab before
-// the first wraps to the last; the set is taken at keydown time, disabled controls left out.
+// [fe-12] the focus trap: every Tab and Shift+Tab is moved by the shared task dialog trap
+// (tasks/focusTrap.ts; one the input method took aside), not only the ones at the ends, since macOS
+// Safari leaves buttons out of its default Tab order. Past the last control wraps to the first,
+// before the first to the last; the set is taken at keydown time, disabled controls left out. The
+// dialog root takes no focus (no tabindex), so with every control disabled the Tab is held and focus
+// stays where it is. An Escape the input method may be using cancels the composition, not the dialog.
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    if (isInputMethodKey(event)) {
+      event.stopPropagation()
+      return
+    }
     close()
     return
   }
-  if (event.key !== 'Tab') return
-  const items = focusableElements()
-  if (items.length === 0) {
-    event.preventDefault()
-    return
-  }
-  const first = items[0]
-  const last = items[items.length - 1]
-  const active = document.activeElement as HTMLElement | null
-  const inside = active !== null && items.includes(active)
-  if (event.shiftKey) {
-    if (!inside || active === first) {
-      event.preventDefault()
-      last.focus()
-    }
-    return
-  }
-  if (!inside || active === last) {
-    event.preventDefault()
-    first.focus()
-  }
+  if (event.key !== 'Tab' || !dialogRef.value) return
+  moveFocusWithin(dialogRef.value, event)
 }
 
 onMounted(() => {
@@ -728,5 +709,40 @@ onBeforeUnmount(() => {
 
 .tasks-list-members__close {
   align-self: flex-end;
+}
+
+/* Up to 960px: where supported, the dynamic viewport unit keeps the dialog's bottom edge inside the
+   visible viewport when browser toolbars take part of the screen (the 100vh value above is the
+   fallback). Long words break; the member rows wrap, so their labels keep their width and only a
+   part wider than the whole line, such as a long user id, breaks; the add-member input and select
+   can narrow with the dialog. */
+@media (max-width: 960px) {
+  .tasks-list-members {
+    max-height: calc(100dvh - 96px);
+    overflow-wrap: break-word;
+  }
+
+  .tasks-list-members__row {
+    overflow-wrap: anywhere;
+  }
+
+  .tasks-list-members__add input,
+  .tasks-list-members__add select {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* Narrow screens: the dialog keeps a small margin on every side and gives the content the width. */
+@media (max-width: 720px) {
+  .tasks-list-members__backdrop {
+    padding: 16px 12px;
+  }
+
+  .tasks-list-members {
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    padding: 16px;
+  }
 }
 </style>

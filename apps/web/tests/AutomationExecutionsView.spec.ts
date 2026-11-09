@@ -345,3 +345,35 @@ describe('AutomationExecutionsView — values-free step reasons render as copy (
     })
   }
 })
+
+// 客户反馈 2026-10-21 item 1 follow-up: the admin runs page renders the same step error line as the rule log —
+// a legacy `DingTalk account not linked for users: <ids>` error never shows the ids, and zh shows the count
+// sentence without the English error line.
+describe('AutomationExecutionsView — DingTalk person-message step errors never render user ids', () => {
+  const DINGTALK_DETAIL: AutomationRunView = {
+    ...RUN_DETAIL,
+    id: 'axe_1',
+    status: 'skipped',
+    statusLegacy: 'skipped',
+    steps: [
+      { id: 'axe_1:step:0', executionId: 'axe_1', stepKey: '0', status: 'skipped', upstreamJobId: null, error: 'DingTalk account not linked for users: user_fake_old_a', result: { notifiedUsers: 0, skippedRecipientCount: 1, skippedUserIds: ['user_fake_old_a'] } },
+      { id: 'axe_1:step:1', executionId: 'axe_1', stepKey: '1', status: 'skipped', upstreamJobId: 'axe_1:step:0', error: 'No DingTalk recipient was reached: 1 skipped (not linked: 1, inactive: 0, not found: 0) (DINGTALK_RECIPIENTS_UNREACHABLE)', result: { reason: 'dingtalk_recipients_unreachable', notifiedUsers: 0, skippedRecipientCount: 1, skippedUserIds: ['user_fake_new_b'], skippedReasonCounts: { notLinked: 1, inactive: 0, notFound: 0 } } },
+    ],
+  }
+
+  it('zh: legacy error becomes the values-free sentence; the unreachable step shows only the Chinese count sentence', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue(DINGTALK_DETAIL) })
+    mounted = mount(client)
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_1"]') as HTMLElement).click()
+    await settle()
+
+    const errors = [...mounted.container.querySelectorAll('[data-field="step-error"]')].map((el) => el.textContent?.trim())
+    expect(errors).toEqual(['有收件人未绑定钉钉（旧记录，未列出具体用户）。'])
+    const text = mounted.container.textContent ?? ''
+    expect(text).toContain('0 人收到：1 人未绑定钉钉。')
+    for (const value of ['user_fake_old_a', 'user_fake_new_b', 'not linked for users', 'No DingTalk recipient was reached']) expect(text).not.toContain(value)
+    useLocale().setLocale('en')
+  })
+})

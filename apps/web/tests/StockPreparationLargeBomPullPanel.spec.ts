@@ -140,7 +140,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
   })
 
-  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the workbench when it does not', async () => {
+  it('D-02: the link NAMES the 备料主表 when the parent holds a handle, and the multitable home when it does not', async () => {
     // The panel routes nothing and invents no destination — it is told. What it must not do is
     // promise the 备料主表 on a deployment where the parent can only open the chooser.
     const bound = mountPanel({ api: doneApi(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
@@ -148,6 +148,7 @@ describe('StockPreparationLargeBomPullPanel', () => {
     const boundLink = bound.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(boundLink.getAttribute('data-fill-target')).toBe('bound')
     expect(boundLink.textContent).toContain('打开备料多维表')
+    expect(bound.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')).toBeNull()
     app?.unmount()
     app = null
     container!.innerHTML = ''
@@ -156,7 +157,19 @@ describe('StockPreparationLargeBomPullPanel', () => {
     await flushUi()
     const plainLink = plain.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
     expect(plainLink.getAttribute('data-fill-target')).toBe('none')
-    expect(plainLink.textContent).toContain('打开多维表工作台')
+    expect(plainLink.textContent).toContain('打开多维表首页')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('不用在首页选模板')
+    expect(plain.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]')?.textContent).toContain('请在「项目备料」页打开这个项目')
+    app?.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    // Review round 1 (F1): inside 项目备料 the sentence points down the page instead.
+    const onBoard = mountPanel({ api: doneApi(), noLinkHintContext: 'board' })
+    await flushUi()
+    const boardHint = onBoard.querySelector('[data-testid="stock-prep-large-bom-no-sheet-link-hint"]') as HTMLElement
+    expect(boardHint.textContent).toContain('见本页下方另一个「打开多维表首页」按钮旁的说明')
+    expect(boardHint.textContent).not.toContain('「项目备料」页')
   })
   it('D-02: no open-multitable link renders before done', async () => {
     const api = doneApi({
@@ -189,6 +202,59 @@ describe('StockPreparationLargeBomPullPanel', () => {
     const errorCode = root.querySelector('[data-testid="stock-prep-large-bom-tech-error-code"]') as HTMLElement
     expect(errorCode).not.toBeNull()
     expect(errorCode.textContent).toBe('LARGE_BOM_APPLY_TARGET_REQUIRED')
+  })
+
+  // PR #6501 (Codex review P1-b): in the large lane a superseded plan is fixed only by expanding again —
+  // the generation is bound at expansion time, so the panel says so (never "re-approve").
+  it('D-03b: a superseded plan (stale expansion) tells the operator to expand again before planning', async () => {
+    const api = doneApi({
+      planExpansion: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_stale', detailPartial: false }),
+      ),
+    })
+    const root = mountPanel({ api })
+    await flushUi()
+
+    expect(phaseOf(root)).toBe('failed')
+    const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
+    expect(status.textContent).toContain('BOM 已有更新的试算或写入，请重新展开后再规划')
+    expect(status.textContent).not.toContain('重新批准')
+    expect(status.textContent).not.toContain('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    expect(api.startApply).not.toHaveBeenCalled()
+  })
+
+  // PR #6501 round 6 (N1): an expansion or job left over by an OLDER version (no write observation / no
+  // binding) is not "a newer preview or write exists" — nothing newer happened. Its own sentence, same remedy.
+  it('D-03c: a superseded plan whose reason is expansion_unbound / job_unbound says the job is left over by an older version, not that a newer write exists', async () => {
+    for (const [reason, failing] of [
+      ['expansion_unbound', 'planExpansion'],
+      ['job_unbound', 'runApplyChunk'],
+    ] as const) {
+      const api = doneApi({
+        [failing]: vi.fn().mockRejectedValue(
+          new StockPreparationProjectSyncCallError(409, failing, { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: reason, detailPartial: false }),
+        ),
+      })
+      const root = mountPanel({ api })
+      await flushUi()
+      expect(phaseOf(root), reason).toBe('failed')
+      const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
+      expect(status.textContent, reason).toContain('这个作业是旧版本留下的，需要重新展开后再规划')
+      expect(status.textContent, reason).not.toContain('更新的试算')
+      expect(status.textContent, reason).not.toContain('重新批准')
+      expect(status.textContent, reason).not.toContain('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+      const errorCode = root.querySelector('[data-testid="stock-prep-large-bom-tech-error-code"]') as HTMLElement
+      expect(errorCode.textContent, reason).toBe('STOCK_PREP_PROJECT_PLAN_SUPERSEDED')
+    }
+    // control: the stale-expansion reason keeps D-03b's sentence, and no reason keeps the code-only one
+    const stale = doneApi({ planExpansion: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED', detailReason: 'expansion_stale', detailPartial: false })) })
+    const staleRoot = mountPanel({ api: stale })
+    await flushUi()
+    expect((staleRoot.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement).textContent).toContain('BOM 已有更新的试算或写入')
+    const bare = doneApi({ planExpansion: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(409, 'plan', { code: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED' })) })
+    const bareRoot = mountPanel({ api: bare })
+    await flushUi()
+    expect((bareRoot.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement).textContent).toContain('BOM 已有更新的试算或写入')
   })
 
   // ---- D-04 --------------------------------------------------------------------------------
@@ -236,5 +302,81 @@ describe('StockPreparationLargeBomPullPanel', () => {
     await flushUi()
     const status = root.querySelector('[data-testid="stock-prep-large-bom-status"]') as HTMLElement
     expect(status.textContent).toContain('multitable')
+  })
+})
+
+// ---- 批次标识 BI-3 (R-65; P-6, critic C-3): the large panel's done line --------------------------------------------
+describe('StockPreparationLargeBomPullPanel — 批次标识 (BI-3)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function runWith(chunks: StockPreparationLargeBomApplyJob[]): Promise<HTMLElement> {
+    const runApplyChunk = vi.fn()
+    for (const answer of chunks) runApplyChunk.mockResolvedValueOnce(answer)
+    app = createApp(StockPreparationLargeBomPullPanel as Component, { projectNo: PROJECT_NO, wait: instantWait(), api: doneApi({ runApplyChunk }) })
+    app.mount(container!)
+    await flushUi(16)
+    return container!
+  }
+
+  const counts = { created: 90, updated: 10, inactive: 0, skipped: 0, held: 0, failed: 0 }
+
+  it('LARGE-PB: a fresh two-chunk pull (chunk 2 answers joined) reads 记为, never 并入', async () => {
+    const root = await runWith([
+      applyJob({ status: 'running', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 50 } }),
+      applyJob({ status: 'succeeded', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 90 } }),
+    ])
+    const line = root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')
+    expect(line?.textContent?.trim()).toBe('本次新增 90 行，记为 第2批（2026-11-08）')
+    expect(root.textContent ?? '').not.toContain('并入')
+  })
+
+  it('LARGE-PB: no_creates says so; not_installed and absent say nothing', async () => {
+    let root = await runWith([applyJob({ status: 'succeeded', counts, pullBatch: { stamped: false, reason: 'no_creates' } })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')?.textContent?.trim()).toBe('本次没有新增物料，不产生新的拉取批次')
+    app?.unmount()
+    container!.innerHTML = ''
+    root = await runWith([applyJob({ status: 'succeeded', counts, pullBatch: { stamped: false, reason: 'not_installed' } })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')).toBeNull()
+    app?.unmount()
+    container!.innerHTML = ''
+    root = await runWith([applyJob({ status: 'succeeded', counts })])
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')).toBeNull()
+  })
+
+  // Review fix M-W14: kills the mutant that drops the "state.phase === 'done'" guard on the batch line.
+  it('LARGE-PB-MIDRUN: no batch line while chunks are still being written; the line appears once done', async () => {
+    let release: (answer: StockPreparationLargeBomApplyJob) => void = () => {}
+    const pending = new Promise<StockPreparationLargeBomApplyJob>((resolve) => { release = resolve })
+    const runApplyChunk = vi.fn()
+      .mockResolvedValueOnce(applyJob({ status: 'running', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 50 } }))
+      .mockImplementationOnce(() => pending)
+    app = createApp(StockPreparationLargeBomPullPanel as Component, { projectNo: PROJECT_NO, wait: instantWait(), api: doneApi({ runApplyChunk }) })
+    app.mount(container!)
+    await flushUi(16)
+    const root = container!
+    expect(runApplyChunk).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).not.toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]'), 'no batch line before done').toBeNull()
+
+    release(applyJob({ status: 'succeeded', counts, pullBatch: { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 90 } }))
+    await flushUi(16)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')?.getAttribute('data-phase')).toBe('done')
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull-batch"]')?.textContent?.trim()).toBe('本次新增 90 行，记为 第2批（2026-11-08）')
   })
 })

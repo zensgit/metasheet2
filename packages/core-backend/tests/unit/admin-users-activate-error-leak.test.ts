@@ -275,8 +275,9 @@ describe('activate error surface — HTTP-level leak control (behaviour, not syn
       ['ACTIVATE_SOURCE_INELIGIBLE', 409, 'Directory source is not eligible for DingTalk SSO activation'],
       ['ACTIVATE_ORG_MISMATCH', 409, 'orgId does not match the directory source integration for this user'],
       ['ACTIVATE_ORG_AMBIGUOUS', 409, 'Multiple active directory sources in different orgs; orgId is required to disambiguate'],
+      ['ACTIVATE_DINGTALK_OPEN_ID_REQUIRED', 409, 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login'],
     ]
-    expect(cases).toHaveLength(14)
+    expect(cases).toHaveLength(15)
     return cases.reduce(
       (chain, [code, status, message]) => chain.then(async () => {
         state.activateImpl = () => {

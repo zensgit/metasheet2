@@ -81,6 +81,28 @@ test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact
   assert.equal(isActivated(spec, 'True'), false)
 })
 
+// YiDa owner-run 测试连接 (ADR adr-yida-connection-test-20261028, R-64): its own default-OFF switch,
+// danger high like the send switch, exact literal only, independent of the send switch, every cited file real.
+test('INTEGRATION_YIDA_CONNECTION_TEST_ENABLED manifest entry: exact true, danger high, independent, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,'))
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
 // ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
 // M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
 test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
@@ -252,6 +274,9 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_BASE_ADOPTION_REFUSED',
   'MULTITABLE_BASE_SCOPE_FORBIDDEN',
   'MULTITABLE_SYSTEM_BASE_INPUT_INVALID',
+  // 批次标识 BI-5: the input refusal code of the view landing primitives (multitable/view-landing.ts) — an error
+  // code, not a flag; nobody reads it from process.env.
+  'MULTITABLE_VIEW_LANDING_INPUT_INVALID',
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
   // 自定义模板表名常量(#5617)，不是环境开关：它是 migration 与 custom-template-store 共用的表名字面量，
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
@@ -271,6 +296,7 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
+  'MULTITABLE_OUTBOUND_WEBHOOKS_DISABLED', // ops switch that pauses subscription webhook sends (default off) — not a Global-History/recovery flag
   // W9: kill-switch for the stock-prep per-chunk batch idempotency-key lookup (perf, default ON; set
   // to `false`/`0`/`off`/`no` to fall back to the per-row lookup). Not a Global-History/recovery
   // flag, which is what this list means: NON_GH_EXACT is the EXCLUSION list for the grep below, so
@@ -320,6 +346,19 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_RELABEL_SCOPE_FORBIDDEN', // object not bound to the caller's project in the registry (403), not a flag
   'MULTITABLE_RELABEL_APPLY_DISABLED', // write leg refused because the operator switch is off (409), not a flag
   'MULTITABLE_RELABEL_PLAN_CHANGED', // write leg refused because the plan differs from the preview (409), not a flag
+  // 备料分批拉取第一期 step 3 (PR #6507, register R-53): the sheet-level grid-export closure
+  // (multitable/sheet-grid-export-closure.ts, services/sheet-grid-export-closure-service.ts, plugin-scope.ts and
+  // the migration zzzz20261022150000). ERROR CODES and the constants that hold the code and its message — none is
+  // read from process.env, and the closure has no switch: it is a per-sheet stamp the plugin sets through a host
+  // port. EXACT, not a `MULTITABLE_GRID_EXPORT_` prefix, so a real flag added under that name later still reds.
+  'MULTITABLE_GRID_EXPORT_CLOSED', // export-xlsx 403 refusal code on a stamped sheet, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSED_CODE', // constant holding that code, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSED_MESSAGE', // constant holding the refusal copy, not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_OBJECT_NOT_PROJECT_SHEET', // close/read port refusal (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_MISMATCH', // close/read port refusal (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_SHEET_INVALID', // close service refusal of a non-derived sheet id (422), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_UNAVAILABLE', // close service refusal when the column is missing (503), not a flag
+  'MULTITABLE_GRID_EXPORT_CLOSURE_ROWS_PRESENT', // migration down() refusal code, not a flag
   // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
   // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
   // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
@@ -378,21 +417,72 @@ function globalHistoryFlagsInSource() {
   // new env flag is registered here; the ADR §8 names this manifest explicitly). One family by name
   // shape, scanned in the plugin's lib — the two keys are the switch and the G1 role list. Every
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
-  const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
-    .filter((t) => !t.endsWith('_'))
+  // 人工补充行 B2 (ADR adr-stock-prep-manual-rows-20261030 §3.2 condition 5, §8 「B2 主机」 7): the HOST now reads the
+  // switch too (multitable/stock-preparation-manual-rows-gate.ts), so both trees are scanned — the members-page precedent.
+  const stockPrepProjectSheets = [
+    ...grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+    ...grepFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
+  ].filter((t) => !t.endsWith('_'))
   // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
   // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
   const stockPrepMembersPage = [
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // 批次标识 BI-1b (R-65): the pull-batch switch, read by the plugin lanes helper only. PLUGIN LIB ONLY (planner
+  // decision P-9): the host never reads it (ruling C10) and its band module names it in a comment, which would defeat
+  // the phantom half if packages/core-backend/src were scanned. `_ENABLED` only, so the pull-batch error codes
+  // (…_DISABLED, …_STORE_FAILED, …) and the `_ENV` constant are not mistaken for flags.
+  const stockPrepPullBatch = grepPluginFlagTokens('STOCK_PREP_PULL_BATCH_[A-Z_0-9]*')
+    .filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
+  // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
+  // here). One family by name shape, scanned where the executor and retry-eligibility read it.
+  const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
   // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
   // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
+
+// #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
+// exported predicate; the purpose names both migrations the ON path depends on, as they are on disk.
+test('AUTOMATION_CLASSB_OUTBOUND_ENABLED manifest entry: exact true, danger high, predicate source, migrations on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_CLASSB_OUTBOUND_ENABLED
+  assert.ok(spec, 'AUTOMATION_CLASSB_OUTBOUND_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-outbound-intent.ts#isClassBOutboundEnabled')
+  const module = readFileSync(path.join(REPO_ROOT, spec.source.split('#')[0]), 'utf8')
+  assert.match(module, /export function isClassBOutboundEnabled\(/)
+  assert.ok(module.includes("env.AUTOMATION_CLASSB_OUTBOUND_ENABLED === 'true'"), 'the reader compares the exact literal')
+  const migrationsDir = path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations')
+  for (const pattern of [/^zzzz\d{14}_create_automation_outbound_intent\.ts$/, /^zzzz\d{14}_outbound_intent_attempt_lease_target_key\.ts$/]) {
+    const onDisk = readdirSync(migrationsDir).filter((name) => pattern.test(name))
+    assert.equal(onDisk.length, 1, `${pattern} on disk exactly once`)
+    assert.ok(spec.purpose.includes(onDisk[0].slice(0, 'zzzz00000000000000'.length)), `purpose names ${onDisk[0]}`)
+  }
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
+test('recycle sweeper manifest requires exact true and matches the runtime source', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.USER_RECYCLE_SWEEPER_ENABLED
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.equal(spec.source, 'packages/core-backend/src/admin/user-recycle-scheduler.ts#startUserRecycleSweeper')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '1', 'TRUE', ' true', 'true ']) assert.equal(isActivated(spec, value), false)
+})
 
 function grepPluginFlagTokens(pattern) {
   const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
@@ -431,7 +521,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = globalHistoryFlagsInSource()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -790,6 +880,15 @@ test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-202610
   assert.equal(isActivated(spec, ' true'), false)
   assert.equal(isActivated(spec, '1'), false)
   assert.equal(isActivated(spec, undefined), false)
+  // 人工补充行 B2: the host reads the same switch for the manual-row create routes and /context. Both readers spell the
+  // exact-literal comparison against the same env name, and the purpose names the host reader.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs'), 'utf8')
+  assert.match(plugin, /PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(plugin, /env\[PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/multitable/stock-preparation-manual-rows-gate.ts'), 'utf8')
+  assert.match(host, /STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'/)
+  assert.match(host, /env\[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV\] === 'true'/)
+  assert.match(spec.purpose, /stock-preparation-manual-rows-gate\.ts#stockPrepProjectSheetsEnabledForManualRows/)
 })
 
 test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, sourced from its exported parser, not a dependsOn of the switch', () => {
@@ -861,4 +960,423 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
   assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
   assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
+})
+
+test('stock-prep pull-batch switch (批次标识 BI-1b, R-65): boolean, exact true, danger high, sourced from the plugin lanes reader; the host never reads it', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_PULL_BATCH_ENABLED
+  assert.ok(spec, 'STOCK_PREP_PULL_BATCH_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+  // The reader spells the exact-literal comparison against the same env name (M-1B-5: a trim / case fold reds here).
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs'), 'utf8')
+  assert.match(plugin, /STOCK_PREP_PULL_BATCH_ENABLED_ENV = 'STOCK_PREP_PULL_BATCH_ENABLED'/)
+  assert.match(plugin, /env\[STOCK_PREP_PULL_BATCH_ENABLED_ENV\] === 'true'/)
+  assert.doesNotMatch(plugin, /STOCK_PREP_PULL_BATCH_ENABLED_ENV\]\.(trim|toLowerCase)/)
+  // Ruling C10: the host's band module (the 人工补充 stamp) never reads the switch.
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/multitable/stock-preparation-pull-batch-band.ts'), 'utf8')
+  assert.doesNotMatch(host, /STOCK_PREP_PULL_BATCH_ENABLED[^\n]*===/)
+  // The off contract is stated in the record: zero ledger IO, no pullBatch key, the status read still answers.
+  assert.match(spec.purpose, /OFF: zero ledger IO/)
+  assert.match(spec.purpose, /no pull answer carries a pullBatch key/)
+  assert.match(spec.purpose, /owner gate O-BI-7/)
+  // BI-2 (R-65): the per-sheet install and the born-ready create leg ride the same switch.
+  assert.match(spec.purpose, /per-sheet install/)
+  assert.match(spec.purpose, /born ready/)
+  assert.match(spec.purpose, /409 STOCK_PREP_PULL_BATCH_DISABLED before any IO/)
+})
+
+// ── Automation runtime flags (AGENTS.md: every env flag is registered; iPaaS follow-up 2026-11-03) ──
+// Derived from READ SITES, not from name shape: every `env.AUTOMATION_*` read under packages/core-backend/src
+// joins the population as soon as source reads it, so a new automation env read fails completeness until it
+// is registered. AUTOMATION_CLASSB_OUTBOUND_ENABLED is excluded here only because #6715 registers it with its
+// own family scan in globalHistoryFlagsInSource(); this scan therefore does not depend on merge order.
+// The scheduler leader-lock pair is read in automation-service.ts as `process.env.<KEY>`; the read-site
+// shape keeps ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS (attendance scheduler, not registered) out.
+const AUTOMATION_FLAGS_REGISTERED_ELSEWHERE = new Set(['AUTOMATION_CLASSB_OUTBOUND_ENABLED'])
+
+function automationFlagsInSource() {
+  const reads = [
+    ...grepFlagTokens('env[.]AUTOMATION_[A-Z_0-9]+'),
+    ...grepFlagTokens('process[.]env[.]ENABLE_SCHEDULER_LEADER_LOCK[A-Z_0-9]*'),
+    ...grepFlagTokens('process[.]env[.]SCHEDULER_LEADER_LOCK_[A-Z_0-9]+'),
+  ].map((read) => read.replace(/^.*env\./, ''))
+  return [...new Set(reads)].filter((key) => !AUTOMATION_FLAGS_REGISTERED_ELSEWHERE.has(key)).sort()
+}
+
+test('automation flags: the read-site scan finds every registered automation key (non-vacuous)', () => {
+  assert.deepEqual(automationFlagsInSource(), [
+    'AUTOMATION_CLASSA_CLAIM_ENABLED',
+    'AUTOMATION_DURABLE_DELIVERY_ENABLED',
+    'AUTOMATION_WEBHOOK_MAX_RETRIES',
+    'AUTOMATION_WEBHOOK_TIMEOUT_MS',
+    'ENABLE_SCHEDULER_LEADER_LOCK',
+    'SCHEDULER_LEADER_LOCK_TTL_MS',
+  ])
+})
+
+function readRepoSource(relative) {
+  return readFileSync(path.join(REPO_ROOT, relative), 'utf8').replace(/\r\n/g, '\n')
+}
+
+function migrationOnDisk(pattern) {
+  const onDisk = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations')).filter((name) => pattern.test(name))
+  assert.equal(onDisk.length, 1, `${pattern} on disk exactly once`)
+  return onDisk[0].replace(/\.ts$/, '')
+}
+
+test('AUTOMATION_DURABLE_DELIVERY_ENABLED: trim + lowercase true, danger high, predicate source, outbox migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_DURABLE_DELIVERY_ENABLED
+  assert.ok(spec, 'AUTOMATION_DURABLE_DELIVERY_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-durable-delivery.ts#isDurableDeliveryEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDurableDeliveryEnabled\(/)
+  assert.ok(module.includes("String(env.AUTOMATION_DURABLE_DELIVERY_ENABLED ?? '').trim().toLowerCase() === 'true'"), 'the reader trims and lowercases')
+  assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_outbox\.ts$/)), 'purpose names the outbox migration on disk')
+  for (const value of ['true', 'TRUE', ' true ', 'True']) assert.equal(isActivated(spec, value), true, value)
+  for (const value of [undefined, '', 'false', '1', 'yes', 'on']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('AUTOMATION_CLASSA_CLAIM_ENABLED: exact true, danger high, predicate source, claim-table migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_CLASSA_CLAIM_ENABLED
+  assert.ok(spec, 'AUTOMATION_CLASSA_CLAIM_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/multitable/automation-execution-ledger.ts#isClassAExecutionClaimEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isClassAExecutionClaimEnabled\(/)
+  assert.ok(module.includes("env.AUTOMATION_CLASSA_CLAIM_ENABLED === 'true'"), 'the reader compares the exact literal')
+  assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_action_applied\.ts$/)), 'purpose names the claim-table migration on disk')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('automation webhook knobs: numeric, defaults and bounds match the executor parsers', () => {
+  const executor = readRepoSource('packages/core-backend/src/multitable/automation-executor.ts')
+  assert.match(executor, /\nconst DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000\n/)
+  assert.match(executor, /\nconst DEFAULT_MAX_WEBHOOK_RETRIES = 2\n/)
+  const timeout = /\nfunction webhookTimeoutMs\(\): number \{\n([\s\S]*?)\n\}\n/.exec(executor)
+  assert.ok(timeout, 'webhookTimeoutMs reader found')
+  assert.ok(timeout[1].includes('process.env.AUTOMATION_WEBHOOK_TIMEOUT_MS'))
+  assert.ok(timeout[1].includes('Number.parseInt(raw, 10)'))
+  assert.ok(timeout[1].includes('Math.min(Math.max(parsed, 1_000), 30_000)'))
+  const retries = /\nfunction maxWebhookRetries\(\): number \{\n([\s\S]*?)\n\}\n/.exec(executor)
+  assert.ok(retries, 'maxWebhookRetries reader found')
+  assert.ok(retries[1].includes('process.env.AUTOMATION_WEBHOOK_MAX_RETRIES'))
+  assert.ok(retries[1].includes('Number.parseInt(raw, 10)'))
+  assert.ok(retries[1].includes('parsed < 0) return DEFAULT_MAX_WEBHOOK_RETRIES'))
+  assert.ok(retries[1].includes('Math.min(parsed, 5)'))
+  const timeoutSpec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_WEBHOOK_TIMEOUT_MS
+  assert.ok(timeoutSpec, 'AUTOMATION_WEBHOOK_TIMEOUT_MS must be registered in the manifest')
+  assert.equal(timeoutSpec.type, 'numeric')
+  assert.equal(timeoutSpec.source, 'packages/core-backend/src/multitable/automation-executor.ts#webhookTimeoutMs')
+  assert.match(timeoutSpec.activationValue, /default 5000; clamped to \[1000, 30000\]/)
+  const retrySpec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_WEBHOOK_MAX_RETRIES
+  assert.ok(retrySpec, 'AUTOMATION_WEBHOOK_MAX_RETRIES must be registered in the manifest')
+  assert.equal(retrySpec.type, 'numeric')
+  assert.equal(retrySpec.source, 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries')
+  assert.match(retrySpec.activationValue, /default 2; capped at 5/)
+  for (const spec of [timeoutSpec, retrySpec]) {
+    assert.deepEqual(spec.dependsOn, [])
+    assert.equal(isActivated(spec, '5000'), false)
+    assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  }
+})
+
+test('automation scheduler leader lock: exact true switch plus a numeric TTL that depends on it', () => {
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  assert.match(service, /export async function resolveAutomationSchedulerLeaderOptions\(/)
+  assert.ok(service.includes("if (process.env.ENABLE_SCHEDULER_LEADER_LOCK !== 'true') return null"), 'the switch compares the exact literal')
+  assert.ok(service.includes('const ttlMs = Number(process.env.SCHEDULER_LEADER_LOCK_TTL_MS) > 0'), 'the TTL uses Number(raw) > 0')
+  assert.match(service, /\n {4}: 30_000\n/)
+  const lock = GLOBAL_HISTORY_FLAG_BY_KEY.ENABLE_SCHEDULER_LEADER_LOCK
+  assert.ok(lock, 'ENABLE_SCHEDULER_LEADER_LOCK must be registered in the manifest')
+  assert.equal(lock.type, 'boolean')
+  assert.equal(lock.activationValue, 'true')
+  assert.equal(lock.caseInsensitive, undefined)
+  assert.equal(lock.source, 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions')
+  assert.equal(isActivated(lock, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', '1']) assert.equal(isActivated(lock, value), false, String(value))
+  const ttl = GLOBAL_HISTORY_FLAG_BY_KEY.SCHEDULER_LEADER_LOCK_TTL_MS
+  assert.ok(ttl, 'SCHEDULER_LEADER_LOCK_TTL_MS must be registered in the manifest')
+  assert.equal(ttl.type, 'numeric')
+  assert.deepEqual(ttl.dependsOn, ['ENABLE_SCHEDULER_LEADER_LOCK'])
+  assert.equal(ttl.source, lock.source)
+  assert.match(ttl.activationValue, /default 30000/)
+  assert.equal(isActivated(ttl, '30000'), false)
+})
+
+// ── DingTalk integration-scoped work-notification credentials (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES, not from name shape alone: every `DINGTALK_INTEGRATION_SCOPED_*_ENABLED` token
+// under packages/core-backend/src joins the population as soon as source reads it, so a sibling switch
+// added to this family later fails completeness until it is registered. The family prefix is chosen so it
+// is not a substring of any other registered key (TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED
+// would be caught by a DINGTALK_WORK_NOTIFICATION_ prefix; this one is not).
+function dingtalkIntegrationScopedFlagsInSource() {
+  return grepFlagTokens('DINGTALK_INTEGRATION_SCOPED_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('DingTalk integration-scoped credentials: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(dingtalkIntegrationScopedFlagsInSource(), ['DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED'])
+})
+
+test('DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED
+  assert.ok(spec, 'DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDingTalkIntegrationScopedCredentialsEnabled\(/)
+  assert.ok(
+    module.includes("env.DINGTALK_INTEGRATION_SCOPED_CREDENTIALS_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+// ── Directory integration capabilities (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `DIRECTORY_INTEGRATION_CAPABILITIES_*_ENABLED` token under
+// packages/core-backend/src joins the population as soon as source reads it, so a sibling switch added
+// to this family later fails completeness until it is registered.
+function directoryIntegrationCapabilitiesFlagsInSource() {
+  return grepFlagTokens('DIRECTORY_INTEGRATION_CAPABILITIES_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('directory integration capabilities: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(directoryIntegrationCapabilitiesFlagsInSource(), ['DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'])
+})
+
+test('directory integration capabilities: a key absent from the manifest is reported by the completeness comparison', () => {
+  const manifestKeys = new Set(GLOBAL_HISTORY_FLAG_KEYS.filter((key) => key !== 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'))
+  const missing = directoryIntegrationCapabilitiesFlagsInSource().filter((flag) => !manifestKeys.has(flag))
+  assert.deepEqual(missing, ['DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'])
+})
+
+test('DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED: exact true (no case folding), danger low, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED
+  assert.ok(spec, 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDirectoryIntegrationCapabilitiesEnabled\(/)
+  assert.ok(
+    module.includes("env.DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module.replace(/\/\*[\s\S]*?\*\//g, ''), /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+test('DINGTALK_TODO_MIRROR_ENABLED: the registry evaluates the same input matrix exactly like the runtime reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DINGTALK_TODO_MIRROR_ENABLED
+  assert.ok(spec, 'DINGTALK_TODO_MIRROR_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true, 'the runtime reader trims and lowercases, so the registry must too')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.doesNotMatch(spec.purpose, /exact literal/i, 'the purpose must not claim exact-literal behaviour')
+  // The runtime reader is a TypeScript module; it is read as text (Node 20 has no type stripping) and its
+  // single return expression is evaluated as-is, so this compares against what the runtime really runs.
+  const runtimePath = 'packages/core-backend/src/integrations/dingtalk/todo-mirror-flag.ts'
+  assert.ok(spec.source.startsWith(`${runtimePath}:`), 'the source cites the runtime reader first')
+  const module = readRepoSource(runtimePath)
+  const match = module.match(/export function isDingTalkTodoMirrorEnabled\([^)]*\)[^{]*\{\n\s*return ([^\n]+)\n\}/)
+  assert.ok(match, 'isDingTalkTodoMirrorEnabled is a single return expression')
+  const expression = match[1]
+  assert.equal(expression, "String(env[DINGTALK_TODO_MIRROR_ENABLED] ?? '').trim().toLowerCase() === 'true'")
+  // The env key comes from the runtime module's own constant, so a renamed key cannot pass silently.
+  const keyMatch = module.match(/export const DINGTALK_TODO_MIRROR_ENABLED = '([^']+)'/)
+  assert.ok(keyMatch, 'the runtime module declares its env key as a constant')
+  assert.equal(keyMatch[1], spec.key, 'the runtime reads the same env key the registry describes')
+  const runtimeExpression = new Function('env', 'DINGTALK_TODO_MIRROR_ENABLED', `return ${expression}`)
+  const runtimeReader = (raw) => runtimeExpression(raw === undefined ? {} : { [keyMatch[1]]: raw }, keyMatch[1])
+  const matrix = ['true', 'TRUE', ' true ', 'True', undefined, '', 'false', '1', 'yes']
+  for (const value of matrix) {
+    assert.equal(isActivated(spec, value), runtimeReader(value), `registry and runtime disagree on ${JSON.stringify(value)}`)
+  }
+  // Positive control: the matrix really has both outcomes, so agreement is not vacuous.
+  assert.deepEqual(matrix.map(runtimeReader), [true, true, true, true, false, false, false, false, false])
+  // isMisconfiguredTruthy follows isActivated: a value the runtime honours is not flagged as a footgun.
+  for (const value of ['TRUE', 'True', ' true ']) assert.equal(isMisconfiguredTruthy(spec, value), false, value)
+  for (const value of ['1', 'yes']) assert.equal(isMisconfiguredTruthy(spec, value), true, value)
+})
+
+// ── Security action proofs (AGENTS.md: every env flag is registered) ─────────────────────────────────
+// Derived from READ SITES: every `SECURITY_ACTION_*_ENABLED` token under packages/core-backend/src joins
+// the population as soon as source reads it. The `_ENABLED` suffix keeps the policy constants and error
+// codes of the same family (SECURITY_ACTION_PURPOSES, SECURITY_ACTION_UNAVAILABLE, ...) out of it.
+function securityActionFlagsInSource() {
+  return grepFlagTokens('SECURITY_ACTION_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('security action flags: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(securityActionFlagsInSource(), ['SECURITY_ACTION_PROOF_ENABLED'])
+})
+
+test('SECURITY_ACTION_PROOF_ENABLED: exact true, danger high, independent, predicate source compares the literal, migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.SECURITY_ACTION_PROOF_ENABLED
+  assert.ok(spec, 'SECURITY_ACTION_PROOF_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
+  )
+  const [flagSource, routeSource] = spec.source.split('; ').map((entry) => readRepoSource(entry.split('#')[0]))
+  assert.match(flagSource, /export function isSecurityActionProofEnabled\(/)
+  assert.ok(flagSource.includes("env.SECURITY_ACTION_PROOF_ENABLED === 'true'"), 'the reader compares the exact literal (no trim, no lowercase)')
+  assert.doesNotMatch(flagSource, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(routeSource, /export function securityActionsRouter\(\): Router \| null/)
+  assert.ok(routeSource.includes('if (!isSecurityActionProofEnabled()) return null'), 'the router factory returns null while OFF')
+  const migrations = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/src/db/migrations'))
+    .filter((name) => name.startsWith('zzzz20261106120000_create_security_action_challenges'))
+  assert.deepEqual(migrations, ['zzzz20261106120000_create_security_action_challenges.ts'])
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.match(spec.purpose, /zzzz20261106120000_create_security_action_challenges/)
+  assert.match(spec.purpose, /Not a grant/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+// ── Approval-routing source requirement (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `APPROVAL_ROUTING_*_ENABLED` token under packages/core-backend/src joins the
+// population, so a sibling switch added to this family later fails completeness until it is registered.
+// The same prefix is also used by error codes (APPROVAL_ROUTING_POLICY_REQUIRED, ..._MISCONFIGURED), which
+// are not flags: the `_ENABLED` suffix filter is what tells them apart.
+function approvalRoutingTokensInSource() {
+  return grepFlagTokens('APPROVAL_ROUTING_[A-Z_0-9]+').sort()
+}
+
+function approvalRoutingFlagsInSource() {
+  return approvalRoutingTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
+}
+
+test('approval-routing family: the read-site scan finds exactly the registered key (non-vacuous), error codes are filtered out', () => {
+  assert.deepEqual(approvalRoutingFlagsInSource(), ['APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'])
+  const all = approvalRoutingTokensInSource()
+  assert.ok(
+    all.some((t) => !t.endsWith('_ENABLED')),
+    'the family prefix also matches error-code tokens; the suffix filter must be what excludes them',
+  )
+  assert.ok(approvalRoutingFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: exact true (no case folding), danger high, independent, predicate source compares the literal', () => {
+  const key = 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isApprovalRoutingRequirePolicyEnabled\(/)
+  assert.ok(
+    module.includes(`env.${key} === 'true'`),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-identical/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+  assert.equal(isMisconfiguredTruthy(spec, undefined), false)
+})
+
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: both environment templates list it as a commented sample that is OFF', () => {
+  for (const template of ['docker/app.env.example', 'docker/app.staging.env.example']) {
+    const text = readRepoSource(template)
+    const lines = text.split('\n').filter((line) => line.includes('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED='))
+    assert.deepEqual(lines, ['# APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED=false'], template)
+    assert.match(text, /already in the multi-source, no-policy state/, template)
+  }
 })

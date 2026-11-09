@@ -53,6 +53,7 @@ const syncMocks = vi.hoisted(() => ({
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
+  updateDirectoryIntegrationIdentity: vi.fn(),
 }))
 
 const alertDeliveryMocks = vi.hoisted(() => ({
@@ -64,6 +65,11 @@ const workNotificationMocks = vi.hoisted(() => ({
   getDingTalkWorkNotificationRuntimeStatusFromStore: vi.fn(),
   saveDingTalkWorkNotificationAgentId: vi.fn(),
   testDingTalkWorkNotificationAgentId: vi.fn(),
+}))
+
+const workNotificationVerifyMocks = vi.hoisted(() => ({
+  buildDingTalkWorkNotificationVerifyAuditMeta: vi.fn(() => ({})),
+  verifyDingTalkWorkNotificationIntegration: vi.fn(),
 }))
 
 const approvalCardMocks = vi.hoisted(() => ({
@@ -102,6 +108,7 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => {
 })
 vi.mock('../../src/directory/directory-sync-alert-delivery', () => alertDeliveryMocks)
 vi.mock('../../src/integrations/dingtalk/work-notification-settings', () => workNotificationMocks)
+vi.mock('../../src/integrations/dingtalk/work-notification-verify', () => workNotificationVerifyMocks)
 vi.mock('../../src/integrations/dingtalk/approval-card-config', () => approvalCardMocks)
 vi.mock('../../src/directory/deprovision-evidence-api', () => evidenceMocks)
 vi.mock('../../src/directory/directory-sync-scheduler', () => schedulerMocks)
@@ -230,6 +237,19 @@ const CATCH_SITES: Site[] = [
     },
   },
   {
+    owner: 'POST /dingtalk/work-notification/verify',
+    // The uuid check runs before the try: the body must carry a uuid-shaped integrationId for a probe to
+    // reach the clause at all.
+    calls: [{ method: 'post', path: '/dingtalk/work-notification/verify', body: { integrationId: INTEGRATION_UUID, level: 'config' } }],
+    fail: rejectWith(workNotificationVerifyMocks.verifyDingTalkWorkNotificationIntegration),
+    outcome: {
+      kind: 'config400',
+      code: 'DINGTALK_WORK_NOTIFICATION_VERIFY_FAILED',
+      fallback: 'Failed to verify DingTalk work notification integration',
+      typed: [configTyped('level must be one of config, token, send'), configTyped('recipientUserId is required for level send'), encryptionMaterialTyped],
+    },
+  },
+  {
     owner: 'GET /integrations',
     calls: [{ method: 'get', path: '/integrations' }],
     fail: rejectWith(syncMocks.listDirectoryIntegrations),
@@ -261,6 +281,12 @@ const CATCH_SITES: Site[] = [
     calls: [{ method: 'put', path: '/integrations/:integrationId', params: INTEGRATION, body: {} }],
     fail: rejectWith(syncMocks.updateDirectoryIntegration),
     outcome: helper('DIRECTORY_UPDATE_FAILED', 'Failed to update directory integration'),
+  },
+  {
+    owner: 'PUT /integrations/:integrationId/identity',
+    calls: [{ method: 'put', path: '/integrations/:integrationId/identity', params: INTEGRATION, body: {} }],
+    fail: rejectWith(syncMocks.updateDirectoryIntegrationIdentity),
+    outcome: helper('DIRECTORY_IDENTITY_UPDATE_FAILED', 'Failed to save directory identity metadata'),
   },
   {
     owner: 'GET /integrations/:integrationId/approval-card-config',
@@ -641,9 +667,10 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
 const loggedTexts = (): string => collectStrings(warnSpy.mock.calls).join('\n')
 
 beforeEach(() => {
-  for (const group of [syncMocks, alertDeliveryMocks, workNotificationMocks, approvalCardMocks, evidenceMocks, schedulerMocks, auditMocks]) {
+  for (const group of [syncMocks, alertDeliveryMocks, workNotificationMocks, workNotificationVerifyMocks, approvalCardMocks, evidenceMocks, schedulerMocks, auditMocks]) {
     for (const fn of Object.values(group)) fn.mockReset()
   }
+  workNotificationVerifyMocks.buildDingTalkWorkNotificationVerifyAuditMeta.mockReturnValue({})
   evidenceMocks.readDeprovisionRuntimeFlags.mockReturnValue({})
   auditMocks.auditLog.mockResolvedValue(undefined)
   // Silences the route's warn logs and lets a probe check that the caught text reached the log.
@@ -691,7 +718,7 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(clauses.filter((c) => !c.binding).map((c) => c.owner)).toEqual(BARE_CATCH_SITES.map((s) => s.owner))
     // The plain-text count, so a clause the AST walk could misread still has to be listed.
     expect(ROUTE_SOURCE.split('catch (').length - 1).toBe(CATCH_SITES.length)
-    expect(CATCH_SITES.length).toBe(35)
+    expect(CATCH_SITES.length).toBe(37)
   })
 
   it('every sendDirectoryFailure call in the route is a helper site of the table, with its code and literal fallback', () => {
@@ -703,10 +730,11 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(calls).toEqual(listed)
   })
 
-  it('R-41: the five literal-400 sites that used to echo are the config sites, and no body reads a caught text any more', () => {
+  it('R-41: the five literal-400 sites that used to echo, plus the verification route, are the config sites, and no body reads a caught text any more', () => {
     expect(CONFIG_400_SITES.map((s) => s.outcome.kind === 'config400' && s.outcome.code)).toEqual([
       'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
       'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED',
+      'DINGTALK_WORK_NOTIFICATION_VERIFY_FAILED',
       'APPROVAL_CARD_SECRET_GENERATE_FAILED',
       'APPROVAL_CARD_CONFIG_SAVE_FAILED',
       'DIRECTORY_TEST_FAILED',
@@ -730,7 +758,7 @@ const EXPECTED_MARKER_PROBES =
   RESPONDING_SITES.filter((s) => s.outcome.kind !== 'config400').reduce((n, s) => n + s.calls.length, 0)
   + NOTHING_COMMITTED.length
   + 1 // the test-send outcome-unknown 502
-  + CONFIG_400_SITES.length * 7 // R-41: untyped, five typed DingTalk shapes and a raw network error at every config site
+  + CONFIG_400_SITES.length * 7 // R-41: untyped, five typed DingTalk shapes and a raw network error at every config site (the verification route included)
 
 describe('an untyped failure at every catch clause answers a fixed 5xx sentence — never the caught text', () => {
   RESPONDING_SITES.forEach((site, index) => {

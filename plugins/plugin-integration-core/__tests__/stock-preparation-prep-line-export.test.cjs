@@ -36,6 +36,21 @@
 //            for every row, the workbook degrades to a pure 图号 order — deterministic but NOT
 //            hierarchical — and says so through unresolvedColumns.
 //
+// PLUS (2026-10-29, R76 synthetic trial) the two free-text human columns 采购回复 / 仓库确认:
+//   R24 they are the LAST two columns (appended after 毛胚质量), labelled as the template's labelZh, and
+//       the first 28 columns are byte-identical to before, in order (labels AND ids)
+//   R24b a stored string is copied verbatim (no trim, no reformat); an unset cell is blank (null)
+//   R24c through the mounted route the workbook's last two cells of a row carry the same values
+//   R24d a target that does not bind them still exports, blank, and names them in unresolvedColumns
+//   (since 2026-11-07 they are columns 29-30: 层级 follows them, R25)
+//
+// PLUS (2026-11-07, owner question on parents/children) 层级, the row's stored BOM level:
+//   R25a it is the LAST column (31st), reads the template column `depth`, and the first 30 columns are
+//        byte-identical to before, in order (labels AND ids)
+//   R25b on a 3-level synthetic tree with a shared sub-assembly under two parents every printed row shows
+//        its STORED level (root 0; a row without one is blank; an orphan keeps its stored level)
+//   R25c the first 30 cells and the row order are identical with the column unbound; unbound is reported
+//
 // plus the module-level (no HTTP) equivalents of R1/R2/R3/R4, and the unknown-project 404 edge case
 // (R1..R5 above are all driven through the mounted route; the module suite drives
 // exportStockPreparationPrepLines directly, so a route-layer regression and a module-layer regression
@@ -54,6 +69,11 @@ const LIB = path.join(__dirname, '..', 'lib')
 
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+// Batch-refresh step 4 PR-5: the export is a FORMAL surface — it consults the REAL refresh governance (over the
+// kit's empty step-4 tables => not governed: today's rows, audit row and workbook, byte for byte) and brackets its
+// read with the sheet's lock generation. Both are required (501 by name without them), so the mount wires them.
+const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const { STOCK_PREP_OPERATE, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 // The ONE stock-prep table action every route in this family defaults to — the same constant the
@@ -100,6 +120,9 @@ const PROJECT_SORTNO = 'PRJ-SORTNO'
 // a target whose fieldIdMap does not bind idempotencyKey. Two of them are identical in every key a
 // reader can see, so ONLY the record id can separate them.
 const PROJECT_MANUAL = 'PRJ-MANUAL-ROWS'
+// R24: synthetic free-text values for 采购回复 / 仓库确认 on rec_a1 (never a real customer string).
+const PROCUREMENT_REPLY_A1 = '  已下单，预计 2026-11-05 到货\n回函编号 SYN-0001  '
+const WAREHOUSE_CONFIRMATION_A1 = '已到 3 件, 缺 1 件 (示例)'
 
 // One row's worth of every export column + the two scope-only fields, so a seed reads like the real
 // sheet. Values are synthetic and structurally shaped (never a real customer string).
@@ -151,7 +174,12 @@ function seededRows() {
     // store's enum/handle pattern. It has real rows, so the export reaches its audit append: this is
     // the row that turns a shape gate on `project_id` into a refused workbook (R5b).
     mainRow(PROJECT_FREE_TEXT, { componentCode: 'DWG-F1', componentName: '自由文本项目部件', totalQuantity: 1 }, 'rec_f1'),
-    mainRow(PROJECT_A, { componentCode: 'DWG-A1', componentName: 'A项目部件一', totalQuantity: 3 }, 'rec_a1'),
+    // rec_a1 carries the two free-text human columns (R24): leading/trailing spaces and an embedded
+    // newline, so a trim or a reformat anywhere on the way out is visible. rec_a2 leaves both unset.
+    mainRow(PROJECT_A, {
+      componentCode: 'DWG-A1', componentName: 'A项目部件一', totalQuantity: 3,
+      procurementReply: PROCUREMENT_REPLY_A1, warehouseConfirmation: WAREHOUSE_CONFIRMATION_A1,
+    }, 'rec_a1'),
     // rec_a2 deliberately leaves the two completion flags UNSET (never assigned, not merely false) —
     // R13's blank-cell witness: a flag nobody has touched must render as an empty cell, never 否.
     mainRow(PROJECT_A, {
@@ -341,7 +369,7 @@ async function moduleReturnsExactAgreedColumnsForASeededProject() {
     permission: 'admin',
   })
   assert.deepEqual(result.headers, EXPORT_COLUMNS.map((c) => c.label), 'R1: headers are exactly EXPORT_COLUMNS, in order')
-  assert.equal(result.headers.length, 28, 'R1/R12: 28 columns (#5447 的五列之后,F1c 又补了老系统 23 列里缺的十一列)')
+  assert.equal(result.headers.length, 31, 'R1/R12/R24/R25: 31 columns (#5447 的五列之后,F1c 又补了老系统 23 列里缺的十一列,再追加 采购回复 / 仓库确认,2026-11-07 再追加 层级)')
   assert.equal(result.totalRowCount, 3, 'PROJECT_A has 3 rows total (2 active + 1 inactive)')
   assert.equal(result.activeRowCount, 2, 'PROJECT_A has 2 active rows')
   assert.equal(result.rows.length, 2)
@@ -581,9 +609,10 @@ function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
       return { member: true }
     },
   }
+  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
   httpRoutes.registerIntegrationRoutes({
     context,
-    services,
+    services: withRefreshGovernance(services),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, auditAppends, auditRows, xlsxExport, hostReads }
@@ -631,6 +660,14 @@ async function routeReturnsExactColumnsForSeededProject() {
   const built = decodedBody(res)
   assert.deepEqual(built.headers, EXPORT_COLUMNS.map((c) => c.label), 'R1: the workbook the route built carries exactly the agreed columns')
   assert.equal(built.rows.length, 2)
+  // R24c: the workbook the route hands the xlsx builder carries 采购回复 / 仓库确认 as columns 29-30, values verbatim
+  // (since 2026-11-07 层级 follows them as the 31st and last column — R25).
+  assert.deepEqual(built.headers.slice(28, 30), ['采购回复', '仓库确认'], 'R24c: the route workbook carries 采购回复 / 仓库确认 at columns 29-30')
+  assert.equal(built.headers[built.headers.length - 1], '层级', 'R25: the route workbook ends with 层级')
+  const a1 = built.rows.find((cells) => cells[EXPORT_COLUMNS.findIndex((c) => c.id === 'componentCode')] === 'DWG-A1')
+  const a2 = built.rows.find((cells) => cells[EXPORT_COLUMNS.findIndex((c) => c.id === 'componentCode')] === 'DWG-A2')
+  assert.deepEqual(a1.slice(28, 30), [PROCUREMENT_REPLY_A1, WAREHOUSE_CONFIRMATION_A1], 'R24c: rec_a1 cells 29-30 are the stored strings, verbatim')
+  assert.deepEqual(a2.slice(28, 30), [null, null], 'R24c: rec_a2 (never filled) cells 29-30 are blank')
 }
 
 async function routeScopingProofOtherProjectRowsNeverAppear() {
@@ -861,7 +898,7 @@ async function moduleParentPairIsReadFromTheTemplateColumnsAlone() {
     projectNo: PROJECT_MIXED,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R7b: the header row is byte-identical to the agreed 28')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R7b: the header row is byte-identical to the agreed 31')
   assert.equal(result.headers[columnIndex('parentComponentCode')], '父组件图号', 'R7b: the Chinese header is unchanged')
   assert.equal(result.headers[columnIndex('parentComponentName')], '父组件名称', 'R7b: the Chinese header is unchanged')
 
@@ -1084,13 +1121,27 @@ async function routeGateRefusesBeforeAnyHostIo() {
 // ---------------------------------------------------------------------------
 
 // F1c: the original 17 (UNMOVED — 老列顺序是约定) followed by the eleven 老系统 23 列里补齐的列.
-const EXPORT_HEADERS_IN_ORDER = Object.freeze([
+// These 28 are FROZEN as of before 2026-10-29: R24 pins that the appended pair moved none of them.
+const EXPORT_HEADERS_FIRST_28 = Object.freeze([
   '父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量',
   '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度',
   '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期',
   '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段',
   '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量',
 ])
+const EXPORT_COLUMN_IDS_FIRST_28 = Object.freeze([
+  'parentComponentCode', 'parentComponentName', 'componentCode', 'componentName', 'componentSpec', 'material', 'totalQuantity',
+  'stockPreparationStatus', 'demandDate', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
+  'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate',
+  'projectNo', 'ext_nameAndSpec', 'materialType', 'blankType', 'notes', 'ext_handoverSection',
+  'leadTimeDays', 'ext_blankWidth', 'ext_blankThickness', 'ext_blankQuantity', 'ext_blankMass',
+])
+// 2026-10-29: the two free-text human columns, appended after the 28. FROZEN as of before 2026-11-07: R25 pins that
+// the appended 层级 moved none of these 30.
+const EXPORT_HEADERS_FIRST_30 = Object.freeze([...EXPORT_HEADERS_FIRST_28, '采购回复', '仓库确认'])
+const EXPORT_COLUMN_IDS_FIRST_30 = Object.freeze([...EXPORT_COLUMN_IDS_FIRST_28, 'procurementReply', 'warehouseConfirmation'])
+// 2026-11-07: 层级 (the row's stored BOM level), appended LAST.
+const EXPORT_HEADERS_IN_ORDER = Object.freeze([...EXPORT_HEADERS_FIRST_30, '层级'])
 
 async function moduleExactSeventeenColumnHeaderOrder() {
   const { records, target } = moduleSubstrate()
@@ -1100,7 +1151,7 @@ async function moduleExactSeventeenColumnHeaderOrder() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R12: the exact 28 headers, in the agreed order')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R12: the exact 31 headers, in the agreed order')
   assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), EXPORT_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
 }
 
@@ -1151,7 +1202,7 @@ async function moduleTargetPredatingPR5447StillExportsAndReportsTheFive() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 28 headers still appear')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 31 headers still appear')
   assert.deepEqual(
     result.unresolvedColumns.slice().sort(),
     ['actualArrivalDate', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone'],
@@ -1527,6 +1578,159 @@ async function moduleLegacyTwentyThreeColumnsAreProjected() {
   // 生产编号 真的有值(它同时是作用域列,取的是同一个绑定)。
   const projectColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'projectNo')
   assert.equal(result.rows[0][projectColumn], PROJECT_A)
+}
+
+// ---------------------------------------------------------------------------
+// R24 — 采购回复 / 仓库确认 (2026-10-29). The R76 synthetic trial showed the frontline fills these two
+// free-text human_preserved columns while the workbench export never carried them. They are appended
+// LAST; the first 28 columns must not move (labels and ids pinned as literals, not via EXPORT_COLUMNS).
+// ---------------------------------------------------------------------------
+
+async function moduleReplyAndConfirmationAreTheLastTwoColumnsAndNothingMoved() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({ recordsApi: records, target, projectNo: PROJECT_A, permission: 'admin' })
+  assert.equal(result.headers.length, 31, 'R24: 28 + 2 columns (+ 层级 since 2026-11-07, R25)')
+  assert.deepEqual(result.headers.slice(28, 30), ['采购回复', '仓库确认'], 'R24: 采购回复 / 仓库确认 are headers 29-30 (层级 follows them)')
+  assert.deepEqual(EXPORT_COLUMNS.slice(28, 30).map((c) => c.id), ['procurementReply', 'warehouseConfirmation'], 'R24: the column ids at 29-30')
+  assert.deepEqual(result.headers.slice(0, 28), EXPORT_HEADERS_FIRST_28, 'R24: the first 28 headers are unchanged, in order')
+  assert.deepEqual(EXPORT_COLUMNS.slice(0, 28).map((c) => c.id), EXPORT_COLUMN_IDS_FIRST_28, 'R24: the first 28 column ids are unchanged, in order')
+  // The labels are the template's own labelZh, not a second spelling invented here.
+  for (const column of EXPORT_COLUMNS.slice(28, 30)) {
+    const templateField = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find((field) => field.id === column.id)
+    assert.ok(templateField, `R24: ${column.id} is a main-template field`)
+    assert.equal(column.label, templateField.labelZh, `R24: ${column.id} label equals the template labelZh`)
+    assert.equal(templateField.type, 'string', `R24: ${column.id} is a free-text column`)
+    assert.equal(column.type, undefined, `R24: ${column.id} carries no special formatting`)
+    assert.equal(column.fallbackId, undefined, `R24: ${column.id} has no fallback source`)
+  }
+  // R24b: values verbatim, blank when unset.
+  const filled = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
+  const unset = result.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A2')
+  assert.equal(filled[columnIndex('procurementReply')], PROCUREMENT_REPLY_A1, 'R24b: 采购回复 is the stored string, verbatim (spaces and newline kept)')
+  assert.equal(filled[columnIndex('warehouseConfirmation')], WAREHOUSE_CONFIRMATION_A1, 'R24b: 仓库确认 is the stored string, verbatim')
+  assert.deepEqual(filled.slice(28, 30), [PROCUREMENT_REPLY_A1, WAREHOUSE_CONFIRMATION_A1], 'R24b: and they are the row\'s cells 29-30')
+  assert.equal(unset[columnIndex('procurementReply')], null, 'R24b: an unset 采购回复 is a blank cell')
+  assert.equal(unset[columnIndex('warehouseConfirmation')], null, 'R24b: an unset 仓库确认 is a blank cell')
+  assert.equal(filled.length, 31, 'R24b: every row has exactly 31 cells')
+  assert.equal(unset.length, 31, 'R24b: every row has exactly 31 cells')
+  assert.deepEqual(result.unresolvedColumns, [], 'R24: a fully provisioned target binds both — nothing unresolved')
+
+  // R24d: a target that does not bind them (not expected on any provisioned sheet — both are in the
+  // template since its first version) still exports: blank cells, both named in unresolvedColumns.
+  const unbound = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target: targetWithout(target, ['procurementReply', 'warehouseConfirmation']),
+    projectNo: PROJECT_A,
+    permission: 'admin',
+  })
+  assert.deepEqual(unbound.headers, EXPORT_HEADERS_IN_ORDER, 'R24d: the header set never shrinks')
+  assert.deepEqual(unbound.unresolvedColumns.slice().sort(), ['procurementReply', 'warehouseConfirmation'], 'R24d: both are reported unresolved')
+  const unboundRow = unbound.rows.find((cells) => cells[columnIndex('componentCode')] === 'DWG-A1')
+  assert.deepEqual(unboundRow.slice(28, 30), [null, null], 'R24d: unbound means blank, never another column\'s value')
+}
+
+// ---------------------------------------------------------------------------
+// R25 — 层级 (2026-11-07). The owner asked whether the system shows a material's parents and children; the
+// workbook is printed in depth-first BOM tree order but carried no level. ONE column is appended LAST: the
+// row's stored template `depth` (BOM层级; root = 0). The first 30 columns must not move (labels and ids pinned
+// as literals, not via EXPORT_COLUMNS), and their cells must be byte-identical with or without the new column.
+//
+// Synthetic 3-level tree, the shared sub-assembly S printed under two parents (R@A and R directly), each
+// occurrence with its own child S1:
+//   R (0) ─ A (1) ─ S (2) ─ S1 (3)
+//         └ S (1) ─ S1 (2)
+// plus N, a root-shaped row with NO stored level (prints blank, never a guessed 0), and O, an ORPHAN whose
+// parent path is not in the batch: the walk prints it as a root, but its stored level 2 is what 层级 shows.
+// ---------------------------------------------------------------------------
+
+const PROJECT_DEPTH = 'PRJ-DEPTH-TREE'
+
+function depthTreeLogicalRows() {
+  const node = (code, name, tokens, depth, sortNo, parent) => ({
+    componentCode: code, componentName: name, ext_nameAndSpec: name, material: 'Q235B', rawQuantity: 1,
+    parentComponentCode: parent ? parent.code : undefined, parentComponentName: parent ? parent.name : undefined,
+    componentSourceId: tokens[tokens.length - 1], parentSourceId: tokens.length > 1 ? tokens[tokens.length - 2] : undefined,
+    path: bomPath(...tokens), depth, ext_componentSortNo: sortNo,
+    idempotencyKey: `idk-depth-${tokens.join('-')}`, __id: `rec_depth_${tokens.join('_')}`,
+  })
+  const R = { code: 'SYN-R', name: 'R总成' }
+  const A = { code: 'SYN-A', name: 'A部件' }
+  const S = { code: 'SYN-S', name: 'S共用组件' }
+  // Deliberately scrambled: the scan order must not matter.
+  return [
+    node('SYN-S1', 'S1子件', ['X-R', 'X-S', 'X-S1'], 2, 1, S),
+    node('SYN-O', 'O孤儿', ['X-R', 'X-GONE', 'X-O'], 2, 9, { code: 'SYN-GONE', name: '已失效父件' }),
+    node('SYN-S', 'S共用组件', ['X-R', 'X-A', 'X-S'], 2, 1, A),
+    node('SYN-N', 'N无层级', ['X-N'], undefined, 8, null),
+    node('SYN-A', 'A部件', ['X-R', 'X-A'], 1, 1, R),
+    node('SYN-S1', 'S1子件', ['X-R', 'X-A', 'X-S', 'X-S1'], 3, 1, S),
+    node('SYN-R', 'R总成', ['X-R'], 0, 1, null),
+    node('SYN-S', 'S共用组件', ['X-R', 'X-S'], 1, 2, R),
+  ]
+}
+
+async function exportDepthTree(target = targetFor(SANDBOX_SHEET)) {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: depthTreeLogicalRows().map(({ __id, ...row }) => mainRow(PROJECT_DEPTH, row, __id)) },
+  })
+  return exportStockPreparationPrepLines({ recordsApi: records, target, projectNo: PROJECT_DEPTH, permission: 'admin' })
+}
+
+async function moduleDepthIsTheLastColumnAndNothingMoved() {
+  // R25a: 31 columns, 层级 last, the first 30 unchanged (labels AND ids, as literals).
+  const result = await exportDepthTree()
+  assert.equal(result.headers.length, 31, 'R25a: 30 + 层级')
+  assert.equal(result.headers[30], '层级', 'R25a: 层级 is the 31st header')
+  assert.equal(result.headers[result.headers.length - 1], '层级', 'R25a: and the LAST one')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R25a: the full header row')
+  assert.deepEqual(result.headers.slice(0, 30), EXPORT_HEADERS_FIRST_30, 'R25a: the first 30 headers are unchanged, in order')
+  assert.deepEqual(EXPORT_COLUMNS.slice(0, 30).map((c) => c.id), EXPORT_COLUMN_IDS_FIRST_30, 'R25a: the first 30 column ids are unchanged, in order')
+  const depthColumn = EXPORT_COLUMNS[EXPORT_COLUMNS.length - 1]
+  assert.equal(depthColumn.id, 'depth', 'R25a: the last column reads the template column `depth`')
+  assert.equal(depthColumn.type, undefined, 'R25a: no special formatting — the stored number passes through')
+  assert.equal(depthColumn.fallbackId, undefined, 'R25a: no fallback source — a missing level is never derived')
+  const templateField = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find((field) => field.id === 'depth')
+  assert.ok(templateField, 'R25a: depth is a main-template field')
+  assert.equal(templateField.type, 'number', 'R25a: a number column')
+  assert.equal(templateField.ownership, 'plm_system', 'R25a: a plm_system column (bound on every install)')
+  assert.deepEqual(result.unresolvedColumns, [], 'R25a: a fully provisioned target binds depth — nothing unresolved')
+
+  // R25b: the tree order and each printed row's 层级 = its STORED level. The shared S prints twice, at levels
+  // 2 and 1, each followed by its own S1 (3 and 2). N (no stored level) prints blank; the orphan O prints 2.
+  const codeColumn = columnIndex('componentCode')
+  const parentColumn = columnIndex('parentComponentCode')
+  assert.deepEqual(
+    result.rows.map((cells) => [cells[parentColumn], cells[codeColumn], cells[30]]),
+    [
+      [null, 'SYN-R', 0],
+      ['SYN-R', 'SYN-A', 1],
+      ['SYN-A', 'SYN-S', 2],
+      ['SYN-S', 'SYN-S1', 3],
+      ['SYN-R', 'SYN-S', 1],
+      ['SYN-S', 'SYN-S1', 2],
+      [null, 'SYN-N', null],
+      ['SYN-GONE', 'SYN-O', 2],
+    ],
+    'R25b: depth-first tree order; 层级 is each row\'s stored level (root 0 is a value, a missing level is blank, an orphan keeps its stored level)',
+  )
+  assert.equal(result.collapsedRowCount, 0, 'R25b: the shared sub-assembly is printed under both parents')
+  assert.equal(result.treeIdentity, 'path')
+  for (const cells of result.rows) assert.equal(cells.length, 31, 'R25b: every row has exactly 31 cells')
+
+  // R25c: the first 30 cells of every row, and the row order, are byte-identical to a workbook built without
+  // the level (an explicit map that leaves `depth` unbound — the projection the pre-2026-11-07 export made).
+  // That run also pins the unresolvedColumns rule unchanged: an unbound projected column is reported.
+  const withoutDepth = await exportDepthTree(targetWithout(targetFor(SANDBOX_SHEET), ['depth']))
+  assert.deepEqual(withoutDepth.unresolvedColumns, ['depth'], 'R25c: an unbound depth is reported like any projected column')
+  assert.equal(withoutDepth.rows.length, result.rows.length)
+  assert.equal(
+    JSON.stringify(result.rows.map((cells) => cells.slice(0, 30))),
+    JSON.stringify(withoutDepth.rows.map((cells) => cells.slice(0, 30))),
+    'R25c: the first 30 cells and the row order do not depend on the new column',
+  )
+  assert.deepEqual(withoutDepth.rows.map((cells) => cells[30]), result.rows.map(() => null), 'R25c: unbound means blank, never a derived level')
 }
 
 // ---------------------------------------------------------------------------
@@ -2133,6 +2337,8 @@ async function main() {
   await moduleExportOrderIsTheBomTreeNotAFlatBand()
   await moduleExportWithoutSourceIdentityKeepsTheFlatOrder()
   await moduleLegacyTwentyThreeColumnsAreProjected()
+  await moduleReplyAndConfirmationAreTheLastTwoColumnsAndNothingMoved()
+  await moduleDepthIsTheLastColumnAndNothingMoved()
   await moduleSameDrawingDifferentSpecIsNotCollapsed()
   await moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts()
 

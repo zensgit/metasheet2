@@ -55,6 +55,45 @@
       </p>
     </div>
 
+    <!-- 备料分批拉取第一期 step 4 PR-7 — 「核对」 (design §9.2): ONE more preview, nothing written. Rendered only for a
+         caller who may run the pull, and only while the board says the project is written but not checked; ABSENT
+         otherwise (R-11), so every not-governed project's panel is the DOM it was. The result line never claims
+         「核对通过」 until the board's own re-read says complete AND settled. -->
+    <div v-if="showsCheck || checkLine" class="sp-sync__check" data-testid="stock-prep-project-sync-check-area">
+      <button
+        v-if="showsCheck"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-check"
+        :disabled="busy"
+        @click="runSettlementCheck"
+      >{{ checkBusy ? bi('正在核对…', 'Checking…') : bi('核对', 'Check') }}</button>
+      <p
+        v-if="checkLine"
+        class="sp-sync__hint"
+        data-testid="stock-prep-project-sync-check-result"
+        :data-check="checkResult ? checkResult.outcome : ''"
+        :data-check-phase="checkPhase"
+        role="status"
+      >
+        {{ checkLine.text }}
+        <span v-if="checkLine.next">{{ checkLine.next }}</span>
+      </p>
+    </div>
+
+    <!-- R67 ④: 试算 runs as a background job — while it reads PLM this line says so, with the time it
+         has taken, instead of one long spinner that a 60 s gateway timeout used to cut off. Also shown
+         after a reload when this caller's earlier trial of the project is still running (re-attach). -->
+    <p
+      v-if="dryRunProgressText"
+      class="sp-sync__hint"
+      role="status"
+      data-testid="stock-prep-project-sync-dry-run-progress"
+      :data-dry-run-progress="dryRunProgress?.source ?? ''"
+    >
+      {{ dryRunProgressText }}
+    </p>
+
     <!-- 一个项目一张备料表 (S2, R-36) — THE QUESTION THE PROJECT-SHEET FLOW IS WAITING ON. Rendered only
          while `runStockPreparationProjectPull` (projectTarget.ts) has asked and nobody has answered:
          create the sheet (absent), pull again (active), or write what the preview showed (a sheet this
@@ -112,6 +151,9 @@
       </template>
       <template v-else>
         <p class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-preview">{{ promptPreviewText }}</p>
+        <!-- 批次标识 BI-3 (P-4): whether the create path's write will be recorded as a pull batch. Absent while the switch
+             is off (no preview), when nothing is added, and for a sheet without the band (not_installed). -->
+        <p v-if="pullBatchPromptText" class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-pull-batch">{{ pullBatchPromptText }}</p>
         <div class="sp-sync__target-actions">
           <button
             type="button"
@@ -260,6 +302,27 @@
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
     </p>
+    <!-- 批次标识 BI-3 (§4.3): how this run's write was recorded (记为 / 并入 / 没有新增 / 未标记：原因), from the apply's own
+         answer. Absent while the switch is off (no key), for not_installed (P-2: the board says 未启用) and before a write. -->
+    <p
+      v-if="report && pullBatchOutcomeText"
+      class="sp-sync__counts"
+      data-testid="stock-prep-project-sync-pull-batch"
+      :data-pull-batch="report.pullBatch?.outcome?.kind"
+    >
+      {{ pullBatchOutcomeText }}
+    </p>
+    <!-- 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3; R-68): the per-sheet switch and the last pull's
+         reminder live in their own component; this panel hands it the project (on the board, always the board's —
+         see `manualRowsProjectNo`), the scope, this run's report (a new report re-reads; only a run for that project)
+         and whether a project-sheet run has seen the sheet. An injected double keeps it inert. -->
+    <StockPreparationProjectTargetManualRows
+      :project-no="manualRowsProjectNo"
+      :scope="scope"
+      :last-run="manualRowsRunIsBound ? report : null"
+      :project-sheet-known="Boolean(afterState && afterState.status !== 'absent')"
+      :inert="Boolean(props.api || props.targetApi)"
+    />
     <!-- S2 fix round 1 (refuter #1): the project sheet is missing the customer's extension columns
          (dry run / write refused 422 TARGET_SCHEMA_INCOMPLETE on a project sheet). A puller repairs
          it in place — the create route's replay re-installs the pack — and the pull runs again;
@@ -384,14 +447,47 @@
       >
         <!-- THE LABEL NAMES THE DESTINATION IT ACTUALLY HAS. With a handle the parent lands the
              operator in the 备料主表 their run just wrote; without one there is no sheet this
-             deployment can prove is theirs, and the parent opens the multitable workbench. Saying
-             「打开备料多维表」 in that second case is the promise that made this button feel broken. -->
+             deployment can prove is theirs, and the parent pushes plain `/multitable` — the multitable
+             HOME page (「新建 Base」 + template cards), not a workbench. Saying 「打开备料多维表」 (or
+             「工作台」) in that second case is the promise that made this button feel broken. -->
         {{ fillTarget
           ? bi('打开备料多维表', 'Open the stock-preparation table')
-          : bi('打开多维表工作台', 'Open the multitable workbench') }}
+          : bi('打开多维表首页', 'Open the multitable home') }}
       </button>
+      <!-- 客户反馈 2026-10-21 9a: the home page's template cards read as "pick a template for this
+           project". Nothing there is the operator's to choose; this sentence says so, beside the
+           button, only when the button is the no-handle one. -->
+      <p
+        v-if="showsSheetLink && !fillTarget"
+        class="sp-sync__no-link-hint"
+        data-testid="stock-prep-project-sync-no-sheet-link-hint"
+      >
+        {{ bi(noSheetLinkHint.zh, noSheetLinkHint.en) }}
+      </p>
+      <!-- PR-7: a SUSPENDED run's work is the puller's holds — the link goes to 「拉取待确认」, PULL tier only. -->
       <button
-        v-if="report.pendingConfirmCount > 0"
+        v-if="report.verdict === 'suspended' && canOpenRefreshQueue"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-open-refresh-queue"
+        @click="emit('navigate-stage', 'refresh-queue')"
+      >
+        {{ bi('去「拉取待确认」处理', 'Go to “Pull holds”') }}<template v-if="suspendedHoldCount !== null && suspendedHoldCount > 0"> ({{ suspendedHoldCount }})</template>
+      </button>
+      <!-- PR-9 (R-77 ⑦): a run that met a written change awaiting review — the review is on 「拉取待确认」, PULL only. -->
+      <button
+        v-if="report.verdict === 'review_pending' && canOpenRefreshQueue"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-open-refresh-review"
+        @click="emit('navigate-stage', 'refresh-queue')"
+      >
+        {{ bi('去「拉取待确认」复核', 'Review it on “Pull holds”') }}<template v-if="reviewPendingCount !== null && reviewPendingCount > 0"> ({{ reviewPendingCount }})</template>
+      </button>
+      <!-- …and never the ledger queue: on a suspended (or review-pending) run `pendingConfirmCount` is the plan's
+           manual_confirm tally, not anything queued (the reconcile was deferred). -->
+      <button
+        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended' && report.verdict !== 'review_pending'"
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-queue"
@@ -441,7 +537,13 @@
             data-testid="stock-prep-project-sync-step-not-yours"
           >{{ bi(notYoursPosture.zh, notYoursPosture.en) }}</span>
           <template v-if="row.result">
-            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
+            <!-- 批次标识 BI-3 (critic C-5): a write refused or stopped on a STOCK_PREP_PULL_BATCH_* code reads that code's own
+                 plain sentence here (never WRITE_FAILED's 「数据没有变化」 after rows may have landed). -->
+            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason"><span
+              v-if="stockPrepPullBatchStepPlain(row.result)"
+              data-testid="stock-prep-project-sync-pull-batch-refusal"
+              :data-pull-batch-code="row.result.detail.code"
+            >{{ reasonText(row.result) }}</span><template v-else>{{ reasonText(row.result) }}</template></small>
             <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
               {{ reasonNext(row.result) }}
             </small>
@@ -451,16 +553,21 @@
       </li>
     </ol>
 
-    <!-- The large-BOM background channel. `:key="submittedProjectNo"` remounts it per run rather
-         than reusing one instance across two different large projects. -->
+    <!-- The large-BOM background channel. `:key` remounts it per run rather than reusing one instance
+         across two different large projects. It is a CLIENT-DRIVEN write, so once started it is never
+         unmounted by a board switch (that would cut the write short) — only hidden while the board shows
+         another project or scope, and shown again when the board is back on the one it started on
+         (see `largeBomChannel`). -->
     <StockPreparationLargeBomPullPanel
-      v-if="showsLargeBomPull"
-      :key="submittedProjectNo"
-      :project-no="submittedProjectNo"
+      v-if="largeBomChannel"
+      v-show="largeBomChannel.context === runContextKey"
+      :key="largeBomChannel.projectNo"
+      :project-no="largeBomChannel.projectNo"
       :scope="scope"
       :api="largeBomApi"
       :wait="largeBomPollWait"
       :fill-target="fillTarget"
+      :no-link-hint-context="noLinkHintContext"
       @open-multitable="emit('open-multitable')"
       @synced="emit('synced', null)"
     />
@@ -522,18 +629,24 @@
 // route deliberately never serves it. Everything else on this panel is a count, a closed status
 // token, an HTTP status or a reason code.
 import { copyText } from '../../../utils/clipboard'
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
+import { onAuthPrincipalChange, readAuthSessionSignature } from '../../../composables/authPrincipal'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
+import StockPreparationProjectTargetManualRows from './StockPreparationProjectTargetManualRows.vue'
 import {
+  STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
   runStockPreparationProjectSync,
+  runStockPreparationSettlementCheck,
+  type StockPreparationSettlementCheckResult,
   type StockPreparationMissingComponent,
   type StockPreparationMissingComponentList,
+  type StockPreparationDryRunOptions,
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
   type StockPreparationProjectSyncStepResult,
@@ -543,14 +656,17 @@ import type { StockPreparationLargeBomJobApi } from '../../../services/integrati
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
+  STOCK_PREP_REFRESH_TOKEN_UNKNOWN,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepErrorPlain,
+  stockPrepNoSheetLinkHint,
   stockPrepProjectTargetPlain,
   stockPrepProjectTargetRowCountText,
   stockPrepProjectTargetWritePreviewText,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
+  type StockPrepNoSheetLinkHintContext,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
@@ -566,9 +682,16 @@ import {
   type StockPrepProjectTargetState,
   type StockPreparationProjectTargetApi,
 } from '../../../services/integration/stockPreparation/projectTarget'
+import { createStockPrepProjectSyncRunGuard, type StockPrepProjectSyncRunTicket } from '../../../services/integration/stockPreparation/projectSyncRunGuard'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
+import { STOCK_PREP_REFRESH_STATUS_LABELS_EN, STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
+import {
+  stockPrepPullBatchOutcomeLine,
+  stockPrepPullBatchPreviewLine,
+  stockPrepPullBatchStepPlain,
+} from '../../../services/integration/stockPreparation/pullBatch'
 
 const props = withDefaults(
   defineProps<{
@@ -591,9 +714,10 @@ const props = withDefaults(
      *
      * A SEED, NOT A LOCK. The input stays editable — the panel's own 项目接入 use on the legacy tab
      * has no seed at all, and a locked field would take away the "sync a different project from
-     * here" path that surface relies on. The seed follows the prop, and a later prop change
-     * (the operator opened a different board) replaces what the seed put there — but never what the
-     * operator typed over it while a run was in flight.
+     * here" path that surface relies on. The seed follows the prop, and every later prop change
+     * (the operator opened a different board) replaces what is in the box — a run in flight
+     * included, so the next press on that board is about that board's project. Nothing typed is
+     * lost that way: the box is disabled while a run is in flight.
      */
     projectNo?: string
     /**
@@ -605,6 +729,8 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /** Test seam ONLY (R67 ④) — the background dry run's poll wait, so specs never wait on a real timer. */
+    dryRunPollWait?: ((ms: number) => Promise<void>) | null
     /**
      * H14 — WHAT THIS BUTTON IS CALLED ON THE SURFACE THAT HOSTS IT.
      *
@@ -636,6 +762,22 @@ const props = withDefaults(
      * pre-S2 suite keeps its exact request set). No production mount injects either.
      */
     targetApi?: StockPreparationProjectTargetApi | null
+    /**
+     * Where this panel is mounted, for the no-link sentence only (review round 1 of 客户反馈 9a).
+     * `board` = 项目备料, whose own fill area further down explains the missing link; `workspace` =
+     * 项目工作台, which points the reader at 项目备料. Copy only — nothing routes on it.
+     */
+    noLinkHintContext?: StockPrepNoSheetLinkHintContext
+    /**
+     * 备料分批拉取第一期 step 4 PR-7 — the board's refresh stanza, as values-free inputs (项目备料页 passes them; the
+     * legacy 项目工作台 mount passes none). `refreshStatus` + `refreshSettled` decide whether 「核对」 is offered
+     * (executed_pending_settlement, or complete ∧ NOT settled — never `exportAllowed`); after a check they are
+     * also the ONLY authority for 「核对通过」 — this panel never claims it from its own counts.
+     */
+    refreshStatus?: string | null
+    refreshSettled?: boolean
+    /** Whether the viewer may open 「拉取待确认」 (PULL tier exactly) — the suspended run's link renders only then. */
+    canOpenRefreshQueue?: boolean
   }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
@@ -644,11 +786,18 @@ const props = withDefaults(
     api: null,
     largeBomApi: null,
     largeBomPollWait: null,
+    dryRunPollWait: null,
     runVariant: 'sync',
     fillTarget: null,
     targetApi: null,
+    noLinkHintContext: 'workspace',
+    refreshStatus: null,
+    refreshSettled: false,
+    canOpenRefreshQueue: false,
   },
 )
+
+const noSheetLinkHint = computed(() => stockPrepNoSheetLinkHint(props.noLinkHintContext))
 
 const emit = defineEmits<{
   /** Reuses the shell's ONE tab-nav surface (the same event the dashboard's stepper emits). */
@@ -708,6 +857,17 @@ const projectNoEl = ref<HTMLInputElement | null>(null)
  */
 const submittedProjectNo = ref('')
 
+/**
+ * 人工补充行 (R80 verifier F1): which project the manual-rows section is about. On the project board (a `projectNo`
+ * seed) it is ALWAYS the board's project — the board keeps this panel mounted across a project switch, and the run
+ * guard's invalidation does not reset `submittedProjectNo`, so following the last run would show project A's switch,
+ * reminder and links (and its open prompt) on project B's board. The workspace mount has no seed and follows the
+ * submitted run, as before.
+ */
+const manualRowsProjectNo = computed<string>(() => (props.projectNo ?? '').trim() || submittedProjectNo.value)
+/** Whether this panel's last run was for that project: only then is its report the section's "new run" (a re-read). */
+const manualRowsRunIsBound = computed<boolean>(() => stockPrepProjectNumbersMatch(manualRowsProjectNo.value, submittedProjectNo.value))
+
 /** The `<table>` DOM node the 缺件清单 "复制" button selects into when the Clipboard API is unavailable. */
 const missingComponentsTableEl = ref<HTMLTableElement | null>(null)
 
@@ -716,13 +876,23 @@ const missingComponentsCopyState = ref<'idle' | 'copied' | 'manual'>('idle')
 
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
 
-// 项目备料页: follow the seed when the PARENT changes which project this panel is about. It never
-// runs anything on its own — the operator still presses 同步 — and it never fires while a run is in
-// flight, so a number the operator typed for their next sync is not overwritten mid-run.
+// 项目备料页: follow the seed when the PARENT changes which project this panel is about — ALSO while a
+// run is in flight, so the box (and with it the next press of 同步 or the board's 「下一步」) is about the
+// project the board shows, never the one it left. It never runs anything on its own — the operator
+// still presses 同步 — and it cannot overwrite a number typed for the next sync: the box is disabled
+// while a run is in flight. Only the re-attach probe waits until the run has ended (see `busy` below).
+let reattachWhenIdle = false
 watch(() => props.projectNo, (next) => {
   const seeded = (next ?? '').trim()
-  if (!seeded || busy.value) return
+  if (!seeded) return
   projectNo.value = seeded
+  // R67 ④: a different project may have its own trial still running.
+  dryRunProgress.value = null
+  if (busy.value) {
+    reattachWhenIdle = true
+    return
+  }
+  void watchRunningDryRun()
 })
 
 // A row's 刷新 arms this panel: it explains why the number has to be typed and puts the cursor in the
@@ -744,6 +914,8 @@ watch(() => props.armedAt, async (next, previous) => {
 interface TargetPrompt {
   request: StockPrepProjectTargetConfirmRequest
   resolve: (answer: boolean) => void
+  /** The run that asked. A yes counts only while that run is still current (see `answerTargetPrompt`). */
+  ticket: StockPrepProjectSyncRunTicket
 }
 const targetPrompt = ref<TargetPrompt | null>(null)
 type TargetNotice = Exclude<StockPrepProjectPullOutcome, { kind: 'synced' }>
@@ -762,17 +934,25 @@ function resolveTargetApi(): StockPreparationProjectTargetApi | null {
   return createStockPreparationProjectTargetApi(props.scope)
 }
 
+// A QUESTION BELONGS TO THE RUN THAT ASKED IT, AND SO TO ITS PROJECT, SCOPE AND SESSION (R78 known limitation a).
+// 「新建」, 「重新拉取」 and 「确认写入」 each continue that run's flow — a create, a pull, a write — for the project the
+// run started on. After the board has moved, a yes would write project A from project B's board, and nothing of it
+// would render there. So: a question asked by a run that is no longer current is answered no and never shown; any
+// invalidation answers an open question no (see `runGuard`); and a click counts as yes only if the run is still
+// current at that moment — another tab replacing the session notifies nobody.
+
 /** Ask, and wait for one of the prompt's two buttons. */
-function askOperator(request: StockPrepProjectTargetConfirmRequest): Promise<boolean> {
+function askOperator(request: StockPrepProjectTargetConfirmRequest, ticket: StockPrepProjectSyncRunTicket): Promise<boolean> {
+  if (!runGuard.isCurrent(ticket)) return Promise.resolve(false)
   return new Promise<boolean>((resolve) => {
-    targetPrompt.value = { request, resolve }
+    targetPrompt.value = { request, resolve, ticket }
   })
 }
 
 function answerTargetPrompt(answer: boolean): void {
   const prompt = targetPrompt.value
   targetPrompt.value = null
-  prompt?.resolve(answer)
+  prompt?.resolve(answer === true && runGuard.isCurrent(prompt.ticket))
 }
 
 // #3365「卸载即作废」: a question nobody can answer any more is a no, never a hang.
@@ -792,6 +972,18 @@ const promptPreviewText = computed<string>(() => {
   if (!request || request.kind !== 'write') return ''
   const text = stockPrepProjectTargetWritePreviewText(request.planned)
   return bi(text.zh, text.en)
+})
+/** 批次标识 BI-3 (§4.4, P-4): the create path's write prompt says whether the write will be recorded as a pull batch. */
+const pullBatchPromptText = computed<string>(() => {
+  const request = targetPrompt.value?.request
+  if (!request || request.kind !== 'write') return ''
+  const line = stockPrepPullBatchPreviewLine(request.pullBatch ?? null, request.planned.add)
+  return line ? bi(line.zh, line.en) : ''
+})
+/** 批次标识 BI-3 (§4.3): how this run's write was recorded; '' (no element) for none / not_installed / disabled. */
+const pullBatchOutcomeText = computed<string>(() => {
+  const line = stockPrepPullBatchOutcomeLine(report.value?.pullBatch?.outcome ?? null)
+  return line ? bi(line.zh, line.en) : ''
 })
 
 const targetNoticeText = computed<StockPrepPlainEntry>(() => {
@@ -817,11 +1009,106 @@ const repairAffordance = computed(() => stockPrepProjectSheetRepairAffordance(re
   canPull: canRun.value,
 }))
 
-function syncRunner(api: StockPreparationProjectSyncApi, target: string) {
+// ── R67 ④ — 试算 in the background ────────────────────────────────────────────────────────────────
+//
+// The run's dry-run step is an enqueue + poll (projectSync.ts). This panel shows its progress and
+// owns the one thing a page can decide about it: when to stop LOOKING. Unmounting aborts the poll —
+// the job itself keeps running on the server — and a later mount for the same project (a reload, a
+// tab switch) asks whether this caller's trial is still running and shows it again. A press while it
+// is still running attaches to it rather than reading PLM a second time.
+
+interface DryRunProgressState {
+  elapsedMs: number
+  /** `run`: this press's own job; `attached`: this press picked up a running one; `resumed`: seen on mount. */
+  source: 'run' | 'attached' | 'resumed'
+}
+const dryRunProgress = ref<DryRunProgressState | null>(null)
+let dryRunAbort: AbortController | null = null
+/** Bumped on every run, every invalidation and every unmount, so a re-attach probe that is still in flight lets go. */
+let dryRunWatchEpoch = 0
+
+function minutesSeconds(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+const dryRunProgressText = computed<string>(() => {
+  const progress = dryRunProgress.value
+  if (!progress) return ''
+  const elapsed = minutesSeconds(progress.elapsedMs)
+  if (progress.source === 'resumed') {
+    return bi(
+      `这个项目上次的试算还在后台读取 PLM(已用 ${elapsed})。再点一次会接着等它的结果,不会重复读取。`,
+      `This project's earlier trial is still reading PLM in the background (${elapsed} so far). Pressing again picks up its result instead of reading PLM twice.`,
+    )
+  }
+  return bi(
+    `正在后台试算,读取 PLM 中(已用 ${elapsed})。PLM 慢时会多等一会儿;离开本页不会中断,回来后会接着显示。`,
+    `Running the trial in the background — reading PLM (${elapsed} so far). A slow PLM just takes longer; leaving this page does not stop it, and the progress shows again when you return.`,
+  )
+})
+
+/**
+ * `isCurrent`: whether the run (or 核对) polling this trial is still the one the board is on. The line belongs to
+ * it: after the board moves, the poll goes on (the trial completes for its own project) but paints nothing, and
+ * the invalidation has already cleared what it painted (see `runGuard`).
+ */
+function dryRunOptions(isCurrent: () => boolean): StockPreparationDryRunOptions {
+  dryRunAbort?.abort()
+  dryRunAbort = new AbortController()
+  return {
+    signal: dryRunAbort.signal,
+    ...(props.dryRunPollWait ? { wait: props.dryRunPollWait } : {}),
+    onProgress: (progress) => {
+      if (!isCurrent()) return
+      dryRunProgress.value = { elapsedMs: progress.elapsedMs, source: progress.attached ? 'attached' : 'run' }
+    },
+  }
+}
+
+/** Re-attach: is this caller's trial of the seeded project still running? Shown, never re-run. */
+async function watchRunningDryRun(): Promise<void> {
+  const target = projectNo.value.trim()
+  if (!target || busy.value || !canRun.value) return
+  const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+  if (typeof api.dryRunJobStatus !== 'function') return
+  const epoch = ++dryRunWatchEpoch
+  for (;;) {
+    let job
+    try {
+      job = await api.dryRunJobStatus(target)
+    } catch {
+      job = null
+    }
+    if (epoch !== dryRunWatchEpoch || busy.value) return
+    if (!job || job.status !== 'running') {
+      if (dryRunProgress.value?.source === 'resumed') dryRunProgress.value = null
+      return
+    }
+    dryRunProgress.value = { elapsedMs: job.elapsedMs, source: 'resumed' }
+    await (props.dryRunPollWait
+      ? props.dryRunPollWait(STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS)
+      : new Promise<void>((resolve) => { setTimeout(resolve, STOCK_PREPARATION_DRY_RUN_JOB_POLL_INTERVAL_MS) }))
+    if (epoch !== dryRunWatchEpoch || busy.value) return
+  }
+}
+
+onMounted(() => { void watchRunningDryRun() })
+onUnmounted(() => {
+  dryRunWatchEpoch += 1
+  dryRunAbort?.abort()
+  dryRunAbort = null
+})
+
+function syncRunner(api: StockPreparationProjectSyncApi, target: string, ticket: StockPrepProjectSyncRunTicket) {
+  dryRunWatchEpoch += 1
   return (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => runStockPreparationProjectSync(api, target, (step) => {
+    // A step of a run the board has moved away from is not painted (see `runGuard` below); the run goes on.
+    if (!runGuard.isCurrent(ticket)) return
     // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
+    if (step.id === 'dry-run') dryRunProgress.value = null
     results.value = [...results.value, step]
-  }, hooks)
+  }, { ...hooks, dryRun: dryRunOptions(() => runGuard.isCurrent(ticket)) })
 }
 
 /** One way a run ends, whichever entry (run / repair) started it. */
@@ -831,6 +1118,7 @@ function applyPullOutcome(outcome: StockPrepProjectPullOutcome): void {
     return
   }
   report.value = outcome.report
+  if (showsLargeBomPull.value) largeBomChannel.value = { projectNo: submittedProjectNo.value, context: runContextKey.value }
   afterState.value = outcome.after
   lastRunOnProjectSheet.value = outcome.mode !== 'legacy'
   armedNote.value = false
@@ -848,6 +1136,52 @@ function resetRunState(): void {
   restorePrompt.value = false
   restoreTyped.value = ''
   restoreRefusal.value = null
+}
+
+// A RUN'S OUTCOME BELONGS TO THE PROJECT, SCOPE AND SESSION IT WAS STARTED FOR (#6591 review, follow-up O2). A
+// 同步 can read PLM and write for minutes; meanwhile the board may open another project (this panel stays mounted
+// across that switch — only its `projectNo` prop moves), the scope may move, or another principal may take the
+// session. The run itself is NOT stopped and its writes are NOT touched: they are complete and correct for the
+// project it ran on, and that project's board re-reads them from the server when it is opened again. What is
+// dropped is the RENDERING: no verdict, no steps, no notice, no `project-target-changed` and no `synced(report)` —
+// the board's 「下一步」 bar must never read project A's report while project B is open. Invalidation also clears
+// whatever this panel was showing, so a FINISHED run's verdict does not stay on the next project's board either.
+// That includes a question the run is still waiting on and the trial's progress line: both are about the project
+// the board has left.
+const runGuard = createStockPrepProjectSyncRunGuard((cause) => {
+  resetRunState()
+  if (targetPrompt.value) answerTargetPrompt(false)
+  dryRunProgress.value = null
+  // …and the re-attach probe that painted it lets go: its polls go to the project and scope it started under (a poll
+  // already in flight also carries the old session), so after a tenant, workspace or session switch it would paint a
+  // trial that is not this board's back here. A project switch starts the new project's own probe from the seed
+  // watch; nothing is probed from here.
+  dryRunWatchEpoch += 1
+  // A write ticked from this page never continues under another principal's session.
+  if (cause === 'session') largeBomChannel.value = null
+})
+/** The project and scope the panel is about now — the same three sources whose change invalidates a run (below). */
+const runContextKey = computed<string>(() => JSON.stringify([props.projectNo ?? '', props.scope.tenantId ?? null, props.scope.workspaceId ?? null]))
+/**
+ * The large-BOM background channel this panel started, and the context it started in. NOT derived from `report`: an
+ * invalidation clears `report`, and the channel's apply is ticked from this page (largeBomPull.ts), so unmounting
+ * it would cut the write for its project short. After the board moves to another project or scope it keeps running,
+ * hidden, and it is shown again when the board is back on the context it started in (A → B → A); a session switch
+ * stops it; the next run this panel starts replaces it (as before). A trial that LANDS after the board moved starts
+ * no channel at all, so the context recorded at landing is the one the run started in.
+ */
+const largeBomChannel = ref<{ projectNo: string; context: string } | null>(null)
+watch([() => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], () => runGuard.invalidate(), { flush: 'sync' })
+onUnmounted(() => runGuard.dispose())
+
+/** A run lands: its own board renders it; any other board is left as the switch left it (nothing of this run). */
+function landPullOutcome(ticket: StockPrepProjectSyncRunTicket, outcome: StockPrepProjectPullOutcome): void {
+  if (!runGuard.isCurrent(ticket)) {
+    // Also covers a session replaced from another tab, which notifies nobody: what was painted mid-run goes too.
+    resetRunState()
+    return
+  }
+  applyPullOutcome(outcome)
 }
 
 // ── S4 (R-38) — 「恢复并重新拉取」 ───────────────────────────────────────────────────────────────────
@@ -879,12 +1213,18 @@ const restoreRefusalText = computed<StockPrepPlainEntry>(() => {
 async function onRestoreAndRepull(): Promise<void> {
   const target = submittedProjectNo.value
   if (!target || busy.value || !canRun.value) return
+  const ticket = runGuard.ticket()
   busy.value = true
   let outcome: StockPrepProjectLifecycleOutcome
   try {
     outcome = await changeStockPreparationProjectTargetLifecycle({ targetApi: resolveTargetApi(), canPull: canRun.value }, 'restore', target, restoreTyped.value)
   } finally {
     busy.value = false
+  }
+  // The restore itself stands; the pull it was going to start is not started on another project's board.
+  if (!runGuard.isCurrent(ticket)) {
+    resetRunState()
+    return
   }
   if (outcome.kind !== 'done') {
     restoreRefusal.value = outcome
@@ -908,19 +1248,24 @@ async function onRun(): Promise<void> {
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
   resetRunState()
+  largeBomChannel.value = null
+  const ticket = runGuard.ticket()
   busy.value = true
+  let outcome: StockPrepProjectPullOutcome
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    applyPullOutcome(await runStockPreparationProjectPull({
+    outcome = await runStockPreparationProjectPull({
       targetApi: resolveTargetApi(),
       canPull: canRun.value,
-      confirm: askOperator,
-      runSync: syncRunner(api, target),
-    }, target))
+      confirm: (request) => askOperator(request, ticket),
+      runSync: syncRunner(api, target, ticket),
+    }, target)
   } finally {
     targetPrompt.value = null
+    dryRunProgress.value = null
     busy.value = false
   }
+  landPullOutcome(ticket, outcome)
 }
 
 /** 「修复项目表（重装客户包）」: the create route's replay heals the pack, then the four steps again. */
@@ -928,28 +1273,193 @@ async function onRepair(): Promise<void> {
   const target = submittedProjectNo.value
   if (!target || busy.value || !canRun.value) return
   resetRunState()
+  largeBomChannel.value = null
+  const ticket = runGuard.ticket()
   busy.value = true
+  let outcome: StockPrepProjectPullOutcome
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    applyPullOutcome(await repairStockPreparationProjectSheet({
+    outcome = await repairStockPreparationProjectSheet({
       targetApi: resolveTargetApi(),
       canPull: canRun.value,
-      runSync: syncRunner(api, target),
-    }, target))
+      runSync: syncRunner(api, target, ticket),
+    }, target)
   } finally {
+    dryRunProgress.value = null
     busy.value = false
   }
+  landPullOutcome(ticket, outcome)
 }
 
 /** P0-3: the workspace title badge's only window into "a run is happening right now". */
-watch(busy, (value) => emit('busy-changed', value))
+watch(busy, (value) => {
+  emit('busy-changed', value)
+  // The board moved while a run was in flight: the new project's re-attach probe runs now (see the seed watch).
+  if (!value && reattachWhenIdle) {
+    reattachWhenIdle = false
+    void watchRunningDryRun()
+  }
+})
+
+// ── 备料分批拉取第一期 step 4 PR-7 — 「核对」 (design §9.2; R-62 ⑦) ─────────────────────────────────────
+//
+// ONE preview, nothing else (projectSync.ts `runStockPreparationSettlementCheck`): a clean computation after the
+// newest execution settles the project server-side. NOT a fifth step — the four-step list is untouched. Offered
+// only to a caller who may run the pull, and only while the board's stanza says the project is written but not
+// checked. THE CLIENT NEVER CLAIMS 「核对通过」 FROM ITS OWN COUNTS: after the check it emits `synced(null)` so the
+// board re-reads its stanza, and only that re-read (`refreshStatus` / `refreshSettled` moving) may say so.
+
+const showsCheck = computed<boolean>(() => {
+  if (!canRun.value) return false
+  const status = props.refreshStatus
+  return status === 'executed_pending_settlement' || (status === 'complete' && props.refreshSettled !== true)
+})
+const checkBusy = ref(false)
+const checkResult = ref<StockPreparationSettlementCheckResult | null>(null)
+/** `submitted` until the board's stanza moves after the check; then `answered` (its own label is shown). */
+const checkPhase = ref<'idle' | 'submitted' | 'answered'>('idle')
+
+watch(() => [props.refreshStatus, props.refreshSettled] as const, () => {
+  if (checkPhase.value === 'submitted') checkPhase.value = 'answered'
+})
+// A CHECK ANSWER BELONGS TO THE PROJECT, SCOPE AND SESSION IT WAS ASKED FOR (#6324 review N1). The check can read
+// PLM for minutes; meanwhile the board may open another project, the scope may move, or another principal may take
+// the browser session. `clearCheck` bumps a generation on each of those (and on unmount), and a late answer whose
+// generation or session no longer matches is DROPPED: no result line (「核对发现还有 N 处要写入…」 on the wrong
+// project) and no `synced(null)`. The session is compared by value at landing as well, because another tab
+// replacing the token notifies nobody (authPrincipal.ts `onAuthPrincipalChange`).
+let checkGeneration = 0
+let checkMounted = true
+function clearCheck(): void {
+  checkGeneration += 1
+  checkResult.value = null
+  checkPhase.value = 'idle'
+}
+function readCheckSessionSignature(): string {
+  try {
+    const session = readAuthSessionSignature()
+    if (session === 'invalid') return 'invalid'
+    // A focus refresh can replace the access snapshot without rotating the token.
+    return JSON.stringify([session, localStorage.getItem('user_permissions'), localStorage.getItem('user_roles')])
+  } catch {
+    return 'invalid'
+  }
+}
+watch([() => props.projectNo, () => props.scope.tenantId, () => props.scope.workspaceId], clearCheck, { flush: 'sync' })
+const unsubscribeCheckSession = onAuthPrincipalChange(clearCheck)
+onUnmounted(() => {
+  checkMounted = false
+  clearCheck()
+  unsubscribeCheckSession()
+})
+
+async function runSettlementCheck(): Promise<void> {
+  if (!showsCheck.value || busy.value || checkBusy.value) return
+  const target = (props.projectNo || projectNo.value).trim()
+  if (!target) return
+  clearCheck()
+  const generation = checkGeneration
+  const session = readCheckSessionSignature()
+  checkBusy.value = true
+  busy.value = true
+  let result: StockPreparationSettlementCheckResult | null = null
+  try {
+    const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+    result = await runStockPreparationSettlementCheck(api, target, { dryRun: dryRunOptions(() => checkMounted && generation === checkGeneration) })
+  } finally {
+    dryRunProgress.value = null
+    busy.value = false
+    checkBusy.value = false
+  }
+  if (!checkMounted || generation !== checkGeneration || session === 'invalid' || session !== readCheckSessionSignature()) return
+  checkResult.value = result
+  checkPhase.value = 'submitted'
+  // The board re-reads its stanza; that re-read is the authority (see above).
+  emit('synced', null)
+}
+
+const checkLine = computed<{ text: string; next: string } | null>(() => {
+  const result = checkResult.value
+  if (!result) return null
+  if (result.outcome === 'settled') {
+    if (checkPhase.value !== 'answered') {
+      return { text: bi('核对已提交:这次试算没有要写入的地方。', 'Check submitted: this preview planned nothing to write.'), next: bi('正在等项目备料页重新读取状态。', 'Waiting for the project page to re-read its state.') }
+    }
+    if (props.refreshStatus === 'complete' && props.refreshSettled === true) {
+      return { text: bi('核对通过:本项目分批拉取状态为「已完成」,可以正式导出。', 'Check passed: this project’s batch refresh reads “complete”; the formal export is open.'), next: '' }
+    }
+    const label = stockPrepRefreshStatusLabel(props.refreshStatus)
+    return {
+      text: bi(`核对已提交;本项目分批拉取状态:${label.zh}。`, `Check submitted; this project’s batch refresh now reads: ${label.en}.`),
+      next: bi('看上面的分批拉取提示。', 'See the batch-refresh note above.'),
+    }
+  }
+  if (result.outcome === 'changes_pending') {
+    const planned = result.planned
+    const n = planned ? planned.add + planned.update + planned.inactive : 0
+    return { text: bi(`核对发现还有 ${n} 处要写入,请再同步一次。`, `The check found ${n} change(s) still to write; sync again.`), next: '' }
+  }
+  if (result.outcome === 'suspended') {
+    const plain = stockPrepSyncVerdictPlain('suspended')
+    return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
+  }
+  if (result.outcome === 'awaiting_recovery') {
+    const plain = stockPrepSyncVerdictPlain('awaiting_recovery')
+    return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
+  }
+  // PR-9 (R-77 ⑨): 复核 ≠ 核对. The check met a written change still awaiting its review: say so — never 「核对通过」
+  // and never a failed check; the board's re-read stays the only authority (R-62 ⑦).
+  if (result.outcome === 'review_pending') {
+    return {
+      text: bi(
+        '核对已提交;本项目有一次已写入的变更等待复核——复核不代替核对,核对也不代替复核,两样都完成后才能正式导出。',
+        'Check submitted; a written change of this project awaits its review — the review does not replace the check, nor the check the review; the formal export opens once both are done.',
+      ),
+      next: bi('拉取人员在「拉取待确认」里完成变更复核;之后以项目备料页为准,显示「已执行待核对」时再点「核对」。', 'The puller completes the change review on “Pull holds”; after that the project page decides — when it shows “written, awaiting check”, press “Check”.'),
+    }
+  }
+  const plain = stockPrepSyncReasonPlain(result.reason)
+  return {
+    text: plain ? bi(plain.zh, plain.en) : bi('核对没有完成。', 'The check did not complete.'),
+    next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '',
+  }
+})
+
+function stockPrepRefreshStatusLabel(status: string | null | undefined): { zh: string; en: string } {
+  // A complete-but-unsettled project is 「待核对」, never 「已完成」 (the posture's own word — #6566 review N5).
+  if (status === 'complete') return { zh: '待核对', en: 'awaiting check' }
+  // PR-9 (the #6579 version-skew residual): the en form reads its own map too; a token this build does not know reads
+  // 「未识别」 / "not recognised" — never the raw token inside the sentence.
+  const known = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
+  if (!known) return { zh: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.zh, en: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.en }
+  const key = status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH
+  return { zh: STOCK_PREP_REFRESH_STATUS_LABELS_ZH[key], en: STOCK_PREP_REFRESH_STATUS_LABELS_EN[key] }
+}
+
+/** PR-9: the review-pending run's pending reviews (values-free integer, from the step detail), or null. */
+const reviewPendingCount = computed<number | null>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'review_pending') return null
+  for (const step of value.steps) {
+    const count = step.detail ? step.detail.pendingReviews : undefined
+    if (typeof count === 'number' && Number.isInteger(count) && count >= 0) return count
+  }
+  return null
+})
+
+/** The suspended run's holds, from the report (values-free integer), or null. */
+const suspendedHoldCount = computed<number | null>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'suspended') return null
+  return value.refresh?.holdCount ?? null
+})
 
 /**
  * P0-3: lets the workspace's "下一步" bar re-run THIS SAME sync (再同步一次 / go-back-and-resync) —
  * without this the parent would need its own second copy of `onRun`'s logic to drive a resync, and
- * two copies is how the two eventually disagree about what "同步" does.
+ * two copies is how the two eventually disagree about what "同步" does. PR-7: and the bar's 「核对」.
  */
-defineExpose({ run: onRun })
+defineExpose({ run: onRun, runSettlementCheck })
 
 /** Every planned step, with its result once it has one. Steps not reached are still listed. */
 const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descriptor) => {
@@ -993,6 +1503,9 @@ function stepIcon(status: StockPreparationProjectSyncStepStatus): string {
 }
 
 function reasonText(result: StockPreparationProjectSyncStepResult): string {
+  // 批次标识 BI-3 (critic C-5): a pull-batch refusal / run stop reads its own code first (`null` for every other step).
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zh, pullBatch.en)
   const plain = stockPrepSyncReasonPlain(result.reason)
   // Fails soft, like every other lookup in plainLanguage.ts: a reason added later renders as its own
   // code rather than blanking the line.
@@ -1000,6 +1513,8 @@ function reasonText(result: StockPreparationProjectSyncStepResult): string {
 }
 
 function reasonNext(result: StockPreparationProjectSyncStepResult): string {
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zhNext ?? '', pullBatch.enNext ?? '')
   const plain = stockPrepSyncReasonPlain(result.reason)
   if (!plain) return ''
   return bi(plain.zhNext ?? '', plain.enNext ?? '')
@@ -1016,9 +1531,13 @@ const verdictNext = computed<string>(() => {
   return bi(plain.zhNext ?? '', plain.enNext ?? '')
 })
 
-/** The one verdict that needs a number in its headline: how many rows are still missing. */
+/** The one verdict that needs a number in its headline: how many rows are still missing. PR-7: and how many holds. */
 const verdictCount = computed<string>(() => {
   const value = report.value
+  if (value && value.verdict === 'suspended') {
+    const holds = suspendedHoldCount.value
+    return holds !== null && holds > 0 ? bi(`有 ${holds} 项待拉取人员确认。`, `${holds} item(s) await the puller’s confirmation.`) : ''
+  }
   if (!value || value.verdict !== 'partial') return ''
   const failedRows = value.written?.failed ?? 0
   if (failedRows <= 0) return ''
@@ -1044,6 +1563,18 @@ const showsSheetLink = computed<boolean>(() => {
 const posture = computed<StockPrepPosture>(() => {
   const value = report.value
   if (!value) return stockPrepPosture({})
+  // PR-7: a suspended / awaiting-recovery run speaks the refresh posture's own words (待确认 N 件 / 上次写入未完成),
+  // the SAME function the board's title reads — never 「等您拿主意」 over a puller's holds.
+  if (value.verdict === 'suspended') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: value.refresh?.holdCount ?? 0 })
+  }
+  if (value.verdict === 'awaiting_recovery') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'failed_pending_recovery' })
+  }
+  // PR-9: a review-pending run speaks the refresh posture's own words (变更待复核).
+  if (value.verdict === 'review_pending') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'change_pending_review' })
+  }
   const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
   const missingList = value.missingComponents
   const missingComponentsCount = missingList && hasMissingComponents(missingList) ? effectiveDistinctCount(missingList) : 0
@@ -1463,6 +1994,15 @@ function onExportMissingComponents(): void {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ms-space-2);
+}
+
+/* A full-width line under the row of next-step buttons, so the other buttons stay on one row. */
+.sp-sync__no-link-hint {
+  flex-basis: 100%;
+  order: 99;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-3);
 }
 
 .sp-sync__link {

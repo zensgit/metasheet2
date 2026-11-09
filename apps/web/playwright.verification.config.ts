@@ -15,10 +15,19 @@ export default defineConfig({
   //
   // 备料 (stock-prep-*) does the same, for the same reason plus one more: its lane boots its own
   // Vite on 5176 and mints its own principal per test, so collecting those specs here would run
-  // them against THIS lane's server and harness assumptions. The two ignores are asserted to be
-  // exhaustive by scripts/ops/stock-prep-browser-ci-wiring.test.mjs (and its approval sibling), so a
-  // spec that belongs to neither lane cannot silently fall out of every lane.
-  testIgnore: ['**/approval-*.spec.ts', '**/stock-prep-*.spec.ts', '**/attendance-makeup-request.spec.ts'],
+  // them against THIS lane's server and harness assumptions. The attendance makeup spec
+  // (playwright.attendance-makeup.config.ts) and the tasks acceptance walk (tasks-*,
+  // playwright.tasks-verification.config.ts, run by tasks-web-guard.yml, own Vite on 5177) have
+  // their own lanes too.
+  //
+  // The four ignores are checked from both sides. scripts/ops/approval-browser-ci-wiring.test.mjs
+  // asserts that this lane collects exactly the specs no dedicated lane owns (so none of approval-*,
+  // stock-prep-*, tasks-* or the makeup spec), and that the approval and makeup lanes each collect
+  // exactly theirs. scripts/ops/stock-prep-browser-ci-wiring.test.mjs and
+  // scripts/ops/tasks-browser-ci-wiring.test.mjs each assert that their lane collects exactly its
+  // on-disk specs and this lane none of them. So a spec that belongs to no dedicated lane cannot
+  // silently fall out of every lane.
+  testIgnore: ['**/approval-*.spec.ts', '**/stock-prep-*.spec.ts', '**/attendance-makeup-request.spec.ts', '**/tasks-*.spec.ts'],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

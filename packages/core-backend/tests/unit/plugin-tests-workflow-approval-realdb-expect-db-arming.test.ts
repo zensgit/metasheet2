@@ -1,3 +1,4 @@
+import { requiredSuiteJob } from '../../../../scripts/ops/plugin-tests-workflow-contract.mjs'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,7 +24,7 @@ import { describe, expect, it } from 'vitest'
  * rather than going RED. This guard pins the fix and reds if it is ever undone.
  *
  * DESIGN NOTE — real YAML, not text/regex: the step is located and its `env` read via a real
- * YAML parser (`js-yaml`) over the PARSED document (`jobs.test.steps[].id` / `.env`), never by
+ * YAML parser (`js-yaml`) over the PARSED document (`jobs["approval-db"].steps[].id` / `.env`), never by
  * scanning workflow bytes with a regex or `indexOf` slice — a source-text match proves a string
  * appeared somewhere, not that it landed on the right YAML key (see
  * feedback_source_text_assertions_are_not_behaviour). The one place this file DOES read raw text
@@ -59,11 +60,7 @@ interface ParsedStep {
 }
 
 interface ParsedWorkflow {
-  jobs?: {
-    test?: {
-      steps?: ParsedStep[]
-    }
-  }
+  jobs?: Record<string, { steps?: ParsedStep[] }>
 }
 
 function loadWorkflow(workflowYamlText: string): ParsedWorkflow {
@@ -71,7 +68,7 @@ function loadWorkflow(workflowYamlText: string): ParsedWorkflow {
 }
 
 function findStepById(doc: ParsedWorkflow, stepId: string): ParsedStep | undefined {
-  const steps = doc.jobs?.test?.steps ?? []
+  const steps = requiredSuiteJob(doc, 'approval-db').steps as ParsedStep[]
   return steps.find((step) => step && step.id === stepId)
 }
 

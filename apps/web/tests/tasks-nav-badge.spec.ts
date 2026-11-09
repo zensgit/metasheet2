@@ -221,3 +221,6 @@ describe('app-level tasks nav entry + badge gating (P2-1)', () => {
     expect(root.querySelector('.app-nav')).toBeTruthy()
   })
 })
+
+// Collect the real shell before its first timed mount.
+await import('../src/App.vue')

@@ -178,8 +178,11 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('index.ts :: ensureObjectDefaultView :: ensureObjectDefaultView', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning ensureObjectDefaultView: meta_views only.'),
   NONWRITER('index.ts :: ensureView :: ensureView', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning ensureView: meta_views only.'),
   NONWRITER('index.ts :: patchObjectFieldProperty :: patchObjectFieldProperty', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning patchObjectFieldProperty: meta_fields.property only.'),
+  NONWRITER('index.ts :: closeSheetGridExport :: closeSheetGridExport', 'new', '备料分批拉取第一期 step 3 (PR #6507): row "new" because the ADR §3.11 table (field-retype first-batch ADR, rows 1–35 incl. 增补 A) was closed before this writer existed and lists only paths that write meta_records.data or field schema; this one writes neither. Host-API port (own transaction) → services/sheet-grid-export-closure-service closeSheetGridExport: fence → meta_sheets row lock → one set-once UPDATE of meta_sheets.grid_export_closure*; no meta_records statement, nothing reached through callees.'),
+  NONWRITER('index.ts :: promoteObjectViewToFirst :: promoteObjectViewToFirst', 'new', '批次标识 BI-5: row "new" for the same reason as closeSheetGridExport above (the ADR §3.11 table lists only paths that write meta_records.data or field schema; this one writes neither). Host-API port (own transaction) → multitable/view-landing promoteObjectViewToFirst: fence → FOR UPDATE lock on the sheet\'s meta_views rows → one UPDATE of meta_views.created_at of one view; no meta_records statement, nothing reached through callees.'),
   NONWRITER('index.ts :: lockSource :: <no in-tree call>', '21', 'C1-F1: attendance cleaning port the plugin calls inside its w4c3c transaction; lockAttendanceCleaningSource → lockAttendanceCleaningProjectionAccess → lockDailyProjectionGroup takes the fence and only locks / reads (FOR UPDATE / FOR SHARE); no data write reached.'),
   NONWRITER('multitable/provisioning.ts :: ensureMissingObjectFields :: ensureMissingObjectFields', '26', 'C1-F1: the repair-transaction surface (buildObjectFieldsRepairSurface) forwards the caller\'s transaction query to ensureMissingObjectFields: meta_fields only.'),
+  NONWRITER('multitable/provisioning.ts :: readObjectMaxFieldOrder :: readObjectMaxFieldOrder', '26', 'Y7 review MEDIUM-2: the repair-transaction surface (buildObjectFieldsRepairSurface) forwards the caller\'s transaction query to readObjectMaxFieldOrder, which takes the fence then runs ONE SELECT MAX("order") FROM meta_fields; no write of any table.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimAttachmentBlobPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimOrphanAttachmentForPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-purge-claim.ts :: claimDirectAttachmentPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
@@ -958,7 +961,7 @@ describe('slice 3b — C2-F1: a write inside the body of an entry or a seam, thr
     ])
   })
 
-  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(\n    `SELECT id, sheet_id, name, type, property, "order"\n     FROM meta_fields\n     WHERE sheet_id = $1 AND id = $2`,'
+  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])'
 
   it('W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check', () => {
     const c = patchedReal(

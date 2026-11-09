@@ -186,6 +186,40 @@ function intOrNull(value) {
 }
 
 /**
+ * 备料分批拉取第一期 step 3 PR B (migration 101) — THE PILOT PROJECTION, kept APART from
+ * `rowToPublicTarget` on purpose: the public target is what every S1–S4 surface answers and it must stay
+ * byte-identical to what it answered before the pilot columns existed; the pilot state is read by the
+ * lane gates, the readiness route and the step-4 governance consult, and by nothing else.
+ *
+ * COLUMN TOLERANCE (step-4 design §12): a row read on a database where migration 101 has NOT run carries
+ * no `pilot_enabled_at` key at all (`SELECT *`), and that reads as NOT pilot — nothing could have been
+ * enabled there. A read that FAILS is the caller's `unreadable` (the store throws; it never answers
+ * "not pilot" for a failure). Handles, enums, a server clock and an integer only.
+ */
+function rowToPilotState(row) {
+  if (!row) return null
+  const enabledAt = row.pilot_enabled_at
+  const pilot = enabledAt !== undefined && enabledAt !== null
+  return {
+    tenantId: row.tenant_id,
+    projectNo: row.project_no,
+    sheetId: row.sheet_id,
+    objectId: row.object_id,
+    status: row.status,
+    pilot,
+    pilotEnabledAt: pilot ? isoOrNull(enabledAt) : null,
+    pilotEnabledBy: pilot ? (row.pilot_enabled_by ?? null) : null,
+    pilotReadinessVersion: pilot ? intOrNull(row.pilot_readiness_version) : null,
+  }
+}
+
+// PR B: the CAS of `markPilotEnabled` found the row moved between the FOR UPDATE read and the update —
+// impossible under the per-tenant advisory lock, so it is a typed 409 rather than a silent retry.
+const PROJECT_TARGET_PILOT_STATE_MOVED_CODE = 'STOCK_PREP_PILOT_STATE_MOVED'
+// SQLSTATE 42P01 undefined_table: the ONE failure `probeTableReadable` reports by name (values-free).
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
+
+/**
  * A DATE column as the calendar day it holds (`YYYY-MM-DD`), or null.
  *
  * S3 fix round 1 (R2): node-postgres parses a DATE as LOCAL midnight (`new Date(y, m - 1, d)`,
@@ -656,7 +690,118 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     })
   }
 
-  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, tryWithOverviewLock }
+  // ── 备料分批拉取第一期 step 3 PR B (migration 101): the pilot marker ──────────────────────────────
+
+  /**
+   * The handle a pilot read runs ON. `options.executor` (optional) is a scoped-db TRANSACTION handle of the
+   * caller's: the step-4 governance consult passes its REPEATABLE READ snapshot handle so the registry row and
+   * the step-4 rows it is compared with come from ONE snapshot (stock-preparation-continuation-store.cjs
+   * readGovernanceRows, #6514 review X-1). Absent => this store's own db, exactly as before. A handle that
+   * cannot read is refused (a throw is the caller's unreadable, never "not pilot").
+   */
+  function pilotReadHandle(options) {
+    const executor = options && typeof options === 'object' ? options.executor : undefined
+    if (executor === undefined || executor === null) return db
+    if (typeof executor.selectOne !== 'function') {
+      throw new Error('createStockPreparationProjectTargetStore: a pilot read executor must expose selectOne')
+    }
+    return executor
+  }
+
+  /** The pilot state of ONE project, by (tenant, project). `null` is ABSENT; a throw is the caller's unreadable. */
+  async function getPilotState(input = {}, options = {}) {
+    const { tenantId, projectNo } = scope(input)
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { tenant_id: tenantId, project_no: projectNo }))
+  }
+
+  /**
+   * The pilot state of the project registered on ONE sheet — the lane gates' read: a large-BOM job and a
+   * chunk carry the SHEET they write, and migration 087's unique index makes "sheet -> row" one row. Not
+   * tenant-scoped on purpose (sheet ids are globally unique; the caller compares `tenantId` if it must);
+   * a refusal derived from it is values-free, so no tenant learns anything it could not already see.
+   */
+  async function getPilotStateBySheetId(input = {}, options = {}) {
+    const sheetId = requiredString(input.sheetId, 'sheetId')
+    return rowToPilotState(await pilotReadHandle(options).selectOne(PROJECT_TARGET_TABLE, { sheet_id: sheetId }))
+  }
+
+  /**
+   * MARK ONE PROJECT PILOT — set-once. Same discipline as a lifecycle transition: one transaction, the
+   * SAME per-tenant advisory lock `create` / `archive` / `restore` take, the row FOR UPDATE, then the
+   * preconditions — an absent row is ABSENT, an ARCHIVED row is 409 STOCK_PREPARATION_PROJECT_ARCHIVED
+   * (a pilot is a live sheet), a row ALREADY pilot answers `{ enabled: false, alreadyEnabled: true }` with
+   * the ORIGINAL stamp (a re-POST repairs the host stamp and writes nothing here, no second audit row) —
+   * then ONE compare-and-set update whose `where` repeats `status: 'active'` AND `pilot_enabled_at IS NULL`,
+   * so even a caller that bypassed the read could not move a row that is not active-and-unmarked. All
+   * three columns land in the same statement (migration 101's CHECK ties the stamp to its version).
+   * There is NO unset counterpart (R-53 ②).
+   *
+   * Pre-enable hardening F-4(c) (step-4 design §23.4): `onMarked(trx, { pilot })`, when given, runs INSIDE
+   * this transaction right after the compare-and-set landed — and ONLY then (never on alreadyEnabled) — so
+   * the caller's audit row commits or rolls back with the mark itself. A throw from it rolls the mark back.
+   */
+  async function markPilotEnabled(input = {}) {
+    const { tenantId, projectNo } = scope(input)
+    const actorId = optionalString(input.actorId)
+    const readinessVersion = input.readinessVersion
+    if (!Number.isInteger(readinessVersion) || readinessVersion < 1) {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'readinessVersion must be a positive integer', { field: 'readinessVersion' })
+    }
+    const onMarked = input.onMarked === undefined ? null : input.onMarked
+    if (onMarked !== null && typeof onMarked !== 'function') {
+      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'onMarked must be a function', { field: 'onMarked' })
+    }
+    const at = now()
+    return db.transaction(async (trx) => {
+      if (!trx || typeof trx.advisoryXactLock !== 'function' || typeof trx.selectOneForUpdate !== 'function' || typeof trx.updateRow !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock, selectOneForUpdate and updateRow')
+      }
+      await trx.advisoryXactLock(`${PROJECT_TARGET_CREATE_LOCK_PREFIX}${tenantId}`)
+      const key = { tenant_id: tenantId, project_no: projectNo }
+      const current = await trx.selectOneForUpdate(PROJECT_TARGET_TABLE, key)
+      if (!current) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ABSENT_CODE, 'this project has no registered stock-preparation sheet', { field: 'projectNo' })
+      }
+      if (current.status !== 'active') {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_ARCHIVED_CODE, 'this project\'s stock-preparation sheet is archived; restore it before enabling the pilot', { field: 'projectNo' })
+      }
+      const already = rowToPilotState(current)
+      if (already.pilot) return { enabled: false, alreadyEnabled: true, pilot: already }
+      const updated = firstRow(await trx.updateRow(
+        PROJECT_TARGET_TABLE,
+        { pilot_enabled_at: at, pilot_enabled_by: actorId, pilot_readiness_version: readinessVersion, updated_at: at },
+        { ...key, status: 'active', pilot_enabled_at: null },
+      ))
+      if (!updated) {
+        throw new StockPreparationProjectTargetStoreError(409, PROJECT_TARGET_PILOT_STATE_MOVED_CODE, 'the project row moved while the pilot was being enabled; read it again', { field: 'projectNo' })
+      }
+      const pilot = rowToPilotState(updated)
+      if (onMarked) await onMarked(trx, { pilot })
+      return { enabled: true, alreadyEnabled: false, pilot }
+    })
+  }
+
+  /**
+   * PR B readiness: is a plugin table READABLE on this database? `{ readable: true }` after one bounded
+   * SELECT; `{ readable: false, reason: 'undefined_table' }` for SQLSTATE 42P01 (a later migration has not
+   * run); `{ readable: false, reason: 'read_failed', sqlState? }` for anything else. Never throws, never
+   * answers readable for a failure. The table name goes through the db helper's own `integration_` scope.
+   */
+  async function probeTableReadable(table) {
+    try {
+      await db.select(table, { limit: 1 })
+      return { readable: true }
+    } catch (error) {
+      const sqlState = error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined
+      if (sqlState === UNDEFINED_TABLE_SQLSTATE) return { readable: false, reason: 'undefined_table' }
+      return { readable: false, reason: 'read_failed', ...(sqlState ? { sqlState } : {}) }
+    }
+  }
+
+  return {
+    get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, tryWithOverviewLock,
+    getPilotState, getPilotStateBySheetId, markPilotEnabled, probeTableReadable,
+  }
 }
 
 module.exports = {
@@ -676,6 +821,9 @@ module.exports = {
   PROJECT_TARGET_PULL_OUTCOMES,
   PROJECT_TARGET_PULL_CODE_UNKNOWN,
   PROJECT_OVERVIEW_LOCK_PREFIX,
+  // PR B (migration 101): the pilot projection, apart from the public target.
+  PROJECT_TARGET_PILOT_STATE_MOVED_CODE,
+  rowToPilotState,
   StockPreparationProjectTargetStoreError,
   createStockPreparationProjectTargetStore,
   normalizeProjectFieldsPatch,
@@ -683,6 +831,7 @@ module.exports = {
   __internals: {
     rowToPublicTarget,
     rowToProjectFields,
+    rowToPilotState,
     dayOrNull,
     isUniqueViolation,
   },

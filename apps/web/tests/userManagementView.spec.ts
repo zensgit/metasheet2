@@ -1,6 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+/* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
+import { useLocale } from '../src/composables/useLocale'
 import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
@@ -81,7 +85,7 @@ async function setSelectValue(select: HTMLSelectElement, value: string): Promise
 
 function registerRouterLink(app: App<Element>, withHref = false): void {
   app.component('RouterLink', {
-    props: ['to'],
+    props: { to: { type: [String, Object], default: '' } },
     computed: {
       resolvedHref(): string {
         return typeof this.to === 'string' ? this.to : String(this.to || '')
@@ -102,6 +106,7 @@ type UserFixture = {
   position?: string | null
   hireDate?: string | null
   role: string
+  roleIds?: string[]
   is_active: boolean
   grantEnabled: boolean
   dingtalkGrantUpdatedAt?: string | null
@@ -288,6 +293,7 @@ function createApiImplementation(
       position: user.position ?? null,
       hireDate: user.hireDate ?? null,
       role: user.role,
+      roleIds: user.roleIds ?? [],
       is_active: user.is_active,
       is_admin: user.role === 'admin',
       last_login_at: '2026-04-09T00:00:00.000Z',
@@ -523,25 +529,87 @@ function createApiImplementation(
 
     if (pathname === '/api/admin/users') {
       const pinUserId = url.searchParams.get('userId')?.trim() || ''
-      const visible = typeof options.paginatedPageSize === 'number'
-        ? filteredUsers.slice(0, Math.max(options.paginatedPageSize, 0))
-        : filteredUsers
+      const role = url.searchParams.get('role')?.trim() || ''
+      const accountStatus = url.searchParams.get('accountStatus')?.trim() || ''
+      const listFilter = url.searchParams.get('listFilter')?.trim() || ''
+      const sort = url.searchParams.get('sort')?.trim() || ''
+      const direction = url.searchParams.get('dir') === 'desc' ? -1 : 1
+      const requestedPage = Math.max(1, Number(url.searchParams.get('page') || '1') || 1)
+      const requestedPageSize = Number(url.searchParams.get('pageSize') || '')
+      const openIdMissing = (user: UserFixture) => (
+        user.dingtalkIdentityExists !== false
+        && Boolean(user.dingtalkCorpId ?? 'dingcorp')
+        && !user.hasOpenId
+      )
+      let listed = filteredUsers.filter((user) => {
+        if (role && user.role !== role) return false
+        if (accountStatus === 'active' && !user.is_active) return false
+        if (accountStatus === 'inactive' && user.is_active) return false
+        if (listFilter === 'account-disabled' && user.is_active) return false
+        if (listFilter === 'dingtalk-disabled' && user.grantEnabled !== false) return false
+        if (listFilter === 'directory-unlinked' && user.directoryLinked === true) return false
+        if (listFilter === 'dingtalk-openid-missing' && !openIdMissing(user)) return false
+        if (listFilter === 'platform-admin' && user.role !== 'admin') return false
+        return true
+      })
+      if (sort === 'name' || sort === 'role' || sort === 'status') {
+        const valueOf = (user: UserFixture) => {
+          if (sort === 'name') return user.name
+          if (sort === 'role') return user.role
+          return user.is_active ? '0' : '1'
+        }
+        listed = [...listed].sort((left, right) => valueOf(left).localeCompare(valueOf(right), 'zh') * direction)
+      }
+      const pageSize = typeof options.paginatedPageSize === 'number'
+        ? Math.max(options.paginatedPageSize, 0)
+        : (Number.isFinite(requestedPageSize) && requestedPageSize > 0 ? requestedPageSize : listed.length)
+      const start = (requestedPage - 1) * pageSize
+      const visible = listed.slice(start, start + pageSize)
       const items = visible.map((user) => buildUserPayload(user))
       if (pinUserId && !items.some((item) => item.id === pinUserId)) {
         const pinned = state.find((user) => user.id === pinUserId)
         if (pinned) {
           items.unshift(buildUserPayload(pinned))
-          if (typeof options.paginatedPageSize === 'number' && items.length > options.paginatedPageSize) {
-            items.length = options.paginatedPageSize
-          }
+          if (items.length > pageSize) items.length = pageSize
         }
       }
+      const roleOptions = [...new Set(filteredUsers.map((user) => user.role).filter(Boolean))]
+        .sort((left, right) => left.localeCompare(right, 'zh'))
       return createJsonResponse({
         ok: true,
         data: {
           items,
+          page: requestedPage,
+          pageSize,
+          total: listed.length,
+          roleOptions,
           pinUserId,
           pinUserIncluded: pinUserId ? items.some((item) => item.id === pinUserId) : null,
+        },
+      })
+    }
+
+    if (pathname === '/api/admin/users/batch/disable') {
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { userIds?: unknown[] } : {}
+      const count = Array.isArray(parsed.userIds) ? parsed.userIds.length : 0
+      return createJsonResponse({
+        ok: true,
+        data: { successCount: count, failureCount: 0, results: [] },
+      })
+    }
+
+    if (pathname === '/api/admin/users/batch/create' || pathname === '/api/admin/users/batch/update') {
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { items?: unknown[]; dryRun?: boolean } : {}
+      const count = Array.isArray(parsed.items) ? parsed.items.length : 0
+      return createJsonResponse({
+        ok: true,
+        data: {
+          successCount: count,
+          failureCount: 0,
+          dryRun: parsed.dryRun === true,
+          results: Array.from({ length: count }, (_item, index) => ({ index, ok: true, code: null, message: 'ok' })),
         },
       })
     }
@@ -711,6 +779,32 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/admin/users/recycle' && (init?.method || 'GET').toUpperCase() !== 'POST') {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          total: 1,
+          retentionDays: 30,
+          items: [{
+            id: 'user-gone',
+            email: 'gone@example.com',
+            name: '已删除同事',
+            department: '装配',
+            deletedAt: '2026-10-01T00:00:00.000Z',
+            deletedBy: 'admin-1',
+            purgeAfter: '2026-10-31T00:00:00.000Z',
+          }],
+        },
+      })
+    }
+
+    if (pathname === '/api/admin/users/recycle/restore') {
+      return createJsonResponse({
+        ok: true,
+        data: { successCount: 1, failureCount: 0, results: [{ ok: true, userId: 'user-gone', message: '已恢复' }] },
+      })
+    }
+
     throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
   }
 }
@@ -753,6 +847,7 @@ describe('UserManagementView', () => {
   })
 
   afterEach(() => {
+    useLocale().setLocale('en')
     if (app) app.unmount()
     if (container) container.remove()
     window.history.replaceState({}, '', '/')
@@ -767,7 +862,7 @@ describe('UserManagementView', () => {
   it('distinguishes DingTalk login from plugin usage and can open namespace admission', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -806,7 +901,7 @@ describe('UserManagementView', () => {
   it('can select filtered users and batch update DingTalk grants', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -854,7 +949,11 @@ describe('UserManagementView', () => {
 
     await setSearchValue(container!, '')
     findButtonByText(container!, '查询').click()
-    await waitForCondition(() => callLog.filter((url) => url === '/api/admin/users?q=').length >= 1)
+    await waitForCondition(() => callLog.some((url) => {
+      if (!url.startsWith('/api/admin/users?')) return false
+      const params = new URL(url, 'http://localhost').searchParams
+      return params.get('q') === '' && params.get('page') === '1'
+    }))
 
     findButtonByText(container!, '选择当前筛选结果').click()
     await flushUi()
@@ -901,7 +1000,8 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Union ID：user-2-union')
     expect(container?.textContent).toContain('Open ID：未记录')
     expect(container?.textContent).toContain('最近目录同步：')
-    expect(container?.textContent).toContain('修复建议：先回到目录同步查看该成员是否已补齐 openId')
+    expect(container?.textContent).toContain('修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。')
+    expect(container?.textContent).not.toContain('重新同步目录')
     const enableButton = findButtonByText(container!, '开通钉钉扫码')
     expect(enableButton.disabled).toBe(true)
     const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
@@ -1067,7 +1167,7 @@ describe('UserManagementView', () => {
       expect(exportedText).toContain('- 已收口：1')
       expect(exportedText).toContain('## 结果回填')
       expect(exportedText).toContain('缺 OpenID 成员清单与预期一致')
-      expect(exportedText).toContain('目录同步可补齐 openId / 或确认仍缺失原因')
+      expect(exportedText).toContain('成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因')
       expect(exportedText).toContain('最近 7 天收口审计可看到时间、处理人和动作')
       expect(exportedText).toContain('## 执行后结论')
       expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
@@ -1326,6 +1426,61 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Bravo')
   })
 
+  it('keeps unrelated query fields and the hash when a member filter changes', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory&directoryFailure=missing_account&handoff=keep#member-detail')
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+
+    const url = new URL(window.location.href)
+    expect(url.searchParams.get('userId')).toBe('user-2')
+    expect(url.searchParams.get('source')).toBe('directory-sync')
+    expect(url.searchParams.get('integrationId')).toBe('ding-1')
+    expect(url.searchParams.get('accountId')).toBe('user-2-directory')
+    expect(url.searchParams.get('directoryFailure')).toBe('missing_account')
+    expect(url.searchParams.get('filter')).toBe('dingtalk-openid-missing')
+    expect(url.searchParams.get('handoff')).toBe('keep')
+    expect(url.hash).toBe('#member-detail')
+    expect(container?.textContent).toContain('目录定位未完成')
+  })
+
+  it('links the selected member to permission sources and management scope', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const permissionLink = container!.querySelector('[data-testid="member-permission-source-link"]')
+    const scopeLink = container!.querySelector('[data-testid="management-scope-link"]')
+    expect(permissionLink?.getAttribute('href')).toBe('/admin/permissions?userId=user-1')
+    expect(scopeLink?.getAttribute('href')).toBe('/admin/role-delegation?userId=user-1')
+    expect(container?.textContent).toContain('不是最终业务访问结论')
+    expect(container?.textContent).toContain('部门范围包含该部门及其下级')
+    expect(container?.textContent).toContain('共享成员组')
+    expect(container?.textContent).toContain('取并集')
+    expect(container?.textContent).toContain('委派管理员只能给允许的成员分配允许的角色')
+    expect(container?.textContent).toContain('平台管理员配置管理范围')
+    expect(container?.textContent).not.toContain('必须开通插件')
+    expect(container?.textContent).toContain('管理委派不要求先开通插件使用')
+    expect(container?.textContent).not.toContain('私有圈定')
+    expect(container?.textContent).not.toContain('不新增范围类型')
+    expect(container?.textContent).not.toContain('中文名只用于阅读')
+    expect(container?.textContent).not.toContain('保存仍使用角色 ID')
+
+    const bravo = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
+    bravo?.click()
+    await waitForCondition(() => container!.querySelector('[data-testid="member-permission-source-link"]')?.getAttribute('href') === '/admin/permissions?userId=user-2')
+    expect(container!.querySelector('[data-testid="member-permission-source-link"]')?.getAttribute('href')).toBe('/admin/permissions?userId=user-2')
+    expect(container!.querySelector('[data-testid="management-scope-link"]')?.getAttribute('href')).toBe('/admin/role-delegation?userId=user-2')
+  })
+
   it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {
     const state = createApiState()
     state[1].hasOpenId = false
@@ -1366,7 +1521,7 @@ describe('UserManagementView', () => {
   it('can batch update plugin usage with namespace selection and refresh the current detail user', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -2137,7 +2292,7 @@ describe('UserManagementView', () => {
 
     await setSearchValue(container!, 'Alpha')
     findButtonByText(container!, '查询').click()
-    await waitForCondition(() => callLog.includes('/api/admin/users?q=Alpha'))
+    await waitForCondition(() => callLog.some((url) => url.includes('/api/admin/users?') && url.includes('q=Alpha')))
     expect(container?.textContent).toContain('Alpha')
 
     window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory')
@@ -3166,5 +3321,539 @@ describe('UserManagementView', () => {
       expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
       expect(sessionHint()?.textContent).toContain('现有会话失效')
     })
+  })
+
+  // Customer field report 2026-10-21 (#4), kept after the member-table redesign: long unbreakable
+  // identifiers must not widen the page. The list is one minmax(0, 1fr) track and the editor is a
+  // fixed drawer, so it cannot be drawn over the table. jsdom cannot lay out; this pins the DOM
+  // structure and the CSS contract in the SFC.
+  it('keeps the left-card buttons in wrapping containers and caps the card track at the card width', async () => {
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1270 })
+    onTestFinished(() => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
+    })
+    // A listed user whose DingTalk identity has a corpId but no openId renders the governance hint (with
+    // the whole corpId, one unbreakable token) as a third child of the user row.
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].dingtalkCorpId = 'ding' + '0'.repeat(32)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app = createApp(UserManagementView)
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi(20)
+
+    const layout = container!.querySelector('.user-admin__layout')
+    const aside = layout?.querySelector(':scope > aside.user-admin__panel')
+    const detail = layout?.querySelector(':scope > section.user-admin__panel')
+    expect(aside).toBeInstanceOf(HTMLElement)
+    expect(detail).toBeInstanceOf(HTMLElement)
+    const exportButtons = Array.from(aside!.querySelectorAll('.user-admin__section-head--workbench > .user-admin__role-actions > button'))
+    expect(exportButtons.map((button) => button.textContent?.trim())).toEqual([
+      '导出治理日报摘要',
+      '导出联调检查单',
+      '导出联调结果模板',
+      '导出联调执行包索引',
+      '导出完整联调包',
+    ])
+    const bulkButtons = aside!.querySelectorAll('.user-admin__bulkbar > .user-admin__role-actions > .user-admin__button')
+    expect(bulkButtons.length).toBeGreaterThanOrEqual(9)
+    const rowHints = Array.from(aside!.querySelectorAll('.user-admin__user > p.user-admin__hint'))
+    expect(rowHints).toHaveLength(1)
+    expect(rowHints[0].textContent).toContain('ding' + '0'.repeat(32))
+
+    const source = readFileSync(resolve(process.cwd(), 'src/views/UserManagementView.vue'), 'utf8').replace(/\r\n/g, '\n')
+    const style = source.slice(source.indexOf('<style scoped>'))
+    const rule = (selector: string) => {
+      const start = style.indexOf(`\n${selector} {`)
+      expect(start, selector).toBeGreaterThan(-1)
+      return style.slice(start, style.indexOf('}', start)).replace(/\/\*[\s\S]*?\*\//g, '')
+    }
+    expect(rule('.user-admin__layout')).toContain('grid-template-columns: minmax(0, 1fr);')
+    expect(rule('.user-admin__panel--detail')).toContain('position: fixed;')
+    expect(rule('.user-admin__panel--detail')).toContain('width: min(640px, 100%);')
+    expect(rule('.user-admin__layout > *')).toContain('min-width: 0;')
+    expect(rule('.user-admin__panel')).toContain('grid-template-columns: minmax(0, 1fr);')
+    expect(rule('.user-admin__panel')).toContain('min-width: 0;')
+    expect(rule('.user-admin__section-head--workbench')).toContain('flex-wrap: wrap;')
+    expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('max-width: 100%;')
+    expect(rule('.user-admin__role-actions > .user-admin__button')).toContain('white-space: normal;')
+    expect(rule('.user-admin__user')).toContain('box-sizing: border-box;')
+    expect(rule('.user-admin__user')).toContain('flex-wrap: wrap;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('flex-basis: 100%;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('min-width: 0;')
+    expect(rule('.user-admin__user > .user-admin__hint')).toContain('overflow-wrap: anywhere;')
+    expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n {2}overflow-wrap: anywhere;/)
+    // The shared flex-wrap rule for every action row is still in place.
+    expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n {2}display: flex;\n {2}flex-wrap: wrap;/)
+  })
+
+  it('keeps invite and editing off the member table until the admin opens them', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const modal = container!.querySelector('.user-admin__modal')
+    const detail = container!.querySelector('.user-admin__panel--detail')
+    expect(modal?.classList.contains('user-admin__modal--open')).toBe(false)
+    expect(detail?.classList.contains('user-admin__panel--detail-open')).toBe(false)
+    expect(container!.querySelector('.user-admin__panel--create input[aria-label="登录名（可选）"]')).toBeTruthy()
+    expect(container!.querySelectorAll('.user-admin__user').length).toBeGreaterThan(0)
+
+    findButtonByText(container!, '邀请用户').click()
+    await flushUi()
+    expect(container!.querySelector('.user-admin__modal')?.classList.contains('user-admin__modal--open')).toBe(true)
+    expect(container!.querySelector('.user-admin__panel--create')?.textContent).toContain('一次邀请一名成员')
+
+    findButtonByText(container!, '待处理邀请').click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="pending-invites-tab"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(container!.textContent).toContain('邀请记录')
+
+    const alphaRow = findUserRow(container!, 'Alpha')
+    const alphaButton = Array.from(alphaRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Alpha'))
+    if (!(alphaButton instanceof HTMLButtonElement)) throw new Error('Alpha row button not found')
+    alphaButton.click()
+    await flushUi()
+    expect(container!.querySelector('.user-admin__panel--detail')?.classList.contains('user-admin__panel--detail-open')).toBe(true)
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+  })
+
+  it('filters the member table by role and status and sorts by name without dropping rows', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const roleSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="角色筛选"]')
+    const statusSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="账号状态"]')
+    if (!roleSelect || !statusSelect) throw new Error('Role or status filter not found')
+
+    await setSelectValue(roleSelect, 'admin')
+    const adminRows = Array.from(container!.querySelectorAll('.user-admin__user')).map((row) => row.textContent || '')
+    expect(adminRows).toHaveLength(1)
+    expect(adminRows[0]).toContain('Delta')
+
+    await setSelectValue(roleSelect, '')
+    await setSelectValue(statusSelect, 'inactive')
+    const inactiveRows = Array.from(container!.querySelectorAll('.user-admin__user')).map((row) => row.textContent || '')
+    expect(inactiveRows).toHaveLength(1)
+    expect(inactiveRows[0]).toContain('Charlie')
+
+    await setSelectValue(statusSelect, '')
+    const nameSort = container!.querySelector<HTMLButtonElement>('.user-admin__table-head button')
+    if (!nameSort) throw new Error('Name sort button not found')
+    nameSort.click()
+    nameSort.click()
+    await flushUi()
+    const names = Array.from(container!.querySelectorAll('.user-admin__user strong')).map((node) => node.textContent?.trim())
+    expect(names).toEqual(['Delta', 'Charlie', 'Bravo', 'Alpha'])
+  })
+
+  it('shows the recycle bin and restores a deleted account', async () => {
+    useLocale().setLocale('zh-CN')
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+
+    findButtonByText(container!, '回收站').click()
+    await waitForCondition(() => container!.textContent?.includes('已删除同事') === true)
+    expect(container!.textContent).toContain('不能登录')
+    expect(container!.textContent).toContain('30')
+
+    const row = findUserRow(container!, '已删除同事')
+    findButtonByText(row, '恢复').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/recycle/restore'))
+    const restoreCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/recycle/restore')
+    expect(JSON.parse(String((restoreCall?.[1] as RequestInit | undefined)?.body))).toEqual({ userIds: ['user-gone'] })
+    useLocale().setLocale('en')
+  })
+
+  it.each(['restore', 'purge'] as const)('reloads the previous recycle page after the last %s on the last page', async (action) => {
+    useLocale().setLocale('zh-CN')
+    let finished = false
+    const kept = {
+      id: 'user-keep',
+      email: 'keep@example.com',
+      name: '仍在回收站',
+      department: '装配',
+      deletedAt: '2026-10-01T00:00:00.000Z',
+      deletedBy: 'admin-1',
+      purgeAfter: '2026-10-31T00:00:00.000Z',
+    }
+    const last = {
+      id: 'user-last',
+      email: 'last@example.com',
+      name: '最后一条',
+      department: '装配',
+      deletedAt: '2026-10-02T00:00:00.000Z',
+      deletedBy: 'admin-1',
+      purgeAfter: '2026-11-01T00:00:00.000Z',
+    }
+    const base = apiFetchMock.getMockImplementation()
+    apiFetchMock.mockImplementation(async (rawUrl: unknown, init?: RequestInit) => {
+      const url = String(rawUrl)
+      const path = url.split('?')[0]
+      if (path === '/api/admin/users/recycle') {
+        const page = new URL(url, 'http://localhost').searchParams.get('page') || '1'
+        if (!finished && page === '2') {
+          return createJsonResponse({ ok: true, data: { total: 21, retentionDays: 30, items: [last] } })
+        }
+        if (finished && page === '2') {
+          return createJsonResponse({ ok: true, data: { total: 20, retentionDays: 30, items: [] } })
+        }
+        return createJsonResponse({ ok: true, data: { total: finished ? 20 : 21, retentionDays: 30, items: [kept] } })
+      }
+      if (path === '/api/admin/users/recycle/restore' || path === '/api/admin/users/recycle/purge') {
+        finished = true
+        return createJsonResponse({ ok: true, data: { successCount: 1, failureCount: 0, results: [{ ok: true, message: 'ok' }] } })
+      }
+      if (!base) throw new Error(`Unhandled apiFetch call: ${url}`)
+      return base(rawUrl, init)
+    })
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+    findButtonByText(container!, '回收站').click()
+    await waitForCondition(() => container!.textContent?.includes('仍在回收站') === true)
+    findButtonByText(container!, '下一页').click()
+    await waitForCondition(() => container!.textContent?.includes('最后一条') === true)
+    if (action === 'restore') {
+      findButtonByText(findUserRow(container!, '最后一条'), '恢复').click()
+    } else {
+      const row = findUserRow(container!, '最后一条')
+      const checkbox = row.querySelector<HTMLInputElement>('input[type="checkbox"]')
+      if (!checkbox) throw new Error('recycle checkbox missing')
+      checkbox.click()
+      const phrase = container!.querySelector<HTMLInputElement>('[data-testid="recycle-purge-phrase"]')
+      if (!phrase) throw new Error('purge phrase missing')
+      phrase.value = '立即清除'
+      phrase.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      const purge = findButtonByText(container!, '立即清除所选')
+      if (purge.disabled) throw new Error('purge button stayed disabled')
+      purge.click()
+    }
+    await waitForCondition(() => container!.textContent?.includes('仍在回收站') === true && container!.textContent?.includes('回收站是空的') !== true)
+    expect(container!.textContent).not.toContain('最后一条')
+    expect(container!.querySelector('[data-testid="recycle-pager"]')).toBeNull()
+    const pages = apiFetchMock.mock.calls
+      .map((args) => String(args[0]))
+      .filter((url) => url.split('?')[0] === '/api/admin/users/recycle')
+      .map((url) => new URL(url, 'http://localhost').searchParams.get('page'))
+    expect(pages).toEqual(['1', '2', '2', '1'])
+  })
+
+  it('pages, filters, and bulk-selects every user when the server has 110', async () => {
+    const state: UserFixture[] = Array.from({ length: 110 }, (_, index) => {
+      const number = index + 1
+      return {
+        id: `user-${number}`,
+        email: `user${number}@example.com`,
+        username: `user${number}`,
+        name: `Member ${String(number).padStart(3, '0')}`,
+        mobile: null,
+        role: number % 10 === 0 ? 'auditor' : 'user',
+        is_active: true,
+        grantEnabled: true,
+        directoryLinked: false,
+        hasOpenId: true,
+        hasUnionId: true,
+        namespaceAdmissions: [],
+      }
+    })
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container!.textContent).toContain('第 1 / 6 页 · 共 110 人')
+    expect(container!.querySelectorAll('.user-admin__user')).toHaveLength(20)
+    const firstRequest = callLog.find((url) => url.startsWith('/api/admin/users?'))
+    const firstParams = new URL(firstRequest || 'http://localhost/missing', 'http://localhost').searchParams
+    expect(firstParams.get('page')).toBe('1')
+    expect(firstParams.get('pageSize')).toBe('20')
+    expect(Number(firstParams.get('pageSize'))).toBeLessThanOrEqual(100)
+
+    const seen = new Set<string>()
+    for (let pageNumber = 1; pageNumber <= 6; pageNumber += 1) {
+      for (const name of container!.querySelectorAll('.user-admin__user strong')) {
+        seen.add(name.textContent?.trim() || '')
+      }
+      if (pageNumber === 6) break
+      const nextFirst = `Member ${String(pageNumber * 20 + 1).padStart(3, '0')}`
+      findButtonByText(container!, '下一页').click()
+      await waitForCondition(() => container!.textContent?.includes(nextFirst) === true)
+    }
+    expect(seen.size).toBe(110)
+    expect(seen.has('Member 001')).toBe(true)
+    expect(seen.has('Member 110')).toBe(true)
+
+    const roleSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="角色筛选"]')
+    if (!roleSelect) throw new Error('Role filter not found')
+    await setSelectValue(roleSelect, 'auditor')
+    await waitForCondition(() => container!.querySelectorAll('.user-admin__user').length === 11)
+    const auditorNames = Array.from(container!.querySelectorAll('.user-admin__user strong')).map((node) => node.textContent?.trim())
+    expect(auditorNames).toHaveLength(11)
+    expect(auditorNames).toContain('Member 010')
+    expect(auditorNames).toContain('Member 110')
+
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await waitForCondition(() => container!.textContent?.includes('已选择 11 / 11 个当前筛选结果') === true)
+    findButtonByText(container!, '批量停用').click()
+    await flushUi()
+    const confirm = container!.querySelector<HTMLButtonElement>('[data-testid="bulk-confirm-submit"]')
+    if (!confirm) throw new Error('Bulk confirm button not found')
+    confirm.click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/disable'))
+    const disableCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/batch/disable')
+    const disabledIds = JSON.parse(String((disableCall?.[1] as RequestInit | undefined)?.body)).userIds as string[]
+    expect(disabledIds).toHaveLength(11)
+    expect(disabledIds).toEqual(Array.from({ length: 11 }, (_, index) => `user-${(index + 1) * 10}`))
+  })
+
+  it('drops the previous selection when the search changes so bulk deactivate cannot submit it', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=Alpha')))
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await flushUi()
+    expect(container!.textContent).toContain('已选择 1 / 1 个当前筛选结果')
+    findButtonByText(container!, '批量停用').click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeTruthy()
+
+    await setSearchValue(container!, 'bravo')
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(container!.textContent).toContain('已选择 0 /')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=bravo')))
+    await waitForCondition(() => container!.textContent?.includes('已选择 0 / 1 个当前筛选结果') === true)
+    expect(findUserRow(container!, 'Bravo')).toBeTruthy()
+
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await flushUi()
+    expect(container!.textContent).toContain('已选择 1 / 1 个当前筛选结果')
+    findButtonByText(container!, '批量停用').click()
+    await flushUi()
+    const confirm = container!.querySelector<HTMLButtonElement>('[data-testid="bulk-confirm-submit"]')
+    if (!confirm) throw new Error('Bulk confirm button not found')
+    confirm.click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/disable'))
+    const disableCalls = apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/disable')
+    const submitted = disableCalls.map((args) => JSON.parse(String((args[1] as RequestInit | undefined)?.body)).userIds as string[])
+    expect(submitted.some((ids) => ids.includes('user-1'))).toBe(false)
+    expect(submitted.at(-1)).toEqual(['user-2'])
+  })
+
+  it('does not apply a stale select-all after the search changes', async () => {
+    const state: UserFixture[] = [
+      ...Array.from({ length: 25 }, (_, index) => {
+        const number = index + 1
+        return {
+          id: `alpha-${number}`,
+          email: `alpha${number}@example.com`,
+          username: `alpha${number}`,
+          name: `Alpha ${String(number).padStart(2, '0')}`,
+          mobile: null,
+          role: 'user',
+          is_active: true,
+          grantEnabled: true,
+          directoryLinked: false,
+          hasOpenId: true,
+          hasUnionId: true,
+          namespaceAdmissions: [],
+        }
+      }),
+      {
+        id: 'bravo-1',
+        email: 'bravo-only@example.com',
+        username: 'bravo-only',
+        name: 'Bravo',
+        mobile: null,
+        role: 'user',
+        is_active: true,
+        grantEnabled: true,
+        directoryLinked: false,
+        hasOpenId: true,
+        hasUnionId: true,
+        namespaceAdmissions: [],
+      },
+    ]
+    const base = createApiImplementation(callLog, state)
+    let releaseSelectAll: (() => void) | null = null
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('pageSize=100') && url.includes('q=Alpha') && !releaseSelectAll) {
+        await new Promise<void>((resolve) => {
+          releaseSelectAll = resolve
+        })
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    await setSearchValue(container!, 'Alpha')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => container!.textContent?.includes('共 25 人') === true)
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await waitForCondition(() => releaseSelectAll !== null)
+
+    await setSearchValue(container!, 'Bravo')
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => container!.textContent?.includes('已选择 0 / 1 个当前筛选结果') === true)
+    releaseSelectAll?.()
+    await flushUi(12)
+    expect(container!.textContent).toContain('已选择 0 / 1 个当前筛选结果')
+    expect(apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/disable')).toBe(false)
+  })
+
+  async function uploadCsv(testId: string, csv: string, fileName: string): Promise<void> {
+    const input = container!.querySelector<HTMLInputElement>(`[data-testid="${testId}"]`)
+    if (!input) throw new Error(`File input not found: ${testId}`)
+    const file = new File([csv], fileName, { type: 'text/csv' })
+    if (typeof file.text !== 'function') {
+      Object.defineProperty(file, 'text', { value: async () => csv })
+    }
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(12)
+  }
+
+  function createImportCsv(count: number): string {
+    const lines = ['name,email,roleId,department']
+    for (let index = 1; index <= count; index += 1) {
+      lines.push(`用户${String(index).padStart(3, '0')},batch${index}@example.com,crm_admin,装配`)
+    }
+    return lines.join('\n')
+  }
+
+  function updateImportCsv(count: number): string {
+    const lines = ['userId,email,name,roleId,department,isActive,roleIds']
+    for (let index = 1; index <= count; index += 1) {
+      lines.push(`import-${index},batch${index}@example.com,用户${String(index).padStart(3, '0')},,装配,true,`)
+    }
+    return lines.join('\n')
+  }
+
+  it.each([100, 101, 105])('create import of %i rows rejects the file before any write when it is over 100', async (count) => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    const before = apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/create').length
+    await uploadCsv('batch-import-file', createImportCsv(count), 'create.csv')
+    if (count <= 100) {
+      expect(container!.textContent).toContain('可导入 100 行')
+      findButtonByText(container!, '确认导入').click()
+      await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/create'))
+      const call = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/batch/create')
+      const items = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)).items as unknown[]
+      expect(items).toHaveLength(100)
+    } else {
+      expect(container!.textContent).toContain(`共 ${count} 行，超出 ${count - 100} 行`)
+      expect(container!.textContent).toContain('未写入任何数据')
+      expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/create').length).toBe(before)
+      expect(container!.textContent).not.toContain('可导入 100 行')
+    }
+  })
+
+  it.each([100, 101, 105])('update import of %i rows rejects the file before any write when it is over 100', async (count) => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    findButtonByText(container!, '导入更新').click()
+    await flushUi()
+    const before = apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/update').length
+    await uploadCsv('reimport-file', updateImportCsv(count), 'update.csv')
+    if (count <= 100) {
+      findButtonByText(container!, '预览差异').click()
+      await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/update'))
+      const call = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/batch/update')
+      const body = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)) as { items: unknown[]; dryRun?: boolean }
+      expect(body.items).toHaveLength(100)
+      expect(body.dryRun).toBe(true)
+    } else {
+      expect(container!.textContent).toContain(`共 ${count} 行，超出 ${count - 100} 行`)
+      expect(container!.textContent).toContain('未写入任何数据')
+      expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/update').length).toBe(before)
+    }
+  })
+
+  it('round-trips an editable export without writing the legacy profile role or dropping multiple roles', async () => {
+    const state = createApiState()
+    const alpha = state.find((user) => user.id === 'user-1')
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!alpha || !bravo) throw new Error('fixture missing')
+    alpha.role = 'user'
+    alpha.roleIds = ['crm_admin']
+    bravo.role = 'user'
+    bravo.roleIds = ['finance_admin', 'crm_admin']
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '导出以便修改').click()
+    await waitForCondition(() => createdBlobParts.some((part) => part.includes('roleIds')))
+    const csv = createdBlobParts.join('')
+    const { parseCsv, previewUpdateRows } = await import('../src/views/adminUserBatch')
+    const parsed = parseCsv(csv)
+    const exportedAlpha = parsed.find((row) => row.userId === 'user-1')
+    const exportedBravo = parsed.find((row) => row.userId === 'user-2')
+    expect(exportedAlpha?.roleId).toBe('')
+    expect(exportedAlpha?.roleIds).toBe('crm_admin')
+    expect(exportedBravo?.roleId).toBe('')
+    expect(exportedBravo?.roleIds).toBe('crm_admin;finance_admin')
+    expect(parsed.some((row) => row.roleId === 'user')).toBe(false)
+    const preview = previewUpdateRows(parsed, state.map((user) => ({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      roleIds: user.roleIds,
+      department: user.department,
+      is_active: user.is_active,
+    })), new Set(['crm_admin', 'finance_admin']))
+    expect(preview.filter((row) => row.userId === 'user-1' || row.userId === 'user-2').every((row) => row.ok)).toBe(true)
+    expect(preview.filter((row) => row.userId === 'user-1' || row.userId === 'user-2').every((row) => row.changes.every((change) => change.field !== '角色'))).toBe(true)
+
+    const unknown = previewUpdateRows(
+      [{ userId: 'user-1', email: alpha.email || '', roleId: 'not-a-real-role', department: alpha.department || '' }],
+      [{ id: 'user-1', email: alpha.email, name: alpha.name, role: 'user', roleIds: ['crm_admin'], department: alpha.department, is_active: true }],
+      new Set(['crm_admin', 'finance_admin']),
+    )
+    expect(unknown[0]?.ok).toBe(false)
+    expect(unknown[0]?.message).toBe('角色不存在')
+
+    findButtonByText(container!, '导入更新').click()
+    await flushUi()
+    await uploadCsv('reimport-file', csv, 'user-update.csv')
+    expect(container!.textContent).not.toContain('角色不存在')
+    findButtonByText(container!, '预览差异').click()
+    await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/update'))
+    const call = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/batch/update')
+    const items = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)).items as Array<{ userId?: string; roleId?: string }>
+    expect(items.find((item) => item.userId === 'user-1')?.roleId).toBeUndefined()
+    expect(items.find((item) => item.userId === 'user-2')?.roleId).toBeUndefined()
   })
 })

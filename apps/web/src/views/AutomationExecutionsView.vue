@@ -91,8 +91,8 @@
                 :disabled="resuming === step.id"
                 @click.stop="resumeStep(step)"
               >{{ automationLabel('runs.resume', isZh) }}</button>
-              <div v-if="step.error" class="automation-runs__step-error" data-field="step-error">
-                {{ summarizeStepError(step.error) }}
+              <div v-if="stepErrorText(step)" class="automation-runs__step-error" data-field="step-error">
+                {{ stepErrorText(step) }}
               </div>
               <div v-if="conditionBranchSelection(step)" class="automation-runs__branch-selection" data-field="branch-selection">
                 <template v-if="conditionBranchSelection(step)?.key">{{ automationLabel('runs.selectedBranch', isZh) }} {{ conditionBranchSelection(step)?.label ? `${conditionBranchSelection(step)?.label} (${conditionBranchSelection(step)?.key})` : conditionBranchSelection(step)?.key }}</template>
@@ -191,7 +191,7 @@ import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authP
 import { authHeaders } from '../utils/api'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
-import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
+import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepErrorText, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import { formatBusinessTimestamp } from '../multitable/utils/business-timezone'
 import StatusTag from '../components/status/StatusTag.vue'
@@ -271,6 +271,11 @@ function conditionBranchSelection(step: AutomationRunStepView): { key: string; l
 }
 function stepOutputView(step: AutomationRunStepView): AutomationStepOutputView {
   return automationStepOutputView(step.result, isZh.value)
+}
+// 客户反馈 2026-10-21 item 1 follow-up: same step-error text as the rule's run log (no raw user ids from legacy
+// DingTalk errors; zh shows the count sentence alone).
+function stepErrorText(step: AutomationRunStepView): string {
+  return summarizeStepError(automationStepErrorText(step.error, step.result, isZh.value))
 }
 function branchChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
   const m = /\.branch\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)

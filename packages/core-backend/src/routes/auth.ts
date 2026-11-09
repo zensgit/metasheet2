@@ -32,6 +32,8 @@ import {
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { query } from '../db/pg'
+import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
@@ -45,7 +47,6 @@ import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } fro
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
-import { query } from '../db/pg'
 import { parseUserActivationStatus } from '../auth/user-activation'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { auditLog } from '../audit/audit'
@@ -626,6 +627,10 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
     // conflict is the exact drift the admin-route closure tests exist to prevent (#4833).
     || code === 'ACTIVATE_ORG_MISMATCH'
     || code === 'ACTIVATE_ORG_AMBIGUOUS'
+    // Not expected from this SSO callback: the grant check runs in every mode, but here the
+    // source row's openId already equals the scanning login's openId, so it passes. Tracked so
+    // the closed set follows the enum instead of falling through to 500.
+    || code === 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED'
   ) {
     return new DingTalkActivationIntentError(
       409,
@@ -640,7 +645,7 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
-async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
+async function issueAuthSessionToken(user: User, req: Request, expectedAccessGeneration?: number): Promise<string> {
   const sessionId = randomUUID()
   const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
@@ -648,12 +653,14 @@ async function issueAuthSessionToken(user: User, req: Request): Promise<string> 
   const payload = authService.readTokenPayload(token)
 
   if (payload?.exp) {
-    await createUserSession(user.id, {
+    const session = await createUserSession(user.id, {
       sessionId,
+      expectedAccessGeneration,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
       ipAddress: getClientIP(req),
       userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
   }
 
   try {
@@ -1104,7 +1111,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       ...authenticated.user,
       must_change_password: false,
     }
-    const token = await issueAuthSessionToken(refreshedUser, req)
+    // Fenced like /session-org: the new session is registered only while the access generation read
+    // when this request authenticated is still current. The password change above stays committed.
+    const token = await issueAuthSessionToken(
+      refreshedUser,
+      req,
+      Number(authenticated.user.access_generation ?? 0),
+    )
 
     return res.json({
       success: true,
@@ -1116,6 +1129,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    if (error instanceof DingTalkLoginPolicyError && error.code === 'authentication_changed') {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: 'Authentication changed; please sign in again with the new password',
+        code: error.code,
+      })
+    }
     logger.error('Password change error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
@@ -1258,10 +1278,16 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     if (!nextPayload?.exp) {
       return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
     }
-    await createUserSession(user.id, {
+    // Fenced like refresh: the session is registered only while the access generation read when this
+    // request authenticated is still current, so a credential verified before a revocation cannot mint one.
+    const session = await createUserSession(user.id, {
       sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      expectedAccessGeneration: Number(user.access_generation ?? 0),
       ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
+    if (!session) {
+      return res.status(409).json({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+    }
     return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
   } catch {
     return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
@@ -1729,7 +1755,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk login for ${user.email} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
 
@@ -1842,7 +1868,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req)
+    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
 
     logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
 
@@ -1991,18 +2017,14 @@ authRouter.get('/users', async (req: Request, res: Response) => {
       })
     }
 
-    const payload = jwt.verify(token, resolveRuntimeJwtSecret(process.env.JWT_SECRET))
-    if (!payload || typeof payload !== 'object') {
+    const user = await authService.verifyToken(token)
+    if (!user) {
       return res.status(401).json({
         success: false,
         error: 'Invalid token'
       })
     }
-
-    const tokenUser = payload as { role?: unknown; roles?: unknown }
-    const roles = Array.isArray(tokenUser.roles) ? tokenUser.roles.map((value) => String(value)) : []
-    const isAdmin = tokenUser.role === 'admin' || roles.includes('admin')
-    if (!isAdmin) {
+    if (user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         error: 'Forbidden'
@@ -2015,8 +2037,11 @@ authRouter.get('/users', async (req: Request, res: Response) => {
     const pageSize = Math.min(100, Math.max(1, requestedPageSize))
     const offset = (page - 1) * pageSize
 
-    const term = q ? `%${q}%` : '%'
-    const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+    const visible = visibleUserPredicate()
+    const term = q ? `%${escapeLikePattern(q)}%` : ''
+    const where = q
+      ? `WHERE ${visible} AND (COALESCE(email, '') ILIKE $1 ESCAPE E'\\\\' OR COALESCE(name, '') ILIKE $1 ESCAPE E'\\\\' OR id ILIKE $1 ESCAPE E'\\\\')`
+      : `WHERE ${visible}`
     const countSql = `SELECT COUNT(*)::int AS total FROM users ${where}`
     const listSql = `
       SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at

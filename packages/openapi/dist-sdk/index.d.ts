@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/admin/directory/integration-capabilities/{integrationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Show the capability state of one directory integration
+         * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.
+         */
+        get: operations["getDirectoryIntegrationCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/plugins": {
         parameters: {
             query?: never;
@@ -1012,6 +1032,270 @@ export interface paths {
         get: operations["getApprovalTemplateVersion"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/editor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read fixed schedule editor configuration and candidate reference eligibility
+         * @description Uses the existing fixed schedule preview actor, organization and group-manager authorization. The authenticated organization is authoritative. Eligibility is advisory and does not grant write permission; apply and rebuild recheck their existing authorization and canonical posture. An absent shiftId selects the saved desired shift, or returns null eligibility when unconfigured. No coverage counts or raw member identifiers are returned. Unreadable segment or posture state fails closed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    shiftId?: string;
+                };
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Desired configuration, old managed sets and candidate reference eligibility */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleEditor"];
+                        };
+                    };
+                };
+                /** @description Invalid group or candidate shift identifier */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or selected shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Fixed schedule */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save fixed schedule desired configuration
+         * @description Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{groupId}/fixed-schedule/config/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Save fixed schedule desired configuration through the POST update alias
+         * @description Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleConfigSave"];
+                };
+            };
+            responses: {
+                /** @description Saved desired configuration and authoritative revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceFixedScheduleSavedConfig"];
+                        };
+                    };
+                };
+                /** @description Invalid date window */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Actor */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -8416,6 +8700,141 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/security-actions/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-verify the signed-in user for one security action
+         * @description Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'. Returns a 300-second single-use proof bound to the session, the authenticated organization, the purpose and the target. A purpose whose prerequisites are not delivered is refused before any data is read. Before authentication the route gives no answer of its own. Responses are not cacheable.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        purpose: "external_identity_bind" | "external_identity_unbind" | "login_grant_enable" | "login_grant_disable";
+                        /** Format: uuid */
+                        connectionId: string;
+                        /**
+                         * Format: uuid
+                         * @description Required for every purpose except external_identity_bind, and refused for it.
+                         */
+                        targetIdentityId?: string;
+                        /** @description Present exactly when targetIdentityId is present. */
+                        expectedBindingRevision?: number;
+                        /** @enum {string} */
+                        method: "local_password";
+                        /** Format: password */
+                        password: string;
+                        clientBindingDigest?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description A single-use proof was issued */
+                200: {
+                    headers: {
+                        "Cache-Control"?: "no-store";
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok?: true;
+                            data?: {
+                                /** @description Opaque; present only in this response body. */
+                                proof?: string;
+                                /** @enum {string} */
+                                purpose?: "external_identity_bind" | "external_identity_unbind" | "login_grant_enable" | "login_grant_disable";
+                                /** Format: uuid */
+                                connectionId?: string;
+                                /** @enum {string} */
+                                method?: "local_password";
+                                /** @enum {string} */
+                                assurance?: "local_password";
+                                /** Format: date-time */
+                                expiresAt?: string;
+                                /** @enum {integer} */
+                                ttlSeconds?: 300;
+                            };
+                        };
+                    };
+                };
+                /** @description No usable session */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Refused (purpose unavailable, method unavailable, policy refusal or rejected credential) */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Organization context, target or state conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Request does not satisfy the closed schema; details.fields names schema fields or the fixed entry _unknown */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Per-user failure limit reached; Retry-After carries details.retryAfter */
+                429: {
+                    headers: {
+                        "Retry-After"?: number;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+                /** @description Verification unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SecurityActionError"];
+                    };
+                };
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -18685,6 +19104,57 @@ export interface components {
                 message?: string;
             };
         };
+        SecurityActionError: {
+            /** @enum {boolean} */
+            ok?: false;
+            error?: {
+                /** @enum {string} */
+                code?: "UNAUTHORIZED" | "PASSWORD_CHANGE_REQUIRED" | "SECURITY_ACTION_SESSION_REQUIRED" | "SECURITY_ACTION_PURPOSE_UNAVAILABLE" | "SECURITY_ACTION_METHOD_UNAVAILABLE" | "SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED" | "SECURITY_ACTION_ASSURANCE_INSUFFICIENT" | "SECURITY_ACTION_CONNECTION_NOT_PERMITTED" | "SECURITY_ACTION_CREDENTIAL_REJECTED" | "SECURITY_ACTION_ORG_CONTEXT_REQUIRED" | "SECURITY_ACTION_TARGET_CONFLICT" | "SECURITY_ACTION_STATE_CHANGED" | "SECURITY_ACTION_INVALID_REQUEST" | "SECURITY_ACTION_RATE_LIMITED" | "SECURITY_ACTION_UNAVAILABLE" | "SECURITY_ACTION_PROOF_UNAVAILABLE";
+                message?: string;
+                /** @description Closed-set values only; never a request value. */
+                details?: {
+                    /** @enum {string} */
+                    nextStep?: "admin_assisted_local_credential";
+                    retryAfter?: number;
+                    fields?: string[];
+                };
+            };
+        };
+        DirectoryIntegrationCapability: {
+            enabled: boolean;
+            /**
+             * @description Null when the provider is not registered
+             * @enum {string|null}
+             */
+            governance: "legacy" | "gated" | "unsupported" | null;
+            /** @description Set only where governance is gated; null means the stored state does not govern the capability */
+            effective: boolean | null;
+            /** @enum {string|null} */
+            reason: "switch_off" | "schema_unavailable" | "org_mismatch" | "state_mismatch" | "provider_not_registered" | "governed_by_legacy_path" | "unsupported" | "implementation_missing" | "not_enabled" | "integration_inactive" | "scope_changed" | null;
+            anchor: {
+                bound: boolean;
+                matchesCurrent: boolean | null;
+            };
+            /** @description Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only */
+            legacy?: {
+                [key: string]: unknown;
+            };
+        };
+        DirectoryIntegrationCapabilities: {
+            /** Format: uuid */
+            integrationId: string;
+            provider: string;
+            integrationStatus: string;
+            /** @description Zero while the integration has no capability row */
+            revision: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+            capabilities: {
+                directory: components["schemas"]["DirectoryIntegrationCapability"];
+                login: components["schemas"]["DirectoryIntegrationCapability"];
+                notification: components["schemas"]["DirectoryIntegrationCapability"];
+            };
+        };
         DirectErrorResponse: {
             error?: {
                 code?: string;
@@ -22569,6 +23039,73 @@ export interface components {
             errorCode: string | null;
             duplicate: boolean;
         };
+        AttendanceFixedScheduleConfigSave: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @description Must equal the authenticated organization when supplied. */
+            orgId?: string;
+            /** @description Zero expects absence; positive values require an exact saved revision. Omitted retains legacy unconditional save. */
+            expectedConfigRevision?: number;
+        };
+        AttendanceFixedScheduleDesired: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+        } | null;
+        AttendanceFixedScheduleSavedConfig: {
+            /** Format: uuid */
+            id: string;
+            orgId: string;
+            /** Format: uuid */
+            groupId: string;
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            revision: number;
+            updatedBy: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        AttendanceFixedScheduleEditor: {
+            /** Format: uuid */
+            groupId: string;
+            /** @enum {string} */
+            state: "not_configured" | "configuration_changed" | "pending_apply" | "effective";
+            reasonCodes: ("NO_DESIRED_CONFIG" | "NO_TARGET_MEMBERS" | "DIFFERENT_MANAGED_KEY_ACTIVE" | "TARGET_MEMBER_MISSING" | "NON_MEMBER_TARGET_ACTIVE" | "DUPLICATE_MATCHING_ASSIGNMENT" | "ASSIGNMENT_VALUE_MISMATCH" | "UNPUBLISHED_MANAGED_ROW" | "EFFECTIVE")[];
+            desired: components["schemas"]["AttendanceFixedScheduleDesired"];
+            drift: {
+                managedSets: {
+                    /** Format: uuid */
+                    shiftId: string;
+                    /** Format: date */
+                    startDate: string;
+                    /** Format: date */
+                    endDate: string | null;
+                    producerKey: string;
+                    rowCount: number;
+                }[];
+            };
+            referenceEligibility: {
+                /** Format: uuid */
+                shiftId: string;
+                allowed: boolean;
+                /** @enum {string|null} */
+                reasonCode: "ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED" | null;
+            } | null;
+        };
     };
     responses: {
         /** @description Values-free e-learning error `{ error: "<code>" }` */
@@ -22657,6 +23194,69 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getDirectoryIntegrationCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                integrationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Capability state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: components["schemas"]["DirectoryIntegrationCapabilities"];
+                    };
+                };
+            };
+            /** @description integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the integration does not exist (DIRECTORY_NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     listApprovals: {
         parameters: {
             query?: {

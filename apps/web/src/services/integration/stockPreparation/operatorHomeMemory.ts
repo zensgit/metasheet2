@@ -132,6 +132,10 @@ const POSTURE_KEYS: ReadonlySet<string> = new Set<StockPrepPostureKey>([
   'not_pulled',
   'unknown',
   'not_yours',
+  // 备料分批拉取第一期 step 4 PR-7 (#6566 review N9): the board records this key since PR-5's posture; without it
+  // `isValidEntry` dropped the entry on read and the project vanished from "recent" instead of reading 刷新未完成.
+  // Only the KEY is stored (values-free) — never the state token, counts or any hold payload.
+  'blocked_pull_state',
 ])
 
 function isValidEntry(value: unknown): value is StockPrepRecentProjectEntry {

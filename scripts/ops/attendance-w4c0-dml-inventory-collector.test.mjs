@@ -107,6 +107,34 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
   )
 })
 
+test('fixed-schedule shared config handler preserves seven downstream assignment identities and cannot claim new writes', () => {
+  const relPath = 'plugins/plugin-attendance/index.cjs'
+  const source = fs.readFileSync(path.join(rootDir, relPath), 'utf8')
+  const handlerDeclaration = '    async function saveAttendanceGroupFixedScheduleConfig(req, res) {'
+  const handlerStart = source.indexOf(handlerDeclaration)
+  const payrollStart = source.indexOf('    const handlePayrollCycleSummaryExport = async (req, res) => {')
+  const handlerEnd = source.indexOf('\n    }\n', handlerStart) + '\n    }'.length
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart && payrollStart > handlerEnd)
+  const raw = scanFileForDmlSites(relPath, source)
+  // Frozen source 771170234e95ff67c0b1d32b2e4929c08d7ee39e has these seven
+  // anonymous assignment-route sites under this nearest-preceding symbol.
+  // Sharing the config-save handler must not rename or broaden those claims.
+  const downstream = raw.filter(site => site.enclosingSymbol === 'handlePayrollCycleSummaryExport'
+    && site.table === 'attendance_shift_assignments')
+  assert.deepEqual(downstream.map(site => site.verb), ['insert', 'update', 'delete', 'insert', 'update', 'update', 'delete'])
+  assert.deepEqual(classifyTrackedSites(classifyCensus(downstream).trackedSites).unclaimed, [])
+  assert.deepEqual(scanFileForDmlSites(relPath, source.slice(handlerStart, handlerEnd)), [])
+
+  // A real new writer in the shared save handler must remain a distinct,
+  // unclaimed site; restoring downstream attribution is not an allowlist grant.
+  const mutated = source.replace(handlerDeclaration,
+    handlerDeclaration + '\n      await db.query(`INSERT INTO attendance_shift_assignments (id) VALUES ($1)`)')
+  const unclaimed = classifyTrackedSites(classifyCensus(scanFileForDmlSites(relPath, mutated)).trackedSites).unclaimed
+  assert.deepEqual(unclaimed.map(({ enclosingSymbol, table, verb }) => ({ enclosingSymbol, table, verb })), [{
+    enclosingSymbol: 'saveAttendanceGroupFixedScheduleConfig', table: 'attendance_shift_assignments', verb: 'insert',
+  }])
+})
+
 test('timezone configuration tables have explicit buckets without a prefix-wide exception', () => {
   assert.equal(TABLE_BUCKETS.attendance_timezone_policies, 'reference')
   assert.equal(TABLE_BUCKETS.attendance_employee_timezone_overrides, 'reference')

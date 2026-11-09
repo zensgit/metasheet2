@@ -2,6 +2,12 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { expect, beforeAll, afterAll, vi } from 'vitest'
 import { spreadsheetMatchers } from './utils/test-db'
+import { setSettlementCoordinationNestingModeV1 } from '../src/attendance/coordination/settlement-coordination-context'
+
+// Settlement coordination (P1-1, r6.1 §3.2 step 11, acceptance A11): inside a live coordination context a
+// main-pool access is refused in tests and only counted in production. A test that pins the production
+// behaviour sets 'count' itself.
+setSettlementCoordinationNestingModeV1('throw')
 
 // Extend expect with custom matchers
 expect.extend({

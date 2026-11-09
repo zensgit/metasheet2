@@ -36,6 +36,9 @@
  * never depend on it. (Whether the tick should be scoped at all is a production question,
  * out of scope for this test-isolation fix.)
  *
+ * This suite's webhooks are bound to one test sheet whose owner can read it, and their delivery rows name
+ * that sheet (each attempt re-checks the owner's access). The foreign webhook is deliberately left unbound.
+ *
  * Runs only with DATABASE_URL (plugin-tests.yml multitable real-DB job).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
@@ -43,7 +46,18 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { WebhookService } from '../../src/multitable/webhook-service'
+import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 import { WebhookRetryScheduler } from '../../src/services/WebhookRetryScheduler'
+
+/**
+ * F-3 SSRF gate (`webhook-service.ts` -> `checkWebhookTargetUrl`): delivery now resolves the target and
+ * refuses anything internal, and an UNRESOLVABLE name is refused fail-closed. The sink names below are
+ * reserved TLDs that never resolve, so the specs inject this deterministic resolver through the service's
+ * third constructor argument: a RESOLVER seam only (the guard still judges the address it returns), which
+ * keeps these specs off real DNS instead of weakening the gate. TEST-NET-3 (RFC 5737) is public as far as
+ * the guard is concerned and is not routable.
+ */
+const publicLookup: SsrfLookupFn = async () => [{ address: '203.0.113.10', family: 4 }]
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -54,6 +68,8 @@ const DEL_FUTURE = `del_retry_future_${TS}` // pending, next_retry_at in the fut
 const DEL_STRAY = `del_retry_stray_${TS}` // pending, next_retry_at NULL, created past the grace
 const DEL_FRESH = `del_retry_fresh_${TS}` // pending, next_retry_at NULL, created just now (in flight)
 const USER_ID = `u_whk_retry_${TS}`
+const BASE_ID = `base_whk_retry_${TS}`
+const SHEET_ID = `sheet_whk_retry_${TS}`
 // Per-run sink URLs: `captured` is a process-wide record of everything this test's fetch
 // stub was asked to POST, INCLUDING foreign rows the process-wide claim swept in. Filtering
 // by these unique URLs is what makes a "delivered exactly once" assertion mean OUR row.
@@ -81,7 +97,7 @@ const insertDelivery = (
 ) =>
   q(
     'INSERT INTO multitable_webhook_deliveries (id, webhook_id, event, payload, status, attempt_count, created_at, next_retry_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)',
-    [id, webhookId, 'record.updated', JSON.stringify({ recordId }), status, attemptCount, createdAt, nextRetryAt],
+    [id, webhookId, 'record.updated', JSON.stringify({ sheetId: SHEET_ID, recordId }), status, attemptCount, createdAt, nextRetryAt],
   )
 
 /**
@@ -115,9 +131,17 @@ const loopbackFetch = (async (url: unknown) => {
 describeIfDatabase('webhook retry tick (real DB)', () => {
   beforeAll(async () => {
     const now = new Date().toISOString()
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1, $1)', [BASE_ID])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $1)', [SHEET_ID, BASE_ID])
+    // workflow:write is not in the permissions catalogue; the legacy users.permissions list carries it.
     await q(
-      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10)',
-      [WH_ID, 'Retry', SINK_URL, null, JSON.stringify(['record.updated']), true, USER_ID, now, 1, 3],
+      `INSERT INTO users (id, name, password_hash, role, permissions) VALUES ($1, $1, 'x', 'user', '["workflow:write"]'::jsonb) ON CONFLICT (id) DO NOTHING`,
+      [USER_ID],
+    )
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`, [USER_ID])
+    await q(
+      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, sheet_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)',
+      [WH_ID, 'Retry', SINK_URL, null, JSON.stringify(['record.updated']), true, USER_ID, now, 1, 3, SHEET_ID],
     )
     // Foreign webhook — a different owner for the deliberately-planted claimable rows.
     await q(
@@ -150,6 +174,10 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
       [WH_ID, FOREIGN_WH_ID],
     ]).catch(() => {})
     await q('DELETE FROM multitable_webhooks WHERE id = ANY($1)', [[WH_ID, FOREIGN_WH_ID]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = $1', [USER_ID]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [USER_ID]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -162,7 +190,7 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     // tick() directly (the same entry the interval drives) so the test is deterministic
     // and does not depend on wall-clock interval timing.
     const scheduler = new WebhookRetryScheduler({
-      service: new WebhookService(db, loopbackFetch),
+      service: new WebhookService(db, loopbackFetch, publicLookup),
     })
     expect(scheduler.leader).toBe(true)
 
@@ -198,7 +226,7 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     await insertDelivery(DEL_STRAY, WH_ID, 'r-stray', 'pending', 0, oldCreated, null)
     await insertDelivery(DEL_FRESH, WH_ID, 'r-fresh', 'pending', 0, new Date().toISOString(), null)
     const scheduler = new WebhookRetryScheduler({
-      service: new WebhookService(db, loopbackFetch),
+      service: new WebhookService(db, loopbackFetch, publicLookup),
     })
     await scheduler.tick()
     // Scoped: exactly ONE POST to this suite's sink — the stray. A second would mean the
@@ -216,7 +244,7 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     captured = []
     await seedForeignClaimableRow() // the tick WILL have work to do — just not ours
     const scheduler = new WebhookRetryScheduler({
-      service: new WebhookService(db, loopbackFetch),
+      service: new WebhookService(db, loopbackFetch, publicLookup),
     })
     await scheduler.tick()
     // Scoped idle assertion: no POST to this suite's sink. (`retried` is not asserted to
@@ -247,8 +275,8 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
     const now = new Date().toISOString()
     await seedForeignClaimableRow() // unrelated claimable row present for this pass too
     await q(
-      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, retry_base_delay_ms) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)',
-      [POLICY_WH, 'Policy', POLICY_SINK_URL, null, JSON.stringify(['record.updated']), true, USER_ID, now, 0, 5, BASE_MS],
+      'INSERT INTO multitable_webhooks (id, name, url, secret, events, active, created_by, created_at, failure_count, max_retries, retry_base_delay_ms, sheet_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12)',
+      [POLICY_WH, 'Policy', POLICY_SINK_URL, null, JSON.stringify(['record.updated']), true, USER_ID, now, 0, 5, BASE_MS, SHEET_ID],
     )
     await insertDelivery(POLICY_DEL, POLICY_WH, 'rp', 'pending', 1, now, new Date(Date.now() - 60_000).toISOString())
 
@@ -257,7 +285,7 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
       policyCaptured.push(String(url))
       return { ok: false, status: 500, text: async () => 'boom' } as Response
     }) as unknown as typeof fetch
-    const svc = new WebhookService(db, failFetch)
+    const svc = new WebhookService(db, failFetch, publicLookup)
     const before = Date.now()
     await svc.retryFailedDeliveries()
     // Scoped: exactly one attempt against the policy webhook's own sink.
@@ -286,8 +314,8 @@ describeIfDatabase('webhook retry tick (real DB)', () => {
       "UPDATE multitable_webhook_deliveries SET status = 'pending', attempt_count = 0, next_retry_at = now() - interval '1 minute' WHERE id = $1",
       [DEL_DUE],
     )
-    const svcA = new WebhookService(db, loopbackFetch)
-    const svcB = new WebhookService(db, loopbackFetch)
+    const svcA = new WebhookService(db, loopbackFetch, publicLookup)
+    const svcB = new WebhookService(db, loopbackFetch, publicLookup)
     await Promise.all([svcA.retryFailedDeliveries(), svcB.retryFailedDeliveries()])
     // Scoped "exactly once" — the sum of the two passes' return values counts foreign rows
     // too, so the per-URL POST count is the assertion that means our row.

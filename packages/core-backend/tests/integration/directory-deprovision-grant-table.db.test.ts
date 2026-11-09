@@ -278,7 +278,8 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
 
     // Closeout review P1: every activation mode now requires the authoritative linked active
     // source, and the membership org DERIVES from it (ORG here — the caller's orgId confirms).
-    await seedActivationSource({ linkedUserId: USER })
+    // DT-HARDEN-02: the corp source carries an openId — a grant needs one (see the next test).
+    await seedActivationSource({ linkedUserId: USER, openId: 'grant-fix-open' })
 
     // Positive control: nothing has granted anything yet.
     expect(await grantEnabled()).toBeUndefined()
@@ -301,6 +302,34 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
       [USER],
     )
     expect(aliases.rows.map((r) => r.normalized_value)).toContain('grant-fix@example.com')
+  })
+
+  it('DT-HARDEN-02: no activation mode (admin-route SSO included) can grant DingTalk login to a corp member with no openId (zero residue)', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, activation_status, local_password_set)
+       VALUES ($1, 'grant-no-open@example.com', 'Grant No Open', 'x', FALSE, 'pending_activation', FALSE)`,
+      [USER],
+    )
+    // corp-scoped source, no openId on the row and no DingTalk login recorded for this person
+    await seedActivationSource({ linkedUserId: USER })
+
+    // 'sso' too: the admin route accepts it and forwards no expectedDingTalkIdentity
+    for (const mode of ['admin_no_password', 'temp_password', 'sso'] as const) {
+      await expect(activatePendingUser({
+        userId: USER,
+        mode,
+        adminUserId: 'admin-test',
+        orgId: ORG,
+        enableDingTalkGrant: true,
+      })).rejects.toMatchObject({ code: 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED' })
+    }
+    expect(await grantEnabled()).toBeUndefined()
+    const still = await query<{ activation_status: string }>(`SELECT activation_status FROM users WHERE id = $1`, [USER])
+    expect(still.rows[0]?.activation_status).toBe('pending_activation')
+
+    // without the grant the same activation goes through (the check only guards the grant)
+    await activatePendingUser({ userId: USER, mode: 'admin_no_password', adminUserId: 'admin-test', orgId: ORG })
+    expect(await grantEnabled()).toBeUndefined()
   })
 
   it('T3 SSO activate commits only with an active exact DingTalk source link', async () => {
@@ -1035,7 +1064,8 @@ describeIfDatabase('DingTalk grant/membership writes target the real tables (rea
     )
 
     // Closeout review P1: activation requires the linked active source in every mode.
-    await seedActivationSource({ linkedUserId: USER_B })
+    // DT-HARDEN-02: with an openId, so the grant check passes and the alias conflict is what fails.
+    await seedActivationSource({ linkedUserId: USER_B, openId: 'alias-conflict-open' })
 
     await expect(
       activatePendingUser({

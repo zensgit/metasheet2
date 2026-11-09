@@ -1,5 +1,9 @@
 'use strict'
 
+const freshProjectWriteLock = () => require('./support/stock-preparation-project-write-lock-kit.cjs').createInMemoryProjectWriteLock({ timers: 'real' }).lock
+
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // THE WIRING, not the registry.
 //
 // b2a-trial-registry.test.cjs pins what the registry DECIDES. This suite pins the only thing that
@@ -24,7 +28,9 @@
 // literals are schema ids, frozen reason tokens, synthetic scope refs and synthetic cell text.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
+const { withoutReadPhaseClock } = require('./support/dry-run-read-phase-clock.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 
@@ -304,6 +310,8 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
     },
   })
   return {
+    // Batch-refresh phase 0 step 1: apply holds the project write lease (fails closed 501 without the lock).
+    stockPreparationProjectWriteLock: freshProjectWriteLock(),
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -454,18 +462,18 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
       },
       multitable: {
         provisioning: { async findObjectSheet() { return { id: SHEET_ID, baseId: null, name: OBJECT_ID, description: null } } },
-        records: records ? records.api : createRecordsApi().api,
+        records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records ? records.api : createRecordsApi().api),
       },
     },
     // `durable: true` is what the large-BOM job store demands; it is also where the values-free
     // PROJECTION of the B2a operation claim is recorded. Since migration 078 the AUTHORITY for the
     // one-operation limit is the SQL row, not this map.
-    storage: storage || Object.assign(new Map(), { durable: true }),
+    storage: storage || consumableMap(),
     config,
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: {
+    services: withRefreshGovernance({
       ...baseServices({
         sourceAdapter: (source || createRecordingSourceAdapter()).adapter,
         spies,
@@ -482,7 +490,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
       // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
       // authority on the claim, exactly as the W-3 suite's M78 cases require.
       b2aOperationClaim: operationClaim === null ? null : (operationClaim || claimForStorage(context.storage)),
-    },
+    }),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, context, spies }
@@ -554,7 +562,7 @@ async function unsetEnvIsDormantAndByteIdentical() {
   const records = createRecordsApi()
   const { routes } = mount({ records, source })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: the applied token must be planned by a caller who may apply
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.ok(source.reads.length > 0, 'a dormant deployment reads its source exactly as before')
@@ -574,7 +582,14 @@ async function unsetEnvIsDormantAndByteIdentical() {
   assert.deepEqual(res.body.data.counts, baseline.counts)
   assert.deepEqual(res.body.data.evidence, baseline.evidence, 'evidence gains nothing when the gate is dormant')
   assert.equal('b2aTrialRegistration' in res.body.data.evidence, false, 'a dormant deployment stamps no B2a stanza')
-  const { dryRunToken: _t, ...routeRest } = res.body.data
+  // R67 ③: the read-phase stanza rides beside evidence on BOTH sides; it is compared on its own
+  // below, minus its wall-clock reading (support/dry-run-read-phase-clock.cjs).
+  const { dryRunToken: _t, plmReadPhase: routeReadPhase, ...routeRest } = res.body.data
+  assert.deepEqual(
+    withoutReadPhaseClock({ plmReadPhase: routeReadPhase }),
+    withoutReadPhaseClock({ plmReadPhase: baseline.plmReadPhase }),
+    'the read phase is the same read phase when dormant',
+  )
   assert.deepEqual(routeRest, {
     action: baseline.action,
     status: baseline.status,
@@ -619,7 +634,7 @@ async function armedWithAMatchingRegistrationPasses() {
   const records = createRecordsApi()
   const { routes } = mount({ registrations: [registration()], records, source })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.status, 'ready')
   assert.ok(source.reads.length > 0, 'an authorized read reaches the source')
@@ -726,7 +741,7 @@ async function M78_theAuthorityIsTheSqlRowAndTheKvRecordIsAProjection() {
     operationClaim: createB2aOperationClaim({ db: claimDb }),
   })
 
-  const res = await routeDryRun(routes)
+  const res = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
   assert.equal(claimDb.rows.size, 1, 'the armed read left exactly ONE claim row in the database')
   const [row] = [...claimDb.rows.values()]
@@ -1296,7 +1311,7 @@ async function R06_schemaDriftRefusesBeforeAnyBusinessArtifact() {
   const seed = mount({ registrations: [registration()], source: createRecordingSourceAdapter() })
   assert.equal((await routeDryRun(seed.routes)).statusCode, 200)
   const pinnedStorage = () => {
-    const storage = Object.assign(new Map(), { durable: true })
+    const storage = consumableMap()
     for (const [key, value] of seed.context.storage) {
       if (key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX)) storage.set(key, value)
     }
@@ -1624,7 +1639,7 @@ function createRunnerHarness({
   const config = {}
   if (registrations !== undefined) config[B2A_REGISTRY_CONFIG_KEY] = registry(registrations)
   const b2aTrialRegistry = createB2aRegistry({ config })
-  const claimStore = storage || Object.assign(new Map(), { durable: true })
+  const claimStore = storage || consumableMap()
   const pipeline = {
     id: PIPELINE_ID,
     tenantId: TENANT_ID,
@@ -2276,7 +2291,7 @@ function activationContext(registrations) {
         async hash(value) { return `hash:${value}` },
       },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config: { [B2A_REGISTRY_CONFIG_KEY]: registry(registrations) },
   }
   // The claim seen through the same substrate index.cjs will use, so a claim taken by the "other
@@ -2863,7 +2878,7 @@ const STOCK_PREP_LOOKUP_CONFIG = Object.freeze(lookupProjectionConfig(LOOKUP_OBJ
 // A fresh durable store carrying ONLY the pinned contract(s) forward — the shape a second Run under
 // a fresh registration sees.
 function carriedContracts(fromStorage, expectedCount = 1) {
-  const storage = Object.assign(new Map(), { durable: true })
+  const storage = consumableMap()
   for (const [key, value] of fromStorage) {
     if (key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX)) storage.set(key, clone(value))
   }
@@ -3046,7 +3061,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
     const { routes, context } = mount({
       registrations: applyRegistrations(), source, records, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
     })
-    const planned = await routeDryRun(routes)
+    const planned = await routeDryRun(routes, { user: WRITE_USER }) // review round 1: see above
     assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
     assert.equal(planned.body.data.evidence.b2aTrialRegistration.registrationId, 'b2a-factory-a-plm')
     const pinnedRecord = context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)
@@ -3107,7 +3122,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
     now: Date.now(),
     ...(sourceObjects === undefined ? {} : { b2aSourceObjects: sourceObjects }),
   })
-  const mvpStorage = Object.assign(new Map(), { durable: true })
+  const mvpStorage = consumableMap()
   const mvpSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
   const mvpPinned = await inProcess(prepareStockPreparationMvpSnapshot, {
     storage: mvpStorage, source: mvpSource, b2aTrialRegistry: mvpRegistry, sourceObjects: [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT],
@@ -3143,7 +3158,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
     ['dry-run', dryRunStockPreparationAction, armedRegistry],
     ['mvp-persist', prepareStockPreparationMvpSnapshot, mvpRegistry],
   ]) {
-    const storage = Object.assign(new Map(), { durable: true })
+    const storage = consumableMap()
     const source = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
     const error = await capturedRejection(inProcess(fn, { storage, source, b2aTrialRegistry }))
     assertRunnerRefusal(error, B2A_SCOPE_MISMATCH, 'config_bound_object_unresolvable',
@@ -3158,7 +3173,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
 
   // ... and the SAME dry-run call WITH the resolved list proceeds and pins the lookup table — so the
   // refusal above is the missing list, not the in-process shape.
-  const withListStorage = Object.assign(new Map(), { durable: true })
+  const withListStorage = consumableMap()
   const withListSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
   const withList = await inProcess(dryRunStockPreparationAction, {
     storage: withListStorage, source: withListSource, b2aTrialRegistry: armedRegistry,
@@ -3175,7 +3190,7 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
   const bridgeRegistry = createB2aRegistry({
     config: { [B2A_REGISTRY_CONFIG_KEY]: registry([registration({ sourceSystemType: BRIDGE_KIND })]) },
   })
-  const bridgeStorage = Object.assign(new Map(), { durable: true })
+  const bridgeStorage = consumableMap()
   const bridgeSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
   const bridge = await inProcess(dryRunStockPreparationAction, {
     storage: bridgeStorage, source: bridgeSource, b2aTrialRegistry: bridgeRegistry,

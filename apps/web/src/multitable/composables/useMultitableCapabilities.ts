@@ -47,6 +47,14 @@ const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
   },
 }
 
+/**
+ * The boolean-valued capability keys. `MetaCapabilities` also carries non-boolean markers (e.g. the 备料
+ * `gridExportClosure` object), which are read where they are needed, never through `caps()`.
+ */
+type BooleanCapabilityKey = {
+  [K in keyof MetaCapabilities]-?: NonNullable<MetaCapabilities[K]> extends boolean ? K : never
+}[keyof MetaCapabilities]
+
 function isMetaCapabilities(value: unknown): value is MetaCapabilities {
   return !!value && typeof value === 'object' && 'canRead' in value
 }
@@ -54,7 +62,7 @@ function isMetaCapabilities(value: unknown): value is MetaCapabilities {
 export function useMultitableCapabilities(
   source: Ref<MultitableRole | MetaCapabilities | null | undefined>,
 ): MultitableCapabilities {
-  const caps = (key: keyof MetaCapabilities, fallbackKey?: keyof MetaCapabilities) =>
+  const caps = (key: BooleanCapabilityKey, fallbackKey?: BooleanCapabilityKey) =>
     computed(() => {
       const current = source.value
       if (isMetaCapabilities(current)) {

@@ -15,6 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// Collect SFC modules before timed tests; keep cold imports out of mount helpers.
+import ApprovalCenterView from '../src/views/approval/ApprovalCenterView.vue'
+import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
+import ApprovalNewView from '../src/views/approval/ApprovalNewView.vue'
+import TemplateCenterView from '../src/views/approval/TemplateCenterView.vue'
+import TemplateDetailView from '../src/views/approval/TemplateDetailView.vue'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -559,7 +565,6 @@ describe('Approval E2E Permissions', () => {
   // Mount helpers
   // -------------------------------------------------------------------------
   async function mountCenterView() {
-    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalCenterView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -568,7 +573,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountDetailView() {
-    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -577,7 +581,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountNewView() {
-    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
     const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -586,7 +589,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountTemplateCenterView() {
-    const { default: TemplateCenterView } = await import('../src/views/approval/TemplateCenterView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateCenterView as any) })
     app = createApp(Host)
     registerAllStubs(app)
@@ -595,7 +597,6 @@ describe('Approval E2E Permissions', () => {
   }
 
   async function mountTemplateDetailView() {
-    const { default: TemplateDetailView } = await import('../src/views/approval/TemplateDetailView.vue')
     const Host = defineComponent({ setup: () => () => h(TemplateDetailView as any) })
     app = createApp(Host)
     registerAllStubs(app)

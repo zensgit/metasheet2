@@ -37,6 +37,25 @@ describe('workbench context request ownership', () => {
     return { wb, client, context, fieldData, contexts, fields }
   }
 
+  // 备料分批拉取第一期 step 3 (review round 1, fix 3): capabilitiesSheetId names the sheet the capabilities were
+  // resolved for. selectSheet switches the active sheet at once but leaves the capabilities (and their owner) as
+  // they were until the new sheet's context is applied — that gap is what the grid-export closure gate checks.
+  it('capabilitiesSheetId follows the applied context, not selectSheet', async () => {
+    const { wb } = fixture()
+    expect(wb.capabilitiesSheetId.value).toBeNull()
+    // (The fixture's own initial load may supersede this call, so only the applied state is asserted.)
+    await wb.loadSheetMeta('sheet_a')
+    await Promise.resolve()
+    expect(wb.activeSheetId.value).toBe('sheet_a')
+    expect(wb.capabilitiesSheetId.value).toBe('sheet_a')
+    wb.selectSheet('sheet_b')
+    expect(wb.activeSheetId.value).toBe('sheet_b')
+    expect(wb.capabilitiesSheetId.value).toBe('sheet_a') // still the previous sheet's: stale until the context lands
+    await wb.loadSheetMeta('sheet_b')
+    expect(wb.activeSheetId.value).toBe('sheet_b')
+    expect(wb.capabilitiesSheetId.value).toBe('sheet_b')
+  })
+
   it('does not let an older poll overwrite a newer restore refresh on the same sheet', async () => {
     const { wb, fields, fieldData } = fixture()
     const late = deferred<ReturnType<typeof fieldData>>()

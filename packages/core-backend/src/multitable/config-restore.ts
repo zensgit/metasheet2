@@ -11,7 +11,38 @@
  */
 import { createHash } from 'node:crypto'
 
+import { carryHumanWriteLock, humanWriteLockKindOfProperty } from './human-write-lock'
+import { carryManualRowPolicy, manualRowsPolicyValueOf } from './stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, hasPullBatchBandMarkerKey } from './stock-preparation-pull-batch-band'
+
 type QueryFn = (text: string, params: unknown[]) => Promise<{ rows: unknown[] }>
+
+/**
+ * Human write lock (human-write-lock.ts): a field-property revert restores a RECORDED property, and a property
+ * recorded before the plugin marked the column carries no lock — written raw, it would silently unlock a PLM-system
+ * column for people. So for a field whose property is being reverted, the CURRENTLY STORED lock wins over the
+ * revision (the same rule `PATCH /fields/:fieldId` follows): a revert can neither drop nor add the lock. Both
+ * the preview's `target` (what the actor is shown) and the write (`applyConfigRevert`) go through this, so the
+ * disclosed target and the stored result stay identical. An unlocked field on both sides is returned untouched
+ * (byte-identical to the pre-lock behaviour).
+ *
+ * The manual-rows switch (`stockPreparationManualRows` on a project sheet's key column, stock-preparation-manual-rows.ts;
+ * ADR adr-stock-prep-manual-rows-20261030 §4) follows the same rule: the STORED value wins, so a revert can neither
+ * turn manual rows off nor back on. The pull-batch band marker (`stockPreparationPullBatch`, stock-preparation-pull-batch-band.ts;
+ * R-65) too: a revert can neither drop a band nor forge one. A field with none of the keys on either side is still
+ * returned untouched.
+ */
+export function fieldRevertPropertyKeepingLock(storedProperty: unknown, revertProperty: unknown): unknown {
+  if (
+    !humanWriteLockKindOfProperty(storedProperty) && !humanWriteLockKindOfProperty(revertProperty)
+    && manualRowsPolicyValueOf(storedProperty) === null && manualRowsPolicyValueOf(revertProperty) === null
+    && !hasPullBatchBandMarkerKey(storedProperty) && !hasPullBatchBandMarkerKey(revertProperty)
+  ) return revertProperty
+  const base = revertProperty && typeof revertProperty === 'object' && !Array.isArray(revertProperty)
+    ? (revertProperty as Record<string, unknown>)
+    : {}
+  return carryPullBatchBandMarker(storedProperty, carryManualRowPolicy(storedProperty, carryHumanWriteLock(storedProperty, base)))
+}
 
 export interface ConfigRevisionRow {
   id: string
@@ -234,13 +265,17 @@ export function computeRevertPreview(rev: ConfigRevisionRow, currentSnapshot: Re
   const current = pick(currentSnapshot, keys)
   const driftConflict = keys.some((k) => stable(current[k]) !== stable(after[k]))
   const { kind, reason } = classifyRevert(rev)
+  const target = pick(before, keys)
+  if (rev.entity_type === 'field' && keys.includes('property')) {
+    target.property = fieldRevertPropertyKeepingLock(currentSnapshot.property, target.property)
+  }
   return {
     revisionId: rev.id,
     entityType: rev.entity_type,
     entityId: rev.entity_id,
     changedKeys: keys,
     current,
-    target: pick(before, keys),
+    target,
     driftConflict,
     opKind: kind,
     ...(reason ? { gatedReason: reason } : {}),
@@ -250,8 +285,19 @@ export function computeRevertPreview(rev: ConfigRevisionRow, currentSnapshot: Re
 
 // --- entity config snapshot loaders (current live config) ---
 
-export async function loadFieldConfigSnapshot(query: QueryFn, fieldId: string): Promise<Record<string, unknown> | null> {
-  const res = await query('SELECT name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
+/** The field config snapshot (current live config). Exported so the real-DB race cases hold on the production text. */
+export const FIELD_CONFIG_SNAPSHOT_SQL = 'SELECT name, type, property, "order" FROM meta_fields WHERE id = $1'
+/** The same snapshot under the row lock — the config-restore EXECUTE transaction only (never the preview). */
+export const FIELD_CONFIG_SNAPSHOT_LOCKED_SQL = `${FIELD_CONFIG_SNAPSHOT_SQL} FOR NO KEY UPDATE`
+
+/**
+ * `lock` (the config-restore EXECUTE transaction only): the snapshot is what the drift check and the baseline hash
+ * compare, and what the revert then writes over — so it is read under the row lock, and a concurrent field write waits
+ * until the revert commits instead of being overwritten without CONFIG_DRIFT. The preview never locks (it runs on the
+ * pool, outside any transaction, and must stay lock-free and write-free).
+ */
+export async function loadFieldConfigSnapshot(query: QueryFn, fieldId: string, lock = false): Promise<Record<string, unknown> | null> {
+  const res = await query(lock ? FIELD_CONFIG_SNAPSHOT_LOCKED_SQL : FIELD_CONFIG_SNAPSHOT_SQL, [fieldId])
   const row = res.rows[0] as { name: string; type: string; property: unknown; order: number } | undefined
   if (!row) return null
   return { name: row.name, type: row.type, property: row.property, order: row.order }
@@ -286,8 +332,13 @@ export async function loadSheetConfigSnapshot(query: QueryFn, sheetId: string): 
   }
 }
 
-export async function loadEntityConfigSnapshot(query: QueryFn, rev: ConfigRevisionRow): Promise<Record<string, unknown> | null> {
-  if (rev.entity_type === 'field') return loadFieldConfigSnapshot(query, rev.entity_id)
+/** `lockField`: lock a FIELD snapshot (see loadFieldConfigSnapshot). Views and sheet_config are not locked here. */
+export async function loadEntityConfigSnapshot(
+  query: QueryFn,
+  rev: ConfigRevisionRow,
+  opts: { lockField?: boolean } = {},
+): Promise<Record<string, unknown> | null> {
+  if (rev.entity_type === 'field') return loadFieldConfigSnapshot(query, rev.entity_id, opts.lockField === true)
   if (rev.entity_type === 'view') return loadViewConfigSnapshot(query, rev.entity_id)
   if (rev.entity_type === 'sheet_config') return loadSheetConfigSnapshot(query, rev.entity_id)
   return null
@@ -310,18 +361,32 @@ const SHEET_CONFIG_COLUMN: Record<string, ColumnMap> = {
   rowLevelReadPermissionsEnabled: { col: 'row_level_read_permissions_enabled' },
 }
 
+/** `applyConfigRevert`'s re-read of the stored property (the lock and switch carry). Exported for the real-DB race cases. */
+export const FIELD_REVERT_STORED_PROPERTY_SQL = 'SELECT property FROM meta_fields WHERE id = $1'
+
 /** Apply the revert: UPDATE the entity's changed columns to the revision's `before` values. Safe-op only (caller gates). */
 export async function applyConfigRevert(query: QueryFn, rev: ConfigRevisionRow): Promise<void> {
   const map = rev.entity_type === 'field' ? FIELD_COLUMN : rev.entity_type === 'view' ? VIEW_COLUMN : rev.entity_type === 'sheet_config' ? SHEET_CONFIG_COLUMN : null
   const table = rev.entity_type === 'field' ? 'meta_fields' : rev.entity_type === 'view' ? 'meta_views' : rev.entity_type === 'sheet_config' ? 'meta_sheets' : null
   if (!map || !table) throw new Error(`config revert not supported for entity_type=${rev.entity_type}`)
   const before = rev.before ?? {}
+  // Human write lock: a field-property revert keeps the STORED lock (fieldRevertPropertyKeepingLock). Read inside
+  // the caller's (fenced) transaction, so it is the same row the preview's drift/baseline checks just compared.
+  let storedFieldProperty: unknown = null
+  const revertsFieldProperty = rev.entity_type === 'field' && rev.changed_keys.includes('property')
+  if (revertsFieldProperty) {
+    const stored = await query(FIELD_REVERT_STORED_PROPERTY_SQL, [rev.entity_id])
+    storedFieldProperty = (stored.rows[0] as { property?: unknown } | undefined)?.property ?? null
+  }
   const sets: string[] = []
   const params: unknown[] = []
   for (const k of rev.changed_keys) {
     const m = map[k]
     if (!m) throw new Error(`config revert not supported for key=${k}`)
-    params.push(m.jsonb ? JSON.stringify(before[k] ?? null) : before[k])
+    const value = revertsFieldProperty && k === 'property'
+      ? fieldRevertPropertyKeepingLock(storedFieldProperty, before[k])
+      : before[k]
+    params.push(m.jsonb ? JSON.stringify(value ?? null) : value)
     sets.push(`${m.col} = $${params.length}${m.jsonb ? '::jsonb' : ''}`)
   }
   if (sets.length === 0) return

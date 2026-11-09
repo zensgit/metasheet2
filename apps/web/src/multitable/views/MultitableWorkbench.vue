@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-workbench" @keydown="onGlobalKeydown">
+  <div ref="workbenchRootRef" class="mt-workbench" @keydown="onGlobalKeydown">
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
@@ -50,7 +50,7 @@
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="openApiTokenManager(null)"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
@@ -227,6 +227,34 @@
       <strong>{{ capabilityOriginNotice.title }}</strong>
       <span>{{ capabilityOriginNotice.message }}</span>
     </div>
+    <div
+      v-if="recordCreateBlockedByLock && caps.canCreateRecord.value && !manualRowsBlock"
+      class="mt-workbench__capability-banner mt-workbench__create-locked-note"
+      role="status"
+      data-testid="record-create-locked-note"
+    >
+      <span>{{ wb('notice.recordCreateBlockedByLock', isZh) }}</span>
+    </div>
+    <!-- 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.1 / §3.7 / §8 B3.3): on a registered project sheet the
+         R68 note above gives way to this one — in state `allowed` the line that points to 「新增人工补充行」, otherwise the
+         state's reason (an unlocked sheet: 「需管理员修复本表」). Every generic create entry is hidden meanwhile
+         (canCreateRecordByHand); in `allowed` the toolbar's, the inline row's and the footer's places hold
+         「新增人工补充行」 instead (`manualRowsCreateAvailable`), so this note carries no button of its own. -->
+    <div
+      v-if="manualRowsBannerVisible && manualRowsNotice"
+      class="mt-workbench__capability-banner mt-workbench__manual-rows-note"
+      role="status"
+      data-testid="manual-rows-note"
+      :data-manual-rows-state="manualRowsBlock?.state"
+    >
+      <template v-if="manualRowsNotice.kind === 'entry'">
+        <span>{{ manualRowLabel('notice.useManualRow', isZh) }}</span>
+      </template>
+      <template v-else>
+        <strong v-if="manualRowsNotice.headlineKey" data-testid="manual-rows-reason-headline">{{ manualRowLabel(manualRowsNotice.headlineKey, isZh) }}</strong>
+        <span data-testid="manual-rows-reason">{{ manualRowLabel(manualRowsNotice.key, isZh) }}</span>
+      </template>
+    </div>
     <MetaMentionPopover
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
@@ -242,7 +270,8 @@
       :filter-groups="grid.filterGroups.value"
       :filter-conjunction="grid.filterConjunction.value"
       :sort-filter-dirty="grid.sortFilterDirty.value"
-      :can-create-record="caps.canCreateRecord.value" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :can-create-record="canCreateRecordByHand" :can-export="caps.canExport.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
+      :export-closed-reason="gridExportClosedReason" :export-pending="capabilitiesStale"
       @toggle-field="grid.toggleFieldVisibility" @add-sort="grid.addSortRule" @remove-sort="grid.removeSortRule"
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
@@ -250,6 +279,7 @@
       :group-field-ids="grid.groupFieldIds.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       :can-reset-to-shared="canResetToShared"
+      :manual-row-create="manualRowsCreateAvailable" @add-manual-row="openManualRowDialog"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
       @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
@@ -287,6 +317,20 @@
         <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
+        <!-- 备料 「查看子件」 / 「查看所有使用位置」: the viewer filter the drawer set (utils/bom-relations.ts). Per-viewer and
+             never stored; 清除 drops it and reloads the page the grid was on, with the view exactly as stored. -->
+        <div
+          v-if="viewerFilterState && !showDashboardView"
+          class="mt-workbench__viewer-filter"
+          role="status"
+          data-testid="workbench-viewer-filter-banner"
+        >
+          <div class="mt-workbench__viewer-filter-copy">
+            <strong data-testid="workbench-viewer-filter-label">{{ viewerFilterState.label }}</strong>
+            <span class="mt-workbench__viewer-filter-note">{{ bomRelationsLabel('banner.note', isZh) }}</span>
+          </div>
+          <MtButton size="sm" data-testid="workbench-viewer-filter-clear" @click="onClearViewerFilter">{{ bomRelationsLabel('banner.clear', isZh) }}</MtButton>
+        </div>
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
@@ -321,7 +365,7 @@
           :group-info="workbench.activeView.value?.groupInfo"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
@@ -334,7 +378,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -350,7 +394,7 @@
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :calendar-holidays="calendarHolidays"
           :calendar-holiday-notice="calendarHolidayNotice"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -365,7 +409,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
@@ -381,7 +425,7 @@
           :view-config="workbench.activeView.value?.config"
           :group-info="workbench.activeView.value?.groupInfo"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
+          :can-create="canCreateRecordByHand" :can-edit="effectiveRowActions.canEdit"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
           @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
@@ -390,7 +434,7 @@
           v-else-if="activeViewType === 'hierarchy'"
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="canCreateRecordByHand"
           :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -410,8 +454,10 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="canCreateRecordByHand" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
+          :manual-row-record-ids="manualRowRecordIdsInGrid" :manual-row-field-ids="manualRowEditableFieldIds"
+          :manual-row-create="manualRowsCreateAvailable"
           :commit-range="grid.patchRange"
           :range-context-key="JSON.stringify([workbench.activeSheetId.value, workbench.activeViewId.value])"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
@@ -419,6 +465,8 @@
           :group-fields="grid.groupFields.value"
           :search-text="searchText" :row-density="rowDensity"
           :can-load-more="gridCanLoadMore" :infinite-scroll="gridIsFlatPath"
+          :page-size="grid.pageSize?.value" :page-size-options="GRID_PAGE_SIZE_OPTIONS" @set-page-size="onSetGridPageSize"
+          :total-rows="grid.page.value.total"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
@@ -438,6 +486,7 @@
           @go-to-page="grid.goToPage" @load-more="grid.loadMore" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @bulk-restore="onBulkRestoreRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
+          @create-manual-row="openManualRowDialog"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
           @set-frozen-rows="onSetFrozenRows"
@@ -466,10 +515,13 @@
         :dispatch-binding="dispatchBinding"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
-        :can-create="caps.canCreateRecord.value"
+        :can-create="canCreateRecordByHand"
+        :duplicate-blocked-reason="recordDuplicateBlockedReason"
+        :manual-copy-available="manualRowsCreateAvailable"
+        :bom-relations="inspectorBomRelations"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
-        :field-permissions="effectiveFieldPermissions"
+        :field-permissions="inspectorFieldPermissions"
         :row-actions="effectiveRowActions"
         :comment-presence="selectedRecordCommentPresence"
         :link-summaries-by-field="selectedRecordLinkSummaries"
@@ -503,6 +555,8 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @manual-copy="onManualCopyRecord(selectedRecordId)"
+        @bom-relations="onBomRelations"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -547,6 +601,15 @@
       :result-message="bulkEditDialog.resultMessage"
       @apply="onBulkEditApply"
       @cancel="onBulkEditCancel"
+    />
+    <MetaManualRowDialog
+      :visible="manualRowDialog.visible"
+      :plan="manualRowDialogPlan"
+      :submitting="manualRowDialog.submitting"
+      :error="manualRowDialog.error"
+      :field-errors="manualRowDialog.fieldErrors"
+      @submit="onManualRowDialogSubmit"
+      @cancel="closeManualRowDialog"
     />
     <MetaImportModal
       :visible="showImportModal"
@@ -694,7 +757,9 @@
       :fields="grid.fields.value"
       :client="workbench.client"
       :views="workbench.views.value"
+      :can-open-ding-talk-group-settings="true"
       @close="showAutomationManager = false"
+      @open-dingtalk-groups="openApiTokenManager('dingtalk-groups')"
     />
     <MetaFormShareManager
       v-if="showFormShareManager || workbench.activeSheetId.value"
@@ -710,6 +775,7 @@
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
       :can-manage-automation="caps.canManageAutomation.value"
+      :initial-tab="apiTokenManagerInitialTab"
       @close="showApiTokenManager = false"
     />
 
@@ -812,7 +878,9 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '../utils/workbench-undo'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
@@ -849,7 +917,26 @@ import type {
   RowDensity,
 } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
-import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
+import type { SortRule, FilterConjunction, ManualCellWrite } from '../composables/useMultitableGrid'
+import { manualRowLabel } from '../utils/manual-row-labels'
+import {
+  isManualSupplementMarked,
+  manualRowsCreateEnabled,
+  manualRowsCreateRefusalKey,
+  manualRowsEditEnabled,
+  manualRowsNoticeOf,
+  readManualRowsBlock,
+  resolveManualRowDialogPlan,
+  resolveManualRowEditableFieldIds,
+} from '../utils/manual-rows'
+import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
+import {
+  bomRelationsLabel,
+  bomRelationsSourceValue,
+  buildBomRelationsViewerFilter,
+  readBomRelationsBlock,
+  type BomRelationKind,
+} from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
@@ -1053,6 +1140,50 @@ onBeforeUnmount(() => {
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
+// 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.7, OQ3–OQ8): /context sends `stockPreparationManualRows`
+// ONLY on a registered project sheet (P_reg), to an actor who can create, edit or delete. While it is present — WHATEVER
+// its state — every generic create entry below is hidden (`canCreateRecordByHand`). In state `allowed` the toolbar's, the
+// grid's inline row's and the footer's places hold 「新增人工补充行」 instead (`manualRowsCreateAvailable`, R74's footer
+// kept); in every other state there is no entry at all and the note shows the state's reason. Every manual-row control
+// is gated on THIS block, never on a row's `manualSupplement` mark (#6664 note N2), which is only the 「人工补充」 label.
+// Read fail-closed (utils/manual-rows.ts): absent ⇒ exactly the old behaviour; present but malformed ⇒ `unavailable`,
+// no manual control.
+const manualRowsBlock = computed(() => readManualRowsBlock(capabilitySource.value))
+// R68 (#6454 judge note): /context sends `recordCreateBlockedByLock: true` when the sheet has a column people may
+// not write (the 备料 project sheet's PLM columns) that its own validation also marks required, so a record a
+// person creates can never pass. Every hand-create entry below (toolbar add / import, grid "+ row", the
+// duplicate action, kanban / gallery / calendar / timeline / gantt / hierarchy create, a new form submission)
+// reads `canCreateRecordByHand`, and the note under the capability banner says why. Same fail-closed read as
+// canDeleteSheet (`=== true` off the /context object): absent ⇒ exactly the old `caps.canCreateRecord`. (Since B3 the
+// new form submission reads `canSubmitNewFormRecord` — this same R68 rule without the manual-rows block, OQ7.)
+const recordCreateBlockedByLock = computed(() => capabilitySource.value?.recordCreateBlockedByLock === true)
+const canCreateRecordByHand = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value && manualRowsBlock.value === null)
+// 人工补充行 OQ7 「表单不改」: a NEW form-view submission goes through the form route (POST /views/:viewId/submit), which
+// the series leaves exactly as it was — so it keeps the pre-B3 rule (R68 only), not the manual-rows block. (On an
+// unlocked registered sheet the form's create stays usable until the lock is repaired; on a locked one R68 closes it.)
+const canSubmitNewFormRecord = computed(() => caps.canCreateRecord.value && !recordCreateBlockedByLock.value)
+// 备料分批拉取第一期 step 3: /context sends `gridExportClosure` ONLY on a sheet the host stamped closed for generic
+// grid export (canExport is then already false). The toolbar keeps its export buttons visible but disabled with
+// this reason, and every client-side export entry below re-checks `canRunGridExport()` before it builds a file.
+// Same fail-closed read as recordCreateBlockedByLock: absent ⇒ exactly the old behaviour.
+// Review round 1, fix 3 / round 2: `selectSheet` switches the active sheet at once, but the capabilities (and so the
+// closure marker) stay the PREVIOUS sheet's until its `/context` lands. In that window nothing about the active
+// sheet is known: no generic export may start (`canRunGridExport` refuses), the toolbar keeps its export pair
+// mounted but disabled (`exportPending`), and a closure reason is shown only when the capabilities belong to the
+// active sheet (no stale reason after closed -> open). Only a string owner can be stale: before any context it is
+// null. Typed through the composable's return type (no cast), so removing `capabilitiesSheetId` there is a type
+// error here; the `?.` only tolerates the many spec doubles of the composable that predate the ref.
+const capabilitiesStale = computed(() => {
+  const owner = workbench.capabilitiesSheetId?.value
+  return typeof owner === 'string' && owner !== workbench.activeSheetId.value
+})
+const gridExportClosed = computed(() => {
+  const marker = (capabilitySource.value as { gridExportClosure?: unknown } | null | undefined)?.gridExportClosure
+  return marker !== null && marker !== undefined && marker !== false
+})
+const gridExportClosedReason = computed(() => (
+  gridExportClosed.value && !capabilitiesStale.value ? wb('notice.gridExportClosed', isZh.value) : null
+))
 const featureFlags = useFeatureFlags()
 // The workflow designer lives at a route gated by the global `workflow` product
 // feature (appRoutes.ts requiredFeature). On deployments without that feature the
@@ -1068,14 +1199,23 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
+// Rows-per-page is a per-viewer choice kept in localStorage per user + sheet (客户反馈 2026-10-21). Its own ref,
+// declared before the grid: the grid's first load runs during useMultitableGrid() itself and reads it through
+// resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
+// the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
+const gridPageSizeUserId = ref<string | null>(null)
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
   isPersonalMode: personalView.isPersonalMode,
+  resolvePageSize: (sheetId) => readGridPageSize(gridPageSizeUserId.value, sheetId),
   // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
   // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
   // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
   onSortFilterWriteFailed: () => showError(wb('toast.sortFilterSaveFailed', isZh.value)),
+  // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
+  // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
+  resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -1515,6 +1655,12 @@ const templateCenterHref = computed<string | undefined>(() => {
 })
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
+// 客户反馈 2026-10-21 (c): the automation rule editor opens this dialog directly on its DingTalk Groups tab.
+const apiTokenManagerInitialTab = ref<'dingtalk-groups' | null>(null)
+function openApiTokenManager(tab: 'dingtalk-groups' | null) {
+  apiTokenManagerInitialTab.value = tab
+  showApiTokenManager.value = true
+}
 const showTrash = ref(false)
 const showHistory = ref(false)
 // W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
@@ -1838,8 +1984,21 @@ function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): vo
 }
 
 function ensureCanCreateRecord(): boolean {
-  if (caps.canCreateRecord.value) return true
-  showError(wb('toast.recordCreateBlocked', isZh.value))
+  if (canCreateRecordByHand.value) return true
+  // 人工补充行 B3: on a P_reg sheet a stale generic-create gesture says what the note says (ADR §3.1 by state) — to an
+  // actor who could create; anyone else keeps the plain "no permission" toast.
+  if (caps.canCreateRecord.value && manualRowsBlock.value) {
+    showError(manualRowLabel(manualRowsCreateRefusalKey(manualRowsBlock.value), isZh.value))
+    return false
+  }
+  showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
+  return false
+}
+
+// OQ7: the form view's NEW submission (the form route) keeps its pre-B3 gate — see `canSubmitNewFormRecord`.
+function ensureCanSubmitNewFormRecord(): boolean {
+  if (canSubmitNewFormRecord.value) return true
+  showError(wb(recordCreateBlockedByLock.value ? 'notice.recordCreateBlockedByLock' : 'toast.recordCreateBlocked', isZh.value))
   return false
 }
 
@@ -1851,9 +2010,11 @@ function ensureCanEditRecord(recordId?: string | null): boolean {
 }
 
 function ensureCanDeleteRecord(recordId?: string | null): boolean {
-  const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
+  const actions = recordId ? (grid.resolveRowActions(recordId) ?? effectiveRowActions.value) : effectiveRowActions.value
+  const allowed = actions.canDelete
   if (allowed) return true
-  showError(wb('toast.recordDeleteBlocked', isZh.value))
+  // R-66: a PLM row (server-derived `deleteBlockedReason`) says why — nobody may delete it.
+  showError(wb(actions.deleteBlockedReason === 'plm_row' ? 'notice.plmRowDeleteBlocked' : 'toast.recordDeleteBlocked', isZh.value))
   return false
 }
 
@@ -2100,7 +2261,7 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
   return resolvers
 })
 const formReadOnly = computed(() => {
-  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !caps.canCreateRecord.value
+  return selectedRecordResolved.value ? !effectiveRowActions.value.canEdit : !canSubmitNewFormRecord.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
 // A1 infinite-scroll activation. The FLAT (ungrouped) grid path accumulates rows via scroll (loadMore)
@@ -2112,6 +2273,19 @@ const gridIsFlatPath = computed(() => grid.groupFields.value.length === 0)
 // composable says one exists (page.hasMore && !capped). The grid additionally re-checks flat/expanded
 // internally before emitting, so this is belt-and-suspenders.
 const gridCanLoadMore = computed(() => gridIsFlatPath.value && grid.canLoadMore.value)
+// Rows-per-page select (MetaGridTable footer): store the choice for this user + sheet, then reload page 1 at it.
+function onSetGridPageSize(size: number) {
+  const next = clampGridPageSize(size)
+  writeGridPageSize(gridPageSizeUserId.value, workbench.activeSheetId.value, next)
+  void grid.setPageSize(next)
+}
+// The user id arrives after the first load (which ran at the default size): apply this sheet's stored size now.
+function onGridPageSizeOwnerResolved(userId: string | null) {
+  gridPageSizeUserId.value = userId
+  const sheetId = workbench.activeSheetId.value
+  if (!userId || !sheetId) return
+  void grid.setPageSize?.(readGridPageSize(userId, sheetId) ?? DEFAULT_GRID_PAGE_SIZE)
+}
 const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[]>>(() => {
   const recordId = selectedRecordId.value
   if (!recordId) return {}
@@ -3084,9 +3258,16 @@ async function onHierarchyReparentRecord(payload: {
     showError(error?.message ?? wb('toast.hierarchyParentUpdateFailed', isZh.value))
   }
 }
+// Toolbar 「+ 新建记录」 and the grid's inline row / footer entry. 客户反馈 2026-10-27 (R74): the new record used to
+// land as an empty last row with the grid back on its first page, so a person scrolled to the bottom to fill it
+// in. It now opens in the inspector; resolveDeepLink fetches it when it is not among the loaded rows.
 async function onAddRecord() {
   if (!ensureCanCreateRecord()) return
-  await grid.createRecord()
+  const newRecordId = await grid.createRecord()
+  if (newRecordId) {
+    await resolveDeepLink(newRecordId)
+    return
+  }
   if (grid.error.value) showError(grid.error.value)
 }
 async function onKanbanCreateRecord(data: Record<string, unknown>) {
@@ -3107,13 +3288,29 @@ async function onDeleteRecord() {
   if (grid.error.value) showError(grid.error.value)
 }
 
-// Duplicate / clone record (design 2026-06-16). Both the drawer Duplicate button and the grid right-click
-// affordance route here. Gated on canCreateRecord (the server re-enforces it + the field-mask). On success
-// the new clone is opened in the drawer (Airtable/feishu staple) so the user lands on the copy to tweak it.
+// Customer feedback 2026-10-27: /context sends `recordDuplicateBlocked` on a sheet whose rows the stock-preparation
+// plugin maintains (the duplicate route answers 409 there). The drawer shows its 复制 entry disabled with this
+// reason, and a stale emit is refused below with the same copy. Same fail-closed read: absent ⇒ unchanged.
+const recordDuplicateBlocked = computed(() => capabilitySource.value?.recordDuplicateBlocked === true)
+const recordDuplicateBlockedReason = computed(() => (
+  recordDuplicateBlocked.value ? wb('notice.recordDuplicateBlocked', isZh.value) : null
+))
+
+// Duplicate / clone record (design 2026-06-16). The drawer's 复制 entry routes here; the grid declares
+// `duplicate-record` but no gesture emits it since the right-click duplicate was removed (customer feedback
+// 2026-10-27: a right-click created a row, and 「记录已复制」 read as a clipboard copy). Gated on
+// canCreateRecord (the server re-enforces it + the field-mask) and on `recordDuplicateBlocked`, then it ASKS
+// first — the copy is a new record in this sheet. On success the new clone is selected (the drawer, already
+// open, follows it) and the toast says a record was ADDED.
 async function onDuplicateRecord(recordId?: string | null) {
   const sourceId = recordId ?? selectedRecordId.value
   if (!sourceId) return
+  if (recordDuplicateBlocked.value) {
+    showError(wb('notice.recordDuplicateBlocked', isZh.value))
+    return
+  }
   if (!ensureCanCreateRecord()) return
+  if (!window.confirm(wb('confirm.duplicateRecord', isZh.value))) return
   const newRecordId = await grid.duplicateRecord(sourceId)
   if (newRecordId) {
     showSuccess(wb('toast.recordDuplicated', isZh.value))
@@ -3121,6 +3318,127 @@ async function onDuplicateRecord(recordId?: string | null) {
     return
   }
   if (grid.error.value) showError(grid.error.value)
+}
+
+// ── 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4, §3.7, §8 B3) ─────────────────────────────────
+//
+// Every gate below reads `manualRowsBlock` (/context), never a row's `manualSupplement` mark alone (#6664 N2): the mark
+// says WHICH row is a manual row; only the block says the sheet is P_reg, its state, and that this actor may act. The
+// block's id lists are sheet-level and are narrowed by the actor's field permissions here (utils/manual-rows.ts, N5).
+// While the active sheet's /context is still on its way (`capabilitiesStale`) no manual-row control is offered.
+
+const manualRowsNotice = computed(() => (manualRowsBlock.value ? manualRowsNoticeOf(manualRowsBlock.value) : null))
+// The note above the table (the R68 note's place): only for an actor who could create (a reader lost nothing).
+const manualRowsBannerVisible = computed(() => manualRowsBlock.value !== null && caps.canCreateRecord.value && !capabilitiesStale.value)
+// 「新增人工补充行」 (toolbar / inline row / footer, in the generic entries' places) and 「复制为新行」: state `allowed`
+// only (ADR §3.1).
+const manualRowsCreateAvailable = computed(() => (
+  caps.canCreateRecord.value && !capabilitiesStale.value && manualRowsCreateEnabled(manualRowsBlock.value)
+))
+// Editing the six fillable cells of a manual row: allowed / disabled, or an archived project / the deployment switch.
+const manualRowsEditGate = computed(() => (
+  caps.canEditRecord.value && !capabilitiesStale.value && manualRowsEditEnabled(manualRowsBlock.value)
+))
+const manualRowEditableFieldIds = computed(() => (
+  manualRowsEditGate.value
+    ? resolveManualRowEditableFieldIds(manualRowsBlock.value, grid.fields.value, effectiveFieldPermissions.value)
+    : []
+))
+// The page's manual rows whose fillable cells the grid opens as editors (empty unless the block allows editing).
+const manualRowRecordIdsInGrid = computed(() => {
+  if (!manualRowsEditGate.value || manualRowEditableFieldIds.value.length === 0) return []
+  return Object.entries(grid.rowActionOverrides.value ?? {})
+    .filter(([, actions]) => isManualSupplementMarked(actions))
+    .map(([recordId]) => recordId)
+})
+
+function isManualRowRecord(recordId: string): boolean {
+  if (isManualSupplementMarked(grid.rowActionOverrides.value?.[recordId])) return true
+  return deepLinkedRecord.value?.id === recordId && isManualSupplementMarked(deepLinkedRecordRowActions.value)
+}
+
+/** The grid's route choice (patchCell / undo / redo / conflict retry): PATCH …/manual-fields or null for /patch. */
+function resolveManualCellWrite(recordId: string, fieldId: string): ManualCellWrite | null {
+  const block = manualRowsBlock.value
+  if (!block || !manualRowsEditGate.value) return null
+  if (!manualRowEditableFieldIds.value.includes(fieldId) || !isManualRowRecord(recordId)) return null
+  return { required: block.requiredFieldIds.includes(fieldId) }
+}
+
+// The drawer's field permissions: on a manual row the fillable columns this actor may edit lose the lock's read-only
+// (and only those; the panel's own canEdit / row-action checks still apply). Its patch then routes like the grid's.
+const inspectorFieldPermissions = computed<Record<string, MetaFieldPermission>>(() => {
+  const base = effectiveFieldPermissions.value
+  const recordId = selectedRecordId.value
+  if (!recordId || manualRowEditableFieldIds.value.length === 0 || !isManualRowRecord(recordId)) return base
+  const lifted: Record<string, MetaFieldPermission> = { ...base }
+  for (const fieldId of manualRowEditableFieldIds.value) lifted[fieldId] = { visible: base[fieldId]?.visible ?? true, readOnly: false }
+  return lifted
+})
+
+// 新增人工补充行 (ADR §8 B3.3): the dialog's columns = the block's dialog / required ids ∩ the actor's field permissions;
+// a column the current VIEW hides is still offered (the host folds view-hidden ids into `visible`, utils/manual-rows.ts).
+const manualRowDialogPlan = computed(() => resolveManualRowDialogPlan(
+  manualRowsBlock.value,
+  grid.fields.value.length > 0 ? grid.fields.value : workbench.fields.value,
+  effectiveFieldPermissions.value,
+  new Set([...(grid.hiddenFieldIds.value ?? []), ...(workbench.activeView.value?.hiddenFieldIds ?? [])]),
+))
+const manualRowDialog = ref<{ visible: boolean; submitting: boolean; error: string | null; fieldErrors: Record<string, string> }>({
+  visible: false, submitting: false, error: null, fieldErrors: {},
+})
+
+function manualRowsUnavailableToast(): void {
+  const block = manualRowsBlock.value
+  showError(block ? manualRowLabel(manualRowsCreateRefusalKey(block), isZh.value) : wb('toast.recordCreateBlocked', isZh.value))
+}
+
+function openManualRowDialog(): void {
+  if (!manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  manualRowDialog.value = { visible: true, submitting: false, error: null, fieldErrors: {} }
+}
+
+function closeManualRowDialog(): void {
+  if (manualRowDialog.value.submitting) return
+  manualRowDialog.value = { visible: false, submitting: false, error: null, fieldErrors: {} }
+}
+
+async function onManualRowDialogSubmit(data: Record<string, unknown>): Promise<void> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId || !manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  manualRowDialog.value = { ...manualRowDialog.value, submitting: true, error: null, fieldErrors: {} }
+  try {
+    const { record } = await workbench.client.createManualRow(sheetId, data)
+    manualRowDialog.value = { visible: false, submitting: false, error: null, fieldErrors: {} }
+    showSuccess(manualRowLabel('toast.created', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    // ADR §8 B3.3: open the new row (resolveDeepLink fetches it when it is not on the loaded page).
+    if (record?.id) await resolveDeepLink(record.id)
+  } catch (error: any) {
+    manualRowDialog.value = {
+      ...manualRowDialog.value,
+      submitting: false,
+      error: error?.message ?? manualRowLabel('dialog.failed', isZh.value),
+      fieldErrors: error?.fieldErrors && typeof error.fieldErrors === 'object' ? { ...error.fieldErrors } : {},
+    }
+  }
+}
+
+// 复制为新行 (ADR §3.3): any row of the sheet is a source; the server picks the columns (whitelist) and stamps the new
+// row's own key, 项目号 and 有效. Asks first — like 复制, it adds a row to this sheet.
+async function onManualCopyRecord(recordId?: string | null): Promise<void> {
+  const sourceId = recordId ?? selectedRecordId.value
+  if (!sourceId) return
+  if (!manualRowsCreateAvailable.value) return manualRowsUnavailableToast()
+  if (!window.confirm(manualRowLabel('confirm.copy', isZh.value))) return
+  try {
+    const { record } = await workbench.client.copyAsManualRow(sourceId, { sheetId: workbench.activeSheetId.value || undefined })
+    showSuccess(manualRowLabel('toast.copied', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    if (record?.id) await resolveDeepLink(record.id)
+  } catch (error: any) {
+    showError(error?.message ?? manualRowLabel('toast.copyFailed', isZh.value))
+  }
 }
 
 async function onToggleRecordLock(payload: { recordId: string; locked: boolean }) {
@@ -3364,13 +3682,57 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
+  // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
+  // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
+  // patch keeps the typing undoable.
+  const settleUndo = workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
+    await runManualDrawerPatch(record.id, fieldId, value, settleUndo)
+    return
+  }
+  await commitDrawerPatch(record, fieldId, value, false, settleUndo)
+}
+
+// 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
+// fillable column through PATCH …/manual-fields, every other column through /patch (the grid routes each patch). The two
+// routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
+// a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
+// next one from trying with the version actually stored.
+const manualDrawerWriteTails = new Map<string, Promise<void>>()
+
+function drawerRecordById(recordId: string): MetaRecord | null {
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
+  return grid.rows.value.find((row) => row.id === recordId) ?? null
+}
+
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
+  const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
+  const step = previous.then(async () => {
+    // Re-read AFTER the previous step: its returned version is on the row by now.
+    const current = drawerRecordById(recordId)
+    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
+  })
+  const tail = step.then(() => undefined, () => undefined)
+  manualDrawerWriteTails.set(recordId, tail)
+  try {
+    await step
+  } finally {
+    if (manualDrawerWriteTails.get(recordId) === tail) manualDrawerWriteTails.delete(recordId)
+  }
+}
+
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
   inspectorPatchOwners.set(fieldId, patchOwner)
+  // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
+  const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const failure = manualRow
+    ? await grid.patchCell(record.id, fieldId, value, record.version, { onCommitted: (version) => { committed.version = version } })
+    : await grid.patchCell(record.id, fieldId, value, record.version)
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
   if (failure) {
     // Route by the failure the composable returned for THIS patch — still guarded on record + field
@@ -3416,13 +3778,14 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     showError(grid.error.value)
     return
   }
+  onCommitted?.()
   // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
   // panel's watch, its draft). Other fields' errors are untouched.
   if (latestRequest) clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
-      version: deepLinkedRecord.value.version + 1,
+      version: committed.version ?? deepLinkedRecord.value.version + 1,
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
@@ -3447,7 +3810,7 @@ async function onCopyRecordLink() {
 async function onFormSubmit(data: Record<string, unknown>) {
   const viewId = workbench.activeViewId.value
   if (viewId && activeViewType.value === 'form') {
-    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanCreateRecord())) return
+    if (!(selectedRecordResolved.value ? ensureCanEditRecord(selectedRecordResolved.value.id) : ensureCanSubmitNewFormRecord())) return
     try {
       formSubmitting.value = true
       formSuccessMessage.value = null
@@ -3918,7 +4281,7 @@ async function loadAggregates() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value })
     if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
     aggregateGroups.value = r.groups ?? []
@@ -3931,7 +4294,7 @@ async function loadAggregates() {
   }
 }
 watch(
-  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value],
+  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value, () => grid.viewerFilterParam?.value],
   () => { void loadAggregates() },
   { immediate: true },
 )
@@ -3951,7 +4314,7 @@ async function loadScaleStats() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, statsFields })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value, statsFields })
     if (seq !== scaleStatsReqSeq) return // a newer request superseded this one
     scaleServerStats.value = r.stats ?? {}
   } catch {
@@ -3979,6 +4342,7 @@ const scaleStatsKey = () => JSON.stringify([
   grid.filterRules.value,
   grid.filterGroups.value,
   searchText.value,
+  grid.viewerFilterParam?.value ?? null,
   autoScaleStatsFieldIds.value,
 ])
 let lastScaleStatsKey = ''
@@ -5252,7 +5616,22 @@ const activeSheetExportName = computed(() => {
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
+// 备料分批拉取第一期 step 3: the ONE client-side gate of generic grid export, run where a file can be started —
+// when the dialog opens AND again at confirm (the only caller of doExportCsv / doExportXlsx / exportAllRowsViaRoute),
+// because the sheet may be closed while the dialog is open. "Selected rows" are built in the browser from rows
+// already loaded, so the server's 403 cannot stop them — this re-check does, driven by the server-set
+// `gridExportClosure` marker. Refusing toasts the reason instead of failing silently. On an ordinary sheet it is
+// always true, so nothing there changes.
+function canRunGridExport(): boolean {
+  // Capabilities of another sheet (mid-switch): nothing is known about the active sheet yet — refuse quietly.
+  if (capabilitiesStale.value) return false
+  if (!gridExportClosed.value) return true
+  showError(wb('notice.gridExportClosed', isZh.value))
+  return false
+}
+
 function openExportDialog(initialFormat: 'csv' | 'xlsx') {
+  if (!canRunGridExport()) return
   if (!scopedGridFields.value.length) return
   exportInitialFormat.value = initialFormat
   exportDialogVisible.value = true
@@ -5260,6 +5639,8 @@ function openExportDialog(initialFormat: 'csv' | 'xlsx') {
 
 function onExportDialogConfirm(payload: ExportConfirmPayload) {
   exportDialogVisible.value = false
+  // Re-checked at confirm time: the sheet may have been closed (context reloaded) while the dialog was open.
+  if (!canRunGridExport()) return
   const selectedFieldIds = new Set(payload.fieldIds)
   // Preserve the on-screen column order; ignore unknown ids defensively.
   const fields = scopedGridFields.value.filter((f) => selectedFieldIds.has(f.id))
@@ -5375,11 +5756,28 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   e.returnValue = ''
 }
 
+// mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts,
+// installed on the document in onMounted): the browser's own undo never runs on the page, since it is
+// page-wide and can revert another field. A text control's chord is its own step or nothing; the grid's
+// undo/redo runs from a non-text target in the workbench, or from the page itself after a press on the
+// grid's cells or the drawer's title or fields (their edits are cell patches; a button or file input
+// there, the grid's footer, the drawer's comments, or a rail or manager rename is not:
+// `isWorkbenchGridSurface`).
+const workbenchRootRef = ref<HTMLElement | null>(null)
+const workbenchUndo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),
+  isGridSurface: isWorkbenchGridSurface,
+})
+let removeWorkbenchUndo: (() => void) | null = null
+// The drawer's controls are reused when it shows another record (and the sheet's and view's controls
+// when those change), so a control's history must not outlive what it was typed for: with equal content
+// in both (commonly empty), an undo would bring record A's typing into record B and save it there.
+watch([selectedRecordId, () => workbench.activeSheetId.value, () => workbench.activeViewId.value], () => workbenchUndo.reset())
+
 function onGlobalKeydown(e: KeyboardEvent) {
-  const mod = e.metaKey || e.ctrlKey
-  if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
-  else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
-  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
+  // (the rich-text editor is a contenteditable div, not an input).
+  if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
   // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
   // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
   // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
@@ -5803,6 +6201,37 @@ const selectedRecordResolved = computed<MetaRecord | null>(() => {
   return null
 })
 
+// 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07; utils/bom-relations.ts). The buttons exist only when
+// /context sends the stockPreparationBomRelations block for the ACTIVE sheet (never from stale capabilities of the
+// previous sheet). Pressing one sets the grid's VIEWER filter (useMultitableGrid setViewerFilter): GET /view narrows
+// this viewer's rows; nothing is written to the shared view or the personal overlay. 查看子件 closes the drawer first
+// (the open row is the parent and is not among its own children); 查看所有使用位置 keeps it open (the row is one of
+// the positions).
+const bomRelationsBlock = computed(() => (capabilitiesStale.value ? null : readBomRelationsBlock(capabilitySource.value)))
+const inspectorBomRelations = computed<{ disabledReason: string | null } | null>(() => {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return null
+  return { disabledReason: bomRelationsSourceValue(block, record) === null ? bomRelationsLabel('action.noSource', isZh.value) : null }
+})
+const viewerFilterState = computed(() => grid.viewerFilter?.value ?? null)
+async function onBomRelations(kind: BomRelationKind) {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return
+  const state = buildBomRelationsViewerFilter(kind, block, record, isZh.value)
+  if (!state) return
+  if (kind === 'children') {
+    onCloseDrawer()
+    // A pending edit the user chose to keep (confirmDiscardRecordChanges declined) keeps the drawer — and the grid as it is.
+    if (inspectorOpen.value) return
+  }
+  await grid.setViewerFilter(state)
+}
+async function onClearViewerFilter() {
+  await grid.clearViewerFilter()
+}
+
 watch(
   [() => workbench.activeSheetId.value, visibleCommentPresenceRecordIds, () => effectiveRowActions.value.canComment],
   ([sheetId, recordIds, canComment]) => {
@@ -6069,6 +6498,7 @@ watch(
 )
 
 onMounted(async () => {
+  removeWorkbenchUndo = installWorkbenchUndo(workbenchUndo, { undo: () => grid.undo(), redo: () => grid.redo() })
   window.addEventListener('beforeunload', onBeforeUnload)
   syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
   // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
@@ -6077,6 +6507,7 @@ onMounted(async () => {
   window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
+    onGridPageSizeOwnerResolved(userId)
   }).catch(() => undefined)
   // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
   // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.
@@ -6154,6 +6585,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  removeWorkbenchUndo?.()
+  removeWorkbenchUndo = null
   workbenchAlive = false
   closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
@@ -6206,6 +6639,20 @@ defineExpose({
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.mt-workbench__viewer-filter {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #b3d8ff;
+  border-radius: 10px;
+  background: #ecf5ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mt-workbench__viewer-filter-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mt-workbench__viewer-filter-note { font-size: 12px; line-height: 1.4; color: #606266; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
   padding: 10px 12px;

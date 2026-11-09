@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 
-// The first mounted test pays for the dynamic `import()` of ApprovalDetailView.vue plus a full
-// mount — the same ~10 s cold start approval-member-bar-operation-policy.spec.ts measured against
-// vitest's 5 s default — so the budget is raised the same way.
+// Keep the existing mounted-test budget; preload the component during collection below
+// so each test measures its mount and assertions rather than cold module acquisition.
 vi.setConfig({ testTimeout: 15_000 })
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
@@ -591,3 +590,6 @@ describe('退回 candidates: the server list, else the legacy list (mounted Appr
     expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
   })
 })
+
+// Acquire only after all mock refs are initialized; each mount retains its original import.
+await import('../src/views/approval/ApprovalDetailView.vue')

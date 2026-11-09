@@ -133,6 +133,12 @@ const ALLOWLIST: Record<string, Record<string, { disposition: 'CHOKEPOINT' | 'SA
       reason: 'GET /sheets/:sheetId/trash list (#15 recycle bin): visibleFieldIds from maskStoredRecordFieldIds masks each trashed record data so field_permissions-denied / taint values do not leak through the trash API',
     },
   },
+  'multitable/webhook-delivery-authority.ts': {
+    'valueMap|readableFieldIds': {
+      disposition: 'CHOKEPOINT',
+      reason: 'subscription webhook body mask: readableFieldIds = loadReadableRecordFieldIdsForAccess (loadAllowedFieldIds then maskStoredRecordFieldIds with the database-read access snapshot)',
+    },
+  },
   'multitable/record-write-service.ts': {
     'row.data|visiblePropertyFieldIds': {
       disposition: 'CHOKEPOINT',

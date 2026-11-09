@@ -217,7 +217,7 @@
               :data-who="entry.who"
             >
               <span data-testid="stock-prep-ops-audit-row-time">{{ formatAuditTime(entry.createdAt) }}</span>
-              <span data-testid="stock-prep-ops-audit-row-action">{{ auditActionLabel(entry.action) }}</span>
+              <span data-testid="stock-prep-ops-audit-row-action">{{ auditActionLabel(entry.action, entry.technical.mode) }}</span>
               <!-- THREE outcomes, not two. An unreadable current account or an actor-less row must not
                    be rendered as the positive claim 「其他同事」 — see audit.ts's `StockPrepAuditWho`. -->
               <span data-testid="stock-prep-ops-audit-row-who">{{ auditWhoLabel(entry.who) }}</span>
@@ -902,8 +902,10 @@ const auditEntries = computed(() => {
   return outcome !== null && outcome.ok ? outcome.entries : []
 })
 
-function auditActionLabel(action: string): string {
-  const plain = stockPrepAuditActionPlain(action)
+// A row's sentence depends on its mode too (R68: the repair leg's rows share the create action); the
+// action-filter list passes no mode and keeps the action's own line (it lists no project_target_* action today).
+function auditActionLabel(action: string, mode?: string | null): string {
+  const plain = stockPrepAuditActionPlain(action, mode)
   if (plain) return bi(plain.zh, plain.en)
   return bi(`其他动作(${action})`, `Other action (${action})`)
 }

@@ -760,13 +760,14 @@ describe('link chips (§1.3 "Link chips", HI-1)', () => {
     await flushUi()
     const chips = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-test="link-chip"]'))
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['Acme Supply', 'Beacon Labs'])
-    expect(container.querySelector('.meta-linked-record-popover')).toBeNull()
+    // The popover teleports to <body> (see MetaLinkedRecordPopover.vue), so it is looked up on the document.
+    expect(document.querySelector('.meta-linked-record-popover')).toBeNull()
     chips[0].click()
     await flushUi()
     expect(fetchRecord).toHaveBeenCalledTimes(1)
     expect(fetchRecord).toHaveBeenCalledWith('vendor_1')
-    expect(container.querySelector('.meta-linked-record-popover [role="dialog"]')).not.toBeNull()
-    expect(container.querySelector('.meta-linked-record-popover')?.textContent).toContain('Acme Supply')
+    expect(document.querySelector('.meta-linked-record-popover [role="dialog"]')).not.toBeNull()
+    expect(document.querySelector('.meta-linked-record-popover')?.textContent).toContain('Acme Supply')
     // the picker button is still there, now reading record.editLinks (chips carry the names/count)
     const btn = container.querySelector<HTMLButtonElement>('.meta-record-drawer__link-btn')!
     expect(btn.textContent?.trim()).toBe(recordLabel('record.editLinks', false))
@@ -1087,5 +1088,64 @@ describe('attachments 3-up gallery (§1.3 "Attachments") — CSS provision only'
     await flushUi()
     await vi.waitFor(() => expect(container.querySelector('.meta-record-drawer__attachments .meta-attachment-list__items img')?.getAttribute('src')).toBe('blob:gallery-thumbnail'))
     expect(authenticatedApi.apiFetch).toHaveBeenCalledWith('/api/multitable/attachments/att_1?thumbnail=true', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+})
+
+// Input-method composition (utils/ime-keys.ts): an Enter that commits a composition commits no field
+// and moves no focus, and an Escape that cancels one closes no drawer. The key that ends a composition
+// may come with isComposing false and keyCode 229 (Safari, per engine behaviour), which is why
+// isComposing alone is not enough.
+describe('keyboard during an input-method composition', () => {
+  const IME_INITS: KeyboardEventInit[] = [{ isComposing: true }, { keyCode: 229 }]
+  const KB_FIELDS = [F_TITLE, F_QTY, F_STATUS, F_NOTES]
+  const KB_RECORD = record('rec_1', { fld_title: 'a', fld_qty: 1, fld_status: 'todo', fld_notes: 'n' })
+
+  it('an Enter during a composition on a single-line control, or a mod+Enter in the textarea, neither commits nor moves focus; a plain Enter still advances', async () => {
+    const onPatch = vi.fn()
+    const { container } = mountPanel({ record: KB_RECORD, fields: KB_FIELDS, onPatch })
+    await flushUi()
+    const title = container.querySelector<HTMLInputElement>('#drawer_field_fld_title')!
+    const qty = container.querySelector<HTMLInputElement>('#drawer_field_fld_qty')!
+    const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    title.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(title, { key: 'Enter', ...init }).defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(title)
+    }
+    textarea.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(textarea, { key: 'Enter', metaKey: true, ...init }).defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(textarea)
+    }
+    expect(onPatch).not.toHaveBeenCalled()
+    title.focus()
+    expect(keydown(title, { key: 'Enter' }).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(qty)
+  })
+
+  it('an Escape during a composition in a field control bubbles to the drawer root and closes nothing; a plain Escape there closes the drawer once', async () => {
+    const onClose = vi.fn()
+    const { container } = mountInspector({
+      record: record('rec_1', { fld_title: 'Alpha', fld_qty: 1, fld_notes: 'n' }),
+      fields: [F_TITLE, F_QTY, F_NOTES],
+      recordIds: ['rec_1'],
+      onClose,
+    })
+    await flushUi()
+    const inspectorRoot = container.querySelector<HTMLElement>('.meta-record-drawer')!
+    const control = container.querySelector<HTMLInputElement>('#drawer_field_fld_title')!
+    const reachedRoot: string[] = []
+    inspectorRoot.addEventListener('keydown', (event) => { reachedRoot.push(event.key) })
+    control.focus()
+    for (const init of IME_INITS) {
+      expect(keydown(control, { key: 'Escape', ...init }).defaultPrevented).toBe(false)
+      await flushUi()
+    }
+    // the key really reached the root (bubbling, not a stop below it); the root closed nothing
+    expect(reachedRoot).toEqual(['Escape', 'Escape'])
+    expect(onClose).not.toHaveBeenCalled()
+    expect(keydown(control, { key: 'Escape' }).defaultPrevented).toBe(true)
+    await flushUi()
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

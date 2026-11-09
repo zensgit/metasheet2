@@ -128,11 +128,23 @@ function rowToDelivery(row: {
   }
 }
 
-async function readJsonSafely(response: Response): Promise<unknown> {
+// The body read is bounded by the same signal as the request: an aborted read resolves null, i.e.
+// the existing unreadable-body path, even when an injected fetch does not tie the body to `signal`.
+async function readJsonSafely(response: Response, signal: AbortSignal): Promise<unknown> {
+  if (signal.aborted) return null
+  let onAbort: (() => void) | undefined
   try {
-    return await response.json()
+    const body = response.json()
+    body.catch(() => undefined)
+    const aborted = new Promise<null>((resolve) => {
+      onAbort = () => resolve(null)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    return await Promise.race([body, aborted])
   } catch {
     return null
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
   }
 }
 
@@ -396,6 +408,10 @@ export class DingTalkGroupDestinationService {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), DINGTALK_REQUEST_TIMEOUT_MS)
       let response: Response
+      let parsed: unknown
+      // The timeout stays armed through the body read. A body that never completes is treated like
+      // any other unreadable body (failed delivery, not re-sent): headers already came back, so the
+      // message may have been delivered.
       try {
         response = await this.fetchFn(signedUrl, {
           method: 'POST',
@@ -406,11 +422,11 @@ export class DingTalkGroupDestinationService {
           body: JSON.stringify(payload),
           signal: controller.signal,
         })
+        parsed = await readJsonSafely(response, controller.signal)
       } finally {
         clearTimeout(timeout)
       }
 
-      const parsed = await readJsonSafely(response)
       responseStatus = response.status
       responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
       if (!response.ok) {

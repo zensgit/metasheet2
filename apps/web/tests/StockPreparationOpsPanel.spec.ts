@@ -27,12 +27,15 @@ import { createRequire } from 'node:module'
 //   OP-06 三行免责常驻 — present before a search, mid-search, and after one (every branch).
 //   OP-07 空态措辞 — "这不等于没人动过", not a generic "暂无数据".
 //   OP-08 403 措辞 — "这一格看不了:需要平台管理员" (BOTH halves, every tile).
-//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries all 20 actions the .cjs store declares,
+//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries all 21 actions the .cjs store declares,
 //         read from that module directly (anti-vacuity, same discipline as
 //         StockPreparationPosturePlainLanguage.spec.ts's manifest read).
 //   OP-10 目标表一致性 — installs 与 readiness 问同一个 objectId, and WHICH readiness route is used
 //         is decided by that id's namespace (canonical vs sandbox), never sent blind.
 //   OP-11 反查不带 workspaceId — the regression that made this lookup return zero rows forever.
+//   OP-13 审计行按 (动作, 模式) 出句 (R68) — the options-sync repair leg writes under 088's
+//         `project_target_create` with mode `contract_options_synced`; that row reads 「修补了…」, every
+//         create mode / null / unknown mode keeps 「为一个项目建了备料表」. No new action literal anywhere.
 //   OP-12 源就绪预检's own refusals (no membership / another organisation / not the connection's
 //         owner / binding lookup unavailable) each say so, instead of 「需要对接读取权限」 for a 403 or
 //         「目标表配置不对」 for a 400; a real 403 FORBIDDEN keeps the permission sentence.
@@ -69,7 +72,11 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationOpsPanel from '../src/components/integration/stockPreparation/StockPreparationOpsPanel.vue'
-import { STOCK_PREP_AUDIT_ACTION_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
+import {
+  STOCK_PREP_AUDIT_ACTION_MODE_PLAIN,
+  STOCK_PREP_AUDIT_ACTION_PLAIN,
+  stockPrepAuditActionPlain,
+} from '../src/services/integration/stockPreparation/plainLanguage'
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
 
@@ -803,6 +810,42 @@ describe('BOM备料 记录与排查面板 (P1-4/P1-5)', () => {
   })
 
   // -------------------------------------------------------------------------
+  // OP-13 — a row's sentence is chosen by (action, mode).
+  // -------------------------------------------------------------------------
+
+  function projectTargetRows(): AuditRow[] {
+    return ['sheet_created', 'sheet_adopted', 'customer_pack_installed', 'contract_options_synced', 'some_future_mode', null]
+      .map((mode, index) => ({
+        id: `row-pt-${index}`,
+        tenantId: 'tenant-a',
+        workspaceId: null,
+        projectId: 'P2026-001',
+        action: 'project_target_create',
+        subjectId: 'sheet-under-test',
+        mode,
+        actor: 'u_me',
+        detail: {},
+        createdAt: `2026-09-01T0${index}:00:00.000Z`,
+      }))
+  }
+
+  for (const [locale, create, repair] of [
+    ['zh-CN', '为一个项目建了备料表', '修补了一个项目的备料表（补齐选项 / 加锁 PLM 列）'],
+    ['en', 'Created the 备料 sheet for a project', "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)"],
+  ] as const) {
+    it(`OP-13 (${locale}): the repair-sync row reads as a repair; every create mode, a null and an unknown mode keep the create line`, async () => {
+      h.locale = locale
+      installRoutes({ audit: (url) => auditResponse(url, projectTargetRows()) })
+      const root = await mountPanel()
+      await search(root, 'P2026-001')
+
+      // Rows render in the order the store answered them (projectTargetRows order).
+      const labels = nodes(root, 'stock-prep-ops-audit-row').map((row) => text(row, 'stock-prep-ops-audit-row-action').trim())
+      expect(labels).toEqual([create, create, create, repair, create, create])
+    })
+  }
+
+  // -------------------------------------------------------------------------
   // OP-06 — three-line disclaimer, always present.
   // -------------------------------------------------------------------------
 
@@ -889,8 +932,8 @@ describe('STOCK_PREP_AUDIT_ACTION_PLAIN (anti-vacuity)', () => {
     STOCK_PREP_AUDIT_ACTIONS: readonly string[]
   }
 
-  it('reads the shipped 20-action vocabulary (anti-vacuity: the actions really are declared there)', () => {
-    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS.length).toBe(20)
+  it('reads the shipped 21-action vocabulary (anti-vacuity: the actions really are declared there)', () => {
+    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS.length).toBe(21)
   })
 
   it('carries a plain-language line for EVERY audit action the store vocabulary declares — 词表 key 数 = 动作数', () => {
@@ -916,5 +959,56 @@ describe('STOCK_PREP_AUDIT_ACTION_PLAIN (anti-vacuity)', () => {
       expect(String(plain.zh ?? '').trim().length, `${action}.zh`).toBeGreaterThan(0)
       expect(String(plain.en ?? '').trim().length, `${action}.en`).toBeGreaterThan(0)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// OP-13 — (action, mode) labels, pure. The mode literal is read out of http-routes.cjs as TEXT (that
+// module pulls a heavy dependency chain; same text-scrape discipline as the posture spec's manifest
+// read), so a renamed repair mode cannot silently fall back to the create sentence.
+// ---------------------------------------------------------------------------
+describe('stockPrepAuditActionPlain(action, mode) (OP-13)', () => {
+  const require = createRequire(import.meta.url)
+  const storeModule = require('../../../plugins/plugin-integration-core/lib/stock-preparation-audit-store.cjs') as {
+    STOCK_PREP_AUDIT_ACTIONS: readonly string[]
+  }
+  const fs = require('node:fs') as typeof import('node:fs')
+  const routesSource = fs.readFileSync(
+    require.resolve('../../../plugins/plugin-integration-core/lib/http-routes.cjs'),
+    'utf8',
+  )
+  const create = STOCK_PREP_AUDIT_ACTION_PLAIN.project_target_create
+
+  it('the repair mode literal is the one the repair leg writes, under the CREATE action (no new action)', () => {
+    const literal = /const STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE = '([a-z_]+)'/.exec(routesSource)?.[1]
+    expect(literal).toBe('contract_options_synced')
+    expect(Object.keys(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN.project_target_create)).toEqual([literal])
+    expect(routesSource).toMatch(
+      /action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,\s+subjectId: repaired\.row\.sheetId,\s+mode: STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE,/,
+    )
+  })
+
+  it('a mode entry exists only under an action the store vocabulary declares', () => {
+    for (const action of Object.keys(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN)) {
+      expect(storeModule.STOCK_PREP_AUDIT_ACTIONS, action).toContain(action)
+    }
+  })
+
+  it('create mode → create line; repair mode → repair line; unknown / null / absent mode → create line as before', () => {
+    for (const mode of ['sheet_created', 'sheet_adopted', 'customer_pack_installed']) {
+      expect(stockPrepAuditActionPlain('project_target_create', mode), mode).toBe(create)
+    }
+    expect(stockPrepAuditActionPlain('project_target_create', 'contract_options_synced')).toEqual({
+      zh: '修补了一个项目的备料表（补齐选项 / 加锁 PLM 列）',
+      en: "Repaired a project's stock-preparation sheet (filled in option lists / locked PLM columns)",
+    })
+    expect(stockPrepAuditActionPlain('project_target_create', 'some_future_mode')).toBe(create)
+    expect(stockPrepAuditActionPlain('project_target_create', null)).toBe(create)
+    expect(stockPrepAuditActionPlain('project_target_create')).toBe(create)
+  })
+
+  it('the repair mode on ANOTHER action does not borrow the repair line', () => {
+    expect(stockPrepAuditActionPlain('project_target_grant', 'contract_options_synced')).toBe(STOCK_PREP_AUDIT_ACTION_PLAIN.project_target_grant)
+    expect(stockPrepAuditActionPlain('no_such_action', 'contract_options_synced')).toBeNull()
   })
 })

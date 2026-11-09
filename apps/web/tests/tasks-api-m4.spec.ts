@@ -396,6 +396,15 @@ describe('createTask — M4 date keys and the 422 allowlist', () => {
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'validation', code })
   })
 
+  it('resolves validation ASSIGNEE_TASK_ACCESS_REQUIRED for a 422 with that code', async () => {
+    expect(CREATE_TASK_VALIDATION_CODES).toContain('ASSIGNEE_TASK_ACCESS_REQUIRED')
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    await expect(createTask({ title: 'x', assignees: ['u2'] })).resolves.toEqual({
+      kind: 'validation',
+      code: 'ASSIGNEE_TASK_ACCESS_REQUIRED',
+    })
+  })
+
   it('still resolves error (NOT validation) for a 422 code outside the allowlist', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'VALIDATION_FAILED' } }))
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'error', status: 422 })
@@ -408,6 +417,66 @@ describe('createTask — M4 date keys and the 422 allowlist', () => {
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'org_missing' })
     h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'invalid_title' })
+  })
+})
+
+describe('createTask — package 2: the record source and the retry key', () => {
+  const SOURCE = { sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1' }
+  const KEY = '0f8fad5b-d9cb-469f-a165-70867728950e'
+
+  it('sends source and dispatchKey when given, and the view id only when given', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, sourceLinked: true }))
+    await createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })
+    expect(sentBody()).toStrictEqual({ title: 'x', source: SOURCE, dispatchKey: KEY })
+    await createTask({ title: 'x', source: { sheetId: 'sht_1', recordId: 'rec_1' }, dispatchKey: KEY })
+    expect(sentBody()).toStrictEqual({ title: 'x', source: { sheetId: 'sht_1', recordId: 'rec_1' }, dispatchKey: KEY })
+  })
+
+  it('omits both keys when not given: never a null (the service refuses an explicit null)', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1 }))
+    await createTask({ title: 'x' })
+    const body = sentBody() as Record<string, unknown>
+    expect('source' in body).toBe(false)
+    expect('dispatchKey' in body).toBe(false)
+  })
+
+  it('a sourced create reads sourceLinked strictly: true only for a literal true', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, sourceLinked: true }))
+    await expect(createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })).resolves.toStrictEqual({
+      kind: 'ok', id: 't1', version: 1, sourceLinked: true,
+    })
+    // A service that does not store the link answers without it (A1).
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1 }))
+    await expect(createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })).resolves.toStrictEqual({
+      kind: 'ok', id: 't1', version: 1, sourceLinked: false,
+    })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, sourceLinked: 'true' }))
+    await expect(createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })).resolves.toStrictEqual({
+      kind: 'ok', id: 't1', version: 1, sourceLinked: false,
+    })
+  })
+
+  it('a matched resend is read as reused only for a literal true', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, reused: true, sourceLinked: true }))
+    await expect(createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })).resolves.toStrictEqual({
+      kind: 'ok', id: 't1', version: 1, reused: true, sourceLinked: true,
+    })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, reused: 1, sourceLinked: true }))
+    const notReused = await createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })
+    expect('reused' in notReused).toBe(false)
+  })
+
+  it('A3: a create without a source carries neither key in its result, whatever the body says', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { id: 't1', version: 1, sourceLinked: true, reused: true }))
+    await expect(createTask({ title: 'x' })).resolves.toStrictEqual({ kind: 'ok', id: 't1', version: 1 })
+  })
+
+  it('the three package 2 refusals are validation codes', async () => {
+    for (const code of ['INVALID_SOURCE', 'INVALID_DISPATCH_KEY', 'SOURCE_NOT_READABLE'] as const) {
+      expect(CREATE_TASK_VALIDATION_CODES).toContain(code)
+      h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code } }))
+      await expect(createTask({ title: 'x', source: SOURCE, dispatchKey: KEY })).resolves.toEqual({ kind: 'validation', code })
+    }
   })
 })
 
@@ -503,6 +572,63 @@ describe('getTask — canManageMembers (FE-8)', () => {
   })
 })
 
+// Package 2 (S-G2): the detail's `source`, the record a dispatched task came from. Optional, checked
+// strictly when present: a malformed one makes the body malformed, like `listIds`.
+describe('getTask — package 2: the source record', () => {
+  const SOURCE = Object.freeze({ kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null })
+
+  it('parses a source key for key', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m2TaskBody({ ...m4TaskKeys, source: { ...SOURCE } })))
+    const result = await getTask('t1')
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.task.source).toEqual({ kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null })
+    expect(result.task.listIds).toEqual(['tlst_1', 'tlst_2'])
+  })
+
+  it('parses a source with a base id and without a view id', async () => {
+    const source = { ...SOURCE, viewId: null, baseId: 'bse_1' }
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m2TaskBody({ source })))
+    const result = await getTask('t1')
+    expect(result.kind).toBe('ok')
+    if (result.kind === 'ok') expect(result.task.source).toEqual(source)
+  })
+
+  it('keeps only the five keys of the source', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m2TaskBody({ source: { ...SOURCE, title: 'Row 1', extra: 1 } })))
+    const result = await getTask('t1')
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(Object.keys(result.task.source ?? {}).sort()).toEqual(['baseId', 'kind', 'recordId', 'sheetId', 'viewId'])
+  })
+
+  it('a body without the key parses without it (a task not dispatched from a record, or an older body)', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m2TaskBody(m4TaskKeys)))
+    const result = await getTask('t1')
+    expect(result.kind).toBe('ok')
+    if (result.kind === 'ok') expect('source' in result.task).toBe(false)
+  })
+
+  it.each([
+    ['null', null],
+    ['a string', 'sht_1/rec_1'],
+    ['an array', [SOURCE]],
+    ['an empty object', {}],
+    ['kind missing', { sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1', baseId: null }],
+    ['an unknown kind', { ...SOURCE, kind: 'approval' }],
+    ['sheetId a number', { ...SOURCE, sheetId: 1 }],
+    ['sheetId missing', { kind: 'multitable_record', recordId: 'rec_1', viewId: 'viw_1', baseId: null }],
+    ['recordId null', { ...SOURCE, recordId: null }],
+    ['viewId missing', { kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', baseId: null }],
+    ['viewId a number', { ...SOURCE, viewId: 2 }],
+    ['baseId missing', { kind: 'multitable_record', sheetId: 'sht_1', recordId: 'rec_1', viewId: 'viw_1' }],
+    ['baseId an object', { ...SOURCE, baseId: {} }],
+  ])('resolves error for a malformed source: %s', async (_label, source) => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m2TaskBody({ source })))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'error', status: 200 })
+  })
+})
+
 // FE-8: 422 INACTIVE_ORG_MEMBER at the three task write points PR-3a S9 checks (R17 / N2, ruled
 // 2026-10-07): an assignee or a follower added, and an assignee named at creation.
 describe('task member writes — 422 INACTIVE_ORG_MEMBER (FE-8)', () => {
@@ -513,6 +639,13 @@ describe('task member writes — 422 INACTIVE_ORG_MEMBER (FE-8)', () => {
     await expect(addAssignee('t1', 'u9')).resolves.toEqual({ kind: 'validation', code: 'INACTIVE_ORG_MEMBER' })
     expect(lastCall()[0]).toBe('/api/tasks/t1/assignees')
     expect(lastCall()[1]?.method).toBe('POST')
+    expect(sentBody()).toEqual({ userId: 'u9' })
+  })
+
+  it('addAssignee resolves validation ASSIGNEE_TASK_ACCESS_REQUIRED and sent { userId }', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' } }))
+    await expect(addAssignee('t1', 'u9')).resolves.toEqual({ kind: 'validation', code: 'ASSIGNEE_TASK_ACCESS_REQUIRED' })
+    expect(lastCall()[0]).toBe('/api/tasks/t1/assignees')
     expect(sentBody()).toEqual({ userId: 'u9' })
   })
 
@@ -559,6 +692,33 @@ describe('listTasks — page and total', () => {
     expect(lastCall()[0]).toBe(`/api/tasks?view=created&status=done&limit=${TASK_PAGE_LIMIT}&offset=100`)
     await listTasks('delegated', undefined, undefined)
     expect(lastCall()[0]).toBe('/api/tasks?view=delegated')
+  })
+
+  it('search: q is sent encoded after the status and before the page; absent or empty leaves the string unchanged', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await listTasks('assigned', undefined, 'open', 'alpha')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open&q=alpha')
+    await listTasks('created', { offset: 100 }, 'done', 'alpha')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=created&status=done&q=alpha&limit=${TASK_PAGE_LIMIT}&offset=100`)
+    await listTasks('assigned', undefined, undefined, 'alpha')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&q=alpha')
+    await listTasks('assigned', undefined, 'all', '100% a_b\\c&d=e 任务')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=assigned&status=all&q=${encodeURIComponent('100% a_b\\c&d=e 任务')}`)
+    await listTasks('assigned', undefined, 'open', undefined)
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+    await listTasks('assigned', undefined, 'open', '')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+  })
+
+  it('search: text that cannot be encoded reads as a failed request, with nothing sent', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await expect(listTasks('assigned', undefined, 'open', 'a\ud83d')).resolves.toEqual({ kind: 'error', status: 0 })
+    expect(h.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('search: a refused query keeps its status in the error result', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_QUERY' } }))
+    await expect(listTasks('assigned', undefined, 'open', '\u200b')).resolves.toEqual({ kind: 'error', status: 422 })
   })
 
   it('G2-core: an unknown status answered as predicate_error reads as predicate_error, not as an empty list', async () => {

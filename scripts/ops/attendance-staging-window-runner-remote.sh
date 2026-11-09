@@ -135,6 +135,48 @@ hash_value() {
   fi
 }
 
+response_body_summary() {
+  # response_body_summary <body_file> <kind>
+  # Prints key=value lines that describe an HTTP response body without any of its values, so
+  # OUTPUT_DIR (uploaded as a CI artifact) keeps non-identifying summaries only: whether it
+  # parsed as JSON, and per kind
+  #   auth-me  - whether a user object came back (no size or hash: the body is one user record);
+  #   settings - byte count and sha256 of the raw body and of the key-sorted JSON, so two
+  #              snapshots can be compared for equality.
+  # Best effort by design: it never fails the caller (pass/fail stays on the HTTP codes), and an
+  # absent, unreadable or non-JSON body is reported as such.
+  local body="$1" kind="$2"
+  if [[ -z "$body" || ! -f "$body" ]]; then
+    echo "body_capture=unavailable"
+    return 0
+  fi
+  python3 - "$body" "$kind" 2>/dev/null <<'PY' || echo "body_summary=unavailable"
+import hashlib, json, sys
+path, kind = sys.argv[1], sys.argv[2]
+with open(path, "rb") as f:
+    raw = f.read()
+if kind != "auth-me":
+    print(f"body_bytes={len(raw)}")
+    print(f"body_sha256={hashlib.sha256(raw).hexdigest()}")
+try:
+    doc = json.loads(raw)
+except Exception:
+    print("body_json=unparsed")
+    if kind == "auth-me":
+        print("user_object_returned=false")
+    sys.exit(0)
+print("body_json=parsed")
+if kind == "auth-me":
+    data = doc.get("data") if isinstance(doc, dict) else None
+    user = data.get("user") if isinstance(data, dict) else None
+    print("user_object_returned=" + ("true" if isinstance(user, dict) and len(user) > 0 else "false"))
+else:
+    canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    print(f"body_canonical_sha256={hashlib.sha256(canonical.encode('utf-8')).hexdigest()}")
+PY
+  return 0
+}
+
 ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
@@ -638,28 +680,33 @@ assert_owner_exclusions_hold() {
   # agreement) and that none of the owner-excluded tables exists. Read-only.
   local pg_user="$1" db="$2" phase="$3" applied names name sql present
   local out="${OUTPUT_DIR}/owner-exclusions-${phase}.txt"
+  # Messages name the database by role, not by its configured name (they reach the uploaded log).
+  local db_label="the staging DB"
+  if [[ "$db" == "${REHEARSAL_DB:-}" ]]; then
+    db_label="the rehearsal DB"
+  fi
   names="$(staging_owner_excluded_names)" \
     || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
   sql="$(staging_owner_excluded_tables_present_sql)" \
     || fail "the owner-ruled excluded-table list failed validation (attendance-window-runner-pipeline.lib.sh)"
   applied="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
     -c "SELECT name FROM kysely_migration ORDER BY name;")" \
-    || fail "owner exclusions (${phase}): could not read kysely_migration on ${db}"
+    || fail "owner exclusions (${phase}): could not read kysely_migration on ${db_label}"
   : > "$out"
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     if grep -qxF -- "$name" <<< "$applied"; then
-      fail "owner exclusions (${phase}): ${name} is already applied on ${db} — the exclusion is stale; remove it in the same owner-ruled change that applies it"
+      fail "owner exclusions (${phase}): ${name} is already applied on ${db_label} — the exclusion is stale; remove it in the same owner-ruled change that applies it"
     fi
     echo "migration=${name} applied=no" >> "$out"
   done <<< "$names"
   present="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
     -c "$sql" | tr -d '[:space:]')" \
-    || fail "owner exclusions (${phase}): could not check the excluded tables on ${db}"
+    || fail "owner exclusions (${phase}): could not check the excluded tables on ${db_label}"
   [[ "$present" == "0" ]] \
-    || fail "owner exclusions (${phase}): ${present:-<unreadable>} owner-excluded table(s) exist on ${db} — STOP; the excluded migration (or an equivalent) has run"
+    || fail "owner exclusions (${phase}): ${present:-<unreadable>} owner-excluded table(s) exist on ${db_label} — STOP; the excluded migration (or an equivalent) has run"
   echo "excluded_tables_present=0" >> "$out"
-  log "owner exclusions hold (${phase}) on ${db}: excluded migration(s) unapplied, excluded table(s) absent"
+  log "owner exclusions hold (${phase}) on ${db_label}: excluded migration(s) unapplied, excluded table(s) absent"
 }
 
 assert_applied_counts_agree() {
@@ -826,9 +873,9 @@ mint_token() {
   # (minting is pure signing — no DB read — so seeding may happen either before or after this
   # call, as long as it happens before the token's first authenticated use).
   local user_id="$1" roles="$2" perms="$3" tenant_id="${4:-}"
-  [[ "$user_id" =~ ^[A-Za-z0-9._@-]+$ ]] || fail "refusing to mint token for unsafe user id: ${user_id}"
+  [[ "$user_id" =~ ^[A-Za-z0-9._@-]+$ ]] || fail "refusing to mint token for an unsafe user id (value not printed)"
   if [[ -n "$tenant_id" ]]; then
-    [[ "$tenant_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "refusing to mint token for unsafe tenant id: ${tenant_id}"
+    [[ "$tenant_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "refusing to mint token for an unsafe tenant id (value not printed)"
     staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
       --mint --user-id "$user_id" --roles "$roles" --perms "$perms" --tenant-id "$tenant_id"
   else
@@ -838,14 +885,23 @@ mint_token() {
 }
 
 capture_settings() {
-  # capture_settings <token> <out_file>; records HTTP code alongside the body.
-  local token="$1" out_file="$2" http_code
-  http_code="$(curl -sS --max-time 15 -o "$out_file" -w '%{http_code}' \
+  # capture_settings <token> <summary_file>; writes the HTTP code and a values-free summary of the
+  # body (response_body_summary: byte count + sha256, enough to compare snapshots for equality).
+  # The body itself goes to a private temp file outside OUTPUT_DIR and is removed here, so the
+  # uploaded artifact never carries settings values.
+  local token="$1" out_file="$2" http_code body_tmp
+  body_tmp="$(mktemp "${TMPDIR:-/tmp}/window-runner-body.XXXXXX" 2>/dev/null)" || body_tmp=""
+  http_code="$(curl -sS --max-time 15 -o "${body_tmp:-/dev/null}" -w '%{http_code}' \
     -H "Authorization: Bearer ${token}" -H 'x-org-id: default' \
     'http://127.0.0.1:8082/api/attendance/settings?orgId=default' || echo '000')"
-  echo "$http_code" > "${out_file}.http_code"
+  {
+    echo "endpoint=GET /api/attendance/settings?orgId=default"
+    echo "http_code=${http_code}"
+    response_body_summary "$body_tmp" settings
+  } > "$out_file"
+  [[ -z "$body_tmp" ]] || rm -f "$body_tmp"
   # callers capture stdout as the code — informational line goes to stderr
-  log "GET /api/attendance/settings -> ${http_code} (${out_file})" >&2
+  log "GET /api/attendance/settings -> ${http_code} ($(basename "$out_file"))" >&2
   printf '%s' "$http_code"
 }
 
@@ -900,15 +956,24 @@ snapshot_staging_ps() {
 auth_round_trip() {
   # Bundle §3: staging-realm token must authenticate. Mint in-container (staging
   # JWT_SECRET), then require /api/auth/me == 200 AND /api/attendance/settings == 200.
-  local admin_id admin_token me_code settings_code
+  # OUTPUT_DIR is uploaded as a CI artifact, so it keeps only a summary of /api/auth/me (HTTP code,
+  # whether a user object came back); the body goes to a private temp file that is removed before
+  # the pass/fail check. The subject's id is not logged.
+  local admin_id admin_token me_code settings_code me_tmp
   admin_id="$(find_admin_user)"
-  log "auth round-trip subject: ${admin_id}"
+  log "auth round-trip subject: active admin user resolved (id not recorded)"
   admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:write,attendance:admin,attendance:approve')"
-  me_code="$(curl -sS --max-time 15 -o "${OUTPUT_DIR}/auth-me.json" -w '%{http_code}' \
+  me_tmp="$(mktemp "${TMPDIR:-/tmp}/window-runner-body.XXXXXX" 2>/dev/null)" || me_tmp=""
+  me_code="$(curl -sS --max-time 15 -o "${me_tmp:-/dev/null}" -w '%{http_code}' \
     -H "Authorization: Bearer ${admin_token}" 'http://127.0.0.1:8082/api/auth/me' || echo '000')"
-  echo "$me_code" > "${OUTPUT_DIR}/auth-me.http_code"
+  {
+    echo "endpoint=GET /api/auth/me"
+    echo "http_code=${me_code}"
+    response_body_summary "$me_tmp" auth-me
+  } > "${OUTPUT_DIR}/auth-me.summary.txt"
+  [[ -z "$me_tmp" ]] || rm -f "$me_tmp"
   [[ "$me_code" == "200" ]] || fail "auth round-trip failed: GET /api/auth/me -> ${me_code} (401 = wrong-realm token / missing admin user; do not debug the route — see bundle §3)"
-  settings_code="$(capture_settings "$admin_token" "${OUTPUT_DIR}/settings-postdeploy.json")"
+  settings_code="$(capture_settings "$admin_token" "${OUTPUT_DIR}/settings-postdeploy.summary.txt")"
   [[ "$settings_code" == "200" ]] || fail "auth round-trip failed: GET /api/attendance/settings -> ${settings_code} (503 = schema gap: STOP per bundle §3)"
   log "auth round-trip OK (me=200, settings=200)"
 }
@@ -1206,10 +1271,11 @@ action_smoke() {
   local admin_id admin_token
   admin_id="$(find_admin_user)"
   admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:write,attendance:admin,attendance:approve')"
-  log "smoke admin subject: ${admin_id}; stamp: ${stamp}"
+  log "smoke admin subject: active admin user resolved (id not recorded); stamp: ${stamp}"
 
-  # Window-level settings-restore evidence (bundle §5): settings BEFORE and AFTER.
-  capture_settings "$admin_token" "${OUTPUT_DIR}/settings-before.json" >/dev/null
+  # Window-level settings-restore evidence (bundle §5): settings BEFORE and AFTER, kept as
+  # values-free summaries — equal body_canonical_sha256 lines mean the two responses were identical.
+  capture_settings "$admin_token" "${OUTPUT_DIR}/settings-before.summary.txt" >/dev/null
 
   copy_smoke_bundle "$smoke_script" ${smoke_deps[@]+"${smoke_deps[@]}"}
 
@@ -1258,12 +1324,13 @@ action_smoke() {
     fail "tee failed writing the smoke log (rc=${pipe_status[1]})"
   fi
 
-  capture_settings "$admin_token" "${OUTPUT_DIR}/settings-after.json" >/dev/null
+  capture_settings "$admin_token" "${OUTPUT_DIR}/settings-after.summary.txt" >/dev/null
 
   # Filtered backend log slice for the artifact — zero matches is a normal outcome;
   # a failing `docker logs` must still fail this step (filtered_pipe contract, proven
-  # by scripts/ops/attendance-window-runner-pipeline.test.mjs).
-  filtered_pipe "${OUTPUT_DIR}/backend-log-slice.log" \
+  # by scripts/ops/attendance-window-runner-pipeline.test.mjs). masked_log_slice replaces
+  # account ids and contact-shaped values before the slice is written to the output dir.
+  masked_log_slice "${OUTPUT_DIR}/backend-log-slice.log" \
     'attendance|digest|delivery|reminder|overtime|makeup|tasks' \
     -- docker logs --since 30m "$BACKEND_CONTAINER"
 
@@ -1517,9 +1584,9 @@ action_residue_sweep() {
   local admin_id admin_token
   if admin_id="$(find_admin_user)"; then
     admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:admin')"
-    capture_settings "$admin_token" "${OUTPUT_DIR}/settings-sweep.json" >/dev/null || true
+    capture_settings "$admin_token" "${OUTPUT_DIR}/settings-sweep.summary.txt" >/dev/null || true
   else
-    echo "no active admin user found; settings snapshot skipped" > "${OUTPUT_DIR}/settings-sweep.json"
+    echo "no active admin user found; settings snapshot skipped" > "${OUTPUT_DIR}/settings-sweep.summary.txt"
   fi
 
   local result="ok" nonzero_list="none"
@@ -1764,9 +1831,9 @@ action_status() {
     local admin_id admin_token
     if admin_id="$(find_admin_user)"; then
       admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:admin')"
-      capture_settings "$admin_token" "${OUTPUT_DIR}/settings-current.json" >/dev/null || status_rc=1
+      capture_settings "$admin_token" "${OUTPUT_DIR}/settings-current.summary.txt" >/dev/null || status_rc=1
     else
-      echo "no active admin user found; settings snapshot skipped" > "${OUTPUT_DIR}/settings-current.json"
+      echo "no active admin user found; settings snapshot skipped" > "${OUTPUT_DIR}/settings-current.summary.txt"
     fi
   else
     log "backend container not running; container-side snapshots skipped"
@@ -1907,6 +1974,7 @@ SELECT 'recovery09_unsupported_class6_count=' || count(*)::text
 SQL
 
   local invalid conflicts zero_membership zero_no_row zero_deactivated repairable_users active_orgs directory_orgs non_default_integrations anchor_witness class6 unsupported_class6 value
+  local recovery09_ledger="" recovery09_ready recovery09_will_run
   invalid="$(sed -n 's/^invalid_approval_action_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   zero_membership="$(sed -n 's/^zero_membership_active_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
@@ -1928,18 +1996,54 @@ SQL
   # the corrected provisioning migration intentionally do not write them, so they must not make a
   # safe retry demand that the already-applied Recovery09 migration still be pending. Only the
   # executable no-row population and unresolved class-6 rows require the repair gate.
+  #
+  # Once that chain is recorded in kysely_migration it cannot be pending again, and a later
+  # active user with no membership is a legitimate product state (provisioning runs once;
+  # zzzz20260823050000). Record the repairable count as informational instead of failing.
+  # A chain that is genuinely unapplied must still be pending in the exact target image, and
+  # the execution premises below still apply, because those migrations are about to write.
   if [[ "$repairable_users" -gt 0 || "$class6" -gt 0 ]]; then
     if [[ "$active_orgs" != "1" ]]; then
-      grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
-        || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
-      grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
-        || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
-      [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
-        || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
-      [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
-        || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
-      [[ "$unsupported_class6" == "0" ]] \
-        || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+      recovery09_ledger="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 \
+        -c "SELECT name FROM kysely_migration WHERE name IN ('zzzz20260823040000_recovery09_prepare_legacy_default_org','zzzz20260823050000_provision_zero_membership_active_users','zzzz20260823149900_recovery09_close_approval_org_gap') ORDER BY name;")" \
+        || fail "target precheck: could not read kysely_migration to classify the Recovery09 chain"
+      recovery09_ledger="$(printf '%s\n' "$recovery09_ledger" | tr -d '\r' | sed '/^[[:space:]]*$/d')"
+      recovery09_ready=1
+      recovery09_will_run=0
+      if ! grep -qxF -- 'zzzz20260823040000_recovery09_prepare_legacy_default_org' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if ! grep -qxF -- 'zzzz20260823149900_recovery09_close_approval_org_gap' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if ! grep -qxF -- 'zzzz20260823050000_provision_zero_membership_active_users' <<< "$recovery09_ledger"; then
+        recovery09_ready=0
+        grep -q 'zzzz20260823050000_provision_zero_membership_active_users' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+          || fail "target precheck: multi-org repair is required but the Recovery09 provisioning migration is not pending in the exact target image"
+        recovery09_will_run=1
+      fi
+      if [[ "$recovery09_ready" == "1" ]]; then
+        {
+          echo "recovery09_ledger=applied"
+          echo "recovery09_repairable_users_informational=${repairable_users}"
+        } >> "${OUTPUT_DIR}/target-read-only-prechecks.txt"
+        log "target precheck: Recovery09 chain already applied; recovery09_repairable_users_informational=${repairable_users}"
+      else
+        [[ "$recovery09_will_run" == "1" ]] \
+          || fail "target precheck: Recovery09 chain is neither applied nor pending"
+        [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
+          || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
+        [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
+          || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
+        [[ "$unsupported_class6" == "0" ]] \
+          || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+      fi
     fi
   fi
   log "target read-only prechecks OK"
@@ -1961,7 +2065,7 @@ action_migrate_backup() {
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   MIGRATE_BACKUP_PATH="${BACKUP_DIR}/staging-${ts}-pre-migrate.dump"
 
-  log "backup: pg_dump -Fc -U ${pg_user} ${pg_db} -> ${MIGRATE_BACKUP_PATH}"
+  log "backup: pg_dump -Fc of the staging DB -> ${MIGRATE_BACKUP_PATH}"
   docker exec "$POSTGRES_CONTAINER" pg_dump -Fc -U "$pg_user" "$pg_db" > "$MIGRATE_BACKUP_PATH"
   [[ -s "$MIGRATE_BACKUP_PATH" ]] \
     || fail "backup file is empty: ${MIGRATE_BACKUP_PATH}; refusing to proceed without a working backup (runbook: pg_dump first is non-negotiable)"
@@ -1975,8 +2079,6 @@ action_migrate_backup() {
     echo "path=${MIGRATE_BACKUP_PATH}"
     echo "sha256=${MIGRATE_BACKUP_SHA256}"
     echo "bytes=${MIGRATE_BACKUP_BYTES}"
-    echo "pg_user=${pg_user}"
-    echo "pg_db=${pg_db}"
     echo "note=dump stays on the deploy host at the path above; NOT uploaded (business data, public-repo artifacts are world-downloadable); retention is an operator decision"
   } > "${OUTPUT_DIR}/backup-metadata.txt"
   log "backup OK: ${MIGRATE_BACKUP_BYTES} bytes, sha256=${MIGRATE_BACKUP_SHA256} (dump stays on host, not uploaded)"
@@ -2137,7 +2239,7 @@ action_migrate_rehearse() {
   rehearsal_before="$(count_applied "$REHEARSAL_DB")"
   [[ "$real_before" =~ ^[0-9]+$ && "$rehearsal_before" =~ ^[0-9]+$ ]] \
     || fail "pre-rehearsal applied-migration counts unreadable (real='${real_before}' rehearsal='${rehearsal_before}')"
-  log "rehearsal isolation baseline: applied(real ${real_db})=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
+  log "rehearsal isolation baseline: applied(real staging DB)=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
 
   log "rehearsal: running migrate.js against the REHEARSAL DB only (staging DB untouched so far)"
   target_migrate_exec "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
@@ -2145,9 +2247,9 @@ action_migrate_rehearse() {
 
   real_after="$(count_applied "$real_db")"
   rehearsal_after="$(count_applied "$REHEARSAL_DB")"
-  log "rehearsal isolation check: applied(real ${real_db}) ${real_before}->${real_after}; applied(${REHEARSAL_DB}) ${rehearsal_before}->${rehearsal_after}"
+  log "rehearsal isolation check: applied(real staging DB) ${real_before}->${real_after}; applied(${REHEARSAL_DB}) ${rehearsal_before}->${rehearsal_after}"
   {
-    echo "real_db=${real_db} real_before=${real_before} real_after=${real_after}"
+    echo "real_before=${real_before} real_after=${real_after}"
     echo "rehearsal_before=${rehearsal_before} rehearsal_after=${rehearsal_after}"
   } > "${OUTPUT_DIR}/rehearsal-isolation-check.txt"
   [[ "$real_after" == "$real_before" ]] \
@@ -3708,12 +3810,12 @@ PY
   [[ "${pipe_status[1]}" == "0" ]] || fail "tee failed writing soak-run.log (rc=${pipe_status[1]})"
   docker cp "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/soak-run-summary.json" \
     "${OUTPUT_DIR}/soak-run-summary.json" 2>/dev/null || true
-  # Filtered backend-log slice, ALWAYS captured (same filtered_pipe contract as
-  # action_smoke): dispatch 31953571638 produced five INTERNAL_ERROR punch 500s on the
+  # Filtered backend-log slice, ALWAYS captured (same masked_log_slice / filtered_pipe
+  # contract as action_smoke): dispatch 31953571638 produced five INTERNAL_ERROR punch 500s on the
   # W4-shadow org with zero artifact-side server evidence — the HTTP body says only
   # "Failed to punch attendance", so without this slice a server-side punch failure is
   # undiagnosable from the run's own artifact.
-  filtered_pipe "${OUTPUT_DIR}/soak-run-backend-log-slice.log" \
+  masked_log_slice "${OUTPUT_DIR}/soak-run-backend-log-slice.log" \
     'attendance|punch|calculation|shadow|segment|boundary|error|Error' \
     -- docker logs --since 30m "$BACKEND_CONTAINER"
   cleanup_soak_run

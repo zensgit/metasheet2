@@ -5,11 +5,16 @@ const { createAttendanceCalendarSettingsWriter } = require('../../../../plugins/
 class TestError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message) }
 }
-function fixture() {
+function fixture(earlyAllowed = true) {
   const events: string[] = []
   const current = { calendarPolicy: { overrides: [{ id: 'fresh' }] }, annualLeavePolicy: { enabled: false } }
-  const query = vi.fn(async (sql: string) => {
+  const query = vi.fn(async (sql: string, values?: unknown[]) => {
     if (sql.includes('FROM user_orgs')) { events.push('orgs'); return [{ org_id: 'a' }, { org_id: 'b' }] }
+    if (sql.includes('AS allowed')) {
+      expect(values).toEqual(['actor', 'a'])
+      events.push('check:a')
+      return [{ allowed: earlyAllowed }]
+    }
     if (sql.includes('pg_advisory')) { events.push('settings-lock'); return [] }
     events.push('fresh-settings')
     return [{ value: JSON.stringify(current) }]
@@ -45,12 +50,29 @@ describe('calendar settings fresh transaction writer', () => {
     expect(f.events).toEqual(['orgs', 'prefix:a', 'prefix:b', 'capture:a', 'capture:b',
       'settings-lock', 'fresh-settings', 'write', 'verify:a', 'verify:b', 'commit', 'cache'])
   })
-  it('authorizes only the current actor organization after all affected prefixes and before settings DML', async () => {
+  it('authorizes after all prefixes and rechecks authority after the calendar scan', async () => {
     const f = fixture(), actor = { orgId: 'a', actorId: 'actor' }
     await f.update(f.db, { calendarPolicy: { overrides: [] } }, actor)
     expect(f.assertManage).toHaveBeenCalledOnce()
-    expect(f.events).toEqual(['orgs', 'prefix:a', 'prefix:b', 'capture:a', 'capture:b',
+    expect(f.events).toEqual(['orgs', 'prefix:a', 'prefix:b', 'check:a', 'capture:a', 'capture:b',
       'manage:a', 'settings-lock', 'fresh-settings', 'write', 'verify:a', 'verify:b', 'commit'])
+  })
+  it('refuses a revoked actor before reading any calendar or locking settings', async () => {
+    const f = fixture(false)
+    await expect(f.update(f.db, { calendarPolicy: { overrides: [] } }, { orgId: 'a', actorId: 'actor' }))
+      .rejects.toMatchObject({ status: 403, code: 'ATTENDANCE_TIMEZONE_FORBIDDEN' })
+    expect(f.events).toEqual(['orgs', 'prefix:a', 'prefix:b', 'check:a'])
+    expect(f.saveSettings).not.toHaveBeenCalled()
+    expect(f.cacheCommitted).not.toHaveBeenCalled()
+  })
+  it('does not save or cache when authority is lost during the calendar scan', async () => {
+    const f = fixture()
+    f.assertManage.mockRejectedValue(new TestError(403, 'ATTENDANCE_TIMEZONE_FORBIDDEN', 'ATTENDANCE_TIMEZONE_FORBIDDEN'))
+    await expect(f.update(f.db, { calendarPolicy: { overrides: [] } }, { orgId: 'a', actorId: 'actor' }))
+      .rejects.toMatchObject({ status: 403, code: 'ATTENDANCE_TIMEZONE_FORBIDDEN' })
+    expect(f.prepareSourceChange).toHaveBeenCalledTimes(2)
+    expect(f.saveSettings).not.toHaveBeenCalled()
+    expect(f.cacheCommitted).not.toHaveBeenCalled()
   })
   it('a revoked actor prevents every settings write and cache update', async () => {
     const f = fixture()

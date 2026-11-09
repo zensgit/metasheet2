@@ -78,6 +78,12 @@
 //           its tenant from `scope.tenantId` rather than from `resolveTenantId`, because the tenant
 //           chosen there is the tenant whose PLM binding is opened and whose part numbers therefore
 //           come back. Without the flag the handler is byte-for-byte the values-free route it was.
+//        5b. GET …/table-actions/:actionId/dry-run-jobs  `tableActionDryRunJobGet`
+//           R67 ④: the read-back of (5) run in the background — the stored result IS (5)'s response,
+//           missing-component list included when the job was enqueued with the opt-in. A value-bearing
+//           job is a separate record that only a poll carrying `includeMissingComponents=true` can
+//           address, and that poll resolves the scope here and takes its tenant from it, exactly as
+//           (5) does; without the flag it is the values-free job, on `resolveTenantId`, as (5) is.
 //      (1) and (2) predate this module and were left on `resolveTenantId` when it landed, which was a
 //      live cross-tenant leak on a claimless deployment rather than a stylistic gap — see the routes.
 //
@@ -169,9 +175,69 @@
 //           (its repair leg, `repairProjectSheetContractOptions`) — G1 field defect (R67): a WRITE of
 //           field metadata (the server-held contract option sets) onto the sheet the proven tenant's
 //           registry row names, in the staging project derived from this scope with no request
-//           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
+//           projectId. R-71 ⑦.4 PR-3: with `addMissingColumns: true` the same leg also ADDS the frozen
+//           template's missing columns there (field metadata again, never a row; `dryRun: true` writes
+//           nothing). A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
+//       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`
+//       22. POST …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotEnable`
+//           备料分批拉取第一期 step 3 PR B (register R-53 / R-54), ADMIN. The GET answers the pilot
+//           marker and a values-free readiness list about the proven tenant's registry row and sheet
+//           (the staging project the probes read is derived from this scope with no request
+//           projectId, in the shared readiness helper). The POST is a WRITE: it bumps the sheet's plan
+//           generation, asks the host to stamp the sheet closed for grid export and marks the registry
+//           row — keyed by the proven tenant; a header-fillable tenant here would mark another
+//           tenant's project pilot. Set-once; there is no unset surface.
+//       23. GET  …/projects/:projectNo/refresh/holds                       `stockPreparationRefreshHolds`
+//       24. GET  …/projects/:projectNo/refresh/holds/:holdId/evidence      `stockPreparationRefreshHoldEvidence`
+//       25. POST …/projects/:projectNo/refresh/holds/:holdId/keep          `stockPreparationRefreshHoldKeep`
+//       26. POST …/projects/:projectNo/refresh/continuations/confirm       `stockPreparationRefreshContinuationConfirm`
+//       27. GET  …/projects/:projectNo/refresh/continuations/:id           `stockPreparationRefreshContinuationGet`
+//       28. POST …/projects/:projectNo/refresh/continuations/:id/end       `stockPreparationRefreshContinuationEnd`
+//           备料分批拉取第一期 step 4 PR-4 (register R-59), PULL. ONE resolution for the six, in the shared
+//           context builder `stockPreparationRefreshDecisionContext` (http-routes.cjs), at the PULL tier:
+//           the hold page, the evidence and the relationship detail carry the proven tenant's PRIVATE
+//           business values (keys, quantities, before / after cells), and the confirm / keep / end
+//           decide over its step-4 rows and bump its sheet's plan generation. A header-fillable tenant
+//           here would read another tenant's values or confirm a relationship on its sheet; a
+//           TENANTLESS platform admin is refused (403 OPERATOR_SCOPE_TENANT_REQUIRED) — counts are the
+//           board's, values never theirs.
+//       29. GET  …/projects/:projectNo/refresh/change-plans/current        `stockPreparationRefreshChangePlanCurrent`
+//       30. POST …/projects/:projectNo/refresh/change-plans/confirm        `stockPreparationRefreshChangePlanConfirm`
+//       31. POST …/projects/:projectNo/refresh/change-reviews/complete     `stockPreparationRefreshChangeReviewComplete`
+//           备料分批拉取第一期 step 5 PR-8 (register R-63), PULL. The SAME shared context builder as 23–28 (no new
+//           call site): the change-plan page and the review READ the proven tenant's main sheet (behind the
+//           table-action wall) and its private record set; the confirm and the review decide over its step-4 /
+//           step-5 rows (the confirm bumps its sheet's plan generation). A header-fillable tenant here would read
+//           or approve another tenant's content change.
+//       32. GET  …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsGet`
+//       33. POST …/projects/:projectNo/target/manual-rows  `stockPreparationProjectManualRowsSet`
+//           人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4; register R-68), ADMIN. The GET answers the
+//           proven tenant's project sheet switch 「允许人工补充行」 and its last pull's persisted reminder (counts and
+//           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
+//           provisioning port in the staging project derived from this scope with no request projectId. A
+//           header-fillable tenant here would read or flip another tenant's project switch.
+//       34. GET  …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchGet`
+//           批次标识 BI-1b (design §8.7; register R-65), ADMIN. A values-free READ of the proven tenant's project
+//           sheet: whether its two batch columns are present / locked / visible, its pull-batch ledger state and its
+//           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
+//           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
+//           sheet state.
+//       35. GET  …/pull-batch/settings                                  `stockPreparationPullBatchSettingsGet`
+//       36. POST …/pull-batch/settings                                  `stockPreparationPullBatchSettingsSet`
+//       37. POST …/projects/:projectNo/target/pull-batch/settings       `stockPreparationProjectPullBatchSettingsSet`
+//           批次标识 BI-7 (design §5.5 / §11; register R-65), ADMIN. The GET reads the proven tenant's pull-batch
+//           settings: its tenant default and its registered sheets' captured values (with their project numbers,
+//           admin-visible); the two POSTs are WRITES to that tenant's settings row and to one of its sheets' ledger
+//           rows. Plugin ledger only — no staging project, no host call. A header-fillable tenant here would read or
+//           change another tenant's settings.
+//       38. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
+//           批次标识 BI-2 (design §8.1-§8.6; register R-65), ADMIN. The per-sheet install (dry_run / install / abort): a
+//           WRITE of the proven tenant's project sheet — the band columns, the plugin views, the landing, the persisted
+//           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope
+//           with no request projectId. Every real run is owner gate ② per sheet. A header-fillable tenant here would
+//           install onto another tenant's sheet.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

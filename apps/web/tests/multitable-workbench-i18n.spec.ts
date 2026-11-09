@@ -62,6 +62,8 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'confirm.pageLeaveBusy', 'confirm.pageLeaveDirty',
   'card.install', 'card.installing',
   'error.loadSheets', 'error.loadSheetMetadata', 'error.loadBaseMetadata',
+  'notice.recordCreateBlockedByLock',
+  'notice.gridExportClosed',
 ]
 
 describe('workbench-labels static table', () => {

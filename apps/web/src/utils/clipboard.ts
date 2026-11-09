@@ -18,10 +18,14 @@
  *   3. No `document` / no `execCommand` / anything throwing: resolves `false`.
  *   It NEVER rejects. It never logs the text (callers copy API-token plaintext and public links).
  *
- * `readClipboardText()` is the read side for the grid paste handlers. There is no fallback for a
- * programmatic read (browsers disable `execCommand('paste')`), so it rejects with
- * `ClipboardReadUnavailableError` when the API is absent — callers already treat a rejection as
- * "paste failed".
+ * `readClipboardText()` is the programmatic read side (the grid's "Paste range" toolbar button).
+ * There is no fallback for a programmatic read (browsers disable `execCommand('paste')`), so it
+ * rejects with `ClipboardReadUnavailableError` when the API is absent; `canReadClipboardText()` lets
+ * such a button tell the user up front instead.
+ *
+ * Keyboard paste (Ctrl/Cmd+V) does NOT go through `readClipboardText()`: it reads the native `paste`
+ * event via `pasteEventText(event)`. `event.clipboardData` is filled by the user's own gesture, is
+ * readable in a non-secure context too, and never triggers a permission prompt.
  *
  * Guarded by apps/web/tests/clipboard-no-bare-navigator-clipboard.spec.ts (no other file in src may
  * mention the native API).
@@ -161,4 +165,28 @@ export function readClipboardText(): Promise<string> {
   const clipboard = nativeClipboard()
   if (typeof clipboard?.readText !== 'function') return Promise.reject(new ClipboardReadUnavailableError())
   return clipboard.readText()
+}
+
+/**
+ * Whether a programmatic clipboard read (`readClipboardText()`) can work on this page at all. False on
+ * a plain-HTTP deployment (no `navigator.clipboard`), where only a native paste gesture can read.
+ */
+export function canReadClipboardText(): boolean {
+  return typeof nativeClipboard()?.readText === 'function'
+}
+
+/**
+ * The plain-text payload of a native `paste` event, or `null` when the event carries no
+ * `clipboardData` object at all. A paste without a text flavour (an image only, say) yields `''`,
+ * which is what `navigator.clipboard.readText()` resolves to in that case too, so both read paths
+ * feed the same text into the same paste logic.
+ */
+export function pasteEventText(event: ClipboardEvent): string | null {
+  const data = event.clipboardData
+  if (!data || typeof data.getData !== 'function') return null
+  try {
+    return data.getData('text/plain') ?? ''
+  } catch {
+    return ''
+  }
 }

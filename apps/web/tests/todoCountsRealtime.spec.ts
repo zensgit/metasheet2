@@ -40,12 +40,12 @@ describe('useTodoCountsRealtime', () => {
     disconnectSpy.mockClear()
   })
 
-  async function mountAndSubscribe(received: (payload: unknown) => void) {
+  async function mountAndSubscribe(received: (payload: unknown) => void, onTasksCountsUpdated?: () => void) {
     const { useTodoCountsRealtime } = await import('../src/todo/useTodoCountsRealtime')
     let reconnect: (() => Promise<unknown>) | null = null
     const Component = defineComponent({
       setup() {
-        reconnect = useTodoCountsRealtime({ onCountsUpdated: received }).reconnect
+        reconnect = useTodoCountsRealtime({ onCountsUpdated: received, onTasksCountsUpdated }).reconnect
         return () => h('div')
       },
     })
@@ -88,6 +88,25 @@ describe('useTodoCountsRealtime', () => {
       reason: 'approval-decision',
       updatedAt: '2026-09-18T00:00:00.000Z',
     })
+  })
+
+  it('listens to tasks:counts-updated only when a callback is given', async () => {
+    await mountAndSubscribe(vi.fn())
+    expect(socketHandlers.has('todo:counts-updated')).toBe(true)
+    expect(socketHandlers.has('tasks:counts-updated')).toBe(false)
+  })
+
+  it('a tasks:counts-updated signal calls the callback with nothing from its payload, on the one socket', async () => {
+    const received = vi.fn()
+    const onTasks = vi.fn()
+    await mountAndSubscribe(received, onTasks)
+
+    expect(ioSpy).toHaveBeenCalledTimes(1)
+    socketHandlers.get('tasks:counts-updated')?.({ count: 9 })
+
+    expect(onTasks).toHaveBeenCalledTimes(1)
+    expect(onTasks).toHaveBeenCalledWith()
+    expect(received).not.toHaveBeenCalled()
   })
 
   it('drops a push with a non-numeric count rather than guessing', async () => {

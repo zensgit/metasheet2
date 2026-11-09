@@ -18,9 +18,10 @@ import {
 } from './elearning-projection-constants'
 import { deriveCanManageFields } from './manage-schema-permission'
 import {
-  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from './stock-preparation-overview-contract'
+import { loadStockPreparationSheetStamps, restrictGridExportCapabilities } from './sheet-grid-export-closure'
+import { applyStockPreparationProjectSheetSchemaClamp } from './stock-preparation-project-sheet-schema-clamp'
 import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
@@ -268,6 +269,11 @@ export async function resolveSheetCapabilitiesForUser(
   sheetScope?: SheetPermissionScope
   isAdminRole: boolean
   permissions: string[]
+  /** 备料分批拉取第一期 step 3: present (true) only on a sheet stamped closed for generic grid export. */
+  gridExportClosed?: true
+  /** Option B (owner 2026-10-29, R-66 ②): present (true) only on a registered project sheet for a non-admin (R-66 ③: a
+   *  `stock-prep:admin` holder there keeps the resolved canManageViews; canManageFields is false for every non-admin). */
+  stockPrepProjectSheetSchemaClamped?: true
 }> {
   const isAdminRole = await isAdmin(userId)
   const permissions = await listUserPermissions(userId)
@@ -345,11 +351,28 @@ export async function resolveSheetCapabilitiesForUser(
   // (permission-service.ts resolveSheetCapabilitiesForAccess). This resolver fronts the Yjs record-write
   // flush, the collab rooms, API-token capability checks and the FWB rule-save gates, so without it a
   // person could still WRITE the overview through the collab channel. Every person, admins included.
-  if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
+  // 备料分批拉取第一期 step 3 (review round 1, fix 2): both host stamps in ONE statement.
+  const stamps = await loadStockPreparationSheetStamps(query, [sheetId])
+  if (stamps.overviewSheetIds.has(sheetId)) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
+  }
+  // Option B (owner 2026-10-29, R-66 ②): the project-sheet structure clamp, the same as the REST resolver's. This
+  // resolver fronts the Yjs field-schema flush and the API-token capability checks, so without it a non-admin
+  // could still change a project sheet's fields through those channels. Platform admins keep both bits; R-66 ③ keeps
+  // the resolved view bit for a `stock-prep:admin` holder (`permissions` above, plus a role check on a project sheet).
+  const projectSheetClamp = await applyStockPreparationProjectSheetSchemaClamp(query, sheetId, capabilities, isAdminRole, { userId, permissions })
+  capabilities = projectSheetClamp.capabilities
+  // 备料分批拉取第一期 step 3: the grid-export closure clamp, the same as the REST resolver's. This resolver
+  // fronts the collab rooms and API-token capability checks, so it must not report an export the REST resolver
+  // refuses. Every person, admins included; only `canExport` changes.
+  const gridExportClosed = stamps.gridExportClosedSheetIds.has(sheetId)
+  if (gridExportClosed) {
+    capabilities = restrictGridExportCapabilities(capabilities, true)
   }
   return {
     capabilities,
+    ...(gridExportClosed ? { gridExportClosed: true as const } : {}),
+    ...(projectSheetClamp.clamped ? { stockPrepProjectSheetSchemaClamped: true as const } : {}),
     ...(sheetScope ? { sheetScope } : {}),
     isAdminRole,
     permissions,

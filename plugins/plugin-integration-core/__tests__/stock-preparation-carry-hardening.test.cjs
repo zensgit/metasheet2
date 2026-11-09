@@ -30,6 +30,7 @@
 // Every guard added for these is itself mutation-covered: disabling it reds a named case here.
 
 const assert = require('node:assert/strict')
+const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -57,6 +58,7 @@ const {
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
+const lockKit = require(path.join(__dirname, 'support', 'stock-preparation-project-write-lock-kit.cjs'))
 
 const CANONICAL_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const STAGING = 'tenant-a:integration-core'
@@ -233,13 +235,17 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning, records },
+      // PR-0: the carry runs under the sheet write lease and its patch is host-fenced — the fake host
+      // declares + enforces the fence (stripped before the wrapped records see the call).
+      multitable: { provisioning, records: lockKit.withFakeHostWriteFence(records) },
     },
     storage: new Map(),
     // The deploy-time table action the carry route reads its target off.
     config: { stockPreparationTableActions: [CARRY_TABLE_ACTION_CONFIG] },
   }
   const services = {
+    // PR-0: the sheet write lease the carry route holds (501 without it).
+    stockPreparationProjectWriteLock: lockKit.createInMemoryProjectWriteLock({ timers: 'real' }).lock,
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem']),
       async getExternalSystem() { return null },
@@ -262,7 +268,7 @@ function mount({ canonicalRows = pairRows(), recordsWrapper } = {}) {
     // witnessed in stock-preparation-carry-target-binding.test.cjs (T9-*).
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services: withRefreshGovernance(services), logger: { info() {}, warn() {}, error() {} } })
   return { routes, auditDb, provisioning, records, baseRecords }
 }
 

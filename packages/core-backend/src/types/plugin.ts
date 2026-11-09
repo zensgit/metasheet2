@@ -402,6 +402,16 @@ export interface MultitableRepairTransactionSurface {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  /**
+   * Y7 review MEDIUM-2: the largest field `order` over EVERY field row of the object's sheet (null when it has
+   * none), read inside this transaction after the canonical writer fence — so an additive repair can append its
+   * columns after every existing one. Values-free (one integer). OPTIONAL: a plugin newer than its host must
+   * detect it, never assume it.
+   */
+  readObjectMaxFieldOrder?(input: {
+    projectId: string
+    objectId: string
+  }): Promise<number | null>
 }
 
 /** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
@@ -605,6 +615,43 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   } | null>
+  /**
+   * 批次标识 BI-5: make ONE of the caller's provisioned views (by logical id) the sheet's first view — the view the
+   * context route and GET /views list first (`ORDER BY created_at ASC`), i.e. where a person lands when they click
+   * the sheet. Writes ONLY that view's `meta_views.created_at`, to strictly before every other view of the sheet
+   * (also on bases whose views share one template-install timestamp). Never creates a view; refuses the host
+   * default view (`'default'`) and, in the plugin scope, the stock-preparation overview object. Idempotent: a second
+   * call answers `alreadyFirst`. A later `ensureView` re-ensure keeps the promotion (its upsert never touches
+   * `created_at`). Same project namespace and object scope as `findObjectView`. OPTIONAL: an older host has none.
+   */
+  promoteObjectViewToFirst?(input: {
+    projectId: string
+    objectId: string
+    viewLogicalId: string
+  }): Promise<{ promoted: boolean; alreadyFirst: boolean; missing: boolean }>
+  /**
+   * 批次标识 BI-5: a VALUES-FREE read of the caller's object sheet layout — counts and logical ids only (never a view
+   * name, a physical id, a field id of a user's view or a cell value). `firstView` is `'default'`, one of
+   * `candidateViewLogicalIds`, `'other'`, or null on a sheet without views. `viewsLosingFrozen` counts views whose
+   * frozen left prefix (the web rule over the shared order) is > 0 now and would be 0 after `leftInsertCount` fields
+   * were inserted leftmost. Parity with the web: hidden field ids are read the way the host ships them to the grid
+   * (normalizeJsonArray: trimmed, finite numbers stringified), and views of a type the web never renders as a grid
+   * (form, kanban, gallery, calendar, timeline, gantt, hierarchy) have no frozen columns; `viewCount` and
+   * `firstView` still count every view. Same scope as `findObjectView`; refuses the overview object. OPTIONAL like it.
+   */
+  describeObjectSheetLayout?(input: {
+    projectId: string
+    objectId: string
+    candidateViewLogicalIds: string[]
+    leftInsertCount: number
+  }): Promise<{
+    viewCount: number
+    firstView: string | null
+    viewsWithFrozenColumns: number
+    viewsLosingFrozen: number
+    personalOrderOverrides: number
+    trashedRecordCount: number
+  }>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string
@@ -703,6 +750,47 @@ export interface MultitableProvisioningAPI {
     alreadyGranted: string[]
   }>
   /**
+   * 备料分批拉取第一期 step 3 (PR A): stamp ONE stock-preparation project sheet closed for GENERIC GRID EXPORT
+   * (column `meta_sheets.grid_export_closure`, set to the host literal `stock_prep_pilot`). Afterwards every capability resolver
+   * reports `canExport: false` on that sheet for everyone, the whole-sheet export route (xlsx and csv) answers 403
+   * MULTITABLE_GRID_EXPORT_CLOSED, copy-with-data refuses it, and the workbench disables its export buttons. The
+   * stamp can only TAKE EXPORT AWAY. SET-ONCE and idempotent: a repeat call writes nothing and reports
+   * `alreadyClosed: true` with the original time and actor. There is NO reopen / unset port.
+   * Same gate shape as `grantSheetRoleWrite`: handed to plugin-integration-core ONLY; the objectId must have the
+   * project-sheet shape, the sheet id must be the one derived for (projectId, objectId), and the registry must
+   * record it as this plugin's and this project's. OPTIONAL: an older host has no port; the plugin must then treat
+   * the pilot as not enablable (never as closed).
+   */
+  closeSheetGridExport?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+    actorId?: string | null
+  }): Promise<{
+    sheetId: string
+    present: boolean
+    closure: 'stock_prep_pilot'
+    closedAt: string | null
+    closedBy: string | null
+    alreadyClosed: boolean
+  }>
+  /**
+   * 备料分批拉取第一期 step 3 (PR A): read the grid-export closure stamp of ONE project sheet (no lock, no write).
+   * Same gates as `closeSheetGridExport`; plugin-integration-core only. `closure: null` = not closed (also on a
+   * database where the migration has not run).
+   */
+  getSheetGridExportClosure?(input: {
+    projectId: string
+    sheetId: string
+    objectId: string
+  }): Promise<{
+    sheetId: string
+    present: boolean
+    closure: 'stock_prep_pilot' | null
+    closedAt: string | null
+    closedBy: string | null
+  }>
+  /**
    * S3 fix round 1 (R8c): the host stamps a requested `systemKind` at INSERT, refuses to adopt an existing
    * sheet whose kind differs, and reports `systemKind` on every sheet it returns. A plugin that relies on
    * the stamp checks this declaration BEFORE any write and fails closed (503) when it is not `true` — an
@@ -765,6 +853,11 @@ export interface MultitableRecordsAPI {
   createRecord(input: {
     sheetId: string
     data: Record<string, unknown>
+    /**
+     * OPTIONAL host fenced write (see multitable/plugin-write-fence.ts). Honoured only when
+     * `supportsWriteFence` is true; allow-listed per calling plugin; refused otherwise.
+     */
+    writeFence?: PluginRecordWriteFence
   }): Promise<{
     id: string
     sheetId: string
@@ -785,6 +878,8 @@ export interface MultitableRecordsAPI {
     recordId: string
     changes: Record<string, unknown>
     expectedVersion?: number
+    /** OPTIONAL host fenced write — same contract as on `createRecord`. */
+    writeFence?: PluginRecordWriteFence
   }): Promise<{
     id: string
     sheetId: string
@@ -830,6 +925,13 @@ export interface MultitableRecordsAPI {
    * may only forward it when the surface underneath declares it, never assert it on its own.
    */
   supportsFilterValueLists?: boolean
+  /**
+   * Host fenced writes (PR #6501): `true` iff `createRecord` / `patchRecord` honour `writeFence` — the
+   * host checks the caller's allow-listed lease row with SELECT ... FOR SHARE INSIDE the write transaction
+   * and refuses the write when it no longer holds. Absent on an older host: a caller that REQUIRES fencing
+   * must then refuse to write (it must never send a fence a host would silently ignore).
+   */
+  supportsWriteFence?: boolean
   /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
@@ -2609,9 +2711,23 @@ export interface Notification {
   scheduledAt?: Date
 }
 
+/**
+ * Delivery result contract. The literals are distinct outcomes and must not be conflated by consumers:
+ *   - `sent`       — the transport / provider accepted EVERY recipient the channel addressed (at least one).
+ *                    It is provider acceptance, NOT proof of delivery or of being read.
+ *   - `simulated`  — a development simulation handled the message; NO transport call was made. Never a
+ *                    business success.
+ *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled, or
+ *                    every recipient was filtered by preference. `metadata.reason` names which.
+ *   - `failed`     — configuration failure, transport error, or a channel with no sender configured.
+ *                    `failedReason` is redacted text; `metadata.acceptedCount` (when present) counts the
+ *                    recipients accepted before the failure.
+ *   - `pending` / `scheduled` — deferred; the outcome is not known yet.
+ * A consumer that needs "did a real send happen" must match `sent` positively, never "not failed".
+ */
 export interface NotificationResult {
   id: string
-  status: 'sent' | 'failed' | 'pending' | 'scheduled' | 'cancelled'
+  status: 'sent' | 'simulated' | 'failed' | 'pending' | 'scheduled' | 'cancelled'
   sentAt?: Date
   failedReason?: string
   metadata?: Record<string, unknown>
@@ -3133,3 +3249,15 @@ export interface UnionSchema<T = unknown> extends ValidationSchema<T> {
 }
 
 export interface OptionalSchema<T = unknown> extends ValidationSchema<T | undefined> {}
+/**
+ * A plugin's host fenced write: the lease the write must still hold at COMMIT. `lock` names the calling
+ * plugin's ALLOW-LISTED lease table (multitable/plugin-write-fence.ts); the host never takes a table or a
+ * column from the plugin beyond that identifier.
+ */
+export interface PluginRecordWriteFence {
+  lock: string
+  scopeKey: string
+  leaseId: string
+  fencingEpoch: number
+  generationToken: string
+}

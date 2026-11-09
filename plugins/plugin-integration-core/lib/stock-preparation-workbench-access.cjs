@@ -322,6 +322,172 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/project-overview/ensure',
     control: 'stock-prep-project-overview-ensure',
   }),
+  // 备料分批拉取第一期 step 3 PR B (plan §5.1 / §7 G5, G7; register R-53, R-54) — THE PILOT MARKER of a
+  // project sheet. Both ADMIN (R-53 owner default ②: enabling a pilot is an administrator's act; the
+  // readiness answer names infrastructure facts, so the read is ADMIN too). The read is the pilot
+  // status line on 项目备料页's sheet-state line, the enable its typed-confirmation button; both 404
+  // DISABLED while the project-sheets switch is off, after the gate. There is NO unset capability.
+  Object.freeze({
+    capability: 'projectTarget.pilotRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pilotEnable',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pilot',
+    control: 'stock-prep-project-pilot-enable',
+  }),
+  // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §8 「B4」; OQ4, OQ6; register R-68) — THE PER-SHEET
+  // SWITCH 「允许人工补充行」 and the last pull's reminder. The READ is the PULL tier (OQ4: the reminder is on the project
+  // sync panel for the people who pull, ADR §8 「B4」 6), the SET is ADMIN (OQ6: the 备料主管理员 flips it). Their
+  // controls live on the project sync panel (StockPreparationProjectTargetManualRows.vue, mounted in
+  // StockPreparationProjectSyncPanel.vue): the switch-state line (with the reminder), read only for a holder and rendered
+  // once the server answered for a registered sheet, and the typed-confirmation switch button, rendered only for an
+  // ADMIN while the server says `may.set`. Both 404 DISABLED while the project-sheets switch is off, after the gate. The
+  // web suite StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN) asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.manualRowsRead',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.manualRowsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
+    control: 'stock-prep-project-manual-rows-set',
+  }),
+  Object.freeze({
+    // 批次标识 BI-1b (design §8.7; register R-65): the pull-batch STATUS read of one project sheet — whether its two batch
+    // columns are present / locked / visible, its ledger state and its values-free row classes. ADMIN (the install it
+    // reports on is an owner-gated production write). `control: null` is deliberate: no web control renders this read yet
+    // (BI-3 / BI-7 give it one — the handoff precedent above), so presence cannot equal grant for F-04.
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 批次标识 BI-7 (design §5.5 / §11; register R-65; rulings C2 / C6 / C8) — THE PULL-BATCH SETTINGS of 数据来源与体检:
+  // the read (tenant default, fixed facts, every registered sheet's captured values and locks), the tenant-default
+  // write and one captured sheet's rule / format write (typed confirmation). All ADMIN. Their controls live on the
+  // settings panel of 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue) and render only after the read answered
+  // 200; all three routes are 404 while either the pull-batch or the project-sheets switch is off, so the panel is
+  // invisible then (C6). The web suite asserts the alignment in PBS-ALIGN.
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    // 批次标识 BI-2 (design §8.1; register R-65) — THE PER-SHEET INSTALL (dry_run / install / abort). ADMIN: an install is an
+    // owner-gated production write (gate ② per sheet). `control: null` is deliberate: there is no web install control
+    // (design §7.2) — installs run through this route or the ops script, whose default is a dry-run.
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
+  // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
+  // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
+  // `stock-prep:admin` and the platform admin through the ladder, a TENANTLESS platform admin refused by the
+  // host-vouched scope). VALUE-BEARING (keys, quantities, before/after cells), every read audited.
+  //
+  // PR-7 (register R-62) assigned their control ids: they live on the 「拉取待确认」 tab of the 「工作」 group
+  // (the web's StockPreparationRefreshQueueView.vue), never on the confirmation-queue view; the web's
+  // StockPreparationRefreshQueue.spec.ts (RQ-ALIGN) asserts presence = grant where they live, and the browser
+  // mirror stays byte-equal (F-01).
+  Object.freeze({
+    capability: 'refresh.holds',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
+    control: 'stock-prep-refresh-holds',
+  }),
+  Object.freeze({
+    capability: 'refresh.evidence',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/evidence',
+    control: 'stock-prep-refresh-evidence',
+  }),
+  Object.freeze({
+    capability: 'refresh.keep',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds/:holdId/keep',
+    control: 'stock-prep-refresh-keep',
+  }),
+  Object.freeze({
+    capability: 'refresh.confirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/confirm',
+    control: 'stock-prep-refresh-confirm',
+  }),
+  Object.freeze({
+    capability: 'refresh.continuation',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id',
+    control: 'stock-prep-refresh-continuation',
+  }),
+  Object.freeze({
+    capability: 'refresh.end',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
+    control: 'stock-prep-refresh-end',
+  }),
+  // 备料分批拉取第一期 step 5 PR-8 (design §10.3, §13; register R-63) — THE CHANGE PLAN: the private page (the proposal
+  // the open content holds make + the pending plan, a written plan's current diff), the confirm and the review. PULL
+  // tier like the six above (D-14: the puller confirms AND reviews — two separate operations, C11). The controls are
+  // PR-9's (R-77 ⑩): the 「变更计划」 / 「变更复核」 sections of 「拉取待确认」.
+  Object.freeze({
+    capability: 'refresh.changePlan',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
+    control: 'stock-prep-refresh-change-plan',
+  }),
+  Object.freeze({
+    capability: 'refresh.changePlanConfirm',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
+    control: 'stock-prep-refresh-change-plan-confirm',
+  }),
+  Object.freeze({
+    capability: 'refresh.reviewComplete',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: 'stock-prep-refresh-change-review-complete',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -439,6 +605,22 @@ const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
     step: 'dry-run',
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/dry-run',
+    legacyGate: 'read',
+  }),
+  // R67 ④ — THE SAME DRY-RUN, ENQUEUED AND POLLED. The enqueue runs the dry-run handler itself (same
+  // gate, same lines), so it takes the dry-run's tier and legacy gate; the poll reads back only the
+  // caller's own job, at the same tier. Leaving them out of the split would admit a puller to the
+  // synchronous dry-run and refuse the one the page actually calls.
+  Object.freeze({
+    step: 'dry-run-job-start',
+    method: 'POST',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
+    legacyGate: 'read',
+  }),
+  Object.freeze({
+    step: 'dry-run-job-get',
+    method: 'GET',
+    path: '/api/integration/table-actions/:actionId/dry-run-jobs',
     legacyGate: 'read',
   }),
   Object.freeze({
@@ -678,12 +860,19 @@ const STOCK_PREP_RAIL_GATE_OPERATOR_BOARD = 'operator-board'
 const STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN = 'workbench-admin'
 /** Platform admin — the legacy MVP tabs, folded into 深度工具 but NOT re-tiered. */
 const STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN = 'platform-admin'
+/**
+ * 备料分批拉取第一期 step 4 PR-7 (register R-62 ①): the PULL tier exactly (`stock-prep:pull` ∧ operate ∧ read; the
+ * ladder admits `stock-prep:admin` and a platform admin) — 「拉取待确认」, whose six routes gate on exactly this
+ * code. NOT `integration:write`: `satisfiesStockPrepAccess` never grants a stock-prep code to it.
+ */
+const STOCK_PREP_RAIL_GATE_PULL = 'pull'
 
 const STOCK_PREP_RAIL_GATES = Object.freeze([
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
   STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+  STOCK_PREP_RAIL_GATE_PULL,
 ])
 
 /**
@@ -701,6 +890,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
       // not already granted, and nothing a lower tier may be shown.
       Object.freeze({ key: 'project-query', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+      // 拉取待确认 (PR-7, R-62 ①) — the puller's holds of a governed project. The PULL tier re-tiers this one rail
+      // item (R-33's "the pull code re-tiers no rail item" no longer holds); appended LAST so every existing
+      // item keeps its position.
+      Object.freeze({ key: 'refresh-queue', gate: STOCK_PREP_RAIL_GATE_PULL }),
     ]),
   }),
   Object.freeze({
@@ -716,13 +909,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
-      'dashboard',
       'project-workspace',
       'bom-snapshot-diff',
       'material-mapping',
       'unit-conversion',
-      'prep-line',
-      'exception-queue',
     ]),
   }),
   Object.freeze({
@@ -744,6 +934,7 @@ function satisfiesStockPrepRailGate(permissions, gate) {
   if (gate === STOCK_PREP_RAIL_GATE_OPERATOR_BOARD) return satisfiesStockPrepAccess(held, STOCK_PREP_OPERATE)
   if (gate === STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN) return satisfiesStockPrepAccess(held, STOCK_PREP_ADMIN)
   if (gate === STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN) return holdsPlatformAdmin(held)
+  if (gate === STOCK_PREP_RAIL_GATE_PULL) return satisfiesStockPrepAccess(held, STOCK_PREP_PULL)
   return false
 }
 
@@ -803,6 +994,7 @@ module.exports = {
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+  STOCK_PREP_RAIL_GATE_PULL,
   STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
   STOCK_PREP_RAIL_GROUPS,

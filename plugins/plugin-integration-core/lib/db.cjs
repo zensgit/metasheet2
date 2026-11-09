@@ -36,6 +36,15 @@ const TRANSACTION_ISOLATION_STATEMENTS = Object.freeze({
   serializable: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
 })
 
+// The ONE statement `setLocalLockTimeout` renders (handle-only, see below). `SET LOCAL lock_timeout = $1`
+// is not valid SQL (SET takes no bind parameter), so the value rides as the one parameter of set_config
+// with is_local = true — the same form packages/core-backend/src/attendance/w4c0-identity.ts uses.
+const LOCAL_LOCK_TIMEOUT_STATEMENT = "SELECT set_config('lock_timeout', $1, true)"
+// Bounds for the ONE parameter: a positive integer number of milliseconds, never above the host pool's
+// statement_timeout (30 s, DB_STATEMENT_TIMEOUT) — a lock wait longer than that is the statement timeout
+// anyway, and a caller naming one has the wrong tool.
+const LOCAL_LOCK_TIMEOUT_MAX_MS = 30_000
+
 class ScopeViolationError extends Error {
   constructor(message, { table, column } = {}) {
     super(message)
@@ -489,10 +498,37 @@ function createDb({ database, logger } = {}) {
           : (result && Array.isArray(result.rows) ? result.rows : [])
         return Boolean(rows[0] && rows[0].locked === true)
       }
+      /**
+       * `SELECT set_config('lock_timeout', $1, true)` on THIS transaction — bound how long the statements
+       * that follow in it may WAIT for a row lock. Past the bound PostgreSQL aborts the waiting statement
+       * with SQLSTATE 55P03 (lock_not_available) and the transaction, and the pooled connection is given
+       * back at once instead of being pinned until statement_timeout (30 s). First caller: the stock-prep
+       * sheet write lock (stock-preparation-project-write-lock.cjs), whose takeover / abandoned-lease clear /
+       * release are non-key UPDATEs of a row a stalled holder's fenced write may be holding FOR SHARE
+       * inside an open transaction; without a bound every contender blocked for 30 s on one of the 20
+       * pool connections and then answered "store failed" instead of "a holder is writing" (PR #6501, S1).
+       *
+       * Added under the module header's extension clause: the statement is a fixed literal and the
+       * timeout is its ONE parameter — a positive integer number of milliseconds, at most
+       * LOCAL_LOCK_TIMEOUT_MAX_MS, rendered as its decimal text (set_config takes text; a bare integer is
+       * read as milliseconds). `is_local = true` scopes it to this transaction, so nothing leaks to the next
+       * user of the pooled connection. Offered ONLY on the transaction handle: in autocommit a local
+       * setting ends with the statement that made it and bounds nothing.
+       */
+      async function setLocalLockTimeout(ms) {
+        if (!Number.isInteger(ms) || ms <= 0 || ms > LOCAL_LOCK_TIMEOUT_MAX_MS) {
+          throw new ScopeViolationError(
+            `plugin-integration-core: lock timeout must be an integer between 1 and ${LOCAL_LOCK_TIMEOUT_MAX_MS} milliseconds`,
+            {},
+          )
+        }
+        await trx.query(LOCAL_LOCK_TIMEOUT_STATEMENT, [String(ms)])
+      }
       return callback({
         setTransactionIsolationLevel,
         advisoryXactLock,
         tryAdvisoryXactLock,
+        setLocalLockTimeout,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,
@@ -540,6 +576,8 @@ module.exports = {
     prepareParamValue,
     transactionIsolationStatement,
     TRANSACTION_ISOLATION_STATEMENTS,
+    LOCAL_LOCK_TIMEOUT_STATEMENT,
+    LOCAL_LOCK_TIMEOUT_MAX_MS,
     IDENT_RE,
   },
 }

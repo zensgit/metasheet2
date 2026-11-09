@@ -1,5 +1,7 @@
 'use strict'
 
+const { consumableMap } = require('./support/consumable-storage.cjs')
+
 // 「把系统表的英文表头改成中文」 — THROUGH THE REAL ROUTE TABLE (客户反馈 2026-09-24 #4a).
 //
 // The host primitive's own guarantees (compare-and-set in SQL, registry triple, config revision per
@@ -306,7 +308,7 @@ function mount(hostOptions = {}, { packs, sandboxAllowlist } = {}) {
       },
       multitable: { provisioning: host.provisioning, records: {} },
     },
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: consumableMap(),
     config,
   }
   httpRoutes.registerIntegrationRoutes({

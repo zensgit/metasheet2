@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 // vars (vi.mock is hoisted), so the creator id is a fixed literal, mirrored by WRITER below.
 vi.mock('../../src/middleware/auth', () => {
   const authenticate = (req: { user?: unknown }, _res: unknown, next: () => void) => {
-    ;(req as { user?: unknown }).user = { id: 'user_tc_oapi4a_fixed' }
+    ;(req as { user?: unknown }).user = { id: 'user_tc_oapi4a_fixed', access_generation: 0 }
     next()
   }
   return { authenticate, authMiddleware: authenticate, default: authenticate }

@@ -17,6 +17,14 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
+import { defineStockPreparationProjectWriteLockRealDbCases } from './stock-preparation-project-write-lock-realdb.cases'
+import { defineStockPreparationGenericWriterGovernanceRealDbCases } from './stock-preparation-generic-writer-governance-realdb.cases'
+import { defineStockPreparationManualRowsRealDbCases } from './stock-preparation-manual-rows-realdb.cases'
+import { defineStockPreparationSheetCensusRealDbCases } from './stock-preparation-sheet-census-realdb.cases'
+import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-pull-batch-realdb.cases'
+import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
+import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
+import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -494,3 +502,23 @@ describeIfDatabase('stock-preparation P4 one-shot repair (real DB)', () => {
     for (const objectId of objectIds) expect(available.has(objectId)).toBe(true)
   })
 })
+
+// Batch-refresh phase 0 step 1: the stock-prep project write lock (migration 100) real-DB cases ride this
+// already-wired stock-prep real-DB host (see the cases module header for why there is no lane file of their own).
+defineStockPreparationProjectWriteLockRealDbCases()
+// Batch-refresh step 4 PR-6: the generic configured writers refuse governed stock-prep sheets (real PG, S6-*).
+defineStockPreparationGenericWriterGovernanceRealDbCases()
+// 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §8 「B1 插件」 1 / 10): the pull never touches a `manual:` row, the
+// export carries 来源, and the R-60 boundary holds (real PG, MR-RD-*).
+defineStockPreparationManualRowsRealDbCases()
+// Batch-refresh step 6d-1a (S6-0): the R-line doubled-sheet census pack runs on real PG with parity to the pure module (S9D-02/03).
+defineStockPreparationSheetCensusRealDbCases()
+// 批次标识 BI-1a (register R-65): migration 105 and the pull-batch ledger store on real PG — CHECK vocabulary, allocation
+// races, the zombie holder after a takeover, the settings lock and its C7 release (BI-R*).
+defineStockPreparationPullBatchRealDbCases()
+// Pull batch BI-6a (O-BI-9): the read-only site probe pack runs on real PG on synthetic sheets (BI-PROBE-RD-01/02).
+defineStockPreparationPullBatchSiteProbeRealDbCases()
+// 批次标识 BI-5: the plugin view landing promotion and the values-free sheet layout read on real PG (BI5-RD-*).
+defineMultitablePluginViewLandingRealDbCases()
+// 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
+defineStockPreparationPullBatchBandRealDbCases()
