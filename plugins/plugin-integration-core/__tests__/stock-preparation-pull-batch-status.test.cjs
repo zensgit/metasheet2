@@ -376,6 +376,7 @@ test('SR-03 the tenancy wall: a project the registry resolves onto another tenan
       assert.ok(h.provisioning.calls.some((c) => c[0] === 'isSheetOwnedByProject' && c[1] === foreign.sheetId && c[2] === h.staging), 'the wall ran on the resolved sheet against the caller\'s staging project')
       assert.deepEqual(h.db.log, [], 'zero pull-batch ledger statements')
       assert.deepEqual(h.records.calls, [], 'zero records reads')
+      assert.deepEqual(h.auditAppends, [], 'no audit append (plain or in-transaction)')
       // The overlay's own field binding, then the wall — and nothing after it (no band, view or layout read).
       assert.deepEqual(h.provisioning.calls.map((c) => c[0]), ['resolveFieldIds', 'isSheetOwnedByProject'], 'the wall is the last host call')
       assert.equal(JSON.stringify(res.body).includes(OTHER), false, 'values-free: no tenant named')

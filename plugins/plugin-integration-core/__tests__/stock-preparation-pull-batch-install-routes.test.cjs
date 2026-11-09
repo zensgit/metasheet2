@@ -17,6 +17,10 @@
 //   IR-9   ON end to end: dry-run -> install under the real lease -> resolved; values-free answers; the scheduled-pull
 //          shape (the dry-run precheck answers WRITE_LOCKED with holderPurpose pull_batch_install while an install holds
 //          the sheet)
+//   IR-10  the tenancy wall (IR-RL-WALL on main): a registry row of the caller's tenant whose sheet belongs to ANOTHER
+//          tenant's staging project is refused 409 TABLE_ACTION_TARGET_TENANT_MISMATCH for dry_run (switch on AND off),
+//          install and abort — zero ledger statements, zero records reads, zero host writes, no audit row; the caller's
+//          own sheet still answers 200
 //
 // Synthetic values only.
 
@@ -333,6 +337,59 @@ test('IR-9 ON end to end through the route: dry-run, install under the real shee
     assert.deepEqual([lockRow.lease_id, lockRow.generation_reason], [null, 'pull_batch_install'], 'released, then bumped with the install reason')
     assert.deepEqual(h.audits.map((entry) => entry.mode), ['pull_batch_install_started', 'pull_batch_installed'])
   } finally { h.restore() }
+})
+
+test('IR-10 the tenancy wall: a project the registry resolves onto another tenant\'s sheet is refused 409 for dry_run, install and abort before any ledger, records or host write', async () => {
+  const OTHER = 'tenant-syn-bi2r-other'
+  const cases = [
+    ['dry_run', 'true', dryRunBody()],
+    ['dry_run', undefined, dryRunBody()],
+    ['install', 'true', { mode: 'install', confirmProjectNo: PROJECT, approvalRef: 'R-65', planDigest: 'a'.repeat(64), confirmHistoricalBatchCount: 1 }],
+    ['abort', 'true', { mode: 'abort', confirmProjectNo: PROJECT, approvalRef: 'R-65' }],
+  ]
+  for (const [mode, switchValue, body] of cases) {
+    const label = `${mode} (switch ${switchValue})`
+    const h = mount()
+    try {
+      // The OTHER tenant's sheet, provisioned in ITS staging project with one pulled row; then the caller's registry row
+      // is pointed at it (sheet and object both the other tenant's), so neither ownership nor the derived-id fallback
+      // attributes it to the caller.
+      const foreign = h.seedRegistryRow(PROJECT, { tenant: OTHER })
+      const planted = h.registryRows().find((r) => r.tenant_id === OTHER && r.project_no === PROJECT)
+      planted.tenant_id = TENANT
+      assert.notEqual(foreign.objectId, h.projectObjectId(PROJECT), 'the planted object is not the caller\'s derived one')
+      h.records.rows.push({ id: 'rec_foreign_1', sheetId: foreign.sheetId, version: 1, createdAt: '2026-11-01T01:00:01.000Z', createdBy: null, locked: false, data: {} })
+      h.db.log.length = 0
+      h.records.calls.length = 0
+      h.provisioning.calls.length = 0
+      const res = await withSwitch(switchValue, () => post(h, body))
+      assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH', label)
+      assert.deepEqual({ ...res.body.error.details }, { objectId: foreign.objectId }, `${label}: the refusal names only the logical object id`)
+      assert.ok(h.provisioning.calls.some((c) => c[0] === 'isSheetOwnedByProject' && c[1] === foreign.sheetId && c[2] === h.staging), `${label}: the wall ran on the resolved sheet against the caller's staging project`)
+      assert.deepEqual(h.db.log, [], `${label}: zero pull-batch ledger statements`)
+      assert.deepEqual(h.records.calls, [], `${label}: zero records reads or writes`)
+      // The overlay's own field binding, then the wall — and nothing after it (no band, view, layout or repair call).
+      assert.deepEqual(h.provisioning.calls.map((c) => c[0]), ['resolveFieldIds', 'isSheetOwnedByProject'], `${label}: the wall is the last host call`)
+      assert.deepEqual(h.context.api.multitable.records.fakeHostFences, [], `${label}: no fenced host write`)
+      assert.deepEqual(h.audits, [], `${label}: no audit row`)
+      assert.deepEqual(h.auditAppends, [], `${label}: no plain (out-of-transaction) audit append either`)
+      assert.deepEqual([h.db.rows(pbKit.T.sheet), h.db.rows(pbKit.T.lock)], [[], []], `${label}: no ledger or lease row`)
+      assert.equal(h.records.rows.find((row) => row.id === 'rec_foreign_1').version, 1, `${label}: the foreign row is untouched`)
+      const text = JSON.stringify(res.body)
+      for (const value of [OTHER, foreign.sheetId, PROJECT]) assert.equal(text.includes(value), false, `${label}: values-free (${value === PROJECT ? 'project' : 'foreign tenant or sheet'} not named)`)
+    } finally { h.restore() }
+  }
+  // Control: the caller's OWN registered sheet passes the same wall, switch on and off.
+  for (const switchValue of ['true', undefined]) {
+    const own = mount()
+    try {
+      seedSheet(own)
+      const res = await withSwitch(switchValue, () => post(own, dryRunBody()))
+      assert.equal(res.statusCode, 200, `own sheet (switch ${switchValue}): ${JSON.stringify(res.body)}`)
+      assert.ok(own.provisioning.calls.some((c) => c[0] === 'isSheetOwnedByProject'), 'the control crossed the same wall')
+    } finally { own.restore() }
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-install-routes.test.cjs', tests)
