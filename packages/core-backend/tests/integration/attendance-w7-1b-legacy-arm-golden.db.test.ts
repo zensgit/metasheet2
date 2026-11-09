@@ -106,7 +106,7 @@ import * as crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
-import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { captureAttendanceW7SyntheticSourceHistoryV1, seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { canonicalAttendanceJsonV1 } from '../../src/attendance/w4c0-fingerprints'
 import {
   computeAttendanceSourceDefinitionFingerprintV1,
@@ -564,6 +564,11 @@ describeDb('W7-1b — W7-R3 structural parity: legacy-arm golden equality (real 
         // ILLEGAL under W7-3's `trg_accss_state_guard` (BEFORE-ROW, bootstrap shapes
         // only -> P0001) and its four NOT NULL columns (-> 23502). Seeded through the
         // ONE shared legal fixture: bootstrap at `off`, then walk the ratified ladder.
+        // The synthetic fixture declares no membership at its fixed business date.
+        // This captures absence only; the legacy shift/rule input and golden stay untouched.
+        await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+          orgId: f.orgId, businessEffectiveDate: f.workDate, groupIds: [], userIds: [f.userId],
+        })
         await seedAttendanceW7ContextSourcePostureV1(pool, f.orgId, posture)
       }
       for (const [id, f] of Object.entries(fixtures)) {

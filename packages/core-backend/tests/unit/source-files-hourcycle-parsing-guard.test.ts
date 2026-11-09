@@ -178,6 +178,28 @@ interface KnownSite {
 // prettier-ignore
 const KNOWN_SITES: KnownSite[] = [
   {
+    // readAttendanceCalc14GroupSourcesV1: retained shift/group/rule timezone,
+    // format(epoch) only validates it; the formatted result is discarded.
+    file: 'packages/core-backend/src/attendance/attendance-calc14-source-history.ts',
+    lineText: "try { new Intl.DateTimeFormat('en', { timeZone: zone }).format(new Date(0)) } catch { return null }",
+    kind: 'display',
+  },
+  {
+    // prepareAttendanceCalc14SourceWriteContextV1: org-default rule timezone;
+    // only year/month/day parts form today for the effective-date validator.
+    // No hour is requested or consumed; retain the existing no-hour check.
+    file: 'packages/core-backend/src/attendance/attendance-calc14-source-write-context.ts',
+    lineText: "const parts = new Intl.DateTimeFormat('en-US', {",
+    kind: 'display',
+  },
+  {
+    // prepare: locked default-rule timezone and now() Date, result discarded.
+    // The separately called toWorkDate uses its existing date-only formatter.
+    file: 'plugins/plugin-attendance/lib/attendance-calc14-source-history.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en', { timeZone: rule.timezone }).format(at) }",
+    kind: 'display',
+  },
+  {
     // IANA validity probe only; formatted date is discarded, no hour is consumed.
     file: 'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
     lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0))",
@@ -758,7 +780,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 31 = 29 + two hour-free attendance timezone validity probes.
     // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
     // 38 = 37 + the daily scheduler's hour-free year/month/day key.
-    expect(KNOWN_SITES.length).toBe(38)
+    // 41 = 38 + two CALC14 timezone probes and the core writer's date-only key.
+    expect(KNOWN_SITES.length).toBe(41)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

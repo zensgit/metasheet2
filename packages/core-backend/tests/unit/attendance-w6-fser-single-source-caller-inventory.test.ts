@@ -61,6 +61,9 @@ const ALLOWED_RELATIVE_FILES = new Set([
   // calls (they reference the singleton exports only).
   'packages/core-backend/tests/integration/attendance-w7-1b-legacy-arm-golden.db.test.ts',
   'packages/core-backend/tests/integration/attendance-w7-2-group-shadow-dualrun.db.test.ts',
+  // CALC14: injects the real pure FSER derivation into both current-row and
+  // retained-row resolver cases; no service factory or second predicate.
+  'packages/core-backend/tests/integration/attendance-calc14-effective-source-history.db.test.ts',
   // this inventory test's own file (names the guarded strings for documentation)
   'packages/core-backend/tests/unit/attendance-w6-fser-single-source-caller-inventory.test.ts',
   // Names the module in a CLOSED FILE SET / a derived-domain floor list, not

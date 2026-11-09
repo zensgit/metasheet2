@@ -68,6 +68,15 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // CALC14 source capture, retained inputs, shared current/retained facts and
+  // import attribution all feed calculation. Keep BOTH bans on all seven files.
+  'packages/core-backend/src/attendance/attendance-calc14-source-history.ts',
+  'packages/core-backend/src/attendance/attendance-calc14-source-write-context.ts',
+  'packages/core-backend/src/attendance/attendance-calc14-w7-source-loader.ts',
+  'packages/core-backend/src/attendance/w7-resolver/w7-group-effective-facts-from-rows.ts',
+  'plugins/plugin-attendance/lib/attendance-calc14-import-policy.cjs',
+  'plugins/plugin-attendance/lib/attendance-calc14-source-history.cjs',
+  'plugins/plugin-attendance/lib/attendance-calc14-source-reader.cjs',
   // Trip, request and timezone modules supply or protect the frozen calculation context.
   // Apply both aggregate bans to every new module; no exclusion is introduced.
   'packages/core-backend/src/attendance/attendance-business-trip-locks.ts',

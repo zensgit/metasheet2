@@ -522,7 +522,11 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3b',
     sharedHook: false,
     canonicalizedBy: 'W4C-3b',
-    claims: bySymbol('packages/core-backend/src/routes/admin-users.ts', /^body$/),
+    // CALC14's source-history closure is the nearest preceding declaration for
+    // this same onboarding writer; retain the pinned baseline's body identity.
+    claims: (site) =>
+      bySymbol('packages/core-backend/src/routes/admin-users.ts', /^(body|flushSourceHistory)$/)(site)
+      && site.table === 'attendance_shift_assignments' && site.verb === 'insert',
   },
 
   // ---------------------------------------------------------------------------------------

@@ -789,6 +789,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       for (const concurrentTarget of ['proposal', 'canonical', 'calculation'] as const) {
         const proposalWriter = await pool.connect()
         let concurrentApply: Promise<JsonResponse> | undefined
+        let concurrentApplyResponse: JsonResponse | undefined
+        let concurrentApplyRejected = false
         try {
           await proposalWriter.query('BEGIN')
           await proposalWriter.query(concurrentTarget === 'proposal'
@@ -799,10 +801,28 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
           concurrentApply = requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
             method: 'POST', headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: 1 },
           })
+          // Observe the original request; its response/rejection is still awaited below.
+          void concurrentApply.then(
+            response => { concurrentApplyResponse = response },
+            () => { concurrentApplyRejected = true },
+          )
           await vi.waitFor(async () => {
             const blocked = await pool.query(`SELECT pid FROM pg_stat_activity
               WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`, [writerPid])
-            expect(blocked.rows.length).toBeGreaterThan(0)
+            const code = concurrentApplyResponse?.body?.error?.code
+            const knownCode = [
+              'UNAUTHORIZED', 'FORBIDDEN', 'INTERNAL_ERROR',
+              'ATTENDANCE_CLEANING_REQUEST_INVALID', 'ATTENDANCE_CLEANING_UNAUTHORIZED',
+              'ATTENDANCE_CLEANING_DISABLED', 'ATTENDANCE_CLEANING_FORBIDDEN',
+              'ATTENDANCE_CLEANING_CONFLICT', 'ATTENDANCE_CLEANING_BUSY',
+              'ATTENDANCE_CLEANING_OUTCOME_UNKNOWN', 'ATTENDANCE_CLEANING_UNAVAILABLE',
+            ].includes(code) ? code : code === undefined ? 'NO_ERROR_CODE' : 'UNLISTED_ERROR_CODE'
+            expect(blocked.rows.length, JSON.stringify({
+              mode, concurrentTarget,
+              requestState: concurrentApplyResponse ? 'resolved' : concurrentApplyRejected ? 'rejected' : 'pending',
+              responseStatus: concurrentApplyResponse?.status ?? null,
+              responseCode: concurrentApplyResponse ? knownCode : null,
+            })).toBeGreaterThan(0)
           }, { timeout: 3000, interval: 20 })
           if (concurrentTarget === 'proposal') await proposalWriter.query('UPDATE meta_records SET data = data || $1::jsonb, version = version + 1 WHERE id = $2',
             [JSON.stringify({ [physical('cleaning_reason')]: 'Concurrent user proposal' }), projectionId])

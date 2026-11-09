@@ -2973,6 +2973,19 @@
       "AttendanceRule": {
         "type": "object",
         "properties": {
+          "capabilities": {
+            "type": "object",
+            "description": "Advisory source-date metadata; existing capability properties are retained.",
+            "properties": {
+              "businessEffectiveDateRequired": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission."
+              }
+            }
+          },
           "id": {
             "type": "string"
           },
@@ -3044,6 +3057,19 @@
       "AttendanceGroup": {
         "type": "object",
         "properties": {
+          "capabilities": {
+            "type": "object",
+            "description": "Advisory source-date metadata; existing capability properties are retained.",
+            "properties": {
+              "businessEffectiveDateRequired": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission."
+              }
+            }
+          },
           "id": {
             "type": "string"
           },
@@ -5056,6 +5082,13 @@
         "type": "object",
         "description": "Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only.",
         "properties": {
+          "businessEffectiveDateRequired": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Optional exact true on list items for an active existing W7 state including suspended; omitted in OFF. Existing segmentCalculation metadata is retained; grants no permission."
+          },
           "segmentCalculation": {
             "type": "object",
             "properties": {
@@ -14541,6 +14574,77 @@
           }
         }
       },
+      "AttendanceBusinessEffectiveDate": {
+        "type": "string",
+        "format": "date",
+        "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
+        "description": "Explicit valid calendar date (year 0001-9999), not an instant or recording timestamp. OFF ignores this optional input. Existing non-OFF W7 source mutations require it only when source facts actually change; omission is not a default date. Ordinary date must be at least the current business day from the trusted default rule timezone. Past dates require a separately authorized validated path; no such public endpoint is added by this schema. No-op save creates no version."
+      },
+      "AttendanceFixedScheduleMaterialize": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shiftId",
+          "startDate",
+          "endDate"
+        ],
+        "properties": {
+          "shiftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "orgId": {
+            "type": "string",
+            "description": "Must equal the authenticated organization when supplied."
+          },
+          "businessEffectiveDate": {
+            "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+          },
+          "expectedConfigRevision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Existing saved revision OCC; omitted retains existing matching-candidate handling."
+          }
+        }
+      },
+      "AttendanceFixedScheduleClear": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shiftId",
+          "startDate",
+          "endDate"
+        ],
+        "properties": {
+          "shiftId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "orgId": {
+            "type": "string",
+            "description": "Must equal the authenticated organization when supplied."
+          },
+          "businessEffectiveDate": {
+            "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+          }
+        }
+      },
       "AttendanceFixedScheduleConfigSave": {
         "type": "object",
         "additionalProperties": false,
@@ -14550,6 +14654,9 @@
           "endDate"
         ],
         "properties": {
+          "businessEffectiveDate": {
+            "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+          },
           "shiftId": {
             "type": "string",
             "format": "uuid"
@@ -14672,6 +14779,22 @@
           "referenceEligibility"
         ],
         "properties": {
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "businessEffectiveDateRequired"
+            ],
+            "description": "Present only for the existing effective non-OFF W7 arm; absent preserves the OFF editor shape. This hint grants no write permission.",
+            "properties": {
+              "businessEffectiveDateRequired": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              }
+            }
+          },
           "groupId": {
             "type": "string",
             "format": "uuid"
@@ -17887,7 +18010,7 @@
       "x-plugin": "plugin-attendance",
       "put": {
         "summary": "Save fixed schedule desired configuration",
-        "description": "Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.",
+        "description": "Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps. The optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement; OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.",
         "security": [
           {
             "bearerAuth": []
@@ -17956,6 +18079,9 @@
           },
           "409": {
             "description": "ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry"
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           },
           "503": {
             "description": "Attendance tables unavailable"
@@ -17967,7 +18093,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Save fixed schedule desired configuration through the POST update alias",
-        "description": "Uses the identical handler, authorization, validation, revision checks and response as PUT config.",
+        "description": "Uses the identical handler, authorization, validation, revision checks and response as PUT config. Optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement; OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.",
         "security": [
           {
             "bearerAuth": []
@@ -18037,8 +18163,191 @@
           "409": {
             "description": "ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED; reload before retry"
           },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
+          },
           "503": {
             "description": "Attendance tables unavailable"
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{id}/fixed-schedule/apply": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Apply managed fixed schedule assignments",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceFixedScheduleMaterialize"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Existing fixed schedule plan with created assignments and applied=true."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission."
+          },
+          "404": {
+            "description": "Group or shift not found in the authenticated organization."
+          },
+          "409": {
+            "description": "Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT."
+          },
+          "422": {
+            "description": "Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
+          },
+          "503": {
+            "description": "Existing attendance source",
+            "runtime or storage unavailable.": null
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{id}/fixed-schedule/rebuild": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Rebuild managed fixed schedule assignments",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceFixedScheduleMaterialize"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing fixed schedule plan with created/deactivated assignments and rebuilt=true."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission."
+          },
+          "404": {
+            "description": "Group or shift not found in the authenticated organization."
+          },
+          "409": {
+            "description": "Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT."
+          },
+          "422": {
+            "description": "Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
+          },
+          "503": {
+            "description": "Existing attendance source",
+            "runtime or storage unavailable.": null
+          }
+        }
+      }
+    },
+    "/api/attendance/groups/{id}/fixed-schedule/clear": {
+      "x-plugin": "plugin-attendance",
+      "post": {
+        "summary": "Clear managed fixed schedule assignments",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceFixedScheduleClear"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing producer identity, deactivated assignments and cleared=true."
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission."
+          },
+          "404": {
+            "description": "Group or shift not found in the authenticated organization."
+          },
+          "409": {
+            "description": "Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT."
+          },
+          "422": {
+            "description": "Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
+          },
+          "503": {
+            "description": "Existing attendance source",
+            "runtime or storage unavailable.": null
           }
         }
       }
@@ -20808,6 +21117,7 @@
       "x-plugin": "plugin-attendance",
       "get": {
         "summary": "Get default attendance rule",
+        "description": "Optional data.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended; then data.orgId equals the authenticated route organization. OFF returns the existing default-rule response unchanged and omits the new field. This is advisory source-date metadata; existing capabilities and authorization are preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.",
         "security": [
           {
             "bearerAuth": []
@@ -20846,11 +21156,15 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "description": "ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure."
           }
         }
       },
       "put": {
         "summary": "Update default attendance rule",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -20863,6 +21177,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -20967,6 +21284,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -20975,6 +21298,7 @@
       "x-plugin": "plugin-attendance",
       "get": {
         "summary": "List attendance shifts",
+        "description": "Each returned item.orgId equals the authenticated route organization. Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities. This is advisory source-date metadata; existing authorization is preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.",
         "security": [
           {
             "bearerAuth": []
@@ -21046,11 +21370,15 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "description": "ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure."
           }
         }
       },
       "post": {
         "summary": "Create attendance shift",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21064,6 +21392,9 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string",
                     "minLength": 1,
@@ -21186,6 +21517,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
           "422": {
             "description": "Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields), or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure)."
           }
@@ -21243,6 +21577,7 @@
       },
       "put": {
         "summary": "Update attendance shift",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21266,6 +21601,9 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string",
                     "minLength": 1,
@@ -21359,6 +21697,7 @@
       },
       "delete": {
         "summary": "Delete attendance shift",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21374,6 +21713,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -21409,6 +21763,9 @@
           },
           "409": {
             "description": "Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by any assignment row (including ended/inactive history), a rotation rule, a pending swap snapshot, or a pending/published dispatch target. Historical evidence is preserved."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -21516,6 +21873,7 @@
       },
       "post": {
         "summary": "Create attendance shift assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21528,6 +21886,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "userId": {
                     "type": "string"
                   },
@@ -21650,6 +22011,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -21658,6 +22025,7 @@
       "x-plugin": "plugin-attendance",
       "put": {
         "summary": "Update attendance shift assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21680,6 +22048,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "userId": {
                     "type": "string"
                   },
@@ -21770,11 +22141,18 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete attendance shift assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21790,6 +22168,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -21819,6 +22212,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -21897,6 +22296,7 @@
       },
       "post": {
         "summary": "Create attendance holiday",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -21909,6 +22309,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "date": {
                     "type": "string",
                     "format": "date"
@@ -21965,6 +22368,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -22020,6 +22429,7 @@
       },
       "put": {
         "summary": "Update attendance holiday",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -22042,6 +22452,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "date": {
                     "type": "string",
                     "format": "date"
@@ -22095,11 +22508,18 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete attendance holiday",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -22115,6 +22535,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -22144,6 +22579,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -23192,6 +23633,7 @@
     "/api/attendance-admin/calculation-group-memberships/transition": {
       "post": {
         "summary": "Transition a user to a calculation group on an inclusive effective date",
+        "description": "Optional businessEffectiveDate is a source-history business date, independent of effectiveOn, the membership timeline start. It is never inferred from effectiveOn or recording time. OFF ignores it; an actual source change in an existing non-OFF W7 state requires it. Completed replay and unchanged transitions retain their existing handling without a new source version. Past ordinary dates return 403 ATTENDANCE_CALC14_HISTORICAL_AUTHORIZATION_REQUIRED; source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID. Same-day source/date conflicts return 409 ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT; immutable-source conflicts return 409 ATTENDANCE_CALC14_SOURCE_IMMUTABLE. Errors are values-free; existing authorization remains in force and no historical entry route is added.",
         "security": [
           {
             "bearerAuth": []
@@ -23217,6 +23659,9 @@
                   "effectiveOn": {
                     "type": "string",
                     "format": "date"
+                  },
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
                   },
                   "reason": {
                     "type": "string",
@@ -23306,7 +23751,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "422": {
-            "description": "Target user is not active in the requested organization",
+            "description": "Target user is not active in the requested organization, or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED, ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID, or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. Source-date requirement applies only to actual non-OFF source changes, not completed replay or unchanged transitions.",
             "content": {
               "application/json": {
                 "schema": {
@@ -23335,6 +23780,7 @@
       "x-plugin": "plugin-attendance",
       "get": {
         "summary": "List attendance groups",
+        "description": "Each returned item.orgId equals the authenticated route organization. Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities. This is advisory source-date metadata; existing authorization is preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.",
         "security": [
           {
             "bearerAuth": []
@@ -23381,11 +23827,15 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "description": "ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure."
           }
         }
       },
       "post": {
         "summary": "Create attendance group",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -23398,6 +23848,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -23463,6 +23916,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -23518,6 +23974,7 @@
       },
       "put": {
         "summary": "Update attendance group",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -23540,6 +23997,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -23605,11 +24065,15 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete attendance group",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -23625,6 +24089,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -23657,6 +24136,12 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -23745,6 +24230,7 @@
       },
       "post": {
         "summary": "Add attendance group members",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -23767,6 +24253,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "userId": {
                     "type": "string"
                   },
@@ -23917,6 +24406,12 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -23925,6 +24420,7 @@
       "x-plugin": "plugin-attendance",
       "delete": {
         "summary": "Remove an attendance group member",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -23948,6 +24444,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -23980,6 +24491,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -25473,6 +25990,7 @@
       },
       "post": {
         "summary": "Create rotation rule",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -25485,6 +26003,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -25609,6 +26130,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -25687,6 +26214,7 @@
       },
       "put": {
         "summary": "Update rotation rule",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -25709,6 +26237,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -25766,11 +26297,18 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete rotation rule",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -25786,6 +26324,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -25815,6 +26368,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -25899,6 +26458,7 @@
       },
       "post": {
         "summary": "Create rotation assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -25911,6 +26471,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "userId": {
                     "type": "string"
                   },
@@ -26022,6 +26585,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -26030,6 +26599,7 @@
       "x-plugin": "plugin-attendance",
       "put": {
         "summary": "Update rotation assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -26052,6 +26622,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "userId": {
                     "type": "string"
                   },
@@ -26110,11 +26683,18 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete rotation assignment",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -26130,6 +26710,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -26159,6 +26754,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -26243,6 +26844,7 @@
       },
       "post": {
         "summary": "Create attendance rule set",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -26255,6 +26857,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -26382,6 +26987,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }
@@ -26440,6 +27051,7 @@
       },
       "put": {
         "summary": "Update attendance rule set",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -26462,6 +27074,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -26516,11 +27131,18 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       },
       "delete": {
         "summary": "Delete attendance rule set",
+        "description": "businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.",
         "security": [
           {
             "bearerAuth": []
@@ -26536,6 +27158,21 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "businessEffectiveDate": {
+                    "$ref": "#/components/schemas/AttendanceBusinessEffectiveDate"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
@@ -26565,6 +27202,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE."
+          },
+          "422": {
+            "description": "ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE."
           }
         }
       }

@@ -1076,6 +1076,7 @@ export function attendanceAdminRouter(): Router {
         actorId,
         reason,
         correlationId: suppliedCorrelationId || req.correlationId,
+        ...(body.businessEffectiveDate !== undefined ? { businessEffectiveDate: body.businessEffectiveDate } : {}),
       })
       res.setHeader('X-Correlation-Id', result.correlationId)
       return jsonOk(res, result)

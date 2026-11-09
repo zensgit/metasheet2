@@ -47,7 +47,7 @@ import http from 'http'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
-import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { captureAttendanceW7SyntheticSourceHistoryV1, seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import { canonicalAttendanceJsonV1 } from '../../src/attendance/w4c0-fingerprints'
 import { isCoreIssuedGroupEffectiveContextV2 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
@@ -404,7 +404,14 @@ describeDb('W7-1b — issuance seam, mirror gate and ruling-7 controls (real hos
        VALUES ($1, $2, $3, '2026-01-01', '2026-12-31', true, 'published', 1)`,
       [legacyPunchOrg, legacyPunchUser, legacyPunchShift],
     )
+    // Initial synthetic inputs are known at WORK_DATE, before any group-arm leg.
+    await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+      orgId: groupOrg, businessEffectiveDate: WORK_DATE, groupIds: [groupId], userIds: [groupUser],
+    })
     // gapOrg deliberately has NO W1 membership -> `membership-absent`.
+    await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+      orgId: gapOrg, businessEffectiveDate: WORK_DATE, groupIds: [], userIds: [gapUser],
+    })
   }, 180_000)
 
   afterAll(async () => {

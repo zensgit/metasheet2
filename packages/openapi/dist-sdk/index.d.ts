@@ -1130,7 +1130,7 @@ export interface paths {
         get?: never;
         /**
          * Save fixed schedule desired configuration
-         * @description Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps.
+         * @description Requires existing fixed schedule dispatch authorization. This saves configuration only and does not create assignments. expectedConfigRevision=0 requires absence; a positive value requires that exact saved revision. A stale expectation returns ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED with no configuration or assignment change. Omission retains legacy unconditional save behavior. A no-op save retains revision and timestamps. The optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement; OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.
          */
         put: {
             parameters: {
@@ -1195,6 +1195,13 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 /** @description Attendance tables unavailable */
                 503: {
                     headers: {
@@ -1222,7 +1229,7 @@ export interface paths {
         put?: never;
         /**
          * Save fixed schedule desired configuration through the POST update alias
-         * @description Uses the identical handler, authorization, validation, revision checks and response as PUT config.
+         * @description Uses the identical handler, authorization, validation, revision checks and response as PUT config. Optional businessEffectiveDate follows the existing W7 non-OFF actual-source-change requirement; OFF omissions preserve legacy payloads. Ordinary writes cannot grant historical authorization.
          */
         post: {
             parameters: {
@@ -1287,7 +1294,254 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 /** @description Attendance tables unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}/fixed-schedule/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply managed fixed schedule assignments
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleMaterialize"];
+                };
+            };
+            responses: {
+                /** @description Existing fixed schedule plan with created assignments and applied=true. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                /** @description Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in the authenticated organization. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing attendance source */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}/fixed-schedule/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rebuild managed fixed schedule assignments
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleMaterialize"];
+                };
+            };
+            responses: {
+                /** @description Existing fixed schedule plan with created/deactivated assignments and rebuilt=true. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                /** @description Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in the authenticated organization. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing attendance source */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}/fixed-schedule/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear managed fixed schedule assignments
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceFixedScheduleClear"];
+                };
+            };
+            responses: {
+                /** @description Existing producer identity, deactivated assignments and cleared=true. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                /** @description Existing actor/organization/dispatch or clear authority refusal; historical date does not grant permission. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Group or shift not found in the authenticated organization. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing configuration/assignment/transaction conflict or ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing source/shift refusal or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Existing attendance source */
                 503: {
                     headers: {
                         [name: string]: unknown;
@@ -2931,7 +3185,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get default attendance rule */
+        /**
+         * Get default attendance rule
+         * @description Optional data.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended; then data.orgId equals the authenticated route organization. OFF returns the existing default-rule response unchanged and omits the new field. This is advisory source-date metadata; existing capabilities and authorization are preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
+         */
         get: {
             parameters: {
                 query?: {
@@ -2957,9 +3214,19 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
-        /** Update default attendance rule */
+        /**
+         * Update default attendance rule
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -2970,6 +3237,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name?: string;
                         timezone?: string;
                         workStartTime?: string;
@@ -3017,6 +3285,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
@@ -3033,7 +3315,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List attendance shifts */
+        /**
+         * List attendance shifts
+         * @description Each returned item.orgId equals the authenticated route organization. Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities. This is advisory source-date metadata; existing authorization is preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
+         */
         get: {
             parameters: {
                 query?: {
@@ -3066,10 +3351,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         put?: never;
-        /** Create attendance shift */
+        /**
+         * Create attendance shift
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -3080,6 +3375,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name: string;
                         timezone?: string;
                         workStartTime?: string;
@@ -3130,6 +3426,13 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 /** @description Typed rejection with zero writes: ATTENDANCE_SHIFT_SEGMENTS_INVALID (invalid segment array), ATTENDANCE_SHIFT_SEGMENT_MODE_AMBIGUOUS (segments combined with legacy start/end fields), or ATTENDANCE_SHIFT_FLEX_POLICY_INVALID (canonical semantic flex rejection after request-shape validation, including multi-segment flex or core-hours coverage failure). */
                 422: {
                     headers: {
@@ -3181,7 +3484,10 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
             };
         };
-        /** Update attendance shift */
+        /**
+         * Update attendance shift
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -3194,6 +3500,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name?: string;
                         timezone?: string;
                         workStartTime?: string;
@@ -3250,7 +3557,10 @@ export interface paths {
             };
         };
         post?: never;
-        /** Delete attendance shift */
+        /**
+         * Delete attendance shift
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -3260,7 +3570,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -3287,6 +3603,13 @@ export interface paths {
                 };
                 /** @description Typed delete blocker with zero writes: ATTENDANCE_SHIFT_DELETE_BLOCKED — the shift is still referenced by any assignment row (including ended/inactive history), a rotation rule, a pending swap snapshot, or a pending/published dispatch target. Historical evidence is preserved. */
                 409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -3348,7 +3671,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create attendance shift assignment */
+        /**
+         * Create attendance shift assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -3359,6 +3685,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         userId: string;
                         shiftId: string;
                         slotIndex?: number;
@@ -3408,6 +3735,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -3424,7 +3765,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update attendance shift assignment */
+        /**
+         * Update attendance shift assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -3437,6 +3781,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         userId?: string;
                         shiftId?: string;
                         slotIndex?: number;
@@ -3477,10 +3822,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete attendance shift assignment */
+        /**
+         * Delete attendance shift assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -3490,7 +3852,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -3508,6 +3876,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -3556,7 +3938,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create attendance holiday */
+        /**
+         * Create attendance holiday
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -3567,6 +3952,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         /** Format: date */
                         date: string;
                         name?: string | null;
@@ -3593,6 +3979,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -3637,7 +4037,10 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
-        /** Update attendance holiday */
+        /**
+         * Update attendance holiday
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -3650,6 +4053,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         /** Format: date */
                         date?: string;
                         name?: string | null;
@@ -3676,10 +4080,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete attendance holiday */
+        /**
+         * Delete attendance holiday
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -3689,7 +4110,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -3707,6 +4134,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -4630,7 +5071,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Transition a user to a calculation group on an inclusive effective date */
+        /**
+         * Transition a user to a calculation group on an inclusive effective date
+         * @description Optional businessEffectiveDate is a source-history business date, independent of effectiveOn, the membership timeline start. It is never inferred from effectiveOn or recording time. OFF ignores it; an actual source change in an existing non-OFF W7 state requires it. Completed replay and unchanged transitions retain their existing handling without a new source version. Past ordinary dates return 403 ATTENDANCE_CALC14_HISTORICAL_AUTHORIZATION_REQUIRED; source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID. Same-day source/date conflicts return 409 ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT; immutable-source conflicts return 409 ATTENDANCE_CALC14_SOURCE_IMMUTABLE. Errors are values-free; existing authorization remains in force and no historical entry route is added.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -4647,6 +5091,7 @@ export interface paths {
                         targetGroupId: string;
                         /** Format: date */
                         effectiveOn: string;
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         reason: string;
                         correlationId?: string;
                     };
@@ -4676,7 +5121,7 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
-                /** @description Target user is not active in the requested organization */
+                /** @description Target user is not active in the requested organization, or ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED, ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID, or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. Source-date requirement applies only to actual non-OFF source changes, not completed replay or unchanged transitions. */
                 422: {
                     headers: {
                         [name: string]: unknown;
@@ -4710,7 +5155,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List attendance groups */
+        /**
+         * List attendance groups
+         * @description Each returned item.orgId equals the authenticated route organization. Optional item.capabilities.businessEffectiveDateRequired is exactly true only for active existing W7 states including suspended. OFF omits the new field and preserves the existing item and capabilities. This is advisory source-date metadata; existing authorization is preserved. Source scope mismatch returns 403 ATTENDANCE_CALC14_SOURCE_SCOPE_INVALID.
+         */
         get: {
             parameters: {
                 query?: {
@@ -4738,10 +5186,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_POSTURE_UNAVAILABLE or DB_NOT_READY; no inferred posture on failure. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         put?: never;
-        /** Create attendance group */
+        /**
+         * Create attendance group
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -4752,6 +5210,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name: string;
                         code?: string;
                         timezone: string;
@@ -4780,6 +5239,13 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 409: components["responses"]["Conflict"];
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -4824,7 +5290,10 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
-        /** Update attendance group */
+        /**
+         * Update attendance group
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -4837,6 +5306,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name?: string;
                         code?: string;
                         timezone?: string;
@@ -4869,10 +5339,20 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete attendance group */
+        /**
+         * Delete attendance group
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -4882,7 +5362,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -4901,6 +5387,20 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -4953,7 +5453,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Add attendance group members */
+        /**
+         * Add attendance group members
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -4966,6 +5469,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         userId?: string;
                         userIds?: string[];
                         /** @description Legacy snake_case alias for userId. */
@@ -5016,6 +5520,20 @@ export interface paths {
                         };
                     };
                 };
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -5034,7 +5552,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Remove an attendance group member */
+        /**
+         * Remove an attendance group member
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -5045,7 +5566,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -5064,6 +5591,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -5918,7 +6459,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create rotation rule */
+        /**
+         * Create rotation rule
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -5929,6 +6473,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name: string;
                         timezone?: string;
                         /** @description Ordered shift IDs. */
@@ -5962,6 +6507,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -6020,7 +6579,10 @@ export interface paths {
                 };
             };
         };
-        /** Update rotation rule */
+        /**
+         * Update rotation rule
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -6033,6 +6595,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name?: string;
                         timezone?: string;
                         /** @description Ordered shift IDs. */
@@ -6059,10 +6622,27 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete rotation rule */
+        /**
+         * Delete rotation rule
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -6072,7 +6652,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -6090,6 +6676,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -6140,7 +6740,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create rotation assignment */
+        /**
+         * Create rotation assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6151,6 +6754,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         userId: string;
                         rotationRuleId: string;
                         /** Format: date */
@@ -6197,6 +6801,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -6213,7 +6831,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update rotation assignment */
+        /**
+         * Update rotation assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -6226,6 +6847,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         userId?: string;
                         rotationRuleId?: string;
                         /** Format: date */
@@ -6255,10 +6877,27 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete rotation assignment */
+        /**
+         * Delete rotation assignment
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -6268,7 +6907,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -6286,6 +6931,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -6336,7 +6995,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create attendance rule set */
+        /**
+         * Create attendance rule set
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6347,6 +7009,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name: string;
                         description?: string | null;
                         version?: number;
@@ -6375,6 +7038,20 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -6420,7 +7097,10 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
-        /** Update attendance rule set */
+        /**
+         * Update attendance rule set
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         put: {
             parameters: {
                 query?: never;
@@ -6433,6 +7113,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
                         name?: string;
                         description?: string | null;
                         version?: number;
@@ -6459,10 +7140,27 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         post?: never;
-        /** Delete attendance rule set */
+        /**
+         * Delete attendance rule set
+         * @description businessEffectiveDate follows AttendanceBusinessEffectiveDate: ignored in OFF, required for actual source changes under existing non-OFF W7 states. No-op saves create no version. Existing actor, organization and source guards remain authoritative; ordinary writes do not authorize historical entry.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -6472,7 +7170,13 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -6490,6 +7194,20 @@ export interface paths {
                 };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description ATTENDANCE_CALC14_SOURCE_DATE_CONFLICT or ATTENDANCE_CALC14_SOURCE_IMMUTABLE. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description ATTENDANCE_CALC14_EFFECTIVE_DATE_REQUIRED or ATTENDANCE_CALC14_EFFECTIVE_DATE_INVALID or ATTENDANCE_CALC14_SOURCE_HISTORY_INCOMPLETE. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         options?: never;
@@ -19815,6 +20533,14 @@ export interface components {
             off_days?: number;
         };
         AttendanceRule: {
+            /** @description Advisory source-date metadata; existing capability properties are retained. */
+            capabilities?: {
+                /**
+                 * @description Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission.
+                 * @enum {boolean}
+                 */
+                businessEffectiveDateRequired?: true;
+            };
             id?: string;
             orgId?: string;
             name?: string;
@@ -19838,6 +20564,14 @@ export interface components {
             isDefault?: boolean;
         };
         AttendanceGroup: {
+            /** @description Advisory source-date metadata; existing capability properties are retained. */
+            capabilities?: {
+                /**
+                 * @description Optional exact true for an active existing W7 state including suspended; omitted in OFF. Grants no permission.
+                 * @enum {boolean}
+                 */
+                businessEffectiveDateRequired?: true;
+            };
             id?: string;
             orgId?: string;
             name?: string;
@@ -20489,6 +21223,11 @@ export interface components {
         };
         /** @description Values-safe capability projection (state and labels only). Shows that authoritative segment calculation is disabled by default; while disabled, multi-segment authoring is preview-only. */
         AttendanceShiftCapabilities: {
+            /**
+             * @description Optional exact true on list items for an active existing W7 state including suspended; omitted in OFF. Existing segmentCalculation metadata is retained; grants no permission.
+             * @enum {boolean}
+             */
+            businessEffectiveDateRequired?: true;
             segmentCalculation?: {
                 enabled?: boolean;
                 /** @enum {boolean} */
@@ -23039,7 +23778,37 @@ export interface components {
             errorCode: string | null;
             duplicate: boolean;
         };
+        /**
+         * Format: date
+         * @description Explicit valid calendar date (year 0001-9999), not an instant or recording timestamp. OFF ignores this optional input. Existing non-OFF W7 source mutations require it only when source facts actually change; omission is not a default date. Ordinary date must be at least the current business day from the trusted default rule timezone. Past dates require a separately authorized validated path; no such public endpoint is added by this schema. No-op save creates no version.
+         */
+        AttendanceBusinessEffectiveDate: string;
+        AttendanceFixedScheduleMaterialize: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @description Must equal the authenticated organization when supplied. */
+            orgId?: string;
+            businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+            /** @description Existing saved revision OCC; omitted retains existing matching-candidate handling. */
+            expectedConfigRevision?: number;
+        };
+        AttendanceFixedScheduleClear: {
+            /** Format: uuid */
+            shiftId: string;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+            /** @description Must equal the authenticated organization when supplied. */
+            orgId?: string;
+            businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
+        };
         AttendanceFixedScheduleConfigSave: {
+            businessEffectiveDate?: components["schemas"]["AttendanceBusinessEffectiveDate"];
             /** Format: uuid */
             shiftId: string;
             /** Format: date */
@@ -23080,6 +23849,11 @@ export interface components {
             updatedAt: string;
         };
         AttendanceFixedScheduleEditor: {
+            /** @description Present only for the existing effective non-OFF W7 arm; absent preserves the OFF editor shape. This hint grants no write permission. */
+            capabilities?: {
+                /** @enum {boolean} */
+                businessEffectiveDateRequired: true;
+            };
             /** Format: uuid */
             groupId: string;
             /** @enum {string} */

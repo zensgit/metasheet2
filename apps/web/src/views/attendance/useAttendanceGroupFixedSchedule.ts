@@ -1,5 +1,7 @@
 import { computed, onScopeDispose, reactive, ref, shallowRef, watch, type Ref } from 'vue'
 
+import { businessEffectiveDateError, withBusinessEffectiveDate } from './attendanceBusinessEffectiveDate'
+
 type Translate = (en: string, zh: string) => string
 type Candidate = { shiftId: string; startDate: string; endDate: string }
 type Desired = Candidate & { revision: number }
@@ -10,6 +12,7 @@ export type FixedScheduleEditor = {
   reasonCodes: string[]
   desired: Desired | null
   drift: { managedSets: FixedScheduleManagedSet[] }
+  capabilities?: { businessEffectiveDateRequired?: unknown }
   referenceEligibility: { shiftId: string; allowed: boolean; reasonCode: string | null } | null
 }
 type PreviewResult = {
@@ -86,6 +89,7 @@ class FixedScheduleRequestError extends Error {
 export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(options: Options) {
   const { tr } = options
   const form = reactive<Candidate>({ shiftId: '', startDate: '', endDate: '' })
+  const effectiveDates = reactive({ save: '', apply: '', rebuild: '', clear: '' })
   const editor = ref<FixedScheduleEditor | null>(null)
   const loadState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const errorMessage = ref('')
@@ -103,6 +107,11 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
   const snapshot = () => ({ generation, context: context(), fingerprint: fingerprint(), draftVersion, revision: editor.value?.desired?.revision ?? 0 })
   const current = (token: ReturnType<typeof snapshot>) => token.generation === generation
     && token.context === context() && token.fingerprint === fingerprint() && token.draftVersion === draftVersion
+  const effectiveDateAvailable = computed(() => {
+    const data = editor.value
+    if (!options.enabled.value || !data || data.groupId !== options.groupId.value) return false
+    return record(data.capabilities) && data.capabilities.businessEffectiveDateRequired === true
+  })
   const busy = computed(() => loadState.value === 'loading' || operation.value !== null)
   const ready = computed(() => options.enabled.value && Boolean(options.groupId.value) && loadState.value === 'ready')
   const valid = computed(() => candidate(form) && options.hasShift(form.shiftId))
@@ -131,6 +140,8 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
   })
   function localizedError(error: unknown): string {
     if (error instanceof FixedScheduleRequestError) {
+      const effectiveError = businessEffectiveDateError(error.code, tr)
+      if (effectiveError) return effectiveError
       if (error.code === 'ATTENDANCE_FIXED_SCHEDULE_CONFIG_CHANGED') return tr('The saved configuration changed. Reload it and review before retrying.', '已保存配置已变化，请重新加载并核对后再操作。')
       if (error.code === multiSegmentCode) return tr('This organization cannot reference multi-segment shifts for scheduling.', '当前组织暂不支持引用多时段班次进行排班。')
       if (error.status === 403) return tr('You do not have permission to manage this group schedule.', '没有管理此考勤组排班的权限。')
@@ -201,10 +212,15 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
     }
   }
   watch(() => [form.shiftId, form.startDate, form.endDate], (next, previous) => {
+    if (!hydrating && next[0] !== previous[0]) Object.assign(effectiveDates, { save: '', apply: '', rebuild: '', clear: '' })
     draftVersion += 1
     previewResult.value = null
     if (!hydrating && (next[0] !== previous[0] || loadState.value === 'loading') && options.groupId.value && options.enabled.value) void load(false)
   }, { flush: 'sync' })
+  watch(effectiveDateAvailable, () => {
+    Object.assign(effectiveDates, { save: '', apply: '', rebuild: '', clear: '' })
+  }, { flush: 'sync' })
+  watch(selectedManagedKey, () => { effectiveDates.clear = '' }, { flush: 'sync' })
   watch(context, () => {
     generation += 1
     readSequence += 1
@@ -214,6 +230,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
     loadState.value = 'idle'
     errorMessage.value = ''
     selectedManagedKey.value = ''
+    Object.assign(effectiveDates, { save: '', apply: '', rebuild: '', clear: '' })
     hydrating = true
     Object.assign(form, { shiftId: '', startDate: '', endDate: '' })
     hydrating = false
@@ -238,7 +255,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
     operation.value = 'save'
     previewResult.value = null
     try {
-      const data = await request(`/api/attendance/groups/${groupId}/fixed-schedule/config/update`, { method: 'POST', body: JSON.stringify(payload) })
+      const data = await request(`/api/attendance/groups/${groupId}/fixed-schedule/config/update`, { method: 'POST', body: JSON.stringify(withBusinessEffectiveDate(payload, effectiveDateAvailable.value ? effectiveDates.save : '')) })
       if (!current(token)) return
       if (!desired(data) || !record(data) || data.groupId !== groupId || (data.orgId !== undefined && options.orgId() !== undefined && data.orgId !== options.orgId()) || JSON.stringify([data.shiftId, data.startDate, data.endDate]) !== token.fingerprint) throw new Error('INVALID_FIXED_SCHEDULE_CONFIG')
       await load(false)
@@ -250,6 +267,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
         options.setStatus(errorMessage.value, 'error')
         return
       }
+      effectiveDates.save = ''
       options.setStatus(tr('Desired configuration saved. Assignments were not changed.', '期望配置已保存，未修改排班。'))
     } catch (error) { if (current(token) && token.revision === (editor.value?.desired?.revision ?? 0)) await recover(error) }
     finally { if (operationId === operationSequence) operation.value = null }
@@ -272,7 +290,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
     operation.value = action
     if (action === 'preview') previewResult.value = null
     try {
-      const data = await request(`/api/attendance/groups/${groupId}/fixed-schedule/${action}`, { method: 'POST', body: JSON.stringify(payload) })
+      const data = await request(`/api/attendance/groups/${groupId}/fixed-schedule/${action}`, { method: 'POST', body: JSON.stringify(action === 'preview' ? payload : withBusinessEffectiveDate(payload, effectiveDateAvailable.value ? effectiveDates[action] : '')) })
       if (!current(token) || (action !== 'clear' && token.revision !== (editor.value?.desired?.revision ?? 0))) return
       if (!record(data) || (action === 'clear' ? !Array.isArray(data.deactivated)
         : !record(data.group) || data.group.id !== groupId || !record(data.shift) || data.shift.id !== payload.shiftId
@@ -287,6 +305,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
         await load(false)
         if (!current(token) || loadState.value !== 'ready') return
       }
+      if (action !== 'preview') effectiveDates[action] = ''
       options.setStatus(action === 'preview' ? tr('Fixed schedule preview ready. No assignments were written.', '固定排班预览已生成，未写入任何排班。')
         : action === 'apply' ? tr('Fixed schedule applied. Existing frozen attendance context is preserved.', '固定排班已应用，已有冻结考勤上下文将保留。')
           : action === 'rebuild' ? tr('Managed fixed schedule rows rebuilt. Existing frozen attendance context is preserved.', '已重建已管理固定排班，已有冻结考勤上下文将保留。')
@@ -294,7 +313,7 @@ export function useAttendanceGroupFixedSchedule<Result extends PreviewResult>(op
     } catch (error) { if (current(token) && (action === 'clear' || token.revision === (editor.value?.desired?.revision ?? 0))) await recover(error) }
     finally { if (operationId === operationSequence) operation.value = null }
   }
-  return { form, editor, loadState, errorMessage, operation, previewResult, busy, dirty, managedSets,
+  return { form, effectiveDates, effectiveDateAvailable, editor, loadState, errorMessage, operation, previewResult, busy, dirty, managedSets,
     selectedManagedKey, managedKey, eligibilityHint, previewAvailable, saveAvailable, applyAvailable,
     rebuildAvailable, clearAvailable, load, save, preview: () => run('preview'), apply: () => run('apply'),
     rebuild: () => run('rebuild'), clear: () => run('clear') }

@@ -76,6 +76,7 @@
  * That failure mode is the reason this is a thunk and not a `(trx, args)` pair.
  */
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
+import { loadAttendanceCalc14W7SourceRowsInTransactionV1 } from '../attendance-calc14-w7-source-loader'
 import type { FrozenAttendanceContextV1 } from '../w4c0-write-boundary-types'
 import { resolveAttendanceW7ContextSourcePostureV1 } from './w7-context-source-posture-resolver'
 import {
@@ -439,7 +440,7 @@ export async function issueAttendanceFrozenContextV1(
       holidayKind: input.holidayKind,
       shiftId: input.shiftId,
     })
-    const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, deps, {
+    const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, { ...deps, loadSourceRows: loadAttendanceCalc14W7SourceRowsInTransactionV1 }, {
       effectiveTimezone: input.effectiveTimezone,
       orgId: input.orgId,
       userId: input.userId,
@@ -479,7 +480,7 @@ export async function issueAttendanceFrozenContextV1(
   }
 
   // Step 4 — group facts, fail-closed, NEVER a legacy fallback.
-  const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, deps, {
+  const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, { ...deps, loadSourceRows: loadAttendanceCalc14W7SourceRowsInTransactionV1 }, {
       effectiveTimezone: input.effectiveTimezone,
     orgId: input.orgId,
     userId: input.userId,

@@ -43,7 +43,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
-import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { captureAttendanceW7SyntheticSourceHistoryV1, seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -255,6 +255,10 @@ describeDb('W7-1b — cutover end-to-end: both machines ON (real host, real DB)'
       // ONE shared legal fixture: bootstrap at `off`, then walk the ratified ladder.
       // Never by dropping the trigger — that would run this evidence against a schema
       // production does not ship.
+    // These synthetic source facts are declared valid from the fixture's W1/config start.
+    await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+      orgId, businessEffectiveDate: '2026-01-01', groupIds: [groupId], userIds: [userId],
+    })
     await seedAttendanceW7ContextSourcePostureV1(pool, orgId, 'group_authoritative')
   }
 

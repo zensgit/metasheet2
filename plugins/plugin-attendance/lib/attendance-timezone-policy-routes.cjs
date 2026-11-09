@@ -42,7 +42,7 @@ function registerAttendanceTimezonePolicyRoutes({ addRoute, withPermission, reso
   function fields(body, required) {
     if (!body || typeof body !== 'object' || Array.isArray(body)
       || required.some(key => !Object.hasOwn(body, key))
-      || Object.keys(body).some(key => !required.includes(key))) invalid()
+      || Object.keys(body).some(key => !required.includes(key) && key !== 'businessEffectiveDate')) invalid()
     return body
   }
   function revision(value, zero = false) {
@@ -101,7 +101,7 @@ function registerAttendanceTimezonePolicyRoutes({ addRoute, withPermission, reso
             return true
           },
           prepareTripSourceChange: source => prepareTimezoneSourceChange({
-            ...source, trx, mutation: action === 'policy'
+            ...source, trx, businessEffectiveDate:req.body?.businessEffectiveDate,sourceActorId:actor.userId, mutation: action === 'policy'
               ? { kind: 'policy', enabled: input.enabled, expectedVersion: input.expectedVersion }
               : action === 'create'
                 ? { kind: 'employee_override_create', ...input }

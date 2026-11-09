@@ -81,7 +81,7 @@ import {
 // on the posture table; a bare (org_id, state, scope) seed is now rejected.
 // This shared helper is THE one legal fixture path: bootstrap at 'off', then
 // walk the ratified legal ladder to the target state, asserting it landed.
-import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
+import { captureAttendanceW7SyntheticSourceHistoryV1, seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeDb = dbUrl ? describe : describe.skip
@@ -408,6 +408,10 @@ describeDb('W7-4 — read-side trace labeling (real host, real DB, real routes)'
       [randomUUID(), orgId, 'UTC'],
     )
     seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
+    // Capture after the whole fixture, including its org rule, is present.
+    await captureAttendanceW7SyntheticSourceHistoryV1(pool, {
+      orgId, businessEffectiveDate: '2026-01-01', groupIds: [groupId], userIds: [userId],
+    })
   }
 
   async function seedPlainAssignment(

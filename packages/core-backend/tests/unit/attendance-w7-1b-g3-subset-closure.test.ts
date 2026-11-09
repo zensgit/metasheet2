@@ -42,18 +42,55 @@ import {
   coreIssueGroupEffectiveContextV2,
   isCoreIssuedGroupEffectiveContextV2,
 } from '../../src/attendance/w7-resolver/w7-group-effective-context-issuance'
-import type { AttendanceW7GroupEffectiveFactsV1 } from '../../src/attendance/w7-resolver/w7-group-effective-facts-resolver'
+import {
+  assembleAttendanceW7GroupEffectiveFactsV1,
+  type AttendanceW7LoadedSourceRowsV1,
+} from '../../src/attendance/w7-resolver/w7-group-effective-facts-from-rows'
+import {
+  resolveW7GroupEffectiveFactsInTransactionV1,
+  type AttendanceW7GroupEffectiveResolverDepsV1,
+  type AttendanceW7GroupEffectiveFactsV1,
+} from '../../src/attendance/w7-resolver/w7-group-effective-facts-resolver'
 
-const RESOLVER = path.resolve(
-  __dirname,
-  '../../src/attendance/w7-resolver/w7-group-effective-facts-resolver.ts',
-)
+const SOURCE_FILES = {
+  resolver: 'w7-resolver/w7-group-effective-facts-resolver.ts',
+  assembler: 'w7-resolver/w7-group-effective-facts-from-rows.ts',
+  retained: 'attendance-calc14-w7-source-loader.ts',
+  seam: 'w7-resolver/w7-frozen-context-issuance-seam.ts',
+} as const
 
-/** The resolver's fail-close guard count at this head. A NEW guard means the
- *  meaning of `ok: true` narrowed; a DELETED one means it widened. Either way
- *  the class below must be re-examined, so the count is pinned rather than
- *  described. */
+type ResolverSources = Record<keyof typeof SOURCE_FILES, string>
+const compact = (source: string): string => source.replace(/\s+/g, '')
+const readSources = (): ResolverSources => Object.fromEntries(
+  Object.entries(SOURCE_FILES).map(([key, file]) => [
+    key, compact(fs.readFileSync(path.resolve(__dirname, '../../src/attendance', file), 'utf8')),
+  ]),
+) as ResolverSources
+
+// The original 12 semantic guards survive CALC14's split. Three group checks
+// now share one return; do not confuse a return-site count with that contract.
 const RESOLVER_FAIL_CLOSE_GUARDS_V1 = 12
+const GROUP_GUARD = "if(!calculationGroupId||!groupRow||groupRow.id!==calculationGroupId||groupRow.attendance_type!=='fixed_shift')return{ok:false,reason:'incomplete-policy'}"
+const ORIGINAL_GUARDS: ReadonlyArray<readonly [string, string]> = [
+  ['membership absent', "if(loaded.membershipRows.length===0)return{ok:false,reason:'membership-absent'}"],
+  ['group id', GROUP_GUARD],
+  ['group row', GROUP_GUARD],
+  ['fixed shift only', GROUP_GUARD],
+  ['FSER effective', "if(effectiveness.state!=='effective'||effectiveness.desired===null){return{ok:false,reason:'incomplete-policy'}}"],
+  ['FSER member reconciliation', "if(!targetMemberIds.includes(userId))return{ok:false,reason:'incomplete-policy'}"],
+  ['shift row', "if(!loaded.shiftRow||loaded.shiftRow.id!==shiftId)return{ok:false,reason:'incomplete-policy'}"],
+  ['strict mode', "if(shiftRow.flex_mode!=='strict')return{ok:false,reason:'incomplete-policy'}"],
+  ['segment maximum', "if(loaded.segmentRows.length>3)return{ok:false,reason:'incomplete-policy'}"],
+  ['segment shape', "if(index!==i||startDayOffset!==0||(endDayOffset!==0&&endDayOffset!==1)||!startTime||!endTime){return{ok:false,reason:'incomplete-policy'}}"],
+  ['fallback times', "if(!startTime||!endTime)return{ok:false,reason:'incomplete-policy'}"],
+  ['rounding minimum', "if(roundingMinutes<1)return{ok:false,reason:'incomplete-policy'}"],
+]
+const CALC14_GUARDS: ReadonlyArray<readonly [keyof ResolverSources, string]> = [
+  ['assembler', "if(loaded.orgId!==orgKey||loaded.userId!==userId||loaded.workDate!==workDate)return{ok:false,reason:'incomplete-policy'}"],
+  ['assembler', "if(loaded.publishedSourceRows&&(loaded.publishedSourceRows.length!==1||loaded.publishedSourceRows[0].shift_id!==loaded.configRow?.shift_id||loaded.publishedSourceRows[0].producer_type!=='attendance_group_fixed_schedule'||loaded.publishedSourceRows[0].producer_ref_id!==calculationGroupId))return{ok:false,reason:'incomplete-policy'}"],
+  ['assembler', "if(!ruleFacts)return{ok:false,reason:'incomplete-policy'}"],
+  ['resolver', "returnloaded?assembleAttendanceW7GroupEffectiveFactsV1(deps,input,loaded):{ok:false,reason:'incomplete-policy'}"],
+]
 
 /** A fact set the resolver would legitimately call `ok: true`. Every boundary
  *  case below is this shape with exactly ONE field moved to its edge — so a
@@ -83,18 +120,59 @@ const baseFacts = (): AttendanceW7GroupEffectiveFactsV1 => ({
   ],
 })
 
+const loadedRows = (): AttendanceW7LoadedSourceRowsV1 => {
+  const facts = baseFacts()
+  return {
+    orgId: facts.orgId, userId: facts.userId, workDate: facts.workDate,
+    membershipRows: [{ group_id: facts.calculationGroupId }],
+    groupRow: { id: facts.calculationGroupId, attendance_type: 'fixed_shift' },
+    configRow: { shift_id: facts.shiftId, start_date: facts.workDate, end_date: null, revision: 1 },
+    memberRows: [{ user_id: facts.userId }], managedRows: [],
+    shiftRow: { id: facts.shiftId, flex_mode: 'strict', rounding_minutes: 1 },
+    segmentRows: [{ segment_index: 0, start_time: '09:00', end_time: '18:00' }],
+    orgRuleFacts: { severeLateThresholdMinutes: 0, absenceLateThresholdMinutes: 0 },
+    publishedSourceRows: [{
+      shift_id: facts.shiftId, producer_type: 'attendance_group_fixed_schedule',
+      producer_ref_id: facts.calculationGroupId,
+    }],
+  }
+}
+const assemblerDeps: AttendanceW7GroupEffectiveResolverDepsV1 = {
+  deriveFixedScheduleEffectiveness: ({ desired }) => ({ state: 'effective', desired, reasonCodes: [] }),
+  buildFixedScheduleProducerKey: () => 'synthetic-producer',
+  loadOrgRuleFacts: async () => ({ severeLateThresholdMinutes: 0, absenceLateThresholdMinutes: 0 }),
+  now: () => '2026-06-01T00:00:00Z',
+}
+
 describe('W7-1b g3 — the resolver/op(i) subset closure, as a CLASS', () => {
   it('the resolver fail-close guard set is PINNED (a new or deleted guard changes what ok:true means)', () => {
-    const source = fs.readFileSync(RESOLVER, 'utf8')
-    const guards = source.split('\n').filter((l) => /return \{ ok: false/.test(l)).length
-    expect(
-      guards,
-      'the resolver fail-close guard count moved. That changes the meaning of `ok: true`, so the ' +
-        'boundary cases below must be re-derived before this pin is updated — never the other way round.',
-    ).toBe(RESOLVER_FAIL_CLOSE_GUARDS_V1)
-    // Non-vacuity: the file really is the resolver and really carries guards.
-    expect(source).toContain('resolveW7GroupEffectiveFactsInTransactionV1')
+    const sources = readSources()
+    expect(ORIGINAL_GUARDS).toHaveLength(RESOLVER_FAIL_CLOSE_GUARDS_V1)
+    for (const [label, guard] of ORIGINAL_GUARDS) {
+      expect(sources.assembler, label).toContain(guard)
+    }
+    for (const [file, guard] of CALC14_GUARDS) expect(sources[file]).toContain(guard)
+    // Complete resolver + assembler union: 12 original sites, minus two
+    // coalesced group returns, plus four explicitly named CALC14 refusals.
+    const guards = (sources.resolver + sources.assembler).split('{ok:false,reason:').length - 1
+    expect(guards).toBe(RESOLVER_FAIL_CLOSE_GUARDS_V1 - 2 + CALC14_GUARDS.length)
     expect(guards).toBeGreaterThan(0)
+    expect(sources.resolver).toContain("from'./w7-group-effective-facts-from-rows'")
+    expect(sources.resolver).toContain('exportasyncfunctionresolveW7GroupEffectiveFactsInTransactionV1(')
+    expect(sources.resolver).toContain('constloaded=await(deps.loadSourceRows??loadAttendanceW7CurrentSourceRowsInTransactionV1)(trx,deps,sourceInput)')
+    expect(sources.resolver).toContain('if(membershipResult.rows.length!==1)returnloaded')
+    expect(sources.resolver).toContain('if(groupResult.rows.length!==1)returnloaded')
+    expect(sources.resolver).toContain("if(loaded.groupRow.attendance_type!=='fixed_shift')returnloaded")
+    expect(sources.resolver).toContain('if(!loaded.configRow)returnloaded')
+    expect(sources.resolver).toContain('if(shiftResult.rows.length!==1)returnloaded')
+    expect(sources.retained).toContain('exportasyncfunctionloadAttendanceCalc14W7SourceRowsInTransactionV1(')
+    expect(sources.retained).toContain('if(!publication)returnnull')
+    expect(sources.retained).toContain('if(membershipRows.length!==1)returnloaded')
+    expect(sources.retained).toContain('if(!groupId)returnnull')
+    expect(sources.retained).toContain('if(!source)returnnull')
+    expect(sources.retained).toContain("if(holidays.length>1||holidays.some(row=>typeofrow.is_working_day!=='boolean'))returnnull")
+    expect(sources.seam).toContain("from'../attendance-calc14-w7-source-loader'")
+    expect(sources.seam.split('loadSourceRows:loadAttendanceCalc14W7SourceRowsInTransactionV1')).toHaveLength(3)
   })
 
   it('the base fact set is accepted (non-vacuity — otherwise every boundary case below is meaningless)', () => {
@@ -189,18 +267,56 @@ describe('W7-1b g3 — the resolver/op(i) subset closure, as a CLASS', () => {
     })
   }
 
+  it('the shared assembler accepts a complete retained row set at rounding 1 (non-vacuity)', () => {
+    const result = assembleAttendanceW7GroupEffectiveFactsV1(assemblerDeps, baseFacts(), loadedRows())
+    expect(result).toEqual({ ok: true, facts: baseFacts() })
+    if (!result.ok) throw new Error('EXPECTED_ASSEMBLER_SUCCESS')
+    expect(isCoreIssuedGroupEffectiveContextV2(coreIssueGroupEffectiveContextV2(result.facts))).toBe(true)
+  })
+
+  it('a missing retained source fails closed rather than falling back to current rows', async () => {
+    const result = await resolveW7GroupEffectiveFactsInTransactionV1(
+      { query: async () => ({ rows: [] }) },
+      { ...assemblerDeps, loadSourceRows: async () => null },
+      baseFacts(),
+    )
+    expect(result).toEqual({ ok: false, reason: 'incomplete-policy' })
+  })
+
+  const INVALID_ROWS: ReadonlyArray<readonly [string, (rows: AttendanceW7LoadedSourceRowsV1) => void]> = [
+    ['foreign org', rows => { rows.orgId = '33333333-3333-4333-8333-333333333333' }],
+    ['foreign user', rows => { rows.userId = '33333333-3333-4333-8333-333333333333' }],
+    ['different work date', rows => { rows.workDate = '2026-06-02' }],
+    ['missing rule facts', rows => { delete rows.orgRuleFacts }],
+    ['absent publication', rows => { rows.publishedSourceRows = [] }],
+    ['ambiguous publication', rows => { rows.publishedSourceRows!.push({ ...rows.publishedSourceRows![0] }) }],
+    ['publication shift mismatch', rows => { rows.publishedSourceRows![0].shift_id = 'other-shift' }],
+    ['publication producer mismatch', rows => { rows.publishedSourceRows![0].producer_type = 'other-producer' }],
+    ['publication group mismatch', rows => { rows.publishedSourceRows![0].producer_ref_id = 'other-group' }],
+    ...[0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY].map(value => [
+      `rounding below one after normalization: ${value}`,
+      (rows: AttendanceW7LoadedSourceRowsV1) => { rows.shiftRow!.rounding_minutes = value },
+    ] as const),
+  ]
+  for (const [label, invalidate] of INVALID_ROWS) {
+    it(`the shared assembler fails closed: ${label}`, () => {
+      const rows = loadedRows()
+      invalidate(rows)
+      expect(assembleAttendanceW7GroupEffectiveFactsV1(assemblerDeps, baseFacts(), rows))
+        .toEqual({ ok: false, reason: 'incomplete-policy' })
+    })
+  }
+
   it('CLASS STATEMENT: no field op(i) constrains is left un-guarded by the resolver', () => {
     // The closure argument, asserted rather than narrated: every numeric/enum
     // boundary op(i) enforces above has a corresponding `return { ok: false }`
     // guard in the resolver. `roundingMinutes` is the one that was missing and
     // is now present; this leg reds if that guard is deleted.
-    const source = fs.readFileSync(RESOLVER, 'utf8')
-    expect(source, 'the roundingMinutes fail-close is the known instance of this class').toMatch(
-      /roundingMinutes\s*<\s*1[\s\S]{0,120}?ok:\s*false/,
-    )
-    // Segment-count bounds are guarded on the resolver side too.
-    expect(source).toMatch(/segmentResult\.rows\.length\s*>\s*3[\s\S]{0,120}?ok:\s*false/)
-    // And the group id, which op(i) re-checks rather than trusting.
-    expect(source).toMatch(/!calculationGroupId[\s\S]{0,80}?ok:\s*false/)
+    const { assembler } = readSources()
+    expect(assembler).toContain('constroundingMinutes=toNonNegativeInt(shiftRow.rounding_minutes)')
+    expect(assembler, 'the roundingMinutes fail-close is the known instance of this class')
+      .toContain(ORIGINAL_GUARDS[11][1])
+    expect(assembler).toContain(ORIGINAL_GUARDS[8][1])
+    expect(assembler).toContain(GROUP_GUARD)
   })
 })

@@ -46,6 +46,17 @@
  * hand-written: a pair removed from that constant makes the walk unreachable
  * and throws here, instead of silently taking a stale route.
  */
+import type { Pool } from 'pg'
+import {
+  parseCanonicalAttendanceRolloutOrgKeyV1,
+  parseCanonicalAttendanceUserIdV1,
+  parseCanonicalAttendanceWorkDateV1,
+} from '../../src/attendance/w4c0-identity'
+import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
+import {
+  readAttendanceCalc14GroupSourcesV1,
+  readAttendanceCalc14UserPublicationV1,
+} from '../../src/attendance/attendance-calc14-source-history'
 import {
   ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_LEGAL_TRANSITIONS_V1,
   ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1,
@@ -163,4 +174,79 @@ export async function clearAttendanceW7ContextSourcePostureV1(
   await db.query(`DELETE FROM ${ATTENDANCE_W7_POSTURE_TABLE_V1} WHERE org_id = $1`, [
     orgId.toLowerCase(),
   ])
+}
+
+/** Trusted synthetic input history, separate from posture changes and ordinary saves.
+ * The caller declares the fixture's business date and exact org/group/user scope.
+ * Capture only after that fixture's current input rows are complete. No clock date,
+ * fabricated payload, cross-org discovery, or capture implied by enabling W7.
+ */
+export async function captureAttendanceW7SyntheticSourceHistoryV1(
+  pool: Pick<Pool, 'connect'>,
+  input: {
+    orgId: string
+    businessEffectiveDate: string
+    groupIds: readonly string[]
+    userIds: readonly string[]
+  },
+): Promise<void> {
+  if (process.env.NODE_ENV !== 'test' || !process.env.ATTENDANCE_TEST_DATABASE_URL) {
+    throw new Error('W7_SYNTHETIC_SOURCE_HISTORY_TEST_DATABASE_REQUIRED')
+  }
+  const orgId = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
+  const workDate = parseCanonicalAttendanceWorkDateV1(input.businessEffectiveDate)
+  const userIds = [...new Set(input.userIds.map(parseCanonicalAttendanceUserIdV1))].sort()
+  const groupIds = [...new Set(input.groupIds)]
+  if (userIds.length === 0) throw new Error('W7_SYNTHETIC_SOURCE_HISTORY_USERS_REQUIRED')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    for (const userId of userIds) {
+      await acquireAttendanceTimezoneRuntimeLocksV1(client, { orgId, userId, mode: 'exclusive' })
+    }
+    const groups = await client.query<{ id: string; shift_id: string; rule_set_id: string | null }>(
+      `SELECT g.id, g.rule_set_id, c.shift_id
+         FROM attendance_groups g
+         JOIN attendance_group_fixed_schedule_configs c ON c.org_id=g.org_id AND c.group_id=g.id
+        WHERE g.org_id=$1 AND g.id=ANY($2::uuid[])
+        ORDER BY g.id FOR SHARE OF g, c`,
+      [orgId, groupIds],
+    )
+    if (groups.rows.length !== groupIds.length) throw new Error('W7_SYNTHETIC_SOURCE_HISTORY_GROUP_INCOMPLETE')
+    await client.query(
+      `SELECT set_config('metasheet.calc14_org',$1,true),
+         set_config('metasheet.calc14_date_required','true',true),
+         set_config('metasheet.calc14_business_effective_date',$2,true),
+         set_config('metasheet.calc14_actor','w7-trusted-synthetic-fixture',true)`,
+      [orgId, workDate],
+    )
+    if (groups.rows.length > 0) {
+      await client.query("SELECT attendance_calc14_capture_source($1,'rule',$1)", [orgId])
+    }
+    for (const group of groups.rows) {
+      for (const kind of ['group', 'desired', 'members', 'publication']) {
+        await client.query('SELECT attendance_calc14_capture_source($1,$2,$3)', [orgId, kind, group.id])
+      }
+      await client.query("SELECT attendance_calc14_capture_source($1,'shift',$2)", [orgId, group.shift_id])
+      if (group.rule_set_id !== null) {
+        await client.query("SELECT attendance_calc14_capture_source($1,'rule_set',$2)", [orgId, group.rule_set_id])
+      }
+      if (!await readAttendanceCalc14GroupSourcesV1(client, { orgId, groupId: group.id, workDate })) {
+        throw new Error('W7_SYNTHETIC_SOURCE_HISTORY_GROUP_INCOMPLETE')
+      }
+    }
+    for (const userId of userIds) {
+      // Also retains a KNOWN EMPTY membership set; missing history is not absence.
+      await client.query("SELECT attendance_calc14_capture_source($1,'user_publication',$2)", [orgId, userId])
+      if (!await readAttendanceCalc14UserPublicationV1(client, { orgId, userId, workDate })) {
+        throw new Error('W7_SYNTHETIC_SOURCE_HISTORY_USER_INCOMPLETE')
+      }
+    }
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }

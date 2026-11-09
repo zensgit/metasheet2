@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { query, transaction } from '../db/pg'
+import {
+  attendanceCalc14SourceWriteErrorV1,
+  prepareAttendanceCalc14SourceWriteContextV1,
+} from '../attendance/attendance-calc14-source-write-context'
 import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../attendance/attendance-timezone-runtime-locks'
 import { AttendanceW4IdentityError, acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1 } from '../attendance/w4c0-identity'
 
@@ -104,6 +108,7 @@ export interface TransitionAttendanceCalculationGroupMembershipInput {
   userId: string
   targetGroupId: string
   effectiveOn: string
+  businessEffectiveDate?: unknown
   actorId: string
   reason: string
   correlationId?: string
@@ -344,6 +349,7 @@ export async function transitionAttendanceCalculationGroupMembership(
       'targetGroupId',
     ),
     effectiveOn: normalizeAttendanceMembershipDate(rawInput.effectiveOn),
+    businessEffectiveDate: rawInput.businessEffectiveDate,
     actorId: requireText(rawInput.actorId, 'ACTOR_ID_REQUIRED', 'actorId'),
     reason: requireText(
       rawInput.reason,
@@ -578,6 +584,12 @@ export async function transitionAttendanceCalculationGroupMembership(
         ? previousCalendarDate(asDateString(next.effective_from))
         : null
 
+      const flushSourceHistory = await prepareAttendanceCalc14SourceWriteContextV1(client, {
+        orgId: input.orgId,
+        actorId: input.actorId,
+        businessEffectiveDate: input.businessEffectiveDate,
+      })
+
       if (current) {
         await runQuery(
           `UPDATE attendance_calculation_group_memberships
@@ -636,6 +648,7 @@ export async function transitionAttendanceCalculationGroupMembership(
         ],
       )
 
+      await flushSourceHistory()
       await verifyTimezone()
       return {
         correlationId: input.correlationId,
@@ -645,6 +658,12 @@ export async function transitionAttendanceCalculationGroupMembership(
     })
   } catch (error) {
     if (error instanceof AttendanceCalculationGroupMembershipError) throw error
+    const sourceWriteError = attendanceCalc14SourceWriteErrorV1(error)
+    if (sourceWriteError) {
+      throw new AttendanceCalculationGroupMembershipError(
+        sourceWriteError.code, sourceWriteError.status, sourceWriteError.message,
+      )
+    }
     if (isOverlapError(error)) {
       throw new AttendanceCalculationGroupMembershipError(
         ATTENDANCE_CALCULATION_GROUP_MEMBERSHIP_OVERLAP,

@@ -413,7 +413,7 @@ function selectAmongMatchingCandidates({
       userId: winner.userId,
       evidenceSnapshot: {
         calendarWorkDate,
-        attributionTailMinutes,
+        attributionTailMinutes:winner.attributionTailMinutes ?? attributionTailMinutes,
         winner: serializeCandidate(winner),
         openRecordWorkDate: winner.workDate,
         matchingCount: matching.length,
@@ -447,7 +447,7 @@ function selectAmongMatchingCandidates({
       userId: winner.userId,
       evidenceSnapshot: {
         calendarWorkDate,
-        attributionTailMinutes,
+        attributionTailMinutes:winner.attributionTailMinutes ?? attributionTailMinutes,
         winner: serializeCandidate(winner),
         matchingCount: matching.length,
       },
@@ -477,7 +477,7 @@ function selectAmongMatchingCandidates({
       userId: winner.userId,
       evidenceSnapshot: {
         calendarWorkDate,
-        attributionTailMinutes,
+        attributionTailMinutes:winner.attributionTailMinutes ?? attributionTailMinutes,
         winner: serializeCandidate(winner),
         matchingCount: matching.length,
       },
@@ -504,7 +504,7 @@ function selectAmongMatchingCandidates({
       userId: winner.userId,
       evidenceSnapshot: {
         calendarWorkDate,
-        attributionTailMinutes,
+        attributionTailMinutes:winner.attributionTailMinutes ?? attributionTailMinutes,
         winner: serializeCandidate(winner),
         matchingCount: 1,
       },
@@ -643,6 +643,10 @@ function createAttendanceWorkDateResolver(deps = {}) {
     if (row.source !== 'shift' && row.source !== 'rotation') {
       return { __malformedSource: true, row }
     }
+    if (row.attributionTailMinutes!==undefined && (!Number.isSafeInteger(row.attributionTailMinutes)
+      || row.attributionTailMinutes<0)) return malformedShape('attribution_tail')
+    const candidateTailMinutes=row.attributionTailMinutes===undefined ? attributionTailMinutes
+      : clampAttributionTailMinutes(row.attributionTailMinutes)
     const isOvernight = typeof resolveOvernightFlag === 'function'
       ? resolveOvernightFlag(row.isOvernight ?? row.is_overnight, workStartTime, workEndTime)
       : Boolean(row.isOvernight ?? row.is_overnight)
@@ -657,7 +661,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
     })
     if (!absoluteWindow) return malformedShape('absolute_window')
     const attributionWindow = buildAttributionWindow(absoluteWindow, {
-      attributionTailMinutes,
+      attributionTailMinutes:candidateTailMinutes,
       approvedOvertimeWindows,
       orgId: ctx.orgId,
       userId: ctx.userId,
@@ -669,7 +673,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       return malformedShape('segment_index')
     }
     const segmentIndex = null
-    const baseEndMs = absoluteWindow.endAt.getTime() + attributionTailMinutes * 60000
+    const baseEndMs = absoluteWindow.endAt.getTime() + candidateTailMinutes * 60000
     const extendedByOvertime = attributionWindow.endAt.getTime() > baseEndMs
     return {
       orgId: String(row.orgId),
@@ -683,6 +687,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       assignmentId: row.assignmentId == null ? null : String(row.assignmentId),
       isOvernight,
       extendedByOvertime,
+      ...(row.attributionTailMinutes===undefined ? {} : {attributionTailMinutes:candidateTailMinutes}),
       // W4C-2 (#4556): wall-time/zone provenance retained for the strict V2
       // freeze rebuild. Internal candidate fields only — serializeCandidate /
       // serializeAmbiguousCandidate project explicit fields, so nothing here
@@ -895,7 +900,7 @@ function createAttendanceWorkDateResolver(deps = {}) {
       return {
         ...result,
         fullWinner,
-        attributionTailMinutes,
+        attributionTailMinutes:fullWinner?.attributionTailMinutes ?? attributionTailMinutes,
         approvedOvertimeWindows,
       }
     }
