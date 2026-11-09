@@ -3947,6 +3947,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          afterwards is unaffected
         //   BI-R18 (P2-18) an extension re-run in another history mode than the persisted run: 409 history_mode_changed
         //          before any cell write; the persisted mode resolves (BI-R14 is the pull-batch file's zombie allocate)
+        //   BI-R19 (R-65 / R-89) a RIGHT band ensured while the real template-column repair holds the canonical write fence
+        //          waits on the fence and lands after the repaired columns and a person column above every known id; re-created
+        //          under a person column above EVERY column (known ids included) it lands after that column too
         describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
           const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
@@ -4206,6 +4209,146 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(resumed.body.data).toMatchObject({ run: 'continue', resolved: true })
             expect((await k.sheetRow()).history_mode).toBe('unknown')
             expect(await labelled()).toBeGreaterThan(0)
+          }, 300000)
+
+          // R-65 / R-89 (Y7 close-out): the band's RIGHT order is the whole-sheet max read under the canonical write fence.
+          // The holder is the REAL Y7 repair (reconcileFrozenTemplateColumnsOnObject, apply) over the production plugin-scoped
+          // host, frozen right after its INSERT of the two re-added template columns — still inside its transaction, so it
+          // holds the fence. The band ensure (the install's own ensureBandColumns over the same host) then has to WAIT on the
+          // fence; once the repair commits it lands after the repaired columns AND after a person-added column whose order
+          // is above every known id. The earlier rule (max over the KNOWN ids, read before the fence) put the band before
+          // the person column, on orders below the repaired tail.
+          test('BI-R19 (R-65 / R-89) a right band ensured while a template-column repair holds the write fence waits for it and lands after the repaired columns and a person column above every known id: no shared order, nothing else moves', async () => {
+            const installLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-install.cjs')) as any
+            const targetProvisioningLib = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
+            const FENCE = 'MULTITABLE_ENABLE_WRITER_FENCE'
+            const k = await installStack('bi2r19')
+            const st = k.st
+            const prov = st.multitable.provisioning
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            const tail = templateIds.slice(-2)
+            const resolvedTail = await prov.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: tail })
+            const tailPhysical = tail.map((id) => resolvedTail[id])
+            expect(tailPhysical.every((id) => typeof id === 'string')).toBe(true)
+            const bandPhysical = [k.physical('firstPullBatch'), k.physical('pullBatch')]
+            const maxOrder = async () => Number((await q('SELECT MAX("order") AS m FROM meta_fields WHERE sheet_id = $1', [st.sheetId])).rows[0].m)
+            const orderOf = async (ids: string[]) => {
+              const rows = (await q('SELECT id, "order" FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, ids])).rows
+              const byId = new Map(rows.map((row: any) => [String(row.id), Number(row.order)]))
+              return ids.map((id) => byId.get(id))
+            }
+            const fieldRows = async () => new Map<string, string>(
+              (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+            )
+            // An aged sheet (the template's last two columns missing) and a person's column (a random id) above every known id.
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, tailPhysical])).rowCount).toBe(2)
+            expect((await orderOf(bandPhysical)).every((order) => order === undefined), 'precondition: no band yet').toBe(true)
+            const maxAged = await maxOrder()
+            const personId = `fld_person_${TOKEN}_r19`
+            await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [personId, st.sheetId, 'Person column', 'string', '{}', maxAged + 10])
+            const settledBefore = await fieldRows()
+
+            const fenceBefore = process.env[FENCE]
+            process.env[FENCE] = 'true'
+            let releaseRepair: () => void = () => {}
+            const repairGate = new Promise<void>((resolve) => { releaseRepair = resolve })
+            let repairHolds: () => void = () => {}
+            const repairHolding = new Promise<void>((resolve) => { repairHolds = resolve })
+            // The repair, frozen INSIDE its transaction right after its INSERT (it took the fence in readObjectMaxFieldOrder).
+            const holdingProvisioning = {
+              ...prov,
+              runObjectFieldsRepairTransaction: (fn: any) => prov.runObjectFieldsRepairTransaction((tx: any) => fn({
+                ...tx,
+                ensureMissingObjectFields: async (input: any) => {
+                  const out = await tx.ensureMissingObjectFields(input)
+                  repairHolds()
+                  await repairGate
+                  return out
+                },
+              })),
+            }
+            const fenceWaiters = async () => Number((await q(
+              `SELECT COUNT(*)::int AS n FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+                  AND pid <> pg_backend_pid() AND query LIKE '%pg_advisory_xact_lock%'`,
+            )).rows[0].n)
+            let repair: Promise<any> | null = null
+            let bandEnsure: Promise<any> | null = null
+            const observed: Record<string, unknown> = {}
+            try {
+              repair = targetProvisioningLib.reconcileFrozenTemplateColumnsOnObject({ provisioning: holdingProvisioning, projectId: st.projectId, objectId: st.objectId, expectedSheetId: st.sheetId, apply: true, locale: 'zh-CN' })
+              repair!.catch(() => {})
+              await Promise.race([repairHolding, repair, new Promise((_, reject) => setTimeout(() => reject(new Error('the repair never reached its INSERT')), 30000))])
+              bandEnsure = installLib.__internals.ensureBandColumns({
+                deps: {
+                  provisioning: prov,
+                  projectId: st.projectId,
+                  target: { objectId: st.objectId },
+                  band: { fieldIds: { pullBatch: k.physical('pullBatch'), firstPullBatch: k.physical('firstPullBatch') } },
+                  knownFieldIds: templateIds,
+                  bandDescriptors: templatesLib.pullBatchBandFieldDescriptors,
+                },
+                keys: ['pullBatch', 'firstPullBatch'],
+                placement: 'right',
+                locale: 'zh-CN',
+              })
+              bandEnsure!.catch(() => {})
+              // The band ensure parks on the fence (bounded poll; the final orders are the primary assertion).
+              const started = Date.now()
+              while (Date.now() - started < 15000 && (await fenceWaiters()) === 0) await new Promise((resolve) => setTimeout(resolve, 25))
+              observed.bandWaitedOnFence = (await fenceWaiters()) > 0
+              observed.bandAbsentWhileRepairHolds = (await orderOf(bandPhysical)).every((order) => order === undefined)
+            } finally {
+              releaseRepair()
+              if (fenceBefore === undefined) delete process.env[FENCE]
+              else process.env[FENCE] = fenceBefore
+            }
+            const [repaired, banded] = await Promise.allSettled([repair!, bandEnsure!])
+            expect(repaired.status, JSON.stringify(repaired)).toBe('fulfilled')
+            expect(banded.status, JSON.stringify(banded)).toBe('fulfilled')
+            expect((repaired as PromiseFulfilledResult<any>).value.addedFieldIds).toEqual(tail)
+            expect((banded as PromiseFulfilledResult<any>).value.added).toBe(2)
+            expect(observed.bandWaitedOnFence, 'the band ensure waited on the canonical fence the repair held').toBe(true)
+            expect(observed.bandAbsentWhileRepairHolds, 'no band column while the repair holds the fence').toBe(true)
+
+            const personOrder = maxAged + 10
+            expect(await orderOf(tailPhysical), 'the repair appends after the person column (Y7, max + 1 + i)').toEqual([personOrder + 1, personOrder + 2])
+            expect(await orderOf(bandPhysical), 'the band lands after the repaired columns: the fenced whole-sheet max + 1 / + 2').toEqual([personOrder + 3, personOrder + 4])
+            const shared = (await q('SELECT "order", COUNT(*) AS n FROM meta_fields WHERE sheet_id = $1 GROUP BY "order" HAVING COUNT(*) > 1', [st.sheetId])).rows
+            expect(shared, 'no two columns share an order').toEqual([])
+            const grid = (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [st.sheetId])).rows.map((row: any) => String(row.id))
+            expect(grid.slice(-5), 'the grid: … person column, the repaired tail, then the band').toEqual([personId, ...tailPhysical, ...bandPhysical])
+            const after = await fieldRows()
+            for (const [id, text] of settledBefore) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            expect(after.size).toBe(settledBefore.size + 4)
+
+            // Leg 2 — a person column above EVERY column, known ids included (the band re-created on the same sheet): only
+            // the whole-sheet max puts the band after it; a max over the known ids (template ∪ band) would land on
+            // tail + 1 / + 2, before the person column.
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, bandPhysical])).rowCount).toBe(2)
+            const personTopId = `fld_person_${TOKEN}_r19top`
+            const personTopOrder = (await maxOrder()) + 20
+            await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [personTopId, st.sheetId, 'Person column (top)', 'string', '{}', personTopOrder])
+            const settledTop = await fieldRows()
+            const again = await installLib.__internals.ensureBandColumns({
+              deps: {
+                provisioning: prov,
+                projectId: st.projectId,
+                target: { objectId: st.objectId },
+                band: { fieldIds: { pullBatch: k.physical('pullBatch'), firstPullBatch: k.physical('firstPullBatch') } },
+                knownFieldIds: templateIds,
+                bandDescriptors: templatesLib.pullBatchBandFieldDescriptors,
+              },
+              keys: ['pullBatch', 'firstPullBatch'],
+              placement: 'right',
+              locale: 'zh-CN',
+            })
+            expect(again.added).toBe(2)
+            expect(await orderOf(bandPhysical), 'right = after the last column: the top person column + 1 / + 2').toEqual([personTopOrder + 1, personTopOrder + 2])
+            const gridTop = (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [st.sheetId])).rows.map((row: any) => String(row.id))
+            expect(gridTop.slice(-3)).toEqual([personTopId, ...bandPhysical])
+            const afterTop = await fieldRows()
+            for (const [id, text] of settledTop) expect(afterTop.get(id), `meta_fields ${id} byte-identical (leg 2)`).toBe(text)
           }, 300000)
         })
 
