@@ -1088,6 +1088,9 @@ test('LN-27 F-7 (R-65): a stored plan whose stamp the writer would refuse is ref
   for (const [label, corrupt, field] of [
     ['a carry that misses the ADD', (job) => { job.pullBatchPlan.firstPullBatchByKey = {} }, 'pullBatchStamp.firstPullBatchByKey'],
     ['a band id that is a key of the stored fieldIdMap', (job, h) => { job.target.fieldIdMap = { ...job.target.fieldIdMap, [h.physical('pullBatch')]: 'fld_syn_ln27_unused' } }, 'fieldIds'],
+    // The stored fieldIdMap is read as the writer normalizes it (values trimmed): a padded band id stored as a VALUE
+    // is still a band id the template maps, and is refused here, not only inside the chunk.
+    ['a padded band id stored as a fieldIdMap VALUE', (job, h) => { job.target.fieldIdMap = { ...job.target.fieldIdMap, fld_syn_ln27_extra: ` ${h.physical('firstPullBatch')} ` } }, 'fieldIds'],
   ]) {
     const h = mount()
     try {
@@ -1145,6 +1148,20 @@ test('LN-27 F-7 (R-65): a stored plan whose stamp the writer would refuse is ref
   assert.deepEqual(admitted.stamp.fieldIds, band.fieldIds)
   assert.deepEqual([...admitted.stamp.firstPullBatchByKey], [['ln27-k2', null]])
   assert.equal(reads, 1, 'calibration: the admitted gate read the ledger once')
+  // (c') the uncovered ADD is NOT the first remaining decision: the carry covers ln27-k1 only, ln27-k2 is a LATER one
+  // (the chunk that would refuse it is not this one). It is refused NOW, before any chunk writes, zero ledger IO.
+  {
+    let laterReads = 0
+    const laterLane = { ...lane, store: { async readSheetState() { laterReads += 1; return { sheet: { historyStatus: 'born_empty' }, batches: [] } } } }
+    const job = jobAt(0)
+    job.pullBatchPlan = { ...job.pullBatchPlan, firstPullBatchByKey: { 'ln27-k1': null } }
+    await assert.rejects(
+      lanes.largeChunkPullBatchGate({ lane: laterLane, probe, job, projectNo: PROJECT }),
+      (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.status === 500 && error.details.field === 'pullBatchStamp.firstPullBatchByKey',
+      'checkpoint 0: ln27-k2 is a LATER decision the carry misses — refused now, before any chunk writes',
+    )
+    assert.equal(laterReads, 0, 'the later-decision refusal comes before the ledger read')
+  }
   // (d) switch OFF: the gate is inert — it never reads the malformed plan; the chunk runs unstamped.
   assert.equal(await lanes.largeChunkPullBatchGate({ lane: { ...lane, enabled: false }, probe, job: jobAt(0), projectNo: PROJECT }), null)
   assert.equal(await lanes.largeChunkPullBatchGate({ lane: { ...lane, enabled: false }, probe, job: { ...jobAt(0), pullBatchPlan: 'not a plan' }, projectNo: PROJECT }), null)

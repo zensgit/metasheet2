@@ -596,7 +596,8 @@ async function largeChunkPullBatchGate({ lane, probe, job, projectNo, writeFence
  * job's STORED target (what the writer is handed: its fieldIdMap, its keyField) over every decision the job has
  * still to run — from the checkpoint on, a superset of this chunk's slice, so a stamp that would be refused by this
  * chunk or by any later one is refused NOW, with nothing written and the job untouched. Throws the writer's own
- * refusal (500 STAMP_INVALID, `partial: false`) — the same code as a malformed stored plan above. Zero IO. A valid
+ * refusal, 500 STAMP_INVALID — the same code as a malformed stored plan above (the ADD-coverage refusal carries
+ * `partial: false`; a stamp-shape refusal such as `fieldIds` carries its `field` only). Zero IO. A valid
  * plan's carry covers every ADD of the plan it was built from, so a valid stamp is admitted and returned unchanged.
  */
 function admittedChunkStamp({ lane, job, stored, scope, executionRef }) {
