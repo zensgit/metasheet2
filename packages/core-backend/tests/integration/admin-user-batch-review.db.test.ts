@@ -5,12 +5,15 @@ import { Client } from 'pg'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
 
-import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
+import { HARD_DELETE_CONFIRM_TEXT } from '../../src/admin/user-batch-plan'
+import { countLivePlatformAdmins, isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
+import { PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../../src/auth/user-activation'
 import { query } from '../../src/db/pg'
 import { authenticate } from '../../src/middleware/auth'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import { isAdmin } from '../../src/rbac/service'
 import { adminUsersRouter } from '../../src/routes/admin-users'
+import { attendanceAdminRouter } from '../../src/routes/attendance-admin'
 import { rolesRouter } from '../../src/routes/roles'
 
 const app = express()
@@ -21,6 +24,11 @@ const rolesApp = express()
 rolesApp.use(express.json())
 rolesApp.use(authenticate)
 rolesApp.use(rolesRouter())
+
+const attendanceApp = express()
+attendanceApp.use(express.json())
+attendanceApp.use(authenticate)
+attendanceApp.use(attendanceAdminRouter())
 
 beforeAll(async () => {
   const url = new URL(process.env.DATABASE_URL || 'invalid:')
@@ -311,13 +319,14 @@ async function restoreParked(rows: ParkedAdmin[]): Promise<void> {
 }
 
 async function seedPhaseUser(options: {
+  id?: string
   role: string
   isAdminFlag?: boolean
   activationStatus?: string
   rbacAdmin?: boolean
   active?: boolean
 }): Promise<string> {
-  const userId = `phasea_${randomUUID()}`
+  const userId = options.id ?? `phasea_${randomUUID()}`
   await query(
     `INSERT INTO users(id, username, email, name, password_hash, role, is_admin, is_active, activation_status)
      VALUES ($1, $1, $2, 'Synthetic phase user', 'synthetic-only', $3, $4, $5, $6)`,
@@ -337,10 +346,24 @@ async function seedPhaseUser(options: {
   return userId
 }
 
+async function deleteOwnedAudits(ids: string[]): Promise<void> {
+  if (ids.length === 0) return
+  await query(
+    `DELETE FROM audit_logs
+     WHERE EXISTS (
+       SELECT 1
+       FROM unnest($1::text[]) AS owned(id)
+       WHERE owned.id = ANY(string_to_array(resource_id, ':'))
+     )`,
+    [ids],
+  )
+}
+
 async function removePhaseUsers(ids: string[]): Promise<void> {
   if (ids.length === 0) return
   await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [ids])
   await query('DELETE FROM users WHERE id = ANY($1::text[])', [ids])
+  await deleteOwnedAudits(ids)
 }
 
 async function adminProfile(userId: string) {
@@ -380,6 +403,35 @@ async function waitForBlockedBy(blockerPid: number, expected: number): Promise<v
          AND pid <> pg_backend_pid()
          AND $1::int = ANY(pg_blocking_pids(pid))`,
       [blockerPid],
+    )
+    waiting = Number(result.rows[0].count)
+    if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  expect(waiting).toBe(expected)
+}
+
+async function waitForBlockedChain(rootPid: number, expected: number): Promise<void> {
+  const deadline = Date.now() + 5000
+  let waiting = 0
+  while (Date.now() < deadline && waiting < expected) {
+    const result = await query(
+      `WITH RECURSIVE waiters AS (
+         SELECT pid, ARRAY[pid] AS path
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND pid <> pg_backend_pid()
+           AND $1::int = ANY(pg_blocking_pids(pid))
+         UNION ALL
+         SELECT activity.pid, waiters.path || activity.pid
+         FROM pg_stat_activity AS activity
+         JOIN waiters ON waiters.pid = ANY(pg_blocking_pids(activity.pid))
+         WHERE activity.datname = current_database()
+           AND activity.pid <> pg_backend_pid()
+           AND NOT (activity.pid = ANY(waiters.path))
+       )
+       SELECT count(DISTINCT pid)::int AS count
+       FROM waiters`,
+      [rootPid],
     )
     waiting = Number(result.rows[0].count)
     if (waiting < expected) await new Promise((resolve) => setTimeout(resolve, 20))
@@ -566,8 +618,20 @@ describe('phase A last-admin and legacy profile regressions', () => {
     const blocker = new Client({ connectionString: process.env.DATABASE_URL })
     const pending: Array<Promise<Response>> = []
     try {
-      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
-      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      // Actor sorts before the target, so the second request can wait on the first
+      // request's actor admission lock instead of directly on this target lock.
+      const actorId = await seedPhaseUser({
+        id: `a-phasea-${randomUUID()}`,
+        role: 'admin',
+        isAdminFlag: true,
+        rbacAdmin: true,
+      })
+      const targetId = await seedPhaseUser({
+        id: `z-phasea-${randomUUID()}`,
+        role: 'user',
+        isAdminFlag: false,
+        rbacAdmin: false,
+      })
       ids.push(actorId, targetId)
       await blocker.connect()
       await blocker.query('BEGIN')
@@ -577,7 +641,7 @@ describe('phase A last-admin and legacy profile regressions', () => {
         assignAdmin('platform', actorId, targetId),
         unassignAdmin('delegated', actorId, targetId),
       )
-      await waitForBlockedBy(pid, 2)
+      await waitForBlockedChain(pid, 2)
       await blocker.query('COMMIT')
       const responses = await Promise.all(pending)
       expect(responses.map((response) => response.status)).toEqual([200, 200])
@@ -659,4 +723,909 @@ describe('phase A last-admin and legacy profile regressions', () => {
       await removePhaseUsers(ids)
     }
   })
+})
+
+async function sessionPid(client: Client): Promise<number> {
+  const result = await client.query<{ pid: number }>('SELECT pg_backend_pid()::int AS pid')
+  return Number(result.rows[0].pid)
+}
+
+async function advisoryLockIsFree(key: string): Promise<boolean> {
+  const client = new Client({ connectionString: process.env.DATABASE_URL })
+  await client.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query("SET LOCAL lock_timeout = '250ms'")
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key])
+    await client.query('ROLLBACK')
+    return true
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    if ((error as { code?: string }).code === '55P03') return false
+    throw error
+  } finally {
+    await client.end().catch(() => undefined)
+  }
+}
+
+async function userRowLockIsFree(userId: string): Promise<boolean> {
+  const client = new Client({ connectionString: process.env.DATABASE_URL })
+  await client.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query("SET LOCAL lock_timeout = '250ms'")
+    await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId])
+    await client.query('ROLLBACK')
+    return true
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    if ((error as { code?: string }).code === '55P03') return false
+    throw error
+  } finally {
+    await client.end().catch(() => undefined)
+  }
+}
+
+type OwnedCatalog = {
+  roles: Set<string>
+  permissions: Set<string>
+  mappings: Set<string>
+}
+
+function fixtureToken(value: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('unsafe fixture id')
+  return value
+}
+
+async function snapshotOwnedCatalog(roleIds: string[], permissionCodes: string[]): Promise<OwnedCatalog> {
+  const roles = roleIds.length === 0
+    ? []
+    : (await query<{ id: string }>('SELECT id FROM roles WHERE id = ANY($1::text[])', [roleIds])).rows
+  const permissions = permissionCodes.length === 0
+    ? []
+    : (await query<{ code: string }>('SELECT code FROM permissions WHERE code = ANY($1::text[])', [permissionCodes])).rows
+  const mappings = roleIds.length === 0 && permissionCodes.length === 0
+    ? []
+    : (await query<{ role_id: string; permission_code: string }>(
+      `SELECT role_id, permission_code
+       FROM role_permissions
+       WHERE role_id = ANY($1::text[]) OR permission_code = ANY($2::text[])`,
+      [roleIds, permissionCodes],
+    )).rows
+  return {
+    roles: new Set(roles.map((row) => row.id)),
+    permissions: new Set(permissions.map((row) => row.code)),
+    mappings: new Set(mappings.map((row) => `${row.role_id}\0${row.permission_code}`)),
+  }
+}
+
+async function restoreOwnedCatalog(before: OwnedCatalog, roleIds: string[], permissionCodes: string[]): Promise<void> {
+  if (roleIds.length === 0 && permissionCodes.length === 0) return
+  const current = (await query<{ role_id: string; permission_code: string }>(
+    `SELECT role_id, permission_code
+     FROM role_permissions
+     WHERE role_id = ANY($1::text[]) OR permission_code = ANY($2::text[])`,
+    [roleIds, permissionCodes],
+  )).rows
+  for (const row of current) {
+    if (before.mappings.has(`${row.role_id}\0${row.permission_code}`)) continue
+    await query(
+      'DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2',
+      [row.role_id, row.permission_code],
+    )
+  }
+  for (const code of permissionCodes) {
+    if (before.permissions.has(code)) continue
+    await query(
+      `DELETE FROM permissions
+       WHERE code = $1
+         AND NOT EXISTS (SELECT 1 FROM role_permissions WHERE permission_code = $1)`,
+      [code],
+    )
+  }
+  for (const roleId of roleIds) {
+    if (before.roles.has(roleId) || roleId === 'admin' || roleId === 'user') continue
+    await query('DELETE FROM user_roles WHERE role_id = $1', [roleId])
+    await query('DELETE FROM role_permissions WHERE role_id = $1', [roleId])
+    await query('DELETE FROM roles WHERE id = $1', [roleId])
+  }
+}
+
+async function snapshotAuditIds(resourceIds: string[]): Promise<string[]> {
+  if (resourceIds.length === 0) return []
+  const rows = (await query<{ id: string }>(
+    'SELECT id::text AS id FROM audit_logs WHERE resource_id = ANY($1::text[])',
+    [resourceIds],
+  )).rows
+  return rows.map((row) => row.id)
+}
+
+async function deleteNewAudits(resourceIds: string[], before: string[]): Promise<void> {
+  if (resourceIds.length === 0) return
+  await query(
+    `DELETE FROM audit_logs
+     WHERE resource_id = ANY($1::text[])
+       AND NOT (id::text = ANY($2::text[]))`,
+    [resourceIds, before],
+  )
+}
+
+async function releaseBlocker(blocker: Client, pending: Array<Promise<Response>>): Promise<void> {
+  await blocker.query('ROLLBACK').catch(() => undefined)
+  await Promise.allSettled(pending)
+  pending.length = 0
+  await blocker.end().catch(() => undefined)
+}
+
+async function removeOwnedUsers(ids: string[]): Promise<void> {
+  if (ids.length === 0) return
+  await query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [ids])
+  await query('DELETE FROM delegated_role_admin_scopes WHERE admin_user_id = ANY($1::text[])', [ids])
+  await query(
+    `DELETE FROM delegated_role_admin_member_groups
+     WHERE admin_user_id = ANY($1::text[]) OR created_by = ANY($1::text[])`,
+    [ids],
+  )
+  await query('DELETE FROM platform_member_group_members WHERE user_id = ANY($1::text[])', [ids])
+  await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [ids])
+  await query('DELETE FROM users WHERE id = ANY($1::text[])', [ids])
+  await deleteOwnedAudits(ids)
+}
+
+async function seedVisibleUser(userId: string): Promise<void> {
+  await query(
+    `INSERT INTO users(id, username, email, name, password_hash, role, is_admin, is_active, activation_status)
+     VALUES ($1, $1, $2, 'Synthetic phase user', 'synthetic-only', 'user', FALSE, TRUE, 'activated')`,
+    [userId, `${userId}@example.test`],
+  )
+  await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [userId, 'user'])
+}
+
+const ATTENDANCE_TEMPLATE_ROLE_IDS = ['attendance_admin', 'attendance_approver', 'attendance_employee', 'attendance_importer']
+const ATTENDANCE_PERMISSION_CODES = ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin']
+
+describe('phase B lifecycle, preview budget, and lock order', () => {
+  it('keeps a pending or flag-only profile from consuming the hard-delete admin budget', async () => {
+    const parked = await parkAcceptedAdmins()
+    const ids: string[] = []
+    const batchAudits = ['recycle']
+    const auditsBefore = await snapshotAuditIds(batchAudits)
+    try {
+      const actorId = await seedPhaseUser({ role: 'disabled', isAdminFlag: false, rbacAdmin: true })
+      const pendingId = await seedPhaseUser({
+        role: 'admin', isAdminFlag: true, rbacAdmin: true, activationStatus: 'pending_activation',
+      })
+      const flagOnlyId = await seedPhaseUser({ role: 'user', isAdminFlag: true, rbacAdmin: false })
+      const disabledId = await seedPhaseUser({ role: 'disabled', isAdminFlag: true, rbacAdmin: true })
+      const usableBId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const usableAId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      ids.push(actorId, pendingId, flagOnlyId, disabledId, usableBId, usableAId)
+      expect(await countLivePlatformAdmins()).toBe(2)
+      const response = await request(app).post('/api/admin/users/batch/delete')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({
+          userIds: [pendingId, flagOnlyId, disabledId, usableBId, usableAId],
+          mode: 'hard',
+          confirmText: HARD_DELETE_CONFIRM_TEXT,
+        })
+      expect(response.status).toBe(200)
+      const byUser = new Map(
+        (response.body.data.results as Array<{ userId: string; code: string | null; ok: boolean }>)
+          .map((row) => [row.userId, row]),
+      )
+      expect(byUser.get(usableBId)?.code).toBeNull()
+      expect(byUser.get(usableBId)?.ok).toBe(true)
+      expect(byUser.get(usableAId)?.code).toBe('LAST_PLATFORM_ADMIN')
+      expect(byUser.get(pendingId)?.code).not.toBe('LAST_PLATFORM_ADMIN')
+      expect(byUser.get(flagOnlyId)?.code).not.toBe('LAST_PLATFORM_ADMIN')
+      expect(byUser.get(disabledId)?.code).not.toBe('LAST_PLATFORM_ADMIN')
+      const kept = await adminProfile(usableAId)
+      expect(kept.profile.deleted_at).toBeNull()
+      expect(kept.profile.role).toBe('admin')
+      expect((await adminProfile(usableBId)).profile.deleted_at).not.toBeNull()
+    } finally {
+      await restoreParked(parked)
+      await deleteNewAudits(batchAudits, auditsBefore)
+      await removePhaseUsers(ids)
+    }
+  })
+
+  it('refuses enabling a user who becomes pending while the status write waits', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const batchAudits = ['enable']
+    const auditsBefore = await snapshotAuditIds(batchAudits)
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false, active: false })
+      ids.push(actorId, targetId)
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(app).post('/api/admin/users/batch/disable')
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ userIds: [targetId], isActive: true }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(
+        `UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`,
+        [targetId],
+      )
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(200)
+      expect(response.body.data.results[0].code).toBe(PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE)
+      const profile = await adminProfile(targetId)
+      expect(profile.profile.is_active).toBe(false)
+      expect(profile.profile.activation_status).toBe('pending_activation')
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      await Promise.allSettled(pending)
+      await blocker.end().catch(() => undefined)
+      await deleteNewAudits(batchAudits, auditsBefore)
+      await removePhaseUsers(ids)
+    }
+  })
+
+  it('refuses a pending user from batch status, CSV update, and dry-run update', async () => {
+    const ids: string[] = []
+    const auditResources = ['update', 'enable']
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({
+        role: 'user', isAdminFlag: false, rbacAdmin: false, active: false, activationStatus: 'pending_activation',
+      })
+      ids.push(actorId, targetId)
+      auditResources.push(targetId)
+      const before = await query(
+        'SELECT name, role, is_active, activation_status FROM users WHERE id = $1',
+        [targetId],
+      )
+      const beforeRoles = await adminProfile(targetId)
+      const enable = await request(app).post('/api/admin/users/batch/disable')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ userIds: [targetId], isActive: true })
+      const update = await request(app).post('/api/admin/users/batch/update')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ items: [{ userId: targetId, name: 'Must not save', roleId: 'admin', isActive: true }] })
+      const dryRun = await request(app).post('/api/admin/users/batch/update')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ items: [{ userId: targetId, name: 'Must not save', roleId: 'admin', isActive: true }], dryRun: true })
+      for (const response of [enable, update, dryRun]) {
+        expect(response.status).toBe(200)
+        expect(response.body.data.failureCount).toBe(1)
+        expect(response.body.data.results[0].code).toBe(PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE)
+      }
+      expect((await query(
+        'SELECT name, role, is_active, activation_status FROM users WHERE id = $1',
+        [targetId],
+      )).rows).toEqual(before.rows)
+      expect(await adminProfile(targetId)).toEqual(beforeRoles)
+    } finally {
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it('refuses a CSV update when the user becomes pending while the row lock is held', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const auditResources = ['update']
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false, active: false })
+      ids.push(actorId, targetId)
+      auditResources.push(targetId)
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(app).post('/api/admin/users/batch/update')
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ items: [{ userId: targetId, name: 'Must not save', roleId: 'admin', isActive: true }] }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(`UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`, [targetId])
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(200)
+      expect(response.body.data.failureCount).toBe(1)
+      expect(response.body.data.results[0].code).toBe(PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE)
+      const row = (await query(
+        'SELECT name, role, is_active, activation_status FROM users WHERE id = $1',
+        [targetId],
+      )).rows[0]
+      expect(row).toMatchObject({
+        name: 'Synthetic phase user',
+        role: 'user',
+        is_active: false,
+        activation_status: 'pending_activation',
+      })
+      expect((await adminProfile(targetId)).roles).toEqual([{ role_id: 'user' }])
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it('refuses a platform assign when the actor loses authority under the user lock', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      const before = await adminProfile(targetId)
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(assignAdmin('platform', actorId, targetId))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(`UPDATE users SET role = 'user', is_admin = FALSE WHERE id = $1`, [actorId])
+      await blocker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [actorId])
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(403)
+      expect(response.body.error.code).toBe('FORBIDDEN')
+      expect(await adminProfile(targetId)).toEqual(before)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined)
+      await Promise.allSettled(pending)
+      await blocker.end().catch(() => undefined)
+      await removePhaseUsers(ids)
+    }
+  })
+
+  it.each(['recycled', 'purged'] as const)('rejects a target %s under the row lock and writes no membership', async (stage) => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      const before = await adminProfile(targetId)
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(assignAdmin('platform', actorId, targetId))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(
+        stage === 'purged'
+          ? 'UPDATE users SET deleted_at = NOW(), purged_at = NOW() WHERE id = $1'
+          : 'UPDATE users SET deleted_at = NOW() WHERE id = $1',
+        [targetId],
+      )
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('USER_IN_RECYCLE_BIN')
+      const after = await adminProfile(targetId)
+      expect(after.roles).toEqual(before.roles)
+      expect(after.profile.deleted_at).not.toBeNull()
+      if (stage === 'purged') expect(after.profile.purged_at).not.toBeNull()
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it('rolls back a bulk admission when one locked target is already recycled', async () => {
+    const ids: string[] = []
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const visibleId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      const recycledId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, visibleId, recycledId)
+      await query('UPDATE users SET deleted_at = NOW() WHERE id = $1', [recycledId])
+      const response = await request(app)
+        .post('/api/admin/users/namespaces/crm/admission/bulk')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ userIds: [visibleId, recycledId], enabled: true })
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('USER_IN_RECYCLE_BIN')
+      const written = await query(
+        'SELECT user_id FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+        [[visibleId, recycledId]],
+      )
+      expect(written.rows).toEqual([])
+    } finally {
+      await query(
+        'DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+        [ids],
+      ).catch(() => undefined)
+      await removePhaseUsers(ids)
+    }
+  })
+
+  it('rolls back the first bulk admission when a later upsert fails', async () => {
+    const ids: string[] = []
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const seenName = `phaseb_seen_${suffix}`
+    const functionName = `phaseb_admit_${suffix}`
+    let installed = false
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const firstId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      const secondId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, firstId, secondId)
+      const [earlierId, laterId] = [firstId, secondId].sort()
+      fixtureToken(earlierId)
+      fixtureToken(laterId)
+      await query(`CREATE SEQUENCE ${seenName}`)
+      await query(
+        `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $body$
+         BEGIN
+           PERFORM nextval('${seenName}');
+           IF NEW.user_id = '${fixtureToken(laterId)}' THEN
+             RAISE EXCEPTION 'synthetic admission failure';
+           END IF;
+           RETURN NEW;
+         END
+         $body$`,
+      )
+      await query(
+        `CREATE TRIGGER ${functionName} BEFORE INSERT ON user_namespace_admissions
+         FOR EACH ROW EXECUTE FUNCTION ${functionName}()`,
+      )
+      installed = true
+      const response = await request(app)
+        .post('/api/admin/users/namespaces/crm/admission/bulk')
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ userIds: [laterId, earlierId], enabled: true })
+      expect(response.status).toBe(500)
+      expect(response.body.error.code).toBe('MEMBER_NAMESPACE_ADMISSION_BULK_FAILED')
+      const seen = (await query<{ last_value: number; is_called: boolean }>(
+        `SELECT last_value::int AS last_value, is_called FROM ${seenName}`,
+      )).rows[0]
+      expect(Number(seen.last_value)).toBe(2)
+      expect(seen.is_called).toBe(true)
+      const written = await query(
+        'SELECT user_id FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+        [[earlierId, laterId]],
+      )
+      expect(written.rows).toEqual([])
+    } finally {
+      if (installed) {
+        await query(`DROP TRIGGER IF EXISTS ${functionName} ON user_namespace_admissions`)
+      }
+      await query(`DROP FUNCTION IF EXISTS ${functionName}()`)
+      await query(`DROP SEQUENCE IF EXISTS ${seenName}`)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it('waits on a protected role delete without holding the other member admission lock', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const roleId = `crm_peer_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const catalog = await snapshotOwnedCatalog(['crm_admin', roleId], ['crm:admin'])
+    const auditResources = [roleId]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    let groupId: string | null = null
+    try {
+      const deleterId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const delegateId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      const memberAId = `phaseb-a-${randomUUID()}`
+      const memberBId = `phaseb-b-${randomUUID()}`
+      ids.push(deleterId, delegateId, memberAId, memberBId)
+      auditResources.push(`${memberBId}:${roleId}`)
+      for (const userId of [memberAId, memberBId]) await seedVisibleUser(userId)
+      await query(
+        `INSERT INTO roles(id, name) VALUES ('crm_admin', 'CRM admin'), ($1, $1) ON CONFLICT DO NOTHING`,
+        [roleId],
+      )
+      await query(
+        `INSERT INTO permissions(code, name, description) VALUES ('crm:admin', 'CRM admin', 'synthetic')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [roleId, 'crm:admin'],
+      )
+      await query(
+        'INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2), ($3, $4), ($5, $6)',
+        [delegateId, 'crm_admin', memberAId, roleId, memberBId, roleId],
+      )
+      groupId = (await query<{ id: string }>(
+        'INSERT INTO platform_member_groups(name) VALUES ($1) RETURNING id',
+        [`phaseb-${roleId}`],
+      )).rows[0].id
+      await query(
+        'INSERT INTO platform_member_group_members(group_id, user_id) VALUES ($1, $2)',
+        [groupId, memberBId],
+      )
+      await query(
+        `INSERT INTO delegated_role_admin_member_groups(admin_user_id, namespace, group_id, created_by)
+         VALUES ($1, 'crm', $2, $3)`,
+        [delegateId, groupId, deleterId],
+      )
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await lockNamespaceAdmissionWrites(blocker, memberAId)
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(rolesApp).delete(`/api/roles/${roleId}`).auth(token(deleterId), { type: 'bearer' }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      const deletePid = Number((await query<{ pid: number }>(
+        `SELECT pid
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND $1::int = ANY(pg_blocking_pids(pid))
+         LIMIT 1`,
+        [blockerPid],
+      )).rows[0].pid)
+      pending.push(Promise.resolve(
+        request(app).post(`/api/admin/role-delegation/users/${memberBId}/roles/assign`)
+          .auth(token(delegateId), { type: 'bearer' })
+          .send({ roleId }),
+      ))
+      await waitForBlockedBy(deletePid, 1)
+      expect(await advisoryLockIsFree(`namespace-admission:${memberBId}`)).toBe(true)
+      expect(await userRowLockIsFree(memberBId)).toBe(true)
+      await blocker.query('ROLLBACK')
+      const [deleteResponse, delegateResponse] = await Promise.all(pending)
+      pending.length = 0
+      expect(deleteResponse.status).toBe(200)
+      expect(delegateResponse.status).toBe(404)
+      expect(delegateResponse.body.error.code).toBe('ROLE_NOT_FOUND')
+      expect((await query('SELECT id FROM roles WHERE id = $1', [roleId])).rows).toEqual([])
+      expect((await query('SELECT user_id FROM user_roles WHERE role_id = $1', [roleId])).rows).toEqual([])
+      expect((await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id',
+        [memberBId],
+      )).rows).toEqual([{ role_id: 'user' }])
+    } finally {
+      await releaseBlocker(blocker, pending)
+      if (groupId) {
+        await query('DELETE FROM delegated_role_admin_member_groups WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+      }
+      await restoreOwnedCatalog(catalog, ['crm_admin', roleId], ['crm:admin'])
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it.each([
+    ['assign', 'namespace', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['unassign', 'audience', 'ROLE_DELEGATION_SCOPE_REQUIRED'],
+    ['admission', 'target-membership', 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'],
+    ['assign', 'disabled-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['admission', 'pending-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+  ] as const)('rechecks delegated %s authority after %s is revoked under the lock', async (operation, revocation, code) => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const catalog = await snapshotOwnedCatalog(['crm_admin', 'crm_reader'], ['crm:read'])
+    let groupId: string | null = null
+    let targetId = ''
+    const auditResources = ['crm_reader']
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      targetId = `a-phaseb-${randomUUID()}`
+      ids.push(actorId, targetId)
+      auditResources.push(`${targetId}:crm_reader`, `${targetId}:crm`)
+      await seedVisibleUser(targetId)
+      await query(
+        `INSERT INTO roles(id, name) VALUES ('crm_admin', 'CRM admin'), ('crm_reader', 'CRM reader')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        `INSERT INTO permissions(code, name, description) VALUES ('crm:read', 'CRM read', 'synthetic')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        `INSERT INTO role_permissions(role_id, permission_code) VALUES ('crm_reader', 'crm:read')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [actorId, 'crm_admin'])
+      if (operation === 'unassign') {
+        await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [targetId, 'crm_reader'])
+      }
+      groupId = (await query<{ id: string }>(
+        'INSERT INTO platform_member_groups(name) VALUES ($1) RETURNING id',
+        [`phaseb-delegate-${randomUUID()}`],
+      )).rows[0].id
+      await query(
+        'INSERT INTO platform_member_group_members(group_id, user_id) VALUES ($1, $2)',
+        [groupId, targetId],
+      )
+      await query(
+        `INSERT INTO delegated_role_admin_member_groups(admin_user_id, namespace, group_id, created_by)
+         VALUES ($1, 'crm', $2, $1)`,
+        [actorId, groupId],
+      )
+      const beforeRoles = (await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id',
+        [targetId],
+      )).rows
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await lockNamespaceAdmissionWrites(blocker, targetId)
+      const blockerPid = await sessionPid(blocker)
+      const started = operation === 'admission'
+        ? request(app).patch(`/api/admin/role-delegation/users/${targetId}/namespaces/crm/admission`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ enabled: true })
+        : request(app).post(`/api/admin/role-delegation/users/${targetId}/roles/${operation}`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ roleId: 'crm_reader' })
+      pending.push(Promise.resolve(started))
+      await waitForBlockedBy(blockerPid, 1)
+      if (revocation === 'target-membership') {
+        await blocker.query('DELETE FROM platform_member_group_members WHERE user_id = $1', [targetId])
+      } else {
+        const revoker = new Client({ connectionString: process.env.DATABASE_URL })
+        await revoker.connect()
+        try {
+          await revoker.query('BEGIN')
+          await lockNamespaceAdmissionWrites(revoker, actorId)
+          await revoker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+          if (revocation === 'namespace') {
+            await revoker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'crm_admin'`, [actorId])
+          } else if (revocation === 'audience') {
+            await revoker.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = $1', [actorId])
+            await revoker.query('DELETE FROM delegated_role_admin_scopes WHERE admin_user_id = $1', [actorId])
+          } else if (revocation === 'disabled-actor') {
+            await revoker.query(`UPDATE users SET role = 'disabled' WHERE id = $1`, [actorId])
+          } else {
+            await revoker.query(`UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`, [actorId])
+          }
+          await revoker.query('COMMIT')
+        } finally {
+          await revoker.query('ROLLBACK').catch(() => undefined)
+          await revoker.end().catch(() => undefined)
+        }
+      }
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(403)
+      expect(response.body.error.code).toBe(code)
+      expect((await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id',
+        [targetId],
+      )).rows).toEqual(beforeRoles)
+      expect((await query(
+        `SELECT 1 FROM user_namespace_admissions WHERE user_id = $1 AND namespace = 'crm'`,
+        [targetId],
+      )).rows).toEqual([])
+      if (revocation === 'namespace') {
+        expect((await query(
+          `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'crm_admin'`,
+          [actorId],
+        )).rows).toEqual([])
+      } else if (revocation === 'audience') {
+        expect((await query(
+          'SELECT 1 FROM delegated_role_admin_member_groups WHERE admin_user_id = $1',
+          [actorId],
+        )).rows).toEqual([])
+      } else if (revocation === 'target-membership') {
+        expect((await query(
+          'SELECT 1 FROM platform_member_group_members WHERE user_id = $1',
+          [targetId],
+        )).rows).toEqual([])
+      } else if (revocation === 'disabled-actor') {
+        expect((await adminProfile(actorId)).profile.role).toBe('disabled')
+      } else {
+        expect((await adminProfile(actorId)).profile.activation_status).toBe('pending_activation')
+      }
+    } finally {
+      await releaseBlocker(blocker, pending)
+      if (groupId) {
+        await query('DELETE FROM delegated_role_admin_member_groups WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+      }
+      await restoreOwnedCatalog(catalog, ['crm_admin', 'crm_reader'], ['crm:read'])
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it.each([
+    ['scope', 'recycled'],
+    ['scope', 'purged'],
+    ['scope-group', 'recycled'],
+    ['scope-group', 'purged'],
+    ['member-group', 'recycled'],
+    ['member-group', 'purged'],
+    ['template', 'recycled'],
+    ['template', 'purged'],
+  ] as const)('refuses a %s write when the locked target is %s', async (kind, stage) => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const namespace = `b${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const adminRoleId = `${namespace}_admin`
+    const catalog = await snapshotOwnedCatalog([adminRoleId], [])
+    const integrationId = randomUUID()
+    const departmentId = randomUUID()
+    const templateId = randomUUID()
+    let groupId: string | null = null
+    const auditResources = [templateId, `${templateId}:${namespace}`]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      auditResources.push(targetId, `${targetId}:${namespace}:${departmentId}`)
+      await query('INSERT INTO roles(id, name) VALUES ($1, $1)', [adminRoleId])
+      await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [targetId, adminRoleId])
+      if (kind === 'scope' || kind === 'template') {
+        await query(
+          `INSERT INTO directory_integrations(id, org_id, provider, name, corp_id, sync_enabled)
+           VALUES ($1::uuid, 'default', 'dingtalk', $1::text, $1::text, FALSE)`,
+          [integrationId],
+        )
+        await query(
+          `INSERT INTO directory_departments(id, integration_id, external_department_id, name, is_active, raw)
+           VALUES ($1::uuid, $2::uuid, $1::text, $1::text, TRUE, '{}'::jsonb)`,
+          [departmentId, integrationId],
+        )
+      }
+      if (kind === 'template') {
+        await query(
+          'INSERT INTO delegated_role_scope_templates(id, name) VALUES ($1::uuid, $2)',
+          [templateId, `phaseb-template-${namespace}`],
+        )
+        await query(
+          `INSERT INTO delegated_role_scope_template_departments(template_id, directory_department_id)
+           VALUES ($1::uuid, $2::uuid)`,
+          [templateId, departmentId],
+        )
+      }
+      if (kind === 'member-group' || kind === 'scope-group') {
+        groupId = (await query<{ id: string }>(
+          'INSERT INTO platform_member_groups(name) VALUES ($1) RETURNING id',
+          [`phaseb-group-${namespace}`],
+        )).rows[0].id
+        auditResources.push(kind === 'scope-group'
+          ? `${targetId}:${namespace}:group:${groupId}`
+          : `${groupId}:${targetId}`)
+      }
+      const beforeRoles = (await adminProfile(targetId)).roles
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      const blockerPid = await sessionPid(blocker)
+      const started = kind === 'scope'
+        ? request(app).post(`/api/admin/role-delegation/users/${targetId}/scopes/assign`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ namespace, directoryDepartmentId: departmentId })
+        : kind === 'scope-group'
+          ? request(app).post(`/api/admin/role-delegation/users/${targetId}/scope-groups/assign`)
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ namespace, groupId })
+          : kind === 'member-group'
+            ? request(app).post(`/api/admin/role-delegation/users/${targetId}/member-groups/assign`)
+              .auth(token(actorId), { type: 'bearer' })
+              .send({ groupId })
+            : request(app).post(`/api/admin/role-delegation/users/${targetId}/scope-templates/apply`)
+              .auth(token(actorId), { type: 'bearer' })
+              .send({ namespace, templateId, mode: 'replace' })
+      pending.push(Promise.resolve(started))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(
+        stage === 'purged'
+          ? 'UPDATE users SET deleted_at = NOW(), purged_at = NOW() WHERE id = $1'
+          : 'UPDATE users SET deleted_at = NOW() WHERE id = $1',
+        [targetId],
+      )
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('USER_IN_RECYCLE_BIN')
+      expect((await adminProfile(targetId)).roles).toEqual(beforeRoles)
+      expect((await query(
+        'SELECT 1 FROM delegated_role_admin_scopes WHERE admin_user_id = $1',
+        [targetId],
+      )).rows).toEqual([])
+      expect((await query(
+        'SELECT 1 FROM delegated_role_admin_member_groups WHERE admin_user_id = $1',
+        [targetId],
+      )).rows).toEqual([])
+      if (groupId) {
+        expect((await query(
+          'SELECT 1 FROM platform_member_group_members WHERE group_id = $1 AND user_id = $2',
+          [groupId, targetId],
+        )).rows).toEqual([])
+      }
+      const after = await adminProfile(targetId)
+      expect(after.profile.deleted_at).not.toBeNull()
+      if (stage === 'purged') expect(after.profile.purged_at).not.toBeNull()
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await query('DELETE FROM delegated_role_scope_template_departments WHERE template_id = $1::uuid', [templateId])
+      await query('DELETE FROM delegated_role_scope_templates WHERE id = $1::uuid', [templateId])
+      await query('DELETE FROM directory_departments WHERE integration_id = $1::uuid', [integrationId])
+      await query('DELETE FROM directory_integrations WHERE id = $1::uuid', [integrationId])
+      if (groupId) {
+        await query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+      }
+      await restoreOwnedCatalog(catalog, [adminRoleId], [])
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it.each(['single', 'batch'] as const)(
+    'shares every attendance template role before the %s assign target locks',
+    async (mode) => {
+      const ids: string[] = []
+      const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+      const pending: Array<Promise<Response>> = []
+      const catalog = await snapshotOwnedCatalog(ATTENDANCE_TEMPLATE_ROLE_IDS, ATTENDANCE_PERMISSION_CODES)
+      let auditResources: string[] = []
+      let auditsBefore: string[] = []
+      try {
+        const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        auditResources = [...ATTENDANCE_TEMPLATE_ROLE_IDS, targetId, `${targetId}:attendance_employee`]
+        auditsBefore = await snapshotAuditIds(auditResources)
+        for (const roleId of ATTENDANCE_TEMPLATE_ROLE_IDS) {
+          await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        }
+        await blocker.connect()
+        await blocker.query('BEGIN')
+        const held = await blocker.query(`SELECT id FROM roles WHERE id = 'attendance_admin' FOR UPDATE`)
+        expect(held.rows).toHaveLength(1)
+        const blockerPid = await sessionPid(blocker)
+        const started = mode === 'batch'
+          ? request(attendanceApp).post('/api/attendance-admin/users/batch/roles/assign')
+            .query({ scope: 'global' })
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ userIds: [targetId], template: 'employee' })
+          : request(attendanceApp).post(`/api/attendance-admin/users/${targetId}/roles/assign`)
+            .query({ scope: 'global' })
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ template: 'employee' })
+        pending.push(Promise.resolve(started))
+        await waitForBlockedBy(blockerPid, 1)
+        expect(await advisoryLockIsFree(`namespace-admission:${targetId}`)).toBe(true)
+        expect(await userRowLockIsFree(targetId)).toBe(true)
+        await blocker.query('ROLLBACK')
+        const [response] = await Promise.all(pending)
+        pending.length = 0
+        expect(response.status).toBe(200)
+        expect((await query(
+          `SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+          [targetId],
+        )).rows).toEqual([{ role_id: 'attendance_employee' }])
+      } finally {
+        await releaseBlocker(blocker, pending)
+        await query(
+          'DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = ANY($2::text[])',
+          [ids, ATTENDANCE_TEMPLATE_ROLE_IDS],
+        )
+        await restoreOwnedCatalog(catalog, ATTENDANCE_TEMPLATE_ROLE_IDS, ATTENDANCE_PERMISSION_CODES)
+        await deleteNewAudits(auditResources, auditsBefore)
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
 })

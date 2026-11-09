@@ -778,17 +778,51 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
       handler({ query: pgMocks.query })
     ))
     rbacServiceMocks.isAdmin.mockResolvedValue(false)
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       seen.push(sql)
+      const actorId = 'delegated-actor'
       // `isUserWithinDelegatedScope` — also names the scopes table, so it is matched first.
       if (/WITH RECURSIVE/i.test(sql)) return { rows: [{ allowed: true }], rowCount: 1 }
+      if (/SELECT EXISTS \(/i.test(sql) && /delegated_role_admin_/i.test(sql) && /AS configured/i.test(sql)) {
+        const requestedActor = String(params?.[0] ?? '')
+        const namespaces = Array.isArray(params?.[1]) ? params[1].map((namespace) => String(namespace)) : []
+        const namespace = actorRoleId.replace(/_admin$/, '')
+        const configured = requestedActor === actorId && namespaces.includes(namespace)
+        return { rows: [{ configured }], rowCount: 1 }
+      }
       if (/SELECT\s+role_id\s+FROM\s+user_roles/i.test(sql)) {
+        if (String(params?.[0] ?? '') !== actorId) return { rows: [], rowCount: 0 }
         return { rows: [{ role_id: actorRoleId }], rowCount: 1 }
+      }
+      if (/FROM users/i.test(sql) && /FOR UPDATE/i.test(sql)) {
+        const userId = String(params?.[0] ?? '')
+        if (userId !== actorId && userId !== TARGET_USER_ID) return { rows: [], rowCount: 0 }
+        return {
+          rows: [{
+            id: userId,
+            email: userId === actorId ? 'actor@example.com' : 'target@example.com',
+            name: userId === actorId ? 'Delegated Actor' : 'Target',
+            username: null,
+            mobile: null,
+            role: 'user',
+            activation_status: 'activated',
+            is_active: true,
+            is_admin: false,
+            access_generation: 0,
+            deleted_at: null,
+            purged_at: null,
+            last_login_at: null,
+            created_at: 'now',
+            updated_at: 'now',
+          }],
+          rowCount: 1,
+        }
       }
       if (/FROM users/i.test(sql)) {
         return {
           rows: [{
             id: TARGET_USER_ID, email: 'target@example.com', name: 'Target', role: 'user',
+            activation_status: 'activated', deleted_at: null, purged_at: null,
             is_active: true, is_admin: false, last_login_at: null, created_at: 'now',
             updated_at: 'now',
           }],
