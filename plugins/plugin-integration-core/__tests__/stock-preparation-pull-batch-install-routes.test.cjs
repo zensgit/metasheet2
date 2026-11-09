@@ -373,6 +373,7 @@ test('IR-10 the tenancy wall: a project the registry resolves onto another tenan
       assert.deepEqual(h.provisioning.calls.map((c) => c[0]), ['resolveFieldIds', 'isSheetOwnedByProject'], `${label}: the wall is the last host call`)
       assert.deepEqual(h.context.api.multitable.records.fakeHostFences, [], `${label}: no fenced host write`)
       assert.deepEqual(h.audits, [], `${label}: no audit row`)
+      assert.deepEqual(h.auditAppends, [], `${label}: no plain (out-of-transaction) audit append either`)
       assert.deepEqual([h.db.rows(pbKit.T.sheet), h.db.rows(pbKit.T.lock)], [[], []], `${label}: no ledger or lease row`)
       assert.equal(h.records.rows.find((row) => row.id === 'rec_foreign_1').version, 1, `${label}: the foreign row is untouched`)
       const text = JSON.stringify(res.body)
