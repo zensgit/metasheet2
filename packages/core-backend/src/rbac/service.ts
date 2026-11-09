@@ -10,8 +10,13 @@ import {
 
 const logger = new Logger('RBACService')
 
+// Not an authorization memo. Entries are never stored: a process-local TTL cannot
+// observe another process's committed role, direct, legacy, or admission change,
+// and this process's invalidateUserPerms does not reach that process. The generation
+// counter still covers a read in THIS process that straddles invalidateUserPerms.
 const cache = new Map<string, { codes: string[]; exp: number; generation: number }>()
 const permCacheGeneration = new Map<string, number>()
+// Reported by getPermCacheStatus only. It is not a serve window.
 const TTL_MS = parseInt(process.env.RBAC_CACHE_TTL_MS || '60000', 10)
 
 // Graceful degradation for missing RBAC tables (Phase B)
@@ -139,32 +144,27 @@ async function readUserPermissionsFromPool(userId: string): Promise<string[]> {
 
 export async function listUserPermissions(userId: string, runQuery?: RbacPermissionQueryFn): Promise<string[]> {
   if (typeof runQuery === 'function') return readUserPermissionsOn(userId, runQuery)
-  const now = Date.now()
-  const key = `perms:${userId}`
+  // Each pool-path call reads committed rows (direct ∪ role ∪ legacy, then admission).
+  // Cost is those indexed reads on every profile load instead of a 60s Map hit.
+  // A hit would keep the other process's pre-commit allow or deny, including when
+  // this process never runs invalidateUserPerms. RBAC_CACHE_TTL_MS does not change that.
   const generation = currentPermCacheGeneration(userId)
-  const hit = cache.get(key)
-  if (hit && hit.exp > now && hit.generation === generation) {
-    metrics.rbacPermCacheHits.inc()
-    return hit.codes
-  }
   metrics.rbacPermCacheMiss.inc()
   if (!pool) return []
   try {
     const filtered = await readUserPermissionsFromPool(userId)
     if (currentPermCacheGeneration(userId) !== generation) {
       // One bounded retry. If that retry's generation also moves, the codes it
-      // read are not a witness for this caller: do not cache them and do not
-      // return them. Empty fails closed the current profile; the next caller
-      // misses and reads again. Optional-schema errors still use the catch below.
+      // read are not a witness for this caller: do not return them. Empty fails
+      // closed the current profile; the next caller reads again. Optional-schema
+      // errors still use the catch below. Nothing is stored for a later call.
       const retryGeneration = currentPermCacheGeneration(userId)
       const retried = await readUserPermissionsFromPool(userId)
       if (currentPermCacheGeneration(userId) !== retryGeneration) {
         return []
       }
-      cache.set(key, { codes: retried, exp: Date.now() + TTL_MS, generation: retryGeneration })
       return retried
     }
-    cache.set(key, { codes: filtered, exp: now + TTL_MS, generation })
     return filtered
   } catch (error) {
     if (isDatabaseSchemaError(error) && rbacOptionalEnabled()) {
@@ -279,6 +279,8 @@ export async function inspectUserPermissionGrants(
 
 export function invalidateUserPerms(userId: string) {
   cache.delete(`perms:${userId}`)
+  // Local generation only. A committed change is visible to every process on its
+  // next listUserPermissions read; this bump retries a read already in flight here.
   permCacheGeneration.set(userId, currentPermCacheGeneration(userId) + 1)
 }
 

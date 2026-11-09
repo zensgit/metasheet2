@@ -402,6 +402,16 @@ export interface MultitableRepairTransactionSurface {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  /**
+   * Y7 review MEDIUM-2: the largest field `order` over EVERY field row of the object's sheet (null when it has
+   * none), read inside this transaction after the canonical writer fence — so an additive repair can append its
+   * columns after every existing one. Values-free (one integer). OPTIONAL: a plugin newer than its host must
+   * detect it, never assume it.
+   */
+  readObjectMaxFieldOrder?(input: {
+    projectId: string
+    objectId: string
+  }): Promise<number | null>
 }
 
 /** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
