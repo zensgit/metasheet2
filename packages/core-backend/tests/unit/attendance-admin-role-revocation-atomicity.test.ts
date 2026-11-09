@@ -65,6 +65,7 @@ type SqlResult = { rows: unknown[]; rowCount: number }
 type RouteCall = {
   events: string[]
   lockKeys: string[]
+  roleLockIds: string[]
   witnessParams: unknown[][]
   namespaceRoleIds: unknown[]
   poolSql: string[]
@@ -134,6 +135,7 @@ function installTransaction(options: {
   const call: RouteCall = {
     events: [],
     lockKeys: [],
+    roleLockIds: [],
     witnessParams: [],
     namespaceRoleIds: [],
     poolSql: [],
@@ -145,6 +147,11 @@ function installTransaction(options: {
       call.events.push('lock')
       call.lockKeys.push(String(params?.[0] ?? ''))
       return { rows: [], rowCount: 1 }
+    }
+    if (/FROM roles WHERE id = \$1 FOR SHARE/.test(text)) {
+      call.events.push('role-lock')
+      call.roleLockIds.push(String(params?.[0] ?? ''))
+      return { rows: [{ id: params?.[0] }], rowCount: 1 }
     }
     if (/DELETE FROM user_roles/.test(text)) {
       call.events.push('delete')
@@ -320,6 +327,7 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
     expect(res.statusCode).toBe(404)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
     expect(call.events).toEqual(['begin', 'resolve-targets', 'rollback'])
+    expect(call.roleLockIds).toEqual([])
     expectNoMembershipMutation(call)
   })
 
@@ -376,7 +384,9 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     expect(call.events).toEqual([
       'begin',
       'resolve-targets',
+      'role-lock',
       'lock',
+      'resolve-targets',
       'delete',
       'list-namespaces',
       'remaining-role',
@@ -384,6 +394,9 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'profile',
       'commit',
     ])
+    expect(call.roleLockIds).toEqual(['attendance_employee'])
+    expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
+    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.indexOf('lock'))
     expect(call.lockKeys).toEqual([`namespace-admission:${SINGLE_USER_ID}`])
     expect(call.namespaceRoleIds).toEqual(['attendance_employee'])
     expect(call.witnessParams).toEqual([
@@ -420,9 +433,11 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     expect(call.events).toEqual([
       'begin',
       'resolve-targets',
+      'role-lock',
       'lock',
       'lock',
       'lock',
+      'resolve-targets',
       'delete',
       'list-namespaces',
       'remaining-role',
@@ -435,6 +450,9 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'witness',
       'commit',
     ])
+    expect(call.roleLockIds).toEqual(['attendance_employee'])
+    expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
+    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.lastIndexOf('lock'))
     expect(call.lockKeys).toEqual(BATCH_SORTED_ORDER.map((id) => `namespace-admission:${id}`))
     expect(call.namespaceRoleIds).toEqual([
       'attendance_employee',
