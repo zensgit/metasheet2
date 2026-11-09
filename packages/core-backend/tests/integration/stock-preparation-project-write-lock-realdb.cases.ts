@@ -4165,6 +4165,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 expect(all[1].pull_batch_source_digest, 'calibration: the retry read another source').not.toBe(digest1)
                 const led = await k.ledgerRows()
                 expect(led.batches.map((b: any) => [b[0], b[1], b[2]])).toEqual([[1, 'closed', 'superseded_by_new_source'], [2, 'closed', 'execution_succeeded']])
+                // The retry's own link: its exec_ id (C-11), the writer's own count, no recovery outcome (it succeeded by itself).
                 expect(linkCounts(led.links)).toEqual([[ex[0].id, 3, 'verified_mixed', true], [all[1].id, 2, null, true]])
                 const rowsNow = await k.st.rows()
                 expect(rowsNow).toHaveLength(5)
@@ -4296,10 +4297,17 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 })
               }
               expect(windows.map((w: any) => w.mode)).toEqual(['execution_verified_closed', 'execution_closed_unverified'])
-              const inWindow = (e: any) => windows.some((w: any) => e.at >= w.start && e.at <= w.end)
-              expect(events.filter((e: any) => e.heartbeatLike && e.ok).length, 'calibration: the 100 ms heartbeat ran outside the closes').toBeGreaterThan(0)
+              const [puller, runbook] = windows
+              // Calibration: the heartbeat ran before the first close and again between the two (the runbook leg is not vacuous).
+              expect(events.filter((e: any) => e.heartbeatLike && e.ok && e.at < puller.start).length, 'calibration: heartbeats before the puller close').toBeGreaterThan(0)
+              expect(events.filter((e: any) => e.heartbeatLike && e.ok && e.at > puller.end && e.at < runbook.start).length, 'calibration: heartbeats between the two closes').toBeGreaterThan(0)
+              // Per close window: no heartbeat attempted while it held the lock row, none failed.
+              for (const w of windows) {
+                const within = (e: any) => e.at >= w.start && e.at <= w.end
+                expect(events.filter((e: any) => e.heartbeatLike && within(e)).length, `${w.mode}: no heartbeat attempted while the close held the lock row`).toBe(0)
+                expect(events.filter((e: any) => !e.ok && within(e)).map((e: any) => [e.code, e.ms]), `${w.mode}: no lock statement failed inside the close`).toEqual([])
+              }
               expect(events.filter((e: any) => !e.ok).map((e: any) => [e.code, e.ms]), 'no heartbeat queued behind a close and timed out').toEqual([])
-              expect(events.filter((e: any) => e.heartbeatLike && inWindow(e)).length, 'no heartbeat attempted while a close held the lock row').toBe(0)
               expect(warnings.filter((w: any) => /heartbeat failed/.test(w.msg)).length).toBe(0)
             }, 300000)
           })

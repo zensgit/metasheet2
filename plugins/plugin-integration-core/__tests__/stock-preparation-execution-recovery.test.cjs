@@ -1070,7 +1070,9 @@ test('CU-01 close-unverified: inspect reads the SHEET only (no source read) and 
   const row = w.executions()[0]
   assert.deepEqual([row.verified_result, row.closed_mode, row.runbook_ref], ['unknown', 'runbook', 'TICKET-9'])
   assert.equal(w.closeAudits[0].mode, 'execution_closed_unverified')
-  assert.equal(w.closeAudits[0].insideHostWrite, true, 'rebaseline (d): the runbook close transaction runs inside guard.withHostWrite too (N6)')
+  const runbookClose = w.closeAudits.filter((audit) => audit.mode === 'execution_closed_unverified')
+  assert.equal(runbookClose.length, 1)
+  assert.equal(runbookClose[0].insideHostWrite, true, 'rebaseline (d): the runbook close transaction runs inside guard.withHostWrite too (N6)')
   assert.equal(w.hostWriteDepth, 0)
 })
 
