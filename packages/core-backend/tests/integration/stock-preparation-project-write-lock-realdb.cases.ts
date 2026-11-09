@@ -3948,7 +3948,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   BI-R18 (P2-18) an extension re-run in another history mode than the persisted run: 409 history_mode_changed
         //          before any cell write; the persisted mode resolves (BI-R14 is the pull-batch file's zombie allocate)
         //   BI-R19 (R-65 / R-89) a RIGHT band ensured while the real template-column repair holds the canonical write fence
-        //          waits on the fence and lands after the repaired columns and a person column above every known id
+        //          waits on the fence and lands after the repaired columns and a person column above every known id; re-created
+        //          under a person column above EVERY column (known ids included) it lands after that column too
         describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
           const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
@@ -4320,6 +4321,34 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             const after = await fieldRows()
             for (const [id, text] of settledBefore) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
             expect(after.size).toBe(settledBefore.size + 4)
+
+            // Leg 2 — a person column above EVERY column, known ids included (the band re-created on the same sheet): only
+            // the whole-sheet max puts the band after it; a max over the known ids (template ∪ band) would land on
+            // tail + 1 / + 2, before the person column.
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, bandPhysical])).rowCount).toBe(2)
+            const personTopId = `fld_person_${TOKEN}_r19top`
+            const personTopOrder = (await maxOrder()) + 20
+            await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [personTopId, st.sheetId, 'Person column (top)', 'string', '{}', personTopOrder])
+            const settledTop = await fieldRows()
+            const again = await installLib.__internals.ensureBandColumns({
+              deps: {
+                provisioning: prov,
+                projectId: st.projectId,
+                target: { objectId: st.objectId },
+                band: { fieldIds: { pullBatch: k.physical('pullBatch'), firstPullBatch: k.physical('firstPullBatch') } },
+                knownFieldIds: templateIds,
+                bandDescriptors: templatesLib.pullBatchBandFieldDescriptors,
+              },
+              keys: ['pullBatch', 'firstPullBatch'],
+              placement: 'right',
+              locale: 'zh-CN',
+            })
+            expect(again.added).toBe(2)
+            expect(await orderOf(bandPhysical), 'right = after the last column: the top person column + 1 / + 2').toEqual([personTopOrder + 1, personTopOrder + 2])
+            const gridTop = (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [st.sheetId])).rows.map((row: any) => String(row.id))
+            expect(gridTop.slice(-3)).toEqual([personTopId, ...bandPhysical])
+            const afterTop = await fieldRows()
+            for (const [id, text] of settledTop) expect(afterTop.get(id), `meta_fields ${id} byte-identical (leg 2)`).toBe(text)
           }, 300000)
         })
 
