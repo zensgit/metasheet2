@@ -42,6 +42,8 @@ const {
   PULL_BATCH_RESOLVED_HISTORY_STATUSES,
   __internals: { EXECUTION_REF_PATTERN },
 } = require('./stock-preparation-pull-batch-store.cjs')
+// F-7 (R-65): the writer's own zero-IO stamp checks, pre-run by the large chunk gate (one copy, never a re-derivation).
+const { assertWriterAdmitsPullBatchStamp } = require('./stock-preparation-apply-writer.cjs')
 
 // ── the switch (design §7.1; the members-page reader shape) ─────────────────────────────────────────────────────────
 const STOCK_PREP_PULL_BATCH_ENABLED_ENV = 'STOCK_PREP_PULL_BATCH_ENABLED'
@@ -546,6 +548,7 @@ async function assertLargeApprovePullBatch({ lane, probe, sheetId, projectNo, ex
  *   switch off                                       => null
  *   band unusable (probe fold) and the job has a ready plan => 409 REPLAN (the band changed since the plan)
  *   band unusable otherwise                          => null
+ *   ready plan whose stamp the writer would refuse   => 500 STAMP_INVALID before any IO (F-7: admittedChunkStamp)
  *   ONE ledger read (503) ; installing               => 409 INSTALL_IN_PROGRESS
  *   ready plan ∧ resolved                            => the stamp, keyed `large:<apply job id>` (every chunk, resume
  *                                                       and takeover reuses the one link)
@@ -567,6 +570,10 @@ async function largeChunkPullBatchGate({ lane, probe, job, projectNo, writeFence
   const sheetId = job && isPlainObject(job.target) ? job.target.sheetId : null
   const scope = scopeOf(lane, { sheetId, projectNo })
   const executionRef = executionRefOf('large', job && job.jobId)
+  // F-7 (R-65): a ready plan's stamp is built — and checked with the WRITER'S OWN zero-IO checks — before the ledger
+  // read and so before the job turns `running`. On main the writer refused a malformed stored plan only inside the
+  // chunk, after `running` was stored: the job then answered 409 RUN_IN_PROGRESS forever.
+  const stamp = stored && stored.ready ? admittedChunkStamp({ lane, job, stored, scope, executionRef }) : null
   const state = await readLedger(lane, scope)
   const reason = ledgerReasonOf(state.sheet)
   if (reason === 'installing') throw installInProgress()
@@ -576,28 +583,48 @@ async function largeChunkPullBatchGate({ lane, probe, job, projectNo, writeFence
   }
   if (!stored.ready) return unstampedChunk(stored.reason, stored.gapRows)
   if (reason !== null) throw replanRequired('history_unresolved')
-  const fieldIds = lane.band.fieldIds
-  const labelsOnSheet = new Set(stored.labelsOnSheet)
   return Object.freeze({
-    stamp: {
-      fieldIds,
-      firstPullBatchByKey: new Map(Object.entries(stored.firstPullBatchByKey)),
-      allocate: () => lane.store.allocate({
-        ...scope,
-        executionRef,
-        lane: 'large_apply',
-        sourceDigest: stored.sourceDigest,
-        labelsOnSheet,
-        voidReuse: 'in_lease',
-        expectedRule: stored.expectedRule,
-        refreshExecutionId: null,
-        holderWithin: lane.holderWithin || undefined,
-      }),
-    },
+    stamp,
     finish({ writerStatus, createdRowCount } = {}) {
       return finishBestEffort({ lane, scope, executionRef, writerStatus, createdRowCount, sourceDigest: stored.sourceDigest, writeFence, logger })
     },
   })
+}
+
+/**
+ * F-7 (R-65): the chunk's writer stamp, checked by the writer's own assertWriterAdmitsPullBatchStamp against the
+ * job's STORED target (what the writer is handed: its fieldIdMap, its keyField) over every decision the job has
+ * still to run — from the checkpoint on, a superset of this chunk's slice, so a stamp that would be refused by this
+ * chunk or by any later one is refused NOW, with nothing written and the job untouched. Throws the writer's own
+ * refusal (500 STAMP_INVALID, `partial: false`) — the same code as a malformed stored plan above. Zero IO. A valid
+ * plan's carry covers every ADD of the plan it was built from, so a valid stamp is admitted and returned unchanged.
+ */
+function admittedChunkStamp({ lane, job, stored, scope, executionRef }) {
+  const labelsOnSheet = new Set(stored.labelsOnSheet)
+  const stamp = {
+    fieldIds: lane.band ? lane.band.fieldIds : null,
+    firstPullBatchByKey: new Map(Object.entries(stored.firstPullBatchByKey)),
+    allocate: () => lane.store.allocate({
+      ...scope,
+      executionRef,
+      lane: 'large_apply',
+      sourceDigest: stored.sourceDigest,
+      labelsOnSheet,
+      voidReuse: 'in_lease',
+      expectedRule: stored.expectedRule,
+      refreshExecutionId: null,
+      holderWithin: lane.holderWithin || undefined,
+    }),
+  }
+  const plan = job && isPlainObject(job.plan) && Array.isArray(job.plan.decisions) ? job.plan : null
+  const next = plan && isPlainObject(job.checkpoint) ? job.checkpoint.nextDecisionIndex : 0
+  const start = Number.isSafeInteger(next) && next >= 0 ? next : 0
+  assertWriterAdmitsPullBatchStamp({
+    pullBatchStamp: stamp,
+    plan: plan ? { ...plan, decisions: plan.decisions.slice(start) } : plan,
+    target: job ? job.target : undefined,
+  })
+  return stamp
 }
 
 function unstampedChunk(reason, gapRows) {
