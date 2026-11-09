@@ -1,8 +1,9 @@
 /**
- * R-69 1c test utility: the in-memory model of the outbound-intent and job-lease ledgers that
- * tests/unit/automation-run-integration-job.test.ts (I3) defines inline — the same statements, matched by shape,
- * `now()` evaluated with the (fake) clock, a transaction rolled back on throw. Copied verbatim (not imported) so the
- * I3 suite stays byte-identical. Synthetic only.
+ * R-69 1c test utility: the in-memory model of the outbound-intent and job-lease ledgers — the statements
+ * automation-outbound-intent.ts and automation-job-lease.ts issue, matched by shape, `now()` evaluated with the (fake)
+ * clock, a transaction rolled back on throw. It began as a verbatim copy of the model the I3 suite
+ * (tests/unit/automation-run-integration-job.test.ts) defined inline; since R-69 I6a that suite imports it from here,
+ * so there is one model. Synthetic only.
  *
  * R-69 I6a: the model also answers the ONE project-sheet registry read the executor's rule-sheet re-check issues
  * (stock-preparation-manual-rows-gate.ts MANUAL_ROWS_PROJECT_TARGET_SQL, migration 087). `projectTargets` defaults to
