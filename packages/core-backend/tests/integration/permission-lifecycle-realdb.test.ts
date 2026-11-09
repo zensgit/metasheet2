@@ -94,6 +94,34 @@ const ownedUserIds = [
   raceUserId,
   cacheUserId,
 ]
+
+function uuidSortedAgainst(anchor: string, side: 'before' | 'after'): string {
+  const hex = '0123456789abcdef'
+  const source = anchor.toLowerCase()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(source)) {
+    throw new Error('anchor is not a uuid')
+  }
+  const reserved = new Set(ownedUserIds)
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === '-' || index === 14) continue
+    const digit = hex.indexOf(source[index] ?? '')
+    const moved = side === 'before' ? digit - 1 : digit + 1
+    if (moved < 0 || moved > 15) continue
+    const chars = source.split('')
+    chars[index] = hex[moved] ?? ''
+    const candidate = chars.join('')
+    const ordered = side === 'before' ? candidate < source : candidate > source
+    if (!ordered || reserved.has(candidate)) continue
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate)) continue
+    return candidate
+  }
+  throw new Error(`no uuid sorts ${side} the actor`)
+}
+
+const actorBeforeTargetId = uuidSortedAgainst(adminId, 'after')
+ownedUserIds.push(actorBeforeTargetId)
+const targetBeforeActorId = uuidSortedAgainst(adminId, 'before')
+ownedUserIds.push(targetBeforeActorId)
 const extraGroupIds: string[] = []
 const ownedTemplateIds: string[] = []
 let directory: PermissionLifecycleDirectory | null = null
@@ -942,33 +970,105 @@ describe.sequential('permission lifecycle real database', () => {
     expect(await scopeCount(raceUserId, otherNamespace)).toBe(1)
   }
 
-  it('serializes a department scope assign with revoke on that user admission lock', async () => {
-    const tree = requireDirectory()
-    assertOk(await post(rolePath(raceUserId, 'assign'), adminToken, { roleId: STOCK_PREP_ADMIN_ROLE_ID }))
-    assertOk(await patch(admissionPath(raceUserId), adminToken, { enabled: true }))
+  async function admissionLockWaitChain(rootPid: number): Promise<number[]> {
+    const result = await query<{ pid: number }>(
+      `WITH RECURSIVE waiters AS (
+         SELECT pid, ARRAY[pid] AS path
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND pid <> pg_backend_pid()
+           AND $1::int = ANY(pg_blocking_pids(pid))
+         UNION ALL
+         SELECT activity.pid, waiters.path || activity.pid
+         FROM pg_stat_activity AS activity
+         JOIN waiters ON waiters.pid = ANY(pg_blocking_pids(activity.pid))
+         WHERE activity.datname = current_database()
+           AND activity.pid <> pg_backend_pid()
+           AND NOT (activity.pid = ANY(waiters.path))
+       )
+       SELECT DISTINCT pid::int AS pid
+       FROM waiters`,
+      [rootPid],
+    )
+    return result.rows
+      .map((row) => Number(row.pid))
+      .filter((pid) => Number.isInteger(pid) && pid > 0)
+  }
+
+  async function directBlockersOf(waiterPid: number): Promise<number[]> {
+    const result = await query<{ pid: number }>(
+      'SELECT blocker.pid::int AS pid FROM unnest(pg_blocking_pids($1::int)) AS blocker(pid)',
+      [waiterPid],
+    )
+    return result.rows
+      .map((row) => Number(row.pid))
+      .filter((pid) => Number.isInteger(pid) && pid > 0)
+  }
+
+  async function proveScopeAssignSerializedWithRevoke(
+    targetUserId: string,
+    order: 'actor-before-target' | 'target-before-actor',
+    tree: PermissionLifecycleDirectory,
+  ): Promise<void> {
+    expect(order === 'actor-before-target' ? adminId < targetUserId : targetUserId < adminId).toBe(true)
+    assertOk(await post(rolePath(targetUserId, 'assign'), adminToken, { roleId: STOCK_PREP_ADMIN_ROLE_ID }))
+    assertOk(await patch(admissionPath(targetUserId), adminToken, { enabled: true }))
     assertOk(await post(
-      `/api/admin/role-delegation/users/${raceUserId}/scopes/assign`,
+      `/api/admin/role-delegation/users/${targetUserId}/scopes/assign`,
       adminToken,
       { namespace: 'stock-prep', directoryDepartmentId: tree.parentDepartmentId },
     ))
-    const lock = await holdNamespaceAdmissionLock(raceUserId)
-    const pendingRevoke = post(rolePath(raceUserId, 'unassign'), adminToken, { roleId: STOCK_PREP_ADMIN_ROLE_ID })
+    const lock = await holdNamespaceAdmissionLock(targetUserId)
+    const pendingRevoke = post(rolePath(targetUserId, 'unassign'), adminToken, { roleId: STOCK_PREP_ADMIN_ROLE_ID })
     void pendingRevoke.catch(() => undefined)
     let pendingAssign: Promise<HttpResult> | undefined
     let revokePid: number | null = null
     let assignPid: number | null = null
+    let witnessedChain: number[] = []
+    let waitEdge: 'revoke' | 'gate' | null = null
     let revokeResult: HttpResult | undefined
     let assignResult: HttpResult | undefined
     try {
       revokePid = await waitForAdvisoryLockWaiterPid(lock.pid)
-      pendingAssign = post(
-        `/api/admin/role-delegation/users/${raceUserId}/scopes/assign`,
-        adminToken,
-        { namespace: 'stock-prep', directoryDepartmentId: tree.childDepartmentId },
-      )
-      void pendingAssign.catch(() => undefined)
       if (revokePid) {
-        assignPid = await waitForAdvisoryLockWaiterPid(lock.pid, { ignorePids: [revokePid] })
+        pendingAssign = post(
+          `/api/admin/role-delegation/users/${targetUserId}/scopes/assign`,
+          adminToken,
+          { namespace: 'stock-prep', directoryDepartmentId: tree.childDepartmentId },
+        )
+        void pendingAssign.catch(() => undefined)
+        const deadline = Date.now() + 5000
+        while (Date.now() < deadline && assignPid === null) {
+          const chain = await admissionLockWaitChain(lock.pid)
+          witnessedChain = chain
+          const others = chain.filter((pid) => pid !== revokePid)
+          if (!chain.includes(revokePid) || others.length !== 1 || new Set(chain).size !== 2) {
+            await new Promise((resolve) => setTimeout(resolve, 25))
+            continue
+          }
+          const candidate = others[0] ?? null
+          if (candidate === null) {
+            await new Promise((resolve) => setTimeout(resolve, 25))
+            continue
+          }
+          const blockers = await directBlockersOf(candidate)
+          if (order === 'actor-before-target') {
+            if (blockers.includes(revokePid) && !blockers.includes(lock.pid)) {
+              assignPid = candidate
+              waitEdge = 'revoke'
+            }
+          } else {
+            const directAssign = await waitForAdvisoryLockWaiterPid(lock.pid, {
+              ignorePids: [revokePid],
+              timeoutMs: 40,
+            })
+            if (directAssign === candidate && blockers.includes(lock.pid)) {
+              assignPid = candidate
+              waitEdge = 'gate'
+            }
+          }
+          if (assignPid === null) await new Promise((resolve) => setTimeout(resolve, 25))
+        }
       }
     } finally {
       await lock.release()
@@ -987,11 +1087,29 @@ describe.sequential('permission lifecycle real database', () => {
     }
     assertOk(revokeResult ?? { status: 0, body: null })
     assertError(assignResult ?? { status: 0, body: null }, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD')
-    expect(revokePid, 'revoke did not block on the admission lock').not.toBeNull()
-    expect(assignPid, 'scope assign did not block on the admission lock').not.toBeNull()
-    expect(await roleHeld(raceUserId, STOCK_PREP_ADMIN_ROLE_ID)).toBe(false)
-    expect(await scopeCount(raceUserId, 'stock-prep')).toBe(0)
-    expect(await admissionEnabled(raceUserId, 'stock-prep')).toBe(false)
+    expect(revokePid, `${order}: revoke did not block on the admission lock`).not.toBeNull()
+    expect(
+      assignPid,
+      `${order}: scope assign did not block on the admission lock; chain=${witnessedChain.join(',')}`,
+    ).not.toBeNull()
+    if (revokePid === null || assignPid === null) throw new Error(`${order}: both blocked writers must be observed`)
+    expect(assignPid).not.toBe(revokePid)
+    expect(new Set([revokePid, assignPid]).size).toBe(2)
+    expect(witnessedChain.slice().sort((left, right) => left - right)).toEqual(
+      [revokePid, assignPid].slice().sort((left, right) => left - right),
+    )
+    expect(waitEdge).toBe(order === 'actor-before-target' ? 'revoke' : 'gate')
+    expect(await roleHeld(targetUserId, STOCK_PREP_ADMIN_ROLE_ID)).toBe(false)
+    expect(await scopeCount(targetUserId, 'stock-prep')).toBe(0)
+    expect(await admissionEnabled(targetUserId, 'stock-prep')).toBe(false)
+  }
+
+  it('serializes a department scope assign with revoke on that user admission lock', async () => {
+    const tree = requireDirectory()
+    // Actor and target admission locks are sorted. Actor-first makes the scope
+    // assign a transitive waiter; target-first makes both writers direct waiters.
+    await proveScopeAssignSerializedWithRevoke(actorBeforeTargetId, 'actor-before-target', tree)
+    await proveScopeAssignSerializedWithRevoke(targetBeforeActorId, 'target-before-actor', tree)
   })
 
   it.each(['department', 'member-group', 'template'] as const)(
