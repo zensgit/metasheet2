@@ -2976,7 +2976,14 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   const scope = read('lib', 'stock-preparation-operator-scope.cjs')
   const migrationsDir = path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations')
   const migration = fs.readFileSync(path.join(migrationsDir, '084_create_integration_stock_prep_handoff.sql'), 'utf8')
-  const vocabulary = fs.readFileSync(path.join(migrationsDir, '085_extend_stock_prep_audit_handoff_action.sql'), 'utf8')
+  const vocabulary085 = fs.readFileSync(path.join(migrationsDir, '085_extend_stock_prep_audit_handoff_action.sql'), 'utf8')
+  // Pre-pilot fix batch 8(d) (R-91): 085 is shipped and never edited, so a mode added after it is documented in the
+  // audit store's addendum block instead — the mode vocabulary is 085's header PLUS that block, nothing else.
+  const auditStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-audit-store.cjs'), 'utf8')
+  const addendumStart = auditStoreSource.indexOf('HANDOFF MODES ADDED AFTER 085')
+  const addendumEnd = auditStoreSource.indexOf('END HANDOFF MODES ADDED AFTER 085')
+  assert.ok(addendumStart >= 0 && addendumEnd > addendumStart, 'J7: the audit store carries the post-085 handoff mode addendum')
+  const vocabulary = `${vocabulary085}\n${auditStoreSource.slice(addendumStart, addendumEnd)}`
 
   // (a) the scope key, in the file that routes 23505 on it
   assert.ok(!store.includes("COALESCE(workspace_id,'')"), 'G9: the store no longer documents a column 084 does not create')
@@ -3012,7 +3019,7 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // yields three on one line; `notification_lost` is its own.
   assert.ok(modes.size >= 4, `J7: the mode derivation found only ${[...modes].join(',')}`)
   for (const mode of modes) {
-    assert.ok(vocabulary.includes(mode), `J7: migration 085 names the '${mode}' audit mode it documents`)
+    assert.ok(vocabulary.includes(mode), `J7: migration 085 (or the audit store's post-085 addendum) names the '${mode}' audit mode it documents`)
   }
   assert.ok(!vocabulary.includes('advanced|replayed|completed;'), 'J7: and no longer names only three')
   // The two real detail shapes, keyed off what the route actually writes.
