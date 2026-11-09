@@ -603,9 +603,10 @@ async function recoveryWorld() {
     executions() {
       return env.db.rows(T.execution)
     },
+    hostWriteDepth: 0,
     async recover(operation, extra = {}) {
       const handle = env.handleFor(RW_TENANT)
-      return harness.lock.withProjectWriteLease(scopeKey, { purpose: 'recovery_verify', runId: 'rec-rv-run', tenantId: RW_TENANT }, (guard) => tableActions.recoverStockPreparationExecution({
+      return harness.lock.withProjectWriteLease(scopeKey, { purpose: 'recovery_verify', runId: 'rec-rv-run', tenantId: RW_TENANT }, (realGuard) => tableActions.recoverStockPreparationExecution({
         operation,
         action,
         parameters: { projectNo: RW_PROJECT },
@@ -616,12 +617,14 @@ async function recoveryWorld() {
         plannedAt: PLANNED_AT,
         runId: 'run_rv',
         refreshGovernance: handle,
-        projectWriteGuard: guard,
+        // The real guard, its host-write bracket observed (rebaseline (d): the close runs inside it, so the lease's own
+        // heartbeat skips instead of queueing behind the close's lock-row hold).
+        projectWriteGuard: Object.freeze({ ...realGuard, withHostWrite: async (fn) => { w.hostWriteDepth += 1; try { return await realGuard.withHostWrite(fn) } finally { w.hostWriteDepth -= 1 } } }),
         projectWriteRunId: 'rec-rv-run',
         closedBy: 'u_rv_puller',
         holderWithin: async () => {},
         auditVerifyRead: async (detail) => { verifyAudits.push(detail) },
-        auditCloseWithin: async (trx, event) => { closeAudits.push(recovery.recoveryCloseAuditEntryOf(event)) },
+        auditCloseWithin: async (trx, event) => { closeAudits.push({ ...recovery.recoveryCloseAuditEntryOf(event), insideHostWrite: w.hostWriteDepth > 0 }) },
         readSheetRows: () => tableActions.__internals.readExistingStockPreparationRows(sheet.api, action.target, RW_PROJECT),
         ...extra,
       }))
@@ -668,6 +671,8 @@ test('RV-01 verify then close a PARTIAL run: mixed (n-k landed, k not), the orde
   assert.deepEqual([row.status, row.verified_result, row.closed_mode, row.settlement_subject], ['verified_closed', 'mixed', 'puller_verified', true])
   assert.notEqual((await w.derived()).status, 'failed_pending_recovery')
   assert.equal(w.closeAudits.length, 1)
+  assert.equal(w.closeAudits[0].insideHostWrite, true, 'rebaseline (d): the close transaction runs inside guard.withHostWrite (N6)')
+  assert.equal(w.hostWriteDepth, 0)
   assert.doesNotThrow(() => (assertValuesFreeDetail ? assertValuesFreeDetail(w.closeAudits[0].detail) : null))
   // The retry: a fresh preview plans exactly the missing rows; its apply succeeds.
   const retry = await w.dryRun()

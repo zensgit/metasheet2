@@ -1740,6 +1740,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
           // Readiness v3 (批次标识 BI-1b): the real pull-batch ledger store (migration 105).
           stockPreparationPullBatchStore: pullBatchStore,
+          // Readiness v4 (batch-refresh step 6a-2, R-91): the real refresh store (execution_recovery_ready reads its methods).
+          stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.

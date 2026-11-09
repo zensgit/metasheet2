@@ -1973,6 +1973,11 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // Batch-refresh step 6a-2 (R-91): the executions list, the recovery and close-unverified share the refresh routes'
+  // decision context (the host-vouched operator scope at the PULL / ADMIN tier).
+  'refresh.executions',
+  'refresh.recover',
+  'refresh.closeUnverified',
   // PR-4 (R-59): the six refresh routes resolve the host-vouched operator scope at the PULL tier, before any
   // host work; a carried tenant is already refused with the door open.
   'refresh.holds',

@@ -2411,6 +2411,11 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationRefreshChangePlanCurrent',
   'stockPreparationRefreshChangePlanConfirm',
   'stockPreparationRefreshChangeReviewComplete',
+  // Batch-refresh step 6a-2 (S6-2, R-91): the executions list and the recovery (verify / close, close-unverified) — the
+  // store's, the lock's, the recovery lib's and the decision library's typed refusals answer as themselves.
+  'stockPreparationRefreshExecutions',
+  'stockPreparationRefreshExecutionRecover',
+  'stockPreparationRefreshExecutionCloseUnverified',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',

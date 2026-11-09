@@ -3623,7 +3623,7 @@ async function recoverStockPreparationExecution(input = {}) {
       b2aClaimStore: input.b2aClaimStore,
       b2aSourceObjects,
       b2aNow: input.now,
-      refreshGovernance: handle,
+      refreshGovernance: input.refreshGovernance,
       // 批次标识 (BI §3.4, RS-2): the reader strip (always) and, while the switch is on, the band probe fold.
       pullBatchLane,
     })
