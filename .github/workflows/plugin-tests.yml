@@ -1682,6 +1682,25 @@ jobs:
             tests/tasks-auth/tasks-auth-gate.ts \
             --reporter=verbose
 
+      # Permission lifecycle on the migrated database. Dedicated config keeps
+      # RBAC_BYPASS and RBAC_TOKEN_TRUST false. Whole file; a missing database fails.
+      - name: Run permission lifecycle real-DB gate
+        id: permission-lifecycle-realdb
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for permission lifecycle real-DB gate}"
+          mkdir -p artifacts/grok-permission-lifecycle-ci
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-lifecycle.config.ts run \
+            tests/integration/permission-lifecycle-realdb.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 1
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'

@@ -18,6 +18,8 @@ export default defineConfig({
       // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).
       // Its module guard throws under any other config, so a bare run here would only report it as failed.
       'tests/integration/task-enablement-http.db.test.ts',
+      // Permission lifecycle real-DB gate. Trust-off config; this harness enables RBAC bypass.
+      'tests/integration/permission-lifecycle-realdb.test.ts',
     ],
     testTimeout: 30000,
     hookTimeout: 15000,
