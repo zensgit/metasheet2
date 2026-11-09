@@ -342,6 +342,56 @@ test('RT-U03d by-id reads are never an existence oracle: another tenant\'s hold 
   } finally { st.restore() }
 })
 
+// Pre-pilot fix batch 8(b) (R-91): the typed project number on the two DECISION routes that change state — the hold
+// confirm and the relationship end — pinned with real, otherwise-admissible bodies. A mistyped number is 400 before the
+// scope, the consult or any store statement; the same body with the path's number then lands (calibration).
+test('RT-U03f the hold CONFIRM and the relationship END refuse a mistyped confirmProjectNo (another number, case-folded, a suffix, missing, not a string) 400 REQUEST_INVALID field confirmProjectNo — no consult, no store statement, no audit row, no host work, nothing persisted; the same body with the path\'s number then lands', async () => {
+  const mistyped = [
+    ['another number', { confirmProjectNo: 'PRJ-RD-OTHER' }],
+    ['case-folded', { confirmProjectNo: PROJECT.toLowerCase() }],
+    ['a suffix', { confirmProjectNo: `${PROJECT}0` }],
+    ['not a string', { confirmProjectNo: 7 }],
+  ]
+  async function assertRefusedBeforeAnyIo(st, label, send) {
+    const before = JSON.stringify(st.env.snapshot())
+    const audits = st.audits().length
+    const hostCalls = st.h.provisioning.calls.length + st.h.records.calls.length
+    st.env.db.log.length = 0
+    const res = await send()
+    assert.equal(res.statusCode, 400, `${label}: ${JSON.stringify(res.body)}`)
+    assert.equal(errorOf(res).code, CODES.REQUEST_INVALID, label)
+    assert.equal(errorOf(res).details.field, 'confirmProjectNo', label)
+    assert.equal(st.env.db.log.length, 0, `${label}: no consult and no store statement`)
+    assert.equal(st.audits().length, audits, `${label}: no audit row`)
+    assert.equal(st.h.provisioning.calls.length + st.h.records.calls.length, hostCalls, `${label}: zero host work`)
+    assert.equal(JSON.stringify(st.env.snapshot()), before, `${label}: nothing persisted`)
+  }
+  // The hold confirm: a real candidate hold, read through the page, bound by its receipt.
+  {
+    const st = mount()
+    try {
+      const { row, hold } = await seedCandidate(st)
+      const { body } = await readAndBind(st, row, hold)
+      for (const [label, typed] of mistyped) await assertRefusedBeforeAnyIo(st, `confirm ${label}`, () => confirm(st, { ...body, ...typed }))
+      await assertRefusedBeforeAnyIo(st, 'confirm missing', () => call(st, 'POST', PATHS.confirm, { body }))
+      const done = await confirm(st, body)
+      assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    } finally { st.restore() }
+  }
+  // The end: a relationship that needs re-confirmation, escalated (admissible while a hold names it).
+  {
+    const st = mount()
+    try {
+      const { confirmed } = await needsReconfirmation(st)
+      const body = { revision: 1, outcome: 'escalate_special_repair' }
+      for (const [label, typed] of mistyped) await assertRefusedBeforeAnyIo(st, `end ${label}`, () => end(st, confirmed.continuationId, { ...body, ...typed }))
+      await assertRefusedBeforeAnyIo(st, 'end missing', () => call(st, 'POST', PATHS.end, { params: { id: confirmed.continuationId }, body }))
+      const done = await end(st, confirmed.continuationId, body)
+      assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+    } finally { st.restore() }
+  }
+})
+
 test('RT-U03e every value read appends exactly ONE values-free audit row (project_board_read with its mode) BEFORE the body; a sentinel planted in a hold\'s detail reaches the hold page and the evidence only — never an audit row, never an error detail of any refusal', async () => {
   const st = mount()
   try {
