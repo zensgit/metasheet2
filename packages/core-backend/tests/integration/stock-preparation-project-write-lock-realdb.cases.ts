@@ -8104,12 +8104,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             const lock0 = await lockRowFor(st.key)
             const audits0 = (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length
             const relationship = async () => (await q(`SELECT status, revision FROM ${RT.continuation} WHERE id = $1`, [confirmed.continuationId])).rows[0]
+            const before = await relationship().then((r: any) => r && `${r.status}:${r.revision}`)
             fire = async () => { await st.pilotExit() }
             const refused = await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body })
             const lock1 = await lockRowFor(st.key)
             const observed = {
               suspended: suspended.body.data.status,
-              before: await relationship().then((r: any) => r && `${r.status}:${r.revision}`),
+              before,
               fired: fire === null,
               confirm: answer(refused),
               decidedUnderLock: Boolean(errorOf(refused).details && errorOf(refused).details.decidedUnderLock === true),
