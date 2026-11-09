@@ -655,6 +655,8 @@ const {
   provisionProjectSheet,
   // G1 field defect (R67): the contract option sets onto ONE registered project sheet (the repair leg).
   syncProjectSheetContractOptions,
+  // R-71 ⑦.4 PR-3: the frozen template's missing columns on ONE registered project sheet (report-first).
+  reconcileProjectSheetTemplateColumns,
   markProjectSheetPlmSystemColumns,
   grantProjectSheetRoles,
   projectSheetViewHandles,
@@ -2202,7 +2204,10 @@ const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set(['con
 // set, no tenant, no projectId, no objectId: the sheet comes from the registry row, the sets from the
 // server. Its audit row reuses 088's `project_target_create` (it is the part of creating the sheet that
 // makes it usable — the S2 pack-install precedent) with this closed mode; no new vocabulary migration.
-const VALID_STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_KEYS = new Set(['projectNo'])
+// R-71 ⑦.4 PR-3: two optional booleans beside `projectNo`. `dryRun: true` changes nothing and reports;
+// `addMissingColumns: true` is the owner-gated field-creating write. Neither present = the pre-PR-3 repair
+// (options + PLM lock) plus a read-only report of the missing template columns.
+const VALID_STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_KEYS = new Set(['projectNo', 'dryRun', 'addMissingColumns'])
 const STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE = 'contract_options_synced'
 const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
 const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
@@ -5668,6 +5673,23 @@ function requireStockPreparationAudit() {
    * read-only for people (`markProjectSheetPlmSystemColumns`, idempotent — already-marked columns are not
    * written again). This is the rollout path for project sheets created before the lock existed; it changes
    * column metadata only, never a row. The counts ride the same audit row.
+   *
+   * R-71 ⑦.4 PR-3 — THE MISSING TEMPLATE COLUMNS (report-first). A template column merged after a sheet was
+   * created makes that sheet's pull answer 422 TARGET_SCHEMA_INCOMPLETE until the column exists there. The same
+   * locked step now reconciles the FROZEN main template's columns on the registry row's object, FIRST. An added
+   * `plm_system` column is INSERTED already carrying `humanWriteLock: 'plm_system'` (Y7 review MEDIUM-1), so it is
+   * read-only for people from the statement that creates it, even if the option sync or the lock step below then
+   * fails; the option set lands in the option sync's own later write (retryable). Three modes, chosen by two
+   * optional exact-boolean body keys (anything but a boolean is 400, nothing is coerced):
+   *   * neither (the pre-PR-3 call): options + lock exactly as before, plus a READ-ONLY report of the missing
+   *     columns (`columns.missingFieldIds`); nothing is added.
+   *   * `dryRun: true`: CHANGES NOTHING — no column, no option patch, no lock patch, no audit row. Reports what
+   *     an add would add (`columns.missingFieldIds` minus `refusedFieldIds`) and the current lock state. Wins
+   *     over `addMissingColumns`.
+   *   * `addMissingColumns: true`: the owner-gated FIELD-CREATING write. Additive, frozen template only,
+   *     atomic (one host transaction; existing columns byte-compared before/after), idempotent (a second call
+   *     reports every column `alreadyPresent` and adds 0, with no write call). There is no UI undo.
+   * The audit row records the column counts (`columnAddedCount` …) whatever the mode; a dry-run writes none.
    */
   async function repairProjectSheetContractOptions(req, res) {
     const user = getUser(req)
@@ -5678,6 +5700,13 @@ function requireStockPreparationAudit() {
     if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
       throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
     }
+    for (const flag of ['dryRun', 'addMissingColumns']) {
+      if (Object.prototype.hasOwnProperty.call(body, flag) && typeof body[flag] !== 'boolean') {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', `${flag} must be a boolean`, { field: flag })
+      }
+    }
+    const dryRun = body.dryRun === true
+    const addMissingColumns = !dryRun && body.addMissingColumns === true
     const scope = await resolveOperatorValueScope({
       user,
       authenticatedTenantId: req.authenticatedTenantId,
@@ -5697,13 +5726,88 @@ function requireStockPreparationAudit() {
     // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
     const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
     const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
-    const repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
-      row: locked,
-      options: await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
-      // B (awaiting owner): the same call marks the sheet's PLM columns read-only for people — the rollout
-      // path for sheets created before the lock existed. Idempotent; registry-resolved objectId only.
-      plmColumnLock: await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
-    }))
+    if (dryRun) {
+      // R-71 ⑦.4 PR-3: reads only, under the same row lock (so archived is the same 409), and no audit row.
+      const inspected = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => ({
+        row: locked,
+        columns: await reconcileProjectSheetTemplateColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId, sheetId: locked.sheetId, add: false }),
+        plmColumnLock: await readProjectSheetPlmSystemColumnLock({ provisioning, projectId: targetProjectId, objectId: locked.objectId }),
+      }))
+      const lockChecked = inspected.plmColumnLock.readBeforeWrite === true
+      return sendOk(res, {
+        ok: true,
+        dryRun: true,
+        projectNo,
+        target: { sheetId: inspected.row.sheetId, objectId: inspected.row.objectId },
+        columns: publicProjectSheetColumnReport(inspected.columns, 'dry_run'),
+        plmColumnLock: {
+          checked: lockChecked,
+          alreadyMarked: lockChecked ? inspected.plmColumnLock.marked : null,
+          unmarked: lockChecked ? inspected.plmColumnLock.unmarked : null,
+          missing: lockChecked ? inspected.plmColumnLock.missing : null,
+        },
+      })
+    }
+    // R-71 ⑦.4 PR-3 (review round 1): the column add COMMITS in its own host transaction, BEFORE the option sync
+    // and the PLM lock run. A failure in either of those (or in releasing the registry row) leaves the added
+    // columns in place — a field-creating write with no UI undo — so that write is audited on its OWN failure
+    // path: `committedColumns` is set the moment the add returns, `laterStep` names the step that was running,
+    // and the catch below appends ONE row (same action and mode, `outcome: 'failed_after_columns_added'`) with
+    // the column counts before the original error is rethrown. Nothing added ⇒ no extra row (the pre-PR-3
+    // failure behaviour, unchanged).
+    let committedColumns = null
+    let laterStep = null
+    let repaired
+    try {
+      repaired = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+        // R-71 ⑦.4 PR-3: columns FIRST. An added plm_system column is already locked by its own INSERT (MEDIUM-1); the
+        // option sync below gives an added select column its options, and the lock step finds the added ones marked.
+        const columns = await reconcileProjectSheetTemplateColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId, sheetId: locked.sheetId, add: addMissingColumns })
+        if (addMissingColumns) committedColumns = { row: locked, columns }
+        laterStep = 'options'
+        const options = await syncProjectSheetContractOptions({ provisioning, projectId: targetProjectId, objectId: locked.objectId })
+        laterStep = 'plm_lock'
+        // B (awaiting owner): the same call marks the sheet's PLM columns read-only for people — the rollout
+        // path for sheets created before the lock existed. Idempotent; registry-resolved objectId only.
+        const plmColumnLock = await markProjectSheetPlmSystemColumns({ provisioning, projectId: targetProjectId, objectId: locked.objectId })
+        laterStep = 'registry_release'
+        return { row: locked, columns, options, plmColumnLock }
+      })
+    } catch (error) {
+      const committedReport = committedColumns ? publicProjectSheetColumnReport(committedColumns.columns, 'add') : null
+      if (committedReport && committedReport.added > 0) {
+        const failureCode = error && typeof error.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(error.code) ? error.code : 'UNTYPED'
+        try {
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
+            subjectId: committedColumns.row.sheetId,
+            mode: STOCK_PREPARATION_PROJECT_SHEET_OPTION_REPAIR_AUDIT_MODE,
+            actor: user.id || user.email,
+            detail: {
+              objectId: committedColumns.row.objectId,
+              outcome: 'failed_after_columns_added',
+              failedStep: laterStep || 'columns',
+              failureCode,
+              ...projectSheetColumnAuditDetail(committedReport),
+            },
+          })
+        } catch (auditError) {
+          // The caller gets the ORIGINAL failure; the missing audit row is logged (codes only, never a value).
+          if (routeLogger && typeof routeLogger.error === 'function') {
+            try {
+              routeLogger.error('stock-prep project-sheet repair: columns were added but the failure audit row could not be written', {
+                failureCode,
+                auditCode: auditError && typeof auditError.code === 'string' ? auditError.code : 'UNTYPED',
+              })
+            } catch (_ignored) { /* a broken logger must not replace the original failure */ }
+          }
+        }
+      }
+      throw error
+    }
+    const columnReport = publicProjectSheetColumnReport(repaired.columns, addMissingColumns ? 'add' : 'report')
     await audit.append({
       tenantId,
       projectId: projectNo,
@@ -5719,6 +5823,8 @@ function requireStockPreparationAudit() {
         plmLockMarkedFieldCount: repaired.plmColumnLock.marked,
         plmLockAlreadyMarkedFieldCount: repaired.plmColumnLock.alreadyMarked,
         plmLockMissingFieldCount: repaired.plmColumnLock.missing,
+        // R-71 ⑦.4 PR-3: how many template columns this call found missing, added, and left (counts only).
+        ...projectSheetColumnAuditDetail(columnReport),
       },
     })
     return sendOk(res, {
@@ -5727,7 +5833,50 @@ function requireStockPreparationAudit() {
       target: { sheetId: repaired.row.sheetId, objectId: repaired.row.objectId, fieldCount: repaired.options.synced },
       evidence: repaired.options.evidence,
       plmColumnLock: { marked: repaired.plmColumnLock.marked, alreadyMarked: repaired.plmColumnLock.alreadyMarked, missing: repaired.plmColumnLock.missing },
+      columns: columnReport,
     })
+  }
+
+  /**
+   * R-71 ⑦.4 PR-3: the seven column counts both audit rows of the repair leg carry (the success row and the
+   * `failed_after_columns_added` row), from a public column report. Counts, booleans and the mode enum only.
+   */
+  function projectSheetColumnAuditDetail(columnReport) {
+    return {
+      columnMode: columnReport.mode,
+      columnsChecked: columnReport.checked,
+      templateColumnCount: columnReport.templateFieldCount,
+      columnAlreadyPresentCount: columnReport.checked ? columnReport.alreadyPresent : 0,
+      columnMissingBeforeCount: columnReport.missingFieldIds.length,
+      columnAddedCount: columnReport.added,
+      columnRefusedCount: columnReport.refusedFieldIds.length,
+    }
+  }
+
+  /**
+   * R-71 ⑦.4 PR-3: the column summary the repair leg answers, values-free (logical template ids and counts).
+   * `missingFieldIds` is what was missing BEFORE this call; `addedFieldIds` what this call added (only in mode
+   * `add`); `refusedFieldIds` what an add would refuse (a human column outside the whitelist), reported by the
+   * read-only modes. `checked: false` = a host without the existence read (nothing could be judged).
+   */
+  function publicProjectSheetColumnReport(summary, mode) {
+    const s = summary || {}
+    const list = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string') : [])
+    const missing = list(s.missingFieldIds)
+    const refused = list(s.refusedFieldIds)
+    const added = list(s.addedFieldIds)
+    return {
+      mode,
+      checked: s.checked === true,
+      templateFieldCount: Number.isInteger(s.templateFieldCount) ? s.templateFieldCount : 0,
+      alreadyPresent: s.checked === true && Number.isInteger(s.alreadyPresent) ? s.alreadyPresent : null,
+      missingFieldIds: missing,
+      // What `addMissingColumns: true` would add now (empty once this call added them).
+      wouldAddFieldIds: mode === 'add' ? [] : missing.filter((id) => !refused.includes(id)),
+      addedFieldIds: added,
+      added: added.length,
+      refusedFieldIds: refused,
+    }
   }
 
   /**
