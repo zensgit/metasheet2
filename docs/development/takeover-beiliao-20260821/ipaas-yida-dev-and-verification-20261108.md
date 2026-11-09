@@ -89,6 +89,7 @@ CI 数字为写作时该 head 上 `gh pr checks` 的通过 / 跳过（跳过项�
 - **叠在 Y4 上**：Y10 #6785、YT 二段 #6794。**单独基于 main**：Y0、Y1、YT 一段、D0。
 - **iPaaS 链**：I2 #6769 + I1 #6764 → I3a #6782 → I3b #6789 → I4 #6793 → I5 #6795。
 - 所有 PR 以 main 为基，说明顶部写明栈与自身 diff 范围。父 PR squash 合并后，子 PR **合 main，不 rebase**。
+- **合并任何一个 PR 之前，先把它更新到当时的 main 并重跑检查**：现在各 PR 的绿 CI 跑在各自 head 的 checkout 上，不含之后进 main 的提交（例如 #6824）。2026-11-08 对 main `f9ee5a781` 的状态：Y7 #6768、Y8 #6778、D0 #6775 无文本冲突；**Y9 #6812 有冲突**，在 `stock-preparation-project-write-lock.cjs`、它的测试和 `s6a-package-provenance-pins.json`（与 #6824 无关），按顺序 Y7 → Y8 推进后由 Y9 合新 Y8 / main 时一并解决。
 - **合并时已知的冲突与解法**（都已和备料线约定）：
   - Y7 × I2：两边都重钉 `s6a-package-provenance-pins.json` 的 pluginHttpRoutes，后合的一方重算钉子并重跑插件测试链。
   - **Y7 × #6818（已在 main）**：#6818 在 `http-routes.cjs` 模块作用域已导入 `readProjectSheetPlmSystemColumnLock`，自动合并会让它声明两次、整个文件加载失败（merge-tree 只报钉子冲突，看不出来）。Y7 已在 `1f23c410a` 合 main 并删掉重复项；**任何带旧 Y7（`ba1576ca3`）的分支——目前是 Y9 #6812——下次合 Y8 或 main 后必须先 `node --check lib/http-routes.cjs` 再跑测试**，钉子按合并后的 LF 字节重算。
