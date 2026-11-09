@@ -35,6 +35,8 @@
 //   IN-24  the band cannot be derived (critic C3): dry_run band_unavailable, install 503, birth provisioning_unavailable
 //
 //   Review round 1 killing tests: IN-4b (X7), IN-10c (H2d), IN-12b (H3h), IN-17b (H5b), IN-18b (X4), IN-23b (X2), IN-28 (X3)
+//   IN-28b (#6828 verifier) a firstPullBatch column committed concurrently between the resolve and the write =>
+//          409 band_appeared_concurrently; own new column rolled back, the concurrent row untouched, nothing written
 //   IN-29  (R-89, Y7 close-out) right = after the LAST column of the sheet: the whole-sheet max (the fenced
 //          readObjectMaxFieldOrder, read first) — a person column with a higher order than every known id sorts BEFORE
 //          the band (install and birth); left keeps −2 / −1 with the same person column
@@ -1000,6 +1002,56 @@ test('IN-28 (review X3) a repair that changes an existing column is refused (CON
   assert.equal(error.details.reason, 'band_mutated_existing')
   assert.equal(world.fields.get('componentSourceId').property.changedByRepair, undefined, 'rolled back')
   assert.equal(world.sheet(), null)
+})
+
+// #6828 verifier: the post-write check `skippedExistingFieldIds` => band_appeared_concurrently had no hermetic pin. A
+// firstPullBatch column row committed by ANOTHER transaction between this repair's resolve and its write, carrying the
+// DERIVED physical id — so the later band_unverified and band_mutated_existing checks both pass and only this check can
+// refuse. The concurrent commit is outside this transaction: the fake's rollback restores the pre-transaction snapshot,
+// so the wrapper re-applies the concurrent row after that rollback (a real rollback never undoes another transaction).
+test('IN-28b (#6828 verifier) a firstPullBatch column committed concurrently between the resolve and the write => 409 CONFLICT band_appeared_concurrently; the band\'s own new column rolled back, the concurrent row untouched, nothing else written', async () => {
+  const world = createWorld({ records: c09() })
+  const CONCURRENT = Object.freeze({ physical: P_FPB, order: 77, property: { ...TP.pullBatchBandProperty('zh-CN'), concurrentSyn: true } })
+  let committed = false
+  const racing = (tx) => ({
+    ...tx,
+    async resolveExistingObjectFieldIds(input) {
+      const out = await tx.resolveExistingObjectFieldIds(input)
+      if (!committed) {
+        committed = true
+        world.fields.set('firstPullBatch', structuredClone(CONCURRENT))
+      }
+      return out
+    },
+  })
+  const base = world.deps().provisioning
+  const prov = {
+    ...base,
+    async runObjectFieldsRepairTransaction(fn) {
+      try {
+        return await base.runObjectFieldsRepairTransaction((tx) => fn(racing(tx)))
+      } finally {
+        if (committed) world.fields.set('firstPullBatch', structuredClone(CONCURRENT))
+      }
+    },
+  }
+  const preview = await dryRun(world, {}, { provisioning: prov })
+  assert.equal(world.fields.has('firstPullBatch') || world.fields.has('pullBatch'), false, 'no band before the install')
+  const fieldsBefore = structuredClone(Array.from(world.fields.entries()))
+  const cellsBefore = allCells(world)
+  const logStart = world.log.length
+  const error = await rejects(install(world, { planDigest: preview.planDigest, count: 2 }, { provisioning: prov }), PB.PULL_BATCH_ERROR_CODES.CONFLICT, 'band appeared concurrently')
+  assert.equal(error.status, 409)
+  assert.equal(error.details.reason, 'band_appeared_concurrently')
+  assert.equal(committed, true, 'the concurrent row landed inside the repair window')
+  const during = world.log.slice(logStart)
+  assert.ok(during.includes('tx.ensureMissingObjectFields'), 'the write ran and reported the skipped id')
+  assert.equal(world.fields.has('pullBatch'), false, 'the band\'s own new column is rolled back')
+  assert.deepEqual(world.fields.get('firstPullBatch'), CONCURRENT, 'the concurrent row is untouched')
+  assert.deepEqual(Array.from(world.fields.entries()).filter(([id]) => id !== 'firstPullBatch'), fieldsBefore, 'no other column changed')
+  assert.deepEqual(allCells(world), cellsBefore, 'no cell written')
+  assert.equal(during.some((entry) => entry === 'host.patchRecord' || entry.startsWith('prov.patchProperty') || entry.startsWith('prov.ensureView') || entry.startsWith('prov.promote')), false, 'no host write after the refusal')
+  assert.equal(world.sheet(), null, 'the ledger is untouched')
 })
 
 // X4: the registry lock hands back another sheet (the registry moved meanwhile) => the resolve never runs.
