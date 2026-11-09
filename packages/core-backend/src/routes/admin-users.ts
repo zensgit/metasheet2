@@ -627,15 +627,33 @@ async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null
   return result.rows[0] ?? null
 }
 
-async function fetchUserRoleIds(userId: string): Promise<string[]> {
-  const result = await query<{ role_id: string }>(
-    `SELECT role_id
+type RoleIdExecutor = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ role_id?: string | null }> }>
+}
+
+async function fetchUserRoleIds(userId: string, executor?: RoleIdExecutor): Promise<string[]> {
+  const sql = `SELECT role_id
      FROM user_roles
      WHERE user_id = $1
-     ORDER BY role_id ASC`,
-    [userId],
-  )
-  return result.rows.map((row) => row.role_id).filter(Boolean)
+     ORDER BY role_id ASC`
+  const result = executor
+    ? await executor.query(sql, [userId])
+    : await query<{ role_id: string }>(sql, [userId])
+  return result.rows.map((row) => row.role_id).filter((roleId): roleId is string => Boolean(roleId))
+}
+
+/**
+ * Scope writes share the per-user admission lock with role revoke.
+ * Take that lock, then read roles again, and only then write.
+ * Do not take the platform-admin invariant lock: admin revoke already takes it first.
+ * Callers write only the requested namespace, so a sibling namespace's rows stay.
+ */
+async function recheckDelegableNamespacesUnderAdmissionLock(
+  executor: RoleIdExecutor,
+  userId: string,
+): Promise<string[]> {
+  await lockNamespaceAdmissionWrites(executor, userId)
+  return deriveDelegableNamespaces(await fetchUserRoleIds(userId, executor))
 }
 
 async function fetchRoleCatalog() {
@@ -3089,8 +3107,8 @@ export function adminUsersRouter(): Router {
       ])
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const adminNamespaces = deriveDelegableNamespaces(roleIds)
-      if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+      const previewNamespaces = deriveDelegableNamespaces(roleIds)
+      if (action === 'assign' && !previewNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
 
@@ -3106,26 +3124,40 @@ export function adminUsersRouter(): Router {
         if (!department.rows.length) {
           return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
         }
-        await query(
-          `INSERT INTO delegated_role_admin_scopes (
-             admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, directory_department_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, directoryDepartmentId, adminUserId],
-        )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_admin_scopes
-           WHERE admin_user_id = $1
-             AND namespace = $2
-             AND directory_department_id = $3`,
-          [userId, namespace, directoryDepartmentId],
-        )
       }
+
+      const locked = await transaction(async (client) => {
+        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
+        if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+          return { refused: true as const, adminNamespaces }
+        }
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO delegated_role_admin_scopes (
+               admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, directory_department_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, directoryDepartmentId, adminUserId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM delegated_role_admin_scopes
+             WHERE admin_user_id = $1
+               AND namespace = $2
+               AND directory_department_id = $3`,
+            [userId, namespace, directoryDepartmentId],
+          )
+        }
+        return { refused: false as const, adminNamespaces }
+      })
+      if (locked.refused) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+      const adminNamespaces = locked.adminNamespaces
 
       await auditLog({
         actorId: adminUserId,
@@ -3177,32 +3209,43 @@ export function adminUsersRouter(): Router {
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
       if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
 
-      const adminNamespaces = deriveDelegableNamespaces(roleIds)
-      if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+      const previewNamespaces = deriveDelegableNamespaces(roleIds)
+      if (action === 'assign' && !previewNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO delegated_role_admin_member_groups (
-             admin_user_id, namespace, group_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, group_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, groupId, adminUserId],
-        )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_admin_member_groups
-           WHERE admin_user_id = $1
-             AND namespace = $2
-             AND group_id = $3`,
-          [userId, namespace, groupId],
-        )
+      const locked = await transaction(async (client) => {
+        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
+        if (action === 'assign' && !adminNamespaces.includes(namespace)) {
+          return { refused: true as const, adminNamespaces }
+        }
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO delegated_role_admin_member_groups (
+               admin_user_id, namespace, group_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, group_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, groupId, adminUserId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM delegated_role_admin_member_groups
+             WHERE admin_user_id = $1
+               AND namespace = $2
+               AND group_id = $3`,
+            [userId, namespace, groupId],
+          )
+        }
+        return { refused: false as const, adminNamespaces }
+      })
+      if (locked.refused) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
+      const adminNamespaces = locked.adminNamespaces
 
       await auditLog({
         actorId: adminUserId,
@@ -3321,58 +3364,65 @@ export function adminUsersRouter(): Router {
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
       if (!template) return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
 
-      const adminNamespaces = deriveDelegableNamespaces(roleIds)
-      if (!adminNamespaces.includes(namespace)) {
+      const previewNamespaces = deriveDelegableNamespaces(roleIds)
+      if (!previewNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
       if (template.departments.length === 0 && template.memberGroups.length === 0) {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
       }
 
-      if (mode === 'replace') {
-        await Promise.all([
-          query(
+      const locked = await transaction(async (client) => {
+        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
+        if (!adminNamespaces.includes(namespace)) {
+          return { refused: true as const, adminNamespaces }
+        }
+        if (mode === 'replace') {
+          await client.query(
             `DELETE FROM delegated_role_admin_scopes
              WHERE admin_user_id = $1
                AND namespace = $2`,
             [userId, namespace],
-          ),
-          query(
+          )
+          await client.query(
             `DELETE FROM delegated_role_admin_member_groups
              WHERE admin_user_id = $1
                AND namespace = $2`,
             [userId, namespace],
-          ),
-        ])
+          )
+        }
+        for (const department of template.departments) {
+          await client.query(
+            `INSERT INTO delegated_role_admin_scopes (
+               admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, directory_department_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, department.directoryDepartmentId, adminUserId],
+          )
+        }
+        for (const group of template.memberGroups) {
+          await client.query(
+            `INSERT INTO delegated_role_admin_member_groups (
+               admin_user_id, namespace, group_id, created_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (admin_user_id, namespace, group_id)
+             DO UPDATE SET
+               created_by = EXCLUDED.created_by,
+               updated_at = NOW()`,
+            [userId, namespace, group.id, adminUserId],
+          )
+        }
+        return { refused: false as const, adminNamespaces }
+      })
+      if (locked.refused) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
-
-      for (const department of template.departments) {
-        await query(
-          `INSERT INTO delegated_role_admin_scopes (
-             admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, directory_department_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, department.directoryDepartmentId, adminUserId],
-        )
-      }
-
-      for (const group of template.memberGroups) {
-        await query(
-          `INSERT INTO delegated_role_admin_member_groups (
-             admin_user_id, namespace, group_id, created_by, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, NOW(), NOW())
-           ON CONFLICT (admin_user_id, namespace, group_id)
-           DO UPDATE SET
-             created_by = EXCLUDED.created_by,
-             updated_at = NOW()`,
-          [userId, namespace, group.id, adminUserId],
-        )
-      }
+      const adminNamespaces = locked.adminNamespaces
 
       const [scopeAssignments, groupAssignments] = await Promise.all([
         fetchDelegatedScopeAssignments(userId),
