@@ -199,6 +199,12 @@ function mount() {
       resolveExistingObjectFieldIds: (input: Loose) => p.resolveExistingObjectFieldIds(input),
       readObjectFieldsContent: (input: Loose) => p.readObjectFieldsContent(input),
       ensureMissingObjectFields: (input: Loose) => p.ensureMissingObjectFields(input),
+      readObjectMaxFieldOrder: async ({ projectId, objectId }: Loose) => {
+        p.calls.push(['readObjectMaxFieldOrder', objectId])
+        const object = p.objects.get(`${projectId}/${objectId}`)
+        const orders = object ? Array.from(object.fields.values()).map((field: Loose) => field.order) : []
+        return orders.length > 0 ? Math.max(...orders) : null
+      },
     })
   }
   // Two IO counters on the governed path's pre-read hops (this file's own): the credential load and the adapter build.
@@ -285,6 +291,7 @@ describe('R-69 1c / BI-2 — a REAL pull-batch install lease → the governed pr
     vi.stubEnv(ACTION_FLAG, 'true')
     vi.stubEnv(EVENT_FLAG, 'true')
     vi.stubEnv(PULL_BATCH_FLAG, 'true')
+    vi.stubEnv('MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED', 'true')
   })
   afterEach(() => {
     vi.unstubAllEnvs()
@@ -327,7 +334,7 @@ describe('R-69 1c / BI-2 — a REAL pull-batch install lease → the governed pr
       // 2. The REAL executor → the REAL plugin port over the registration's governed entries.
       const events = captureSink()
       const port = createIntegrationRunPort({ governedEntries: h.governedEntries }) as IntegrationRunPort
-      const db = createFakeJobDb()
+      const db = createFakeJobDb({ projectTargets: { sheet_rule_i6c: { tenantId: TENANT, projectNo: PROJECT, status: 'active' } } })
       const { run } = harness(db, port)
       const step = await run('exec_i6c_held')
 
@@ -396,7 +403,7 @@ describe('R-69 1c / BI-2 — a REAL pull-batch install lease → the governed pr
       const seeded = seedSheet(h)
       const events = captureSink()
       const port = createIntegrationRunPort({ governedEntries: h.governedEntries }) as IntegrationRunPort
-      const { run } = harness(createFakeJobDb(), port)
+      const { run } = harness(createFakeJobDb({ projectTargets: { sheet_rule_i6c: { tenantId: TENANT, projectNo: PROJECT, status: 'active' } } }), port)
       const step = await h.lock.withProjectWriteLease(
         lockLib.sheetWriteScopeKey(seeded.sheetId),
         { purpose: 'small_apply', runId: 'small-apply:i6c-calibration', tenantId: TENANT },
