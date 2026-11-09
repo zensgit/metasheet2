@@ -65,8 +65,25 @@ const permissionLifecycleStep = {
     'mkdir -p artifacts/grok-permission-lifecycle-ci',
     'pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-lifecycle.config.ts run \\',
     '  tests/integration/permission-lifecycle-realdb.test.ts \\',
+    '  tests/integration/permission-role-delete-realdb.test.ts \\',
     '  --reporter=verbose --reporter=json --outputFile.json=../../artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json',
-    'node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 1',
+    'node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 2',
+    '',
+  ].join('\n'),
+}
+
+const permissionBrowserStep = {
+  name: 'Run permission browser real-DB gate',
+  id: 'permission-browser-realdb',
+  if: "matrix.node-version == '20.x'",
+  env: { ...permissionLifecycleStep.env },
+  run: [
+    ': "${DATABASE_URL:?DATABASE_URL is required for permission browser real-DB gate}"',
+    'mkdir -p artifacts/permission-browser-ci',
+    'pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-browser.config.ts run \\',
+    '  tests/integration/permission-browser-realdb.test.ts \\',
+    '  --reporter=verbose --reporter=json --outputFile.json=../../artifacts/permission-browser-ci/vitest.json',
+    'node scripts/ops/vitest-zero-skip.mjs artifacts/permission-browser-ci/vitest.json 1',
     '',
   ].join('\n'),
 }
@@ -132,6 +149,11 @@ function assertParallelWorkflow(doc) {
       assert.equal(actual[anchor + 1] && actual[anchor + 1].id, permissionLifecycleStep.id,
         'Keep the permission lifecycle gate immediately after the tasks auth gate')
       assert.deepEqual(actual.splice(anchor + 1, 1), [permissionLifecycleStep])
+      const browserAnchor = actual.findIndex(step => step.id === 'stock-preparation-yida-owner-browser-install')
+      assert.ok(browserAnchor >= 0, 'Keep Chromium installation before browser acceptance')
+      assert.equal(actual.filter(step => step.id === permissionBrowserStep.id).length, 1,
+        'Permission browser real-DB gate must run exactly once')
+      assert.deepEqual(actual.splice(browserAnchor + 1, 1), [permissionBrowserStep])
     }
     if (!['contracts', 'permissions', 'unit'].includes(suite)) {
       assert.deepEqual(actual.splice(-1), [resultUpload(suite)])
@@ -256,6 +278,12 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
   const mutations = [
+    ...[permissionLifecycleStep, permissionBrowserStep].flatMap(gate => [
+      doc => { const steps = doc.jobs['runtime-db'].steps; steps.splice(steps.findIndex(step => step.id === gate.id), 1) },
+      doc => { doc.jobs['runtime-db'].steps.find(step => step.id === gate.id).if = false },
+      doc => { doc.jobs['runtime-db'].steps.find(step => step.id === gate.id)['continue-on-error'] = true },
+      doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === gate.id); step.run = step.run.replace(/node scripts\/ops\/vitest-zero-skip[^\n]+\n/, '') },
+    ]),
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolZeroSkipLine)); step.run = step.run.replace(lockProtocolZeroSkipLine, '') },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.endsWith(lockProtocolZeroSkipLine)); step.run = `${step.run.slice(0, -1)} || true\n` },
