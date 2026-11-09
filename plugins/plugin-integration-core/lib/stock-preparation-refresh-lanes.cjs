@@ -688,6 +688,23 @@ function selfSettlementFor({ dryRun, outcome, applyResult, guard, template }) {
   })
 }
 
+/**
+ * Step 6a-2 (design §3.6 step 7): the settlement a RECOVERY close may carry — its in-lease recompute IS a computation made
+ * after the run under recovery. Non-null only when the recompute is clean (not suspended, no hold) with zero pending
+ * decisions; the store re-decides admissibility under its state lock (and never settles a transparent close). The digests
+ * are the SAME as every other settlement's (one definition: sourceContentDigestOf / machineDigestOf).
+ */
+function recoverySettlementFor({ dryRun, guard, template }) {
+  const plan = dryRun && dryRun.plan
+  if (!plan || plan.suspended === true || (Array.isArray(plan.holds) && plan.holds.length > 0)) return null
+  if (pendingDecisionCount(plan) !== 0) return null
+  return Object.freeze({
+    generationToken: guard && nonBlankString(guard.generationToken) ? guard.generationToken : null,
+    sourceContentDigest: sourceContentDigestOf(dryRun),
+    sheetMachineDigest: machineDigestOf(dryRun, template),
+  })
+}
+
 // ── the large lane (TD-17) ───────────────────────────────────────────────────────────────────────
 
 /** First match: pilot | continuation | hold | execution | review | refresh_state. */
@@ -780,6 +797,12 @@ function createRefreshGovernanceHandle({
     beginExecution: (input) => services().store.beginExecution(input),
     // Step 6a-1: a self-verifying finish appends its audit row on its own transaction through the SAME route-wired hook.
     finishExecution: (input) => services().store.finishExecution(input, typeof auditWithin === 'function' ? { auditWithin } : {}),
+    // Step 6a-2 (S6-2, design §3.5 step 4a): the recovery's read, close and list. The close's hooks (the route's audit
+    // row with its actor, the holder assert, 批次标识's close hook) are the RECOVERY's own, handed per call — never the
+    // system hook above.
+    readExecutionForRecovery: (input) => services().store.readExecutionForRecovery(input),
+    closeExecution: (input, options) => services().store.closeExecution(input, options),
+    listExecutions: (input) => services().store.listExecutions(input),
   })
   return Object.freeze({
     // Step 5 PR-8 (refutation m2, C08 「每一步的状态、导出结果与审计可见」): the audit row a reconciliation appends ON ITS
@@ -847,6 +870,8 @@ module.exports = {
   refreshHoldStanza,
   refreshSourceIdentity,
   selfSettlementFor,
+  // Step 6a-2.
+  recoverySettlementFor,
   settlementForComputation,
   sourceBindingDisagreementOf,
   sourceBindingSplit,

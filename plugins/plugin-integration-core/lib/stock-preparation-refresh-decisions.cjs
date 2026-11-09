@@ -122,6 +122,12 @@ const REFRESH_DECISION_AUDIT = Object.freeze({
     // Step 6a-1 (design §3.3, D9 — no vocabulary migration): the SYSTEM row a self-verifying execution finish appends on
     // its own transaction.
     executionSelfVerified: 'execution_self_verified',
+    // Step 6a-2 (design §3.11, D9 — no vocabulary migration): the recovery close (puller / runbook), on the close's own
+    // transaction; the audited verify page (and close-unverified's inspect) and the executions list.
+    executionVerifiedClosed: 'execution_verified_closed',
+    executionClosedUnverified: 'execution_closed_unverified',
+    executionVerifyRead: 'execution_verify_read',
+    executionListRead: 'execution_list_read',
   }),
 })
 
