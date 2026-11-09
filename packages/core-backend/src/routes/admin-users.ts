@@ -2365,8 +2365,22 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
   }
 }
 
-async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise<void> {
-  await query(
+class LastPlatformAdminConflict extends Error {
+  readonly code = 'LAST_PLATFORM_ADMIN'
+  constructor() {
+    super('至少保留一名可登录的平台管理员')
+    this.name = 'LastPlatformAdminConflict'
+  }
+}
+
+type LegacyProfileQuery = (sql: string, params?: unknown[]) => Promise<unknown>
+
+async function syncLegacyAdminProfile(
+  userId: string,
+  enabled: boolean,
+  runQuery: LegacyProfileQuery,
+): Promise<void> {
+  await runQuery(
     `UPDATE users
      SET role = CASE
        WHEN $2::boolean THEN 'admin'
@@ -3722,6 +3736,14 @@ export function adminUsersRouter(): Router {
       let disabledNamespaces: string[] = []
       try {
         membership = await transaction(async (client) => {
+          const runQuery = (sql: string, params?: unknown[]) => client.query(sql, params)
+          // Platform-admin demotion takes the global invariant before any user lock.
+          // Delegates never reach the admin role (refused above). The role row
+          // FOR SHARE stays before the user admission lock.
+          if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID) {
+            await lockPlatformAdminInvariant(client)
+            if (await isLastSignInPlatformAdmin(client, userId)) throw new LastPlatformAdminConflict()
+          }
           if (!delegation.isPlatformAdmin) {
             // The role's codes are read INSIDE the transaction that writes the membership, with
             // the role row held FOR SHARE: the role editor (`PUT`/`POST /api/roles`) takes the
@@ -3748,10 +3770,20 @@ export function adminUsersRouter(): Router {
             )
             if (refusal) throw refusal
           }
-          if (action === 'assign') {
-            return assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          // Same per-user admission lock as platform unassign and batch update, held
+          // across membership DML and the legacy profile write. Assign's INSERT
+          // ON CONFLICT DO NOTHING otherwise interleaves with a concurrent unassign.
+          if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+            await lockNamespaceAdmissionWrites(client, userId)
           }
-          await lockNamespaceAdmissionWrites(client, userId)
+          if (action === 'assign') {
+            const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+            if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, runQuery)
+            return assigned
+          }
+          if (roleId !== PLATFORM_ADMIN_ROLE_ID) {
+            await lockNamespaceAdmissionWrites(client, userId)
+          }
           const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
           disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
             userId,
@@ -3760,9 +3792,13 @@ export function adminUsersRouter(): Router {
             source: 'role_unassigned',
             revokedRoleId: roleId,
           }, client.query)
+          if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, false, runQuery)
           return removed
         })
       } catch (error) {
+        if (error instanceof LastPlatformAdminConflict) {
+          return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', error.message)
+        }
         if (!(error instanceof DelegatedRoleRefusal)) throw error
         if (error.code !== 'ROLE_NOT_FOUND') {
           await auditDelegatedRoleRefusal({
@@ -3782,9 +3818,6 @@ export function adminUsersRouter(): Router {
         trigger: action === 'assign' ? 'role_appointed' : 'role_unassigned',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, action === 'assign')
-      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5252,22 +5285,30 @@ export function adminUsersRouter(): Router {
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
       // One transaction so that a fresh main-admin appointment and the removal of any audience
-      // left over from an earlier tenure land together (see `assignUserRoles`).
-      const membership = await transaction((client) => assignUserRoles({
-        userIds: [userId],
-        roleId,
-        scope: { kind: 'platform-admin' },
-        executor: client,
-      }))
+      // left over from an earlier tenure land together (see `assignUserRoles`). The admin
+      // role also holds the same admission lock as unassign across the membership insert
+      // and the legacy profile update.
+      const membership = await transaction(async (client) => {
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await lockNamespaceAdmissionWrites(client, userId)
+        }
+        const assigned = await assignUserRoles({
+          userIds: [userId],
+          roleId,
+          scope: { kind: 'platform-admin' },
+          executor: client,
+        })
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await syncLegacyAdminProfile(userId, true, (sql, params) => client.query(sql, params))
+        }
+        return assigned
+      })
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
         trigger: 'role_appointed',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, true)
-      }
       const disabledNamespaces: string[] = []
       invalidateUserPerms(userId)
 
@@ -5334,18 +5375,7 @@ export function adminUsersRouter(): Router {
           revokedRoleId: roleId,
         }, client.query)
         if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await client.query(
-            `UPDATE users
-             SET role = CASE
-               WHEN $2::boolean THEN 'admin'
-               WHEN role = 'admin' THEN 'user'
-               ELSE role
-             END,
-             is_admin = $2,
-             updated_at = NOW()
-             WHERE id = $1`,
-            [userId, false],
-          )
+          await syncLegacyAdminProfile(userId, false, (sql, params) => client.query(sql, params))
         }
         return { blocked: false as const, membership, disabledNamespaces }
       })
