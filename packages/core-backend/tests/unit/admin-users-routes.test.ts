@@ -3164,6 +3164,105 @@ describe('admin-users routes', () => {
       expect.stringContaining('SET role = CASE'),
       ['user-1', true],
     )
+    expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), 'user-1')
+    const lockAt = namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mock.invocationCallOrder[0]
+    const insertAt = pgMocks.query.mock.invocationCallOrder[
+      pgMocks.query.mock.calls.findIndex((call) => String(call[0]).includes('INSERT INTO user_roles'))
+    ]
+    const legacyAt = pgMocks.query.mock.invocationCallOrder[
+      pgMocks.query.mock.calls.findIndex((call) => String(call[0]).includes('SET role = CASE'))
+    ]
+    expect(lockAt).toBeLessThan(insertAt)
+    expect(insertAt).toBeLessThan(legacyAt)
+  })
+
+  it.each(['platform', 'delegated'] as const)('%s admin assign keeps the admission lock and legacy profile inside one transaction', async (entry) => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const events: string[] = []
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => pgMocks.query(sql, params)),
+    }
+    vi.mocked(transaction).mockImplementationOnce(async (callback) => {
+      events.push('begin')
+      const result = await callback(client as never)
+      events.push('commit')
+      return result
+    })
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO user_roles')) {
+        events.push('insert')
+        return { rows: [{ user_id: 'user-1' }], rowCount: 1 }
+      }
+      if (sql.includes('SET role = CASE')) {
+        events.push('legacy')
+        return { rows: [] }
+      }
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'admin' }] }
+      if (sql.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'admin',
+            is_active: true, is_admin: true, last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z', updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      if (sql.includes('role_id')) return { rows: [{ role_id: 'admin' }] }
+      return { rows: [] }
+    })
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockImplementation(async () => {
+      events.push('admission')
+    })
+
+    const response = await invokeRoute('post', entry === 'platform'
+      ? '/api/admin/users/:userId/roles/assign'
+      : '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(events).toEqual(['begin', 'admission', 'insert', 'legacy', 'commit'])
+  })
+
+  it('delegated unassign refuses the last platform admin before the admission lock', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const events: string[] = []
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_advisory_xact_lock')) {
+        events.push('invariant')
+        return { rows: [] }
+      }
+      if (sql.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: true }] }
+      if (sql.includes('COUNT(*)')) return { rows: [{ c: 0 }] }
+      if (sql.includes('DELETE FROM user_roles') || sql.includes('SET role = CASE')) {
+        events.push('write')
+        return { rows: [] }
+      }
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'admin' }] }
+      if (sql.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'admin',
+            is_active: true, is_admin: true, last_login_at: null,
+            created_at: '2026-03-12T00:00:00.000Z', updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockImplementation(async () => {
+      events.push('admission')
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'unassign' },
+      body: { roleId: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as { error: { code: string } }).error.code).toBe('LAST_PLATFORM_ADMIN')
+    expect(events).toEqual(['invariant'])
   })
 
   it('unassigns a role and writes an audit entry', async () => {
