@@ -714,6 +714,10 @@ const {
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
   // S3 follow-ups 2, fix round 1: 409 BUSY for a click while this process's refresh of the tenant is still running.
   projectOverviewBusyError,
+  // Pre-pilot fix batch 8(c): the directory's per-row refresh facts, derived as the overview derives them.
+  refreshBlockedToken,
+  refreshPostureInputOf,
+  readRefreshStateForOverview,
 } = require('./stock-preparation-project-overview.cjs')
 // 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
 // decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
@@ -5056,6 +5060,40 @@ function requireStockPreparationAudit() {
     } catch (error) {
       return { ready: false, byProjectNo: new Map() }
     }
+  }
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): THE DIRECTORY'S PER-ROW REFRESH FACTS for the registry rows
+  // (switch on, union opt-in) — so a home card / 项目查询 row never says 「可以导出」 where the formal export refuses.
+  // Cost: ONE governed index (the registry's pilot markers + the store's state / relationship / open-hold project
+  // numbers: four bounded reads per directory response) and ONE consult per GOVERNED registry row — never per project:
+  // on today's build (CONTINUATION_SUPPORT_VERSION 0, no pilot) that is the index alone. `null` (governance or either
+  // index read not wired) adds no key (absent, not false); a failed index read is `{ ready: false }` (every registry
+  // row `unreadable`); a failed consult is that row's `unreadable` (readRefreshStateForOverview), the rest go on.
+  async function directoryRefreshFactsFor(tenantId, projectTargetRows) {
+    if (!Array.isArray(projectTargetRows)) return null
+    const reader = refreshStateReaderOrNull(tenantId)
+    const store = stockPreparationContinuationStore
+    const registry = stockPreparationProjectTargets
+    if (!reader || !store || typeof store.listGovernedProjectNos !== 'function' || !registry || typeof registry.listPilotStates !== 'function') return null
+    let candidates
+    try {
+      const [pilots, indexed] = [await registry.listPilotStates({ tenantId }), await store.listGovernedProjectNos({ tenantId })]
+      if (!Array.isArray(pilots) || !indexed || indexed.ok !== true || !(indexed.projectNos instanceof Set)) return { ready: false, byProjectNo: new Map() }
+      candidates = new Set(indexed.projectNos)
+      for (const pilot of pilots) if (pilot && pilot.pilot === true && typeof pilot.projectNo === 'string') candidates.add(pilot.projectNo)
+    } catch {
+      return { ready: false, byProjectNo: new Map() }
+    }
+    const byProjectNo = new Map()
+    for (const row of projectTargetRows) {
+      const no = row && typeof row.projectNo === 'string' ? row.projectNo : null
+      if (!no || !candidates.has(no) || byProjectNo.has(no)) continue
+      const state = await readRefreshStateForOverview(reader, { projectNo: no, sheetId: row.sheetId })
+      byProjectNo.set(no, Object.freeze({
+        refreshBlocked: refreshBlockedToken(refreshPostureInputOf(state)),
+        pendingReviewCount: state && state.readable === true && state.counts && Number.isInteger(state.counts.pendingReviews) ? state.counts.pendingReviews : null,
+      }))
+    }
+    return { ready: true, byProjectNo }
   }
   // PR-5 (design §7.1 row 25, D-17): the handoff's TERMINAL hop is a formal handover and is refused while the
   // project's refresh state is unfinished or unreadable — the ONE predicate the export keys on
@@ -13474,6 +13512,8 @@ function requireStockPreparationAudit() {
         // PR-5 (design §11): `pendingDecisionCount` is the UNION of the confirmation ledger and the open refresh
         // holds; an unreadable hold table makes `ledgerReady` false, never "zero holds".
         refreshHoldCounts: await openHoldCountsFor(scope.tenantId),
+        // Pre-pilot fix batch 8(c) (R-91): per registry row, the hold count, the pending reviews and the blocked token.
+        refreshFacts: await directoryRefreshFactsFor(scope.tenantId, projectTargetRows),
       })
       // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
       // projectNo, no projectName, and no `projects` array — the row records THAT a directory read

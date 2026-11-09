@@ -1338,6 +1338,69 @@ test('RT-EV the evidence behind a hold: the demand facts the computation recorde
   } finally { st.restore() }
 })
 
+// ── RT-DIR (pre-pilot fix batch 8(c), R-91; PR-9 residual 5) ───────────────────────────────────────
+
+const DIRECTORY_PATH = '/api/integration/stock-preparation/operator/projects'
+const directory = (st, options = {}) => harness.call(st.h.routes, 'GET', DIRECTORY_PATH, { user: PULLER, query: { includePullTargets: '1', ...(options.query || {}) }, params: {} })
+const rowOf = (res, projectNo = PROJECT) => dataOf(res).projects.find((entry) => entry.projectNo === projectNo)
+const refreshKeysOf = (row) => ({ openRefreshHoldCount: row.openRefreshHoldCount, pendingReviewCount: row.pendingReviewCount, refreshBlocked: row.refreshBlocked })
+
+test('RT-DIR (8c) the directory\'s REGISTRY rows carry the open hold count, the pending reviews and a closed blocked token from the derived refresh state: an open hold => pending_confirmation; a pilot never settled => unsettled; a not-governed project beside it => null with zero counts and NO consult; a governed index that cannot be read => unreadable on every registry row; values-free', async () => {
+  // (a) a governed pilot project with an open candidate hold, and a not-governed registered project beside it.
+  {
+    const st = mount()
+    try {
+      st.h.seedRegistryRow('PRJ-RD-PLAIN')
+      await seedCandidate(st)
+      const consultsBefore = st.env.db.log.filter(([method, args]) => method === 'trx.select' && args && args.table === REFRESH_STORE_TABLES.continuation).length
+      const res = await directory(st)
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+      assert.deepEqual(refreshKeysOf(rowOf(res)), { openRefreshHoldCount: 1, pendingReviewCount: 0, refreshBlocked: 'pending_confirmation' })
+      assert.equal(rowOf(res).pendingDecisionCount, 1, 'the union count is unchanged (the hold folded in)')
+      assert.deepEqual(refreshKeysOf(rowOf(res, 'PRJ-RD-PLAIN')), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: null })
+      // ONE consult: the governed row only (the consult's snapshot reads continuations by (tenant, project) AND by sheet).
+      const consults = st.env.db.log.filter(([method, args]) => method === 'trx.select' && args && args.table === REFRESH_STORE_TABLES.continuation)
+      const projectsConsulted = new Set(consults.slice(consultsBefore).map(([, args]) => args.where && args.where.project_no).filter(Boolean))
+      assert.deepEqual([...projectsConsulted], [PROJECT], 'the not-governed registry row was never consulted')
+      assert.equal(JSON.stringify(res.body).includes(SENTINEL), false)
+    } finally { st.restore() }
+  }
+  // (b) a pilot with no step-4 row at all: complete but never settled => unsettled (the export refuses not_settled).
+  {
+    const st = mount()
+    try {
+      assert.deepEqual(refreshKeysOf(rowOf(await directory(st))), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: 'unsettled' })
+    } finally { st.restore() }
+  }
+  // (c) a registered project that is NOT governed (no marker, no row): the pre-8(c) posture inputs, no consult.
+  {
+    const st = mount({ pilot: false })
+    try {
+      assert.deepEqual(refreshKeysOf(rowOf(await directory(st))), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: null })
+    } finally { st.restore() }
+  }
+  // (d) the governed index cannot be read (the state table read fails): every registry row is unreadable, never ready.
+  {
+    const st = mount({ pilot: false })
+    try {
+      st.env.db.faults.select = (args) => (args && args.table === REFRESH_STORE_TABLES.state && args.where && args.where.tenant_id && !args.where.project_no ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+      const row = rowOf(await directory(st))
+      assert.equal(row.refreshBlocked, 'unreadable')
+      assert.equal(row.pendingReviewCount, null)
+      st.env.db.faults.select = null
+    } finally { st.restore() }
+  }
+  // (e) governance not wired: the three keys are ABSENT (nobody asked), the rest of the row as before.
+  {
+    const st = mount({ unwired: true })
+    try {
+      const row = rowOf(await directory(st))
+      for (const key of ['openRefreshHoldCount', 'pendingReviewCount', 'refreshBlocked']) assert.equal(Object.prototype.hasOwnProperty.call(row, key), false, key)
+      assert.equal(typeof row.archived, 'boolean', 'still a registry row')
+    } finally { st.restore() }
+  }
+})
+
 // ── RT-NG ────────────────────────────────────────────────────────────────────────────────────────
 
 test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker stays 0 (pilot enable impossible — the pilot column is seeded directly by these cases)', async () => {

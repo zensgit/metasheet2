@@ -211,6 +211,8 @@ const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5
 const REVIEWED_CELL_CONFLICT_COLUMNS = Object.freeze(['sheet_id', 'project_no', 'record_key_digest', 'field_id'])
 const REVIEWED_CELL_UPDATE_COLUMNS = Object.freeze(['record_id', 'reviewed_cell', 'change_plan_id', 'reviewed_at', 'updated_at'])
 const NEWEST_EXECUTIONS = 5
+// Pre-pilot fix batch 8(c): one state row per governed project; the registry caps a tenant at 200 projects.
+const GOVERNED_INDEX_STATE_CEILING = 1000
 
 class StockPreparationRefreshStoreError extends Error {
   constructor(status, code, message, details = {}) {
@@ -1404,6 +1406,26 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       byProjectNo.set(projectNo, (byProjectNo.get(projectNo) || 0) + 1)
     }
     return Object.freeze({ ok: true, byProjectNo })
+  }
+
+  /**
+   * Pre-pilot fix batch 8(c) (register R-91): the project numbers of one tenant that hold a refresh-state row, a
+   * relationship (any status — ended ones still govern, D3) or an OPEN hold — with the registry's pilot markers, the
+   * operator directory's governed-candidate index (only those projects are consulted). Why these three suffice next
+   * to the marker: the state row is created by the hold reconciliation alone (`lockStateRow` createIfAbsent), a hold
+   * only by that reconciliation, a relationship only by a confirm that requires the state row; an execution or a
+   * change plan only on a governed project, and a governed project is a pilot (the marker has no unset path, R-53 ②)
+   * or already holds one of these. Throws 503 on any failure — never an empty set.
+   */
+  async function listGovernedProjectNos(input = {}) {
+    const tenantId = trimmed(input.tenantId)
+    if (!tenantId) throw scopeInvalid('tenantId')
+    const out = new Set()
+    const add = (rows) => { for (const row of rows) { const no = trimmed(row.project_no); if (no) out.add(no) } }
+    add(await selectAll(db, REFRESH_STORE_TABLES.state, { tenant_id: tenantId }, { ceiling: GOVERNED_INDEX_STATE_CEILING, operation: 'list_governed_states' }))
+    add(await selectAll(db, REFRESH_STORE_TABLES.continuation, { tenant_id: tenantId }, { ceiling: READ_CEILINGS.continuation, operation: 'list_governed_continuations' }))
+    add(await selectAll(db, REFRESH_STORE_TABLES.hold, { tenant_id: tenantId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'list_governed_holds' }))
+    return Object.freeze({ ok: true, projectNos: out })
   }
 
   /** One hold by id, scoped (any status). */
@@ -3079,6 +3101,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     confirmChangePlan,
     completeChangeReview,
     countOpenHoldsByProjectNo,
+    listGovernedProjectNos,
     confirmContinuation,
     reconfirmContinuation,
     endContinuation,
