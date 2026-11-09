@@ -123,6 +123,11 @@ function stubClient(
       if (/^\s*INSERT INTO directory_deprovision_effects \(/i.test(sql)) {
         return { rows: [] }
       }
+      // D21 (Y5a): lockCandidateUser bumps the subject authorization version row as its first
+      // statement, before the users FOR UPDATE mutex (zzzz20261106110500); a lock-taking upsert.
+      if (/INSERT INTO subject_authorization_versions/i.test(sql)) {
+        return { rows: [], rowCount: 1 }
+      }
       // Anything else is drift: a new query appeared that no test has reasoned about.
       throw new Error(`Unhandled SQL in deprovision stub:\n${sql}`)
     },

@@ -966,8 +966,13 @@ describe('StockPreparationYidaPreviewPanel', () => {
       expect(protocolData()).toEqual(host.plan.rows.map((row) => row.protocolPreview?.data))
       host.plan.rows.forEach((row) => expect(q(`sp-yida-result-row-${row.index}`).textContent).toContain(`本地业务键：${row.localBusinessKey}`))
     }
-    expect(q<HTMLButtonElement>('sp-yida-initialization-open').disabled).toBe(true)
-    expect(q('sp-yida-initialization-blocked').textContent).toContain('本地初始化仍只接受 v2 合同')
+    // R-71 ⑦.3: a clean v3 create preview is a persistent draft input. The entry opens, but the
+    // initialization POST stays refused inside (E1): v3 goes only to the owner send path.
+    expect(q<HTMLButtonElement>('sp-yida-initialization-open').disabled).toBe(false)
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+    q<HTMLButtonElement>('sp-yida-initialization-open').click(); await flush()
+    expect(q('sp-yida-init-v3-blocked').textContent).toContain('v3 草稿只能发往已用 v2 七键布局初始化的目标')
+    expect(q<HTMLButtonElement>('sp-yida-init-submit').disabled).toBe(true)
     expectNoIo()
   })
 
@@ -982,6 +987,45 @@ describe('StockPreparationYidaPreviewPanel', () => {
     expect(q('sp-yida-row-issue-1-0').textContent).toBe('KEY_MISSING（业务键缺失）；material → materialGrade（期望文本）')
     const imported = parseYidaRuleTemplate(text)
     expect(() => compileYidaLocalDraft({ config: { ...imported.rules, target: V3_TARGET }, rowsText, allocation: { mode: 'original' } })).toThrow('YIDA_DRAFT_PLAN')
+    expectNoIo()
+  })
+
+  // R-71 ⑦.4 PR-2 (A7): the generated template is edited as JSON text; the panel hands the parts to the
+  // shared validator in their listed order, so the preview equals the host recompute byte for byte.
+  it('R-71 ⑦.4: a generated template edited in the panel previews exactly as the host recompute, duplicates refused, without I/O', async () => {
+    const { text, rowsText, rows } = v3Template()
+    const example = createYidaTransformExample()
+    const at = example.config.fieldMap.findIndex((entry) => entry.transform === 'generated')
+    await importRules(text)
+    expect(q<HTMLSelectElement>(`sp-yida-map-transform-${at}`).value).toBe('generated')
+    expect(q<HTMLTextAreaElement>(`sp-yida-map-generated-template-${at}`).value).toBe(JSON.stringify(example.config.fieldMap[at].template))
+    const template = [{ literal: 'SYN-' }, { field: 'project' }, { literal: '-' }, { hash: [...example.config.businessKey].reverse(), form: 'uuid-32' }]
+    edit(`sp-yida-map-generated-template-${at}`, JSON.stringify(template)); await flush()
+    const edited = parseYidaRuleTemplate(await exportRules())
+    const editedEntry = edited.rules.fieldMap.find((entry) => entry.transform === 'generated')
+    expect(editedEntry && 'template' in editedEntry ? editedEntry.template : null).toEqual(template)
+    for (const projects of [V3_PROJECTS, null]) {
+      edit('sp-yida-app-type', V3_TARGET.appType); edit('sp-yida-form-uuid', V3_TARGET.formUuid); edit('sp-yida-rows', rowsText)
+      if (projects) { edit('sp-yida-allocation-mode', 'equal_integer'); edit('sp-yida-allocation-projects', projects.join('\n')) } else edit('sp-yida-allocation-mode', 'original')
+      await flush(); await preview()
+      const allocation = projects ? { ...edited.allocation, projects } : { mode: 'original' as const }
+      const host = compileYidaLocalDraft({ config: { ...edited.rules, target: V3_TARGET }, rowsText, allocation })
+      expect(payloads()).toEqual(host.plan.rows.map((row) => row.payload))
+      expect(new Set(payloads().map((payload) => payload.materialCodeText)).size).toBe(host.plan.rows.length)
+      expect(String(payloads()[0].materialCodeText)).toMatch(/^SYN-.+-[0-9A-F]{32}$/)
+    }
+    // Ruling L1: the order the hash members are listed in is not part of the code, so the panel previews the same
+    // codes for the reversed list (above, original mode) and for the key order.
+    const reversedCodes = payloads().map((payload) => payload.materialCodeText)
+    edit(`sp-yida-map-generated-template-${at}`, JSON.stringify(template.map((part) => 'hash' in part ? { ...part, hash: [...example.config.businessKey] } : part)))
+    await flush(); await preview()
+    expect(payloads().map((payload) => payload.materialCodeText)).toEqual(reversedCodes)
+    // Two rows with one preset code are both refused with the generated-duplicate reason.
+    edit(`sp-yida-map-generated-template-${at}`, JSON.stringify([{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }]))
+    edit('sp-yida-rows', JSON.stringify(rows.map((row) => ({ ...row, idempotencyKey: 'SYN-LINE-1' }))))
+    edit('sp-yida-allocation-mode', 'original'); await flush(); await preview()
+    expect(q('sp-yida-row-issue-0-0').textContent).toBe('DUPLICATE_GENERATED_VALUE（同批另一行生成了同一个值）；生成 → materialCodeText（期望文本）')
+    expect(q('sp-yida-row-issue-1-0').textContent).toBe('DUPLICATE_GENERATED_VALUE（同批另一行生成了同一个值）；生成 → materialCodeText（期望文本）')
     expectNoIo()
   })
 

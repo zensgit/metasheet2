@@ -13,7 +13,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
+import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, isFakeSheetVersionBump, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET = 'sheet_undo_1'
@@ -243,6 +243,8 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       expect(state.perms).toEqual(ADMIN_PERMS)
       expect([label, issued[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
       expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      // D21: the in-transaction gate precedes the sheet version bump — a refused caller never touches the version row
+      expect([label, issued.filter(isFakeSheetVersionBump)]).toEqual([label, []])
       // granted again ⇒ the same request undoes
       arranged.pg.world.dbUsers[ACTOR] = dbUser(ADMIN_PERMS)
       expect([label, (await undo({ convertRevisionId: arranged.id, confirm: CONFIRM })).status]).toEqual([label, 200])
@@ -265,6 +267,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status, code, newTransactions: 1 })
       state.hook = undefined
       expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, issued.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
   })
 
@@ -288,6 +291,8 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       })
       state.hook = undefined
       expect([reason, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([reason, []])
+      // the managed-sheet re-check precedes the D21 sheet version bump as well
+      expect([reason, issued.filter(isFakeSheetVersionBump)]).toEqual([reason, []])
       expect([reason, arranged.pg.world.fields[0].type]).toEqual([reason, 'multiSelect'])
     }
   })
@@ -529,6 +534,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     arranged.pg.world.trash.push({ record_id: 't1', sheet_id: SHEET, data: {} })
     const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status: 413, code: 'SHEET_TOO_LARGE', newTransactions: 1 })
     expect(issued.filter((sql) => /FOR UPDATE/.test(sql))).toEqual([])
+    expect(issued.filter(isFakeSheetVersionBump)).toEqual([])
   })
 
   // ── the undo itself ──────────────────────────────────────────────────────────────────────────────────
@@ -537,6 +543,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     const { pg, id } = arranged
     const transactionsBefore = pg.transactions
     const statementsBefore = pg.statements.length
+    const versionBefore = pg.world.sheetVersions?.[SHEET] ?? 0
     const res = await undo({ convertRevisionId: id, confirm: CONFIRM })
     expect(res.status).toBe(200)
     const undoId = String(res.body.data.undoRevisionId)
@@ -579,6 +586,14 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     expect(order.every((i) => i >= 0)).toBe(true)
     expect(order).toEqual([...order].sort((a, b) => a - b))
     expect(tx.slice(0, order[7]).filter((sql) => FAKE_WRITE_RE.test(sql))).toEqual([])
+    // D21 field-row writer rule: the sheet version row is bumped ONCE, after the fence and before the first row lock
+    // (the job row FOR UPDATE; the field row and every cell follow) — never left to the visibility trigger
+    const bumps = tx.flatMap((sql, i) => (isFakeSheetVersionBump(sql) ? [i] : []))
+    expect(bumps).toHaveLength(1)
+    expect(bumps[0]).toBeGreaterThan(order[0])
+    expect(bumps[0]).toBeLessThan(order[1])
+    expect(tx.slice(0, bumps[0]).filter((sql) => /FOR (NO KEY )?UPDATE|FOR (KEY )?SHARE/.test(sql))).toEqual([])
+    expect(pg.world.sheetVersions?.[SHEET]).toBe(versionBefore + 1)
 
     // record revisions of the undo: key removed ⇒ null sentinel + no key in the snapshot; JSON null ⇒ null + key present
     const revisions = pg.world.recordRevisions.filter((r) => r.batch_id === undoId)

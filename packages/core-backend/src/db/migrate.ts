@@ -154,7 +154,11 @@ Notes:
   security_action_challenges holds any row, and
   zzzz20261106130000_create_directory_integration_capabilities.ts refuses
   while directory_integration_capabilities or
-  directory_integration_capability_history holds any row.`)
+  directory_integration_capability_history holds any row, and
+  zzzz20261108120000_create_integration_yida_generated_layout.ts refuses
+  while integration_yida_generated_layout holds any row (a sealed
+  generated-code layout is evidence for every GENERATED code sent under
+  that target from the seal onward).`)
 }
 
 async function main(): Promise<void> {

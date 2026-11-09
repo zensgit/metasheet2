@@ -237,6 +237,9 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
       credentialRef: credential.credentialRef, credentialGeneration: credential.credentialGeneration,
       businessKeyDigest: compiled.rowSpecs[0].businessKeyDigest, rowPayloadDigest: compiled.rowSpecs[0].payloadDigest,
       config: example.config, selectedRow: JSON.parse(example.text)[0], source: compiled.source, plan: compiled.plan,
+      // Pasted rows carry no source binding (design baseline v2.3 §7.2): the selection names the three binding
+      // members as null, exactly as the private primitive does for an unbound row.
+      sourceRecordDigest: null, creationIdentityDigest: null, sourceBinding: null,
     })
     const instant = 1_700_000_000_000
     // Memory answers to the actual service's SQL shapes; they do not establish live host authority.
@@ -244,6 +247,8 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
       if (sql.startsWith('SET TRANSACTION')) return { rows: [] }
       if (sql.includes("current_setting('transaction_isolation')")) return { rows: [{ isolation: 'read committed' }] }
       if (sql.includes('pg_current_xact_id')) return { rows: [{ xid: 'synthetic-probe-xid' }] }
+      // D21 phase 1 (slice Y5): approve() ensures and holds the actor's subject version row before the live-actor rows.
+      if (sql.includes('subject_authorization_versions')) return sql.includes('FOR SHARE') ? { rows: [{ subject_id: context.ownerId, version: '1' }] } : { rows: [] }
       if (sql.includes('FROM user_roles')) return { rows: [{ role_id: 'admin' }] }
       if (sql.includes('FROM users')) return { rows: [{ id: context.ownerId, role: 'admin', is_active: true, activation_status: 'activated', permissions: [] }] }
       if (sql.includes('FROM user_orgs')) return { rows: [{ user_id: context.ownerId, org_id: context.tenantId, is_active: true }] }
@@ -267,6 +272,8 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
         executionPayloadDigest(value, grant) { return crypto.createHash('sha256').update(JSON.stringify({ value, grant })).digest('hex') },
         // Gate 4: the approval service requires the send-budget primitive; this synthetic row is within it.
         sendBudget() { return Object.freeze({ withinBudget: true }) },
+        // P1 generated-layout seal: this v2 probe row carries no generated entry, so the real primitive would answer this too.
+        async sealGeneratedLayoutInTransaction() { return Object.freeze({ admissible: true, sealed: false }) },
         async prepareInTransaction() { throw new Error('YiDa fixture: no admission or sending') },
       },
     })

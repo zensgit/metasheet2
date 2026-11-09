@@ -7,7 +7,8 @@ import { yidaConnectionTestErrorCode, type YidaConnectionTestInput } from '../in
 import { YIDA_OWNER_HTTP_PREFIX as PREFIX } from '../integration/yida-owner-http-observation'
 import { YIDA_SEND_REQUEST_MAX_BYTES } from '../integration/yida-send-budget'
 import {
-  parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceDependencies,
+  parseYidaSheetSourceInput, readYidaSheetSourceRows, yidaSheetSourceErrorCode, type YidaSheetSourceBinding,
+  type YidaSheetSourceDependencies,
 } from '../integration/yida-sheet-source'
 
 /** Dedicated host owner boundary, after actual JWT. Never a communication API.
@@ -43,6 +44,12 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
   // Gate 4 (R-71 ⑦.2): the row exceeds the shared send budget; refused before any grant/admission.
   YIDA_SEND_APPROVAL_LIMIT: 422,
+  // Identity fence (design baseline v2.3 §3.3, D16): this material row's logical creation identity (key value +
+  // project) was already created under this target; nothing new is created. Refused at approval, before a grant.
+  YIDA_SEND_APPROVAL_IDENTITY_RESERVED: 409,
+  // Generated-layout seal (external review P1, 2026-11-08): this target's generated template layout was sealed by an
+  // earlier approval and this draft's layout differs; refused at approval and at admission, nothing new is created.
+  YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: 409,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
@@ -335,6 +342,9 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     if (Object.hasOwn(input, 'rowsText') === Object.hasOwn(input, 'source')) fail()
     const targetRef = Object.hasOwn(input, 'targetRef') ? id(input.targetRef) : undefined
     let rowsText: string
+    // Source binding (design baseline v2.3 §7.2): only the server-side sheet read can produce one; a pasted body
+    // never carries it (the closed body above has no such key), so a pasted draft is always unbound.
+    let sourceBinding: YidaSheetSourceBinding | undefined
     if (Object.hasOwn(input, 'rowsText')) {
       if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
       rowsText = input.rowsText
@@ -348,10 +358,12 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       if (!port.proveDraftOwner) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
       await port.proveDraftOwner(owner, targetRef === undefined ? {} : { targetRef })
       // The owner's own multitable read (this request's actor), never an elevated or plugin read.
-      rowsText = (await readYidaSheetSourceRows(req, source, sheetSource)).rowsText
+      const read = await readYidaSheetSourceRows(req, source, sheetSource)
+      rowsText = read.rowsText
+      sourceBinding = read.binding
     }
     const result = await port.prepareDraft(owner, { config: input.config, rowsText, allocation: input.allocation,
-      ...(targetRef === undefined ? {} : { targetRef }) })
+      ...(targetRef === undefined ? {} : { targetRef }), ...(sourceBinding === undefined ? {} : { sourceBinding }) })
     return dto(() => draft(result))
   }))
   router.post('/preview', route(200, async (req, owner) => {

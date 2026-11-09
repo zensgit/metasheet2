@@ -13,7 +13,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
+import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, isFakeSheetVersionBump, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET = 'sheet_exec_1'
@@ -286,9 +286,12 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
       expect(state.perms).toEqual(ADMIN_PERMS)
       expect([label, pg.transactionStatements[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
       expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      // D21: the in-transaction gate precedes the sheet version bump — a refused caller never touches the version row
+      expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump), pg.world.sheetVersions]).toEqual([label, [], {}])
       // (b) revoked while the request is already past its pool-side gates
       ;({ pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(revoke) }))
       expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
     // control: the same request with the database unchanged converts
     const pg = use(world())
@@ -313,6 +316,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     for (const [label, change, status, code] of changes) {
       const { pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(change) })
       expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
   })
 
@@ -638,6 +642,14 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     expect(order).toEqual([...order].sort((a, b) => a - b))
     // no write precedes the pre-image
     expect(tx.slice(0, order[3]).filter((sql) => FAKE_WRITE_RE.test(sql))).toEqual([])
+    // D21 field-row writer rule: the sheet version row is bumped ONCE, after the fence and before the first row lock
+    // (the field row FOR UPDATE) — never left to the visibility trigger inside the field UPDATE, after every row lock
+    const bumps = tx.flatMap((sql, i) => (isFakeSheetVersionBump(sql) ? [i] : []))
+    expect(bumps).toHaveLength(1)
+    expect(bumps[0]).toBeGreaterThan(0)
+    expect(bumps[0]).toBeLessThan(order[0])
+    expect(tx.slice(0, bumps[0]).filter((sql) => /FOR (NO KEY )?UPDATE|FOR (KEY )?SHARE/.test(sql))).toEqual([])
+    expect(pg.world.sheetVersions).toEqual({ [SHEET]: 1 })
 
     // the field: options in first-appearance order over the code-unit-sorted record ids, no color
     expect(pg.world.fields[0]).toMatchObject({ type: 'multiSelect', property: { options: [{ value: '机密-ALPHA' }, { value: '机密-BETA,含逗号' }] } })
