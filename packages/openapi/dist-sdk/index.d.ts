@@ -6789,7 +6789,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Preview attendance import */
+        /**
+         * Preview attendance import
+         * @description Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6799,7 +6802,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                    "application/json": components["schemas"]["AttendanceImportPublicRequest"];
                 };
             };
             responses: {
@@ -6811,13 +6814,33 @@ export interface paths {
                     content: {
                         "application/json": {
                             ok?: boolean;
-                            data?: components["schemas"]["AttendanceImportPreviewData"];
+                            data?: components["schemas"]["AttendanceImportPreviewResponseData"];
                         };
                     };
                 };
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
+                /** @description Frozen target or canonical context does not match the named command */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Values-free import failure */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -6835,7 +6858,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Enqueue attendance import preview async job */
+        /**
+         * Enqueue attendance import preview async job
+         * @description Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced. The existing async disabled response remains 404. Submission returns a job; current authorization is checked again when processing or reading its result. A named preview freezes its complete calculation without committing attendance records. Exact retries reuse the original job and key; changed command or preview limit returns 409.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6845,7 +6871,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                    "application/json": components["schemas"]["AttendanceImportPublicRequest"];
                 };
             };
             responses: {
@@ -6865,6 +6891,26 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description Frozen target or canonical context does not match the named command */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Values-free import failure */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -6882,7 +6928,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Commit attendance import */
+        /**
+         * Commit attendance import
+         * @description Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6892,7 +6941,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                    "application/json": components["schemas"]["AttendanceImportPublicRequest"];
                 };
             };
             responses: {
@@ -6904,13 +6953,33 @@ export interface paths {
                     content: {
                         "application/json": {
                             ok?: boolean;
-                            data?: components["schemas"]["AttendanceImportResult"];
+                            data?: components["schemas"]["AttendanceImportCommitResponseData"];
                         };
                     };
                 };
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
+                /** @description Frozen target or canonical context does not match the named command */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Values-free import failure */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -6928,7 +6997,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Enqueue attendance import commit async job */
+        /**
+         * Enqueue attendance import commit async job
+         * @description Accepts unchanged daily records when inputKind is absent, or the separate punch_events_v1 format. Named input never falls back to daily parsing. Existing authorization, current actor/target membership, canonical posture, feature gates and commit-token policy remain enforced. The existing async disabled response remains 404. Submission returns a job; current authorization is checked again when processing or reading its result.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6938,7 +7010,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                    "application/json": components["schemas"]["AttendanceImportPublicRequest"];
                 };
             };
             responses: {
@@ -6958,6 +7030,26 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description Frozen target or canonical context does not match the named command */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Values-free import failure */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -19989,6 +20081,126 @@ export interface components {
             statusMap?: Record<string, never>;
             mode?: string;
         };
+        /** @description Absence of inputKind selects the unchanged daily-record format. A present discriminator must select the explicit punch format; invalid variants never fall back to daily parsing. */
+        AttendanceImportPublicRequest: (components["schemas"]["AttendanceImportRequest"] & unknown) | components["schemas"]["AttendancePunchDetailImportRequest"];
+        /** @description Explicit physical events for one employee and attribution day, distinct from daily rows. The server additionally validates real calendar dates, IANA timezone, strictly chronological instants and alternating directions, and independently admits the target against frozen canonical policy. A leading checkout or trailing check-in remains partial. No minutes, authority, frozen context or group assignment can be supplied. Existing token requirements, organization isolation and disabled responses remain; actor identity comes from authentication. */
+        AttendancePunchDetailImportRequest: {
+            /** @enum {string} */
+            inputKind: "punch_events_v1";
+            userId: string;
+            /** Format: date */
+            workDate: string;
+            timezone: string;
+            punches: components["schemas"]["AttendancePunchDetailEvent"][];
+            /** @description Optional selector checked against authenticated organization; never authority. */
+            orgId?: string;
+            /** @description Trimmed to 1 through 128 characters. The accepted key, including a literal preview prefix, is preserved on replay. Preview and commit have separate command identities. */
+            idempotencyKey?: string;
+            commitToken?: string;
+            /** @description Limits visible event items, not retained evidence or calculation input. Defaults to the event count. */
+            previewLimit?: number;
+            /** @default true */
+            returnItems: boolean;
+            itemsLimit?: number;
+            /** @enum {string} */
+            mode?: "override";
+        };
+        AttendancePunchDetailEvent: {
+            /** @enum {string} */
+            direction: "check_in" | "check_out";
+            /**
+             * Format: date-time
+             * @description Canonical UTC instant with exactly three fractional digits; calendar validity is checked by the server.
+             */
+            occurredAt: string;
+        };
+        AttendanceImportPreviewResponseData: (components["schemas"]["AttendanceImportPreviewData"] & unknown) | components["schemas"]["AttendancePunchDetailPreviewData"];
+        AttendancePunchDetailPreviewData: {
+            /** @enum {string} */
+            inputKind: "punch_events_v1";
+            eventCount: number;
+            /** @enum {integer} */
+            targetCount: 1;
+            total: number;
+            rowCount: number;
+            processedRows: number;
+            /** @enum {integer} */
+            failedRows: 0;
+            items: {
+                sourceOrdinal: number;
+                direction: components["schemas"]["AttendancePunchDetailEvent"]["direction"];
+                occurredAt: components["schemas"]["AttendancePunchDetailEvent"]["occurredAt"];
+            }[];
+            previewLimit: number;
+            truncated: boolean;
+            targets: {
+                userId: string;
+                /** Format: date */
+                workDate: string;
+                /** @enum {string} */
+                outcome: "completed" | "review_required";
+                reasonCode: components["schemas"]["AttendanceW4Calculation"]["outcomeReasonCode"];
+                dailyProjection: components["schemas"]["AttendancePunchDetailDailyProjection"];
+                segments: components["schemas"]["AttendancePunchDetailCalculatedSegment"][];
+            }[];
+            engine: string;
+            recordUpsertStrategy: string;
+            csvWarnings: string[];
+            groupWarnings: string[];
+        };
+        /** @description Null for review_required. Physical worked minutes come from the frozen calculation, not a first/last daily envelope. */
+        AttendancePunchDetailDailyProjection: {
+            /** Format: date-time */
+            firstInAt: string | null;
+            /** Format: date-time */
+            lastOutAt: string | null;
+            workedMinutes: number;
+            lateMinutes: number;
+            earlyLeaveMinutes: number;
+            /** @enum {string} */
+            status: "normal" | "late" | "early_leave" | "late_early" | "partial" | "absent" | "adjusted" | "off";
+            timezone: string;
+            /** Format: date */
+            workDate: string;
+            meta: {
+                [key: string]: unknown;
+            } | null;
+        } | null;
+        /** @description Frozen calculator projection; names differ from persisted calculation-detail segment DTOs. */
+        AttendancePunchDetailCalculatedSegment: {
+            segmentIndex: number;
+            /** Format: date-time */
+            expectedStartAt: string;
+            /** Format: date-time */
+            expectedEndAt: string;
+            expectedStartOffsetMinutes: number;
+            expectedEndOffsetMinutes: number;
+            /** @enum {string} */
+            expectedStartFold: "unique" | "fold_earlier" | "fold_later";
+            /** @enum {string} */
+            expectedEndFold: "unique" | "fold_earlier" | "fold_later";
+            /** Format: date-time */
+            actualInAt: string | null;
+            /** Format: date-time */
+            actualOutAt: string | null;
+            workedMinutes: number;
+            lateMinutes: number;
+            earlyLeaveMinutes: number;
+            overtimeExtensionMinutes: number;
+            excusedByLeave: boolean;
+            status: components["schemas"]["AttendanceW4CalculationSegment"]["status"];
+            reasons: components["schemas"]["AttendanceW4CalculationSegment"]["statusReasons"];
+            matchedEvidenceRefs: string[];
+            unmatchedEvidenceRefs: string[];
+        };
+        AttendanceImportCommitResponseData: (components["schemas"]["AttendanceImportResult"] & unknown) | components["schemas"]["AttendancePunchDetailImportResult"];
+        AttendancePunchDetailImportResult: components["schemas"]["AttendanceImportResult"] & {
+            /** @enum {string} */
+            inputKind: "punch_events_v1";
+            eventCount: number;
+            /** @enum {integer} */
+            targetCount: 1;
+        };
         AttendanceImportJob: {
             id?: string;
             orgId?: string;
@@ -20013,7 +20225,8 @@ export interface components {
             /** Format: float */
             throughputRowsPerSec?: number;
             error?: string | null;
-            preview?: components["schemas"]["AttendanceImportPreviewData"];
+            /** @description Verified preview only after completion; null while unavailable. Named previews retain all frozen events even when visible items are limited. */
+            preview?: components["schemas"]["AttendanceImportPreviewResponseData"] | (never | null);
             /** Format: date-time */
             startedAt?: string | null;
             /** Format: date-time */

@@ -173,7 +173,7 @@ export type AttendanceCalculatedSegmentV1 = {
 
 export interface AttendanceSegmentCalculationInputV1 {
   attribution: AttendanceAttributionSnapshotV1
-  context: FrozenAttendanceContextV1 | null
+  context: Exclude<RoutedFrozenAttendanceContextV1, { kind: 'invalid' }>['context'] | null
   evidence: readonly AttendanceEvidenceV1[]
   approvedFacts: readonly ApprovedAttendanceFactV1[]
 }

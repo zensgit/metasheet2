@@ -295,7 +295,7 @@ export async function appendRecomputeCalculationV1(
 
   const calcRows = await rows(
     input.client,
-    `SELECT id::text AS id, version, outcome, expected_segment_count,
+    `SELECT id::text AS id, version, outcome, expected_segment_count, merge_policy,
             attribution_snapshot, context_snapshot, segment_snapshot, evidence_snapshot,
             approved_facts_snapshot, manual_override_snapshot
        FROM attendance_record_calculations
@@ -414,13 +414,16 @@ export async function appendRecomputeCalculationV1(
   if (sourceDefinitionFingerprint === null || !HEX64_RE.test(sourceDefinitionFingerprint)) {
     fail(ATTENDANCE_RECOMPUTE_ERROR_CODES.PRIOR_UNSUPPORTED, 409)
   }
+  // Frozen replay retains the prior semantic merge policy; operation provenance
+  // still identifies this append as a recompute.
+  const mergePolicy = policy === 'frozen_prior' ? prior.merge_policy : 'merge'
   const semanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
     attribution,
     context,
     evidence,
     approvedFacts,
     manualOverride,
-    mergePolicy: 'merge',
+    mergePolicy,
     calculationTier,
     engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
     snapshotSchemaVersion: 1,
@@ -504,7 +507,7 @@ export async function appendRecomputeCalculationV1(
         $9, $10, $11,
         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
         $16::jsonb, $17::jsonb, $18::jsonb,
-        'merge', $19, 'completed', 'calculated', $20,
+        $33, $19, 'completed', 'calculated', $20,
         $21, $22, $23, $24, $25, $26, $27, $28,
         $29, $30::jsonb, $31, $32
       )`,
@@ -549,6 +552,7 @@ export async function appendRecomputeCalculationV1(
       shadowDiff ? canonicalAttendanceJsonV1(shadowDiff) : null,
       actorId,
       correlationId,
+      mergePolicy,
     ],
   )
 

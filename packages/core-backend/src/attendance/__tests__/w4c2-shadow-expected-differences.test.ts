@@ -294,8 +294,13 @@ describe('w4c2 expected shadow differences (#4607 handover P0)', () => {
       join(here, '..', 'w4c2-live-scheduled-boundary.ts'),
       'utf8',
     )
-    const relabel = boundarySource.match(/\{ \.\.\.shadowDiffCandidate, code: '([a-z_]+)' as const \}/)
-    expect(relabel, 'the relabel branch must exist in the boundary').not.toBeNull()
+    // The boundary delegates to the shared writer; pin both the actual delegation
+    // and its relabel literal so moving the writer cannot bypass this guard.
+    expect(boundarySource).toMatch(/import \{[\s\S]*?insertShadowCalculationV1,[\s\S]*?\} from '\.\/w4c2-shadow-calculation-core'/)
+    expect(boundarySource).toContain('return insertShadowCalculationV1(client, input)')
+    const writerSource = readFileSync(join(here, '..', 'w4c2-shadow-calculation-core.ts'), 'utf8')
+    const relabel = writerSource.match(/\{ \.\.\.shadowDiffCandidate, code: '([a-z_]+)' as const \}/)
+    expect(relabel, 'the relabel branch must exist in the shared shadow writer').not.toBeNull()
     expect(relabel?.[1]).toBe(ATTENDANCE_W4C2_WRITE_PROBE_PRESENTED_CODE_V1)
   })
 
