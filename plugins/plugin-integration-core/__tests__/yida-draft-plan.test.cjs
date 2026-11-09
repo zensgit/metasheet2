@@ -118,9 +118,79 @@ function expectError(compile, ErrorClass, candidate, code) {
   })
 }
 
-test('exports only the compiler and fixed draft error class', async () => {
+test('exports the two persisted-path compilers and the fixed draft error class', async () => {
   const exported = await modulePromise
-  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft'])
+  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft'])
+})
+
+// R-71 ⑦.3 (B2): literal v2 goldens, computed by the base compiler before this change. A stored v2
+// draft, an L4-sealed plan digest and a ledger plan revision must keep exactly these bytes, through
+// the initialization entry and the send entry alike.
+const V2_GOLDEN = {
+  protocol: {
+    planDigest: 'abab832e3a8c42adecb79e244901400f47b61b712fa922f2a863688366e07fcd',
+    keyDefinitionDigest: '45e2fcf5e9ea73a18f75319b2b43632c9969de643802220439deed1924aa9495',
+    locatorDigest: 'bb9d4879e19db998bf1aa865102470bb3fea7c2a149d4bdb888e653bd52569e2',
+    rowSpecs: [
+      { index: 0, businessKeyDigest: 'fa3228a6f42b2725a14ba1a4bd9d0665eb43a302a901bfb92a8277cecc362b49', payloadDigest: '3f7f9a196dd22e9b37bfee43e2623457c6c8843b13441253c339527f3a8b2166' },
+      { index: 1, businessKeyDigest: 'efedaff7d65b4b06eea4b7bffaea130d78518f9f9ee79ca24fc8e12ad5acdd4d', payloadDigest: '65c04d05883a4b6ab242f36692d518aef408f684b8afd2464cfcc44b814c1088' },
+    ],
+  },
+  material: {
+    planDigest: 'fb883eb7830903d243dc5acf7df5593a0d66970aa4defdf86d808b78c6969066',
+    keyDefinitionDigest: 'd320bf2a69eeff33b75ad11af51a50f8000d62d2dc0965bf16d35ef283a96f26',
+    locatorDigest: '9c954dc26211cd6de7190ceda515a56d5aec59c331f01c607acb44db29a98369',
+    rowSpecs: [
+      { index: 0, businessKeyDigest: 'e54631415663b1a44ee2acd473a1b24fe78c780e8581b1bfea8a44a20e838426', payloadDigest: 'ba606ceb515d63688d80487191c33d0c78d9fd8d5fe2f7802e50d2c9de0e790f' },
+      { index: 1, businessKeyDigest: '0ad6b53932125831250141dbf6debc370c3c7077c5235d13f249c7160a87a851', payloadDigest: '1b39c25b35a44b77d99796e6ed6349285c11e079384b9317ee2215c4cdb8c370' },
+      { index: 2, businessKeyDigest: '3f080ebf507efc660d81ad362812f435e15abe3c6b3c72996a6d37472f8e1c39', payloadDigest: '7ae7514e45e6bbcd55b0999a612ceb9aa4c39c7e82a55ee98f272acd41c258f8' },
+      { index: 3, businessKeyDigest: '4f9077c90291a153831ff2d29f9494592627110371c99821696a4cb85d564523', payloadDigest: '37a0e09828a5a901e5caf3f09b84faf478b2e513f0a7eb4787c1352c7c0ec416' },
+    ],
+  },
+}
+async function goldenInputs() {
+  const { createYidaProtocolExample, createYidaTransformExample } = await plannerPromise
+  const template = JSON.parse(require('node:fs').readFileSync(path.join(__dirname,
+    '../../../docs/development/takeover-beiliao-20260821/yida-legacy-templates/material.json'), 'utf8'))
+  const example = createYidaProtocolExample()
+  return {
+    protocol: { config: example.config, rowsText: example.text, allocation: { mode: 'original' } },
+    material: { config: { ...template.rules, target: { appType: 'synthetic_golden_app', formUuid: 'synthetic_golden_form' } },
+      rowsText: createYidaTransformExample().text, allocation: { ...template.allocation, projects: ['DEMO-P1', 'DEMO-P2'] } },
+  }
+}
+
+test('R-71 ⑦.3 B2: v2 literal goldens (protocol example, shipped material template) are byte-identical through both entries', async () => {
+  const { compileYidaDraft, compileYidaSendDraft } = await modulePromise
+  const inputs = await goldenInputs()
+  for (const [name, golden] of Object.entries(V2_GOLDEN)) {
+    for (const compile of [compileYidaDraft, compileYidaSendDraft]) {
+      const result = compile(inputs[name])
+      assert.deepEqual({ planDigest: result.planDigest, keyDefinitionDigest: result.keyDefinitionDigest,
+        locatorDigest: result.locatorDigest, rowSpecs: result.rowSpecs }, golden, name)
+    }
+  }
+})
+
+test('R-71 ⑦.3 B2: a v3 plan digest is the v2 formula plus exactly one mapping: 3 marker; key definition and rows stay shared', async () => {
+  const { compileYidaDraft, compileYidaSendDraft } = await modulePromise
+  const lifted = config({ version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+    fieldMap: config().fieldMap.map((entry) => ({ transform: 'direct', ...entry })) })
+  for (const settings of [{ mode: 'original' }, allocation()]) {
+    const v2 = compileYidaSendDraft(input([row(), row('LINE-2', 4)], config(), settings))
+    const v3 = compileYidaSendDraft(input([row(), row('LINE-2', 4)], lifted, settings))
+    const rows = v3.rowSpecs.map(({ businessKeyDigest, payloadDigest }) => ({ businessKeyDigest, payloadDigest }))
+      .sort((left, right) => compareCodePoints(left.businessKeyDigest, right.businessKeyDigest))
+    const formula = (marker) => digest({ version: 1, kind: 'yida-local-plan', locator: v3.locator,
+      keyDefinition: v3.keyDefinition, intent: 'create', ...marker, rows })
+    assert.equal(v3.planDigest, formula({ mapping: 3 }))
+    assert.equal(v2.planDigest, formula({}))
+    assert.notEqual(v3.planDigest, v2.planDigest)
+    assert.equal(v3.keyDefinitionDigest, v2.keyDefinitionDigest)
+    assert.deepEqual(v3.rowSpecs, v2.rowSpecs)
+    // The initialization entry still refuses v3 (decision E1).
+    expectError(compileYidaDraft, (await modulePromise).YidaDraftPlanError, input([row()], lifted, settings), 'YIDA_DRAFT_CONFIG')
+  }
 })
 
 test('original draft contains the real full plan, exact normalized source and independently computed digests', async () => {
@@ -601,4 +671,564 @@ test('raw UTF-8 input bytes, depth and node budgets refuse before planner valida
   const many = input()
   many.config.nodes = Array.from({ length: 20001 }, () => null)
   expectError(compileYidaDraft, YidaDraftPlanError, many, 'YIDA_DRAFT_LIMIT')
+})
+
+// ---- Source binding (design baseline v2.3 §3.3 / §7.2; D1 a′, D16): the two row digests ----
+// Synthetic binding for the five-column v2 layout above: the sheet's key column is `fld_line` (idempotency key),
+// bound to the `lineId` alias; records align with the rows of rowsText.
+function binding(rows, patch = {}) {
+  return {
+    sheetId: 'sheet_synthetic', keyFieldId: 'fld_line',
+    fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_desc' },
+    records: rows.map((entry, index) => ({ recordId: `rec_${index + 1}`, keyValue: entry.lineId, projectNo: 'DEMO-P1' })),
+    ...patch,
+  }
+}
+// Independent oracle for the two digests (the baseline formulas), never the compiler's own helper.
+function expectedBinding(bound, index, projectNo, fieldDependencies) {
+  const record = bound.records[index]
+  const sourceBinding = { sheetId: bound.sheetId, recordId: record.recordId, keyFieldId: bound.keyFieldId, keyValue: record.keyValue,
+    projectNo, fieldBindings: bound.fieldBindings, fieldDependencies }
+  return { sourceBinding,
+    sourceRecordDigest: digest({ version: 1, kind: 'yida-source-record', ...sourceBinding }),
+    creationIdentityDigest: digest({ version: 1, kind: 'yida-creation-identity', keyValue: record.keyValue, projectNo }) }
+}
+const V2_DEPENDENCIES = { project: ['fld_project'], line: ['fld_line'], parent: ['fld_parent'], qty: ['fld_qty'], description: ['fld_desc'] }
+
+test('source binding: a bound row spec carries both digests, the per-row binding and dependencies by target; the plan digest covers them', async () => {
+  const { compileYidaSendDraft, compileYidaDraft } = await modulePromise
+  const rows = [row('LINE-1', 6), row('LINE-2', 3)]
+  const bound = binding(rows)
+  const unbound = compileYidaSendDraft(input(rows))
+  const result = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  assertFrozenTree(result)
+  assert.deepEqual(result.source, { ...unbound.source, sourceBinding: bound })
+  // Unbound specs stay byte-identical to the pre-binding shape: no binding keys at all.
+  for (const spec of unbound.rowSpecs) assert.deepEqual(Object.keys(spec).sort(), ['businessKeyDigest', 'index', 'payloadDigest'])
+  for (const [index, spec] of result.rowSpecs.entries()) {
+    assert.deepEqual(Object.keys(spec).sort(), ['businessKeyDigest', 'creationIdentityDigest', 'index', 'payloadDigest', 'sourceBinding', 'sourceRecordDigest'])
+    assert.equal(spec.businessKeyDigest, unbound.rowSpecs[index].businessKeyDigest)
+    assert.equal(spec.payloadDigest, unbound.rowSpecs[index].payloadDigest)
+    const expected = expectedBinding(bound, index, 'DEMO-P1', V2_DEPENDENCIES)
+    assert.deepEqual(spec.sourceBinding, expected.sourceBinding)
+    assert.equal(spec.sourceRecordDigest, expected.sourceRecordDigest)
+    assert.equal(spec.creationIdentityDigest, expected.creationIdentityDigest)
+    assert.match(spec.sourceRecordDigest, /^[0-9a-f]{64}$/); assert.match(spec.creationIdentityDigest, /^[0-9a-f]{64}$/)
+  }
+  // Both digests enter the plan digest (sorted row entries), so a bound draft is a different operation.
+  assert.notEqual(result.planDigest, unbound.planDigest)
+  assert.equal(result.planDigest, digest({ version: 1, kind: 'yida-local-plan', locator: result.locator, keyDefinition: result.keyDefinition,
+    intent: 'create', rows: result.rowSpecs.map(({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }) =>
+      ({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }))
+      .sort((left, right) => compareCodePoints(left.businessKeyDigest, right.businessKeyDigest)) }))
+  // The key definition, locator and business keys are binding-independent (the seven-key fence is unchanged).
+  assert.equal(result.keyDefinitionDigest, unbound.keyDefinitionDigest)
+  assert.equal(result.locatorDigest, unbound.locatorDigest)
+  // The initialization entry accepts a binding too (same compiler), without changing the v2 layout rules.
+  assert.equal(compileYidaDraft({ ...input(rows), sourceBinding: bound }).planDigest, result.planDigest)
+})
+
+test('source binding: the identity digest is stable across a draft rebuild and distinct per allocated project', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const rows = [row('LINE-1', 6)]
+  const bound = binding(rows)
+  const first = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  const again = compileYidaSendDraft({ ...input(rows), sourceBinding: bound })
+  assert.deepEqual(again.rowSpecs, first.rowSpecs); assert.equal(again.planDigest, first.planDigest)
+  // A rebuilt draft whose unrelated column changed: same identity, same source record, a new plan digest.
+  const changed = [{ ...row('LINE-1', 6), description: 'synthetic corrected description' }]
+  const rebuilt = compileYidaSendDraft({ ...input(changed), sourceBinding: binding(changed) })
+  assert.equal(rebuilt.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.equal(rebuilt.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  assert.notEqual(rebuilt.rowSpecs[0].payloadDigest, first.rowSpecs[0].payloadDigest)
+  assert.notEqual(rebuilt.planDigest, first.planDigest)
+  // The same key under a NEW physical record (deleted and re-created): same identity, another source record.
+  const recreated = compileYidaSendDraft({ ...input(rows), sourceBinding: binding(rows, { records: [{ recordId: 'rec_new', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] }) })
+  assert.equal(recreated.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.notEqual(recreated.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  // Another sheet (moved registration): same identity again, another source record.
+  const moved = compileYidaSendDraft({ ...input(rows), sourceBinding: binding(rows, { sheetId: 'sheet_other' }) })
+  assert.equal(moved.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  assert.notEqual(moved.rowSpecs[0].sourceRecordDigest, first.rowSpecs[0].sourceRecordDigest)
+  // A different key value or project is another identity.
+  const otherKey = compileYidaSendDraft({ ...input([row('LINE-9', 6)]), sourceBinding: binding([row('LINE-9', 6)]) })
+  assert.notEqual(otherKey.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  // Allocation: every expanded row of one source record carries its allocated project; identities differ per project,
+  // the record is shared, and the project column of the expanded row is the project of its identity.
+  const split = compileYidaSendDraft({ ...input(rows, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])), sourceBinding: bound })
+  assert.equal(split.rowSpecs.length, 2)
+  assert.deepEqual(split.rowSpecs.map(spec => spec.sourceBinding.projectNo), ['DEMO-P1', 'DEMO-P2'])
+  assert.deepEqual(split.rowSpecs.map(spec => spec.sourceBinding.recordId), ['rec_1', 'rec_1'])
+  assert.notEqual(split.rowSpecs[0].creationIdentityDigest, split.rowSpecs[1].creationIdentityDigest)
+  assert.equal(split.rowSpecs[0].creationIdentityDigest, first.rowSpecs[0].creationIdentityDigest)
+  for (const [index, spec] of split.rowSpecs.entries()) {
+    assert.equal(split.plan.rows[index].payload.project, spec.sourceBinding.projectNo)
+    const expected = expectedBinding(bound, 0, spec.sourceBinding.projectNo, V2_DEPENDENCIES)
+    assert.equal(spec.sourceRecordDigest, expected.sourceRecordDigest); assert.equal(spec.creationIdentityDigest, expected.creationIdentityDigest)
+  }
+})
+
+test('source binding: v3 dependencies follow the transform (copy primary, concat parts, no constant) through the alias map', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { createYidaTransformExample, transformDependencies } = await plannerPromise
+  const example = createYidaTransformExample()
+  const rows = JSON.parse(example.text)
+  const columns = [...new Set(example.config.fieldMap.flatMap(entry => transformDependencies(entry, example.config)))]
+  const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+  const keySource = example.config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === 'sourceLineId')?.source
+    ?? example.config.fieldMap.find(entry => entry.transform === 'direct').source
+  const bound = { sheetId: 'sheet_v3', keyFieldId: fieldBindings[keySource], fieldBindings,
+    records: rows.map((entry, index) => ({ recordId: `rec_${index}`, keyValue: String(entry[keySource]), projectNo: 'DEMO-P1' })) }
+  const result = compileYidaSendDraft({ config: example.config, rowsText: example.text, allocation: { ...example.allocation, projects: ['DEMO-P1'] }, sourceBinding: bound })
+  const dependencies = result.rowSpecs[0].sourceBinding.fieldDependencies
+  for (const entry of example.config.fieldMap) {
+    const expected = transformDependencies(entry, example.config).map(column => fieldBindings[column]).sort()
+    if (expected.length === 0) assert.equal(Object.hasOwn(dependencies, entry.target), false, entry.target)
+    else assert.deepEqual(dependencies[entry.target], expected, entry.target)
+  }
+  const copy = example.config.fieldMap.find(entry => entry.transform === 'copy')
+  const primary = example.config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === copy.copyOf)
+  assert.deepEqual(dependencies[copy.target], ['fld_' + primary.source])
+  const concat = example.config.fieldMap.find(entry => entry.transform === 'concat')
+  assert.deepEqual(dependencies[concat.target], concat.parts.filter(part => part.source).map(part => 'fld_' + part.source).sort())
+  assert.equal(example.config.fieldMap.some(entry => entry.transform === 'constant'), true)
+})
+
+test('source binding: a malformed, misaligned or smuggled binding is a fixed INPUT refusal with no plan', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const rows = [row('LINE-1', 6), row('LINE-2', 3)]
+  const reject = (patch) => expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: binding(rows, patch) }, 'YIDA_DRAFT_INPUT')
+  // The key the server read must be what the planner sees in that row's key column.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-OTHER', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }] })
+  // One record per source row, distinct record ids.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] })
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_1', keyValue: 'LINE-2', projectNo: 'DEMO-P1' }] })
+  // One sheet is one registered project (087 maps a sheet to exactly one project_no): records naming two projects
+  // under one sheetId are not a binding the sheet source can produce, in either allocation mode.
+  reject({ records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P2' }] })
+  const divisible = [row('LINE-1', 6), row('LINE-2', 4)]
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(divisible, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])),
+    sourceBinding: binding(divisible, { records: [{ recordId: 'rec_1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }, { recordId: 'rec_2', keyValue: 'LINE-2', projectNo: 'DEMO-P2' }] }) }, 'YIDA_DRAFT_INPUT')
+  // The same split with one project per binding is a valid draft (the refusal above is the mixed projects, not the split).
+  assert.equal(compileYidaSendDraft({ ...input(divisible, config(), allocation('equal_integer', ['DEMO-P1', 'DEMO-P2'])), sourceBinding: binding(divisible) }).rowSpecs.length, 4)
+  // The key column must be one of the bound columns; aliases are planner identifiers; ids are opaque text.
+  reject({ keyFieldId: 'fld_unbound' })
+  reject({ fieldBindings: { 'bad alias': 'fld_x', lineId: 'fld_line' } })
+  reject({ fieldBindings: { projectNo: 'fld_line', lineId: 'fld_line' } })
+  reject({ sheetId: ' sheet ' })
+  for (const extra of [{ extra: true }, { sheetId: undefined }]) {
+    expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: { ...binding(rows), ...extra } }, 'YIDA_DRAFT_INPUT')
+  }
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: null }, 'YIDA_DRAFT_INPUT')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...input(rows), sourceBinding: binding(rows), extra: 1 }, 'YIDA_DRAFT_INPUT')
+})
+
+// ---- R-71 ⑦.4 PR-2 (Y6): the `generated` transform in the persisted compile (owner addendum 2026-11-06 decision 1) ----
+// Independent oracle for the material code: node:crypto SHA-1 with the RFC 4122 UUIDv5 bit layout and the frozen
+// name layout of material-code-v1 (never the leaf or the planner).
+function oracleMaterialCode(keyValue, projectNo) {
+  const digest = createHash('sha1').update(Buffer.from('6d37f698e75c4b5e8eefb702478a1cfb', 'hex'))
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-material-code', 'v1', keyValue, projectNo]), 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `WLBH-${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+const compilerPromise = import(pathToFileURL(path.join(__dirname, '../lib/yida-draft-compiler.mjs')).href)
+// The shipped v3 example (one preset part on materialCodeText, rowIdOf the idempotency key sourceLineId, projectOf
+// project), bound the way the sheet source binds a registered project sheet: the key column is idempotencyKey.
+async function generatedInput({ allocation: settings = { mode: 'original' }, rows: patchRows, config: patchConfig, projectNo = 'DEMO-P1' } = {}) {
+  const { createYidaTransformExample, transformDependencies } = await plannerPromise
+  const example = createYidaTransformExample()
+  const layout = patchConfig ? patchConfig(structuredClone(example.config)) : example.config
+  const rows = patchRows ? patchRows(structuredClone(example.rows)) : example.rows
+  const columns = [...new Set(layout.fieldMap.flatMap((entry) => transformDependencies(entry, layout)))]
+  const fieldBindings = Object.fromEntries(columns.map((column) => [column, 'fld_' + column]))
+  const unbound = { config: layout, rowsText: JSON.stringify(rows), allocation: settings }
+  const sourceBinding = { sheetId: 'sheet_generated', keyFieldId: 'fld_idempotencyKey', fieldBindings,
+    records: rows.map((entry, index) => ({ recordId: `rec_g${index}`, keyValue: entry.idempotencyKey, projectNo })) }
+  return { unbound, bound: { ...unbound, sourceBinding }, rows }
+}
+const codesOf = (compiled) => compiled.plan.rows.map((planned) => planned.payload.materialCodeText)
+
+test('generated (SOURCE_UNBOUND): the persisted send entry refuses a generated entry on unbound rows whatever the template; local and bound compile', async () => {
+  const { compileYidaSendDraft, compileYidaDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  const hashOnly = (layout) => {
+    layout.fieldMap.at(-1).template = [{ literal: 'SYN-' }, { hash: [...layout.businessKey], form: 'uuid-32' }, { literal: '-' }, { field: 'versionNo' }]
+    return layout
+  }
+  for (const patchConfig of [undefined, hashOnly]) {
+    const { unbound, bound } = await generatedInput({ config: patchConfig })
+    expectError(compileYidaSendDraft, YidaDraftPlanError, unbound, 'YIDA_DRAFT_PLAN')
+    // The never-persisted local recompute needs no binding (browser preview parity), and a bound draft compiles.
+    const local = compileYidaLocalDraft(unbound), sent = compileYidaSendDraft(bound)
+    assert.equal(local.plan.rows.length, 2); assert.equal(sent.plan.rows.length, 2)
+    assert.deepEqual(codesOf(sent), codesOf(local))
+    // The initialization entry stays v2 only.
+    expectError(compileYidaDraft, YidaDraftPlanError, bound, 'YIDA_DRAFT_CONFIG')
+  }
+  // The same unbound rows without the generated entry are an ordinary (unbound) v3 send draft.
+  const { unbound } = await generatedInput({ config: (layout) => {
+    layout.fieldMap = layout.fieldMap.filter((entry) => entry.transform !== 'generated')
+    layout.fieldCatalog = layout.fieldCatalog.filter((item) => item.id !== 'materialCodeText')
+    return layout
+  } })
+  const plain = compileYidaSendDraft(unbound)
+  for (const spec of plain.rowSpecs) assert.deepEqual(Object.keys(spec).sort(), ['businessKeyDigest', 'index', 'payloadDigest'])
+})
+
+test('generated: a bound row whose preset project cell is not the project of its identity is refused (original mode); a split holds by construction', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  // Original mode: the binding names the registry project DEMO-P1 and every row's project cell says DEMO-P1.
+  const same = await generatedInput()
+  const compiled = compileYidaSendDraft(same.bound)
+  for (const [index, spec] of compiled.rowSpecs.entries()) {
+    assert.equal(spec.sourceBinding.projectNo, 'DEMO-P1')
+    assert.equal(compiled.plan.rows[index].payload.materialCodeText, oracleMaterialCode(same.rows[index].idempotencyKey, 'DEMO-P1'))
+  }
+  // A row whose project cell differs from its binding (cell not re-pulled, plugin-SDK or SQL write): the code would be
+  // minted for another project than the row's creation identity, so the whole draft is refused (row problem
+  // SOURCE_PROJECT_MISMATCH → PLAN). Verbatim comparison: no case folding.
+  for (const cell of ['DEMO-P2', 'demo-p1']) {
+    const other = await generatedInput({ rows: (rows) => rows.map((entry, index) => index === 1 ? { ...entry, projectNo: cell } : entry) })
+    expectError(compileYidaSendDraft, YidaDraftPlanError, other.bound, 'YIDA_DRAFT_PLAN')
+    // The same rows compile unbound locally (the preview has no identity to compare with).
+    const { compileYidaLocalDraft } = await compilerPromise
+    assert.equal(compileYidaLocalDraft(other.unbound).plan.rows.length, 2)
+  }
+  // The binding naming another project than all cells: refused as well.
+  expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ projectNo: 'DEMO-P9' })).bound, 'YIDA_DRAFT_PLAN')
+  // Without a generated entry the same mismatch is not this row problem (Y4 pins the per-binding project rule).
+  const noCode = await generatedInput({ projectNo: 'DEMO-P9', config: (layout) => {
+    layout.fieldMap = layout.fieldMap.filter((entry) => entry.transform !== 'generated')
+    layout.fieldCatalog = layout.fieldCatalog.filter((item) => item.id !== 'materialCodeText')
+    return layout
+  } })
+  assert.equal(compileYidaSendDraft(noCode.bound).rowSpecs.every((spec) => spec.sourceBinding.projectNo === 'DEMO-P9'), true)
+  // Split: every expanded row's project cell is its allocated project, which is also its identity project.
+  const split = await generatedInput({ allocation: { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'totalQuantity' } })
+  const allocated = compileYidaSendDraft(split.bound)
+  assert.equal(allocated.rowSpecs.length, 4)
+  for (const [index, spec] of allocated.rowSpecs.entries()) {
+    const payload = allocated.plan.rows[index].payload
+    assert.equal(payload.project, spec.sourceBinding.projectNo)
+    assert.equal(payload.materialCodeText, oracleMaterialCode(spec.sourceBinding.keyValue, spec.sourceBinding.projectNo))
+  }
+  assert.deepEqual(allocated.rowSpecs.map((spec) => spec.sourceBinding.projectNo).sort(), ['DEMO-P1', 'DEMO-P1', 'DEMO-P2', 'DEMO-P2'])
+})
+
+test('generated: a bound row whose preset rowIdOf cell is not the key value of its identity is refused (one code, two identities)', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  // A valid planner config (rowIdOf only has to be a string direct target): the preset reads the drawing number,
+  // not the key column idempotencyKey the binding names.
+  const offKey = (layout) => {
+    layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }]
+    return layout
+  }
+  // One component (DEMO-DRW-1) under two parents: two source lines, two creation identities, one drawing number.
+  const lineOf = (key, parent) => (rows) => [{ ...rows[0], idempotencyKey: key, parentComponentCode: parent }]
+  const drafts = [await generatedInput({ config: offKey, rows: lineOf('SYN-LINE-1', null) }),
+    await generatedInput({ config: offKey, rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })]
+  // Locally both compile to the SAME code with different seven keys, so neither fence would refuse the second draft.
+  const locals = drafts.map((draft) => compileYidaLocalDraft(draft.unbound))
+  assert.equal(codesOf(locals[0])[0], oracleMaterialCode('DEMO-DRW-1', 'DEMO-P1'))
+  assert.equal(codesOf(locals[1])[0], codesOf(locals[0])[0])
+  assert.notEqual(locals[1].rowSpecs[0].businessKeyDigest, locals[0].rowSpecs[0].businessKeyDigest)
+  // The persisted compile refuses both bound drafts (row problem SOURCE_KEY_MISMATCH → PLAN), before any fence.
+  for (const draft of drafts) expectError(compileYidaSendDraft, YidaDraftPlanError, draft.bound, 'YIDA_DRAFT_PLAN')
+  // The default template (rowIdOf = the key column) still compiles bound, and its code is WLBH(identity).
+  const keyed = await generatedInput({ rows: lineOf('SYN-LINE-5', 'DEMO-DRW-9') })
+  const compiled = compileYidaSendDraft(keyed.bound)
+  assert.equal(codesOf(compiled)[0], oracleMaterialCode(compiled.rowSpecs[0].sourceBinding.keyValue, compiled.rowSpecs[0].sourceBinding.projectNo))
+  // Until 2026-11-08 the rule was on values alone and an off-key column holding exactly the key value was accepted; the
+  // structural rule (rowIdOf must NAME the bound key field; the dedicated test below) now refuses it as well.
+  const equalCell = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }] })
+  expectError(compileYidaSendDraft, YidaDraftPlanError, equalCell.bound, 'YIDA_DRAFT_PLAN')
+  // Verifier r2 M1: the hook covers every planned row, every preset of every generated entry, and compares verbatim.
+  // (K5) Two bound rows: row 0's off-key cell equals its key value, only row 1's does not → the draft is refused.
+  const rowTwoOff = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey }, { ...rows[1] }] })
+  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOff.bound, 'YIDA_DRAFT_PLAN')
+  const rowTwoOn = await generatedInput({ config: offKey, rows: (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey })) })
+  expectError(compileYidaSendDraft, YidaDraftPlanError, rowTwoOn.bound, 'YIDA_DRAFT_PLAN') // every cell equal, the column still not the bound key field
+  // (K3) Two generated entries: the first is the default (key column), the SECOND one's preset reads the drawing number.
+  const secondEntry = (rowIdOf) => (layout) => {
+    layout.fieldCatalog.push({ id: 'secondCodeText', control: 'text', required: false })
+    layout.fieldMap.push({ transform: 'generated', template: [{ literal: 'B-' }, { preset: 'material-code-v1', rowIdOf, projectOf: 'project' }],
+      target: 'secondCodeText', type: 'string', required: false })
+    return layout
+  }
+  const secondOff = await generatedInput({ config: secondEntry('drawingNo'), rows: (rows) => [rows[0]] })
+  expectError(compileYidaSendDraft, YidaDraftPlanError, secondOff.bound, 'YIDA_DRAFT_PLAN')
+  const secondOn = compileYidaSendDraft((await generatedInput({ config: secondEntry('sourceLineId'), rows: (rows) => [rows[0]] })).bound)
+  assert.equal(secondOn.plan.rows[0].payload.secondCodeText, 'B-' + oracleMaterialCode('SYN-LINE-1', 'DEMO-P1'))
+  // (K4) An off-key cell that differs from the key value only by case is another value: refused.
+  const caseOnly = await generatedInput({ config: offKey, rows: (rows) => [{ ...rows[0], componentCode: rows[0].idempotencyKey.toLowerCase() }] })
+  assert.notEqual(caseOnly.rows[0].componentCode, caseOnly.rows[0].idempotencyKey)
+  expectError(compileYidaSendDraft, YidaDraftPlanError, caseOnly.bound, 'YIDA_DRAFT_PLAN')
+  // Split: every expanded row keeps the record's key value, so an off-key preset is refused there as well.
+  expectError(compileYidaSendDraft, YidaDraftPlanError, (await generatedInput({ config: offKey,
+    allocation: { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'totalQuantity' } })).bound, 'YIDA_DRAFT_PLAN')
+})
+
+test('generated: fieldDependencies of a bound row name the field ids a generated target reads (preset inputs, hash members, field parts)', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const preset = compileYidaSendDraft((await generatedInput()).bound)
+  for (const spec of preset.rowSpecs) assert.deepEqual(spec.sourceBinding.fieldDependencies.materialCodeText, ['fld_idempotencyKey', 'fld_projectNo'])
+  const template = await generatedInput({ config: (layout) => {
+    layout.fieldMap.at(-1).template = [{ field: 'materialGrade' }, { literal: '/' }, { hash: [...layout.businessKey], form: 'uuid-36' }]
+    return layout
+  } })
+  const hashed = compileYidaSendDraft(template.bound)
+  for (const spec of hashed.rowSpecs) {
+    assert.deepEqual(spec.sourceBinding.fieldDependencies.materialCodeText, ['fld_componentCode', 'fld_componentName', 'fld_componentSpec',
+      'fld_material', 'fld_parentComponentCode', 'fld_projectNo', 'fld_sourceVersion'])
+  }
+  // The dependencies enter the source record digest: a template reading other columns is another source record.
+  assert.notEqual(hashed.rowSpecs[0].sourceRecordDigest, preset.rowSpecs[0].sourceRecordDigest)
+  assert.equal(hashed.rowSpecs[0].creationIdentityDigest, preset.rowSpecs[0].creationIdentityDigest)
+  // A field part on a non-key column (verifier r2 L2, mutant V5c): the generated target's own sealed list names it.
+  const decorated = compileYidaSendDraft((await generatedInput({ config: (layout) => {
+    layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }, { literal: '/' }, { field: 'versionNo' }]
+    return layout
+  }, rows: (rows) => [rows[0]] })).bound)
+  assert.deepEqual(decorated.rowSpecs[0].sourceBinding.fieldDependencies.materialCodeText, ['fld_idempotencyKey', 'fld_projectNo', 'fld_sourceVersion'])
+})
+
+test('generated (persisted entry): two bound rows with one generated value are refused as DUPLICATE_GENERATED_VALUE before any draft exists', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { buildYidaStaticPlan, parseYidaStaticRows } = await plannerPromise
+  // Verifier r2 L4: one key value (so one preset code), other seven keys (so no duplicate business key). Each row alone
+  // compiles bound; together the batch pass marks both rows and the persisted compile refuses the draft.
+  const twin = await generatedInput({ rows: (rows) => [rows[0], { ...rows[0], componentCode: 'DEMO-DRW-7' }] })
+  const plan = buildYidaStaticPlan({ config: twin.unbound.config, rows: parseYidaStaticRows(twin.unbound.rowsText, twin.unbound.config) })
+  assert.deepEqual(plan.rows.map((planned) => planned.issues.map((issue) => issue.code)), [['DUPLICATE_GENERATED_VALUE'], ['DUPLICATE_GENERATED_VALUE']])
+  assert.equal(plan.evidence.duplicateKeyCount, 0)
+  expectError(compileYidaSendDraft, YidaDraftPlanError, twin.bound, 'YIDA_DRAFT_PLAN')
+  for (const index of [0, 1]) {
+    const single = await generatedInput({ rows: (rows) => [index === 0 ? rows[0] : { ...rows[0], componentCode: 'DEMO-DRW-7' }] })
+    assert.equal(codesOf(compileYidaSendDraft(single.bound))[0], oracleMaterialCode('SYN-LINE-1', 'DEMO-P1'))
+  }
+})
+
+test('generated SR1: a rebuilt bound draft keeps the code bytes and the source record; an unrelated constant changes only payload and plan digests', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  const { buildYidaStaticPlan, parseYidaStaticRows } = await plannerPromise
+  const input = await generatedInput()
+  const first = compileYidaSendDraft(input.bound), again = compileYidaSendDraft(structuredClone(input.bound))
+  assert.deepEqual(again.rowSpecs, first.rowSpecs); assert.equal(again.planDigest, first.planDigest)
+  assert.deepEqual(codesOf(again), codesOf(first))
+  assert.deepEqual(codesOf(first), input.rows.map((entry) => oracleMaterialCode(entry.idempotencyKey, 'DEMO-P1')))
+  // Third draft: one unrelated constant changed (not a key, not a template input).
+  const changed = await generatedInput({ config: (layout) => {
+    layout.fieldMap.find((entry) => entry.target === 'defaultText').value = 'SYN-DEFAULT-CHANGED'
+    return layout
+  } })
+  const third = compileYidaSendDraft(changed.bound)
+  assert.deepEqual(codesOf(third), codesOf(first))
+  for (const [index, spec] of third.rowSpecs.entries()) {
+    assert.equal(spec.sourceRecordDigest, first.rowSpecs[index].sourceRecordDigest)
+    assert.equal(spec.creationIdentityDigest, first.rowSpecs[index].creationIdentityDigest)
+    assert.equal(spec.businessKeyDigest, first.rowSpecs[index].businessKeyDigest)
+    assert.notEqual(spec.payloadDigest, first.rowSpecs[index].payloadDigest)
+  }
+  assert.notEqual(third.planDigest, first.planDigest)
+  // Parity: the browser sequence (parse, plan) and a one-row re-plan of each row (what the send selection does) give the
+  // same code as the persisted bound compile and the unbound local recompute: the binding never feeds the code.
+  const browser = buildYidaStaticPlan({ config: input.unbound.config, rows: parseYidaStaticRows(input.unbound.rowsText, input.unbound.config) })
+  assert.deepEqual(browser.rows.map((planned) => planned.payload.materialCodeText), codesOf(first))
+  assert.deepEqual(codesOf(compileYidaLocalDraft(input.unbound)), codesOf(first))
+  for (const [index, entry] of input.rows.entries()) {
+    assert.equal(buildYidaStaticPlan({ config: input.unbound.config, rows: [entry] }).rows[0].payload.materialCodeText, codesOf(first)[index])
+  }
+  // ⑦.3 point 6 with generated: any fieldMap permutation is the same bound draft (same plan digest and row specs).
+  const permuted = await generatedInput({ config: (layout) => { layout.fieldMap.reverse(); return layout } })
+  const reordered = compileYidaSendDraft(permuted.bound)
+  assert.equal(reordered.planDigest, first.planDigest)
+  assert.deepEqual(reordered.rowSpecs, first.rowSpecs)
+})
+
+// ---- YD (owner 2026-11-07, R-88: an open question gets a configurable default; the default is today's behaviour) ----
+// Pre-change goldens, captured on b6dc5f4d2 + main merge d59a15525 before the options existed (local, never-persisted
+// compile of the v3 example split two ways with decimal quantities 0.5 / 1.25).
+const YD_V3_DECIMAL_GOLDEN = {
+  planDigest: 'b167c893df12da6f944c534944e8bcb43bb60002955023617b576d30af8d950a',
+  keyDefinitionDigest: 'd320bf2a69eeff33b75ad11af51a50f8000d62d2dc0965bf16d35ef283a96f26',
+}
+async function ydDecimalInput(patch = {}) {
+  const { createYidaTransformExample } = await plannerPromise
+  const example = createYidaTransformExample()
+  const rows = example.rows.map((entry, index) => ({ ...entry, totalQuantity: index === 0 ? 0.5 : 1.25 }))
+  return { config: example.config, rowsText: JSON.stringify(rows),
+    allocation: { mode: 'equal_decimal_exact', projectField: 'projectNo', quantityField: 'totalQuantity', projects: ['DEMO-P1', 'DEMO-P2'], ...patch } }
+}
+
+test('Q4 plan digest: absent and explicit exact are the pre-change digest; legacy-1dp is its own digest even when every share is exact', async () => {
+  const { compileYidaDraft, compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  for (const patch of [{}, { quantityRounding: 'exact' }]) {
+    const compiled = compileYidaLocalDraft(await ydDecimalInput(patch))
+    assert.equal(compiled.planDigest, YD_V3_DECIMAL_GOLDEN.planDigest)
+    assert.equal(compiled.keyDefinitionDigest, YD_V3_DECIMAL_GOLDEN.keyDefinitionDigest)
+  }
+  // The literal v2 material golden through both persisted entries with an explicit 'exact'.
+  const { material } = await goldenInputs()
+  const explicit = { ...material, allocation: { ...material.allocation, quantityRounding: 'exact' } }
+  for (const compile of [compileYidaDraft, compileYidaSendDraft]) {
+    const compiled = compile(explicit)
+    assert.equal(compiled.planDigest, V2_GOLDEN.material.planDigest)
+    assert.equal(compiled.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  }
+  // 4 / 2 and 6 / 2: the legacy shares equal the exact ones, the rows are the same bytes, the plan digest is not.
+  const decimal = { ...material, allocation: { ...material.allocation, mode: 'equal_decimal_exact' } }
+  const exact = compileYidaSendDraft(decimal)
+  const legacy = compileYidaSendDraft({ ...decimal, allocation: { ...decimal.allocation, quantityRounding: 'legacy-1dp' } })
+  assert.deepEqual(legacy.plan, exact.plan)
+  assert.deepEqual(legacy.rowSpecs, exact.rowSpecs)
+  assert.notEqual(legacy.planDigest, exact.planDigest)
+  assert.equal(legacy.keyDefinitionDigest, exact.keyDefinitionDigest)
+  // A legacy share that is not exact changes the rows (and the plan digest) too.
+  const rounded = compileYidaLocalDraft(await ydDecimalInput({ quantityRounding: 'legacy-1dp' }))
+  assert.deepEqual(rounded.plan.rows.map((row) => row.payload.totalQty), [0.3, 0.3, 0.6, 0.6])
+  assert.notEqual(rounded.planDigest, YD_V3_DECIMAL_GOLDEN.planDigest)
+  // The compiler's closed allocation shape: the optional key, never on original, never another key.
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...material, allocation: { mode: 'original', quantityRounding: 'exact' } }, 'YIDA_DRAFT_INPUT')
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...decimal, allocation: { ...decimal.allocation, quantityRounding: 'legacy-1dp', note: 'x' } }, 'YIDA_DRAFT_INPUT')
+  // The allocation module owns the values: legacy-1dp on an integer split is refused (PLAN).
+  expectError(compileYidaSendDraft, YidaDraftPlanError, { ...material, allocation: { ...material.allocation, quantityRounding: 'legacy-1dp' } }, 'YIDA_DRAFT_PLAN')
+})
+
+// D2: the material-code form, an option of the material-code-v1 preset part ONLY (verify-YD-r1 F1 / ruling Y6 P1): there
+// is no config-level form and the key definition never carries it. 'uuid-36' (default) is Y2's code byte for byte;
+// 'uuid-32' drops the UUID's hyphens after the WLBH- prefix. One target keeps one form because the send authority seals
+// the target's generated layout, which copies preset parts whole (the real-PG case is in
+// stock-preparation-yida-send-approvals-realdb.test.ts, "D2 form under the P1 seal").
+const uuid32 = (code) => 'WLBH-' + code.slice(5).replaceAll('-', '')
+const presetForm = (form) => (layout) => {
+  layout.fieldMap.find((entry) => entry.transform === 'generated').template[0].form = form
+  return layout
+}
+// The canonical generated-layout signature digest (what the seal stores). Goldens captured on the Y6 P1 head 9be8be676
+// (its lib refuses a preset `form`, so the absent option there IS today's layout) and, for uuid-32, on this head.
+const layoutDigestOf = (layout) => createHash('sha256').update(stableCanonicalStringify(layout), 'utf8').digest('hex')
+const YD_LAYOUT_GOLDEN = {
+  example: '90fcfc77583df0dbcdf1ce650cac5316307b8ed96eb735716c9c4382653dd4da',
+  uuid32: 'cb794516525bcdc7809a70f599ffa2eb68c96071a9d81f9175974101ef934ade',
+}
+
+test('D2 default: absent and a declared preset uuid-36 compile byte-identically to today: the 41-character Y2 code, the golden key definition and the unchanged generated-layout signature', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  const { yidaGeneratedLayout, validateYidaStaticConfig } = await plannerPromise
+  const base = await generatedInput()
+  const absent = compileYidaSendDraft(base.bound)
+  assert.equal(absent.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  assert.deepEqual(Object.keys(absent.keyDefinition).sort(), ['algorithm', 'fields'])
+  assert.equal(Object.hasOwn(absent.source.config, 'materialCodeForm'), false)
+  for (const [index, code] of codesOf(absent).entries()) {
+    assert.equal(code, oracleMaterialCode(base.rows[index].idempotencyKey, 'DEMO-P1'))
+    assert.equal(code.length, 41)
+  }
+  assert.equal(layoutDigestOf(yidaGeneratedLayout(base.bound.config)), YD_LAYOUT_GOLDEN.example)
+  const declared = await generatedInput({ config: presetForm('uuid-36') })
+  const compiled = compileYidaSendDraft(declared.bound)
+  assert.equal(compiled.planDigest, absent.planDigest)
+  assert.equal(compiled.keyDefinitionDigest, absent.keyDefinitionDigest)
+  assert.deepEqual(compiled.plan, absent.plan)
+  assert.deepEqual(compiled.rowSpecs, absent.rowSpecs)
+  // The declared default is normalized away: the part, the normalized config and the layout signature are the absent ones.
+  assert.deepEqual(compiled.source.config, absent.source.config)
+  assert.equal(Object.hasOwn(validateYidaStaticConfig(declared.bound.config).normalized.fieldMap.at(-1).template[0], 'form'), false)
+  assert.equal(layoutDigestOf(yidaGeneratedLayout(declared.bound.config)), YD_LAYOUT_GOLDEN.example)
+  // The split local compile keeps its pre-change digest too.
+  assert.equal(compileYidaLocalDraft(await ydDecimalInput()).keyDefinitionDigest, YD_V3_DECIMAL_GOLDEN.keyDefinitionDigest)
+})
+
+test('D2 uuid-32: the 37-character code is the Y2 code without the UUID hyphens; the key definition is unchanged; the form is in the generated-layout signature (the P1 seal), never a second seal', async () => {
+  const { compileYidaSendDraft } = await modulePromise
+  const { yidaGeneratedLayout } = await plannerPromise
+  const base = await generatedInput()
+  const defaults = compileYidaSendDraft(base.bound)
+  const chosen = await generatedInput({ config: presetForm('uuid-32') })
+  const compiled = compileYidaSendDraft(chosen.bound)
+  for (const [index, code] of codesOf(compiled).entries()) {
+    assert.equal(code, uuid32(oracleMaterialCode(base.rows[index].idempotencyKey, 'DEMO-P1')))
+    assert.match(code, /^WLBH-[0-9A-F]{32}$/)
+    assert.equal(code.length, 37)
+  }
+  // No second sealing mechanism: the key definition (sealed with the slot by the draft store) is the default one.
+  assert.deepEqual(compiled.keyDefinition, defaults.keyDefinition)
+  assert.equal(compiled.keyDefinitionDigest, defaults.keyDefinitionDigest)
+  assert.notEqual(compiled.planDigest, defaults.planDigest)
+  assert.equal(Object.hasOwn(compiled.source.config, 'materialCodeForm'), false)
+  // The form travels inside the preset part, so the layout signature differs from the default one: a target sealed with
+  // one form refuses the other at approval / admission (GENERATED_LAYOUT_CONFLICT).
+  const layout = yidaGeneratedLayout(chosen.bound.config)
+  assert.deepEqual(layout.entries.map((entry) => entry.template), [[{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project', form: 'uuid-32' }]])
+  assert.equal(layoutDigestOf(layout), YD_LAYOUT_GOLDEN.uuid32)
+  assert.notEqual(layoutDigestOf(layout), YD_LAYOUT_GOLDEN.example)
+  // A split gets one code per split row in the chosen form as well.
+  const split = compileYidaSendDraft((await generatedInput({ config: presetForm('uuid-32'),
+    allocation: { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'totalQuantity', projects: ['DEMO-P1', 'DEMO-P2'] } })).bound)
+  assert.equal(codesOf(split).length, 4)
+  assert.equal(new Set(codesOf(split)).size, 4)
+  for (const code of codesOf(split)) assert.match(code, /^WLBH-[0-9A-F]{32}$/)
+})
+
+test('D2 has no config-level form: a root materialCodeForm is refused on v2 (initialization) and v3 alike; the v2 goldens are untouched; an unknown preset form is FIELD_MAP; two presets keep their own forms', async () => {
+  const { compileYidaDraft, compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { validateYidaStaticConfig, createYidaTransformExample, buildYidaStaticPlan, yidaGeneratedLayout } = await plannerPromise
+  const { material } = await goldenInputs()
+  const plain = compileYidaDraft(material)
+  assert.equal(plain.planDigest, V2_GOLDEN.material.planDigest)
+  assert.equal(plain.keyDefinitionDigest, V2_GOLDEN.material.keyDefinitionDigest)
+  const { bound } = await generatedInput()
+  for (const form of ['uuid-36', 'uuid-32', 'uuid-16']) {
+    expectError(compileYidaDraft, YidaDraftPlanError, { ...material, config: { ...material.config, materialCodeForm: form } }, 'YIDA_DRAFT_CONFIG')
+    assert.deepEqual(validateYidaStaticConfig({ ...material.config, materialCodeForm: form }).issues, [{ code: 'CONFIG_UNEXPECTED_FIELD', field: '(root)' }])
+    assert.equal(validateYidaStaticConfig({ ...bound.config, materialCodeForm: form }).valid, false)
+    expectError(compileYidaSendDraft, YidaDraftPlanError, { ...bound, config: { ...bound.config, materialCodeForm: form } }, 'YIDA_DRAFT_CONFIG')
+  }
+  const example = () => structuredClone(createYidaTransformExample().config)
+  // A preset part's form is closed like a hash part's: an unknown form is an invalid part.
+  for (const bad of ['uuid-16', 'UUID-32', '', null, 32, true]) {
+    assert.deepEqual(validateYidaStaticConfig(presetForm(bad)(example())).issues, [{ code: 'CONFIG_FIELD_MAP_INVALID', field: 'fieldMap' }])
+  }
+  // Two preset parts on two targets each keep their own form (each is its own part of the one sealed layout).
+  const twoPresets = example()
+  const generated = twoPresets.fieldMap.find((entry) => entry.transform === 'generated')
+  twoPresets.fieldMap.push({ ...structuredClone(generated), target: 'materialCodeAlt' })
+  twoPresets.fieldCatalog.push({ id: 'materialCodeAlt', control: 'text', required: false })
+  generated.template[0].form = 'uuid-32'
+  assert.equal(validateYidaStaticConfig(twoPresets).valid, true)
+  const rows = createYidaTransformExample().rows
+  const [row] = buildYidaStaticPlan({ config: twoPresets, rows }).rows
+  assert.equal(row.payload.materialCodeText, uuid32(row.payload.materialCodeAlt))
+  assert.equal(row.payload.materialCodeAlt.length, 41)
+  assert.deepEqual(yidaGeneratedLayout(twoPresets).entries.map((entry) => [entry.target, Object.hasOwn(entry.template[0], 'form')]),
+    [['materialCodeAlt', false], ['materialCodeText', true]])
+})
+
+test('generated (rowIdOf names the bound key field; hardening 2026-11-08): a preset whose rowIdOf is another column that merely holds the key value is refused (SOURCE_KEY_FIELD_MISMATCH → PLAN); the same column bound AS the key field compiles; the local recompute is untouched', async () => {
+  const { compileYidaSendDraft, YidaDraftPlanError } = await modulePromise
+  const { compileYidaLocalDraft } = await compilerPromise
+  // rowIdOf = drawingNo (source componentCode) while the binding's key field is the idempotency key; every row's drawing
+  // number is set to its key value, so the per-row VALUE hook passes and only the structural rule can refuse.
+  const offKey = (layout) => { layout.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }]; return layout }
+  const sameValue = (rows) => rows.map((entry) => ({ ...entry, componentCode: entry.idempotencyKey }))
+  const { unbound, bound, rows } = await generatedInput({ config: offKey, rows: sameValue })
+  for (const [index, entry] of rows.entries()) assert.equal(entry.componentCode, bound.sourceBinding.records[index].keyValue)
+  expectError(compileYidaSendDraft, YidaDraftPlanError, bound, 'YIDA_DRAFT_PLAN')
+  assert.equal(compileYidaLocalDraft(unbound).plan.rows.length, 2)
+  // The same template with drawingNo's column bound AS the key field (keyFieldId fld_componentCode, key values = the drawing
+  // numbers): rowIdOf names the bound key field, the value hook holds, the draft compiles and mints WLBH(drawing number, project).
+  const rebound = { ...bound, sourceBinding: { ...bound.sourceBinding, keyFieldId: 'fld_componentCode',
+    records: bound.sourceBinding.records.map((record, index) => ({ ...record, keyValue: rows[index].componentCode })) } }
+  const compiled = compileYidaSendDraft(rebound)
+  assert.deepEqual(codesOf(compiled), rows.map((entry) => oracleMaterialCode(entry.componentCode, 'DEMO-P1')))
+  // The shipped template (rowIdOf = sourceLineId, the idempotency key's target) satisfies the rule as before.
+  const shipped = await generatedInput()
+  assert.equal(compileYidaSendDraft(shipped.bound).rowSpecs.length, 2)
 })

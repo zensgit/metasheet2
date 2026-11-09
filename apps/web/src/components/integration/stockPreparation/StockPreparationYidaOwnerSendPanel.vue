@@ -3,7 +3,7 @@
     <h3>宜搭 Owner 单次创建确认</h3>
     <p>先保存服务端草稿，再核对所选行、明确授权，最后单独提交一次。当前只支持手动 CREATE；有效期最长 15 分钟。</p>
     <p data-testid="sp-yida-owner-default-off">发送默认关闭；只有服务端明确启用且核验当前 Owner 与集成管理员权限后才接受操作。本页不配置凭据或登记目标。</p>
-    <p v-if="!draftInput" data-testid="sp-yida-owner-input-required">请先完成有效的协议 v2 创建预演。</p>
+    <p v-if="!draftInput" data-testid="sp-yida-owner-input-required">请先完成有效的协议 v2 或派生映射 v3 创建预演。</p>
     <section v-if="multiTarget" data-testid="sp-yida-owner-multi">
       <p>服务端已开启多目标：先选择要写入的宜搭目标（应用 + 表单），再选择数据来源。每个草稿、授权与发送记录只绑定这一个目标。</p>
       <button type="button" data-testid="sp-yida-owner-targets-load" :disabled="busy || !!draft || locked" @click="loadTargets">读取目标列表</button>
@@ -29,6 +29,9 @@
     </section>
     <button type="button" data-testid="sp-yida-owner-save" :disabled="!draftInput || busy || !!draft || locked || disabled" @click="saveDraft">保存服务端草稿（不发送）</button>
     <p v-if="errorCode" role="alert" data-testid="sp-yida-owner-error">{{ errorCode }}</p>
+    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_LIMIT'" data-testid="sp-yida-owner-limit">内容超过单次发送的大小上限（派生映射 v3 的常量与复制也计入）；这次请求没有保存、授权或发送任何内容。请减少字段或缩短常量后重新预演。</p>
+    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_IDENTITY_RESERVED'" data-testid="sp-yida-owner-identity-reserved">此物料行在该目标已经创建过，不再新建；请到宜搭核对。</p>
+    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT'" data-testid="sp-yida-owner-generated-layout-conflict">该目标的编码模板布局已在首次授权时封存，本草稿的模板布局与之不同（或不含编码模板）；未授权、未发送。请改回已封存的模板，或由管理员另建目标。</p>
     <p v-if="disabled" data-testid="sp-yida-owner-disabled">服务端发送开关关闭；未取得新的发送授权。已有授权仅可手动查看或撤销。</p>
 
     <section v-if="draft" data-testid="sp-yida-owner-draft">
@@ -99,6 +102,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import { randomUuid } from '../../../utils/uuid'
+import { yidaTransformSourceColumns } from '../../../../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 import {
   createYidaOwnerClient,
   YidaOwnerClientError,
@@ -143,6 +147,10 @@ const sheetId = ref('')
 const viewId = ref('')
 const columnMap = reactive<Record<string, string>>({})
 const mappingSources = computed(() => {
+  // R-71 ⑦.3: a v3 mapping also reads concat-only columns; the shared helper lists every column it reads.
+  if ((props.draftInput?.config as { version?: unknown } | undefined)?.version === 3) {
+    try { return [...yidaTransformSourceColumns(props.draftInput?.config)] } catch { return [] }
+  }
   const fieldMap = (props.draftInput?.config as { fieldMap?: unknown } | undefined)?.fieldMap
   return Array.isArray(fieldMap) ? fieldMap.map(entry => (entry as { source?: unknown }).source).filter((source): source is string => typeof source === 'string') : []
 })

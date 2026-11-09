@@ -7,7 +7,8 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
-import { pool } from '../db/pg'
+import { pool, transaction } from '../db/pg'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { auditLog } from '../audit/audit'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
@@ -163,13 +164,17 @@ export function permissionsRouter(): Router {
         return res.status(400).json({ error: `Permission code '${permission}' does not exist` })
       }
 
-      // Grant permission (upsert to avoid duplicates)
-      await pool.query(
-        `INSERT INTO user_permissions (user_id, permission_code)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id, permission_code) DO NOTHING`,
-        [userId, permission]
-      )
+      // Grant permission (upsert to avoid duplicates). D21 (Y5a): the write used to run autocommit;
+      // it now runs in one transaction whose first statement bumps the subject authorization version.
+      await transaction(async (client) => {
+        await bumpSubjectAuthorizationVersions(client, [userId])
+        await client.query(
+          `INSERT INTO user_permissions (user_id, permission_code)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id, permission_code) DO NOTHING`,
+          [userId, permission]
+        )
+      })
 
       // Invalidate cache for the user
       invalidateUserPerms(userId)
@@ -234,11 +239,14 @@ export function permissionsRouter(): Router {
         return res.status(403).json({ error: 'Only admins can revoke permissions' })
       }
 
-      // Revoke permission
-      const result = await pool.query(
-        'DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2',
-        [userId, permission]
-      )
+      // Revoke permission. D21 (Y5a): subject version bump first, same transaction as the DELETE.
+      const result = await transaction(async (client) => {
+        await bumpSubjectAuthorizationVersions(client, [userId])
+        return client.query(
+          'DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2',
+          [userId, permission]
+        )
+      })
 
       // Invalidate cache for the user
       invalidateUserPerms(userId)
@@ -406,12 +414,16 @@ export function permissionsRouter(): Router {
 
       if (template.permissions.length > 0) {
         const values = template.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-        await pool.query(
-          `INSERT INTO user_permissions (user_id, permission_code)
-           VALUES ${values}
-           ON CONFLICT (user_id, permission_code) DO NOTHING`,
-          [userId, ...template.permissions],
-        )
+        // D21 (Y5a): subject version bump first, same transaction as the template grants.
+        await transaction(async (client) => {
+          await bumpSubjectAuthorizationVersions(client, [userId])
+          await client.query(
+            `INSERT INTO user_permissions (user_id, permission_code)
+             VALUES ${values}
+             ON CONFLICT (user_id, permission_code) DO NOTHING`,
+            [userId, ...template.permissions],
+          )
+        })
       }
 
       invalidateUserPerms(userId)

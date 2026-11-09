@@ -47,9 +47,9 @@
     <div class="sp-yida-preview__mapping">
       <h4>字段映射</h4>
       <p>source 是本地 JSON 字段；target 是目标表单字段。业务键仅作本地重复检查，不能验证远端状态。</p>
-      <p v-if="previewMode === 'transforms'" data-testid="sp-yida-transform-hint">v3：业务键和允许空键勾选的是「直接映射」行的 target，复制、常量、拼接永不参与业务键。复制取所指直接映射行的同一列；拼接按列出顺序用分隔符连接，数字按 String() 书写，空部分按所选规则跳过或拒绝，全部为空则视为缺失。查表不在这里：所需的值须先由获批的只读备成列。</p>
+      <p v-if="previewMode === 'transforms'" data-testid="sp-yida-transform-hint">v3：业务键和允许空键勾选的是「直接映射」行的 target，复制、常量、拼接永不参与业务键。复制取所指直接映射行的同一列；拼接按列出顺序用分隔符连接，数字按 String() 书写，空部分按所选规则跳过或拒绝，全部为空则视为缺失。查表不在这里：所需的值须先由获批的只读备成列。生成按模板部件 JSON 顺序拼接（字面量、字段、哈希、物料编码预置），恰好一个哈希（覆盖全部业务键目标）或一个预置，在拆分之后逐行计算；任一部分为空即拒绝，同批两行得到同一个值时两行都拒绝。</p>
       <div v-for="(entry, index) in fieldMap" :key="index" class="sp-yida-preview__map-row" :data-testid="`sp-yida-map-row-${index}`">
-        <label v-if="previewMode === 'transforms'">变换<select v-model="entry.transform" :data-testid="`sp-yida-map-transform-${index}`"><option value="direct">直接映射</option><option value="copy">复制</option><option value="constant">常量</option><option value="concat">拼接</option></select></label>
+        <label v-if="previewMode === 'transforms'">变换<select v-model="entry.transform" :data-testid="`sp-yida-map-transform-${index}`"><option value="direct">直接映射</option><option value="copy">复制</option><option value="constant">常量</option><option value="concat">拼接</option><option value="generated">生成</option></select></label>
         <label v-if="previewMode !== 'transforms' || entry.transform === 'direct'">source<input v-model="entry.source" :data-testid="`sp-yida-map-source-${index}`" autocomplete="off"></label>
         <label v-if="previewMode === 'transforms' && entry.transform === 'copy'">复制自（直接映射行的 target）<input v-model="entry.copyOf" :data-testid="`sp-yida-map-copy-of-${index}`" autocomplete="off"></label>
         <label v-if="previewMode === 'transforms' && entry.transform === 'constant'">常量值（数字按 JSON 数字原样书写）<input v-model="entry.constantText" :data-testid="`sp-yida-map-constant-${index}`" autocomplete="off"></label>
@@ -58,6 +58,7 @@
           <label>分隔符<input v-model="entry.separator" :data-testid="`sp-yida-map-concat-separator-${index}`" autocomplete="off"></label>
           <label>空部分<select v-model="entry.blank" :data-testid="`sp-yida-map-concat-blank-${index}`"><option value="refuse">部分为空即拒绝</option><option value="skip">跳过空部分</option></select></label>
         </template>
+        <label v-if="previewMode === 'transforms' && entry.transform === 'generated'">生成模板 JSON（按顺序；每项 {"literal": 文字}、{"field": 直接映射 target}、{"hash": [直接映射 target…], "form": "uuid-36" 或 "uuid-32"} 或 {"preset": "material-code-v1", "rowIdOf": target, "projectOf": target}）<textarea v-model="entry.templateText" :data-testid="`sp-yida-map-generated-template-${index}`" rows="2" spellcheck="false"></textarea></label>
         <label>target<input v-model="entry.target" :data-testid="`sp-yida-map-target-${index}`" autocomplete="off"></label>
         <label>type<select v-model="entry.type" :data-testid="`sp-yida-map-type-${index}`"><option value="string">string</option><option value="number">number</option><option value="boolean">boolean</option></select></label>
         <label><input v-model="entry.required" type="checkbox" :data-testid="`sp-yida-map-required-${index}`">必填</label>
@@ -69,14 +70,16 @@
     </div>
     <div class="sp-yida-preview__allocation">
       <h4>项目数量分配（本地候选）</h4>
-      <p>不从看板、范围或斜杠语法推断项目。整数模式必须整除；小数模式至多六位且不舍入。单位可否拆分、余数归属和旧复合键仍需生产政策批准。</p>
+      <p>不从看板、范围或斜杠语法推断项目。整数模式必须整除；小数模式至多六位且默认不舍入（可选沿用旧系统的 1 位小数取整，会改变总量）。单位可否拆分、余数归属和旧复合键仍需生产政策批准。</p>
       <p>项目字段由明确项目列表覆盖，原值可缺省；其它映射字段仍须满足校验。项目列表不接受空行或制表符。</p>
       <label>模式<select v-model="allocationMode" data-testid="sp-yida-allocation-mode"><option value="original">原已整理逐表单（默认）</option><option value="equal_integer">整数精确均分</option><option value="equal_decimal_exact">小数精确均分（最多 6 位，不舍入）</option></select></label>
       <div v-if="allocationMode !== 'original'" class="sp-yida-preview__allocation-fields" data-testid="sp-yida-allocation-fields">
         <label>明确项目列表（一行一个完整项目号）<textarea v-model="allocationProjectsText" data-testid="sp-yida-allocation-projects" rows="4" spellcheck="false" placeholder="SYN-PROJECT-01&#10;SYN-PROJECT-02"></textarea></label>
         <label>源项目字段<select v-model="allocationProjectField" data-testid="sp-yida-allocation-project-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
         <label>源数量字段<select v-model="allocationQuantityField" data-testid="sp-yida-allocation-quantity-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
+        <label v-if="allocationMode === 'equal_decimal_exact'">数量取整<select v-model="allocationRounding" data-testid="sp-yida-allocation-rounding"><option value="exact">精确均分，除不尽拒绝（默认）</option><option value="legacy-1dp">沿用旧系统：每份四舍五入保留 1 位小数</option></select></label>
       </div>
+      <p v-if="allocationMode === 'equal_decimal_exact' && allocationRounding === 'legacy-1dp'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-rounding-warning">注意：沿用旧系统的取整会改变总量。每个项目的数量四舍五入到 1 位小数，各项目之和可能不等于原数量，差额见下方分配结果。是否采用由 owner 决定。</p>
       <p v-if="allocationMode !== 'original' && intent === 'update'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-update-blocked">禁止更新扇出：项目分配只能计划创建，不能将一个 update instanceId 扇出到多个项目。</p>
     </div>
     <section class="sp-yida-preview__rule-template" data-testid="sp-yida-rule-template">
@@ -108,7 +111,7 @@
     </section>
     <section class="sp-yida-preview__owner-entry" data-testid="sp-yida-owner-entry">
       <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
-      <!-- Always rendered; greyed with the one missing condition until a clean v2 create preview exists. -->
+      <!-- Always rendered; greyed with the one missing condition until a clean v2 or v3 create preview exists. -->
       <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || !persistentInput" @click="initializationOpen = true">打开本地初始化（不发送）</button>
       <p v-if="!initializationOpen && initializationBlockedReason" data-testid="sp-yida-initialization-blocked">暂不能打开：{{ initializationBlockedReason }}</p>
       <template v-if="persistentInput">
@@ -133,13 +136,13 @@ import StockPreparationYidaInitializationPanel from './StockPreparationYidaIniti
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
 
 // One editor row for every contract; the v3-only fields (transform, copyOf, constantText,
-// partsText, separator, blank) are rendered and read only in the v3 contract.
+// partsText, separator, blank, templateText) are rendered and read only in the v3 contract.
 type FieldMapEntry = { source: string; target: string; type: 'string' | 'number' | 'boolean'; required: boolean; businessKey: boolean; emptyKey: boolean
-  transform: YidaTransformName; copyOf: string; constantText: string; partsText: string; separator: string; blank: 'skip' | 'refuse' }
+  transform: YidaTransformName; copyOf: string; constantText: string; partsText: string; separator: string; blank: 'skip' | 'refuse'; templateText: string }
 type CatalogEntry = { id: string; control: 'text' | 'number' | 'select' | 'radio'; required: boolean; optionsText: string; optionsMode: 'lines' | 'json' }
 type AllocationMode = 'original' | 'equal_integer' | 'equal_decimal_exact'
 type PreviewMode = 'mapping' | 'protocol' | 'transforms'
-function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false, transform: 'direct', copyOf: '', constantText: '', partsText: '', separator: '', blank: 'refuse' } }
+function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false, transform: 'direct', copyOf: '', constantText: '', partsText: '', separator: '', blank: 'refuse', templateText: '' } }
 function blankCatalogEntry(): CatalogEntry { return { id: '', control: 'text', required: false, optionsText: '', optionsMode: 'lines' } }
 function modeOf(version: 1 | 2 | 3): PreviewMode { return version === 3 ? 'transforms' : version === 2 ? 'protocol' : 'mapping' }
 const previewMode = ref<PreviewMode>('mapping')
@@ -161,6 +164,8 @@ const businessKeyOrder = ref<string[]>([])
 const emptyKeyOrder = ref<string[]>([])
 const rowsText = ref('')
 const allocationMode = ref<AllocationMode>('original')
+// Q4 (owner 2026-11-07, R-88): 'exact' is today's rule and is never sent; 'legacy-1dp' only with the decimal mode.
+const allocationRounding = ref<'exact' | 'legacy-1dp'>('exact')
 const allocationProjectsText = ref('')
 const allocationProjectField = ref('')
 const allocationQuantityField = ref('')
@@ -191,12 +196,13 @@ function candidateReason(code: YidaStaticRowIssueCode): string {
     FIELD_NUMBER_INVALID: 'FIELD_NUMBER_INVALID（数字须有限且不是负零，整数须在安全范围内）',
     FIELD_PART_MISSING: 'FIELD_PART_MISSING（拼接有部分为空，规则为拒绝）',
     FIELD_VALUE_TOO_LONG: 'FIELD_VALUE_TOO_LONG（拼接结果超过 4096 字符）',
+    DUPLICATE_GENERATED_VALUE: 'DUPLICATE_GENERATED_VALUE（同批另一行生成了同一个值）',
   }
   return labels[code] ?? '候选校验失败'
 }
 function rowIssueReason(issue: YidaStaticRowIssue): string {
   const types = { string: '文本', number: '数字', boolean: '布尔值' }
-  const derived: Record<YidaTransformName, string> = { direct: '直接映射', copy: '复制', constant: '常量', concat: '拼接' }
+  const derived: Record<YidaTransformName, string> = { direct: '直接映射', copy: '复制', constant: '常量', concat: '拼接', generated: '生成' }
   return [candidateReason(issue.code), ...(issue.fields ?? []).map((field) =>
     `${field.source ?? derived[field.transform ?? 'direct']} → ${field.target}（期望${types[field.type]}）`)].join('；')
 }
@@ -210,7 +216,7 @@ function clearResults(): void {
   plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
 }
 function invalidateOutputs(): void { clearResults(); ruleExportText.value = ''; ruleImportNotice.value = '' }
-watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
+watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationRounding, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
 function loadExample(kind: 'primary' | 'renamed'): void {
   applyExample(createYidaStaticExample(kind))
 }
@@ -234,7 +240,7 @@ function applyExample(example: YidaStaticExample | YidaProtocolExample | YidaTra
   fieldCatalog.splice(0, fieldCatalog.length, ...catalogEditorEntries(config, 'lines'))
   businessKeyOrder.value = [...config.businessKey]; emptyKeyOrder.value = config.version !== 1 ? [...config.emptyKeyFields] : []
   const roles = allocationDefaults(config)
-  rowsText.value = example.text; allocationMode.value = 'original'; allocationProjectsText.value = 'SYN-PROJECT-01\nSYN-PROJECT-02'; allocationProjectField.value = roles.projectField; allocationQuantityField.value = roles.quantityField; invalidateOutputs()
+  rowsText.value = example.text; allocationMode.value = 'original'; allocationRounding.value = 'exact'; allocationProjectsText.value = 'SYN-PROJECT-01\nSYN-PROJECT-02'; allocationProjectField.value = roles.projectField; allocationQuantityField.value = roles.quantityField; invalidateOutputs()
 }
 function mapEditorEntries(config: YidaRuleTemplateRules): FieldMapEntry[] {
   // v3 keys name direct targets, so each checkbox is bound to its own row, never "first row with that source".
@@ -247,6 +253,7 @@ function mapEditorEntries(config: YidaRuleTemplateRules): FieldMapEntry[] {
       partsText: entry.transform === 'concat' ? JSON.stringify(entry.parts) : '',
       separator: entry.transform === 'concat' ? entry.separator : '',
       blank: entry.transform === 'concat' ? entry.blank : 'refuse',
+      templateText: entry.transform === 'generated' ? JSON.stringify(entry.template) : '',
       businessKey: entry.transform === 'direct' && config.businessKey.includes(entry.target),
       emptyKey: entry.transform === 'direct' && config.emptyKeyFields.includes(entry.target),
     }))
@@ -267,6 +274,10 @@ function transformConfigEntry(entry: FieldMapEntry): YidaTransformFieldMapEntry 
     // A number constant is read only in its exact spelling, like the template parser does.
     if (entry.type === 'number' && !(NUMBER_TEXT.test(entry.constantText) && String(Number(entry.constantText)) === entry.constantText)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
     return { transform: 'constant', value: entry.type === 'number' ? Number(entry.constantText) : entry.constantText, ...common }
+  }
+  if (entry.transform === 'generated') {
+    const template: unknown = JSON.parse(entry.templateText)
+    return { transform: 'generated', template: template as Extract<YidaTransformFieldMapEntry, { transform: 'generated' }>['template'], target: entry.target, type: entry.type as 'string', required: entry.required }
   }
   const parts: unknown = JSON.parse(entry.partsText)
   return { transform: 'concat', parts: parts as Extract<YidaTransformFieldMapEntry, { transform: 'concat' }>['parts'], separator: entry.separator, blank: entry.blank, target: entry.target, type: entry.type as 'string', required: entry.required }
@@ -309,7 +320,7 @@ function exportRuleTemplate(): void {
   invalidateOutputs()
   try {
     const allocation: YidaRuleTemplateAllocation = allocationMode.value === 'original' ? { mode: 'original' }
-      : { mode: allocationMode.value, projectField: allocationProjectField.value, quantityField: allocationQuantityField.value }
+      : { mode: allocationMode.value, projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() }
     if (previewMode.value === 'transforms') {
       // The exporter normalizes v3 rules itself; only the target is left out.
       const { target: _target, ...transformRules } = currentTransformConfig()
@@ -339,14 +350,19 @@ function importRuleTemplate(): void {
     allocationMode.value = allocation.mode
     allocationProjectField.value = allocation.mode === 'original' ? '' : allocation.projectField
     allocationQuantityField.value = allocation.mode === 'original' ? '' : allocation.quantityField
+    allocationRounding.value = allocation.mode !== 'original' && allocation.quantityRounding === 'legacy-1dp' ? 'legacy-1dp' : 'exact'
     appType.value = ''; formUuid.value = ''; rowsText.value = ''; allocationProjectsText.value = ''
     ruleImportNotice.value = '仅本地规则，目标和数据待填写；未保存到服务器，未发布或授权。'
   } catch (error) { errorCode.value = error instanceof YidaRuleTemplateError ? error.code : 'YIDA_RULE_TEMPLATE_INPUT' }
 }
-function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value } }
+// Only the non-default rounding is sent, and only with the decimal mode: an exact split stays byte-identical to today.
+function roundingSetting(): { quantityRounding?: 'legacy-1dp' } { return allocationMode.value === 'equal_decimal_exact' && allocationRounding.value === 'legacy-1dp' ? { quantityRounding: 'legacy-1dp' } : {} }
+function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string; quantityRounding?: 'legacy-1dp' } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() } }
 function capturePersistentInput(config: YidaStaticConfig): void {
   const current = plan.value
-  if (config.version !== 2 || config.intent !== 'create' || !current || current.evidence.invalid !== 0
+  // R-71 ⑦.3: a clean v2 or v3 create preview. Initialization still takes v2 only (its panel says why);
+  // a v3 draft can go only to the owner send path of an already initialized target.
+  if ((config.version !== 2 && config.version !== 3) || config.intent !== 'create' || !current || current.evidence.invalid !== 0
     || current.evidence.duplicateKeyCount !== 0 || current.rows.length === 0
     || current.rows.some(row => row.status !== 'planned_create') || (allocationPreview.value?.issues.length ?? 0) !== 0) return
   // No transport or storage here. The server recompiles and returns its own
@@ -394,8 +410,7 @@ const stepGuide = computed(() => {
 })
 const initializationBlockedReason = computed(() => {
   if (persistentInput.value) return ownerSendLocked.value ? '单行确认请求进行中，完成后才能打开。' : ''
-  if (previewMode.value === 'transforms') return '派生映射 v3 目前只做本地预演和规则草稿；本地初始化仍只接受 v2 合同，v3 进入初始化须 owner 另批。'
-  if (previewMode.value !== 'protocol') return '预演合同须选「表单字段目录与协议 v2（仅本地）」；字段映射 v1 不支持本地初始化。'
+  if (previewMode.value === 'mapping') return '预演合同须选「表单字段目录与协议 v2（仅本地）」或「字段目录与派生映射 v3（仅本地）」；字段映射 v1 不支持本地初始化。'
   if (intent.value !== 'create') return '意图须为「计划创建」；计划更新不能本地初始化。'
   // An allocation rejection leaves no plan at all, so it is checked before the not-run case.
   if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因（见分配分析）；须先消除。'

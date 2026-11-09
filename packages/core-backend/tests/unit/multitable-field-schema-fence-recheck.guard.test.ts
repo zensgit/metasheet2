@@ -961,7 +961,8 @@ describe('slice 3b — C2-F1: a write inside the body of an entry or a seam, thr
     ])
   })
 
-  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])'
+  // After the fence and the D21 sheet-version bump (the field-row writer rule), immediately before the locked read.
+  const PROVISIONING_ANCHOR = '  await bumpSheetPermissionVersions(input.query, [sheetId])\n  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])'
 
   it('W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check', () => {
     const c = patchedReal(

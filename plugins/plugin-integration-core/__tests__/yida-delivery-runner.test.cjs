@@ -157,10 +157,13 @@ test('actual create composition binds the ledger digest to exactly the submitted
   assert.equal(body.formDataJson, stableCanonicalStringify(planned.rows[0].payload))
   assert.equal(body.systemToken, h.snapshot.systemToken)
   assert.equal(body.userId, h.snapshot.userId)
-  assert.equal(h.db.rows()[0].payload_digest, hash(stableCanonicalStringify({ version: 1,
+  // Execution digest version 2 (design baseline v2.3 §7.2): an unbound snapshot carries both binding digests as null.
+  assert.equal(h.db.rows()[0].payload_digest, hash(stableCanonicalStringify({ version: 2,
     grantRef: h.snapshot.grantRef, expiresAt: h.snapshot.expiresAt, actorId: h.snapshot.actorId,
     targetRef: h.snapshot.targetRef, targetRevision: h.snapshot.targetRevision, planRevision: h.snapshot.planRevision,
-    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid })))
+    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid,
+    sourceRecordDigest: null, creationIdentityDigest: null })))
+  assert.deepEqual([h.db.rows()[0].source_record_digest, h.db.rows()[0].creation_identity_digest], [null, null])
   assert.equal(h.db.rows()[0].business_key_digest, hash(planned.rows[0].localBusinessKey))
   assert.deepEqual(h.db.rows(AUDIT).map((row) => row.event), ['prepare', 'claim', 'acknowledgement'])
 })
@@ -497,4 +500,121 @@ test('same completed identity survives a new runner without token fetch or resen
   assert.equal(h.db.rows().length, 1)
   assert.equal(h.businessFetches.length, 1)
   assert.equal(h.tokenFetches.length, 1)
+})
+
+// R-71 ⑦.3: a v3 snapshot (copy / constant / concat) is accepted and sends exactly its own planned
+// payload; any other mapping version is SNAPSHOT_INVALID before any ledger, token or form I/O.
+async function v3Harness(t) {
+  const h = await harness(t)
+  const { createYidaTransformExample } = await import('../lib/yida-static-plan.mjs')
+  const example = createYidaTransformExample()
+  h.snapshot.config = example.config
+  h.snapshot.row = example.rows[0]
+  return h
+}
+
+test('R-71 ⑦.3: a v3 snapshot sends exactly its planned payload, derived targets included', async (t) => {
+  const h = await v3Harness(t)
+  safeResult(await h.runner.run(request()), 'acknowledged', true)
+  assert.equal(h.businessFetches.length, 1)
+  const body = JSON.parse(h.businessFetches[0][1].body)
+  const planned = h.plan().rows[0]
+  assert.equal(body.formDataJson, stableCanonicalStringify(planned.payload))
+  const sent = JSON.parse(body.formDataJson)
+  assert.equal(sent.blankSize, '1200*600*20')
+  assert.equal(sent.processRule, 'SYN-RULE-A')
+  assert.equal(sent.partCategory, undefined)
+  assert.equal(h.db.rows()[0].business_key_digest, hash(planned.localBusinessKey))
+})
+
+test('R-71 ⑦.3: mapping versions other than exactly 2 or 3 are SNAPSHOT_INVALID with zero I/O', async (t) => {
+  const { createYidaStaticExample } = await import('../lib/yida-static-plan.mjs')
+  for (const version of [1, 4, '3', 3.5, null]) {
+    const h = await v3Harness(t)
+    if (version === 1) {
+      const example = createYidaStaticExample()
+      h.snapshot.config = example.config; h.snapshot.row = example.rows[0]
+    } else h.snapshot.config.version = version
+    await rejects(h.runner.run(request()), 'SNAPSHOT')
+    assert.equal(h.db.events.length, 0)
+    assert.equal(h.tokenFetches.length + h.businessFetches.length, 0)
+  }
+})
+
+test('R-71 ⑦.3: a v3 snapshot that loses its concat-only columns after the token sends nothing', async (t) => {
+  const h = await v3Harness(t)
+  h.resolver = async () => {
+    const next = copy(h.snapshot)
+    // All three concat-only columns gone: the row still plans, but without blankSize.
+    if (h.snapshots.length === 2) for (const column of ['ext_blankLength', 'ext_blankWidth', 'ext_blankThickness']) delete next.row[column]
+    return next
+  }
+  await rejects(h.runner.run(request()), 'CHANGED')
+  assert.equal(h.db.rows()[0].status, 'prepared')
+  assert.equal(h.businessFetches.length, 0)
+})
+
+// R-71 ⑦.4 (Y6): the shipped v3 example carries the generated material code (one preset part). The runner never
+// stores or receives a code: it re-plans the snapshot row, so the form body carries the code recomputed from the
+// snapshot, byte-equal to an independent oracle (node:crypto SHA-1, RFC 4122 UUIDv5 layout, frozen name layout).
+function oracleMaterialCode(keyValue, projectNo) {
+  const digest = createHash('sha1').update(Buffer.from('6d37f698e75c4b5e8eefb702478a1cfb', 'hex'))
+    .update(Buffer.from(JSON.stringify(['metasheet.stock-prep.yida-material-code', 'v1', keyValue, projectNo]), 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `WLBH-${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+
+test('R-71 ⑦.4: a v3 snapshot with a generated entry sends the code recomputed from the snapshot row', async (t) => {
+  const h = await v3Harness(t)
+  assert.equal(h.snapshot.config.fieldMap.some((entry) => entry.transform === 'generated'), true)
+  safeResult(await h.runner.run(request()), 'acknowledged', true)
+  assert.equal(h.businessFetches.length, 1)
+  const sent = JSON.parse(JSON.parse(h.businessFetches[0][1].body).formDataJson)
+  assert.equal(sent.materialCodeText, oracleMaterialCode(h.snapshot.row.idempotencyKey, h.snapshot.row.projectNo))
+  assert.equal(sent.materialCodeText, h.plan().rows[0].payload.materialCodeText)
+  assert.deepEqual(sent, h.plan().rows[0].payload)
+})
+
+test('R-71 ⑦.4: a v3 snapshot whose code input changes after the token sends nothing', async (t) => {
+  const h = await v3Harness(t)
+  h.resolver = async () => {
+    const next = copy(h.snapshot)
+    // The project of the code changes between the two reads: another code, so the verified payload no longer matches.
+    if (h.snapshots.length === 2) next.row.projectNo = 'DEMO-P9'
+    return next
+  }
+  await rejects(h.runner.run(request()), 'CHANGED')
+  assert.equal(h.db.rows()[0].status, 'prepared')
+  assert.equal(h.businessFetches.length, 0)
+})
+
+// ---- Source binding (design baseline v2.3 §7.2): the two row digests travel from the snapshot into the ledger ----
+test('a bound snapshot carries both digests into the ledger row and the version-2 execution digest; a half binding is SNAPSHOT_INVALID', async (t) => {
+  const h = await harness(t)
+  h.snapshot.sourceRecordDigest = 'c'.repeat(64)
+  h.snapshot.creationIdentityDigest = 'd'.repeat(64)
+  const result = await h.runner.run(request())
+  safeResult(result, 'acknowledged', true)
+  const row = h.db.rows()[0]
+  assert.equal(row.source_record_digest, 'c'.repeat(64))
+  assert.equal(row.creation_identity_digest, 'd'.repeat(64))
+  const [, options] = h.businessFetches[0]
+  const body = JSON.parse(options.body)
+  const data = { appType: body.appType, formUuid: body.formUuid, formDataJson: body.formDataJson }
+  assert.equal(row.payload_digest, hash(stableCanonicalStringify({ version: 2,
+    grantRef: h.snapshot.grantRef, expiresAt: h.snapshot.expiresAt, actorId: h.snapshot.actorId,
+    targetRef: h.snapshot.targetRef, targetRevision: h.snapshot.targetRevision, planRevision: h.snapshot.planRevision,
+    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid,
+    sourceRecordDigest: 'c'.repeat(64), creationIdentityDigest: 'd'.repeat(64) })))
+  for (const patch of [{ creationIdentityDigest: null }, { sourceRecordDigest: 'C'.repeat(64) }, { creationIdentityDigest: 'd'.repeat(63) }]) {
+    const broken = await harness(t)
+    broken.snapshot.sourceRecordDigest = 'c'.repeat(64)
+    broken.snapshot.creationIdentityDigest = 'd'.repeat(64)
+    Object.assign(broken.snapshot, patch)
+    await rejects(broken.runner.run(request()), 'SNAPSHOT')
+    assert.equal(broken.db.rows().length, 0)
+    assert.equal(broken.tokenFetches.length + broken.businessFetches.length, 0)
+  }
 })

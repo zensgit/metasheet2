@@ -1,9 +1,15 @@
 // Local, exact project allocation for the static YiDa preview. No I/O or apply path.
-import { buildYidaStaticPlan, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
+import { buildYidaStaticPlan, generatedTemplateDependencies, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
 
 const INPUT_KEYS = new Set(['config', 'rowsText', 'allocation'])
 const ALLOCATION_KEYS = new Set(['mode', 'projects', 'projectField', 'quantityField'])
 const ALLOCATION_RULE_KEYS = new Set(['mode', 'projectField', 'quantityField'])
+// Q4 (owner 2026-11-07, R-88: an open question gets a configurable default, never a hard-coded answer).
+// Optional on both shapes. Absent or 'exact' = today's exact even split (QUANTITY_NOT_DIVISIBLE otherwise);
+// 'legacy-1dp' = the legacy system's rule: each project's share rounded half-up to one decimal, which CHANGES
+// the total (allocatedTotal = share x projects, difference != 0). Decimal mode only: an integer split stays exact.
+const QUANTITY_ROUNDING_KEY = 'quantityRounding'
+const QUANTITY_ROUNDINGS = new Set(['exact', 'legacy-1dp'])
 const MAX_PROJECTS = 20
 const MAX_ROWS = 100
 const MAX_TEXT_BYTES = 128 * 1024
@@ -52,6 +58,23 @@ function hasExactKeys(descriptors, keys) {
     && Object.keys(descriptors).every((key) => keys.has(key))
 }
 
+// The closed key set plus the one optional Q4 key.
+function hasAllocationKeys(descriptors, keys) {
+  if (!descriptors) return false
+  if (!Object.prototype.hasOwnProperty.call(descriptors, QUANTITY_ROUNDING_KEY)) return hasExactKeys(descriptors, keys)
+  return hasExactKeys(descriptors, new Set([...keys, QUANTITY_ROUNDING_KEY]))
+}
+
+// Absent stays absent (every default-path output is byte-identical); a present value is one of the two names.
+function normalizeRounding(descriptors, mode) {
+  if (!Object.prototype.hasOwnProperty.call(descriptors, QUANTITY_ROUNDING_KEY)) return {}
+  const rounding = descriptors[QUANTITY_ROUNDING_KEY].value
+  if (!QUANTITY_ROUNDINGS.has(rounding) || (rounding === 'legacy-1dp' && mode !== 'equal_decimal_exact')) {
+    throw new YidaAllocationError('YIDA_ALLOCATION_SETTINGS_INVALID')
+  }
+  return { quantityRounding: rounding }
+}
+
 function normalizeProjects(value) {
   const raw = dataArray(value, MAX_PROJECTS)
   if (!raw || raw.length < 1) throw new YidaAllocationError('YIDA_ALLOCATION_PROJECTS_INVALID')
@@ -88,6 +111,13 @@ function normalizeTransformRuleFields(projectField, quantityField, config, mode)
     || projectEntry.type !== 'string' || quantityEntry.type !== 'number') {
     throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
   }
+  // R-71 ⑦.4: a generated value is evaluated on the split rows, so it must read the split project
+  // (and a preset must take it as its project). G1 already implies this; asserted here as well.
+  if (config.fieldMap.some((entry) => entry.transform === 'generated'
+    && (!generatedTemplateDependencies(entry, config).includes(projectField)
+      || entry.template.some((part) => Object.prototype.hasOwnProperty.call(part, 'preset') && part.projectOf !== projectEntry.target)))) {
+    throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
+  }
   return { mode, projectField, quantityField }
 }
 
@@ -118,10 +148,12 @@ export function validateYidaProjectAllocationRules(config, rules) {
     if (!validation.valid) throw new YidaAllocationError('YIDA_ALLOCATION_CONFIG_INVALID')
     if (validation.normalized.intent !== 'create') throw new YidaAllocationError('YIDA_ALLOCATION_INTENT_INVALID')
     const descriptors = dataObject(rules)
-    if (!hasExactKeys(descriptors, ALLOCATION_RULE_KEYS)) {
+    if (!hasAllocationKeys(descriptors, ALLOCATION_RULE_KEYS)) {
       throw new YidaAllocationError('YIDA_ALLOCATION_SETTINGS_INVALID')
     }
-    return normalizeRuleFields(descriptors, validation.normalized, normalizeMode(descriptors.mode.value))
+    const mode = normalizeMode(descriptors.mode.value)
+    const rounding = normalizeRounding(descriptors, mode)
+    return { ...normalizeRuleFields(descriptors, validation.normalized, mode), ...rounding }
   } catch (error) {
     if (error instanceof YidaAllocationError) throw error
     throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')
@@ -130,14 +162,15 @@ export function validateYidaProjectAllocationRules(config, rules) {
 
 function normalizeAllocation(value, config) {
   const descriptors = dataObject(value)
-  if (!hasExactKeys(descriptors, ALLOCATION_KEYS)) {
+  if (!hasAllocationKeys(descriptors, ALLOCATION_KEYS)) {
     throw new YidaAllocationError('YIDA_ALLOCATION_SETTINGS_INVALID')
   }
   // Preserve the established mode -> projects -> fields error priority.
   const mode = normalizeMode(descriptors.mode.value)
+  const rounding = normalizeRounding(descriptors, mode)
   const projects = normalizeProjects(descriptors.projects.value)
   const rules = validateYidaProjectAllocationRules(config, {
-    mode, projectField: descriptors.projectField.value, quantityField: descriptors.quantityField.value,
+    mode, projectField: descriptors.projectField.value, quantityField: descriptors.quantityField.value, ...rounding,
   })
   return { ...rules, projects }
 }
@@ -277,9 +310,44 @@ function numberFromExactDecimal(scaled, scale) {
   return value
 }
 
-function allocate(value, mode, projectCount) {
+// Exact signed decimal (scaled / 10^scale) as a Number, or null when it does not round-trip.
+function signedNumberFromExactDecimal(scaled, scale) {
+  if (scaled >= 0n) return numberFromExactDecimal(scaled, scale)
+  const magnitude = numberFromExactDecimal(-scaled, scale)
+  return magnitude === null ? null : -magnitude
+}
+
+// Q4 'legacy-1dp': share = round-half-up(total / projects, 1 decimal), in integers only (never float division).
+// The rounded share times the project count is the new total; difference = allocatedTotal - sourceTotal.
+// A positive quantity whose share rounds to 0 is refused (QUANTITY_PRECISION): a split never drops a quantity.
+function allocateLegacyOneDecimal(source, projectCount) {
+  const count = BigInt(projectCount)
+  const denominator = POWERS_OF_TEN[source.scale] * count
+  const numerator = source.scaled * 10n
+  let eachTenths = numerator / denominator
+  if ((numerator % denominator) * 2n >= denominator) eachTenths += 1n
+  if (eachTenths === 0n && source.scaled > 0n) return { code: 'QUANTITY_PRECISION' }
+  const allocatedTenths = eachTenths * count
+  if (allocatedTenths > MAX_SAFE) return { code: 'QUANTITY_RANGE' }
+  const each = numberFromExactDecimal(eachTenths, 1)
+  const allocatedTotal = numberFromExactDecimal(allocatedTenths, 1)
+  const total = numberFromExactDecimal(source.scaled, source.scale)
+  const commonScale = Math.max(1, source.scale)
+  const difference = signedNumberFromExactDecimal(allocatedTenths * POWERS_OF_TEN[commonScale - 1]
+    - source.scaled * POWERS_OF_TEN[commonScale - source.scale], commonScale)
+  if (each === null || allocatedTotal === null || total === null || difference === null) return { code: 'QUANTITY_PRECISION' }
+  return { each, allocatedTotal, difference }
+}
+
+function allocate(value, mode, projectCount, rounding) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     return { code: 'QUANTITY_INVALID' }
+  }
+  if (rounding === 'legacy-1dp') {
+    const source = decimalParts(value)
+    if (!source || source.scale > 6) return { code: 'QUANTITY_PRECISION' }
+    if (source.scaled > MAX_SAFE) return { code: 'QUANTITY_RANGE' }
+    return allocateLegacyOneDecimal(source, projectCount)
   }
   if (mode === 'equal_integer') {
     if (!Number.isSafeInteger(value)) return { code: 'QUANTITY_RANGE' }
@@ -314,8 +382,11 @@ function refusal(analysis, issues, sourceRows, projectCount, expandedRows) {
   }
 }
 
-export function buildYidaProjectAllocationPreview(input) {
-  try {
+// The one equal_integer / equal_decimal_exact expansion. The preview plans its rows; the send path
+// (R-71 ⑦.3) re-derives the same rows for a v3 selection instead of reversing a payload. Either a
+// refusal (exactly what the preview returns) or the expanded rows with their origins.
+function expandAllocation(input) {
+  { // The block keeps the moved preview body byte-identical (indentation included) for review.
     const top = dataObject(input)
     if (!hasExactKeys(top, INPUT_KEYS)) throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')
     const validation = validateYidaStaticConfig(top.config.value)
@@ -342,7 +413,7 @@ export function buildYidaProjectAllocationPreview(input) {
       const sourceValue = Object.prototype.hasOwnProperty.call(rows[index], allocation.quantityField)
         ? rows[index][allocation.quantityField] : undefined
       const result = lexicalIssues[index]
-        ? { code: lexicalIssues[index] } : allocate(sourceValue, allocation.mode, projectCount)
+        ? { code: lexicalIssues[index] } : allocate(sourceValue, allocation.mode, projectCount, allocation.quantityRounding)
       const entry = { sourceIndex: index,
         sourceTotal: !lexicalIssues[index] && typeof sourceValue === 'number' && Number.isFinite(sourceValue) ? sourceValue : null,
         projectCount, issues: [], candidates: [] }
@@ -352,13 +423,13 @@ export function buildYidaProjectAllocationPreview(input) {
       } else {
         entry.perProjectQuantity = result.each
         entry.allocatedTotal = result.allocatedTotal
-        entry.difference = 0
+        entry.difference = result.difference ?? 0
         quantities.push(result.each)
       }
       analysis.push(entry)
     }
     if (projectedRows > MAX_ROWS) issues.push({ index: null, code: 'EXPANDED_ROWS_LIMIT' })
-    if (issues.length > 0) return refusal(analysis, issues, rows.length, projectCount, projectedRows)
+    if (issues.length > 0) return { refused: refusal(analysis, issues, rows.length, projectCount, projectedRows) }
 
     const expanded = []
     const origins = []
@@ -370,9 +441,18 @@ export function buildYidaProjectAllocationPreview(input) {
       }
     }
     if (new TextEncoder().encode(JSON.stringify(expanded)).length > MAX_TEXT_BYTES) {
-      return refusal(analysis, [{ index: null, code: 'EXPANDED_TEXT_LIMIT' }],
-        rows.length, projectCount, projectedRows)
+      return { refused: refusal(analysis, [{ index: null, code: 'EXPANDED_TEXT_LIMIT' }],
+        rows.length, projectCount, projectedRows) }
     }
+    return { config, rows, analysis, projectCount, expanded, origins }
+  }
+}
+
+export function buildYidaProjectAllocationPreview(input) {
+  try {
+    const expansion = expandAllocation(input)
+    if (expansion.refused) return expansion.refused
+    const { config, rows, analysis, projectCount, expanded, origins } = expansion
     const plan = buildYidaStaticPlan({ config, rows: expanded })
     const invalidSources = new Set()
     // Associate only actual planner result members with their generated origins.
@@ -393,6 +473,23 @@ export function buildYidaProjectAllocationPreview(input) {
       evidence: { sourceRows: rows.length, projectCount, expandedRows: expanded.length,
         invalidSourceRows: invalidSources.size },
     }
+  } catch (error) {
+    if (error instanceof YidaAllocationError) throw error
+    throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')
+  }
+}
+
+// R-71 ⑦.3: the expanded rows the preview plans, for an allocation the preview accepts; the same
+// array, from the same code. A refusal throws: ROWS_LIMIT for the expanded row/text limits, else
+// ROWS_INVALID. Rows only; no plan, no lookup, no I/O.
+export function expandYidaProjectAllocationRows(input) {
+  try {
+    const expansion = expandAllocation(input)
+    if (expansion.refused) {
+      throw new YidaAllocationError(expansion.refused.issues.some((issue) => ['EXPANDED_ROWS_LIMIT', 'EXPANDED_TEXT_LIMIT'].includes(issue.code))
+        ? 'YIDA_ALLOCATION_ROWS_LIMIT' : 'YIDA_ALLOCATION_ROWS_INVALID')
+    }
+    return expansion.expanded
   } catch (error) {
     if (error instanceof YidaAllocationError) throw error
     throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')

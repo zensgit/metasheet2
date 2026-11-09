@@ -18,12 +18,15 @@ type CoreDependencies = {
   database: YidaOwnerRuntimeDependencies['database']
   security: YidaOwnerRuntimeDependencies['security']
   primitives: unknown
+  // D21 (slice Y5): present only when the host injected a re-authorizer.
+  reauthorizeSourceBinding?: unknown
 }
 type FakeAuthority = {
   prepareDraft(input: unknown): Promise<unknown>
   preview(input: unknown): Promise<unknown>
   approvals: { approve(input: unknown): Promise<unknown>; revoke(input: unknown): Promise<unknown> }
   observe(input: unknown): Promise<unknown>
+  proveDraftTarget(input: unknown): Promise<unknown>
 }
 type Factory = (deps: CoreDependencies) => FakeAuthority
 const nativeRequire = createRequire(import.meta.url)
@@ -52,6 +55,7 @@ function fakeAuthority(): FakeAuthority {
     preview: vi.fn(async () => selected),
     approvals: { approve: vi.fn(async () => approval), revoke: vi.fn(async () => approval) },
     observe: vi.fn(async () => Object.freeze({ approval, delivery: null })),
+    proveDraftTarget: vi.fn(async () => Object.freeze({ proven: true })),
   }
 }
 function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = new WeakMap<object, string>()): RuntimeModule {
@@ -71,6 +75,11 @@ function fixture(options: {
   source?: string; enablement?: unknown; readEnablement?: () => unknown
   factory?: Factory; database?: YidaOwnerRuntimeDependencies['database']
   security?: YidaOwnerRuntimeDependencies['security']; result?: unknown
+  readMultiTarget?: () => unknown
+  // D17 b (R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED as the runtime reads it; handed over only when present.
+  readSheetSource?: () => unknown
+  // D21 (slice Y5): the host's in-transaction re-authorizer; handed to the runtime only when the option is present.
+  reauthorizeSourceBinding?: unknown
 } = {}) {
   const authority = fakeAuthority()
   const coreFactory = vi.fn(options.factory ?? (() => authority))
@@ -80,7 +89,11 @@ function fixture(options: {
   const security = options.security ?? { encrypt: vi.fn(async text => `enc:${text}`), decrypt: vi.fn(async () => 'synthetic-plain') }
   const fetcher = vi.fn(async () => { throw new Error('No protocol IO in control unit tests') })
   const readEnablement = vi.fn(options.readEnablement ?? (() => Object.hasOwn(options, 'enablement') ? options.enablement : 'true'))
-  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement })
+  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement,
+    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}),
+    ...(options.readSheetSource ? { readSheetSourceEnablement: options.readSheetSource } : {}),
+    ...(Object.hasOwn(options, 'reauthorizeSourceBinding')
+      ? { reauthorizeSourceBinding: options.reauthorizeSourceBinding as YidaOwnerRuntimeDependencies['reauthorizeSourceBinding'] } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
   const createPrimitives = vi.fn(() => Object.freeze({}))
   const createSendPort = vi.fn(() => Object.freeze({ submit, inspect: vi.fn() }))
@@ -92,6 +105,69 @@ async function active(options: Parameters<typeof fixture>[0] = {}) {
   const registration = await f.runtime.createPluginCapability().activate(f.binding)
   return { ...f, registration }
 }
+
+// Y6 (carry-forward from #6794): a source binding is produced only by the sheet-source route, which exists only
+// while the multi-target switch reads exactly 'true'. If the switch flips OFF during the sheet read, the route
+// still hands prepareDraft a binding; the runtime must refuse it at its input boundary, before any authority work.
+const boundDraft = Object.freeze({ config: {}, rowsText: '[]', sourceBinding: Object.freeze({ sheetId: 'synthetic-sheet' }) })
+const MULTI_TARGET_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ['boolean true', () => true], ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sourceBindingRefusedWhileOff(source = originalSource, readSheetSource?: () => unknown) {
+  for (const [name, readMultiTarget] of MULTI_TARGET_OFF) {
+    const f = await active({ source, readMultiTarget, readSheetSource })
+    try {
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
+}
+
+// D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. With multi-target OFF, a binding (and the
+// owner proof the route runs before its sheet read) is admitted only while this switch reads exactly 'true'.
+const SHEET_SOURCE_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ["' true'", () => ' true'], ["'true '", () => 'true '], ['boolean true', () => true], ["'1'", () => '1'],
+  ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sheetSourceRefusedWhileOff(source = originalSource) {
+  for (const [name, readSheetSource] of SHEET_SOURCE_OFF) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      expect(f.runtime.sheetSourceEnabled(), name).toBe(false)
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      await expect(f.runtime.proveDraftOwner(actor, {}), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.authority.proveDraftTarget, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
+}
+// The run's authority is told about the sheet source only while the switch reads exactly 'true'.
+async function sheetSourceAuthorityBit(source = originalSource) {
+  const { sourceBinding: _binding, ...pasted } = boundDraft
+  for (const [name, readSheetSource, expected] of [['off', () => 'false', false], ['on', () => 'true', true]] as const) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      await f.runtime.prepareDraft(actor, pasted)
+      const deps = f.coreFactory.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(Object.hasOwn(deps, 'sheetSource'), name).toBe(expected)
+      if (expected) expect(deps.sheetSource, name).toBe(true)
+      expect(Object.hasOwn(deps, 'multiTarget'), name).toBe(false)
+    } finally { await f.runtime.stop() }
+  }
+}
+// Sheet source without multi-target is slot 1 only: a targetRef stays refused on the draft and on the owner proof.
+async function sheetSourceKeepsSlotOne(source = originalSource) {
+  const f = await active({ source, readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+  try {
+    await expect(f.runtime.prepareDraft(actor, { ...boundDraft, targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    await expect(f.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    expect(f.authority.prepareDraft).not.toHaveBeenCalled()
+    expect(f.authority.proveDraftTarget).not.toHaveBeenCalled()
+  } finally { await f.runtime.stop() }
+}
+const TARGET_REF_FIXTURE = '00000000-0000-4000-8000-0000000000aa'
 
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
 beforeAll(() => {
@@ -214,6 +290,29 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     expect(options.timeoutMs).toBe(10000)
     expect(Object.isFrozen(options)).toBe(true)
     await f.runtime.stop()
+  })
+
+  it('D21 (slice Y5): an injected re-authorizer reaches the core authority factory unchanged on every run; none injected, the factory gets no such key (the core service then refuses every bound row); a non-function or proxy is refused at construction', async () => {
+    const reauthorizeSourceBinding = vi.fn(async () => Object.freeze({ authorized: true }))
+    const f = await active({ reauthorizeSourceBinding })
+    await f.runtime.observe(actor, grant)
+    await f.runtime.preview(actor, selected)
+    expect(f.coreFactory).toHaveBeenCalledTimes(2)
+    for (const [dependencies] of f.coreFactory.mock.calls) {
+      expect(Object.keys(dependencies).sort()).toEqual(['context', 'database', 'primitives', 'reauthorizeSourceBinding', 'security', 'unboundTestTargetRefs'])
+      expect(dependencies.reauthorizeSourceBinding).toBe(reauthorizeSourceBinding)
+    }
+    // The runtime only hands it over: the core service calls it inside its own approval / admission transactions.
+    expect(reauthorizeSourceBinding).not.toHaveBeenCalled()
+    await f.runtime.stop()
+    const g = await active()
+    await g.runtime.observe(actor, grant)
+    expect(Object.keys(g.coreFactory.mock.calls[0][0]).sort()).toEqual(['context', 'database', 'primitives', 'security', 'unboundTestTargetRefs'])
+    expect(Object.hasOwn(g.coreFactory.mock.calls[0][0], 'reauthorizeSourceBinding')).toBe(false)
+    await g.runtime.stop()
+    for (const invalid of [null, 'synthetic', {}, new Proxy(reauthorizeSourceBinding, {})]) {
+      expect(() => fixture({ reauthorizeSourceBinding: invalid })).toThrow('YIDA_OWNER_RUNTIME_INPUT')
+    }
   })
 
   it('rejects caller identity additions, inherited fields, getters, proxies and closed execution/options extras', async () => {
@@ -485,6 +584,48 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await runtime.stop()
   })
 
+  it('Y6: prepareDraft refuses a sourceBinding unless the multi-target switch reads exactly true (absent, false, TRUE, true, throwing)', async () => {
+    await sourceBindingRefusedWhileOff()
+    // Positive control: with the switch exactly 'true' the same input reaches the authority unchanged.
+    const on = await active({ readMultiTarget: () => 'true' })
+    try {
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft).toHaveBeenCalledTimes(1)
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+    } finally { await on.runtime.stop() }
+    // A draft without a binding (pasted rows) is not affected by the switch.
+    const off = await active({ readMultiTarget: () => 'false' })
+    try {
+      const { sourceBinding: _binding, ...pasted } = boundDraft
+      await expect(off.runtime.prepareDraft(actor, pasted)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await off.runtime.stop() }
+  })
+
+  it('D17 b: with multi-target OFF, a sourceBinding and the owner proof need the sheet-source switch to read exactly true', async () => {
+    await sheetSourceRefusedWhileOff()
+    // The Y6 pin still holds with the new reader absent (above: sourceBindingRefusedWhileOff, no sheet-source reader).
+    await sourceBindingRefusedWhileOff(originalSource, () => 'false')
+    // Positive control: switch exactly 'true' -> the same bound input reaches the authority unchanged; the owner proof
+    // runs (no targetRef); the shape bit reads true; the authority gets sheetSource and never multiTarget.
+    const on = await active({ readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+    try {
+      expect(on.runtime.sheetSourceEnabled()).toBe(true)
+      expect(on.runtime.multiTargetEnabled()).toBe(false)
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+      await expect(on.runtime.proveDraftOwner(actor, {})).resolves.toEqual({ proven: true })
+      expect(on.authority.proveDraftTarget.mock.calls[0][0]).toEqual({})
+    } finally { await on.runtime.stop() }
+    await sheetSourceAuthorityBit()
+    await sheetSourceKeepsSlotOne()
+    // With multi-target ON the switch changes nothing: a targetRef is still accepted whatever it reads.
+    const multi = await active({ readMultiTarget: () => 'true', readSheetSource: () => 'false' })
+    try {
+      await expect(multi.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).resolves.toEqual({ proven: true })
+      await expect(multi.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await multi.runtime.stop() }
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -543,6 +684,14 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         await runtime.createPluginCapability().activate(f.binding)
         try { await expect(runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }
         finally { await runtime.stop() }
+      } },
+      { name: 'reauthorization/handed-to-core', from: '...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })', to: '})', test: async source => {
+        const reauthorizeSourceBinding = vi.fn()
+        const f = await active({ source, reauthorizeSourceBinding })
+        try {
+          await f.runtime.observe(actor, grant)
+          expect(f.coreFactory.mock.calls[0][0].reauthorizeSourceBinding).toBe(reauthorizeSourceBinding)
+        } finally { await f.runtime.stop() }
       } },
       { name: 'dependencies/bounded-timeout', from: '|| !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000', to: '', test: async source => {
         const f = fixture({ source })
@@ -773,6 +922,19 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         try { await expect(f.runtime.submit(actor, submission)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_UNAVAILABLE' }) }
         finally { await f.runtime.stop() }
       } },
+      { name: 'draft/source-binding-switch-gated', from: "if (Object.hasOwn(parsed, 'sourceBinding') && !sourceBindingOn()) fail('INPUT')", to: '',
+        test: source => sourceBindingRefusedWhileOff(source) },
+      // D17 b (R-88): the sheet-source switch is its own exact literal; a folded or trimmed read must not admit a binding.
+      { name: 'draft/sheet-source-exact-literal', from: "try { flag = readSheetSource() } catch { return false }\n    const on = flag === 'true'",
+        to: "try { flag = readSheetSource() } catch { return false }\n    const on = String(flag).trim().toLowerCase() === 'true'",
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'draft/source-binding-needs-a-switch', from: 'const sourceBindingOn = (): boolean => multiTargetOn() || sheetSourceOn()', to: 'const sourceBindingOn = (): boolean => true',
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'authority/sheet-source-only-when-on', from: "...(sheetSourceOn() ? { sheetSource: true } : {}),", to: 'sheetSource: true,',
+        test: source => sheetSourceAuthorityBit(source) },
+      { name: 'prove/target-needs-multi-target', from: "if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')\n        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        to: "return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        test: source => sheetSourceKeepsSlotOne(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

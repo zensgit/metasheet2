@@ -368,10 +368,18 @@ describe('routes/spreadsheet-permissions.ts', () => {
 })
 
 describe('routes/permissions.ts', () => {
+  // D21 (Y5a): the three writes run inside transaction(). The client's query is backed by the same
+  // pool mock, so each leg scripts: [pool reads…], the subject version bump, then the write.
+  beforeEach(() => {
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.poolQuery }) => unknown) =>
+      handler({ query: pgMocks.poolQuery }))
+  })
+
   it('[recovery-census:permissions:grant] grant: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     pgMocks.poolQuery
       .mockResolvedValueOnce({ rows: [{ code: 'perm:x' }] }) // permission exists
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
       .mockRejectedValueOnce(markerError()) // INSERT INTO user_permissions
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/permissions/grant', {
@@ -386,6 +394,7 @@ describe('routes/permissions.ts', () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     pgMocks.poolQuery
       .mockResolvedValueOnce({ rows: [{ code: 'perm:x' }] })
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
       .mockRejectedValueOnce(otherDbError())
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/permissions/grant', {
@@ -397,7 +406,9 @@ describe('routes/permissions.ts', () => {
 
   it('[recovery-census:permissions:revoke] revoke: marker 40001 on the user_permissions DELETE → exact uniform retryable 409', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery.mockRejectedValueOnce(markerError()) // DELETE FROM user_permissions
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
+      .mockRejectedValueOnce(markerError()) // DELETE FROM user_permissions
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
       body: { userId: 'user-1', permission: 'perm:x' },
@@ -409,7 +420,9 @@ describe('routes/permissions.ts', () => {
 
   it('revoke: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery.mockRejectedValueOnce(otherDbError())
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
+      .mockRejectedValueOnce(otherDbError())
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
       body: { userId: 'user-1', permission: 'perm:x' },
@@ -422,7 +435,9 @@ describe('routes/permissions.ts', () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     // 'attendance-employee' is a REAL preset-backed template with non-empty permissions,
     // so the handler reaches the INSERT INTO user_permissions write.
-    pgMocks.poolQuery.mockRejectedValueOnce(markerError())
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
+      .mockRejectedValueOnce(markerError())
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
       body: { userId: 'user-1', templateId: 'attendance-employee' },
@@ -434,7 +449,9 @@ describe('routes/permissions.ts', () => {
 
   it('template apply: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery.mockRejectedValueOnce(otherDbError())
+    pgMocks.poolQuery
+      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
+      .mockRejectedValueOnce(otherDbError())
     const res = mockResponse()
     await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
       body: { userId: 'user-1', templateId: 'attendance-employee' },

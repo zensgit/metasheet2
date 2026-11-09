@@ -155,6 +155,14 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     + 'permission write.',
   ],
   [
+    'multitable/authz-version-protocol.ts :: SELECT id FROM meta_sheets WHERE id = $1 FOR KEY SHARE',
+    'D21 field-row writer rule (`bumpSheetPermissionVersionBehindSheetRow`, Y5a) — FOR KEY SHARE, exactly the lock an FK '
+    + 'child insert (a new meta_fields row, an auto-number sequence row) takes on the sheet row by itself, taken BEFORE the '
+    + 'sheet version row so an ensureFields overwrite and a bumping PATCH /fields keep the sheet-layer order meta_sheets → '
+    + 'version row. A lock-ORDER pin on field-definition writers, not a permission write and not a liveness gate (their '
+    + 'callers gate liveness on their own paths; it does not read `deleted_at`).',
+  ],
+  [
     'services/elearning-stats-multitable-projection.ts :: SELECT id, base_id, system_kind FROM meta_sheets WHERE id = $1 FOR UPDATE',
     'e-learning statistics projection — a SYSTEM-owned read model that CREATES the sheet it then locks in '
     + 'the same transaction, and re-derives `base_id` + `system_kind` under the lock. It writes meta_fields '

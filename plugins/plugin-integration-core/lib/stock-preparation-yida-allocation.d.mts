@@ -1,10 +1,13 @@
 import type { YidaStaticConfig, YidaStaticPlan, YidaStaticPlanRow, YidaStaticRowIssueCode } from './yida-static-plan.mjs'
 
 export type YidaAllocationMode = 'equal_integer' | 'equal_decimal_exact'
+/** Q4 (R-88): absent or 'exact' = exact even split (QUANTITY_NOT_DIVISIBLE otherwise); 'legacy-1dp' = the legacy rule, each share rounded half-up to one decimal, which changes the total (equal_decimal_exact only). */
+export type YidaQuantityRounding = 'exact' | 'legacy-1dp'
 export interface YidaAllocationRules {
   mode: YidaAllocationMode
   projectField: string
   quantityField: string
+  quantityRounding?: YidaQuantityRounding
 }
 export interface YidaAllocationSettings extends YidaAllocationRules {
   projects: string[]
@@ -75,3 +78,9 @@ export function buildYidaProjectAllocationPreview(input: {
   rowsText: string
   allocation: YidaAllocationSettings
 }): YidaProjectAllocationPreview
+/** R-71 ⑦.3: the expanded rows buildYidaProjectAllocationPreview plans (same code, same array) for an allocation it accepts. */
+export function expandYidaProjectAllocationRows(input: {
+  config: YidaStaticConfig
+  rowsText: string
+  allocation: YidaAllocationSettings
+}): Array<Record<string, string | number | boolean | null>>

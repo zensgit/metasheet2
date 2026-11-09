@@ -212,6 +212,10 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     example = (await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href)).createYidaProtocolExample
     ddl = ['092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+    // Source binding (design baseline v2.3 §7.2): the draft-row columns of zzzz20261106110300, exactly what its up() executes.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+      { YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL: string }).YIDA_SOURCE_BINDING_DRAFT_ROWS_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -305,6 +309,11 @@ databaseSuite('SA05 permanent human-attested target — actual PG and no online 
     await rejected(second.target.register({ ...requested, operationId: other.operationId }), 'YIDA_APPROVED_TARGET_CONFLICT')
     const changedKey = input(); changedKey.config.businessKey = changedKey.config.businessKey.filter(key => key !== 'componentName')
     await expect(outcome(second.draft.createDraft(changedKey))).resolves.toEqual({ ok: false, code: 'YIDA_DRAFT_KEY_DEFINITION_CONFLICT' })
+    // D2 (R-88, reworked after verify-YD-r1 F1): there is no config-level material-code form (the form is a preset-part
+    // option sealed by the generated-layout signature), so a v2 draft declaring one is a config error, never a second
+    // key definition for this locator.
+    const otherForm = input(); Object.assign(otherForm.config, { materialCodeForm: 'uuid-32' })
+    await expect(outcome(second.draft.createDraft(otherForm))).resolves.toEqual({ ok: false, code: 'YIDA_DRAFT_CONFIG' })
     const replacement = await second.material.create({ material: material() })
     await rejected(second.target.register({ ...requested, credentialRef: replacement.credentialRef }), 'YIDA_APPROVED_TARGET_CONFLICT')
     await rejected(second.target.register({ ...requested, attestation: { ...attestation(), organizationId: 'synthetic-other' } }), 'YIDA_APPROVED_TARGET_CONFLICT')

@@ -246,6 +246,12 @@ function makeFakeDb(options: {
       if (!current.includes(code)) state.rolePermissions.set(id, [...current, code])
       return { rows: [], rowCount: 1 }
     }
+    // D21 (Y5a): the subject authorization version bump the delete route and unassignUserRoles issue
+    // in front of membership writes — a lock-taking upsert on a protocol table, no role state.
+    if (/^INSERT INTO subject_authorization_versions/i.test(norm)) {
+      const userIds = Array.isArray(params[0]) ? (params[0] as string[]) : []
+      return { rows: [], rowCount: userIds.length }
+    }
     throw new Error(`fake db: unhandled statement: ${norm}`)
   }
 

@@ -30,6 +30,7 @@ import {
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import {
   assignUserRoles,
   auditDelegatedAdminScopeCleanup,
@@ -2366,18 +2367,24 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
 }
 
 async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise<void> {
-  await query(
-    `UPDATE users
-     SET role = CASE
-       WHEN $2::boolean THEN 'admin'
-       WHEN role = 'admin' THEN 'user'
-       ELSE role
-     END,
-     is_admin = $2,
-     updated_at = NOW()
-     WHERE id = $1`,
-    [userId, enabled],
-  )
+  // D21 (Y5a): `users.role` / `is_admin` are subject authority columns. The statement used to run
+  // autocommit (a users-row lock, then the trigger's subject bump — the reverse of an admission's
+  // order); it now bumps the subject version row first, in one transaction with the UPDATE.
+  await transaction(async (client) => {
+    await bumpSubjectAuthorizationVersions(client, [userId])
+    await client.query(
+      `UPDATE users
+       SET role = CASE
+         WHEN $2::boolean THEN 'admin'
+         WHEN role = 'admin' THEN 'user'
+         ELSE role
+       END,
+       is_admin = $2,
+       updated_at = NOW()
+       WHERE id = $1`,
+      [userId, enabled],
+    )
+  })
 }
 
 /**
@@ -3295,21 +3302,27 @@ export function adminUsersRouter(): Router {
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
       if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT DO NOTHING`,
-          [groupId, userId],
-        )
-      } else {
-        await query(
-          `DELETE FROM platform_member_group_members
-           WHERE group_id = $1
-             AND user_id = $2`,
-          [groupId, userId],
-        )
-      }
+      // D21 (Y5a): a member-group change is a Layer-2 authorization change (joining a group that
+      // carries a deny row revokes). The write used to run autocommit; it now runs in one
+      // transaction whose first statement bumps the user's subject authorization version row.
+      await transaction(async (client) => {
+        await bumpSubjectAuthorizationVersions(client, [userId])
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING`,
+            [groupId, userId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM platform_member_group_members
+             WHERE group_id = $1
+               AND user_id = $2`,
+            [groupId, userId],
+          )
+        }
+      })
 
       const [snapshot, memberGroups] = await Promise.all([
         fetchUserAccessSnapshot(userId),
