@@ -70,6 +70,7 @@
 - **B-19 S6-3。** 卡片、每个新码的 plainLanguage 条目、定时拉取 F-14 结论指向卡片、browser-verify 夹具、spec 令牌登记（保留 main 的行再追加）。跨线：#6793 / #6795 把 `STOCK_PREP_REFRESH_RECOVERY_PENDING` 记作失败步骤结果，并从 `scripts/ops/stock-preparation-scheduled-pull.mjs` 导入 `pullOneProject` / `summarize`，该脚本的导出须保持稳定。
 - **B-20 S6-8。** 现在起草，S6-6 之后定稿。补：恢复与装机的交错（B-9）、修复窗口不与装机窗口交错（B-10）、为 R83 现场改写的 §7.4 第 2 条（B-13）、U07 停止条件 SQL。#6778 也在改 switch-on 运行手册，需协调。
 - **B-21 S6-9。** 只在 S6-1、S6-2、S6-3、S6-5、S6-6、S6-8（以及 S6-4，除非延后）各自在冻结头上评审并合入、就绪 ≥ v5 之后翻转。正向一腿需要内存中打开 BI 开关，并有一张已装 BI、历史已解析的合成表；G9 覆盖 S9X-01、U07 演练，以及包括 BI 管理路由在内的 U03。只随 main 基线包发布，永不进 R 线。
+- **B-22 回退停止条件（S6-1 #6835 修正第 1 轮；取代正文 §7.5「Pre-rollback stop-condition queries」里那条新的停止条件）。** 正文写的是「最新结算主体为 `verified_closed` 且未被 `settled_execution_id` 指名」；只计 `verified_closed` 会漏掉排在透明关闭之后的未结算 `succeeded` 主体：旧构建按原始最新执行把该项目派生为 已完成，查询却答 0。改为：按 `started_at` 取每个 sheet / project 的最新结算主体，计 `e.settlement_subject AND e.status IN ('succeeded', 'verified_closed') AND e.id IS DISTINCT FROM s.settled_execution_id`（要求为零；措辞以迁移 106 头注释为准，R-91 ⑳）。S6-2 的 S9R-U07 必须把「未结算主体之上的透明关闭」（transparent close over an unsettled subject）列为一类使该查询非零的产物；S6-8 的回退运行手册 B.7 按同一条件写。
 
 ### N-INTEGRATION：与集成线的配对（不等待）
 
@@ -91,7 +92,7 @@
 | 9 | S6-9 `CONTINUATION_SUPPORT_VERSION` 1 | S 代码 + D4 验证（标签上的 G9） | 在 2、3、4、5、6、8 之后（以及 7，除非延后）。 |
 | 10 | S6-7（有条件）限定范围的 dropped-head 裁定 | D4，L | 只在客户 Q1 加 owner 决定之后做；Y8 #6778 改同一 pairing 文件，后合入者 rebase；第 12 个输入键会改到封闭键测试。 |
 
-关键路径：S6-1 → S6-2 → S6-3 / S6-4 → S6-9；S6-5、S6-6、S6-8 并行。必做 7 个（S6-1、S6-2、S6-3、S6-5、S6-6、S6-8、S6-9），S6-4 除非延后也要做，S6-7 视条件而定；合计约 1.5 万行（含测试），其中 4 个是 D4。规模是估算，不是实测。正文 §9.1 要求的启用前修补批（综合第 8 项 (a)–(g)）仍是翻转前置条件；其中 8(e)（重复幂等键的行拿不到 `expectedRecords`）按 R-91 的条件残留条款处理。
+关键路径：S6-1 → S6-2 → S6-3 / S6-4 → S6-9；S6-5、S6-6、S6-8 并行。必做 7 个（S6-1、S6-2、S6-3、S6-5、S6-6、S6-8、S6-9），S6-4 除非延后也要做，S6-7 视条件而定；合计约 1.5 万行（含测试），其中 4 个是 D4。规模是估算，不是实测。正文 §9.1 要求的启用前修补批（综合第 8 项 (a)–(g)）仍是翻转前置条件；其中 8(e)（重复幂等键的行拿不到 `expectedRecords`）按 R-91 ⑲ 登记为已接受残留（#6836 未改运行时行为）。
 
 ### 开发之外的瓶颈（owner 门，开发不能缩短）
 
