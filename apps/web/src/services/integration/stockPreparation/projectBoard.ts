@@ -96,6 +96,12 @@ export interface StockPreparationProjectBoard {
    * when the key is absent (an older backend) and the `unreadable` stanza for anything malformed.
    */
   refresh?: unknown
+  /**
+   * 批次标识 BI-3 (R-65): the board's pull-batch stanza (`readPullBatchBoardStanza`, BI-1b), present ONLY while the switch
+   * `STOCK_PREP_PULL_BATCH_ENABLED` is exactly 'true'. UNTYPED at the boundary on purpose: read ONLY through
+   * `parseStockPrepPullBatchBoardStanza` (pullBatch.ts), which answers `null` when the key is absent (C6: nothing renders).
+   */
+  pullBatch?: unknown
 }
 
 /**

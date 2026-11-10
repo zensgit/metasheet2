@@ -2976,7 +2976,14 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   const scope = read('lib', 'stock-preparation-operator-scope.cjs')
   const migrationsDir = path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations')
   const migration = fs.readFileSync(path.join(migrationsDir, '084_create_integration_stock_prep_handoff.sql'), 'utf8')
-  const vocabulary = fs.readFileSync(path.join(migrationsDir, '085_extend_stock_prep_audit_handoff_action.sql'), 'utf8')
+  const vocabulary085 = fs.readFileSync(path.join(migrationsDir, '085_extend_stock_prep_audit_handoff_action.sql'), 'utf8')
+  // Pre-pilot fix batch 8(d) (R-91): 085 is shipped and never edited, so a mode added after it is documented in the
+  // audit store's addendum block instead — the mode vocabulary is 085's header PLUS that block, nothing else.
+  const auditStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-audit-store.cjs'), 'utf8')
+  const addendumStart = auditStoreSource.indexOf('HANDOFF MODES ADDED AFTER 085')
+  const addendumEnd = auditStoreSource.indexOf('END HANDOFF MODES ADDED AFTER 085')
+  assert.ok(addendumStart >= 0 && addendumEnd > addendumStart, 'J7: the audit store carries the post-085 handoff mode addendum')
+  const vocabulary = `${vocabulary085}\n${auditStoreSource.slice(addendumStart, addendumEnd)}`
 
   // (a) the scope key, in the file that routes 23505 on it
   assert.ok(!store.includes("COALESCE(workspace_id,'')"), 'G9: the store no longer documents a column 084 does not create')
@@ -3012,7 +3019,7 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // yields three on one line; `notification_lost` is its own.
   assert.ok(modes.size >= 4, `J7: the mode derivation found only ${[...modes].join(',')}`)
   for (const mode of modes) {
-    assert.ok(vocabulary.includes(mode), `J7: migration 085 names the '${mode}' audit mode it documents`)
+    assert.ok(vocabulary.includes(mode), `J7: migration 085 (or the audit store's post-085 addendum) names the '${mode}' audit mode it documents`)
   }
   assert.ok(!vocabulary.includes('advanced|replayed|completed;'), 'J7: and no longer names only three')
   // The two real detail shapes, keyed off what the route actually writes.
@@ -3074,8 +3081,14 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // items 29–31) resolve the PULL-tier scope through that same shared context.
   // 人工补充行 B4 (R-68) added TWO — the per-sheet switch's GET and POST (section D, items 32–33): the registry row whose
   // key column carries the switch, and the staging project the provisioning port is addressed to, are the proven tenant's.
-  assert.equal(callSites, 27, 'G9: twenty-seven call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm', 'stockPreparationRefreshChangePlanConfirm', 'stockPreparationRefreshChangeReviewComplete', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet']) {
+  // 批次标识 BI-1b (R-65) added ONE — the pull-batch status GET (section D, item 34): the sheet it reads and the staging
+  // project it reads it through are the proven tenant's.
+  // 批次标识 BI-7 (R-65) added THREE — the pull-batch settings GET, the tenant-default POST and the per-sheet POST
+  // (section D, items 35–37): the settings row and the sheet ledger rows they read or write are the proven tenant's.
+  // 批次标识 BI-2 (R-65) added ONE — the per-sheet pull-batch install POST (section D, item 38): the sheet it writes and the
+  // staging project it writes it through are the proven tenant's.
+  assert.equal(callSites, 32, 'G9: thirty-two call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm', 'stockPreparationRefreshChangePlanConfirm', 'stockPreparationRefreshChangeReviewComplete', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet', 'stockPreparationProjectPullBatchGet', 'stockPreparationPullBatchSettingsGet', 'stockPreparationPullBatchSettingsSet', 'stockPreparationProjectPullBatchSettingsSet', 'stockPreparationProjectPullBatchInstall']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

@@ -416,6 +416,211 @@ describe('admin user batch routes', () => {
     expect(pg.query.mock.calls.some((call) => String(call[0]).includes('UPDATE users SET is_active'))).toBe(false)
   })
 
+  it('preview refuses to enable a pending user and still previews a profile change and an activated user', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('FOR UPDATE')) throw new Error('preview locked a user row')
+      if (text.includes('FROM users')) {
+        return {
+          rows: [
+            {
+              id: 'user-pending',
+              email: 'pending@example.com',
+              name: '待激活',
+              role: 'user',
+              department: '装配车间',
+              is_active: false,
+              activation_status: 'pending_activation',
+              has_admin_authority: false,
+            },
+            {
+              id: 'user-ready',
+              email: 'ready@example.com',
+              name: '已激活',
+              role: 'user',
+              department: '装配车间',
+              is_active: false,
+              activation_status: 'activated',
+              has_admin_authority: false,
+            },
+          ],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/update')
+      .send({
+        dryRun: true,
+        items: [
+          { userId: 'user-pending', isActive: true },
+          { userId: 'user-pending', department: '质量部' },
+          { userId: 'user-ready', isActive: true },
+        ],
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.dryRun).toBe(true)
+    expect(response.body.data.results.map((item: { code: string | null }) => item.code)).toEqual([
+      'PENDING_ACTIVATE_BYPASS_FORBIDDEN',
+      'DRY_RUN',
+      'DRY_RUN',
+    ])
+    expect(response.body.data.results[1].changes).toEqual([
+      { field: 'department', before: '装配车间', after: '质量部' },
+    ])
+    expect(response.body.data.results[2].changes).toEqual([
+      { field: 'isActive', before: 'false', after: 'true' },
+    ])
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('UPDATE'))).toBe(false)
+    expect(audit.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('rechecks pending activation after the status row lock and does not enable', async () => {
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FOR UPDATE')) {
+        expect(params?.[0]).toBe('user-lin')
+        return {
+          rows: [{
+            id: 'user-lin',
+            email: 'linlan@example.com',
+            name: '林岚',
+            role: 'user',
+            is_active: false,
+            activation_status: 'pending_activation',
+            access_generation: 1,
+            deleted_at: null,
+            purged_at: null,
+          }],
+        }
+      }
+      if (text.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-lin',
+            email: 'linlan@example.com',
+            name: '林岚',
+            role: 'user',
+            department: null,
+            is_active: false,
+            activation_status: 'activated',
+            has_admin_authority: false,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/disable')
+      .send({ userIds: ['user-lin'], isActive: true })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.successCount).toBe(0)
+    expect(response.body.data.results[0].code).toBe('PENDING_ACTIVATE_BYPASS_FORBIDDEN')
+    expect(pg.query.mock.calls.some((call) => /FOR UPDATE/i.test(String(call[0])))).toBe(true)
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('UPDATE users SET is_active'))).toBe(false)
+    expect(sessions.revokeUserSessions).not.toHaveBeenCalled()
+  })
+
+  it('rechecks pending activation after the update row lock and does not enable', async () => {
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FOR UPDATE')) {
+        expect(params?.[0]).toBe('user-lin')
+        return {
+          rows: [{
+            id: 'user-lin',
+            email: 'linlan@example.com',
+            name: '林岚',
+            role: 'user',
+            is_active: false,
+            activation_status: 'pending_activation',
+            access_generation: 1,
+            deleted_at: null,
+            purged_at: null,
+          }],
+        }
+      }
+      if (text.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-lin',
+            email: 'linlan@example.com',
+            name: '林岚',
+            role: 'user',
+            department: '装配车间',
+            is_active: false,
+            activation_status: 'activated',
+            has_admin_authority: false,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/update')
+      .send({ items: [{ userId: 'user-lin', isActive: true }] })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0].code).toBe('PENDING_ACTIVATE_BYPASS_FORBIDDEN')
+    expect(pg.query.mock.calls.some((call) => /FOR UPDATE/i.test(String(call[0])))).toBe(true)
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('UPDATE users'))).toBe(false)
+  })
+
+  it('still applies a profile-only update when the locked user is pending activation', async () => {
+    pg.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const text = String(sql)
+      if (text.includes('FOR UPDATE')) {
+        expect(params?.[0]).toBe('user-pending')
+        return {
+          rows: [{
+            id: 'user-pending',
+            email: 'pending@example.com',
+            name: '待激活',
+            role: 'user',
+            is_active: false,
+            activation_status: 'pending_activation',
+            access_generation: 1,
+            deleted_at: null,
+            purged_at: null,
+          }],
+        }
+      }
+      if (text.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-pending',
+            email: 'pending@example.com',
+            name: '待激活',
+            role: 'user',
+            department: '装配车间',
+            is_active: false,
+            activation_status: 'pending_activation',
+            has_admin_authority: false,
+          }],
+        }
+      }
+      if (text.includes('UPDATE users')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/update')
+      .send({ items: [{ userId: 'user-pending', department: '质量部' }] })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.successCount).toBe(1)
+    expect(response.body.data.results[0].code).toBeNull()
+    const updates = pg.query.mock.calls.filter((call) => String(call[0]).includes('UPDATE users'))
+    expect(updates).toHaveLength(1)
+    expect(String(updates[0]?.[0])).not.toContain('is_active')
+    expect(updates[0]?.[1]).toEqual(['user-pending', null, true, '质量部'])
+  })
+
   it('rejects the old permanent-delete phrase', async () => {
     pg.query.mockResolvedValue({ rows: [] })
     const response = await request(pinned.url())

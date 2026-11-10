@@ -10,6 +10,8 @@ on:
       - 'packages/core-backend/src/routes/admin-user*.ts'
       - 'packages/core-backend/src/directory/access-graph-mutex.ts'
       - 'packages/core-backend/src/rbac/role-assignment.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/routes/attendance-admin.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
@@ -22,6 +24,8 @@ on:
       - 'packages/core-backend/src/routes/admin-user*.ts'
       - 'packages/core-backend/src/directory/access-graph-mutex.ts'
       - 'packages/core-backend/src/rbac/role-assignment.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/routes/attendance-admin.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
@@ -71,7 +75,12 @@ jobs:
         run: pnpm --filter @metasheet/core-backend migrate
       - name: Batch regression tests against isolated PostgreSQL
         if: matrix.slice == 'batch'
-        run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-batch-review.db.test.ts
+        run: |
+          mkdir -p artifacts/admin-users-realdb
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts \
+            tests/integration/admin-user-batch-review.db.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/batch-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/batch-vitest.json 1
       - name: Recycle regression tests against isolated PostgreSQL
         if: matrix.slice == 'recycle'
         run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-recycle-review.db.test.ts

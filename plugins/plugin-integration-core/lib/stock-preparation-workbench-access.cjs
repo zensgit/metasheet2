@@ -363,6 +363,54 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  Object.freeze({
+    // 批次标识 BI-1b (design §8.7; register R-65): the pull-batch STATUS read of one project sheet — whether its two batch
+    // columns are present / locked / visible, its ledger state and its values-free row classes. ADMIN (the install it
+    // reports on is an owner-gated production write). `control: null` is deliberate: no web control renders this read yet
+    // (BI-3 / BI-7 give it one — the handoff precedent above), so presence cannot equal grant for F-04.
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 批次标识 BI-7 (design §5.5 / §11; register R-65; rulings C2 / C6 / C8) — THE PULL-BATCH SETTINGS of 数据来源与体检:
+  // the read (tenant default, fixed facts, every registered sheet's captured values and locks), the tenant-default
+  // write and one captured sheet's rule / format write (typed confirmation). All ADMIN. Their controls live on the
+  // settings panel of 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue) and render only after the read answered
+  // 200; all three routes are 404 while either the pull-batch or the project-sheets switch is off, so the panel is
+  // invisible then (C6). The web suite asserts the alignment in PBS-ALIGN.
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    // 批次标识 BI-2 (design §8.1; register R-65) — THE PER-SHEET INSTALL (dry_run / install / abort). ADMIN: an install is an
+    // owner-gated production write (gate ② per sheet). `control: null` is deliberate: there is no web install control
+    // (design §7.2) — installs run through this route or the ops script, whose default is a dry-run.
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
@@ -439,6 +487,31 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
     control: 'stock-prep-refresh-change-review-complete',
+  }),
+  // 备料分批拉取第一期 step 6a-2 (S6-2; step-6 design §3.5, §3.8, §5.1; register R-91) — THE RECOVERY of an unfinished
+  // execution: the values-free executions list and the verify-and-close (PULL tier: the puller recovers with their own
+  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). Step 6a-3 (S6-3) assigned the
+  // control ids: they live on 「拉取待确认」's recovery card (StockPreparationRefreshRecoveryCard.vue).
+  Object.freeze({
+    capability: 'refresh.executions',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions',
+    control: 'stock-prep-refresh-executions',
+  }),
+  Object.freeze({
+    capability: 'refresh.recover',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover',
+    control: 'stock-prep-refresh-recover',
+  }),
+  Object.freeze({
+    capability: 'refresh.closeUnverified',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
+    control: 'stock-prep-refresh-close-unverified',
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
