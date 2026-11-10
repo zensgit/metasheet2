@@ -140,21 +140,26 @@ export interface PlmBomMultitableLinePatch {
   refdes?: string | null
 }
 
+export interface PlmBomWritePublicUncertainty {
+  attemptOutcome?: 'refused'
+  operationMayHaveApplied?: boolean
+  retryPolicy?: 'same-operation'
+}
+
 export type PlmBomMultitableLineUpdateResult =
   | {
     ok: true
     bom_line_id: string
   }
-  | {
+  | ({
     ok: false
     status: number
     reason: string
     message: string
-  }
+  } & PlmBomWritePublicUncertainty)
 
-// ECO Phase 3: result of the locked-BOM revision-intent CTA. `attached: true` = an already-open
-// bom-ECO for this part was reused (provider attach-before-create; a repeat click attaches
-// instead of spawning a second ECO — that is the idempotency story, no Idempotency-Key).
+// Personal line and ECO writes both require a caller-owned Idempotency-Key frozen with the
+// request. A repeat ECO attach is not a substitute for that key.
 export type PlmBomEcoRevisionIntentResult =
   | {
     ok: true
@@ -162,12 +167,12 @@ export type PlmBomEcoRevisionIntentResult =
     state: string
     attached: boolean
   }
-  | {
+  | ({
     ok: false
     status: number
     reason: string
     message: string
-  }
+  } & PlmBomWritePublicUncertainty)
 
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
@@ -1023,15 +1028,15 @@ export async function getPlmDataSourceCapabilities(dataSourceId: string): Promis
 export async function getPlmBomMultitableContext(
   dataSourceId: string,
   partId: string,
+  signal?: AbortSignal,
 ): Promise<PlmBomMultitableResult> {
   const dsId = dataSourceId.trim()
   const pid = partId.trim()
   if (!dsId || !pid) {
     return { data_source_id: dsId, available: false, reason: 'unavailable' }
   }
-  const response = await apiFetch(
-    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/context`,
-  )
+  const path = `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/context`
+  const response = signal ? await apiFetch(path, { signal }) : await apiFetch(path)
   const payload = await response.json().catch(() => null) as unknown
   if (!response.ok) {
     return { data_source_id: dsId, available: false, reason: 'unavailable' }
@@ -1082,8 +1087,9 @@ export async function updatePlmBomMultitableLine(
     return {
       ok: false,
       status: response.status,
-      reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'writeback-failed',
-      message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : `BOM write-back failed (${response.status})`,
+      reason: failureReason(body, 'writeback-failed'),
+      message: 'BOM 写入失败，详情见服务端日志',
+      ...publicUncertainty(body),
     }
   }
   if (body?.ok === true && typeof body.bom_line_id === 'string' && body.bom_line_id.trim()) {
@@ -1097,24 +1103,38 @@ export async function updatePlmBomMultitableLine(
   }
 }
 
-// ECO Phase 3 consumer CTA: request an ECO revision intent for a lifecycle-locked part.
-// Bare relay object (NOT parseIntegrationResponse — /api/plm-workbench/* returns bare, like
-// getPlmBomMultitableContext). Actionable errors return {ok:false, status, reason, message}
-// instead of throwing; reason surfaces the relay's vocabulary (not_locked / eco_intent_rejected /
-// unsupported / not-entitled / unavailable / provider-rejected / malformed-response).
+function failureReason(body: Record<string, unknown> | null, fallback: string): string {
+  return typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : fallback
+}
+
+function publicUncertainty(body: Record<string, unknown> | null): PlmBomWritePublicUncertainty {
+  const uncertainty: PlmBomWritePublicUncertainty = {}
+  if (body?.attempt_outcome === 'refused') uncertainty.attemptOutcome = 'refused'
+  if (typeof body?.operation_may_have_applied === 'boolean') {
+    uncertainty.operationMayHaveApplied = body.operation_may_have_applied
+  }
+  if (body?.retry_policy === 'same-operation') uncertainty.retryPolicy = 'same-operation'
+  return uncertainty
+}
+
+// ECO revision intent for a lifecycle-locked part. Bare relay object, same as the line write.
+// The caller supplies the frozen Idempotency-Key. A missing key does not hit the network.
 export async function requestPlmBomEcoRevisionIntent(
   dataSourceId: string,
   partId: string,
+  idempotencyKey: string,
 ): Promise<PlmBomEcoRevisionIntentResult> {
   const dsId = dataSourceId.trim()
   const pid = partId.trim()
-  if (!dsId || !pid) {
+  const idem = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+  if (!dsId || !pid || !idem) {
     return { ok: false, status: 400, reason: 'invalid-request', message: 'ECO revision request is incomplete' }
   }
   const response = await apiFetch(
     `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/eco-intent`,
     {
       method: 'POST',
+      headers: { 'Idempotency-Key': idem },
       suppressUnauthorizedRedirect: true,
     },
   )
@@ -1123,8 +1143,9 @@ export async function requestPlmBomEcoRevisionIntent(
     return {
       ok: false,
       status: response.status,
-      reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'intent-failed',
-      message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : `ECO revision intent failed (${response.status})`,
+      reason: failureReason(body, 'intent-failed'),
+      message: 'ECO 意图请求失败，详情见服务端日志',
+      ...publicUncertainty(body),
     }
   }
   if (

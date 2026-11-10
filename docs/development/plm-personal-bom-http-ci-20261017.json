@@ -1,0 +1,58 @@
+{
+  "verified_source_sha": "172def50fba2d904616795a1f10f1f98c100c553",
+  "base_sha": "a5977db1c2afb0106d87e60fe066cd4a3427dc4c",
+  "actual_checkout_merge_sha": "d712c0f5e9fa54dcc8988bde7b3c4869e97ecc5e",
+  "recorded_utc": "2026-10-17T11:41:25.921878+00:00",
+  "pr": "https://github.com/zensgit/metasheet2/pull/6425",
+  "draft": true,
+  "workflow_runs": 46,
+  "checks": {
+    "success": 49,
+    "failure": 0,
+    "pending": 0
+  },
+  "personal_run": "https://github.com/zensgit/metasheet2/actions/runs/39028474503",
+  "personal_job": "https://github.com/zensgit/metasheet2/actions/runs/39028474503/job/117384039460",
+  "actual_ci_counts": {
+    "backend_unit": {
+      "files": 22,
+      "passed": 394,
+      "seconds": 20.78
+    },
+    "web_unit": {
+      "files": 10,
+      "passed": 138,
+      "seconds": 8.23
+    },
+    "approval_pg16": {
+      "passed": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 13.74
+    },
+    "bom_pg16": {
+      "files": 2,
+      "passed": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 5.83
+    }
+  },
+  "steps": {
+    "Backend source types": "success",
+    "Web application source types": "success",
+    "Personal binding settings UI": "success",
+    "Run the whole personal approval PostgreSQL suite": "success",
+    "Personal BOM binding and intent PostgreSQL boundaries": "success",
+    "Require personal BOM PostgreSQL execution without skips": "success",
+    "Require executed tests without skips": "success"
+  },
+  "later_document_head_policy": "This record verifies source172def50. The single documentation closeout commit obtains its own actual checks, reported in PR body and state without another SHA-chasing doc commit.",
+  "limits": [
+    "Native domain-audit candidate depends on parent349 and its own new source CI/26step migration rehearsal; currently unpublished rebaseddd1dd6d5 retains executed blobs.",
+    "Local paired browser/runtime proves actual components/routes and disposable configured stores, not whole managed installation/index lifecycle/native full Alembic/production/customer acceptance.",
+    "Master window objective incomplete; all PRs remain Draft, no merge/deploy/production enablement/real notifications."
+  ]
+}

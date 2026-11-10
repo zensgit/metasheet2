@@ -3,6 +3,7 @@ import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { metrics } from '../metrics/metrics'
 import { apiPathEquals, isGateException } from './api-path-policy'
 import { authService } from './AuthService'
+import { takeVerifiedTenantClaim } from './verified-tenant-claim'
 
 const PASSWORD_CHANGE_WHITELIST = [
   '/api/auth/me',
@@ -96,6 +97,11 @@ async function hydrateAuthenticatedUser(req: Request, token: string): Promise<
           },
         },
       }
+    }
+
+    const verifiedTenantClaim = takeVerifiedTenantClaim(user)
+    if (verifiedTenantClaim) {
+      req.verifiedTenantClaim = verifiedTenantClaim
     }
 
     const authenticatedTenantId = typeof user.tenantId === 'string' ? user.tenantId.trim() : ''

@@ -5,7 +5,7 @@ import { up as changeDispatchUp, down as changeDispatchDown } from '../../src/db
 import { up as changeInboxUp, down as changeInboxDown } from '../../src/db/migrations/zzzz20261014070000_add_plm_change_inbox'
 import { registerBomReviewRealAuthHttpTests } from '../plm-bom-review/auth-http'
 import { registerBomReviewNativeHttpTests } from '../plm-bom-review/native-http'
-import { beforeAll, afterAll, describe, it, expect } from 'vitest'
+import { beforeAll, afterAll, describe, it, expect, vi } from 'vitest'
 import { Pool, Client } from 'pg'
 import { randomUUID, createHmac } from 'crypto'
 import { createServer } from 'http'
@@ -97,6 +97,22 @@ const service = new PlmBomReviewService({
   dataSourceManager: { getDataSource: () => adapter as never },
 })
 let b: any, preview: any, requestId: string
+async function parkRemoteWebhooks(): Promise<Array<{ id: string; active: boolean }>> {
+  const rows = (await pool.query(
+    `SELECT id, active FROM multitable_webhooks
+     WHERE url NOT LIKE 'http://127.0.0.1:%' AND url NOT LIKE 'http://localhost:%' AND url NOT LIKE 'http://[::1]:%'`,
+  )).rows as Array<{ id: string; active: boolean }>
+  if (rows.length) {
+    await pool.query(
+      `UPDATE multitable_webhooks SET active=false
+       WHERE url NOT LIKE 'http://127.0.0.1:%' AND url NOT LIKE 'http://localhost:%' AND url NOT LIKE 'http://[::1]:%'`,
+    )
+  }
+  return rows
+}
+async function restoreWebhooks(rows: Array<{ id: string; active: boolean }>) {
+  for (const row of rows) await pool.query('UPDATE multitable_webhooks SET active=$2 WHERE id=$1', [row.id, row.active])
+}
 async function counts() {
   return Promise.all(
     [
@@ -138,7 +154,18 @@ async function child() {
     )
   ).rows[0]
 }
+const realFetch = globalThis.fetch.bind(globalThis)
 beforeAll(async () => {
+  if (!process.env.W20_PROVIDER_DIR) {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      const host = new URL(raw).hostname
+      if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') {
+        throw new Error(`refused non-local test webhook: ${host}`)
+      }
+      return realFetch(input, init)
+    })
+  }
   process.env.PLM_BOM_REVIEW_ENABLED = 'true'
   process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
   process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
@@ -183,6 +210,7 @@ beforeAll(async () => {
   )
 })
 afterAll(async () => {
+  vi.restoreAllMocks()
   await pool.end()
   // Real auth/RBAC share this native pool across the dedicated HTTP verification groups.
   const { poolManager } = await import(
@@ -577,6 +605,48 @@ describe('actual PG native BOM collaboration', () => {
     expect((await receipts(disabled.id)).rows).toHaveLength(0)
     await expect(pool.query('TRUNCATE meta_plm_bom_review_notification_intents')).rejects.toMatchObject({ code: '23514' })
     await pool.query("DELETE FROM spreadsheet_permissions WHERE sheet_id=$1 AND subject_id='member'",[local.sheetId])
+  })
+  it('disabling a binding stops new reminders/escalations, cancels queued sends and stops listening without deleting evidence', async () => {
+    const p = await makePreview()
+    const local = await service.create('owner',{ previewId: p.previewId,requestId: randomUUID() })
+    const rows = (await pool.query(`SELECT r.id,l.bom_line_id FROM meta_records r JOIN meta_plm_bom_review_rows l ON l.record_id=r.id
+      WHERE l.binding_id=$1 ORDER BY l.bom_line_id`,[local.id])).rows
+    const [first,second] = rows
+    const field = getObjectFieldId('plm-bom-review',p.previewId,'status'), owner = getObjectFieldId('plm-bom-review',p.previewId,'owner')
+    const write = (id: string, data: Record<string,unknown>) => pool.query('UPDATE meta_records SET data=data||$1::jsonb,version=version+1 WHERE id=$2',[JSON.stringify(data),id])
+    await service.notifications('owner',local.id,{ expectedVersion: 0,notifications: {
+      issue: { enabled: true,recipientStrategy: 'event_owner' },
+      reminder: { enabled: false,recipientStrategy: null,leadMinutes: null },
+      escalation: { enabled: true,slaMinutes: 60,recipientUserIds: ['owner'] },
+    } })
+    for (const row of [first,second]) { await write(row.id,{ [field]: '评审中',[owner]: ['owner'] }); await write(row.id,{ [field]: '有问题' }) }
+    expect(await service.scanNotifications(local.id)).toEqual({ created: 2 })
+    const issues = (await pool.query("SELECT id,record_id FROM meta_plm_bom_review_notification_events WHERE binding_id=$1 AND kind='issue'",[local.id])).rows
+    const queued = issues.find((e) => e.record_id === first.id), unprepared = issues.find((e) => e.record_id === second.id)
+    expect(await service.prepareNotification(queued.id)).toEqual({ state: 'prepared' })
+    const generation = randomUUID()
+    await pool.query(`INSERT INTO meta_plm_bom_change_listeners(binding_id,generation,owner_id,source_fingerprint,binding_version,
+      configuration_revision_id,cursor,status) SELECT $1,$2,'owner','synthetic',version,$3,7,'active' FROM meta_plm_bom_review_bindings WHERE id=$1`,
+      [local.id,generation,(await pool.query('SELECT revision_id FROM meta_plm_bom_review_notification_config WHERE binding_id=$1',[local.id])).rows[0].revision_id])
+    const version = Number((await pool.query('SELECT version FROM meta_plm_bom_review_bindings WHERE id=$1',[local.id])).rows[0].version)
+    await service.disable('owner',local.id,{ expectedVersion: version })
+    expect((await pool.query('SELECT status,stop_reason,cursor FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[local.id])).rows[0])
+      .toEqual({ status: 'stopped',stop_reason: 'BINDING_DISABLED',cursor: '7' })
+    expect((await pool.query('SELECT actor_id,before,after FROM meta_config_revisions WHERE entity_id=$1',[`plm-bom-review:${local.id}:lifecycle`])).rows)
+      .toEqual([{ actor_id: 'owner',before: { status: 'active',version },
+        after: { status: 'disabled',version: version+1,stoppedListener: { generation,cursor: 7 } } }])
+    const issueAt = (await pool.query('SELECT max(issue_started_at) AS at FROM meta_plm_bom_review_rounds WHERE record_id=ANY($1::text[])',[[first.id,second.id]])).rows[0].at
+    expect(await service.scanNotifications(local.id,new Date(issueAt.getTime()+61*60000))).toEqual({ created: 0 })
+    expect(await service.deliverNotification(queued.id)).toEqual({ state: 'cancelled',inserted: 0 })
+    expect(await service.prepareNotification(unprepared.id)).toEqual({ state: 'cancelled' })
+    const intents = (await pool.query(`SELECT event_id,state,cancellation_reason FROM meta_plm_bom_review_notification_intents
+      WHERE event_id=ANY($1::uuid[]) ORDER BY event_id`,[[queued.id,unprepared.id]])).rows
+    expect(intents.map((i) => [i.state,i.cancellation_reason])).toEqual([['cancelled','BINDING_DISABLED'],['cancelled','BINDING_DISABLED']])
+    expect((await pool.query("SELECT count(*)::int n FROM meta_record_subscription_notifications WHERE source_event_id LIKE 'bom-review:%' AND record_id=ANY($1::text[])",
+      [[first.id,second.id]])).rows[0].n).toBe(0)
+    expect((await pool.query('SELECT count(*)::int n FROM meta_plm_bom_review_notification_events WHERE binding_id=$1',[local.id])).rows[0].n).toBe(2)
+    expect((await pool.query('SELECT status FROM meta_plm_bom_review_bindings WHERE id=$1',[local.id])).rows[0].status).toBe('disabled')
+    await expect(service.changeListener('owner',local.id,{ expectedVersion: version+1 })).rejects.toMatchObject({ code: 'SOURCE_CHANGED' })
   })
   it('rolls completion policy back when its native audit cannot be committed', async () => {
     const p = await makePreview(), local = await service.create('owner',{ previewId: p.previewId,requestId: randomUUID() })
@@ -978,7 +1048,8 @@ describe('actual PG native BOM collaboration', () => {
     await service.notifications('owner',local.id,{ expectedVersion: 1,notifications: { ...notifications,
       escalation: { enabled: true,slaMinutes: 60,recipientUserIds: ['owner'] } } })
     const worker = new PlmBomNotificationWorker(tx,service,() => undefined)
-    try { await worker.start(); await worker.tick() } finally { await worker.stop() }
+    const parked = await parkRemoteWebhooks()
+    try { await worker.start(); await worker.tick() } finally { await worker.stop(); await restoreWebhooks(parked) }
     expect((await pool.query('SELECT * FROM meta_record_subscription_notifications WHERE source_event_id=$1',['bom-review:'+event.id])).rows.map(r => r.user_id)).toEqual(['owner'])
     expect((await pool.query('SELECT state FROM meta_plm_bom_review_notification_intents WHERE event_id=$1',[event.id])).rows[0].state).toBe('delivered')
   })
@@ -997,6 +1068,7 @@ describe('actual PG native BOM collaboration', () => {
     const failures: number[] = []
     const first = new PlmBomNotificationWorker(tx,service,() => failures.push(1))
     const second = new PlmBomNotificationWorker(tx,service,() => failures.push(1))
+    const parked = await parkRemoteWebhooks()
     try {
       await Promise.all([first.start(),second.start()])
       await Promise.all([first.tick(),second.tick()])
@@ -1006,7 +1078,7 @@ describe('actual PG native BOM collaboration', () => {
       expect((await pool.query(`SELECT i.state FROM meta_plm_bom_review_notification_intents i
         JOIN meta_plm_bom_review_notification_events e ON e.id=i.event_id WHERE e.binding_id=$1`,[local.id])).rows).toEqual([{ state: 'delivered' }])
       expect(failures).toHaveLength(0)
-    } finally { await Promise.all([first.stop(),second.stop()]) }
+    } finally { await Promise.all([first.stop(),second.stop()]); await restoreWebhooks(parked) }
   })
   it('notification config and native audit roll back together when the audit INSERT fails', async () => {
     const failing = new PlmBomReviewService({ pool: {

@@ -245,7 +245,16 @@ export class PlmPersonalApprovalBindingService {
   }
   async unbind(owner: string, id: string) {
     return this.tx(async (c) => {
-      const b = await this.bound(c, id, owner, false)
+      // Owner cleanup does not consult the enable flag or the provider. Turning the package off
+      // must not trap the encrypted grant, and this path never issues a decision.
+      await this.activeOwner(c, owner)
+      const b = (
+        await c.query<Binding>(
+          'SELECT * FROM plm_personal_approval_bindings WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+          [id, owner],
+        )
+      ).rows[0]
+      if (!b) throw new Failure(404, 'PLM_BINDING_REQUIRED')
       await c.query(
         'UPDATE plm_personal_approval_bindings SET encrypted_grant=NULL,generation=generation+1,updated_at=now() WHERE id=$1',
         [b.id],

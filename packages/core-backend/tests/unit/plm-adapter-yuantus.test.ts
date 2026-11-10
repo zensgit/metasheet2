@@ -468,53 +468,19 @@ describe('PLMAdapter Yuantus BOM analysis and approval actions', () => {
     ])
   })
 
-  it('posts approve and reject actions to ECO endpoints with optimistic-lock version payloads', async () => {
+  it('refuses shared-account approve and reject before any provider call', async () => {
     const adapter = createAdapter()
     const selectMock = vi.fn()
-      .mockResolvedValueOnce({
-        data: [{
-          id: 'eco-approve-1',
-          status: 'approved',
-          comment: 'Ship it',
-          approved_at: '2026-04-11T00:00:00.000Z',
-          created_at: '2026-04-11T00:00:00.000Z',
-        }],
-      })
-      .mockResolvedValueOnce({
-        data: [{
-          id: 'eco-reject-1',
-          status: 'rejected',
-          comment: 'Missing test evidence',
-          approved_at: '2026-04-11T00:00:00.000Z',
-          created_at: '2026-04-11T00:00:00.000Z',
-        }],
-      })
-
     ;(adapter as any).select = selectMock
 
     const approved = await adapter.approveApproval('eco-approve-1', 7, 'Ship it')
     const rejected = await adapter.rejectApproval('eco-reject-1', 8, 'Missing test evidence')
 
-    expect(selectMock).toHaveBeenNthCalledWith(1, '/api/v1/eco/eco-approve-1/approve', {
-      method: 'POST',
-      data: { version: 7, comment: 'Ship it' },
-    })
-    expect(selectMock).toHaveBeenNthCalledWith(2, '/api/v1/eco/eco-reject-1/reject', {
-      method: 'POST',
-      data: { version: 8, comment: 'Missing test evidence' },
-    })
-    expect(approved.data[0]).toMatchObject({
-      id: 'eco-approve-1',
-      status: 'approved',
-      approved_at: '2026-04-11T00:00:00.000Z',
-      created_at: '2026-04-11T00:00:00.000Z',
-    })
-    expect(rejected.data[0]).toMatchObject({
-      id: 'eco-reject-1',
-      status: 'rejected',
-      approved_at: '2026-04-11T00:00:00.000Z',
-      created_at: '2026-04-11T00:00:00.000Z',
-    })
+    expect(selectMock).not.toHaveBeenCalled()
+    expect(approved.data).toEqual([])
+    expect(approved.error?.message).toBe('PLM_PERSONAL_BINDING_REQUIRED')
+    expect(rejected.data).toEqual([])
+    expect(rejected.error?.message).toBe('PLM_PERSONAL_BINDING_REQUIRED')
   })
 
   it('queries where-used with recursive and max-level parameters', async () => {

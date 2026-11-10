@@ -41,7 +41,7 @@ const PUB_B64 = Buffer.from((publicKey.export({ format: 'jwk' }) as { x: string 
 
 function mint(overrides: Record<string, unknown> = {}, kid = KID): string {
   const now = Math.floor(Date.now() / 1000)
-  const claims = { sub: '7', tenant_id: 'default', part_id: 'P1', feature_key: 'bom_multitable', aud: AUD, embed_origin: ORIGIN, iat: now, exp: now + 120, jti: 'j1', typ: 'embed', ...overrides }
+  const claims = { sub: '7', tenant_id: 'default', org_id: 'org-1', part_id: 'P1', feature_key: 'bom_multitable', aud: AUD, embed_origin: ORIGIN, iat: now, exp: now + 120, jti: 'j1', typ: 'embed', ...overrides }
   const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid })).toString('base64url')
   const payload = Buffer.from(JSON.stringify(claims)).toString('base64url')
   const sig = crypto.sign(null, Buffer.from(`${header}.${payload}`, 'ascii'), privateKey).toString('base64url')
@@ -50,12 +50,13 @@ function mint(overrides: Record<string, unknown> = {}, kid = KID): string {
 
 const CONTEXT = { part: { part_id: 'P1', item_number: 'P-001', name: 'A', state: 'Released', generation: 3 }, lines: [], source_version: 3, source_updated_at: '2026', sync_status: 'snapshot', template_key: 'bom_review' }
 
-// A COMPLETE PlmBomAdapter mock: the relay's duck-type now also requires the tenant/connect surface
-// (getEffectiveTenantId/isConnected/connect). Default served tenant = 'default' to match the default
-// minted token's tenant_id, so existing happy-path tests keep passing the cross-check.
+// A COMPLETE PlmBomAdapter mock: the relay's duck-type also requires the tenant/org/connect surface
+// (getEffectiveTenantId/getEffectiveOrgId/isConnected/connect). Default served tenant/org match the
+// default minted token's tenant_id/org_id, so existing happy-path tests keep passing the cross-check.
 function fullAdapter(opts: {
   getBomMultitableContext?: ReturnType<typeof vi.fn>
   tenant?: string | undefined
+  org?: string | undefined
   connected?: boolean
   connect?: ReturnType<typeof vi.fn>
 } = {}) {
@@ -64,6 +65,7 @@ function fullAdapter(opts: {
       opts.getBomMultitableContext ??
       vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT }),
     getEffectiveTenantId: () => ('tenant' in opts ? opts.tenant : 'default'),
+    getEffectiveOrgId: () => ('org' in opts ? opts.org : 'org-1'),
     isConnected: () => opts.connected ?? true,
     connect: opts.connect ?? vi.fn().mockResolvedValue(undefined),
   }
@@ -100,7 +102,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     pinned.setApp(buildApp())
   })
   afterEach(() => {
-    for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
+    for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID', 'PLM_EMBED_SAME_ORIGIN']) delete process.env[k]
   })
 
   it('the embed path is whitelisted from the global session gate (else it would 401 before embedTokenAuth)', () => {
@@ -264,6 +266,70 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     expect(res.status).toBe(503)
   })
 
+  // --- org cross-check: the relay reads with the SOURCE's credentials, so the served org must be the token's ---
+
+  it('token org matches the served (effective) org -> 200', async () => {
+    const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, org: 'org-b' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ org_id: 'org-b' }))
+    expect(res.status).toBe(200)
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+  })
+
+  it('CROSS-ORG: same tenant, token org A but served org B -> 403, BOM never queried, jti never consumed', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, org: 'org-b' }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ org_id: 'org-a' }))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+  })
+
+  it('a token without org_id -> 403 fail-closed, BOM never queried', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ org_id: undefined }))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('absent or ambiguous served org -> 403 fail-closed, BOM never queried', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext, org: undefined }))
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  it('an adapter without the served-org surface -> 503 (never read without proving the org)', async () => {
+    const adapter: Record<string, unknown> = fullAdapter()
+    delete adapter.getEffectiveOrgId
+    dsMocks.getDataSource.mockReturnValue(adapter)
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(503)
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+  })
+
+  it('END-TO-END (real adapter): hand-set x-org-id org-a, token org-b in the same tenant -> 403, BOM never queried', async () => {
+    for (const k of ['PLM_TENANT_ID', 'PLM_ORG_ID', 'PLM_BASE_URL', 'PLM_URL']) delete process.env[k]
+    const adapter = new PLMAdapter(
+      { get: async () => undefined } as never,
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      { id: DS_ID, name: 'PLM', type: 'plm', connection: { url: '', headers: { 'x-tenant-id': 'default', 'x-org-id': 'org-a' } } } as never,
+    )
+    await adapter.connect()
+    const spy = vi.spyOn(adapter, 'getBomMultitableContext')
+    dsMocks.getDataSource.mockReturnValue(adapter)
+    const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint({ org_id: 'org-b' }))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(spy).not.toHaveBeenCalled()
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+  })
+
   it('END-TO-END (real adapter): global tenant B but a hand-set connection x-tenant-id A, token B -> 403, BOM never queried', async () => {
     for (const k of ['PLM_TENANT_ID', 'PLM_BASE_URL', 'PLM_URL']) delete process.env[k]
     // global config says tenant-b, but the data source hand-sets x-tenant-id: tenant-a (served value)
@@ -312,6 +378,91 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
     expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  describe('PLM_EMBED_SAME_ORIGIN', () => {
+    const TUNNEL = 'https://tunnel.example'
+    const tunnelHeaders = {
+      Host: 'tunnel.example',
+      'X-Forwarded-Proto': 'https',
+      Origin: TUNNEL,
+    }
+
+    it('flag off keeps the exact allow-list and does not accept the request origin', async () => {
+      delete process.env.PLM_EMBED_SAME_ORIGIN
+      dsMocks.getDataSource.mockReturnValue(fullAdapter())
+      const listed = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint()).set('Host', 'other.example')
+      expect(listed.status).toBe(200)
+      const sameHost = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-tunnel' }))
+        .set(tunnelHeaders)
+      expect(sameHost.status).toBe(403)
+      expect(sameHost.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
+      const config = await request(pinned.url()).get('/api/plm-embed/config').set(tunnelHeaders)
+      expect(config.body.data.allowed_origins).toEqual([ORIGIN])
+      expect(config.body.data.frame_ancestors).toBe(`frame-ancestors ${ORIGIN}`)
+    })
+
+    it('flag on accepts this request origin and still rejects a foreign origin', async () => {
+      process.env.PLM_EMBED_SAME_ORIGIN = 'true'
+      process.env.PLM_EMBED_ALLOWED_ORIGINS = ''
+      const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+      dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+      const same = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-same' }))
+        .set(tunnelHeaders)
+      expect(same.status).toBe(200)
+      expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+
+      const foreign = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example', jti: 'j-evil' }))
+        .set({ ...tunnelHeaders, Origin: 'https://evil.example' })
+      expect(foreign.status).toBe(403)
+      expect(foreign.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
+      expect(getBomMultitableContext).toHaveBeenCalledTimes(1)
+
+      const spoofed = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example', jti: 'j-spoof' }))
+        .set({ ...tunnelHeaders, 'X-Forwarded-Host': 'evil.example', Origin: 'https://evil.example' })
+      expect(spoofed.status).toBe(403)
+
+      const crossOriginCaller = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-cross' }))
+        .set({ ...tunnelHeaders, Origin: 'https://evil.example' })
+      expect(crossOriginCaller.status).toBe(403)
+
+      const viaUpstream = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-upstream' }))
+        .set({ Host: 'localhost:8900', 'X-Forwarded-Host': 'tunnel.example', 'X-Forwarded-Proto': 'https', Origin: TUNNEL })
+      expect(viaUpstream.status).toBe(200)
+
+      const forwardedWithoutOrigin = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-no-origin' }))
+        .set({ Host: 'localhost:8900', 'X-Forwarded-Host': 'tunnel.example', 'X-Forwarded-Proto': 'https' })
+      expect(forwardedWithoutOrigin.status).toBe(403)
+
+      const ambiguousProto = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-proto' }))
+        .set({ Host: 'tunnel.example', 'X-Forwarded-Proto': 'https,http', Origin: TUNNEL })
+      expect(ambiguousProto.status).toBe(403)
+    })
+
+    it('flag on publishes this request origin and frame-ancestors self', async () => {
+      process.env.PLM_EMBED_SAME_ORIGIN = 'true'
+      process.env.PLM_EMBED_ALLOWED_ORIGINS = ORIGIN
+      const config = await request(pinned.url()).get('/api/plm-embed/config').set(tunnelHeaders)
+      expect(config.body.data.allowed_origins).toEqual([ORIGIN, TUNNEL])
+      expect(config.body.data.frame_ancestors).toBe(`frame-ancestors 'self' ${ORIGIN}`)
+      expect(config.headers['cache-control']).toBe('no-store')
+    })
+
+    it.each(['TRUE', '1', ' true', 'true '])('non-exact flag %j stays on the allow-list', async (value) => {
+      process.env.PLM_EMBED_SAME_ORIGIN = value
+      const res = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-off' }))
+        .set(tunnelHeaders)
+      expect(res.status).toBe(403)
+    })
   })
 
   it('a token with no jti -> 401 (cannot be tracked for single-use)', async () => {

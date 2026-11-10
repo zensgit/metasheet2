@@ -1,0 +1,45 @@
+{
+  "source_parent": "037f161216ee7843a30c0e71a56ff00a566515a3",
+  "implementation_model": "Grok4.7(xhigh)",
+  "independent_verifier": "Codex",
+  "unit": {
+    "files": 2,
+    "passed": 50,
+    "seconds": 2.59
+  },
+  "backend_types_exit": 0,
+  "postgres": {
+    "counts": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "seconds": 1.61,
+    "postgres_major": 15,
+    "source_stable": true,
+    "cluster_stopped": true,
+    "cleanup": true
+  },
+  "postgres_vitest_seconds": 1.34,
+  "mechanisms": [
+    "active users FOR SHARE -> exact user_orgs FOR SHARE -> source FOR UPDATE -> binding FOR UPDATE",
+    "explicit null legacy_private only; malformed/missing Meta context denied",
+    "provider verify held until pg_blocking_pids proves membership deactivation waits, then subsequent use denied403",
+    "cleanup owner-only and featureflag independent; no business dispatch authority added"
+  ],
+  "source_sha256": {
+    "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "8198c0510ee9ccbe6c2c4ce7c89681d8bd846ebbaf635dad06515f5b7b308289",
+    "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "7bc121ff4b2992ac03ce193da646038f70cb21c649285166758990efb81b368b",
+    "packages/core-backend/tests/unit/plm-personal-bom-write-binding.test.ts": "1a1743ee89696c86e01bb10cd429793268c5d65e85c119b20cd2cac2ef5545e3",
+    "packages/core-backend/tests/unit/plm-personal-bom-write-transport.test.ts": "095a095194d92b5c367b3408ec5dadc4bdc53345915b88723a4103e42bcfe261",
+    "packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts": "c45c37378caf83d8420c7ed236b68075fc47a9208e306a31ee9550912ae8db82",
+    "packages/core-backend/vitest.plm-personal-bom-write-lock.config.ts": "0fcaf7c3355fbebb5008175da5d10c9aed9c672c7ca53d3191986d7adf3be49b"
+  },
+  "limits": [
+    "controlled provider wire fixture, not live paired native service",
+    "route authenticatedTenantId integration still pending",
+    "durable logical intents, personal line/ECO dispatch, UI and cross-process recovery pending",
+    "new exact-head remote checks pending; foundation037 green is historical scope only"
+  ]
+}

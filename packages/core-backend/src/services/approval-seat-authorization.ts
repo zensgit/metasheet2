@@ -200,9 +200,10 @@ export function decisionDoorIsSeatGated(instance: DecidableInstanceRow): boolean
  * endpoint's own authorization predicate let THIS viewer decide the node this instance is stopped
  * on, right now?
  *
- * `false` when the instance is not pending, when no viewer identity was supplied, and when the
- * viewer holds no matching active seat at any decidable node key. `true` for a pending instance
- * whose decisions do not go through the seat-gated door (see `decisionDoorIsSeatGated`) — there is
+ * `false` when the instance is not pending, when no viewer identity was supplied, when the
+ * instance is a PLM mirror (the bridge refuses that decision), and when the viewer holds no
+ * matching active seat at any decidable node key. `true` for a pending non-PLM instance whose
+ * decisions do not go through the seat-gated door (see `decisionDoorIsSeatGated`) — there is
  * no seat predicate to mirror there, and `true` is what those surfaces already do today, so the
  * value cannot narrow anything that works now.
  *
@@ -231,6 +232,9 @@ export function resolveCanDecideCurrentNode(options: {
   const { instance, assignments, viewerUserId } = options
   if (!viewerUserId) return false
   if (instance.status !== 'pending') return false
+  // PLM mirrors are not decided here. The bridge and federation doors refuse them, so the
+  // affordance must not advertise a shared-account decision.
+  if (instance.id.startsWith('plm:') || instance.source_system === 'plm') return false
   if (!decisionDoorIsSeatGated(instance)) return true
 
   const decidableNodeKeys = new Set(

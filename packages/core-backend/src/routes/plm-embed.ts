@@ -19,7 +19,7 @@
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId, frameAncestorsValue } from '../auth/embed-config'
+import { embedDataSourceId, embedOriginsForRequest, frameAncestorsForRequest, isEmbedOriginAllowed, isPlmEmbedSameOrigin, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { BomMultitableContextResult } from '../data-adapters/PLMAdapter'
 
@@ -27,8 +27,9 @@ const BOM_FEATURE_KEY = 'bom_multitable'
 
 interface PlmBomAdapter {
   getBomMultitableContext(partId: string): Promise<BomMultitableContextResult>
-  // the tenant actually served (x-tenant-id), used to cross-check the embed token's tenant_id
+  // the tenant/org actually served (x-tenant-id/x-org-id), cross-checked against the embed token
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -36,6 +37,7 @@ function isPlmBomAdapter(adapter: unknown): adapter is PlmBomAdapter {
   const a = adapter as Partial<PlmBomAdapter> | null
   return typeof a?.getBomMultitableContext === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
@@ -43,14 +45,19 @@ function isPlmBomAdapter(adapter: unknown): adapter is PlmBomAdapter {
 export default function plmEmbedRouter(): Router {
   const router = Router()
 
-  // Public config the embed iframe fetches to learn its parent-origin allowlist (single source:
-  // PLM_EMBED_ALLOWED_ORIGINS) + the frame-ancestors value the deploy edge should apply. NOT
-  // derived from the iframe URL, so an attacker can't widen the allowlist.
-  router.get('/api/plm-embed/config', (_req: Request, res: Response) => {
+  // Public config the embed iframe fetches to learn its parent-origin allowlist (configured
+  // PLM_EMBED_ALLOWED_ORIGINS, plus this request's own origin when PLM_EMBED_SAME_ORIGIN is
+  // exactly true) + the frame-ancestors value the deploy edge should apply. NOT derived from
+  // the iframe URL or the Origin header, so an attacker can't widen the allowlist.
+  router.get('/api/plm-embed/config', (req: Request, res: Response) => {
+    if (isPlmEmbedSameOrigin()) {
+      res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Vary', 'Host, X-Forwarded-Host, X-Forwarded-Proto')
+    }
     res.json({
       ok: true,
-      data: { allowed_origins: embedAllowedOrigins(), frame_ancestors: frameAncestorsValue(),
-        visual_preview_enabled: process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED === 'true' },
+      data: { allowed_origins: embedOriginsForRequest(req), frame_ancestors: frameAncestorsForRequest(req),
+        visual_preview_enabled: isPlmEmbedVisualPreviewEnabled() },
     })
   })
 
@@ -66,7 +73,7 @@ export default function plmEmbedRouter(): Router {
         return res.status(403).json({ ok: false, error: { code: 'EMBED_FEATURE_MISMATCH', message: 'token not scoped to bom_multitable' } })
       }
       const origin = typeof claims.embed_origin === 'string' ? claims.embed_origin : ''
-      if (!origin || !embedAllowedOrigins().includes(origin)) {
+      if (!isEmbedOriginAllowed(origin, req)) {
         return res.status(403).json({ ok: false, error: { code: 'EMBED_ORIGIN_NOT_ALLOWED', message: 'embed origin not allowed' } })
       }
 
@@ -99,6 +106,12 @@ export default function plmEmbedRouter(): Router {
       const servedTenantId = adapter.getEffectiveTenantId()
       if (!servedTenantId || claims.tenant_id !== servedTenantId) {
         return res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
+      }
+      // The context is read with the source's own credentials, so a matching tenant is not enough:
+      // a token minted in another org of the same tenant must never read the served org's BOM.
+      const servedOrgId = adapter.getEffectiveOrgId()
+      if (!servedOrgId || claims.org_id !== servedOrgId) {
+        return res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH', message: 'token org does not match the embed data source org' } })
       }
 
       // Single-use: atomically consume the token's jti against the SHARED store BEFORE querying, so a

@@ -230,15 +230,16 @@ describe('decisionDoorIsSeatGated — which door the instance uses', () => {
 })
 
 describe('resolveCanDecideCurrentNode — instances whose door has no seat gate', () => {
-  // `ApprovalBridgeService.dispatchAction` (legacy platform rows, plm mirrors, after-sales) checks
-  // `approvals:act` and a pending status and nothing else. Reporting `false` there would HIDE
-  // controls the server accepts, so the honest answer for a pending instance is `true`.
+  // Legacy platform rows and after-sales still accept a pending decision without a seat.
+  // Reporting `false` there would hide a control the server accepts. PLM mirrors are the
+  // exception: the bridge refuses them, so the affordance is false.
   it('a seatless viewer CAN decide a pending legacy instance with no published definition', () => {
     expect(canDecide(instance({ published_definition_id: null }), [])).toBe(true)
   })
 
-  it('a seatless viewer CAN decide a pending plm mirror', () => {
-    expect(canDecide(instance({ id: 'plm:abc', source_system: 'plm' }), [])).toBe(true)
+  it('a pending plm mirror cannot be decided on this door', () => {
+    expect(canDecide(instance({ id: 'plm:abc', source_system: 'plm' }), [])).toBe(false)
+    expect(canDecide(instance({ id: 'plm:abc', source_system: 'plm' }), [seat()])).toBe(false)
   })
 
   it('but a CLOSED instance on that door still cannot be decided', () => {

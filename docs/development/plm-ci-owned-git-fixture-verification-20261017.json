@@ -1,0 +1,70 @@
+{
+  "recorded_utc": "2026-10-17T12:09:26.151739+00:00",
+  "parent": "a775ce1589464c14eac2188a3f941beefaf300e1",
+  "failed_ci": {
+    "run": "https://github.com/zensgit/metasheet2/actions/runs/39029676171",
+    "job": 117387448705,
+    "step": "Verify stock-prep browser CI ownership and collection",
+    "failure": "ENOTEMPTY deleting owned temporary .git/objects/info; first wiring test failed, other5passed, browser notstarted.",
+    "existing_cleanup": "Already20retries/150ms; not increased or suppressed."
+  },
+  "fix": "Only owned throwaway Git fixture sets local gc.auto=0 and maintenance.auto=false before any commit; production checkout/global Git config/classifier/workflow/test collection unchanged.",
+  "implementation_model": "Grok4.7(xhigh) bounded2configlines; Codex independently added actualGit TRACE2 regression and verified entire wiring suite.",
+  "verification": {
+    "whole_wiring": {
+      "tests": 7,
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0,
+      "milliseconds": 8260.586708
+    },
+    "negative_control": {
+      "negative_without_both_local_guards_exit": 1,
+      "actual_git_trace_detects_maintenance": true,
+      "source_sha256": "6ba13cac18b22810231b734048818913c597834b549d028416cc3578a1ea2d39",
+      "scope": "Actual openClassifierSession with aggressive isolated inherited config. Demonstrates absence of prevention; not deterministic reproduction of CI ENOTEMPTY.",
+      "owned_mutant_cleanup": true
+    },
+    "actual_git_mechanism_control": {
+      "before": {
+        "automatic_maintenance_calls": 1,
+        "argv": [
+          [
+            "git",
+            "maintenance",
+            "run",
+            "--auto",
+            "--quiet",
+            "--no-detach"
+          ]
+        ],
+        "commit_created": true
+      },
+      "guarded": {
+        "automatic_maintenance_calls": 0,
+        "argv": [],
+        "commit_created": true
+      },
+      "owned_cleanup": true
+    },
+    "whole_wiring_proof": {
+      "exit": 0,
+      "source_sha256": "6ba13cac18b22810231b734048818913c597834b549d028416cc3578a1ea2d39",
+      "source_stable": true,
+      "pnpm": "existing10.16.1 viaownedPATHwrapper,no install",
+      "owned_wrapper_cleanup": true
+    },
+    "stock_playwright_collection": {
+      "tests": 29,
+      "files": 2,
+      "browser_executed": false
+    },
+    "diff_check": "pass"
+  },
+  "limits": [
+    "The negative control detects actual inherited automatic maintenance; it is not a deterministic reproduction of ENOTEMPTY.",
+    "Local entire wiring test executes actual classifiers and Playwright collection; Chromium stock business scenarios are not rerun locally for a Git-fixture-only change.",
+    "New exact-source CI required. Historical source17249green and documentationa77548green1failure remain attributed separately.",
+    "No another documentation SHA loop; eventual final-head results reported in PR body and state."
+  ]
+}

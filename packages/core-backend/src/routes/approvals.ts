@@ -1240,13 +1240,15 @@ async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string
  *     node key" IS the current round: there is no separate round predicate to add, and none is
  *     invented here.
  *
- * NOT seat-gated instances — a legacy platform row with no `published_definition_id`, or a `plm:`
- * mirror — keep TODAY'S authorization exactly: `decisionDoorIsSeatGated` is false for them,
- * `resolveCanDecideCurrentNode` therefore returns `true`, and the endpoints behave as they do now.
- * That is deliberate: those rows have no assignments to hold a seat in, and `/api/approvals/:id/
- * actions` does not seat-gate them either (it dispatches them to `ApprovalBridgeService`, which has
- * no assignment gate at all). Narrowing them here would refuse callers the OTHER door still
- * accepts — a second, stricter predicate, which is the drift this module exists to prevent.
+ * NOT seat-gated instances — a legacy platform row with no `published_definition_id`, or an
+ * after-sales row — keep TODAY'S authorization exactly: `decisionDoorIsSeatGated` is false for
+ * them, `resolveCanDecideCurrentNode` therefore returns `true`, and the endpoints behave as they
+ * do now. That is deliberate: those rows have no assignments to hold a seat in, and
+ * `/api/approvals/:id/actions` does not seat-gate them either. Narrowing them here would refuse
+ * callers the other door still accepts. A PLM mirror is the exception on the shared predicate:
+ * it returns `false` because `ApprovalBridgeService` refuses the decision. This route's SELECT
+ * already requires `source_system = 'platform'`, so an ordinary PLM row never reaches the helper;
+ * a `plm:` id stamped as platform is refused here instead of being terminalized locally.
  *
  * Attribution is returned ONLY for a seat-gated instance, and only as the `node_key` of the very
  * assignment that satisfied the predicate. On a non-seat-gated instance it is `null` — there is no

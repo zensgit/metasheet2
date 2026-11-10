@@ -36,7 +36,8 @@ Set these in the MetaSheet2 deployment that hosts the embedded BOM review UI.
 | Setting | Required | Purpose | Readiness rule |
 | --- | --- | --- | --- |
 | `PRODUCT_MODE` / `ENABLE_PLM` | Yes | Enables `/api/plm-workbench` and `/api/plm-embed`. | PLM routes must be enabled in the target deployment. |
-| `PLM_EMBED_ALLOWED_ORIGINS` | Yes | Single source for allowed PLM parent origins, backend `embed_origin` check, frontend parent-origin allowlist, and edge CSP value. | Explicit origins only. Never use `*`. |
+| `PLM_EMBED_ALLOWED_ORIGINS` | Yes, unless same-origin mode is on | Configured PLM parent origins. Backend `embed_origin` check, frontend parent-origin allowlist, and edge CSP value. | Explicit origins only. Never use `*`. |
+| `PLM_EMBED_SAME_ORIGIN` | No | Combined gateway with Yuantus (Yuantus #443 uses this same name). Exact `true` accepts an embed whose origin is this request's own origin, so a new tunnel hostname does not need an allow-list edit. | Default off. Off keeps the exact allow-list. On still rejects a foreign origin. The web nginx hop (`docker/nginx.conf`) must forward `Host $http_host` and the incoming `X-Forwarded-Proto` (else `$scheme` on that plain-HTTP hop). |
 | `PLM_EMBED_DATA_SOURCE_ID` | Yes | Server-bound PLM data source used by `/api/plm-embed/bom-review/context`. | Must identify the Yuantus PLM source for this deployment. Never accept source id from the iframe. |
 | `PLM_EMBED_AUDIENCE` | Yes | Expected JWT `aud`. | Must match Yuantus token minting. Default is `metasheet2.embed`. |
 | `YUANTUS_EMBED_PUBLIC_KEYS` | Yes, preferred | JSON object of `kid -> base64 raw Ed25519 public key` for offline verification. | Public keys only. Keep both old and new `kid` entries during rotation windows; never configure a Yuantus private key in MetaSheet2. |
@@ -61,7 +62,7 @@ The Yuantus deployment must provide:
 - The embed-token mint endpoint.
 - Ed25519 signing key configured only on Yuantus.
 - The same audience value as MetaSheet2 `PLM_EMBED_AUDIENCE`.
-- The same parent origin value that MetaSheet2 lists in `PLM_EMBED_ALLOWED_ORIGINS`.
+- The same parent origin value that MetaSheet2 lists in `PLM_EMBED_ALLOWED_ORIGINS`, unless both sides set `PLM_EMBED_SAME_ORIGIN` to the exact string `true`. In that mode Yuantus follows `window.location.origin` and MetaSheet accepts that origin when it is the origin of the request.
 
 The token must be scoped to:
 
@@ -182,15 +183,15 @@ Run these before customer UAT.
 
 | Symptom | Likely cause | Action |
 | --- | --- | --- |
-| `/api/plm-embed/config` returns empty `allowed_origins` | `PLM_EMBED_ALLOWED_ORIGINS` missing or only `*`. | Set explicit PLM origins and redeploy. |
+| `/api/plm-embed/config` returns empty `allowed_origins` | `PLM_EMBED_ALLOWED_ORIGINS` missing or only `*`, and same-origin mode is off or the request origin could not be resolved. | Set explicit PLM origins, or set `PLM_EMBED_SAME_ORIGIN=true` behind the shared gateway, and redeploy. |
 | Iframe stays on `awaiting-token` | Parent did not post token, posted too early without retry, posted from an unallowed origin, or used wrong target origin. | Check parent postMessage timing and exact origin. |
-| Iframe shows `not-configured` | Allowlist is empty after fail-closed filtering. | Fix `PLM_EMBED_ALLOWED_ORIGINS`. |
+| Iframe shows `not-configured` | Allowlist is empty after fail-closed filtering. | Fix `PLM_EMBED_ALLOWED_ORIGINS`, or turn on `PLM_EMBED_SAME_ORIGIN` for a same-gateway deployment. |
 | Iframe shows transient error after token was accepted | The single-use token was already consumed before a provider degradation. | Reopen or reload from PLM so the parent mints and posts a new token. Do not retry the old token. |
 | API returns 401 `EMBED_TOKEN_REQUIRED` | Embed token header missing. | Ensure the parent posts a token and the iframe sends it on embed API calls. |
 | API returns 401 `INVALID_EMBED_TOKEN` | Malformed, expired, wrong audience, wrong type, missing `jti`, unknown `kid`, or bad signature. | Re-mint token. Check public-key map, key id, audience, clocks, and JWT claims. |
 | API returns 401 `EMBED_TOKEN_REPLAYED` | Same token reused. | Re-mint token from PLM. |
 | API returns 403 `EMBED_FEATURE_MISMATCH` | Token is for a different feature. | Mint with `feature_key = "bom_multitable"`. |
-| API returns 403 `EMBED_ORIGIN_NOT_ALLOWED` | Token `embed_origin` is not in `PLM_EMBED_ALLOWED_ORIGINS`. | Align Yuantus mint config and MetaSheet2 allowlist. |
+| API returns 403 `EMBED_ORIGIN_NOT_ALLOWED` | Token `embed_origin` is not in `PLM_EMBED_ALLOWED_ORIGINS`, and it is not this request's own origin under `PLM_EMBED_SAME_ORIGIN=true`. | Align Yuantus mint config and the MetaSheet2 allowlist, or enable same-origin mode on both sides when they share a gateway origin. |
 | API returns 403 `EMBED_TENANT_MISMATCH` | Token tenant differs from the tenant actually served by `PLM_EMBED_DATA_SOURCE_ID`. | Fix token tenant or data-source tenant. Do not bypass this check. |
 | API returns 503 `embed verification not configured` | No usable `YUANTUS_EMBED_PUBLIC_KEYS` map, malformed JSON map, or no legacy `YUANTUS_EMBED_PUBLIC_KEY`. | Set a valid JSON public-key map, or the legacy public key plus matching `YUANTUS_EMBED_KEY_ID`, then redeploy. |
 | API returns 503 `embed replay store unavailable` | Redis unavailable or first Redis connection failed and was memoized null. | Restore Redis and restart MetaSheet2 if first connect failed. |
@@ -204,7 +205,7 @@ Run these before customer UAT.
 Fast fail-closed options:
 
 1. Remove the PLM parent entry point so customers stop opening the iframe.
-2. Remove `PLM_EMBED_ALLOWED_ORIGINS` or set it empty. The iframe will not accept parent tokens and `/config` will fail closed.
+2. Remove `PLM_EMBED_ALLOWED_ORIGINS` or set it empty, and leave `PLM_EMBED_SAME_ORIGIN` unset. The iframe will not accept parent tokens and `/config` will fail closed. Same-origin mode still accepts the request's own origin, so turn that flag off as well when this step is the rollback.
 3. Remove `PLM_EMBED_DATA_SOURCE_ID`. The data route returns 503.
 4. Disable PLM mode for deployments that should not expose PLM routes.
 
@@ -217,8 +218,8 @@ Standalone PLM workbench read-only capability discovery is separate from the tok
 Record the evidence before go-live:
 
 - [ ] `PRODUCT_MODE` / `ENABLE_PLM` enables PLM routes.
-- [ ] `PLM_EMBED_ALLOWED_ORIGINS` contains explicit PLM origin(s), no `*`.
-- [ ] Edge CSP for `/plm-embed/bom-review` uses explicit `frame-ancestors`.
+- [ ] `PLM_EMBED_ALLOWED_ORIGINS` contains explicit PLM origin(s), no `*`, or `PLM_EMBED_SAME_ORIGIN` is the exact string `true` on a shared gateway.
+- [ ] Edge CSP for `/plm-embed/bom-review` uses the `/api/plm-embed/config` `frame_ancestors` value (`frame-ancestors 'self'` when same-origin mode is on).
 - [ ] `PLM_EMBED_DATA_SOURCE_ID` points to the intended Yuantus source.
 - [ ] Served tenant equals Yuantus token `tenant_id`.
 - [ ] `PLM_EMBED_AUDIENCE` matches Yuantus minting.

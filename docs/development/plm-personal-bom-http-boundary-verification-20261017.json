@@ -1,0 +1,94 @@
+{
+  "recorded_utc": "2026-10-17T09:59:56.723882+00:00",
+  "base_head": "14b8b222c4ab75b41843779b9ae70c29700b3a09",
+  "state": "Uncommitted backend candidate, current independent unit/PG/types and three-process paired HTTP proof. Frontend independent acceptance still pending.",
+  "implementation_model": "Grok4.7(xhigh), session gbt-d5a9-1a148fc8e31-5d; main independently reviewed and tested.",
+  "review": "Grok4.7(xhigh) HTTP implementation; main independent code/runtime review found and fixed canonical config.type assumption and native401 uncertainty; Astraultra readonly reviewed the authoritative source-type repair, no demonstrated blocker. Six native401 controls red then green; complete current22-file gate394passes.",
+  "unit": {
+    "files": 22,
+    "tests": 394,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 6.71,
+    "source": "Current personal CI workflow command parsed and executed locally; includes the 271-test/12-file targeted set."
+  },
+  "pg": {
+    "counts": {
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "exit_code": 0,
+    "seconds": 3.75,
+    "postgres_major": 15,
+    "source_stable": true,
+    "source_sha256": {
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "55c5296b48a0f5d06e9faccd43b78f14f34da66a0679cb72159f28fe83e72f6c",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "8261516182f59c48b51f879eec089fa2096cc1690f450a5bee180ade66bf92df",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/data-adapters/PLMAdapter.ts": "675f2606b7be49c2a91736ba1a560d65e18d97d127ea32c9ad7ad110418ccd1a",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/db/migrations/zzzz20261017010000_create_plm_personal_bom_write_bindings.ts": "7a4490b217b1db608f2ea6a59703c3008fac4e6a2ad01f7f5258031622a37f45",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts": "63b2b3b9f7fe0aaf283b525164f2c8f71d3d865541b8a711f6e22137c32f097e",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/vitest.plm-personal-bom-write-lock.config.ts": "362b28529a7559b2ad01b0a1fec9058d270b155f72bf36ed9c3977a15b08e1fe",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/tests/integration/plm-personal-bom-intent-pg.realdb.ts": "303648346f01ab465236b23e0cd0c2b0a49ab1df0da4cdd8335099537a7eb65d",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/db/migrations/zzzz20261017020000_create_plm_personal_bom_write_intents.ts": "aaee62fa9d69309e2a5010cd0ff440d16f5583084e4c50b0251138e8c0cd3fce",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/services/plm-personal-bom-write-http.ts": "08c5a4bdd3f7867b0c9745f5e8aeccf211a7aa4d5d94d6ea0616207a6ae57a0e",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/routes/plm-personal-bom-write-bindings.ts": "1de12ce2c9972b43287a9f0b805e8870d5d2870c028f51514d1cddda7db9dbe3",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/auth/verified-tenant-claim.ts": "b27b593584a73a3bc3d9cbd97a0fd9b8647485e3a5293e617f6ab1a6618367a5",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/auth/AuthService.ts": "9b3ed4c284fdeeb4b98360ba89df9bae2e9b8975c20a93123d5e5cccb488acda",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/auth/jwt-middleware.ts": "9fe10b08bae4357804f64cb33c582f8033762d73db2eb9fbfdb1b3e1576d7f22",
+      "/tmp/codex-review-pr6425-20261016/packages/core-backend/src/routes/plm-workbench.ts": "287faddc10729164b1f82e2019cd56c6973293b146c6f4a76e67ee05a3184883"
+    },
+    "cluster_stopped": true,
+    "cleanup": true
+  },
+  "types": {
+    "backend_tsc_exit": 0,
+    "recovery_archive_tsc_exit": 0
+  },
+  "source_sha256": {
+    "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "55c5296b48a0f5d06e9faccd43b78f14f34da66a0679cb72159f28fe83e72f6c",
+    "packages/core-backend/src/services/plm-personal-bom-write-http.ts": "08c5a4bdd3f7867b0c9745f5e8aeccf211a7aa4d5d94d6ea0616207a6ae57a0e",
+    "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "8261516182f59c48b51f879eec089fa2096cc1690f450a5bee180ade66bf92df",
+    "packages/core-backend/src/routes/plm-personal-bom-write-bindings.ts": "1de12ce2c9972b43287a9f0b805e8870d5d2870c028f51514d1cddda7db9dbe3",
+    "packages/core-backend/src/routes/plm-workbench.ts": "287faddc10729164b1f82e2019cd56c6973293b146c6f4a76e67ee05a3184883",
+    "packages/core-backend/src/auth/AuthService.ts": "9b3ed4c284fdeeb4b98360ba89df9bae2e9b8975c20a93123d5e5cccb488acda",
+    "packages/core-backend/src/auth/jwt-middleware.ts": "9fe10b08bae4357804f64cb33c582f8033762d73db2eb9fbfdb1b3e1576d7f22",
+    "packages/core-backend/src/auth/verified-tenant-claim.ts": "b27b593584a73a3bc3d9cbd97a0fd9b8647485e3a5293e617f6ab1a6618367a5",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "675f2606b7be49c2a91736ba1a560d65e18d97d127ea32c9ad7ad110418ccd1a"
+  },
+  "limits": [
+    "Candidate not yet pushed; current remote14b green CI is earlier source.",
+    "Browser frozen snapshot/binding UI still awaits independent verification.",
+    "Paired proof is actual HTTP/DB/process restarts with recorded schema/application/auth-mode limits; not full package/production/customer acceptance.",
+    "No production enablement, merge, deployment, real business notification or whole-master-goal completion."
+  ],
+  "targeted_unit": {
+    "files": 12,
+    "tests": 271,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 3.34
+  },
+  "counterexamples": {
+    "canonical_persisted_config": "Actual paired managementPOST403 before configOf repair; two object/JSON positive regressions failed before and passed after; DB nonPLM column plus PLM JSON denied before provider. Four realPG fixtures now use ordinary persisted config shape.",
+    "revoked_native_grant": "Actual native line committed quantity8 and response lost; after revocation native returned401. Six new refusal/history checks failed on403-only metadata then passed after401/403 handling; public response never returns prior native receipt.",
+    "fixture_notes": "Owned TLS origin satisfies existing DB HTTPS constraints; custom CA positive and untrusted-CA negative, no validation disable. Explicit ordinary source connect/configured native read JWT; no claim about unconnected source-only runtime."
+  },
+  "paired_http_record": "plm-personal-bom-paired-http-verification-20261017.json",
+  "current_personal_approval_pg15": {
+    "counts": {
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "seconds": 7.75,
+    "scope": "Whole personal approval PostgreSQL suite on current backend WIP; owned socket-only PG15, not remote PG16 acceptance",
+    "source_stable": true,
+    "postgres_stopped": true,
+    "owned_runtime_removed": true,
+    "raw_runtime_proof": "/tmp/plm-approval-http-current-pg-runtime.json",
+    "raw_log": "/tmp/plm-approval-http-current-pg.log"
+  }
+}

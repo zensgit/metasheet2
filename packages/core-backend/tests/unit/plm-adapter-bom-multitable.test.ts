@@ -159,208 +159,44 @@ describe('PLMAdapter.getBomMultitableContext (PLM-COLLAB P3-C)', () => {
   })
 })
 
-describe('PLMAdapter.updateBomMultitableLine (PLM-COLLAB P3 — thin success-only write-back)', () => {
-  it('empty patch ({}): returns an error AND issues NO request (rejected before any network/mock branch)', async () => {
-    const adapter = createAdapter('yuantus')
+const REFUSED = 'PLM_BOM_WRITE_UNCREDENTIALED_REFUSED'
+
+async function expectUncredentialedRefusal(
+  run: () => Promise<{ data?: unknown[]; error?: Error }>,
+  select: ReturnType<typeof vi.fn>,
+) {
+  const result = await run()
+  expect(result.data).toEqual([])
+  expect(result.error).toBeInstanceOf(Error)
+  expect(result.error?.message).toBe(REFUSED)
+  expect(select).not.toHaveBeenCalled()
+}
+
+describe('PLMAdapter uncredentialed BOM writes are refused before select', () => {
+  it.each(['yuantus', 'mock', 'legacy'] as const)('updateBomMultitableLine refuses %s mode, including a well-formed patch', async (mode) => {
+    const adapter = createAdapter(mode)
     const select = vi.fn()
     ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.updateBomMultitableLine('P4', 'R8', {})
-
-    expect(result.data).toEqual([])
-    expect(result.error).toBeInstanceOf(Error)
-    expect(result.error?.message).toBe('updateBomMultitableLine requires at least one of quantity, uom, find_num, refdes')
-    expect(select).not.toHaveBeenCalled()
+    await expectUncredentialedRefusal(
+      () => adapter.updateBomMultitableLine('P4', 'R8', {
+        quantity: 6,
+        uom: 'ea',
+        find_num: '20',
+        refdes: null,
+      }, { idempotencyKey: 'workbench-submit-1', ifMatch: '"bom-line:abc123"' }),
+      select,
+    )
+    await expectUncredentialedRefusal(() => adapter.updateBomMultitableLine('P4', 'R8', {}), select)
   })
 
-  it('only-undefined patch: same as empty — error, no request', async () => {
-    const adapter = createAdapter('yuantus')
+  it.each(['yuantus', 'mock', 'legacy'] as const)('requestBomEcoRevisionIntent refuses %s mode before select', async (mode) => {
+    const adapter = createAdapter(mode)
     const select = vi.fn()
     ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.updateBomMultitableLine('P4', 'R8', { quantity: undefined, uom: undefined })
-
-    expect(result.error).toBeInstanceOf(Error)
-    expect(select).not.toHaveBeenCalled()
+    await expectUncredentialedRefusal(() => adapter.requestBomEcoRevisionIntent('P1'), select)
   })
 
-  it('unknown keys are stripped: only whitelisted cells reach select', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', {
-      quantity: 6,
-      // a non-whitelisted key the caller should never be able to write
-      eco_id: 'E9',
-      applied: true,
-    } as never)
-
-    expect(select).toHaveBeenCalledTimes(1)
-    const [, options] = select.mock.calls[0]
-    expect(options.method).toBe('PATCH')
-    // only the whitelisted, defined keys survive — eco_id/applied are gone
-    expect(Object.keys(options.data).sort()).toEqual(['quantity'])
-    expect(options.data).toEqual({ quantity: 6 })
-  })
-
-  it('valid patch in yuantus mode: select called once with PATCH + the line path + only whitelisted keys', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.updateBomMultitableLine('P4', 'R8', {
-      quantity: 6,
-      uom: 'ea',
-      find_num: '20',
-      refdes: 'B2',
-    })
-
-    expect(select).toHaveBeenCalledTimes(1)
-    const [path, options] = select.mock.calls[0]
-    expect(path).toBe('/api/v1/bom/multitable/P4/lines/R8')
-    expect(options.method).toBe('PATCH')
-    expect(options.data).toEqual({ quantity: 6, uom: 'ea', find_num: '20', refdes: 'B2' })
-    expect(result.data?.[0]).toEqual({ ok: true, bom_line_id: 'R8' })
-  })
-
-  it('mints a FRESH per-edit Idempotency-Key header on each governed write (two successive writes generate DIFFERENT keys)', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 })
-    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 7 })
-
-    expect(select).toHaveBeenCalledTimes(2)
-    const [, firstOptions] = select.mock.calls[0]
-    const [, secondOptions] = select.mock.calls[1]
-    const firstKey = firstOptions.headers['Idempotency-Key']
-    const secondKey = secondOptions.headers['Idempotency-Key']
-
-    // present and NON-EMPTY on each call (the per-edit governed-write seam)
-    expect(typeof firstKey).toBe('string')
-    expect(firstKey.length).toBeGreaterThan(0)
-    expect(typeof secondKey).toBe('string')
-    expect(secondKey.length).toBeGreaterThan(0)
-
-    // per-edit generation: a retried/second write must NOT reuse the same key
-    expect(firstKey).not.toBe(secondKey)
-  })
-
-  it('uses the caller-owned Idempotency-Key when the workbench retries the same logical submit', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'workbench-submit-1' })
-
-    expect(select).toHaveBeenCalledTimes(1)
-    const [, options] = select.mock.calls[0]
-    expect(options.headers['Idempotency-Key']).toBe('workbench-submit-1')
-  })
-
-  it('sends the write_etag verbatim as If-Match (strong-ETag quotes preserved -> byte round-trip)', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'k1', ifMatch: '"bom-line:abc123"' })
-
-    const [, options] = select.mock.calls[0]
-    // the literal quotes MUST survive: a stripped/re-encoded quote would silently 412 every write
-    expect(options.headers['If-Match']).toBe('"bom-line:abc123"')
-    expect(options.headers['Idempotency-Key']).toBe('k1')
-  })
-
-  it('omits If-Match when no write_etag is provided (backward-safe: old provider / etag-less read)', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'k1' })
-
-    const [, options] = select.mock.calls[0]
-    expect('If-Match' in options.headers).toBe(false)
-  })
-
-  it('null cell is a real "clear" edit, not empty: kept in payload, request issued', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
-    ;(adapter as never as { select: unknown }).select = select
-
-    await adapter.updateBomMultitableLine('P4', 'R8', { refdes: null })
-
-    expect(select).toHaveBeenCalledTimes(1)
-    const [, options] = select.mock.calls[0]
-    expect(options.data).toEqual({ refdes: null })
-  })
-
-  it('mock mode: returns a demoable { ok, bom_line_id } without a network call', async () => {
-    const adapter = createAdapter('mock')
-    const select = vi.fn()
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 })
-
-    expect(select).not.toHaveBeenCalled()
-    expect(result.data?.[0]).toEqual({ ok: true, bom_line_id: 'R8' })
-  })
-
-  it('legacy mode: unsupported affordance WITHOUT a request', async () => {
-    const adapter = createAdapter('legacy')
-    const select = vi.fn()
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 })
-
-    expect(result.data).toEqual([])
-    expect(result.error).toBeInstanceOf(Error)
-    expect(select).not.toHaveBeenCalled()
-  })
-})
-
-describe('PLMAdapter.requestBomEcoRevisionIntent (ECO Phase 3)', () => {
-  it('yuantus: POSTs the eco-intent endpoint with NO body and NO Idempotency-Key (provider owns idempotency)', async () => {
-    const adapter = createAdapter('yuantus')
-    const select = vi.fn().mockResolvedValue({
-      data: [{ eco_id: 'ECO-9', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' }],
-    })
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.requestBomEcoRevisionIntent('P1')
-
-    expect(select).toHaveBeenCalledWith('/api/v1/bom/multitable/P1/eco-intent', { method: 'POST' })
-    // structural: no data payload, no headers key at all -> no Idempotency-Key can ride along
-    const options = select.mock.calls[0][1] as Record<string, unknown>
-    expect('data' in options).toBe(false)
-    expect('headers' in options).toBe(false)
-    expect(result.data?.[0]?.eco_id).toBe('ECO-9')
-    expect(result.data?.[0]?.attached).toBe(false)
-  })
-
-  it('yuantus: relays the attach outcome (attached: true) untouched', async () => {
-    const adapter = createAdapter('yuantus')
-    ;(adapter as never as { select: unknown }).select = vi.fn().mockResolvedValue({
-      data: [{ eco_id: 'ECO-EXISTING', state: 'draft', attached: true }],
-    })
-    const result = await adapter.requestBomEcoRevisionIntent('P1')
-    expect(result.data?.[0]).toEqual({ eco_id: 'ECO-EXISTING', state: 'draft', attached: true })
-  })
-
-  it('mock mode: canned success WITHOUT a request', async () => {
-    const adapter = createAdapter('mock')
-    const select = vi.fn()
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.requestBomEcoRevisionIntent('P7')
-
-    expect(select).not.toHaveBeenCalled()
-    expect(result.data?.[0]?.eco_id).toBe('mock-eco-P7')
-    expect(result.data?.[0]?.attached).toBe(false)
-  })
-
-  it('mock manifest advertises bom_eco_revision with the eco_revision_intent action (CTA pre-gate demoable)', async () => {
+  it('mock manifest still advertises bom_eco_revision with the eco_revision_intent action', async () => {
     const adapter = createAdapter('mock')
     const capabilities = await adapter.getIntegrationCapabilities()
     expect(capabilities.available).toBe(true)
@@ -369,17 +205,5 @@ describe('PLMAdapter.requestBomEcoRevisionIntent (ECO Phase 3)', () => {
     expect(feature.supported).toBe(true)
     expect(feature.entitled).toBe(true)
     expect(feature.actions).toEqual(['eco_revision_intent'])
-  })
-
-  it('legacy mode: unsupported affordance WITHOUT a request', async () => {
-    const adapter = createAdapter('legacy')
-    const select = vi.fn()
-    ;(adapter as never as { select: unknown }).select = select
-
-    const result = await adapter.requestBomEcoRevisionIntent('P1')
-
-    expect(result.data).toEqual([])
-    expect(result.error).toBeInstanceOf(Error)
-    expect(select).not.toHaveBeenCalled()
   })
 })

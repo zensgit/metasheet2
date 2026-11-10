@@ -13,12 +13,7 @@ export function createPlmApprovalBindingsRouter(
   const router = Router()
   router.use((_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
-    try {
-      requirePlmApprovalCard()
-      next()
-    } catch {
-      res.status(404).json({ ok: false, error: { code: 'PLM_CARD_DISABLED' } })
-    }
+    next()
   })
   // Explicit login bearer guard, independently of the global gate's API-token exceptions.
   router.use((req, res, next) => {
@@ -38,6 +33,20 @@ export function createPlmApprovalBindingsRouter(
       return
     }
     next()
+  })
+  // Unbind stays available after the package is turned off so a stored grant can be destroyed.
+  // Bind, list, sync, and reconcile stay dark. None of those paths decide an approval.
+  router.use((req, res, next) => {
+    if (req.method === 'DELETE') {
+      next()
+      return
+    }
+    try {
+      requirePlmApprovalCard()
+      next()
+    } catch {
+      res.status(404).json({ ok: false, error: { code: 'PLM_CARD_DISABLED' } })
+    }
   })
   const empty = z.object({}).strict(),
     id = z.string().uuid()

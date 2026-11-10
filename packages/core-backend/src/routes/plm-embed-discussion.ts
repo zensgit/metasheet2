@@ -35,7 +35,7 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId } from '../auth/embed-config'
+import { embedDataSourceId, isEmbedOriginAllowed } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type {
@@ -68,9 +68,10 @@ interface PlmDiscussionWriteAdapter {
   deleteDiscussionComment(sessionToken: string, threadId: string, commentId: string): Promise<QueryResult<DiscussionThreadDetail>>
   resolveDiscussionThread(sessionToken: string, threadId: string, req?: ThreadTransitionRequest): Promise<QueryResult<DiscussionThreadDetail>>
   reopenDiscussionThread(sessionToken: string, threadId: string, req?: ThreadTransitionRequest): Promise<QueryResult<DiscussionThreadDetail>>
-  // tenant/connect surface, same duck-type contract the read relay enforces
+  // tenant/org/connect surface, same duck-type contract the BOM context relay enforces
   isVisualReviewEnabled?(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -85,13 +86,14 @@ function isPlmDiscussionWriteAdapter(adapter: unknown): adapter is PlmDiscussion
     && typeof a?.resolveDiscussionThread === 'function'
     && typeof a?.reopenDiscussionThread === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
 
 /**
  * Runs the read relay's exact guard sequence (feature_key -> embed_origin -> data-source resolve
- * -> connect -> tenant cross-check -> single-use jti consume) and, on success, returns the
+ * -> connect -> tenant cross-check -> org cross-check -> single-use jti consume) and, on success, returns the
  * verified claims + a connected adapter. On failure it has already written the response and
  * returns `null` -- callers must return immediately without touching the response again.
  */
@@ -103,7 +105,7 @@ async function runEmbedWriteGuards(req: Request, res: Response): Promise<{ claim
     return null
   }
   const origin = typeof claims.embed_origin === 'string' ? claims.embed_origin : ''
-  if (!origin || !embedAllowedOrigins().includes(origin)) {
+  if (!isEmbedOriginAllowed(origin, req)) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_ORIGIN_NOT_ALLOWED', message: 'embed origin not allowed' } })
     return null
   }
@@ -138,6 +140,13 @@ async function runEmbedWriteGuards(req: Request, res: Response): Promise<{ claim
   const servedTenantId = adapter.getEffectiveTenantId()
   if (!servedTenantId || claims.tenant_id !== servedTenantId) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
+    return null
+  }
+  // The exchange is sent to the configured source. A matching tenant is not enough: a token minted
+  // for another org of that tenant, or a token with no org, must not burn its jti or reach Yuantus.
+  const servedOrgId = adapter.getEffectiveOrgId()
+  if (!servedOrgId || claims.org_id !== servedOrgId) {
+    res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH', message: 'token org does not match the embed data source org' } })
     return null
   }
 

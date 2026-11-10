@@ -1,0 +1,72 @@
+{
+  "schema": "metasheet.personal-bom-foundation.v1",
+  "base_commit": "670a73116d3e320b4de3241b514953df7c4f933a",
+  "implementation": "Grok4.7(xhigh)",
+  "independent_review_and_execution": "Codex",
+  "node": "20.20.2",
+  "unit": {
+    "files": 2,
+    "passed": 42,
+    "skipped": 0,
+    "seconds": 2.43
+  },
+  "postgres": {
+    "counts": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "exit_code": 0,
+    "seconds": 1.68,
+    "postgres_major": 15,
+    "source_stable": true,
+    "source_sha256": {
+      "src/services/PlmPersonalBomWriteBindingService.ts": "73acca7b89d33dfd5277c9aa801daf3ef43e31d1c1ee828743ba0daee74df508",
+      "src/services/plm-personal-bom-write-wire.ts": "d350c15c088b68e69c362f684728c909516f00df9c4f571560f3aeb49b806d8f",
+      "src/data-adapters/PLMAdapter.ts": "50d0ff766e6d5b2afc5c0b3b3e9cfb27ceeaa46afa22e92a8cf1a3c9d8fb4ce0",
+      "src/db/migrations/zzzz20261017010000_create_plm_personal_bom_write_bindings.ts": "7a4490b217b1db608f2ea6a59703c3008fac4e6a2ad01f7f5258031622a37f45",
+      "tests/integration/plm-personal-bom-write-lock-pg.realdb.ts": "bc309e3f4b08422b64e2464621c32d2d021c6ebd00bf33858c12bfbaa53ae0fd",
+      "vitest.plm-personal-bom-write-lock.config.ts": "0fcaf7c3355fbebb5008175da5d10c9aed9c672c7ca53d3191986d7adf3be49b"
+    },
+    "cluster_stopped": true,
+    "cleanup": true
+  },
+  "types": {
+    "backend_tsc_noEmit_exit": 0
+  },
+  "flag_registry": {
+    "passed": 50,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 2.099
+  },
+  "workflow_lint_exit": 0,
+  "missing_explicit_db_gate": "Actual CLI fails before tests; dedicated CI parses JUnit and rejects skips/zero execution",
+  "independent_counterexamples": [
+    "Stale adapter target repaired using current persisted source authority",
+    "PG40P01 lock inversion repaired and actual waits exercised both orders",
+    "Unicode and140-character native-valid identifiers accepted",
+    "A-B-A retired credential resurrection denied409; replacement remains valid",
+    "429 response retains encrypted retirement for restart and later204 revoke"
+  ],
+  "scope_limits": [
+    "Provider transport fixtures in PG tests; paired real native line/ECO chain not yet complete",
+    "No binding/routes/frontend or durable logical intent integrated yet",
+    "Trusted JWT Meta tenant and active membership lock-through-dispatch remain pending",
+    "Current source remote CI pending; guard-only prior checks are not evidence for this source"
+  ],
+  "source_sha256": {
+    "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "73acca7b89d33dfd5277c9aa801daf3ef43e31d1c1ee828743ba0daee74df508",
+    "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "d350c15c088b68e69c362f684728c909516f00df9c4f571560f3aeb49b806d8f",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "50d0ff766e6d5b2afc5c0b3b3e9cfb27ceeaa46afa22e92a8cf1a3c9d8fb4ce0",
+    "packages/core-backend/src/db/migrations/zzzz20261017010000_create_plm_personal_bom_write_bindings.ts": "7a4490b217b1db608f2ea6a59703c3008fac4e6a2ad01f7f5258031622a37f45",
+    "packages/core-backend/tests/unit/plm-personal-bom-write-binding.test.ts": "007174646633657ef4664b7cbc6dc9f61ba0c85772be83a797bd9d40002c04e2",
+    "packages/core-backend/tests/unit/plm-personal-bom-write-transport.test.ts": "095a095194d92b5c367b3408ec5dadc4bdc53345915b88723a4103e42bcfe261",
+    "packages/core-backend/tests/integration/plm-personal-bom-write-lock-pg.realdb.ts": "bc309e3f4b08422b64e2464621c32d2d021c6ebd00bf33858c12bfbaa53ae0fd",
+    "packages/core-backend/vitest.plm-personal-bom-write-lock.config.ts": "0fcaf7c3355fbebb5008175da5d10c9aed9c672c7ca53d3191986d7adf3be49b",
+    ".github/workflows/plm-personal-approval-realdb.yml": "76b3ff77548d15dfa6d5e743ead7a014a249cebb2800a8b163b8f399b4cbd991",
+    "scripts/ops/global-history-flag-manifest.mjs": "7d0ac2014e43db7d3829ebb67f2275e23b5a2b7386062f61de2cf12958f2bd97",
+    "scripts/ops/global-history-flag-manifest.test.mjs": "241319a4669bbce8a77c9345798d11b8eec043d249e0ce0b5c67aa6c8924d27b"
+  }
+}
