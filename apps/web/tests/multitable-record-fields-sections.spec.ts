@@ -1161,15 +1161,18 @@ describe('inspector patch relay: the record an attachment write was made on', ()
     const onPatch = vi.fn()
     let settle!: (value: unknown) => void
     const uploadFn = vi.fn(() => new Promise((resolve) => { settle = resolve }))
+    let settleDelete!: () => void
+    const deleteAttachmentFn = vi.fn(() => new Promise<void>((resolve) => { settleDelete = resolve }))
     const harness = mountInspector({
       record: REC_A,
       fields: [F_TITLE, F_NOTES, F_FILES],
       recordIds: ['rec_A', 'rec_B'],
       uploadFn,
+      deleteAttachmentFn,
       onPatch,
       ...extra,
     })
-    return { ...harness, onPatch, uploadFn, settle: (value: unknown) => settle(value) }
+    return { ...harness, onPatch, uploadFn, settle: (value: unknown) => settle(value), deleteAttachmentFn, settleDelete: () => settleDelete() }
   }
 
   function pickFile(input: HTMLInputElement) {
@@ -1205,6 +1208,20 @@ describe('inspector patch relay: the record an attachment write was made on', ()
     settle(NEW_ATTACHMENT)
     await flushUi()
     expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A']])
+  })
+
+  it('details tab: a remove that ends after the switch to rec_B reaches onPatch with all four arguments', async () => {
+    const { container, set, onPatch, deleteAttachmentFn, settleDelete } = mountAB()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__field[data-field-id="fld_files"] .meta-attachment-list__remove')!.click()
+    await flushUi()
+    expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    set({ record: REC_B })
+    await flushUi()
+    settleDelete()
+    await flushUi()
+    // The removed id comes through the relay too, so the workbench can take it out of rec_A's list as it is now.
+    expect(onPatch.mock.calls).toEqual([['fld_files', [], 'rec_A', ['att_a1']]])
   })
 
   it('a text-field edit in the details tab still reaches onPatch with exactly two arguments', async () => {

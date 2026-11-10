@@ -770,6 +770,16 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'patch-remote-files',
         ),
+        // A remove that ended after the drawer moved on also names the ids it took out (the fourth argument);
+        // the value is the list it started from. One button per named record.
+        ...['rec_1', 'rec_2', 'rec_remote'].map((recordId) => h(
+          'button',
+          {
+            'data-patch-removed-for': recordId,
+            onClick: () => this.$emit('patch', 'fld_files', ['att_stale'], recordId, ['att_1']),
+          },
+          'patch-removed',
+        )),
         h(
           'button',
           {
@@ -5648,6 +5658,91 @@ describe('MultitableWorkbench view wiring', () => {
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
       expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
+    // Deep link to rec_remote (not in the page, version 4), then move the drawer to the page record rec_2.
+    async function openRemoteThenRec2(files: string[] = ['att_1', 'att_2']) {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: files } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: files.map((id) => ({ id, filename: `${id}.txt` })) },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+
+    it('two named patches for the deep-linked rec_remote after the move: each carries the version the one before left (4, then 5)', async () => {
+      await openRemoteThenRec2()
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([
+        ['rec_remote', 'fld_files', ['att_2'], 4],
+        ['rec_remote', 'fld_files', ['att_2'], 5],
+      ])
+    })
+
+    it('an attachment delete on the page record rec_2 leaves the deep-linked rec_remote copy alone: its later patch carries its own version 4', async () => {
+      await openRemoteThenRec2()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_9' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_9', { recordId: 'rec_2', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4]])
+    })
+
+    // --- a remove that ended after the drawer moved on also names the ids it took out ---
+
+    async function patchRemovedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-removed-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a remove naming rec_1 (no longer shown): rec_1\'s list as it is now minus the removed ids, at rec_1\'s version; the list it started from is not written', async () => {
+      await openRec1ThenRec2()
+      // the delete's reload: att_1 still listed, and att_x added meanwhile; rec_1 moved on, rec_2 stays at 1
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_x'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7]])
+    })
+
+    it('a remove naming rec_1 whose list no longer holds the removed id (the server took it out): nothing written, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_x'] }
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    // While the record is shown the removed ids are ignored: the panel already sent its current list. Both
+    // lists of rec_2 would give another value (or no write) if they were used.
+    it.each([
+      ['still holds att_1', ['att_1', 'att_y']],
+      ['no longer holds att_1', ['att_y']],
+    ])('a remove naming the record shown (rec_2, which %s): the value as given, at rec_2\'s version', async (_label, files) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: files }
+      acceptNextPatch()
+      await patchRemovedFor('rec_2')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1]])
+    })
+
+    it('a remove naming the deep-linked rec_remote (no longer shown): rebuilt from the deep-linked copy minus the removed ids, at its version 4', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2', 'att_3'])
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4]])
     })
 
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---

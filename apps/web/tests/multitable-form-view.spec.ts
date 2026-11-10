@@ -701,6 +701,50 @@ describe('MetaFormView attachment record binding', () => {
     view.unmount()
   })
 
+  it.each(['remove fails', 'clear-all fails', 'clear-all ends'])(
+    'keeps the next record\'s own upload shown as uploading when the earlier record\'s %s after the switch',
+    async (settle) => {
+      const upload = deferredFn<ReturnType<typeof attachment>>()
+      const remove = deferredFn()
+      const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+      const button = settle === 'remove fails' ? '.meta-attachment-list__remove' : '.meta-form-view__attachment-clear'
+      const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+      ;(view.container.querySelector(button) as HTMLButtonElement).click()
+      await flushUi()
+      view.record.value = REC_B()
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['own'], 'own.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      expect(saveButton().disabled).toBe(true)
+
+      if (settle === 'clear-all ends') {
+        // Both of A's deletes finish: the clear's success path runs after the switch.
+        remove.pending[0].resolve()
+        await flushUi()
+        remove.pending[1].resolve()
+      } else {
+        remove.pending[0].reject(new Error('Delete refused'))
+      }
+      await flushUi()
+
+      // A's settled write neither ends B's upload activity nor shows its error under B.
+      expect(view.fileInput().disabled).toBe(true)
+      expect(saveButton().disabled).toBe(true)
+      expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+      expect(fieldError(view)).toBeNull()
+      expect(view.container.textContent).not.toContain('Delete refused')
+
+      upload.pending[0].resolve(attachment('att_b2', 'own.pdf'))
+      await flushUi()
+      expect(view.fileInput().disabled).toBe(false)
+      expect(saveButton().disabled).toBe(false)
+      expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1', 'att_b2'] })
+
+      view.unmount()
+    },
+  )
+
   it.each([
     {
       name: 'upload',

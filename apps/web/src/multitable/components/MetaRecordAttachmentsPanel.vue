@@ -127,8 +127,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** `recordId`: the record the write was made on (as in MetaRecordFieldsPanel.vue). */
-  (e: 'patch', fieldId: string, value: unknown, recordId?: string): void
+  /** `recordId` and `removed`: the record the write was made on, and the ids a remove that ended after the drawer
+   *  moved on took out (as in MetaRecordFieldsPanel.vue). */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[]): void
 }>()
 
 const { isZh } = useLocale()
@@ -309,11 +310,14 @@ async function onRemoveAttachment(fieldId: string, attachmentId: string) {
     }
     if (shown()) setAttachmentActivity(fieldId)
   }
-  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise the list
-  // it started from: this panel's record is another one by now.
-  const existing = shown() ? attachmentList(fieldId) : started
-  emit('patch', fieldId, existing.filter((id) => id !== attachmentId), recordId)
-  if (shown()) forgetLocalAttachment(fieldId, attachmentId)
+  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise this panel's
+  // record is another one by now: the list it started from, and the removed id with it (`removed` above).
+  if (shown()) {
+    emit('patch', fieldId, attachmentList(fieldId).filter((id) => id !== attachmentId), recordId)
+    forgetLocalAttachment(fieldId, attachmentId)
+  } else {
+    emit('patch', fieldId, started.filter((id) => id !== attachmentId), recordId, [attachmentId])
+  }
 }
 </script>
 

@@ -1234,6 +1234,11 @@ export type MetaAttachmentDeleteFn = (
   context?: MetaAttachmentUploadContext,
 ) => Promise<void>
 
+/** The record drawer's `patch` (MetaRecordFieldsPanel / MetaRecordAttachmentsPanel → MetaRecordInspector → the
+ *  workbench): an attachment write names the record it was made on, and a remove or clear-all that ended after
+ *  the drawer moved to another record also the ids it took out. Every other edit is (fieldId, value). */
+export type MetaDrawerPatchArgs = [fieldId: string, value: unknown, recordId?: string, removed?: string[]]
+
 // --- Timeline config ---
 export interface TimelineConfig {
   startFieldId: string

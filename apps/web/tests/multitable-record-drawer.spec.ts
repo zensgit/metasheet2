@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, ref } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
 import * as authenticatedApi from '../src/utils/api'
@@ -617,6 +617,46 @@ describe('MetaRecordDrawer', () => {
       fieldId: 'fld_files',
     })
     expect(patchSpy).toHaveBeenCalledWith('fld_files', ['att_replace'], 'rec_replace_1')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('passes on a remove that ended after the record changed with all its arguments (its record and the removed ids)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    let settleDelete!: () => void
+    const deleteAttachmentFn = vi.fn(() => new Promise<void>((resolve) => { settleDelete = resolve }))
+    const patchSpy = vi.fn()
+    const fileRecord = (id: string, ids: string[]) => ({ id, version: 1, data: { fld_files: ids } })
+    const record = ref(fileRecord('rec_A', ['att_a1', 'att_a2']))
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: record.value,
+          fields: [{ id: 'fld_files', name: 'Files', type: 'attachment' }],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          deleteAttachmentFn,
+          onPatch: patchSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+    ;(container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click()
+    await flushUi()
+    record.value = fileRecord('rec_B', ['att_b1'])
+    await flushUi()
+    settleDelete()
+    await flushUi()
+
+    expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(patchSpy.mock.calls).toEqual([['fld_files', ['att_a2'], 'rec_A', ['att_a1']]])
 
     app.unmount()
     container.remove()

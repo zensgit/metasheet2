@@ -429,7 +429,28 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       await flushUi()
 
       expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_a' })
-      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a2'], 'rec_A']])
+      // The removed id goes with it: the workbench takes it out of rec_A's list as it is now.
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a2'], 'rec_A', ['att_a1']]])
+    })
+
+    it('remove, same record: the current list wins over the one it started from', async () => {
+      const removal = deferred<void>()
+      const { container, set, onPatch } = mountA({
+        record: { id: 'rec_A', version: 1, data: { fld_a: ['att_a1', 'att_a2'] } },
+        attachmentSummariesByField: { fld_a: [attachment('att_a1', 'a1.pdf'), attachment('att_a2', 'a2.pdf')] },
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+      })
+      await flushUi()
+      container.querySelectorAll<HTMLButtonElement>('.meta-attachment-list__remove')[0].click()
+      await flushUi()
+      // A reload during the delete brings a third file onto the same record.
+      set({ record: { id: 'rec_A', version: 2, data: { fld_a: ['att_a1', 'att_a2', 'att_a3'] } } })
+      await flushUi()
+      removal.resolve()
+      await flushUi()
+
+      // Still shown: three arguments, no removed ids.
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a2', 'att_a3'], 'rec_A']])
     })
 
     it('A\'s late upload does not end rec_B\'s own upload activity (B\'s input stays disabled until B\'s upload ends)', async () => {
@@ -515,6 +536,30 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       expect(fileInput(container).disabled).toBe(true)
       expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
       expect(onPatch).not.toHaveBeenCalled()
+    })
+
+    it('A\'s remove that ends after the switch does not end B\'s upload activity', async () => {
+      const removal = deferred<void>()
+      const uploadB = deferred<MetaAttachment>()
+      const { container, set, onPatch } = mountA({
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+        uploadFn: vi.fn(() => uploadB.promise),
+      })
+      await flushUi()
+      container.querySelector<HTMLButtonElement>('.meta-attachment-list__remove')!.click()
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      pickFiles(fileInput(container), ['b.pdf'])
+      await flushUi()
+      removal.resolve()
+      await flushUi()
+
+      // B's upload is still running: its input stays disabled and its uploading text stays.
+      expect(fileInput(container).disabled).toBe(true)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
+      expect(container.querySelector('.meta-record-attachments-panel__error')).toBeNull()
+      expect(onPatch.mock.calls).toEqual([['fld_a', [], 'rec_A', ['att_a1']]])
     })
 
     it('control, same record: a successful upload ends the activity and patches rec_A', async () => {

@@ -8,7 +8,8 @@
  * (frozen-baseline discipline — the P2-2a pattern). This file instead pins the panel's OWN public
  * contract in isolation: props in -> fields render (incl. the load-bearing visibleFields mask), and
  * each of the panel's 7 emits fires upward with the exact payload shape the drawer relays unchanged.
- * Attachment patches also carry the id of the record the write was made on (cells at the end of the file).
+ * Attachment patches also carry the id of the record the write was made on, and a remove or clear-all that
+ * ends after the drawer moved on also carries the ids it took out (cells at the end of the file).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
@@ -466,7 +467,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
 
       expect(deleteAttachmentFn.mock.calls).toEqual([['att_a1', CTX_A], ['att_a2', CTX_A]])
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch).toHaveBeenCalledWith('fld_files', [], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', [], 'rec_A', ['att_a1', 'att_a2'])
     })
 
     it('remove, switched mid-delete: patches A with the list it started from, minus the id', async () => {
@@ -489,7 +490,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       await flushUi()
 
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a2'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a2'], 'rec_A', ['att_a1'])
     })
 
     it('remove, same record: the current list wins over the one it started from', async () => {
@@ -625,10 +626,90 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       if (outcome === 'ends') del.resolve()
       else del.reject(new Error('Delete refused'))
       await flushUi()
-      expect(onPatch.mock.calls).toEqual(outcome === 'ends' ? [['fld_files', [], 'rec_A']] : [])
+      expect(onPatch.mock.calls).toEqual(outcome === 'ends' ? [['fld_files', [], 'rec_A', ['att_a1']]] : [])
       expect(fileInput(container).disabled).toBe(true)
       expect(uploadingText(container)).not.toBeNull()
       expect(errorText(container)).toBeNull()
+    })
+  })
+
+  describe('B\'s panel state is left alone by A\'s late remove', () => {
+    // A's delete settling must not end B's upload ('ends': the success guard; 'fails': the catch guard).
+    it.each(['ends', 'fails'] as const)('A\'s remove that %s after the switch leaves B\'s own upload in flight and shows no error under B', async (outcome) => {
+      const del = deferred<void>()
+      const uploadB = deferred<MetaAttachment>()
+      const onPatch = vi.fn()
+      const { container, set } = mountBoundPanel({
+        record: filesRecord('rec_A', ['att_a1', 'att_a2']),
+        deleteAttachmentFn: vi.fn(() => del.promise),
+        uploadFn: vi.fn(() => uploadB.promise),
+        onPatch,
+      })
+      await flushUi()
+
+      ;(container.querySelectorAll('.meta-attachment-list__remove')[0] as HTMLButtonElement).click()
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      pickFiles(container, ['b.pdf'])
+      await flushUi()
+      expect(fileInput(container).disabled).toBe(true)
+
+      if (outcome === 'ends') del.resolve()
+      else del.reject(new Error('Delete refused'))
+      await flushUi()
+      expect(onPatch.mock.calls).toEqual(outcome === 'ends' ? [['fld_files', ['att_a2'], 'rec_A', ['att_a1']]] : [])
+      expect(fileInput(container).disabled).toBe(true)
+      expect(uploadingText(container)).not.toBeNull()
+      expect(errorText(container)).toBeNull()
+    })
+  })
+
+  describe('the removed ids go with the patch only once the drawer has moved on', () => {
+    const clickRemove = (container: HTMLElement) =>
+      (container.querySelectorAll('.meta-attachment-list__remove')[0] as HTMLButtonElement).click()
+    const clickClear = (container: HTMLElement) =>
+      (container.querySelector('.meta-record-drawer__attachment-clear') as HTMLButtonElement).click()
+
+    it.each([['a remove', clickRemove], ['a clear-all', clickClear]] as const)('%s while still shown emits exactly (fieldId, value, recordId)', async (_name, act) => {
+      const del = deferred<void>()
+      const onPatch = vi.fn()
+      const { container } = mountBoundPanel({
+        record: filesRecord('rec_A', ['att_a1', 'att_a2']),
+        deleteAttachmentFn: vi.fn(() => del.promise),
+        onPatch,
+      })
+      await flushUi()
+
+      act(container)
+      await flushUi()
+      del.resolve()
+      await flushUi()
+
+      expect(onPatch).toHaveBeenCalledTimes(1)
+      expect(onPatch.mock.calls[0]).toHaveLength(3)
+    })
+
+    it.each([['a remove', clickRemove], ['a clear-all', clickClear]] as const)('%s that ends after the switch emits exactly four arguments, the ids it took out last', async (_name, act) => {
+      const del = deferred<void>()
+      const onPatch = vi.fn()
+      const { container, set } = mountBoundPanel({
+        record: filesRecord('rec_A', ['att_a1']),
+        deleteAttachmentFn: vi.fn(() => del.promise),
+        onPatch,
+      })
+      await flushUi()
+
+      act(container)
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      del.resolve()
+      await flushUi()
+
+      expect(onPatch).toHaveBeenCalledTimes(1)
+      expect(onPatch.mock.calls[0]).toHaveLength(4)
+      expect(onPatch.mock.calls[0][3]).toEqual(['att_a1'])
     })
   })
 

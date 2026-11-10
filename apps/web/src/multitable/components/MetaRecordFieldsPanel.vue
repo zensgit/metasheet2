@@ -516,8 +516,10 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   /** `recordId`: the record an attachment write was made on. The panel is reused across records, and the write
-   *  can end after the drawer moved to another one. */
-  (e: 'patch', fieldId: string, value: unknown, recordId?: string): void
+   *  can end after the drawer moved to another one. `removed`: for a remove or clear-all that ended after that, the
+   *  ids it took out (the value is built from the list it started from; the workbench takes them out of the
+   *  record's list as it is now instead). */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[]): void
   (e: 'comment-field', field: MetaField): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'open-person-picker', field: MetaField): void
@@ -1101,11 +1103,14 @@ async function onRemoveAttachment(fieldId: string, attachmentId: string) {
     }
     if (shown()) setAttachmentActivity(fieldId)
   }
-  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise the list
-  // it started from: this panel's record is another one by now.
-  const existing = shown() ? attachmentList(fieldId) : started
-  emit('patch', fieldId, existing.filter((id) => id !== attachmentId), recordId)
-  if (shown()) forgetLocalAttachment(fieldId, attachmentId)
+  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise this panel's
+  // record is another one by now: the list it started from, and the removed id with it (`removed` above).
+  if (shown()) {
+    emit('patch', fieldId, attachmentList(fieldId).filter((id) => id !== attachmentId), recordId)
+    forgetLocalAttachment(fieldId, attachmentId)
+  } else {
+    emit('patch', fieldId, started.filter((id) => id !== attachmentId), recordId, [attachmentId])
+  }
 }
 
 async function onClearAttachments(fieldId: string) {
@@ -1134,7 +1139,9 @@ async function onClearAttachments(fieldId: string) {
     }
     if (shown()) setAttachmentActivity(fieldId)
   }
-  emit('patch', fieldId, [], recordId)
+  // Once the drawer has moved on, the cleared ids go with the patch (as for a remove).
+  if (shown()) emit('patch', fieldId, [], recordId)
+  else emit('patch', fieldId, [], recordId, existing)
 }
 
 function setAttachmentActivity(fieldId: string, activity?: 'uploading' | 'removing' | 'clearing') {

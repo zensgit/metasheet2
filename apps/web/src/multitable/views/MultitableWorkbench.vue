@@ -3695,25 +3695,38 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string) {
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[]) {
   // An attachment write names the record it was made on: it can end after the drawer moved to another record,
   // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
   // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
   // closes while it runs). Every other edit is the shown record's.
   const record = recordId ? drawerRecordById(recordId) : selectedRecordResolved.value
   if (!record) return
+  const shown = record.id === selectedRecordResolved.value?.id
+  // A remove or clear-all that ended after the drawer moved on names the ids it took out: they come out of the
+  // record's list as it is now (the delete's reload refreshed it, and it may hold an attachment added meanwhile),
+  // not the list it started from. With none of them left in it, there is nothing to write (the server already
+  // took them out with the delete).
+  let patchValue = value
+  if (removed && !shown) {
+    const raw = record.data[fieldId]
+    const current = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const next = current.filter((id) => !removed.includes(id))
+    if (next.length === current.length) return
+    patchValue = next
+  }
   if (!ensureCanEditRecord(record.id)) return
   // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
   // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
   // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
-  const settleUndo = record.id === selectedRecordResolved.value?.id
+  const settleUndo = shown
     ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
     : undefined
   if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, value, settleUndo)
+    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
     return
   }
-  await commitDrawerPatch(record, fieldId, value, false, settleUndo)
+  await commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a

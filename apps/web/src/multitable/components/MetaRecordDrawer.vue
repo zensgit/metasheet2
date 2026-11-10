@@ -68,6 +68,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaDrawerPatchArgs,
   MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
@@ -142,7 +143,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'duplicate'): void
   (e: 'copy-link'): void
-  (e: 'patch', fieldId: string, value: unknown, recordId?: string): void
+  (e: 'patch', ...args: MetaDrawerPatchArgs): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
@@ -167,9 +168,8 @@ const emit = defineEmits<{
   (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
 
-/** The inspector's patch, passed on as it came (with the record id of an attachment write). */
-function relayPatch(fieldId: string, value: unknown, recordId?: string) {
-  if (recordId === undefined) emit('patch', fieldId, value)
-  else emit('patch', fieldId, value, recordId)
+/** The inspector's patch, passed on with exactly the arguments it came with. */
+function relayPatch(...args: MetaDrawerPatchArgs) {
+  emit('patch', ...args)
 }
 </script>
