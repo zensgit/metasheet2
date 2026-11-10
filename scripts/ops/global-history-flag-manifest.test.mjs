@@ -274,6 +274,9 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_BASE_ADOPTION_REFUSED',
   'MULTITABLE_BASE_SCOPE_FORBIDDEN',
   'MULTITABLE_SYSTEM_BASE_INPUT_INVALID',
+  // 批次标识 BI-5: the input refusal code of the view landing primitives (multitable/view-landing.ts) — an error
+  // code, not a flag; nobody reads it from process.env.
+  'MULTITABLE_VIEW_LANDING_INPUT_INVALID',
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
   // 自定义模板表名常量(#5617)，不是环境开关：它是 migration 与 custom-template-store 共用的表名字面量，
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
@@ -426,6 +429,15 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // 批次标识 BI-1b (R-65): the pull-batch switch, read by the plugin lanes helper only. PLUGIN LIB ONLY (planner
+  // decision P-9): the host never reads it (ruling C10) and its band module names it in a comment, which would defeat
+  // the phantom half if packages/core-backend/src were scanned. `_ENABLED` only, so the pull-batch error codes
+  // (…_DISABLED, …_STORE_FAILED, …) and the `_ENV` constant are not mistaken for flags.
+  const stockPrepPullBatch = grepPluginFlagTokens('STOCK_PREP_PULL_BATCH_[A-Z_0-9]*')
+    .filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key, read by the host's plugin runtime config.
+  // Only this one _PATH key is scanned: its four sibling deploy-file keys predate this registry and stay out of scope.
+  const stockPrepPilotPath = grepFlagTokens('INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH')
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
@@ -437,7 +449,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepPilotPath, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
@@ -951,6 +963,66 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
   assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
   assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
+})
+
+test('stock-prep pull-batch switch (批次标识 BI-1b, R-65): boolean, exact true, danger high, sourced from the plugin lanes reader; the host never reads it', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_PULL_BATCH_ENABLED
+  assert.ok(spec, 'STOCK_PREP_PULL_BATCH_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+  // The reader spells the exact-literal comparison against the same env name (M-1B-5: a trim / case fold reds here).
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs'), 'utf8')
+  assert.match(plugin, /STOCK_PREP_PULL_BATCH_ENABLED_ENV = 'STOCK_PREP_PULL_BATCH_ENABLED'/)
+  assert.match(plugin, /env\[STOCK_PREP_PULL_BATCH_ENABLED_ENV\] === 'true'/)
+  assert.doesNotMatch(plugin, /STOCK_PREP_PULL_BATCH_ENABLED_ENV\]\.(trim|toLowerCase)/)
+  // Ruling C10: the host's band module (the 人工补充 stamp) never reads the switch.
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/multitable/stock-preparation-pull-batch-band.ts'), 'utf8')
+  assert.doesNotMatch(host, /STOCK_PREP_PULL_BATCH_ENABLED[^\n]*===/)
+  // The off contract is stated in the record: zero ledger IO, no pullBatch key, the status read still answers.
+  assert.match(spec.purpose, /OFF: zero ledger IO/)
+  assert.match(spec.purpose, /no pull answer carries a pullBatch key/)
+  assert.match(spec.purpose, /owner gate O-BI-7/)
+  // BI-2 (R-65): the per-sheet install and the born-ready create leg ride the same switch.
+  assert.match(spec.purpose, /per-sheet install/)
+  assert.match(spec.purpose, /born ready/)
+  assert.match(spec.purpose, /409 STOCK_PREP_PULL_BATCH_DISABLED before any IO/)
+})
+
+// Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key. Not a boolean — it names a file — so it is
+// registered as an enum-shaped value (isActivated() is false for it by construction) with the reader as its source.
+test('stock-prep pilot declarations deploy-file key (pre-pilot fix batch 8(f), R-91): enum-shaped path key, danger medium, sourced from the host reader that names it', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH
+  assert.ok(spec, 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH must be registered in the manifest')
+  assert.equal(spec.type, 'enum')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/plugin-runtime-config.ts#resolvePluginRuntimeConfig')
+  for (const value of ['true', '/srv/pilot.json', '']) assert.equal(isActivated(spec, value), false, 'a path key is never a boolean switch')
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/plugin-runtime-config.ts'), 'utf8')
+  assert.match(host, /INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH'/)
+  assert.match(host, /readDeployJsonObjectFile\(\s*env,\s*INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH_ENV,/)
+  assert.match(host, /\.\.\.\(stockPreparationPilot !== undefined \? \{ stockPreparationPilot \} : \{\}\)/)
+  // The plugin side of the contract: the key it reads and the exact literal it honours.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/http-routes.cjs'), 'utf8')
+  assert.match(plugin, /context\.config\.stockPreparationPilot/)
+  const readiness = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs'), 'utf8')
+  assert.match(readiness, /const SPEC_READ_PLAN_SLOT_NOT_APPLICABLE = 'not_applicable'/)
+  assert.match(readiness, /const CUSTOMER_PACK_NOT_APPLICABLE = 'not_applicable'/)
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /EXACT literal 'not_applicable'/)
+  assert.match(spec.purpose, /enables nothing by itself/)
 })
 
 // ── Automation runtime flags (AGENTS.md: every env flag is registered; iPaaS follow-up 2026-11-03) ──

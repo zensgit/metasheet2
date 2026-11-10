@@ -1124,17 +1124,18 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (38) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (40) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
       # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) +
-      # multitable-onprem-package-range-fill.test.mjs (39) = 140. Get each file's own
+      # multitable-onprem-package-range-fill.test.mjs (39) + stock-preparation-pull-batch-install.test.mjs
+      # (8; 批次标识 BI-2, register R-65) = 150. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=140
+          EXPECTED_OPS_TESTS_COUNT=150
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1681,6 +1682,26 @@ jobs:
             tests/tasks-auth/tasks-auth-gate.ts \
             --reporter=verbose
 
+      # Permission lifecycle on the migrated database. Dedicated config keeps
+      # RBAC_BYPASS and RBAC_TOKEN_TRUST false. Whole file; a missing database fails.
+      - name: Run permission lifecycle real-DB gate
+        id: permission-lifecycle-realdb
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for permission lifecycle real-DB gate}"
+          mkdir -p artifacts/grok-permission-lifecycle-ci
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-lifecycle.config.ts run \
+            tests/integration/permission-lifecycle-realdb.test.ts \
+            tests/integration/permission-role-delete-realdb.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/grok-permission-lifecycle-ci/permission-lifecycle-vitest.json 2
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'
@@ -1707,6 +1728,23 @@ jobs:
         id: stock-preparation-yida-owner-browser-install
         if: matrix.node-version == '20.x'
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run permission browser real-DB gate
+        id: permission-browser-realdb
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for permission browser real-DB gate}"
+          mkdir -p artifacts/permission-browser-ci
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-browser.config.ts run \
+            tests/integration/permission-browser-realdb.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/permission-browser-ci/vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/permission-browser-ci/vitest.json 1
 
       - name: Install hash-pinned Chromium candidate for owner YiDa acceptance
         id: stock-preparation-pinned-browser-install
@@ -2664,6 +2702,7 @@ jobs:
             tests/integration/directory-integration-capabilities.db.test.ts \
             tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \
             tests/integration/directory-deprovision-provider-evidence.db.test.ts \
+            tests/integration/attendance-notification-defer.db.test.ts \
             tests/integration/directory-departure-vouching.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \

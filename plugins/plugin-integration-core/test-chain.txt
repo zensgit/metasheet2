@@ -80,7 +80,9 @@ node __tests__/stock-preparation-project-target-archive.test.cjs
 node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
+node __tests__/stock-preparation-project-sheet-repair-columns.test.cjs
 node __tests__/stock-preparation-sheet-census.test.cjs
+node __tests__/stock-preparation-pull-batch-site-probe.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
@@ -98,6 +100,9 @@ node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
 node __tests__/stock-preparation-continuation-store.test.cjs
 node __tests__/stock-preparation-change-plan-store.test.cjs
+node __tests__/stock-preparation-execution-intent.test.cjs
+node __tests__/stock-preparation-execution-recovery.test.cjs
+node __tests__/stock-preparation-execution-recovery-routes.test.cjs
 node __tests__/stock-preparation-change-plan-planner.test.cjs
 node __tests__/stock-preparation-change-plan-lanes.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs
@@ -149,6 +154,19 @@ node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs
 node __tests__/source-vendor-presets.test.cjs
 node __tests__/stock-preparation-carry-policy.test.cjs
+node __tests__/stock-preparation-pull-batch.test.cjs
+node __tests__/stock-preparation-pull-batch-store.test.cjs
+node __tests__/stock-preparation-pull-batch-portability.test.cjs
+node __tests__/stock-preparation-pull-batch-band.test.cjs
+node __tests__/stock-preparation-pull-batch-vocabulary-migration.test.cjs
+node __tests__/stock-preparation-project-write-lock-holder-within.test.cjs
+node __tests__/stock-preparation-apply-writer-pull-batch.test.cjs
+node __tests__/stock-preparation-pull-batch-lanes.test.cjs
+node __tests__/stock-preparation-pull-batch-status.test.cjs
+node __tests__/stock-preparation-pull-batch-reader-scan.test.cjs
+node __tests__/stock-preparation-pull-batch-hash-neutrality.test.cjs
+node __tests__/stock-preparation-pull-batch-install.test.cjs
+node __tests__/stock-preparation-pull-batch-install-routes.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs
@@ -321,6 +339,7 @@ node __tests__/stock-preparation-manual-rows.test.cjs
 node __tests__/stock-preparation-manual-rows-pull.test.cjs
 node __tests__/stock-preparation-manual-rows-export.test.cjs
 node __tests__/stock-preparation-manual-rows-switch-routes.test.cjs
+node __tests__/stock-preparation-pull-batch-settings-routes.test.cjs
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

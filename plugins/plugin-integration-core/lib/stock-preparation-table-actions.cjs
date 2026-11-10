@@ -76,6 +76,8 @@ const {
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
+  // 批次标识 (BI-1a, R-65; design Q-BI-13): the two band ids join the `ext_` collision catalog (only there).
+  STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 // Batch-refresh step 4 PR-3a: the lane helpers (the consult, the planner input, the one reconcile, the apply's
@@ -98,8 +100,14 @@ const {
   previewRecoveryRechecked,
   previewReviewOf,
   reconcileComputation,
+  recoverySettlementFor,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
+// Batch-refresh step 6a-1 (S6-1; R-91): the execution intent journal, built from the in-lease recompute.
+const { buildExecutionIntent } = require('./stock-preparation-execution-intent.cjs')
+// Batch-refresh step 6a-2 (S6-2; R-91): the recovery assessment (pure) and the refresh store's recovery vocabulary.
+const executionRecovery = require('./stock-preparation-execution-recovery.cjs')
+const { REFRESH_STORE_ERROR_CODES, StockPreparationRefreshStoreError, UNFINISHED_EXECUTION_STATUSES } = require('./stock-preparation-continuation-store.cjs')
 const {
   applyStockPreparationPlan,
   countAttemptedHostWrites,
@@ -162,6 +170,10 @@ const {
   persistManualRowsLastPull,
   summarizeManualSupplement,
 } = require('./stock-preparation-manual-rows.cjs')
+// 批次标识 BI-1b (design §4.4, §6.1; register R-65): the reader's band strip (pure module) and the small lane's
+// evaluation (the lanes helper; it requires nothing of this module — the canonical row order is injected).
+const { normalizePullBatchReaderBand, stripPullBatchBand } = require('./stock-preparation-pull-batch.cjs')
+const pullBatchLanes = require('./stock-preparation-pull-batch-lanes.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -302,7 +314,7 @@ function normalizeActionExtensionFieldIds(input, template) {
       field: 'extensionFieldIds',
     })
   }
-  const templateIds = template.fields.map((field) => field.id)
+  const templateIds = template.fields.map((field) => field.id).concat(STOCK_PREPARATION_PULL_BATCH_FIELD_IDS)
   const seen = new Set()
   const out = []
   for (let index = 0; index < input.length; index += 1) {
@@ -798,11 +810,15 @@ function assertStockPreparationTargetReady(input = {}) {
  * the object id and nothing else (the original stays on `cause` for the server log), the same
  * posture the source side takes for an unreachable source database (SOURCE_UNAVAILABLE, #5586).
  */
-async function assertTargetFieldsExist(action, targetFieldExistence) {
-  if (!isPlainObject(targetFieldExistence)) return
+async function assertTargetFieldsExist(action, targetFieldExistence, { optionalFieldIds = [] } = {}) {
+  // 批次标识 BI-1b (design §6.1 step 2): OPTIONAL ids (the pull-batch band) ride the same round trip and NEVER refuse —
+  // appended only when non-empty, so every call without them is byte-identical. The probe answers null on every early
+  // return and `{ fieldExistenceMode, optional: { [id]: physical | null } }` once a verdict exists.
+  const optionalIds = Array.isArray(optionalFieldIds) ? optionalFieldIds.filter((id) => typeof id === 'string' && id) : []
+  if (!isPlainObject(targetFieldExistence)) return null
   const provisioning = targetFieldExistence.provisioning
   const projectId = optionalString(targetFieldExistence.projectId)
-  if (!provisioning || !projectId) return
+  if (!provisioning || !projectId) return null
   // The DB read, the compute-only fallback `resolveFieldExistence` degrades through, and the
   // derivation that names the sheet the read is about: the contract the shared probe calls into,
   // and what every real host has exposed since the provisioning surface existed.
@@ -810,7 +826,7 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
     typeof provisioning.resolveExistingObjectFieldIds !== 'function'
     || typeof provisioning.resolveFieldIds !== 'function'
     || typeof provisioning.getObjectSheetId !== 'function'
-  ) return
+  ) return null
   const objectId = action.target.objectId
   const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
   let verdict
@@ -843,12 +859,13 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
       throw new Error('provisioning.getObjectSheetId must answer a string sheet id synchronously')
     }
     const judgedSheetId = optionalString(derivedSheetId)
-    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return
+    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return null
+    const probedFieldIds = templateLogicalFieldIds(action.template).concat(extensionFieldIds)
     verdict = await resolveFieldExistence({
       provisioning,
       projectId,
       objectId,
-      fieldIds: templateLogicalFieldIds(action.template).concat(extensionFieldIds),
+      fieldIds: optionalIds.length > 0 ? probedFieldIds.concat(optionalIds) : probedFieldIds,
     })
   } catch (error) {
     const unavailable = new StockPreparationTableActionError(
@@ -860,9 +877,14 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
     unavailable.cause = error
     throw unavailable
   }
-  if (verdict.fieldExistenceMode !== 'db') return
+  const resolvedIds = isPlainObject(verdict.resolved) ? verdict.resolved : {}
+  const answer = Object.freeze({
+    fieldExistenceMode: verdict.fieldExistenceMode,
+    optional: Object.freeze(Object.fromEntries(optionalIds.map((id) => [id, typeof resolvedIds[id] === 'string' && resolvedIds[id] ? resolvedIds[id] : null]))),
+  })
+  if (verdict.fieldExistenceMode !== 'db') return answer
   const missingFields = missingLogicalFields(action.template, verdict.resolved, extensionFieldIds)
-  if (missingFields.length === 0) return
+  if (missingFields.length === 0) return answer
   throw new StockPreparationTableActionError(
     422,
     'TARGET_SCHEMA_INCOMPLETE',
@@ -1167,6 +1189,9 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
   const api = ensureRecordsApi(recordsApi)
   const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
   const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
+  // 批次标识 BI-1b (design §4.4): the server-held band (PHYSICAL ids), validated before the first page. Absent => the
+  // rows and the parked-prefix Symbol are byte-identical (no strip, no Symbol).
+  const pullBatchBand = normalizePullBatchReaderBand(options.pullBatchBand, { fieldIdMap: target.fieldIdMap })
   const rows = []
   // 人工补充行 B1 (ADR §5.1): EVERY row whose key starts with `manual:` leaves planning here, page by page — the M′
   // rows as manual rows, the rest counted as unbound prefix rows. Neither enters the array the planner, the
@@ -1190,6 +1215,8 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
     }
     for (const record of pageRows) {
       const row = withExistingRowRecordRef(unmapRecordFields(record, target.fieldIdMap), record)
+      // 批次标识 BI-1b: BEFORE the prefix classification, so a parked manual row carries the Symbol too (BI-2 reads it).
+      if (pullBatchBand) stripPullBatchBand(row, record, pullBatchBand)
       const prefixKind = manualPrefixKindOf(target, record, row)
       if (prefixKind) {
         prefixRows.add(prefixKind, row, isPlainObject(record) && isPlainObject(record.data) ? record.id : null)
@@ -1661,6 +1688,12 @@ function canonicalHashOrder(value, identityOf) {
     .map((entry) => entry.item)
 }
 
+// 批次标识 BI-1b (design §3.7): the canonical order the pull-batch source digest hashes the expansion rows in — the
+// same order buildSourceContentRevision uses, injected into the portable digest on BOTH lanes (cross-lane join).
+function pullBatchCanonicalRows(rows) {
+  return canonicalHashOrder(rows, expandedRowHashIdentity)
+}
+
 // X4-c: THE PLANNER'S OWN DIAGNOSTIC ARRAYS, which are hashed WHOLE and are themselves built by
 // walking the expansion. `buildConflictPolicyReview` maps over the duplicate diagnostics' groups
 // (stock-preparation-conflict-policies.cjs `groups.map(...)`, groups being keyed off `expansion.rows`)
@@ -2084,6 +2117,10 @@ function projectWriteAbortError(applyResult) {
 // (`withExistingRowRecordRef`). Built from THIS request's read (O-10), never from the token, a preview or a stored
 // artifact. A key whose existing group is not exactly one row with an integer version gets no entry, and the writer
 // patches it exactly as before. Every small apply passes it, governed or not (register R-63 ①).
+// Pre-pilot fix batch 8(e) (R-91): for a DUPLICATED key "exactly as before" means NOT AT ALL — the writer's lookup
+// (per key and the batched prefetch alike) refuses a key matching more than one row `duplicate_target_key` before any
+// patch (stock-preparation-apply-writer.cjs findExistingRecord), so no unfenced UPDATE / INACTIVE of a duplicated key is
+// ever sent (EV-12). The remaining unfenced case is a single row whose record carries no integer version.
 function expectedRecordsOf(dryRun) {
   const groups = new Map()
   for (const row of Array.isArray(dryRun.existingRows) ? dryRun.existingRows : []) {
@@ -2110,11 +2147,15 @@ function expectedRecordsOf(dryRun) {
 // token, or `apply_threw`), best effort. A finish that fails here leaves the row `running` — after the
 // release it derives 失败待恢复 and blocks the next apply (RECOVERY_PENDING) until step 6 — and is logged
 // values-free (codes only). The caller rethrows the ORIGINAL error either way.
+// Step 6a-1 (design §3.3, RR G8): ONLY a throw the writer itself marked `writerPhase === 'pre_io'` (its closed
+// WRITER_PRE_IO_REASONS list) reports `written: 0, attemptedWrites: 0` — then the store self-verifies the run. Any other
+// throw (a `details.partial === false` included) reports no counts and stays recoverable.
 const EXECUTION_ERROR_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/
 async function finishExecutionFailedBestEffort(handle, input, error, logger) {
   const code = error && typeof error.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(error.code) ? error.code : 'apply_threw'
+  const preIo = Boolean(error) && error.writerPhase === 'pre_io'
   try {
-    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code] })
+    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code], ...(preIo ? { written: 0, attemptedWrites: 0 } : {}) })
   } catch (finishError) {
     const finishCode = finishError && typeof finishError.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(finishError.code) ? finishError.code : 'finish_threw'
     if (logger && typeof logger.warn === 'function') {
@@ -2395,13 +2436,14 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
 // 422 refuses before any source read. For a GOVERNED project it also replaces `installedFieldProperties` and
 // `extFieldMapping` with the strict inputs the handle reads (TD-22): a governed computation plans, verifies,
 // settles and writes with those only.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence, refreshGovernance }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence, refreshGovernance, pullBatchLane = null }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   // 目标表字段存在性 — BEFORE the B2a contract, before the first source row, before any plan. A target
   // whose template/ext columns are gone refuses here (422 TARGET_SCHEMA_INCOMPLETE), so no source read,
   // no records read and no plan ever happens on a schema the writer could not address. Every entry
   // point that plans (dry-run, reconcile, mvp-persist, apply) comes through this one line.
-  await assertTargetFieldsExist(action, targetFieldExistence)
+  // 批次标识 BI-1b: while the switch is on, the two band ids ride the same round trip as OPTIONAL ids (never refusing).
+  const pullBatch = pullBatchLanes.pullBatchProbeStanza(pullBatchLane, await assertTargetFieldsExist(action, targetFieldExistence, pullBatchLanes.pullBatchProbeOptions(pullBatchLane)))
   // THE GOVERNANCE CONSULT (PR-3a, P3-G1): before the B2a pre-read pin below (it can read the source schema
   // when B2a is armed), so before every source read.
   const refresh = refreshGovernance === undefined ? null : await consultForPlanning(refreshGovernance, { action, parameters })
@@ -2478,6 +2520,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       hasGlobalErrors,
       extFieldMapping,
       b2aSchemaContract,
+      // 批次标识 BI-1b: the probe stanza rides this early return too (ON only; RESULT only, never hashed or answered).
+      ...(pullBatch ? { pullBatch } : {}),
       // PR-3a: the verdict and the private refresh context ride the RESULT (never `plan`, never hashed). A
       // not_found read is never complete, so nothing reconciles from it.
       ...(refresh ? {
@@ -2486,7 +2530,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       } : {}),
     }
   }
-  const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
+  const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo, { pullBatchBand: pullBatchLanes.readerBandOf(pullBatchLane) })
   // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
   // dry-run before its first write, BEFORE any write on the apply path. Sits after the project-scoped
   // read so the first records read stays the project read every caller and test already pins.
@@ -2588,6 +2632,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // 人工补充行 B1: on the RESULT only (precedent: `governance` / `refresh` below) — never on `plan`, never hashed.
     // Present only when the read took a prefix row out (rowCount or unboundKeyCount > 0).
     ...(manualSupplement ? { manualSupplement } : {}),
+    // 批次标识 BI-1b (design §6.1 step 2): `{ fieldIds, mode, present }` while the switch is on — on the RESULT only
+    // (precedent: `governance` / `refresh` below): never on `plan`, never hashed, never serialized by any caller.
+    ...(pullBatch ? { pullBatch } : {}),
     // PR-3a: the verdict the writer requires (design §7.2) and the PRIVATE refresh context the lanes use (the
     // handle, the consult with its private member keys, the strict band) — on the RESULT only: never on
     // `plan`, never hashed, never serialized by any caller (the egress suites pin that).
@@ -2692,6 +2739,8 @@ function hasHardApplyBlockingRowErrors(expansion) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // 批次标识 BI-1b: the route's server-held lane input (band + switch + ledger), validated before any IO.
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
   // R-02: the ONE object list — resolved by the route, unioned with the plan — that the guard
   // matches and the schema contract pins. Ahead of the guard, so its fail-closed leg spends no claim.
@@ -2744,6 +2793,8 @@ async function dryRunStockPreparationAction(input = {}) {
     b2aNow: input.now,
     // PR-3a: the route's governance handle (absent = a direct lib caller = the pre-step-4 path).
     refreshGovernance: input.refreshGovernance,
+    // 批次标识 BI-1b: the reader strip (always) and, while the switch is on, the band probe fold.
+    pullBatchLane,
   })
   // 备料分批拉取第一期 step 3 PR B (plan §5.1 「超过小车道上限时明确拒绝,不自动转大车道」): when the
   // expansion hit a small-lane cap, the route's pilot guard runs HERE — after the expansion (that is when
@@ -2801,6 +2852,8 @@ async function dryRunStockPreparationAction(input = {}) {
       ...(refreshOutcome ? { refreshBinding: refreshOutcome.binding } : {}),
     })
   }
+  // 批次标识 BI-1b (P-2): ON only, AFTER the token — whether the coming apply would stamp; fail-soft, never refuses.
+  const pullBatchPreview = await pullBatchLanes.previewSmallPullBatch({ lane: pullBatchLane, dryRun, action, parameters })
   // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
   // flag through (http-routes.cjs `tableActionDryRun`) — see the module header. Note the position:
   // AFTER the token was minted from `dryRun.revision`, so it is structurally impossible for this to
@@ -2863,6 +2916,8 @@ async function dryRunStockPreparationAction(input = {}) {
     // 人工补充行 B1 (ADR §5.1): counts and record handles only (never a cell), beside `evidence` and never inside it;
     // absent for a sheet without a `manual:` prefix row, so every such response is byte-identical.
     ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
+    // 批次标识 BI-1b: { preview, wouldStamp, reason, gapRows? } while the switch is on; absent otherwise (byte-identical).
+    ...(pullBatchPreview ? { pullBatch: pullBatchPreview } : {}),
     // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
     // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
     // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
@@ -2901,6 +2956,8 @@ async function prepareStockPreparationConfirmationDecisions(input = {}) {
     targetFieldExistence: input.targetFieldExistence,
     // PR-3a: the route's governance handle (this lane plans through computeDryRun like every other).
     refreshGovernance: input.refreshGovernance,
+    // 批次标识 BI-1b: the reader strip only (this lane hashes rows; no probe fold, no ledger IO, no stanza).
+    pullBatchLane: pullBatchLanes.readerOnlyLaneOf(input.pullBatch),
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'CONFIRMATION_DECISION_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -2977,6 +3034,8 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
     b2aSourceObjects,
     b2aNow: input.now,
+    // 批次标识 BI-1b: the reader strip only (the archive revision hashes rows; no probe fold, no ledger IO, no stanza).
+    pullBatchLane: pullBatchLanes.readerOnlyLaneOf(input.pullBatch),
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -3182,6 +3241,8 @@ async function applyStockPreparationAction(input = {}) {
     projectSheetGate: input.projectSheetGate,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // 批次标识 BI-1b: the route's server-held lane input (band + switch + ledger + holder), validated before any IO.
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
   // PROJECT WRITE GUARD (S5): held by the route around this whole call. Required — no guard, no write
   // (501) — and for exactly this target sheet (500 otherwise). Both refusals come before
   // the B2a claim, the reads and the token claim, so neither burns the token.
@@ -3273,6 +3334,8 @@ async function applyStockPreparationAction(input = {}) {
     b2aNow: input.now,
     // PR-3a: the consult runs HERE, under the lease (no confirm can bump meanwhile, I2).
     refreshGovernance: input.refreshGovernance,
+    // 批次标识 BI-1b: the reader strip (always) and, while the switch is on, the band probe fold.
+    pullBatchLane,
   })
   // PR-3a — THE APPLY LIB'S REFUSALS (E-1 layer (a); design §7.1 row 1; TD-11 as replaced by R-4), from the
   // in-lease recompute and its consult, BEFORE the revision compare (a plan that turned suspended also moves the
@@ -3317,6 +3380,10 @@ async function applyStockPreparationAction(input = {}) {
   // No-op on the sandbox path (mode!=='production'); rejects before any write on the production path.
   const cleanRowCount = (dryRun.plan.counts[DECISIONS.ADD] || 0) + (dryRun.plan.counts[DECISIONS.UPDATE] || 0)
   assertProductionCleanRowsWithinBound(applyGate, cleanRowCount)
+  // 批次标识 BI-1b (design §6.1, P-1): the ONE evaluation of this execution — after every refusal above, BEFORE the
+  // execution is begun (a pull-batch refusal — 409 INSTALL_IN_PROGRESS, 503 STORE_FAILED — never leaves a governed
+  // execution behind). Switch off => null: zero ledger IO, byte-identical writer call and answer.
+  const pullBatchRun = await pullBatchLanes.prepareSmallApplyPullBatch({ lane: pullBatchLane, dryRun, action, parameters, runId: input.projectWriteRunId, canonicalRows: pullBatchCanonicalRows, writeFence: projectWriteGuard, logger: input.logger })
   // C4 apply: the writer already maps every payload key through the operator-configured
   // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160). PR-3a (TD-30, R-11):
   // built BEFORE the execution is begun, so a throw here leaves no `running` row behind.
@@ -3324,9 +3391,27 @@ async function applyStockPreparationAction(input = {}) {
   const governedApply = Boolean(dryRun.refresh && dryRun.refresh.governed)
   const refreshScope = governedApply ? dryRun.refresh.consult.scope : null
   const storeScope = refreshScope ? { tenantId: refreshScope.tenantId, sheetId: refreshScope.sheetId, projectNo: refreshScope.projectNo } : null
+  // Batch-refresh step 6a-1 (S6-1, design §3.2; R-91): the values-free INTENT JOURNAL of this execution, from THIS
+  // in-lease recompute (O-10: the plan the writer receives, the versions it fences on, the writer's own pack-aware band)
+  // — never the token or a preview. Governed only: a not-governed apply begins no execution and journals nothing (C09).
+  const executionPlanDigest = governedApply ? planDigestOf(dryRun.plan) : null
+  const intentExpectedRecords = governedApply ? expectedRecordsOf(dryRun) : null
+  const executionIntent = governedApply
+    ? buildExecutionIntent({
+      plan: dryRun.plan,
+      planDigest: executionPlanDigest,
+      // The SAME versions the writer fences on (expectedRecordsOf is a pure function of this dryRun; the writer call below
+      // computes its own copy, so EV-10's one-writer-call pin stays exact).
+      expectedRecords: intentExpectedRecords,
+      template: action.template,
+      installedFieldProperties: dryRun.refresh.installedFieldProperties,
+    })
+    : null
   // PR-3a (O-13; design §4.2 / §9.3): THE EXECUTION LEDGER — governed only (TD-4), begun BEFORE the first
   // write, bound to the lease grant (its lease id only through the host fence), the token, the plan digest and
   // the refresh binding the apply just verified. A begin failure refuses before any write (partial: false).
+  // Step 6a-1: ONE transaction with the journal; 批次标识's unprefixed source digest rides along only when this run
+  // stamps (R-65; the switch off => no pull-batch run => no key at all).
   const execution = governedApply
     ? await dryRun.refresh.handle.store.beginExecution({
       ...storeScope,
@@ -3339,10 +3424,12 @@ async function applyStockPreparationAction(input = {}) {
         generationToken: projectWriteGuard.generationToken,
       },
       tokenRevision: tokenRecord.revision,
-      planDigest: planDigestOf(dryRun.plan),
+      planDigest: executionPlanDigest,
       plannedCounts: dryRun.plan.counts,
       refreshBinding: refreshOutcome.binding,
       startedBy: input.startedBy,
+      intent: executionIntent,
+      ...(pullBatchRun && pullBatchRun.evaluation.ready && typeof pullBatchRun.sourceDigest === 'string' ? { pullBatchSourceDigest: pullBatchRun.sourceDigest } : {}),
     })
     : null
   // From the moment the execution exists, every way out finishes it (P3-X3): a throw — the writer's or anything
@@ -3370,13 +3457,20 @@ async function applyStockPreparationAction(input = {}) {
       // planned against; a conflict re-reads once (human-only move => one retry; a plugin-written column moved =>
       // the run stops 409 STOCK_PREP_CHANGE_PLAN_STALE). Governed or not.
       expectedRecords: expectedRecordsOf(dryRun),
+      // 批次标识 BI-1b (design §3.4): the create leg's side input — built AFTER the execution exists (critic M9), so the
+      // lazy allocation links the exec_ id. Absent => byte-identical writer call.
+      ...(pullBatchRun && pullBatchRun.evaluation.ready ? { pullBatchStamp: pullBatchRun.stampFor(execution) } : {}),
     })
   } catch (error) {
+    if (pullBatchRun) await pullBatchRun.finishFailed()
     if (execution) {
       await finishExecutionFailedBestEffort(dryRun.refresh.handle, { ...storeScope, executionId: execution.id }, error, input.logger)
     }
     throw error
   }
+  // 批次标识 BI-1b (design §3.6): the link is finished by value (best effort, never the answer), before the execution
+  // finish and the abort rethrow below.
+  if (pullBatchRun) await pullBatchRun.finish(applyResult)
   // PR-3a (TD-9, design §9.2): close the execution inside the lease with the mapped status; a zero-write run of
   // a plan with nothing pending settles itself in the same statement. A finish that fails is never a success:
   // a typed error whose `partial` says whether a host write was attempted (P3-X4).
@@ -3414,6 +3508,8 @@ async function applyStockPreparationAction(input = {}) {
     // (`stockPreparationSourceContentDigest`) and strips this key from the response.
     sourceContentRevision: dryRun.sourceContentRevision,
     apply: summarizeApplyResultForEvidence(applyResult),
+    // 批次标识 BI-1b (design §6.1 step 6): beside apply, never inside evidence; while the switch is on only.
+    ...(pullBatchRun ? { pullBatch: pullBatchRun.answer(applyResult) } : {}),
     // 人工补充行 B1 (ADR §5.1): the in-lease recompute's stanza (counts + record handles), absent without a prefix row.
     ...(dryRun.manualSupplement ? { manualSupplement: cloneJson(dryRun.manualSupplement) } : {}),
     evidence: {
@@ -3438,6 +3534,196 @@ async function applyStockPreparationAction(input = {}) {
       ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
   }
+}
+
+// ── batch-refresh step 6a-2 (S6-2; register R-91): the recovery verify-and-close ─────────────────────────────────────
+
+const RECOVERY_OPERATIONS = Object.freeze(['verify', 'close', 'inspect', 'close_unverified'])
+
+function recoveryError(status, code, message, details = {}) {
+  return new StockPreparationRefreshStoreError(status, code, message, { ...details, partial: false })
+}
+
+/**
+ * THE RECOVERY of one unfinished governed execution (design §3.5-§3.8; G4 「恢复入口」). Called by the route INSIDE the
+ * `recovery_verify` lease it holds (`projectWriteGuard`), never with a token, and it performs NO record write.
+ *   verify            read -> in-lease recompute -> classify -> the values-free report + ONE audited page of the pending list
+ *   close             the same, then (refusals: UNPROVABLE / STALE) the store's close transaction inside guard.withHostWrite
+ *                     (the heartbeat skips while it holds the lock row — rebaseline (d), N6)
+ *   inspect           close-unverified's read: the SHEET only (no source read — the escape works when the source cannot be
+ *                     read), a best-effort classification and its `inspectDigest`
+ *   close_unverified  the runbook close: `verified_result = unknown`, no settlement, every write record of a bound plan to
+ *                     review (P5 / P9), 批次标识's link finished with the sheet-only count, the batch kept open
+ * 批次标识 (rebaseline (a), (b)): readBatchLink / batchWithin only when the lane is ON and has a ledger; the close hands the
+ * execution's UNPREFIXED source digest. The guard's holder assert (`holderWithin`, reason recovery_close) and the audit
+ * hooks are the route's. Allowed while 批次标识's sheet install is in progress (N-INSTALLING): the recovery never touches
+ * the `_sheet` row and classifies band-blind.
+ */
+async function recoverStockPreparationExecution(input = {}) {
+  const operation = input.operation
+  if (!RECOVERY_OPERATIONS.includes(operation)) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the recovery operation is not one of verify / close / inspect / close_unverified', { field: 'operation' })
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
+  const guard = requireProjectWriteGuard(input.projectWriteGuard)
+  assertProjectWriteGuardScope(guard, action)
+  if (typeof guard.withHostWrite !== 'function' || typeof guard.hostWriteFence !== 'function') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the recovery needs the sheet write guard\'s host-write bracket; nothing is closed without it')
+  }
+  const handle = input.refreshGovernance
+  const store = handle && handle.store
+  if (!store || typeof store.readExecutionForRecovery !== 'function' || typeof store.closeExecution !== 'function') {
+    throw recoveryError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the refresh store on this deployment cannot recover an execution', { reason: 'recovery_store' })
+  }
+  const executionId = optionalString(input.executionId)
+  if (!executionId) throw recoveryError(404, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_FOUND, 'this project has no such execution')
+  const tenantId = optionalString(input.tenantId)
+  if (!tenantId) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the recovery needs the proven tenant', { field: 'tenantId' })
+  const scope = { tenantId, sheetId: action.target.sheetId, projectNo: parameters.projectNo }
+  const runbook = operation === 'inspect' || operation === 'close_unverified'
+
+  // a. THE READ (one snapshot), in scope and unfinished — decided again under the close's locks.
+  const read = await store.readExecutionForRecovery({ ...scope, executionId })
+  if (!read) throw recoveryError(404, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_FOUND, 'this project has no such execution')
+  if (!UNFINISHED_EXECUTION_STATUSES.includes(read.execution.status)) {
+    throw recoveryError(409, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_UNFINISHED, 'this execution is not unfinished; there is nothing to recover', { reason: read.execution.status === 'verified_closed' ? 'verified_closed' : 'execution_finished' })
+  }
+  const bandOn = Boolean(pullBatchLane && pullBatchLane.enabled === true && pullBatchLane.store && typeof pullBatchLane.store.readBatchLink === 'function')
+  const link = bandOn ? await pullBatchLane.store.readBatchLink({ ...scope, refreshExecutionId: executionId }) : null
+
+  // b. THE RECOMPUTE under the lease (verify / close): the same read the apply makes, its consult and the band strip —
+  // never reconciled (no computation lane is recorded). close-unverified reads the SHEET only.
+  let dryRun = null
+  let rows
+  if (!runbook) {
+    const b2aSourceObjects = stockPreparationB2aSourceObjects({ registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects })
+    const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+      registry: input.b2aTrialRegistry,
+      store: input.b2aClaimStore,
+      operationClaim: input.b2aOperationClaim,
+      tenantId,
+      action,
+      parameters,
+      runId: input.b2aRunId,
+      purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+      now: input.now,
+      sourceObjects: b2aSourceObjects,
+    })
+    const tableScopeReview = input.policyStore ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore }) : null
+    dryRun = await computeDryRun({
+      action,
+      parameters,
+      sourceAdapter: input.sourceAdapter,
+      recordsApi: input.recordsApi,
+      plannedAt: input.plannedAt,
+      runId: input.runId,
+      runOnlyReview: normalizeRunOnlyConflictPolicyReview(undefined),
+      tableScopeReview,
+      installedFieldProperties: input.installedFieldProperties,
+      targetFieldExistence: input.targetFieldExistence,
+      extFieldMapping: input.extFieldMapping,
+      confirmationDecisionResolver: input.confirmationDecisionResolver,
+      b2aTrialRegistration,
+      b2aClaimStore: input.b2aClaimStore,
+      b2aSourceObjects,
+      b2aNow: input.now,
+      refreshGovernance: input.refreshGovernance,
+      // 批次标识 (BI §3.4, RS-2): the reader strip (always) and, while the switch is on, the band probe fold.
+      pullBatchLane,
+    })
+    if (!dryRun.refresh || dryRun.refresh.governed !== true) {
+      throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'an execution exists, so the project must be governed; the recompute says otherwise', { reason: 'recovery_recompute_not_governed' })
+    }
+    if (dryRun.refresh.complete !== true) {
+      throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_RECOMPUTE_INCOMPLETE, 'the source could not be read completely under the recovery lease; nothing was closed — retry once the source reads cleanly')
+    }
+    rows = dryRun.existingRows
+  } else {
+    if (typeof input.readSheetRows !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'close-unverified needs the route\'s sheet read', { field: 'readSheetRows' })
+    rows = await input.readSheetRows()
+  }
+
+  // c-e. CLASSIFY over the lease's own read, the consistency rule, the plan-bound mapping, 批次标识's sheet count.
+  const assessment = executionRecovery.assessExecutionRecovery({ read, rows, plan: dryRun ? dryRun.plan : null, link, template: action.template })
+  const intentDigest = read.execution.intentDigest
+  const transparentShape = read.changePlanBound !== true
+
+  if (runbook) {
+    const inspectDigest = executionRecovery.inspectDigestOf({ executionId, intentDigest, assessment })
+    if (operation === 'inspect') {
+      const report = executionRecovery.recoveryReportOf({ read, assessment, plan: null, bandOn, link, settlesIfClosedNow: false, digestKey: 'inspectDigest', digest: inspectDigest })
+      if (typeof input.auditVerifyRead !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the inspect read is audited', { field: 'auditVerifyRead' })
+      await input.auditVerifyRead({ operation: 'execution_inspect_read', pageIndex: 0, entryCount: 0, pendingTotal: assessment.pendingTotal, intended: assessment.counts.intended })
+      return Object.freeze({ operation, report })
+    }
+    if (input.inspectDigest !== inspectDigest) throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_STALE, 'the sheet changed since it was inspected; inspect again')
+    if (!input.acknowledge || input.acknowledge.resultUnknown !== true) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'close-unverified acknowledges resultUnknown', { field: 'acknowledge' })
+    // P5 / P9: EVERY write record of the bound plan goes to review (fail-safe); the store takes them all for `unknown`.
+    const closed = await guard.withHostWrite(() => store.closeExecution({
+      ...scope,
+      executionId,
+      mode: 'runbook',
+      classification: {
+        result: 'unknown',
+        intentDigest,
+        counts: assessment.counts,
+        landedRecordIds: [],
+        landedAddCount: assessment.landedAddCount,
+        verifiedCreatedRows: assessment.verifiedCreatedRows,
+      },
+      lease: { leaseId: guard.hostWriteFence().leaseId, leaseRunId: input.projectWriteRunId, fencingEpoch: guard.fencingEpoch },
+      closedBy: input.closedBy,
+      runbookRef: input.runbookRef,
+    }, {
+      auditWithin: input.auditCloseWithin,
+      holderWithin: input.holderWithin,
+      batchWithin: bandOn && typeof pullBatchLane.store.batchWithin === 'function' ? (trx, args) => pullBatchLane.store.batchWithin(trx, args) : null,
+    }))
+    return Object.freeze({ operation, closed })
+  }
+
+  // f. The report and its digest; the settlement a close would carry (re-decided by the store under its lock).
+  const verifyDigest = executionRecovery.verifyDigestOf({ executionId, intentDigest, assessment })
+  const settlement = assessment.result === 'landed' || assessment.result === 'mixed' || (assessment.result === 'nothing_landed' && !transparentShape)
+    ? recoverySettlementFor({ dryRun, guard, template: action.template })
+    : null
+  const report = executionRecovery.recoveryReportOf({ read, assessment, plan: dryRun.plan, bandOn, link, settlesIfClosedNow: assessment.refusalReasons.length === 0 && settlement !== null, digestKey: 'verifyDigest', digest: verifyDigest })
+
+  // g. verify: the report + ONE page of the private pending list, audited FIRST (a refusing audit => no values).
+  if (operation === 'verify') {
+    const page = executionRecovery.pendingPageOf({ assessment, expansionRows: dryRun.expansion && dryRun.expansion.rows, existingRows: rows, cursor: input.pageCursor === undefined ? null : input.pageCursor })
+    if (typeof input.auditVerifyRead !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the verify page is audited', { field: 'auditVerifyRead' })
+    await input.auditVerifyRead({ operation: 'execution_verify_read', pageIndex: page.pageIndex, entryCount: page.entries.length, pendingTotal: assessment.pendingTotal, intended: assessment.counts.intended })
+    return Object.freeze({ operation, report, pending: page })
+  }
+  if (assessment.refusalReasons.length > 0) {
+    throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_UNPROVABLE, 'what landed cannot be proven from the sheet; the execution stays unfinished — follow the runbook', {
+      reasons: assessment.refusalReasons.slice(),
+      counts: { ...assessment.counts },
+    })
+  }
+  if (input.verifyDigest !== verifyDigest) throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_STALE, 'the sheet or the source changed since it was verified; verify again')
+  const closed = await guard.withHostWrite(() => store.closeExecution({
+    ...scope,
+    executionId,
+    mode: 'puller_verified',
+    classification: {
+      result: assessment.result,
+      intentDigest,
+      counts: assessment.counts,
+      landedRecordIds: assessment.landedRecordIds,
+      landedAddCount: assessment.landedAddCount,
+      verifiedCreatedRows: assessment.verifiedCreatedRows,
+    },
+    lease: { leaseId: guard.hostWriteFence().leaseId, leaseRunId: input.projectWriteRunId, fencingEpoch: guard.fencingEpoch },
+    closedBy: input.closedBy,
+    ...(settlement ? { settlement } : {}),
+  }, {
+    auditWithin: input.auditCloseWithin,
+    holderWithin: input.holderWithin,
+    batchWithin: bandOn && typeof pullBatchLane.store.batchWithin === 'function' ? (trx, args) => pullBatchLane.store.batchWithin(trx, args) : null,
+  }))
+  return Object.freeze({ operation, closed })
 }
 
 module.exports = {
@@ -3469,7 +3755,12 @@ module.exports = {
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
+  // Batch-refresh step 6a-2 (S6-2).
+  RECOVERY_OPERATIONS,
+  recoverStockPreparationExecution,
   __internals: {
+    // Step 6a-1 (XS-03): the best-effort failed finish and its pre-IO rule.
+    finishExecutionFailedBestEffort,
     assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
@@ -3477,6 +3768,10 @@ module.exports = {
     buildArchiveRevision,
     buildRevision,
     buildSourceContentRevision,
+    // 批次标识 BI-1b: the canonical row order of the pull-batch digest (the large lane hashes with it too).
+    canonicalHashOrder,
+    expandedRowHashIdentity,
+    pullBatchCanonicalRows,
     confirmationDecisionEvidence,
     hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,

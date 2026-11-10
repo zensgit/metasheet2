@@ -84,6 +84,11 @@ export default defineConfig({
       // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
       'tests/integration/yida-host-connection-test-realdb.test.ts',
       'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // Permission lifecycle real-DB gate. Trust-off config; whole file in plugin-tests.yml runtime-db.
+      'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
+      // Real Chromium + HTTP + database; runs under its dedicated trust-off configuration.
+      'tests/integration/permission-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -403,6 +408,11 @@ export default defineConfig({
       // directory-deprovision-provider-scope-ci-wiring.test.mjs).
       'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
       'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // Departure vouching single source: every statement that asks "does another source still
       // vouch for this person" (candidate selection, state read, write-time recheck, membership
       // helper) against real Postgres, per call site and per scope variant. DATABASE_URL-gated
