@@ -19,6 +19,7 @@ const state = (page) => page.evaluate(() => ({
   composer: window.undoDemo.draft(),
   outside: document.querySelector('#outside').value,
   grid: { ...window.undoDemo.grid },
+  replays: window.undoDemo.replays,
   native: window.undoDemo.native,
 }))
 const saved = (page) => page.evaluate(() => window.undoDemo.patches.slice())
@@ -54,7 +55,7 @@ const SCENARIOS = {
   },
   async 'commit with Enter into the date input, Cmd+Z: the grid undo (undoes the commit)'(page) {
     await page.locator('#drawer_field_fld_note').click(); await page.keyboard.press('End'); await page.keyboard.type('Q'); await page.keyboard.press('Enter'); await page.keyboard.press(`${mod}+z`)
-    check('grid', (await state(page)).grid, { undo: 1, redo: 0 })
+    const s = await state(page); check('grid', s.grid, { undo: 1, redo: 0 }); check('replayed to the server', s.replays, 1)
   },
   async 'title: Enter commits and focus goes to the page; Cmd+Z: the grid undo, never the browser undo'(page) {
     const t = page.locator('.meta-record-drawer__title-input'); await t.click(); await page.keyboard.press('End'); await page.keyboard.type(' X'); await page.keyboard.press('Enter'); await page.waitForTimeout(100)
@@ -149,9 +150,22 @@ const SCENARIOS = {
     await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
     check('focus on the page while it uploads', await onPage(page), true)
     await page.keyboard.press(`${mod}+z`)
-    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+    const s = await state(page); check('grid', s.grid, { undo: 0, redo: 0 }); check('replays', s.replays, 0)
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
     check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
+  },
+  async 'an attachment upload, then a press on the details panel and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there replays the last cell edit'(page) {
+    const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
+    await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
+    await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
+    const panel = page.locator('[role="tabpanel"][id$="-panel-details"]')
+    await panel.dispatchEvent('mousedown'); await panel.focus()
+    await page.keyboard.press(`${mod}+z`)
+    let s = await state(page); check('grid while it uploads', s.grid, { undo: 1, redo: 0 }); check('replays while it uploads', s.replays, 0)
+    await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
+    await panel.focus(); await page.keyboard.press(`${mod}+z`)
+    s = await state(page); check('grid after', s.grid, { undo: 2, redo: 0 }); check('replays after', s.replays, 1)
   },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)
