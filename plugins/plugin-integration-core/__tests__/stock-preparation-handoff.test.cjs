@@ -3087,7 +3087,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // (section D, items 35–37): the settings row and the sheet ledger rows they read or write are the proven tenant's.
   // 批次标识 BI-2 (R-65) added ONE — the per-sheet pull-batch install POST (section D, item 38): the sheet it writes and the
   // staging project it writes it through are the proven tenant's.
-  assert.equal(callSites, 32, 'G9: thirty-two call sites — if this changes, the header list must too')
+  // 备料分批拉取第一期 step 6d-2a (R-91) added ONE call site for THREE routes — the shared context of the doubled-sheet repair,
+  // `stockPreparationSheetRepairContext` (section D, items 39–41): the sheet a retire / restore writes, the fills it
+  // reads and the repair ledger rows are the proven tenant's.
+  assert.equal(callSites, 33, 'G9: thirty-three call sites — if this changes, the header list must too')
   for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'tableActionDryRunJobGet', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions', 'stockPreparationProjectPilotGet', 'stockPreparationProjectPilotEnable', 'stockPreparationRefreshDecisionContext', 'stockPreparationRefreshContinuationConfirm', 'stockPreparationRefreshChangePlanConfirm', 'stockPreparationRefreshChangeReviewComplete', 'stockPreparationProjectManualRowsGet', 'stockPreparationProjectManualRowsSet', 'stockPreparationProjectPullBatchGet', 'stockPreparationPullBatchSettingsGet', 'stockPreparationPullBatchSettingsSet', 'stockPreparationProjectPullBatchSettingsSet', 'stockPreparationProjectPullBatchInstall']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }

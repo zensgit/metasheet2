@@ -6,7 +6,7 @@
 //
 //   ST-01  migration 108: the vocabularies ARE the library's; every CHECK / UNIQUE the kit models exists in the SQL; the
 //          table bodies close with `\n);`; nothing is dropped, no down()
-//   ST-02  the begin is ONE transaction in the stated order — holder assert, open-run sweep, sequence, run row, claim,
+//   ST-02  the begin is ONE transaction in the stated order — holder assert, open-run sweep, sequence, claim, run row,
 //          audit — and both hooks are required; a holder refusal or an audit failure rolls everything back
 //   ST-03  the claim: a second begin of the same approved plan is 409 ALREADY_CONSUMED after a READ-BACK on a fresh
 //          handle; any other insert failure and a failed read-back are 503; never a run without its claim
@@ -144,10 +144,10 @@ test('ST-02 the begin is ONE transaction in the stated order; the holder assert 
     ['transaction', undefined],
     ['trx.select', kit.T.run],
     ['trx.countRows', kit.T.run],
-    ['trx.insertOne', kit.T.run],
     ['trx.insertOne', kit.T.claim],
+    ['trx.insertOne', kit.T.run],
     ['commit', undefined],
-  ], 'the open-run read, the sequence, the run row and the claim, in one transaction')
+  ], 'the open-run read, the sequence, the claim and then the run row, in one transaction')
   assert.deepEqual(m.holders, [true], 'the holder assert ran once, on the transaction handle, before any statement')
   const row = m.db.rows(kit.T.run)[0]
   assert.deepEqual(
@@ -214,7 +214,7 @@ test('ST-03 the one-shot claim: the second begin of an approved plan is ALREADY_
   await rejects(m.store.beginRun(second), { status: 409, code: CODES.ALREADY_CONSUMED, reason: 'claim_consumed' })
   const log = m.db.statements()
   assert.deepEqual(log.slice(-3), [['trx.insertOne', kit.T.claim], ['rollback', undefined], ['selectOne', kit.T.claim]], 'the failed INSERT rolled the transaction back; the claim was then read on a FRESH handle')
-  assert.deepEqual([m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length], [1, 1], 'the second run row did not survive')
+  assert.deepEqual([m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length], [1, 1], 'no second run row: the claim is taken before the run row is written')
   assert.equal(m.db.rows(kit.T.claim)[0].run_id, first.runId, 'the claim still names the run that spent it')
   // A different plan (another digest) of the same scope is its own claim.
   const other = m.beginInput({ planDigest: digestOf('plan-2'), expectSequence: 1, lease: LEASE_B })
@@ -231,11 +231,13 @@ test('ST-03 the one-shot claim: the second begin of an approved plan is ALREADY_
   blind.db.faults.insertOne = (args) => (args.table === kit.T.claim ? kit.sqlError('23505', 'duplicate key value violates unique constraint') : null)
   blind.db.faults.selectOne = (args) => (args.table === kit.T.claim ? kit.sqlError('57014', 'canceling statement') : null)
   await rejects(blind.store.beginRun(blind.beginInput()), { status: 503, code: CODES.STORE_FAILED, operation: 'claim_read_back' })
-  // A run-row insert failure is the ledger's 503 as well (and spends nothing).
+  // A run-row insert failure (after the claim INSERT succeeded) is the ledger's 503 as well — and the claim rolls back
+  // with it: nothing is spent on a run that never began.
   const noTable = mount()
-  noTable.db.faults.insertOne = (args) => (args.table === kit.T.run ? kit.sqlError('42P01', 'relation does not exist') : null)
+  noTable.db.faults.insertOne = (args) => (args.table === kit.T.run ? kit.sqlError('23514', 'check constraint') : null)
   await rejects(noTable.store.beginRun(noTable.beginInput()), { status: 503, code: CODES.STORE_FAILED, operation: 'begin_run' })
-  assert.deepEqual(noTable.db.rows(kit.T.claim), [])
+  assert.deepEqual([noTable.db.rows(kit.T.claim), noTable.db.rows(kit.T.run)], [[], []])
+  assert.deepEqual(noTable.db.statements().slice(-3), [['trx.insertOne', kit.T.claim], ['trx.insertOne', kit.T.run], ['rollback', undefined]])
 })
 
 // ── ST-04 ────────────────────────────────────────────────────────────────────────────────────────────────

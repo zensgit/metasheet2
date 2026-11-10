@@ -27,6 +27,7 @@ import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugi
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 import { defineStockPreparationExecutionIntentRealDbCases } from './stock-preparation-execution-intent-realdb.cases'
 import { defineStockPreparationExecutionRecoveryRealDbCases } from './stock-preparation-execution-recovery-realdb.cases'
+import { defineStockPreparationSheetRepairRealDbCases } from './stock-preparation-sheet-repair-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -528,3 +529,5 @@ defineStockPreparationPullBatchBandRealDbCases()
 defineStockPreparationExecutionIntentRealDbCases()
 // Batch-refresh step 6a-2 (S6-2, R-91): the recovery close under the lease on real PG — plan cells, 批次标识's close hook, lease lost, 55P03 by step, and the U07 stop conditions incl. a transparent close over an unsettled subject (S9R-CL1/15/BI-01/26/U07, RC-07r).
 defineStockPreparationExecutionRecoveryRealDbCases()
+// Batch-refresh step 6d-2a (S6-6, R-91): migration 108 and the doubled-sheet repair on real PG — the boolean retire, the byte-identical restore, the digest, one writer per sheet (a pull / a recovery / an install), takeover and zombie, the one-shot claim on real row locks (S9D-108/11..18).
+defineStockPreparationSheetRepairRealDbCases()

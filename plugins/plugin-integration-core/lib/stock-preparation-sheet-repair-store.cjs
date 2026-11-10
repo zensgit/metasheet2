@@ -23,11 +23,12 @@
 //      identity, never by a clock. An open run begun under THIS lease is 409 RUN_OPEN (a defect: one lease, one run);
 //   3. the run SEQUENCE (the number of runs this sheet's project has) must still be the one the plan was digested
 //      with, else 409 PLAN_CHANGED;
-//   4. the run row, status `running`, with its backup;
-//   5. the claim row. The claim key is the table's PRIMARY KEY, so an approved plan is executed at most once: the
-//      INSERT of a second claimer dies at the unique index. A failed INSERT aborts the transaction (nothing of steps
-//      2-4 survives); the claim is then READ BACK on a fresh handle — a row => 409 ALREADY_CONSUMED, no row =>
+//   4. the claim row, BEFORE the run row. The claim key is the table's PRIMARY KEY, so an approved plan is executed at
+//      most once: the INSERT of a second claimer dies at the unique index — of two concurrent claimers the second
+//      WAITS for the first's commit and then fails there. A failed INSERT aborts the transaction (nothing of steps
+//      2-3 survives); the claim is then READ BACK on a fresh handle — a row => 409 ALREADY_CONSUMED, no row =>
 //      503 STORE_FAILED. Never a run without its claim (the migration 078 precedent: permanent, no TTL, no steal);
+//   5. the run row, status `running`, with its backup (a failure here rolls the claim back with it: nothing is spent);
 //   6. the audit row, on the same transaction (a throw rolls everything back).
 //
 // THREE ANSWERS (fail closed). A read answers rows or THROWS 503 STOCK_PREP_SHEET_REPAIR_STORE_FAILED — never "no
@@ -306,7 +307,7 @@ function createStockPreparationSheetRepairStore({ db, now } = {}) {
     return { leaseId: lease.leaseId, fencingEpoch: lease.fencingEpoch }
   }
 
-  /** THE BEGIN (module header): holder assert -> abandoned open run -> sequence -> run row + backup -> claim -> audit. */
+  /** THE BEGIN (module header): holder assert -> abandoned open run -> sequence -> claim -> run row + backup -> audit. */
   async function beginRun(input = {}) {
     const scope = normalizeScope(input)
     if (typeof input.runId !== 'string' || !RUN_ID_PATTERN.test(input.runId)) throw inputInvalid('runId')
@@ -359,6 +360,23 @@ function createStockPreparationSheetRepairStore({ db, now } = {}) {
         }
         if (sequence !== input.expectSequence) throw planChanged('sequence_moved')
         try {
+          await trx.insertOne(SHEET_REPAIR_TABLES.claim, {
+            claim_key: claimKey,
+            tenant_id: scope.tenantId,
+            sheet_id: scope.sheetId,
+            project_no: scope.projectNo,
+            recipe: input.recipe,
+            plan_digest: input.planDigest,
+            run_id: input.runId,
+            approval_ref: input.approvalRef,
+            claimed_by: input.startedBy.trim(),
+            claimed_at: at,
+          })
+        } catch (error) {
+          claimFailure = error
+          throw error
+        }
+        try {
           await trx.insertOne(SHEET_REPAIR_TABLES.run, {
             id: input.runId,
             tenant_id: scope.tenantId,
@@ -384,23 +402,6 @@ function createStockPreparationSheetRepairStore({ db, now } = {}) {
           })
         } catch (error) {
           throw storeFailed('begin_run', error)
-        }
-        try {
-          await trx.insertOne(SHEET_REPAIR_TABLES.claim, {
-            claim_key: claimKey,
-            tenant_id: scope.tenantId,
-            sheet_id: scope.sheetId,
-            project_no: scope.projectNo,
-            recipe: input.recipe,
-            plan_digest: input.planDigest,
-            run_id: input.runId,
-            approval_ref: input.approvalRef,
-            claimed_by: input.startedBy.trim(),
-            claimed_at: at,
-          })
-        } catch (error) {
-          claimFailure = error
-          throw error
         }
         await runAudit(input.auditWithin, trx, {
           mode: SHEET_REPAIR_AUDIT.modes.started,

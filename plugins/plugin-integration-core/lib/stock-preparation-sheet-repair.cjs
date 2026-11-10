@@ -29,8 +29,8 @@
 //   gates     the batch-identifier sheet row `installing` => 409 (only while that feature is on; rebaseline B-9) ->
 //             the IN-LEASE recompute of the preview (a fresh source read for a retire) -> preconditions -> the plan
 //             digest must equal the echoed one
-//   begin     ONE ledger transaction, holder assert first: an abandoned open run of this sheet is closed, the run row
-//             with its BACKUP is inserted, the one-shot claim is inserted, the audit row is appended
+//   begin     ONE ledger transaction, holder assert first: an abandoned open run of this sheet is closed, the one-shot
+//             claim is inserted, the run row with its BACKUP is inserted, the audit row is appended
 //   writes    one fenced, version-conditional patch per planned row, deepest row first and the root last; the four
 //             repair cells only (never a human cell, never a batch band cell — ruling C7); a row that moved, is locked
 //             or is gone STOPS the run (never a blind retry)

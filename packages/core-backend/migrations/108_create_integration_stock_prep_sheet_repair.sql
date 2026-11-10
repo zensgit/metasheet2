@@ -19,9 +19,9 @@
 --     AT MOST ONE OPEN RUN PER SHEET is the partial unique index below, not a convention.
 --   * integration_stock_prep_sheet_repair_claim — the one-shot claim: claim_key (PRIMARY KEY) =
 --     sha256 over (scheme, tenant, sheet, project, recipe, plan digest). Claiming is a plain INSERT in the run's begin
---     transaction, so an approved plan can be executed AT MOST ONCE; two concurrent claimers resolve to one holder at
---     the unique index. PERMANENT: no TTL, no steal, never UPDATEd or DELETEd by the runtime (the migration 078
---     precedent, design F6-26). A second run of the same approved plan is 409
+--     transaction (before the run row), so an approved plan can be executed AT MOST ONCE; two concurrent claimers
+--     resolve to one holder at the unique index. PERMANENT: no TTL, no steal, never UPDATEd or DELETEd by the runtime
+--     (the migration 078 precedent, design F6-26). A second run of the same approved plan is 409
 --     STOCK_PREP_SHEET_REPAIR_ALREADY_CONSUMED; a different plan has a different digest and needs its own approval.
 --     The plan digest also covers `sequence_no` (the number of runs this sheet's project had when the plan was
 --     previewed), so a run that began and wrote nothing does not leave an identical, already-consumed digest behind.
