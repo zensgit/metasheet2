@@ -6,25 +6,28 @@
 
 Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出三处帮助与代码不符。本轮只改帮助内容和规格测试，未改业务逻辑。
 
-### 1. 「导出范围」不能代替查看他人报表的权限
+### 1. 「导出范围」不是查看他人报表的权限
 
-- 查看他人：`canAccessOtherUsers` 只在 `attendance:admin`（或平台管理员）或 `attendance:approve` 时为真。`plugins/plugin-attendance/index.cjs:24280-24283`。报表/记录查看在目标用户不是本人时只走这个检查，例如 `GET /api/attendance/reports/requests`（`index.cjs:32731-32736`）以及同文件中其他 `canAccessOtherUsers` 查看路径；这些路径不读取排班「导出」范围。
-- 导出他人：`GET /api/attendance/export` 先同样检查 `canAccessOtherUsers`；若没有该项权限，才回退到 `assertAttendanceRecordExportAllowed`，要求排班范围带 `export` 动作且覆盖该人（`index.cjs:26960-26991`、`52819-52828`）。因此「导出」范围只约束导出，不能用来在报表里查看他人。
+查看和导出是两条授权，不能写成同一件事。
 
-已改正：`reports`（含新 FAQ）、`scopes`、`permissions`。删除了「或一条覆盖该人的排班导出范围」「导出可以放宽一个人能下载哪些人的报表」等把导出范围写成查看权限的句子。
+- 查看他人为真的条件只有 `canAccessOtherUsers`：`hasAttendanceAdminAccess` 或 `attendance:approve`。`hasAttendanceAdminAccess` 在 `RBAC_BYPASS === 'true'`、`user_roles.role_id = 'admin'`，或 `attendance:admin` 时为真（`plugins/plugin-attendance/index.cjs:24153-24158`、`24264-24268`、`24280-24283`）。
+- 下列读取在目标用户不是本人时只调用 `canAccessOtherUsers`，不调用 `assertAttendanceRecordExportAllowed`：`GET /api/attendance/records` 与 `GET /api/attendance/calendar`（同一处理函数，`index.cjs:31493-31523`、`31624-31634`）、`GET /api/attendance/summary`（`index.cjs:32634-32669`）、`GET /api/attendance/reports/requests`（`index.cjs:32702-32736`）。没有 `attendance:approve` / `attendance:admin`（以及上面的管理员绕过）时返回 403 `No access to other users`。
+- 导出是另一条路。`GET /api/attendance/export`（`index.cjs:52779-52828`）在目标不是本人时先查 `canAccessOtherUsers`。已有这项权限就直接导出，不再按排班「导出」范围过滤。没有这项权限时才回退到 `assertAttendanceRecordExportAllowed`（`index.cjs:26960-26975`）：排班范围的动作必须包含 `export`，并且覆盖该人与日期，否则 `SCHEDULER_SCOPE_FORBIDDEN`。因此「导出」范围既不是查看权限，也不是对已能查看他人的人再加一层导出限制；它只在缺少查看权限时决定导出接口能否下载范围内的人。
+
+已改正：`reports`（含 FAQ）、`records`、`scopes`、`permissions`。删除了「或包含导出的排班范围」「它只限制能导出哪些人的行」这类把导出范围写成查看权限或写成普遍导出过滤器的句子。
 
 ### 2. 旧工作日的补卡额度不因提交到下个月而恢复
 
-- `computeMakeupCycleWindow` 按工作日期（规则时区下的 `workDate`）计算周期，注释写明 NOT submit time。`index.cjs:14848-14871`。
-- `enforceMakeupPunchPolicy` 统计的是同一主体、工作日期落在该周期内、状态计入额度的补卡申请。`index.cjs:14943-14966`。
+- `computeMakeupCycleWindow` 按工作日期（规则时区下的 `workDate`）计算周期，注释写明 NOT submit time。`index.cjs:14848-14872`。
+- `enforceMakeupPunchPolicy` 用这份 `workDate` 取周期，再统计同一主体、`work_date` 落在该周期内、状态属于 `countStatuses` 的补卡申请。`index.cjs:14943-14966`。强约束默认关：`DEFAULT_SETTINGS.makeupPunchPolicy.enabled` 为 `false`（`index.cjs:542-543`）。前端表单初值同样是 `enabled: false`（`AttendanceView.vue:16980-16981`）。
 - 前端提示句「本周期的补卡次数已用完。」：`apps/web/src/views/attendance/makeupPunchRequestStatus.ts:35-39`。
 
 已改正：`makeup` 步骤、示例、失败处理、FAQ，以及 `errors` 中 `MAKEUP_PUNCH_QUOTA_EXCEEDED` 行。删除了「等到下个周期 / 等到下个自然月」这类会让人以为提交月份变化即可恢复旧工作日额度的指引。
 
 ### 3. 已有下班卡时不要再点「上班打卡」
 
-- 写入后若 `last_out_at < first_in_at`，抛出 `HttpError(409, 'ATTENDANCE_PUNCH_ORDER_CONFLICT', 'Check-out cannot precede check-in; review the work date and existing punches')`。`hasReversedLivePunchOrder`：`plugins/plugin-attendance/lib/attendance-live-punch-order.cjs:5-8`；抛出点：`index.cjs:23618-23621`。
-- 已有下班卡后再点「上班打卡」，新的上班时间若晚于已有下班时间，会再次落入同一冲突。帮助改为引导「补卡」（漏打上班卡）或「时间更正」，明确不要重试「上班打卡」。
+- 写入后若 `last_out_at < first_in_at`，抛出 `HttpError(409, 'ATTENDANCE_PUNCH_ORDER_CONFLICT', 'Check-out cannot precede check-in; review the work date and existing punches')`。`hasReversedLivePunchOrder`：`plugins/plugin-attendance/lib/attendance-live-punch-order.cjs:5-8`；抛出点在同一事务内，拒绝会回滚：`index.cjs:23617-23621`。实时打卡拒绝客户端时间（`index.cjs:30920-30922`），发生时间是 `getOnlinePunchServerInstant()`（`index.cjs:30974-30975`）。已有下班、还没有更早的上班时，再点「上班打卡」会把 `first_in_at` 写成现在，现在晚于已有下班，于是再次 409。
+- 补卡审批通过后按申请里的 `requested_in_at` / `requested_out_at` 回写（`index.cjs:39879-39882`，写入 `index.cjs:39924-39931`），不使用这次点击的服务器现在时间。三种类型是 `missed_check_in`、`missed_check_out`、`time_correction`（`index.cjs:14592`、`24322-24324`）。帮助改为引导「补卡」（漏打上班卡）或「时间更正」，明确不要再点「上班打卡」。
 
 已改正：`punch` 简介、失败步骤、新 FAQ，以及 `errors` 中 `ATTENDANCE_PUNCH_ORDER_CONFLICT` 行。
 
@@ -34,10 +37,10 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 三份排查按「现象 → 原因 → 怎么改」写进现有文章，并新增 `troubleshoot`（排查）。
 
-- 排班保存被拦住：`SHIFT_COMPLIANCE_CAP_EXCEEDED`，强制方式为「保存时阻断」且显式排班分钟超上限。`enforceShiftComplianceCap`：`index.cjs:19667-19690`。
-- 和另一组的人换班失败：没有单独的跨组错误码。列表和接口只接受已发布、生效、常规、单日、无生产者标记的排班。固定排班或轮班行带 `producer_type`，因此不出现。代码 `SHIFT_SWAP_SOURCE_UNSUPPORTED`、`SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY`、`SHIFT_SWAP_SOURCE_TEMPORARY_COVERED`。`normalizeShiftSwapSourceSnapshot`：`index.cjs:33049-33072`；前端过滤 `AttendanceView.vue:24836-24841`。
-- 预览正常、提交没写上：预览不写考勤行。令牌字面量 `1` 时提交要 10 分钟内的新令牌，过期或已用过为 `COMMIT_TOKEN_REQUIRED` / `COMMIT_TOKEN_INVALID`。`index.cjs:5947-5948`、`43513-43526`。
-- `USER_NOT_IN_ORG`：考勤组加人（`index.cjs:47304-47310`）和导入提交写入成员（`index.cjs:30668-30674`）在目标不是本组织有效成员时返回 404。打卡写错组织仍是 `ATTENDANCE_PUNCH_ORG_NOT_PERMITTED`。
+- 排班保存被拦住：`SHIFT_COMPLIANCE_CAP_EXCEEDED`，强制方式为「保存时阻断」且显式排班分钟超上限。`enforceShiftComplianceCap`：`index.cjs:19665-19672`。默认 `shiftCompliance.enforcement` 已是 `'block'`，但三个上限默认 `null`，上限都空时函数直接返回（`index.cjs:435-439`）。
+- 和另一组的人换班失败：没有单独的跨组错误码。列表和接口只接受已发布、生效、常规、单日、无生产者标记的排班。固定排班或轮班行带 `producer_type`，因此不出现。代码 `SHIFT_SWAP_SOURCE_UNSUPPORTED`、`SHIFT_SWAP_SOURCE_NOT_SINGLE_DAY`、`SHIFT_SWAP_SOURCE_TEMPORARY_COVERED`。`normalizeShiftSwapSourceSnapshot`：`index.cjs:32992-33016`；前端过滤 `isShiftSwapSourceCandidate`：`AttendanceView.vue:24941-24947`。
+- 预览正常、提交没写上：预览不写考勤行。令牌开关是字面量比较 `process.env.ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'`（不是 `parseBoolean`，`'true'` 不开）。`index.cjs:5967-5968`，有效期 `IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000` 在 `5967`。打开时缺少或失效的提交返回 `COMMIT_TOKEN_REQUIRED` / `COMMIT_TOKEN_INVALID`，例如 `index.cjs:43459-43483`。
+- `USER_NOT_IN_ORG`：考勤组加人在写入前调用 `assertActiveOrgMemberUserIds`（`index.cjs:47328-47330`），导入提交写入成员时同样调用（`index.cjs:30611-30617`）。抛出点是 404（`index.cjs:20399`）。打卡写错组织仍是 `ATTENDANCE_PUNCH_ORG_NOT_PERMITTED`。
 - 排查文章顺序：规则/班次 → 考勤组成员 → 审批/导入批次。搜索词：异常人员、缺勤未生成、报表数字对不上。
 - 搜索别名只落到已有能力：外勤（打卡/设置）、补卡额度（补卡）、排班管理员（排班管理范围，不是单独角色模板）、年假额度（年假）。
 
@@ -66,15 +69,15 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 按当前计算代码补了可核对的例子，并给偏短的文章补了前提和示例。
 
 - 快速入门改成 8 步，文章 id 写在步骤标题里：settings、rules、shifts、groups、assignments、leave-types、approvals、import、reports。
-- 规则：09:12/17:40、宽限 10、取整 5 → 迟到 2、早退 10、工时 505。取整是向下。严重/旷工按宽限后的迟到分钟，内置 30/60。`computeMetrics`、`roundMinutes`：`index.cjs:11918-11922`、`12457-12473`。
-- 班次：22:00–06:00 的下班落在次日。`resolveOvernightFlag`：`index.cjs:7106-7108`。
-- 补卡：起始日 1 时 2026-03 整月共用 3 次；起始日 26 的周期跨月。窗口按规则时区的工作日。`computeMakeupCycleWindow`：`index.cjs:14854-14873`。同时提交不同日期可能比上限多 1，已写进注意事项。
-- 请假：09:00–18:00、480 分钟，中点 13:30，上下午各 240。同一工作日第二条请假即重复，不论上午下午。`halfDayLeaveHelper.ts:105-107`；重复查询 `index.cjs:10543-10556`。
-- 加班规则：20→30，40→45，610→600。向上取整后再截每日上限。`applyOvertimeRule`：`index.cjs:11931-11944`。
-- 节假日工时：首日默认 8 小时写成 480。加班来源只产生警告，不加进这 480。`applyHolidayPolicy`：`index.cjs:12848-12878`。
-- 计薪：26 日至次月 25 日，锚点 2026-03-10 与 2026-03-26 两个窗口。`resolvePayrollWindow`：`index.cjs:8503-8524`。
-- 导入：默认表头与跳过原因（日期、工号映射、邮箱/用户名/手机号、两人匹配）。`index.cjs:799-813`；`attendance-import-user-identity.cjs:75-98`。
-- 年假：满 8 年发 2400 分钟；累计工龄满年、2026-05-27 入职折成 3 天 1440 分钟；本单位工龄同年入职不满 12 个月跳过。`computeAnnualLeaveAccrualForUser`：`index.cjs:19995-20038`。
+- 规则：09:12/17:40、宽限 10、取整 5 → 迟到 2、早退 10、工时 505。取整是向下。严重/旷工按宽限后的迟到分钟，内置 30/60。`roundMinutes`：`index.cjs:11950-11954`；`computeMetrics`：`index.cjs:12463`。
+- 班次：22:00–06:00 的下班落在次日。`resolveOvernightFlag`：`index.cjs:7128-7131`。
+- 补卡：起始日 1 时 2026-03 整月共用 3 次；起始日 26 的周期跨月。窗口按规则时区的工作日。`computeMakeupCycleWindow`：`index.cjs:14848-14872`。同时提交不同日期可能比上限多 1，已写进注意事项。额度按工作日期所在周期，不按提交月份。
+- 请假：09:00–18:00、480 分钟，中点 13:30，上下午各 240。同一工作日第二条请假即重复，不论上午下午。`halfDayLeaveHelper.ts:105-107`；重复查询 `findDuplicateAttendanceRequest`：`index.cjs:10575-10588`。
+- 加班规则：20→30，40→45，610→600。向上取整后再截每日上限。`applyOvertimeRule`：`index.cjs:11963-11977`。
+- 节假日工时：首日默认 8 小时写成 480。加班来源只产生警告，不加进这 480。`applyHolidayPolicy` 把 `workMinutes` 设成基准分钟：`index.cjs:12859-12888`；加班来源只 `warnings.push`：`index.cjs:12906-12909`。
+- 计薪：26 日至次月 25 日，锚点 2026-03-10 与 2026-03-26 两个窗口。`resolvePayrollWindow`：`index.cjs:8517-8528`。
+- 导入：默认表头与跳过原因（日期、工号映射、邮箱/用户名/手机号、两人匹配）。字段映射含工号：`index.cjs:813`；身份解析 `attendance-import-user-identity.cjs:75-98`。
+- 年假：满 8 年发 2400 分钟；累计工龄满年、2026-05-27 入职折成 3 天 1440 分钟；本单位工龄同年入职不满 12 个月跳过。`computeAnnualLeaveAccrualForUser`：`index.cjs:19993`。
 - 团队可用性、统计字段、排班范围、审批流补了权限和一条例子。
 - 常见问题增加员工情景：忘打卡、围栏外、班次不对、驳回后再交、换班、结果在哪看。
 
@@ -113,30 +116,30 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 ## 各节核验
 
-行号对应当前 `main` 上的源码（帮助改动之前的行为）。
+行号对本次合并 `origin/main`（`078b0ed68`）之后的当前树。2026-10-16 写下来、后来已经挪位的行，以下表和缺口清单已改成现位置。
 
 | 帮助文章 | 核对到的行为 | 代码 |
 | --- | --- | --- |
-| 快速入门 | 管理区块顺序；模板只预填；打卡顺序为轮班班次、个人排班、默认规则 | `useAttendanceAdminRail.ts:203-236`；`attendanceContextHelp.ts:162-169`；组类型文案 `AttendanceView.vue:11594-11614` |
-| 打卡 | `POST /api/attendance/punch` 需要 `attendance:write`；拒绝客户端时间；总览按钮为上班/下班打卡；不采集定位 | `index.cjs:30973-30979`；`AttendanceEmployeeWorkspace.vue:78-97`；`punchOutcome.ts:150-161` |
-| 打卡约束 | 同类间隔、IP、围栏、未排班仅 `block` 才拒绝、外勤备注 | `index.cjs:31244-31254`；`punchOutcome.ts:114-136`；设置表单 `AttendanceView.vue:2995-3054`、`3305-3364` |
-| 常用图标 | 管理员在设置保存四键；员工 `GET /api/attendance/employee-quick-action-icons` 只读；八个图标 id；默认 clock-plus / calendar / moon / swap | `index.cjs:13903-13926`、`52377-52385`；`attendanceEmployeeWorkspaceCommonIcons.ts:9-37`；`AttendanceEmployeeQuickActionIconsField.vue:1-6` |
-| 补卡 | 强约束默认关；自然月、自助申请人、自然日固定；额度与窗口；七个 `MAKEUP_PUNCH_*` 人话 | `AttendanceView.vue:2636-2794`；`index.cjs:14909-14968`；`makeupPunchRequestStatus.ts:35-111` |
-| 请假 | 全天/上午/下午按窗口中点；「需要审批」暂不生效；同日同类型重复；年假单日；调休编码 `comp_time` | `AttendanceEmployeeLeaveRequestCard.vue:9-11`；`attendanceApprovalOptionHint.ts:36-40`；`index.cjs:19911` |
-| 出差 | 独立卡片：目的地时区与当地起止；`POST /api/attendance/business-trip-requests` | `index.cjs:37792` |
-| 加班 | 最小/取整/每日上限；跨一个当地午夜可拆；多于一个午夜拒绝；加班银行不收法定节假日 | `index.cjs:12278`、`12345`；加班规则页 `AttendanceView.vue` 加班规则区块；银行说明见设置区加班银行文案 |
-| 换班 | 已发布单日常规班；对方先同意；专用路由 | `AttendanceEmployeeShiftSwapRequestCard.vue:28-40`；同意/拒绝 `index.cjs:39173-39179` |
-| 查看记录 | 「我的申请」是本人；报表三个数字是当前页；导出忽略本地列显隐，上限 5000 | 既有报表帮助与 `AttendanceView.vue:13722-13779` |
+| 快速入门 | 管理区块顺序；模板只预填；打卡顺序为轮班班次、个人排班、默认规则 | `useAttendanceAdminRail.ts:203-236`；`attendanceContextHelp.ts:162-169`；组类型 `AttendanceView.vue:11602`、自由工时文案 `11643-11647` |
+| 打卡 | `POST /api/attendance/punch` 需要 `attendance:write`；拒绝客户端时间；总览按钮为上班/下班打卡；不采集定位 | `index.cjs:30916-30922`；`AttendanceEmployeeWorkspace.vue:78-97`；`punchOutcome.ts:150-161` |
+| 打卡约束 | 同类间隔、IP、围栏在 `enforcePunchConstraints`；未排班仅 `mode === 'block'` 才拒绝；外勤备注 | `index.cjs:23208-23248`、`31186-31201`；`punchOutcome.ts:114-136`；设置表单 `AttendanceView.vue:3022-3056`，外勤照片勾选 `3341-3347` |
+| 常用图标 | 管理员在设置保存四键；员工 `GET /api/attendance/employee-quick-action-icons` 只读；八个图标 id；默认 clock-plus / calendar / moon / swap | 默认 `index.cjs:620-625`；id `13902-13911`；路由 `52387-52389`；`attendanceEmployeeWorkspaceCommonIcons.ts:9-37`；`AttendanceEmployeeQuickActionIconsField.vue:1-6` |
+| 补卡 | 强约束默认关；自然月、自助申请人、自然日固定；额度按工作日期周期；七个 `MAKEUP_PUNCH_*` 人话 | 默认 `index.cjs:542-563`；表单 `AttendanceView.vue:2642-2794` 与初值 `16980-16990`；强制 `index.cjs:14907-14966`；`makeupPunchRequestStatus.ts:35-111` |
+| 请假 | 全天/上午/下午按窗口中点；「需要审批」暂不生效；同日同类型重复；年假单日；调休编码 `comp_time` | `AttendanceEmployeeLeaveRequestCard.vue:9-11`；`attendanceApprovalOptionHint.ts:36-40`；年假跨日 `index.cjs:19909` |
+| 出差 | 独立卡片：目的地时区与当地起止；`POST /api/attendance/business-trip-requests` | `index.cjs:37735` |
+| 加班 | 最小/取整/每日上限；跨一个当地午夜可拆；多于一个午夜拒绝；加班银行不收法定节假日 | `applyOvertimeRule` `index.cjs:11963-11977`；午夜拆分 `12284-12310`；加班规则页 `AttendanceView.vue` 加班规则区块；银行说明见设置区加班银行文案 |
+| 换班 | 已发布单日常规班；对方先同意；专用路由 | `AttendanceEmployeeShiftSwapRequestCard.vue:28-40`；同意/拒绝 `index.cjs:39115-39122` |
+| 查看记录 | 「我的申请」是本人；报表三个数字是当前页；导出忽略本地列显隐，上限 5000。查看他人不看导出范围 | 导出上限 `index.cjs:52832-52833` 与 `AttendanceView.vue:22913`；查看他人见上文第 1 条 |
 | 班次 | 单段可排班；多段在「仅供预览」时不能分配/轮班/换班/调度/发布 | `AttendanceShiftSegmentsEditor.vue:114-126`；`AttendanceView.vue:28327-28331` |
-| 排班 | 草稿后发布；临时替班须再发布；高级排班与综合工时只读；合规阻断 `SHIFT_COMPLIANCE_CAP_EXCEEDED`；一天多班次默认关 | `index.cjs:19713-19724`、`427-431`；工作台 `readOnly` 见高级排班路由注释与页面「只读」文案 |
-| 排班范围 | 动作：查看、编辑、导入、导出、清空、审批、调度、提醒；无匹配范围 `SCHEDULER_SCOPE_FORBIDDEN` | `AttendanceView.vue:1988-1991`、`30932-30940`；`index.cjs:26484` |
-| 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47136`；既有考勤组帮助 |
+| 排班 | 草稿后发布；临时替班须再发布；高级排班与综合工时只读；合规阻断 `SHIFT_COMPLIANCE_CAP_EXCEEDED`；一天多班次默认关 | 合规应答 `index.cjs:19713-19724`，强制函数 `19665-19672`；一天多班次默认 `multiShiftDay.enabled: false`、`maxSlots: 3`（`index.cjs:449-454`）。`427-431` 现在是最小打卡间隔和排班编辑窗口，不是一天多班次 |
+| 排班范围 | 动作：查看、编辑、导入、导出、清空、审批、调度、提醒；无匹配范围 `SCHEDULER_SCOPE_FORBIDDEN`。导出动作不能查看他人报表 | 动作文案 `AttendanceView.vue:30891-30899`；拒绝 `index.cjs:26406-26413` |
+| 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47152-47158`；既有考勤组帮助 |
 | 请假类型 / 加班规则 | 「需要审批」只保存 | `attendanceApprovalOptionHint.ts:8-14` |
-| 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | `index.cjs:34744`、`24668-24672`、`24747-24751`；页面警告 `AttendanceView.vue:8034` |
-| 权限 | 五个键；三个模板不含单独的 import 键，导入路由接受 import 或 admin | `AttendanceView.vue:12797-12800` |
-| 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | `index.cjs:20401`；`AttendanceView.vue:26656`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
+| 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | 插入 `'pending'`：`index.cjs:34681-34694`；动态步骤抛出 `24412`；页面警告 `AttendanceView.vue:8065` |
+| 权限 | 五个键；三个模板不含 `attendance:import`，导入路由接受 import 或 admin | `AttendanceView.vue:12828-12832` |
+| 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | 抛出 `index.cjs:20399`；页面 `AttendanceView.vue:26773`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
 | 时区提示 | 默认规则缺失、冻结上下文、非法时区等固定人话 | `attendanceTimezoneError.ts:3-22` |
-| 导入 | 令牌字面量 `1`、10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | 既有导入帮助；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |
+| 导入 | 令牌只在 `ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'` 时要求，10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | `index.cjs:5967-5968`；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |
 | 节假日 / 计薪 / 统计字段 / 团队可用性 | 沿用已核过的原文，未改其结论 | 原 `attendanceAdminGuideContent.ts` 对应文章 |
 
 ## 测试
@@ -148,32 +151,38 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（88ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
 
-2026-11-10 更正后的本地结果写在该次提交说明和 PR 回复中（预期 1 个文件、8 个测试）。
+2026-11-10 按合并后的当前树重跑，均通过：
 
-`apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、8 个测试通过（221ms）。
+- `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts tests/attendanceAdminGuide.spec.ts --max-warnings=0`：退出码 0。`apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以这是对改动文件的直接检查；`pnpm --filter @metasheet/web lint` 同样退出码 0。
+- `pnpm --filter @metasheet/web type-check`（`vue-tsc -b`，以及 approval / stock-prep 两份 verification tsconfig）：退出码 0。
 
 ## 缺口清单
 
 下列能力在钉钉/飞书考勤帮助里常见。本仓库当前没有可按帮助步骤操作的同等行为，因此不写进用户帮助。
 
-1. Wi-Fi 打卡、蓝牙、考勤机、设备绑定、人脸识别。考勤组里的打卡方式说明写明这些控件要等独立后端契约（`AttendanceView.vue:5879`、`14907`）。现有约束是设置页的 IP 白名单和地理围栏。
-2. 网页总览采集 GPS 或在打卡按钮上上传照片。打卡请求不带定位和照片（`punchOutcome.ts:25-27`）。照片证据只对提交定位或外勤标记的客户端生效（`AttendanceView.vue:3337-3338`）。
+1. Wi-Fi 打卡、蓝牙、考勤机、设备绑定、人脸识别。考勤组里的打卡方式说明写明这些控件要等独立后端契约（`AttendanceView.vue:5883-5887`、`14916-14919`）。现有约束是设置页的 IP 白名单和地理围栏（`AttendanceView.vue:3022-3056`）。
+2. 网页总览采集 GPS 或在打卡按钮上上传照片。打卡请求不带定位和照片（`punchOutcome.ts:25-27`）。外勤照片勾选在设置页（`AttendanceView.vue:3341-3347`），不是总览打卡按钮。
 3. 考勤组上自选「地点 / Wi-Fi / 考勤机」打卡方式。该抽屉不是可编辑的打卡方式配置。
-4. 钉钉式自由工时：不排班、只按打卡时长算出勤。自由工时类型在界面上是人员和策略分组（`AttendanceView.vue:11609-11613`）。工作日解析要求非空 `shiftId`，`free_time` 无法提供已发布班次候选（`attendance-work-date-resolver.cjs:764-771`）。
+4. 钉钉式自由工时：不排班、只按打卡时长算出勤。自由工时类型在界面上是人员和策略分组（`AttendanceView.vue:11643-11647`）。工作日解析要求非空 `shiftId`，`free_time` 无法提供已发布班次候选（`attendance-work-date-resolver.cjs:764-771`）。
 5. 名为「外出申请」「外出打卡」「出差打卡」的独立流程。已有的是出差申请和外勤打卡审批。
 6. 请假类型或加班规则取消「需要审批」后免审。界面标明暂不生效（`attendanceApprovalOptionHint.ts:36-40`）。
 7. 管理端编辑假期「是否带薪」。字段在存储行上，请假类型表单没有这项。
 8. 服务端强制请假附件。页面会拦，创建请求只把链接写入 metadata。
 9. 按钟点检测请假时间段重叠。重复规则是同一人、同一工作日、同一申请类型已有待处理或已通过。
-10. 年假一次申请跨多个标准日扣减。审批侧单日，超出为 `ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED`（`index.cjs:19911`）。
+10. 年假一次申请跨多个标准日扣减。审批侧单日，超出为 `ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED`（`index.cjs:19909`）。
 11. 加班规则页上的分段开关。三类加班时长来自分段快照；本页只编辑最小、取整和每日上限。
-12. 未排班打卡「需审批」。设置归一化接受 `require_approval`（`index.cjs:15060`），打卡路径只在 `block` 时返回 `PUNCH_UNSCHEDULED_BLOCKED`（`index.cjs:31244-31254`）。
-13. 排班合规的「预警」拦截。该选项文案为预留；只有「保存时阻断」且填写了上限才会回滚。
-14. 自动对班的后台写入。默认关闭，且依赖额外运行开关。帮助不写开启步骤。
-15. 多段班次在权威分段核算未启用时进入排班。编辑器已提示仅供预览（`AttendanceShiftSegmentsEditor.vue:122-124`）。`SEGMENT_CALCULATION_IMPLEMENTED` 仍为 `false`（`attendance-shift-service.cjs:70`）。
+12. 未排班打卡「需审批」。设置归一化接受 `allow` / `block` / `require_approval`（`index.cjs:15057-15060`），缺省是 `DEFAULT_SETTINGS.punchPolicy.unscheduled.mode`，值为 `'allow'`（`index.cjs:445`）。打卡路径只在 `mode === 'block'` 时返回 `PUNCH_UNSCHEDULED_BLOCKED`（`index.cjs:31186-31201`）。`require_approval` 不会在这条路径上改成审批。
+13. 排班合规的「预警」拦截。`enforceShiftComplianceCap` 只在 `enforcement === 'block'` 且至少一个上限非空时继续（`index.cjs:19665-19672`）。默认 `enforcement` 已是 `'block'`，三个上限默认 `null`（`index.cjs:435-439`），所以未填上限时不回滚。`warn` 不进入这段强制。
+14. 自动对班的后台写入。帮助不写开启步骤。要真正写入，下面五处必须同时成立，缺一则 `runAttendanceAutoShiftAutoWriteOnce` 返回 `{ ran: false, reason: 'disabled' }`（`index.cjs:17461-17472`）：
+    - 组织设置 `autoShiftMatching.enabled` 默认 `false`，`mode` 默认 `'preview'`，`autoWrite.enabled` 默认 `false`（`index.cjs:581-594`）。写入还要求 `enabled === true`、`mode === 'auto'`、`autoWrite.enabled === true`。
+    - 运行开关 `ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED`：`isAutoShiftMatchingRuntimeEnabled` 用 `parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED, false)`（`index.cjs:16844-16846`）。`parseBoolean` 对字符串先 `trim().toLowerCase()`，`'true'`、`'1'`、`'yes'` 为真，缺省 `false`（`index.cjs:6526-6532`）。
+    - 运行开关 `ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED`：同样的 `parseBoolean(..., false)`（`index.cjs:16848-16850`）。
+    - 设置注释写明后台写入还要这两个环境开关（`index.cjs:27479-27480`）。这不是字面量 `=== 'true'`。
+15. 多段班次在权威分段核算未启用时进入排班。编辑器已提示仅供预览（`AttendanceShiftSegmentsEditor.vue:122-124`）。`SEGMENT_CALCULATION_IMPLEMENTED` 仍为 `false`（`plugins/plugin-attendance/lib/attendance-shift-service.cjs:56-70`）。同文件注释写明：插件里按环境变量决定参考写入的判断已经退役；这个常量只表示权威计算器尚未交付。`ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED` 仍被实时打卡的外层指纹路径读取（`index.cjs:31163-31164`），它不是把 `SEGMENT_CALCULATION_IMPLEMENTED` 设为真的开关。
 16. 员工在自助端改常用图标。设置页保存，总览只读四个键。
 17. 报表页的人员选择器。筛选是组织 ID 和用户 ID 文本框。
 18. 公式字段互相引用，以及 NOW、TODAY、查找函数、跨表单元格和脚本。统计字段帮助已写明禁用。
 19. 补卡周期除自然月以外的周期、按部门共享额度、按工作日计提交窗口。这三项在补卡策略上是固定说明。
 20. 哺乳假等特殊假种的单独时长规则。没有对应规则页，只是普通请假类型。
-21. 节假日「计入加班」把加班分钟叠加进当日工时。`applyHolidayPolicy` 把首日工时设成基准分钟，加班来源只追加警告（「节假日首日加班单叠加工时」或「节假日首日存在加班单但未提供加班工时」），不把加班分钟加进 `workMinutes`（`index.cjs:12852-12878`）。
+21. 节假日「计入加班」把加班分钟叠加进当日工时。`applyHolidayPolicy` 把 `workMinutes` 设成基准分钟（`index.cjs:12884-12888`），加班来源只追加警告（「节假日首日加班单叠加工时」或「节假日首日存在加班单但未提供加班工时」，`index.cjs:12906-12909`），不把加班分钟加进 `workMinutes`。
