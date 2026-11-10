@@ -12,9 +12,10 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 - 查看他人为真的条件只有 `canAccessOtherUsers`：`hasAttendanceAdminAccess` 或 `attendance:approve`。`hasAttendanceAdminAccess` 在 `RBAC_BYPASS === 'true'`、`user_roles.role_id = 'admin'`，或 `attendance:admin` 时为真（`plugins/plugin-attendance/index.cjs:24153-24158`、`24264-24268`、`24280-24283`）。
 - 下列读取在目标用户不是本人时只调用 `canAccessOtherUsers`，不调用 `assertAttendanceRecordExportAllowed`：`GET /api/attendance/records` 与 `GET /api/attendance/calendar`（同一处理函数，`index.cjs:31493-31523`、`31624-31634`）、`GET /api/attendance/summary`（`index.cjs:32634-32669`）、`GET /api/attendance/reports/requests`（`index.cjs:32702-32736`）。没有 `attendance:approve` / `attendance:admin`（以及上面的管理员绕过）时返回 403 `No access to other users`。
-- 导出是另一条路。`GET /api/attendance/export`（`index.cjs:52779-52828`）在目标不是本人时先查 `canAccessOtherUsers`。已有这项权限就直接导出，不再按排班「导出」范围过滤。没有这项权限时才回退到 `assertAttendanceRecordExportAllowed`（`index.cjs:26960-26975`）：排班范围的动作必须包含 `export`，并且覆盖该人与日期，否则 `SCHEDULER_SCOPE_FORBIDDEN`。因此「导出」范围既不是查看权限，也不是对已能查看他人的人再加一层导出限制；它只在缺少查看权限时决定导出接口能否下载范围内的人。
+- 普通记录导出是另一条路。`GET /api/attendance/export`（`index.cjs:52779-52828`）在目标不是本人时先查 `canAccessOtherUsers`。已有这项权限就直接导出，不再按排班「导出」范围过滤。没有这项权限时才回退到 `assertAttendanceRecordExportAllowed`（`index.cjs:26960-26975`，调用点 `52822`）：排班范围的动作必须包含 `export`，并且覆盖该人与日期，否则 `SCHEDULER_SCOPE_FORBIDDEN`。全文件只有这一处调用 `assertAttendanceRecordExportAllowed`。
+- 工资周期导出不走这个后备。`GET /api/attendance/payroll-cycles/:id/summary/export` 与 `GET /api/attendance/payroll-cycles/:id/export` 共用 `handlePayrollCycleSummaryExport`（`index.cjs:46747-46776`、路由 `46824-46834`）。目标不是本人时只调用 `canAccessOtherUsers`，不允许就 403 `No access to other users`，不调用 `assertAttendanceRecordExportAllowed`。
 
-已改正：`reports`（含 FAQ）、`records`、`scopes`、`permissions`。删除了「或包含导出的排班范围」「它只限制能导出哪些人的行」这类把导出范围写成查看权限或写成普遍导出过滤器的句子。
+已改正：`reports`（含 FAQ）、`records`、`scopes`、`permissions`。中文统一为：排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。
 
 ### 2. 旧工作日的补卡额度不因提交到下个月而恢复
 
@@ -136,7 +137,7 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 | 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47152-47158`；既有考勤组帮助 |
 | 请假类型 / 加班规则 | 「需要审批」只保存 | `attendanceApprovalOptionHint.ts:8-14` |
 | 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | 插入 `'pending'`：`index.cjs:34681-34694`；动态步骤抛出 `24412`；页面警告 `AttendanceView.vue:8065` |
-| 权限 | 五个键；三个模板不含 `attendance:import`，导入路由接受 import 或 admin | `AttendanceView.vue:12828-12832` |
+| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。旧的直接授权回退清单不含 `attendance:import` | 模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；下拉 `AttendanceView.vue:3834-3836`；回退清单 `12828-12832` |
 | 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | 抛出 `index.cjs:20399`；页面 `AttendanceView.vue:26773`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
 | 时区提示 | 默认规则缺失、冻结上下文、非法时区等固定人话 | `attendanceTimezoneError.ts:3-22` |
 | 导入 | 令牌只在 `ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'` 时要求，10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | `index.cjs:5967-5968`；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |
@@ -158,6 +159,8 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 - `pnpm --filter @metasheet/web type-check`（`vue-tsc -b`，以及 approval / stock-prep 两份 verification tsconfig）：退出码 0。
 
 合并 `a6fbdca73`（#6838）之后又跑了同一组命令。行号没有变化。规格 8 个测试通过（153ms）；对改动文件的 eslint、`pnpm --filter @metasheet/web lint`、`pnpm --filter @metasheet/web type-check` 退出码都是 0。
+
+拉取 GitHub update-branch 后的 `5ebac5e64` 之后，只改了导出范围说明和管理员模板清单。规格 8 个测试通过（163ms）；对改动文件的 eslint、`pnpm --filter @metasheet/web lint`、`pnpm --filter @metasheet/web type-check` 退出码都是 0。
 
 ## 缺口清单
 

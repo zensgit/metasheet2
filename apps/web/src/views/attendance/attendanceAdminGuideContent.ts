@@ -576,7 +576,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Who can open Reports', '前提条件/权限'],
-        detail: ['attendance:read opens your own rows. Viewing another person’s user id needs attendance:approve or attendance:admin. Report, record, and summary reads do not consult a scheduler export scope. Without those two permissions, export scope only decides whether the export can download covered people; it does not open their rows in Reports. Someone who can already view others is not filtered by export scope on download. See 权限说明.', 'attendance:read 打开自己的行。要查看别人的用户 ID，需要 attendance:approve 或 attendance:admin。报表、记录和汇总的读取不看排班「导出」范围。没有这两项权限时，「导出」只决定能否下载范围内人员的记录，不能在报表里打开对方。已经能查看他人的人，导出时不再按「导出」范围过滤。见「权限说明」。'],
+        detail: ['attendance:read opens your own rows. Viewing another person’s user id needs attendance:approve or attendance:admin. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. See 权限说明.', 'attendance:read 打开自己的行。要查看别人的用户 ID，需要 attendance:approve 或 attendance:admin。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。见「权限说明」。'],
       },
       {
         path: ['Watch-outs', '注意事项'],
@@ -589,7 +589,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     ],
     faqs: [{
       q: ['Does export scope let me view someone else’s report?', '有「导出范围」就可以查看他人报表吗？'],
-      a: ['No. Viewing another person’s rows needs attendance:approve or attendance:admin. Those reads do not consult export scope. Without those permissions, export scope only decides whether the export can download covered people. It does not open their report rows. Someone who can already view others is not filtered by export scope when exporting.', '不可以。查看他人的行需要 attendance:approve 或 attendance:admin。这些读取不看「导出范围」。没有这两项权限时，它只决定能否下载范围内的人，不能打开对方的报表。已经能查看他人的人，导出时不再按它过滤。'],
+      a: ['No. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. Viewing another person still needs attendance:approve or attendance:admin.', '不可以。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。查看他人仍需要 attendance:approve 或 attendance:admin。'],
     }, {
       q: ['I hid a column. Why is it still in the CSV?', '我藏了一列，为什么 CSV 里还有？'],
       a: ['The table is a local view. The export is the server dataset for the range and filters. Restore default only resets the columns in this browser. The file can include up to 5000 rows for that range.', '表格是本机视图。导出是该区间和筛选条件下的服务端数据集。「恢复默认」只重置这台浏览器里的显示字段。该区间的文件最多包含 5000 行。'],
@@ -962,7 +962,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Reports → date range → reload', '报表 → 日期区间 → 重载'],
-        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Viewing another person’s rows needs attendance:approve or attendance:admin. Export scope is not part of that check. Without those two permissions, it only decides whether covered people’s records can be downloaded; it does not open their rows in Reports. Someone who can already view others is not filtered by export scope on download. Change the dates and reload before export; a stale filter blocks the file.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。查看其他人需要 attendance:approve 或 attendance:admin。排班「导出」不参与这项查看。没有这两项权限时，它只决定能否下载范围内人员的记录，不能在报表里打开对方。已经能查看他人的人，导出时不再按「导出」范围过滤。改了日期要先重载再导出；筛选过期时导出会被拦住。'],
+        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Viewing another person’s rows needs attendance:approve or attendance:admin. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. Change the dates and reload before export; a stale filter blocks the file.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。查看其他人需要 attendance:approve 或 attendance:admin。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。改了日期要先重载再导出；筛选过期时导出会被拦住。'],
       },
     ],
     faqs: [{
@@ -1091,7 +1091,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Which action covers which job', '哪个动作对应哪类操作'],
-        detail: ['Dispatch covers shift assignments, rotation assignments, publish, schedule-group membership, and fixed-schedule apply. Edit covers schedule-group details. Rebuild of a fixed schedule also needs clear. View filters the assignment list. The export action does not grant viewing others’ reports. Viewing still needs attendance:approve or attendance:admin, and report reads do not consult this scope. Without those two permissions, export only decides whether covered people’s records can be downloaded. Someone who can already view others is not filtered by export scope on download. A missing match returns SCHEDULER_SCOPE_FORBIDDEN.', '调度覆盖排班分配、轮班分配、发布、排班组成员，以及固定排班的应用。编辑覆盖排班组资料。重建固定排班还要清空。查看用来过滤排班列表。「导出」不能代替查看他人报表所需的权限。查看他人仍需要 attendance:approve 或 attendance:admin，报表读取不看这个范围。没有这两项权限时，「导出」只决定能否下载范围内人员的记录。已经能查看他人的人，导出时不再按「导出」范围过滤。没有匹配的有效范围时返回 SCHEDULER_SCOPE_FORBIDDEN。'],
+        detail: ['Dispatch covers shift assignments, rotation assignments, publish, schedule-group membership, and fixed-schedule apply. Edit covers schedule-group details. Rebuild of a fixed schedule also needs clear. View filters the assignment list. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. Viewing still needs attendance:approve or attendance:admin. A missing match returns SCHEDULER_SCOPE_FORBIDDEN.', '调度覆盖排班分配、轮班分配、发布、排班组成员，以及固定排班的应用。编辑覆盖排班组资料。重建固定排班还要清空。查看用来过滤排班列表。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。查看他人仍需要 attendance:approve 或 attendance:admin。没有匹配的有效范围时返回 SCHEDULER_SCOPE_FORBIDDEN。'],
       },
       {
         path: ['Who can create a scope', '前提条件/权限'],
@@ -1356,8 +1356,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelZh: '权限说明',
     sectionId: 'attendance-admin-user-access',
     intro: [[
-      'Attendance uses five permission keys. attendance:read views records, rules, one’s own balances, and reports. attendance:write punches and files or cancels one’s own requests. attendance:approve approves and can read other people’s records. attendance:import runs import and batches. attendance:admin manages settings, shifts, groups, rules, report fields, and annual-leave operations. A platform administrator bypasses these checks. A scheduler export scope cannot replace attendance:approve or attendance:admin for viewing others’ reports. Report reads do not consult it. Without view permission, it only decides whether covered people can be downloaded; someone who can already view others is not filtered by it on export.',
-      '考勤使用五类权限。attendance:read 查看记录、规则、本人余额和报表。attendance:write 打卡，以及提交或取消自己的申请。attendance:approve 审批，并可以查看他人记录。attendance:import 执行导入和批次。attendance:admin 管理设置、班次、考勤组、规则、统计字段和年假操作。平台管理员绕过这些检查。排班范围里的「导出」不能代替 attendance:approve 或 attendance:admin 来查看他人报表。报表读取不看这个范围。没有查看权限时，它只决定能否下载范围内的人；已经能查看他人的人，导出时不再按它过滤。',
+      'Attendance uses five permission keys. attendance:read views records, rules, one’s own balances, and reports. attendance:write punches and files or cancels one’s own requests. attendance:approve approves and can read other people’s records. attendance:import runs import and batches. attendance:admin manages settings, shifts, groups, rules, report fields, and annual-leave operations. A platform administrator bypasses these checks. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback.',
+      '考勤使用五类权限。attendance:read 查看记录、规则、本人余额和报表。attendance:write 打卡，以及提交或取消自己的申请。attendance:approve 审批，并可以查看他人记录。attendance:import 执行导入和批次。attendance:admin 管理设置、班次、考勤组、规则、统计字段和年假操作。平台管理员绕过这些检查。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。',
     ]],
     scenarios: [[
       'Grant an employee the ability to punch, an approver the ability to decide requests, or an administrator the settings pages.',
@@ -1366,7 +1366,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Admin → User access', '管理 → 用户权限'],
-        detail: ['Search by email, name, or id, select the person, and assign a role template. Employee is read plus write. Approver is read plus approve. Administrator is read, write, approve, and admin. Remove role takes the template back. Batch provisioning applies the same templates to many people.', '按邮箱、姓名或 ID 搜索，选中人员，再分配角色模板。员工是读加写。审批人是读加审批。管理员是读、写、审批和管理。移除角色收回该模板。批量授权用同一套模板处理多人。'],
+        detail: ['Search by email, name, or id, select the person, and assign a role template. Employee is read plus write. Approver is read plus approve. Administrator is read, write, approve, import, and admin: attendance:read, attendance:write, attendance:approve, attendance:import, and attendance:admin. Remove role takes the template back. Batch provisioning applies the same templates to many people.', '按邮箱、姓名或 ID 搜索，选中人员，再分配角色模板。员工是读加写。审批人是读加审批。管理员是读、写、审批、导入和管理，即 attendance:read、attendance:write、attendance:approve、attendance:import、attendance:admin。移除角色收回该模板。批量授权用同一套模板处理多人。'],
       },
       {
         path: ['Group owners and scheduler scopes sit beside these keys', '考勤组负责人和排班范围在这些权限旁边'],
@@ -1384,7 +1384,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     figureRows: [
       ['Employee: read + write', '员工：读 + 写'],
       ['Approver: read + approve', '审批人：读 + 审批'],
-      ['Administrator: read + write + approve + admin', '管理员：读 + 写 + 审批 + 管理'],
+      ['Administrator: read + write + approve + import + admin', '管理员：读 + 写 + 审批 + 导入 + 管理'],
     ],
   },
   {
