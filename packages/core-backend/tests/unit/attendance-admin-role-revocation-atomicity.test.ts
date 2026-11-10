@@ -1,6 +1,9 @@
 /**
  * A1: attendance-admin single and batch unassign must take the namespace-admission
  * subject lock and write the revoke witness on that same transaction client.
+ * The role row is shared first. The actor and every target then take admission
+ * locks and user-row locks, sorted. Platform authority is re-read from that
+ * locked row and from user_roles. A token claim is not authority.
  *
  * Every case invokes the registered route handler. Source text is not the oracle.
  * Database and session state are doubles; the real lock and witness helpers run.
@@ -66,8 +69,12 @@ type RouteCall = {
   events: string[]
   lockKeys: string[]
   roleLockIds: string[]
+  /** `users.id` values locked `FOR UPDATE`, in the order the handler took them. */
+  userLockIds: string[]
   witnessParams: unknown[][]
   namespaceRoleIds: unknown[]
+  /** True when that resolve used `FOR SHARE OF u` after the role and admission locks. */
+  resolveLocked: boolean[]
   poolSql: string[]
   committed: boolean
 }
@@ -128,16 +135,24 @@ function invokeHandler(
 }
 
 function installTransaction(options: {
-  targets?: 'present' | 'missing'
+  targets?: 'present' | 'missing' | 'missing-after-lock'
   failOn?: 'delete' | 'witness'
   failError?: Error
+  /**
+   * What the locked user row and `user_roles` say about the actor.
+   * Preflight (`isAdmin` / the token) is independent of this.
+   */
+  actorAuthority?: 'platform-admin' | 'revoked'
 } = {}): RouteCall {
+  const actorIsPlatformAdmin = options.actorAuthority !== 'revoked'
   const call: RouteCall = {
     events: [],
     lockKeys: [],
     roleLockIds: [],
+    userLockIds: [],
     witnessParams: [],
     namespaceRoleIds: [],
+    resolveLocked: [],
     poolSql: [],
     committed: false,
   }
@@ -156,10 +171,11 @@ function installTransaction(options: {
     if (/FOR UPDATE/.test(text) && /FROM users/.test(text)) {
       call.events.push('user-lock')
       const id = String(params?.[0] ?? '')
+      call.userLockIds.push(id)
       return {
         rows: [{
           id,
-          role: id === ACTOR_ID ? 'admin' : 'user',
+          role: id === ACTOR_ID && actorIsPlatformAdmin ? 'admin' : 'user',
           activation_status: 'activated',
           is_active: true,
           access_generation: 0,
@@ -174,9 +190,10 @@ function installTransaction(options: {
     if (/SELECT role_id/.test(text) && /FROM user_roles/.test(text)) {
       call.events.push('actor-roles')
       const id = String(params?.[0] ?? '')
+      const holdsAdmin = id === ACTOR_ID && actorIsPlatformAdmin
       return {
-        rows: id === ACTOR_ID ? [{ role_id: 'admin' }] : [],
-        rowCount: id === ACTOR_ID ? 1 : 0,
+        rows: holdsAdmin ? [{ role_id: 'admin' }] : [],
+        rowCount: holdsAdmin ? 1 : 0,
       }
     }
     if (/DELETE FROM user_roles/.test(text)) {
@@ -205,8 +222,12 @@ function installTransaction(options: {
       return { rows: [{ ok: 1 }], rowCount: 1 }
     }
     if (/u\.id = ANY\(\$1::text\[\]\)/.test(text)) {
+      const lockedResolve = /FOR SHARE OF u/.test(text)
       call.events.push('resolve-targets')
-      if (options.targets === 'missing') return { rows: [], rowCount: 0 }
+      call.resolveLocked.push(lockedResolve)
+      if (options.targets === 'missing' || (options.targets === 'missing-after-lock' && lockedResolve)) {
+        return { rows: [], rowCount: 0 }
+      }
       const ids = Array.isArray(params?.[0]) ? params[0] as string[] : []
       return {
         rows: ids.map((id) => ({
@@ -294,6 +315,14 @@ const entries = [
     failureCode: 'BATCH_ROLE_UNASSIGN_FAILED',
   },
 ] as const
+
+/** Actor plus targets, in the sorted order both admission locks and user-row locks use. */
+function lockedWriteSubjectIds(name: 'single' | 'batch'): string[] {
+  const ids = name === 'single'
+    ? [ACTOR_ID, SINGLE_USER_ID]
+    : [ACTOR_ID, ...BATCH_SORTED_ORDER]
+  return [...ids].sort()
+}
 
 beforeEach(() => {
   pgMocks.query.mockReset()
@@ -386,6 +415,83 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
   })
 })
 
+describe('attendance-admin unassign rechecks the locked actor and targets after the role share', () => {
+  it.each(entries)('$name refuses a target lost after preflight without DELETE or witness', async (entry) => {
+    const call = installTransaction({ targets: 'missing-after-lock' })
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), entry.path, {
+      params: entry.params,
+      query: { scope: 'global' },
+      body: entry.body,
+    }, res)
+
+    const subjects = lockedWriteSubjectIds(entry.name)
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
+    expect(call.events).toEqual([
+      'begin',
+      'resolve-targets',
+      'role-lock',
+      ...subjects.map(() => 'lock'),
+      ...subjects.map(() => 'user-lock'),
+      'actor-roles',
+      'resolve-targets',
+      'rollback',
+    ])
+    expect(call.resolveLocked).toEqual([false, true])
+    expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
+    expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
+    expect(call.events.indexOf('actor-roles')).toBeLessThan(call.events.lastIndexOf('resolve-targets'))
+    expect(call.roleLockIds).toEqual(['attendance_employee'])
+    expect(call.lockKeys).toEqual(subjects.map((id) => `namespace-admission:${id}`))
+    expect(call.userLockIds).toEqual(subjects)
+    expect(call.witnessParams).toEqual([])
+    expect(call.committed).toBe(false)
+    expect(call.events).not.toContain('delete')
+  })
+
+  it.each(entries)('$name refuses an actor whose locked row lost platform authority, without DELETE or witness', async (entry) => {
+    const call = installTransaction({ actorAuthority: 'revoked' })
+    // Preflight still sees an administrator. The token does not, and the second
+    // scope read would too. The refusal has to come from the locked row.
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), entry.path, {
+      params: entry.params,
+      query: { scope: 'global' },
+      body: entry.body,
+      user: { id: ACTOR_ID, role: 'user' } as Request['user'],
+    }, res)
+
+    const subjects = lockedWriteSubjectIds(entry.name)
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(call.events).toEqual([
+      'begin',
+      'resolve-targets',
+      'role-lock',
+      ...subjects.map(() => 'lock'),
+      ...subjects.map(() => 'user-lock'),
+      'actor-roles',
+      'rollback',
+    ])
+    expect(call.resolveLocked).toEqual([false])
+    expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
+    expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
+    expect(call.roleLockIds).toEqual(['attendance_employee'])
+    expect(call.lockKeys).toEqual(subjects.map((id) => `namespace-admission:${id}`))
+    expect(call.userLockIds).toEqual(subjects)
+    expect(rbacServiceMocks.isAdmin).toHaveBeenCalledTimes(1)
+    expect(rbacServiceMocks.isAdmin).toHaveBeenCalledWith(ACTOR_ID, expect.any(Function))
+    expect(call.witnessParams).toEqual([])
+    expect(call.committed).toBe(false)
+    expect(call.events).not.toContain('delete')
+    expect(call.events).not.toContain('witness')
+  })
+})
+
 describe('attendance-admin unassign lock, DELETE and witness share one transaction client', () => {
   it('single unassign orders begin, lock, DELETE, witness and commit on the transaction client', async () => {
     const call = installTransaction()
@@ -432,6 +538,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       `namespace-admission:${ACTOR_ID}`,
       `namespace-admission:${SINGLE_USER_ID}`,
     ])
+    expect(call.userLockIds).toEqual([ACTOR_ID, SINGLE_USER_ID])
     expect(call.namespaceRoleIds).toEqual(['attendance_employee'])
     expect(call.witnessParams).toEqual([
       [SINGLE_USER_ID, 'attendance', 'role_unassigned', ACTOR_ID, false],
@@ -495,6 +602,7 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
     expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.lastIndexOf('user-lock'))
     expect(call.lockKeys).toEqual([ACTOR_ID, ...BATCH_SORTED_ORDER].map((id) => `namespace-admission:${id}`))
+    expect(call.userLockIds).toEqual([ACTOR_ID, ...BATCH_SORTED_ORDER])
     expect(call.namespaceRoleIds).toEqual([
       'attendance_employee',
       'attendance_employee',
