@@ -159,6 +159,7 @@ describe('plm-workbench write routes redact the provider error text (values-free
   let errorLog: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
     dispatchMocks.dispatchOperation.mockReset()

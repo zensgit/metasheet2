@@ -116,6 +116,7 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
   app.use(plmWorkbenchRouter)
 
   beforeEach(() => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
     pgMocks.query.mockReset()
@@ -197,6 +198,24 @@ describe('controlled BOM write-back is audited in MetaSheet', () => {
     expect(res.body).toEqual(LINE_NATIVE)
     expect(dispatchMocks.dispatchOperation).toHaveBeenCalledTimes(1)
     expect(updateBomMultitableLine).not.toHaveBeenCalled()
+  })
+
+  it('a disabled personal-write package writes no audit and does not dispatch', async () => {
+    delete process.env.PLM_PERSONAL_BOM_WRITE_ENABLED
+    const updateBomMultitableLine = vi.fn()
+    const requestBomEcoRevisionIntent = vi.fn()
+    dsMocks.getDataSource.mockReturnValueOnce(writeAdapter(updateBomMultitableLine))
+    const line = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'off-1').send({ quantity: 5 })
+    dsMocks.getDataSource.mockReturnValueOnce(intentAdapter(requestBomEcoRevisionIntent))
+    const eco = await request(pinned.url()).post(INTENT_URL).set('Idempotency-Key', 'off-eco')
+    for (const res of [line, eco]) {
+      expect(res.status).toBe(404)
+      expect(res.body.code).toBe('PLM_BOM_WRITE_DISABLED')
+    }
+    expect(auditRows()).toEqual([])
+    expect(dispatchMocks.dispatchOperation).not.toHaveBeenCalled()
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
   })
 
   it('requests refused before dispatch (missing key, unentitled, invalid patch) write no audit row', async () => {

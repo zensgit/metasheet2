@@ -115,6 +115,7 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
   app.use(plmWorkbenchRouter)
 
   beforeEach(() => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
     dispatchMocks.dispatchOperation.mockReset()
@@ -579,6 +580,7 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
   app.use(plmWorkbenchRouter)
 
   beforeEach(() => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
     dispatchMocks.dispatchOperation.mockReset()

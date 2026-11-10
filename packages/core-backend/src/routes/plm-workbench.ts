@@ -46,6 +46,10 @@ import {
   rejectPersonalBomWriteCredential,
   relayPersonalBomWriteFailure,
 } from '../services/plm-personal-bom-write-http'
+import {
+  isPlmPersonalBomWriteEnabled,
+  PlmPersonalBomWriteError,
+} from '../services/plm-personal-bom-write-wire'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -950,6 +954,18 @@ async function recordPlmWritebackOutcome(params: {
   }
 }
 
+function refusePersonalBomWriteWhenDisabled(
+  res: Response,
+  dataSourceId: string,
+  kind: 'line' | 'eco-intent',
+): boolean {
+  if (isPlmPersonalBomWriteEnabled()) return false
+  const relayed = relayPersonalBomWriteFailure(new PlmPersonalBomWriteError(404, 'PLM_BOM_WRITE_DISABLED'), kind)
+  const message = kind === 'line' ? PLM_BOM_WRITEBACK_FAILED_MESSAGE : PLM_ECO_INTENT_FAILED_MESSAGE
+  res.status(relayed.status).json(bomWriteErrorBody(message, dataSourceId, relayed))
+  return true
+}
+
 function writebackAuditUnavailable(res: Response, dataSourceId: string) {
   return res.status(503).json({
     error: 'BOM write-back audit unavailable',
@@ -1163,6 +1179,7 @@ router.patch(
       logBomWriteFailure('BOM write-back failed', error)
       return res.status(relayed.status).json(bomWriteErrorBody(PLM_BOM_WRITEBACK_FAILED_MESSAGE, dataSourceId, relayed))
     }
+    if (refusePersonalBomWriteWhenDisabled(res, dataSourceId, 'line')) return
     const actorId = actor.userId
     const attemptId = randomUUID()
     try {
@@ -1304,6 +1321,7 @@ router.post(
       logBomWriteFailure('ECO revision intent failed', error)
       return res.status(relayed.status).json(bomWriteErrorBody(PLM_ECO_INTENT_FAILED_MESSAGE, dataSourceId, relayed))
     }
+    if (refusePersonalBomWriteWhenDisabled(res, dataSourceId, 'eco-intent')) return
     const actorId = actor.userId
     const attemptId = randomUUID()
     try {

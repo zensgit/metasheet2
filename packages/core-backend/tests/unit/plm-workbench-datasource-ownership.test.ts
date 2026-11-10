@@ -204,6 +204,7 @@ describe('plm-workbench data-source routes enforce per-user ownership', () => {
   app.use(plmWorkbenchRouter)
 
   beforeEach(async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     pinned.setApp(app)
     authRef.user = { id: OWNER, tenantId: 'tenant-a', role: 'admin' }
     managerRef.current = await buildManager([{ id: PROBE_ID, owner: OWNER }])

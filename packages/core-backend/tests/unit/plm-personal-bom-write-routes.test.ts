@@ -220,6 +220,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('dispatches both writes for the owner and ignores the header tenant and admin role', async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     const adapter = writeSource()
     const line = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').set('x-tenant-id', 'forged-header').send({ quantity: 5 })
     dispatchOperation.mockResolvedValueOnce({ native: ECO_NATIVE })
@@ -250,6 +251,7 @@ describe('personal BOM write routes and owner binding management', () => {
     ['line', 401, 'patch' as const, WRITE_URL, 'PLM_BOM_WRITEBACK_FAILED', PLM_BOM_WRITEBACK_FAILED_MESSAGE],
     ['eco-intent', 401, 'post' as const, INTENT_URL, 'PLM_ECO_INTENT_FAILED', PLM_ECO_INTENT_FAILED_MESSAGE],
   ])('native refusal on %s (%s) keeps provider-rejected and marks the operation as possibly applied', async (_kind, status, method, url, code, message) => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     const adapter = writeSource()
     dispatchOperation.mockRejectedValueOnce(
       new PlmPersonalBomWriteError(status, status === 401 ? 'PLM_BOM_WRITE_UNAUTHORIZED' : 'PLM_BOM_WRITE_FORBIDDEN', { message: 'native applied already' }, true),
@@ -301,7 +303,8 @@ describe('personal BOM write routes and owner binding management', () => {
     expect(provider).not.toHaveBeenCalled()
     expect(adapter.updateBomMultitableLine).not.toHaveBeenCalled()
     expect(adapter.requestBomEcoRevisionIntent).not.toHaveBeenCalled()
-    expect(pgMocks.query).toHaveBeenCalled()
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(dispatchOperation).not.toHaveBeenCalled()
   })
 
   it('literal true reaches dispatch and still does not call the shared adapter', async () => {
@@ -338,6 +341,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('attempt audit failure dispatches zero times', async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     pgMocks.query.mockRejectedValue(new Error('audit down'))
     writeSource()
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').send({ quantity: 5 })
@@ -347,6 +351,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('outcome audit failure keeps the committed native success', async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     pgMocks.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockRejectedValueOnce(new Error('audit lost'))
     writeSource()
     const res = await request(pinned.url()).patch(WRITE_URL).set('Idempotency-Key', 'submit-1').send({ quantity: 5 })
@@ -356,6 +361,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('distinguishes a local frozen 409 from native 409 and 412', async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     writeSource()
     dispatchOperation.mockRejectedValueOnce(
       new PlmPersonalBomWriteError(409, 'PLM_BOM_WRITE_CONFLICT', { code: 'lifecycle_locked' }, false),
@@ -399,6 +405,7 @@ describe('personal BOM write routes and owner binding management', () => {
   })
 
   it('uses explicit null only for an absent verified claim', async () => {
+    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED = 'true'
     writeSource()
     authRef.claim = { kind: 'absent' }
     authRef.tenant = undefined
