@@ -421,6 +421,12 @@ export default defineConfig({
       // plugin-tests-parallel-contract.test.mjs and
       // directory-deprovision-provider-scope-ci-wiring.test.mjs).
       'tests/integration/directory-departure-vouching.db.test.ts',
+      // Real PostgreSQL x local HTTP harness feasibility for the Feishu integration: a database
+      // transaction stays open while the Feishu transport talks to the local mock server, and nothing
+      // leaves the loopback. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it,
+      // and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs and tests/unit/feishu-mock-harness-smoke-wiring.test.ts).
+      'tests/integration/feishu-mock-harness-smoke.db.test.ts',
       // History readability of a retired directory integration against real PostgreSQL: every
       // reader that serves history returns its rows through its own read function or route.
       // DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot
