@@ -3679,6 +3679,7 @@ describe('admin-users routes', () => {
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
     pgMocks.query
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -3694,6 +3695,7 @@ describe('admin-users routes', () => {
           updated_at: '2026-03-12T00:00:00.000Z',
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'admin' }] })
       .mockResolvedValueOnce({ rows: [{ is_sign_in_admin: false }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -3740,23 +3742,29 @@ describe('admin-users routes', () => {
 
   it('refuses to disable the last sign-in platform admin', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       const text = String(sql)
       if (text.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: true }] }
       if (text.includes('COUNT(*)')) return { rows: [{ c: 0 }] }
       if (text.includes('FOR UPDATE')) {
+        const id = String(params?.[0] ?? 'admin-2')
         return {
           rows: [{
-            id: 'admin-2',
+            id,
             email: 'other@example.com',
             name: '另一位',
             role: 'admin',
             is_active: true,
             activation_status: 'activated',
             access_generation: 0,
+            deleted_at: null,
+            purged_at: null,
             is_admin: true,
           }],
         }
+      }
+      if (text.includes('FROM user_roles') && text.includes('role_id')) {
+        return { rows: [{ role_id: 'admin' }] }
       }
       return { rows: [] }
     })
@@ -5467,9 +5475,9 @@ describe('admin-users remaining recovery-authority-busy writer sites', () => {
 
   it('[recovery-census:admin-users:status] status update: busy lease inside the access-graph lock transaction → retryable 409', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
-    // The transaction mock runs its handler against pgMocks.query; the FIRST in-txn
-    // query is lockUsersForAccessGraphWrite's FOR UPDATE read — the realistic point for
-    // the marker 40001 while recovery holds the per-subject lease.
+    // The transaction mock runs its handler against pgMocks.query. Disabling takes the
+    // platform-admin advisory lock first; a marker on that statement is still the
+    // retryable 409 for this access-graph transaction.
     pgMocks.query.mockImplementationOnce(async () => {
       throw recoveryBusyError()
     })
