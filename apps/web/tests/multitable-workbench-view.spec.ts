@@ -744,6 +744,32 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'patch-record-status',
         ),
+        // An attachment write names the record it was made on (the third argument): it can end after the
+        // drawer moved to another record. One button per named record.
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_title', 'Stale title', 'rec_1'),
+          },
+          'patch-stale',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_2',
+            onClick: () => this.$emit('patch', 'fld_title', 'Named title', 'rec_2'),
+          },
+          'patch-named',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_remote',
+            onClick: () => this.$emit('patch', 'fld_files', ['att_2'], 'rec_remote'),
+          },
+          'patch-remote-files',
+        ),
         h(
           'button',
           {
@@ -5507,6 +5533,123 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
     })
 
+    // --- a patch that names its record (an attachment write that ended after the drawer moved on) ---
+
+    async function openRec1ThenRec2() {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+    async function patchFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-record-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a patch naming rec_1 while rec_2 is shown goes to rec_1, with rec_1\'s own version, and never to rec_2', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].version = 7 // rec_1 moved on; rec_2 stays at 1
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7)
+      expect(gridMock.patchCell.mock.calls.some((call: unknown[]) => call[0] === 'rec_2')).toBe(false)
+    })
+
+    it('the edit gate is asked about the named record: rec_1 refused while rec_2 is editable → no patch, the edit-blocked toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rowActionOverrides.value = { rec_1: { canEdit: false, canDelete: false, canComment: false } }
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.') // wb('toast.recordEditBlocked', en)
+      expect(gridMock.resolveRowActions).toHaveBeenCalledWith('rec_1')
+    })
+
+    it('a patch naming the record shown (rec_2) is a plain drawer patch: rec_2 at its version, success toast, and it clears the field\'s inline error', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      gridMock.patchCell.mockClear()
+      acceptNextPatch()
+      await patchFor('rec_2')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1)
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a patch naming a record that is neither in the page nor deep-linked is dropped: no patch, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value = gridMock.rows.value.filter((row: { id: string }) => row.id !== 'rec_1')
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('a named rec_1 patch that succeeds after the switch leaves rec_2\'s inline error on the same field alone', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+    })
+
+    // Two answers from the inspector: the real one (it can anchor only on the record it shows), and one that
+    // would anchor anything, so the toast cannot come only from the inspector's answer.
+    it.each([
+      ['answers per record', (recordId: string) => recordId === 'rec_2'],
+      ['would anchor anything', () => true],
+    ])('a named rec_1 patch rejected after the switch (inspector %s) toasts and is never written inline on rec_2', async (_label, answer) => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation(answer)
+      rejectNextPatch('Stale title rejected', { status: 400, code: 'VALIDATION_ERROR' }) // the failure is rec_1's
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Stale title rejected')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      gridMock.error.value = null
+    })
+
+    it('an attachment delete on a deep-linked record ends after the drawer moved on: the linked copy still takes the new version, and its later patch carries it', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: ['att_1', 'att_2'] } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'a.txt' }, { id: 'att_2', filename: 'b.txt' }] },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_1')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      // version 4, plus one for the delete that ended while rec_2 was shown
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
 
     it('field-routed rejection the inspector CANNOT anchor (attachments tab / hidden field) → toast with the server message, NO entry written', async () => {
@@ -6828,6 +6971,32 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('')
         gridMock.error.value = null
+      })
+
+      // A patch that names a record the drawer no longer shows (an attachment write that ended after a switch)
+      // is not a commit of the controls now on screen: the typing on the record shown stays undoable. The
+      // patch of the record shown (no record named, or the shown one named) still ends it.
+      it.each([
+        ['names rec_1, no longer shown', '[data-patch-record-for="rec_1"]', ['rec_1', 'fld_title', 'Stale title', 1], ''],
+        ['names no record (the one shown)', '[data-patch-record="fld_title"]', ['rec_2', 'fld_title', 'Patched title', 1], 'typed on B'],
+        ['names rec_2, the one shown', '[data-patch-record-for="rec_2"]', ['rec_2', 'fld_title', 'Named title', 1], 'typed on B'],
+      ])('wiring: after a switch to rec_2, an accepted title patch that %s', async (_label, button, call, afterUndo) => {
+        const { title } = await openDrawerWithTitle()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        const drawer = container!.querySelector('[data-record-drawer="rec_2"]') as HTMLElement
+        expect(drawer).toBeTruthy()
+        // the stand-in control is kept across the switch, as the real reused title input is (inside the drawer)
+        if (!title.isConnected) drawer.appendChild(title)
+        title.focus()
+        typeInto(title, 'typed on B') // after the switch, which drops every history
+        container!.querySelector<HTMLButtonElement>(button)!.click()
+        await flushUi()
+        expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith(...call)
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(title.value).toBe(afterUndo)
       })
     })
   })

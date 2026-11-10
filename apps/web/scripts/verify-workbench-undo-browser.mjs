@@ -167,6 +167,16 @@ const SCENARIOS = {
     await panel.focus(); await page.keyboard.press(`${mod}+z`)
     s = await state(page); check('grid after', s.grid, { undo: 2, redo: 0 }); check('replays after', s.replays, 1)
   },
+  async 'an attachment upload, then the drawer\'s next-record button while it uploads: the file is saved to the record it was chosen on, never the next one'(page) {
+    const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
+    await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
+    await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
+    await page.locator('button[aria-label="下一条记录"]').click()
+    await page.waitForFunction(() => document.querySelector('#drawer_field_fld_name')?.value === 'gamma')
+    await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
+  },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)
     check('restored', (await state(page)).outside, 'filter')

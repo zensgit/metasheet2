@@ -515,7 +515,9 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  (e: 'patch', fieldId: string, value: unknown): void
+  /** `recordId`: the record an attachment write was made on. The panel is reused across records, and the write
+   *  can end after the drawer moved to another one. */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string): void
   (e: 'comment-field', field: MetaField): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'open-person-picker', field: MetaField): void
@@ -1051,6 +1053,10 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
     input.value = ''
     return
   }
+  // The drawer can move to another record while the upload runs: every file and the patch go to the record it
+  // started on, and this panel's state (the shown record's) is touched only while that record is still shown.
+  const recordId = props.record?.id
+  const shown = () => props.record?.id === recordId
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
@@ -1058,64 +1064,77 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
-      rememberLocalAttachment(fieldId, attachment)
+      if (shown()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds])
+    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds], recordId)
   } catch (error: any) {
-    setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
+    if (shown()) setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
-    setAttachmentActivity(fieldId)
+    if (shown()) setAttachmentActivity(fieldId)
     input.value = ''
   }
 }
 
 async function onRemoveAttachment(fieldId: string, attachmentId: string) {
   clearAttachmentError(fieldId)
+  // As for an upload: the delete and the patch belong to the record it started on.
+  const recordId = props.record?.id
+  const shown = () => props.record?.id === recordId
+  const started = attachmentList(fieldId)
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'removing')
     try {
       await props.deleteAttachmentFn(attachmentId, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentError(fieldId, error?.message ?? lc('cell.removeFailed'))
-      setAttachmentActivity(fieldId)
+      if (shown()) {
+        setAttachmentError(fieldId, error?.message ?? lc('cell.removeFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
-    setAttachmentActivity(fieldId)
+    if (shown()) setAttachmentActivity(fieldId)
   }
-  const existing = attachmentList(fieldId)
-  emit('patch', fieldId, existing.filter((id) => id !== attachmentId))
-  forgetLocalAttachment(fieldId, attachmentId)
+  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise the list
+  // it started from: this panel's record is another one by now.
+  const existing = shown() ? attachmentList(fieldId) : started
+  emit('patch', fieldId, existing.filter((id) => id !== attachmentId), recordId)
+  if (shown()) forgetLocalAttachment(fieldId, attachmentId)
 }
 
 async function onClearAttachments(fieldId: string) {
   const existing = attachmentList(fieldId)
   if (!existing.length) return
   clearAttachmentError(fieldId)
+  // As for an upload: the deletes and the patch belong to the record it started on.
+  const recordId = props.record?.id
+  const shown = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'clearing')
     try {
       for (const attachmentId of existing) {
         await props.deleteAttachmentFn(attachmentId, {
-          recordId: props.record?.id,
+          recordId,
           fieldId,
         })
-        forgetLocalAttachment(fieldId, attachmentId)
+        if (shown()) forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
-      setAttachmentError(fieldId, error?.message ?? lc('cell.clearFailed'))
-      setAttachmentActivity(fieldId)
+      if (shown()) {
+        setAttachmentError(fieldId, error?.message ?? lc('cell.clearFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
-    setAttachmentActivity(fieldId)
+    if (shown()) setAttachmentActivity(fieldId)
   }
-  emit('patch', fieldId, [])
+  emit('patch', fieldId, [], recordId)
 }
 
 function setAttachmentActivity(fieldId: string, activity?: 'uploading' | 'removing' | 'clearing') {

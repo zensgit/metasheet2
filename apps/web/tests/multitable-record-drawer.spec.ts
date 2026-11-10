@@ -616,7 +616,7 @@ describe('MetaRecordDrawer', () => {
       recordId: 'rec_replace_1',
       fieldId: 'fld_files',
     })
-    expect(patchSpy).toHaveBeenCalledWith('fld_files', ['att_replace'])
+    expect(patchSpy).toHaveBeenCalledWith('fld_files', ['att_replace'], 'rec_replace_1')
 
     app.unmount()
     container.remove()

@@ -3001,23 +3001,24 @@ const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, 
 
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
-  if (context?.recordId && selectedRecordId.value === context.recordId) {
-    const updatedIds = (selectedRecordResolved.value?.data[context.fieldId ?? ''] as unknown[] | undefined)
+  // The deep-linked copy (not in the page, so the reload below does not refresh it) follows the server, also
+  // when the drawer has moved on: the patch after the delete is that record's and carries its version.
+  const linked = deepLinkedRecord.value
+  if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
+    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
       ?.map(String)
       .filter((id) => id !== attachmentId) ?? []
-    if (deepLinkedRecord.value?.id === context.recordId && context.fieldId) {
-      deepLinkedRecord.value = {
-        ...deepLinkedRecord.value,
-        version: deepLinkedRecord.value.version + 1,
-        data: {
-          ...deepLinkedRecord.value.data,
-          [context.fieldId]: updatedIds,
-        },
-      }
-      deepLinkedRecordAttachmentSummaries.value = {
-        ...deepLinkedRecordAttachmentSummaries.value,
-        [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
-      }
+    deepLinkedRecord.value = {
+      ...linked,
+      version: linked.version + 1,
+      data: {
+        ...linked.data,
+        [context.fieldId]: updatedIds,
+      },
+    }
+    deepLinkedRecordAttachmentSummaries.value = {
+      ...deepLinkedRecordAttachmentSummaries.value,
+      [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
     }
   }
   await grid.loadViewData(grid.page.value.offset)
@@ -3694,14 +3695,20 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown) {
-  if (!selectedRecordResolved.value) return
-  const record = selectedRecordResolved.value
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string) {
+  // An attachment write names the record it was made on: it can end after the drawer moved to another record,
+  // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
+  // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
+  // closes while it runs). Every other edit is the shown record's.
+  const record = recordId ? drawerRecordById(recordId) : selectedRecordResolved.value
+  if (!record) return
   if (!ensureCanEditRecord(record.id)) return
   // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
   // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
-  // patch keeps the typing undoable.
-  const settleUndo = workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+  // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
+  const settleUndo = record.id === selectedRecordResolved.value?.id
+    ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+    : undefined
   if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
     await runManualDrawerPatch(record.id, fieldId, value, settleUndo)
     return
@@ -3739,7 +3746,9 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
 
 async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
-  inspectorPatchOwners.set(fieldId, patchOwner)
+  // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
+  // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
+  if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
   // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
   const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on

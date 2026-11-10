@@ -45,7 +45,7 @@
     @delete="emit('delete')"
     @duplicate="emit('duplicate')"
     @copy-link="emit('copy-link')"
-    @patch="(fieldId: string, value: unknown) => emit('patch', fieldId, value)"
+    @patch="relayPatch"
     @toggle-lock="(payload: { recordId: string; locked: boolean }) => emit('toggle-lock', payload)"
     @toggle-comments="emit('toggle-comments')"
     @comment-field="(field: MetaField) => emit('comment-field', field)"
@@ -142,7 +142,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'duplicate'): void
   (e: 'copy-link'): void
-  (e: 'patch', fieldId: string, value: unknown): void
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
@@ -166,4 +166,10 @@ const emit = defineEmits<{
    * sees exactly the inspector's event surface (the compat contract this file promises). */
   (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
+
+/** The inspector's patch, passed on as it came (with the record id of an attachment write). */
+function relayPatch(fieldId: string, value: unknown, recordId?: string) {
+  if (recordId === undefined) emit('patch', fieldId, value)
+  else emit('patch', fieldId, value, recordId)
+}
 </script>

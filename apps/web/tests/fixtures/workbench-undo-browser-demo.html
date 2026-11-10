@@ -6,8 +6,9 @@
 <script type="module">
 // The REAL MetaRecordInspector (record drawer, with its comments tab) inside a root wired the way
 // MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document with the same
-// `isWorkbenchGridSurface`; a drawer patch settles its commit at once (an accepted server patch); a
-// record switch resets every history; a comment is sent, resolved or deleted the way the workbench does
+// `isWorkbenchGridSurface`; a drawer patch is the record's it names (an attachment write) or the shown
+// one's, and settles its commit at once (an accepted server patch) when that record is shown; a
+// record switch (also the drawer's next / previous buttons) resets every history; a comment is sent, resolved or deleted the way the workbench does
 // it (its control is disabled while the request is out, then the change lands). The grid's undo/redo
 // are counted; they run the REAL useMultitableGrid on a stand-in server whose history holds one earlier
 // cell edit, so a replay of it reaches the server (`replays`), and an attachment upload holds them the
@@ -115,10 +116,12 @@ createApp({
       onCommentSubmit: async () => { submitting.value = true; try { await request() } finally { submitting.value = false }; draft.value = '' },
       onCommentResolve: async (id) => { resolvingIds.value = [id]; await request(); comments.value = comments.value.map((c) => (c.id === id ? { ...c, resolved: true } : c)); resolvingIds.value = [] },
       onCommentDelete: async (id) => { deletingIds.value = [id]; await request(); comments.value = comments.value.filter((c) => c.id !== id); deletingIds.value = [] },
-      onPatch: (fieldId, value) => {
-        undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
-        window.undoDemo.patches.push(`${record.value.id}:${fieldId}=${String(value)}`)
+      onPatch: (fieldId, value, recordId) => {
+        const target = recordId ?? record.value.id
+        if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
+        window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
+      onNavigate: (id) => { record.value = RECORDS[id] },
     }),
   ]),
 }).mount('#app')
