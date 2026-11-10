@@ -1437,12 +1437,14 @@
 
             <!-- R-69 1b-iii run_integration_job config: DRY RUN ONLY. Job kind is the closed set (pipeline shown,
                  not selectable yet), the apply mode is a fixed display (no other mode is authorable), the timeout
-                 is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly. -->
+                 is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly.
+                 R-69 I6d: EXACTLY ONE project per rule — the project this sheet is registered to (the server's
+                 rule-sheet guard, register R-90). A loaded rule that lists several is shown whole and blocks save. -->
             <div v-if="action.type === 'run_integration_job'" class="meta-rule-editor__action-config" data-action-config="run_integration_job">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="rij-dry-run-hint">
                 {{ isZh
-                  ? '仅预演：按计划对所列项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
-                  : 'Dry run only: runs the stock-prep pull as a dry run for the listed projects on schedule and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
+                  ? '仅预演：按计划对本表登记的项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
+                  : 'Dry run only: runs the stock-prep pull as a dry run for the project this sheet is registered to, on schedule, and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
               </div>
               <label class="meta-rule-editor__label">{{ isZh ? '任务种类' : 'Job kind' }}</label>
               <el-select v-model="(action.config.rijKind as string)" class="meta-rule-editor__select" data-field="rijKind">
@@ -1457,8 +1459,8 @@
                     : (isZh ? '管道（pipeline，暂不可用）' : 'Pipeline (pipeline, not available yet)')"
                 />
               </el-select>
-              <label class="meta-rule-editor__label">
-                {{ isZh ? `项目号（每行一个，最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个）` : `Project numbers (one per line, at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS})` }}
+              <label class="meta-rule-editor__label" data-field="rij-project-label">
+                {{ isZh ? '项目号（恰一个：本表登记的项目）' : 'Project number (exactly one: the project this sheet is registered to)' }}
               </label>
               <el-input
                 v-model="(action.config.rijProjectNosText as string)"
@@ -1467,6 +1469,11 @@
                 class="meta-rule-editor__input"
                 data-field="rijProjectNosText"
               />
+              <div class="meta-rule-editor__hint" data-field="rij-single-project-hint">
+                {{ isZh
+                  ? '一条规则只拉取一个项目：填写本表登记的那个项目号。其他项目请在各自的项目表上各建一条规则。'
+                  : 'One rule pulls one project: enter the project number this sheet is registered to. Every other project gets its own rule on its own project sheet.' }}
+              </div>
               <label class="meta-rule-editor__label">{{ isZh ? '应用方式' : 'Apply mode' }}</label>
               <div class="meta-rule-editor__hint" data-field="rijApplyMode" :data-value="RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE">
                 {{ isZh ? '仅预演（dry_run_only）' : 'Dry run only (dry_run_only)' }}
@@ -2022,10 +2029,10 @@ import {
   RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE,
   RUN_INTEGRATION_JOB_AUTHORABLE_KIND,
   RUN_INTEGRATION_JOB_KINDS,
-  RUN_INTEGRATION_JOB_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES,
   buildRunIntegrationJobConfig,
   checkRunIntegrationJobConfig,
+  checkRunIntegrationJobRuleSheetProjects,
   checkRunIntegrationJobTriggerCoupling,
   defaultRunIntegrationJobDraft,
   isRunIntegrationJobSelectable,
@@ -4299,6 +4306,8 @@ const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
 // exactly what buildPayload would send: the rebuilt config and the trigger timezone triggerTimezoneForSave
 // writes. A refusal becomes an inline save-block line instead of an opaque 400. The switch itself (403) is the
 // server's: the action is not offered for a new selection while it is off.
+// R-69 I6d: after the pure mirror, the count half of the server's rule-sheet guard (register R-90: EXACTLY ONE
+// project per rule, the sheet's registered one) — checkRunIntegrationJobRuleSheetProjects, same server order.
 const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
   const indexes = draft.value.actions
     .map((action, idx) => (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE ? idx : -1))
@@ -4317,7 +4326,8 @@ const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
     })
   }
   for (const idx of indexes) {
-    const check = checkRunIntegrationJobConfig(buildRunIntegrationJobConfig(draft.value.actions[idx].config), `actions[${idx}].config`)
+    const config = buildRunIntegrationJobConfig(draft.value.actions[idx].config)
+    const check = checkRunIntegrationJobConfig(config, `actions[${idx}].config`) ?? checkRunIntegrationJobRuleSheetProjects(config)
     if (check) {
       reasons.push({
         key: `runIntegrationJob:${idx}`,
@@ -4350,9 +4360,12 @@ function runIntegrationJobConfigBlockText(code: string, idx: number): string {
   const step = zh ? `动作 ${idx + 1}（运行集成任务）：` : `Action ${idx + 1} (run integration job): `
   switch (code) {
     case 'projects_empty':
-      return step + (zh ? '请至少填写一个项目号。' : 'enter at least one project number.')
+      return step + (zh ? '请填写项目号（恰一个：本表登记的项目）。' : 'enter the project number (exactly one: the project this sheet is registered to).')
+    // R-69 I6d: one rule, one project (the server's rule-sheet guard). The pure mirror's own cap answers
+    // `projects_too_many` first for a very long list; for the author it is the same thing to fix.
     case 'projects_too_many':
-      return step + (zh ? `最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个项目。` : `at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS} projects.`)
+    case 'projects_not_single':
+      return step + (zh ? '只能填写一个项目号：本表登记的项目。' : 'list exactly one project number: the project this sheet is registered to.')
     case 'project_shape':
       return step + (zh ? '项目号只能是 1–128 个可见 ASCII 字符（不含空格，不含 ://）。' : 'a project number must be 1–128 visible ASCII characters (no spaces, no "://").')
     case 'project_repeat':

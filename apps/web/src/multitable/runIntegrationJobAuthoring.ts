@@ -13,6 +13,8 @@
  *      (`validateRunIntegrationJobConfig`, `validateRunIntegrationJobTriggerCoupling`, the timeout constants of
  *      automation-job-lease.ts). Same branch order, same strings. The editor only authors the dry-run shape;
  *      the mirror exists so a refusal is an inline "why can't I save" line, not an opaque 400.
+ *      1b (R-69 I6d) adds the count half of the server's rule-sheet guard: EXACTLY ONE project per rule
+ *      (RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS) — the editor's project limit; the mirror's 20 is not.
  *   2. Draft <-> config helpers for the editor (project list text, timeout in minutes).
  *   3. The VALUES-FREE step-result view: the executor's `output.outcome` / `output.reason` vocabulary
  *      (automation-executor.ts runIntegrationJobStep / runIntegrationJobUnit, plugin lib/integration-run-port.cjs)
@@ -23,6 +25,10 @@ export const RUN_INTEGRATION_JOB_ACTION_TYPE = 'run_integration_job'
 
 // ── 1. Save-validation mirror (server: automation-run-integration-job.ts + automation-job-lease.ts) ───────────
 
+/**
+ * The PURE validator's cap, equal to the server's by the parity test. NOT the editor's project limit: the server's
+ * rule-sheet guard then requires exactly one project — see RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS (part 1b).
+ */
 export const RUN_INTEGRATION_JOB_MAX_PROJECTS = 20
 export const RUN_INTEGRATION_JOB_TIMEOUT_MIN_MS = 1_000
 export const RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS = 55 * 60_000
@@ -175,12 +181,46 @@ export function validateRunIntegrationJobTriggerCoupling(
   return checkRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)?.message ?? null
 }
 
+// ── 1b. The rule-sheet guard's project-count half (server: automation-run-integration-job-rule-sheet.ts) ────────
+
+/**
+ * R-69 I6a / register R-90 (1): a stock_prep_pull rule lists EXACTLY ONE project — the project its own sheet is
+ * registered to (the project-sheet registry has UNIQUE(sheet_id): one sheet is one project's). The server refuses
+ * anything else at save in its rule-sheet guard (checkRunIntegrationJobRuleSheet: `projectNos.length !== 1` ⇒
+ * project_mismatch), which runs AFTER the pure validator mirrored above. That validator's own cap stays
+ * RUN_INTEGRATION_JOB_MAX_PROJECTS on both sides (byte parity is pinned, and the executor's re-parse of a stored
+ * config reuses it), so THIS number — not that one — is the editor's project limit: with the mirror's "non-empty" it
+ * is "exactly one". It is the half of the guard a client can decide without the registry; WHICH project the sheet is
+ * registered to stays the server's answer. Pinned against the live server guard by the core-backend web-parity test.
+ */
+export const RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS = 1
+
+/** Byte-identical to the server's RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch. */
+export const RUN_INTEGRATION_JOB_PROJECT_MISMATCH_MESSAGE =
+  "run_integration_job (stock_prep_pull) rules must list exactly one project, the sheet's registered project; the rule was not saved"
+
+export type RunIntegrationJobRuleSheetErrorCode = 'projects_not_single'
+
+/**
+ * The count half of the server's rule-sheet guard, for a config the pure mirror accepted: null, or the refusal the
+ * server answers for a rule that lists more than one project. (No project at all is the mirror's `projects_empty`.)
+ */
+export function checkRunIntegrationJobRuleSheetProjects(config: unknown): RunIntegrationJobCheck<RunIntegrationJobRuleSheetErrorCode> | null {
+  const job = isRecord(config) && isRecord(config.job) ? config.job : null
+  const projectNos = job && Array.isArray(job.projectNos) ? job.projectNos : []
+  if (projectNos.length <= RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS) return null
+  return { code: 'projects_not_single', message: RUN_INTEGRATION_JOB_PROJECT_MISMATCH_MESSAGE }
+}
+
 // ── 2. Editor draft <-> config ───────────────────────────────────────────────────────────────────────────────
 
 /** The editor's draft keys for this action (UI only; buildRunIntegrationJobConfig turns them into the config). */
 export interface RunIntegrationJobDraft {
   rijKind: string
-  /** One project number per line (commas also separate). */
+  /**
+   * The project number. A saveable rule has exactly one (part 1b); a LOADED config with several is shown whole, one
+   * per line (commas also separate) — never truncated — and blocks save until one is left.
+   */
   rijProjectNosText: string
   /** Whole minutes as typed; the config carries milliseconds. */
   rijTimeoutMinutes: number | string | null

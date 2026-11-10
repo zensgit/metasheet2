@@ -10,6 +10,11 @@
  * (null, or the same 400 message for the same `path`). A change on EITHER side that is not made on the other
  * turns this red. The web module has zero runtime imports, so it loads in Node without a bundler.
  *
+ * R-69 I6d: the editor's PROJECT LIMIT is not the pure validator's cap (20, mirrored above) but the count half of
+ * the server's rule-sheet guard (automation-run-integration-job-rule-sheet.ts, register R-90: exactly one project
+ * per rule). That half is pinned here too, against the LIVE guard: for the same config the web check and the
+ * server guard agree, and the web message is the server's.
+ *
  * Runs in the default core-backend unit job (tests/unit/**, not DB-gated) — no CI wiring needed.
  */
 import { describe, expect, it } from 'vitest'
@@ -27,17 +32,25 @@ import {
   RUN_INTEGRATION_JOB_TIMEOUT_DEFAULT_MS as SERVER_TIMEOUT_DEFAULT_MS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS as SERVER_TIMEOUT_MAX_MS,
 } from '../../src/multitable/automation-job-lease'
+import {
+  RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES as SERVER_RULE_SHEET_MESSAGES,
+  checkRunIntegrationJobRuleSheet as ruleSheetServer,
+} from '../../src/multitable/automation-run-integration-job-rule-sheet'
+import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
 // LIVE import of the web module across the package boundary (relative path; apps/web is not a dependency).
 // eslint-disable-next-line import/no-relative-packages
 import {
   RUN_INTEGRATION_JOB_ACTION_TYPE as WEB_ACTION_TYPE,
   RUN_INTEGRATION_JOB_APPLY_MODES as WEB_APPLY_MODES,
+  RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS as WEB_EDITOR_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_KINDS as WEB_KINDS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS as WEB_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_PROJECT_MISMATCH_MESSAGE as WEB_PROJECT_MISMATCH_MESSAGE,
   RUN_INTEGRATION_JOB_TIMEOUT_DEFAULT_MS as WEB_TIMEOUT_DEFAULT_MS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS as WEB_TIMEOUT_MAX_MS,
   RUN_INTEGRATION_JOB_TIMEOUT_MIN_MS as WEB_TIMEOUT_MIN_MS,
   buildRunIntegrationJobConfig,
+  checkRunIntegrationJobRuleSheetProjects as ruleSheetProjectsWeb,
   validateRunIntegrationJobConfig as validateWeb,
   validateRunIntegrationJobTriggerCoupling as couplingWeb,
 } from '../../../../apps/web/src/multitable/runIntegrationJobAuthoring'
@@ -158,15 +171,62 @@ describe('run_integration_job save gate — server/web byte parity (R-69 1b-iii)
     })
   })
 
-  it('what the editor SENDS is what the server accepts (default draft = 30 min, dry_run_only, no binding)', () => {
-    const sent = buildRunIntegrationJobConfig({ rijKind: 'stock_prep_pull', rijProjectNosText: 'P-001\nP-002, P-003', rijTimeoutMinutes: 30 })
-    expect(sent).toEqual({ job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002', 'P-003'], applyMode: 'dry_run_only' }, timeoutMs: 30 * MIN })
+  it('what the editor SENDS is what the server accepts (default draft = 30 min, dry_run_only, no binding, ONE project)', () => {
+    const sent = buildRunIntegrationJobConfig({ rijKind: 'stock_prep_pull', rijProjectNosText: 'P-001', rijTimeoutMinutes: 30 })
+    expect(sent).toEqual({ job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' }, timeoutMs: 30 * MIN })
     expect(validateServer(sent, 'actions[0].config')).toBeNull()
+    expect(ruleSheetProjectsWeb(sent)).toBeNull()
+    // The builder never truncates what was typed (lines and commas both separate): a longer list still reaches the
+    // checks whole — the pure validator accepts it (its cap is 20), the one-project rule then refuses it (below).
+    const typed = buildRunIntegrationJobConfig({ rijKind: 'stock_prep_pull', rijProjectNosText: 'P-001\nP-002, P-003', rijTimeoutMinutes: 30 })
+    expect(typed).toEqual({ job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002', 'P-003'], applyMode: 'dry_run_only' }, timeoutMs: 30 * MIN })
+    expect(validateServer(typed, 'actions[0].config')).toBeNull()
+    expect(ruleSheetProjectsWeb(typed)?.code).toBe('projects_not_single')
     // The editor's minute cap is the server's cap: 55 accepted, 56 refused — on both sides.
     for (const [minutes, accept] of [[55, true], [56, false], [0, false], ['', true]] as const) {
       const config = buildRunIntegrationJobConfig({ rijKind: 'stock_prep_pull', rijProjectNosText: 'P-001', rijTimeoutMinutes: minutes })
       expect(validateServer(config, 'c') === null).toBe(accept)
       expect(validateWeb(config, 'c')).toBe(validateServer(config, 'c'))
     }
+  })
+
+  // ── R-69 I6d: the editor's project limit = the count half of the server's rule-sheet guard (register R-90) ──────
+  describe('rule-sheet guard, project count: exactly one project per rule, on both sides', () => {
+    /**
+     * The LIVE server guard on the most favourable registry there is: the rule's sheet is registered, active, to the
+     * binding tenant, and its project is the FIRST one the rule lists. Whatever the guard still refuses is the count.
+     */
+    const serverVerdict = (projectNos: string[]) => ruleSheetServer(
+      async () => ({ rows: [{ sheet_id: 'sheet_1', project_no: projectNos[0], status: 'active', object_id: 'obj_1', tenant_id: 'tenant_1' }], rowCount: 1 }),
+      { sheetId: 'sheet_1', tenantId: 'tenant_1', projectNos },
+      { [STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]: 'true' } as NodeJS.ProcessEnv,
+    )
+
+    it('the editor limit is 1 and its message is the server\'s project_mismatch text, byte for byte', () => {
+      expect(WEB_EDITOR_MAX_PROJECTS).toBe(1)
+      expect(WEB_PROJECT_MISMATCH_MESSAGE).toBe(SERVER_RULE_SHEET_MESSAGES.project_mismatch)
+      // the two numbers are different rules: the pure cap (mirrored, 20) and the guard's count (1)
+      expect(WEB_MAX_PROJECTS).toBe(SERVER_MAX_PROJECTS)
+      expect(WEB_EDITOR_MAX_PROJECTS).toBeLessThan(WEB_MAX_PROJECTS)
+    })
+
+    it.each([1, 2, 3, 20])('%i project(s): the pure validator accepts on both sides; the count check and the live guard give the same verdict', async (count) => {
+      const config = stock({ projectNos: projects(count) })
+      expect(validateServer(config, 'actions[0].config')).toBeNull()
+      expect(validateWeb(config, 'actions[0].config')).toBeNull()
+      const server = await serverVerdict(projects(count))
+      const web = ruleSheetProjectsWeb(config)
+      expect(server.ok).toBe(count === 1)
+      expect(web === null).toBe(server.ok)
+      if (server.ok === false) {
+        expect(server.refusal).toBe('project_mismatch')
+        expect(web?.message).toBe(SERVER_RULE_SHEET_MESSAGES[server.refusal])
+      }
+    })
+
+    it('anti-vacuous: the favourable registry really is favourable (one project passes), and the count is what refuses two', async () => {
+      expect(await serverVerdict(['P-001'])).toEqual({ ok: true })
+      expect(await serverVerdict(['P-001', 'P-002'])).toEqual({ ok: false, refusal: 'project_mismatch' })
+    })
   })
 })

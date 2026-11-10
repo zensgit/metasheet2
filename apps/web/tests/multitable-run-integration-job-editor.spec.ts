@@ -9,6 +9,10 @@
  *   C. The editor offers the action only while the server switch is on (session feature
  *      integrationAutomationRunAction) and the trigger is schedule.cron; a loaded one stays listed; the payload is
  *      the dry-run shape without binding; the save mirror blocks what the server would refuse.
+ *      R-69 I6d: EXACTLY ONE project per rule (the server's rule-sheet guard, register R-90) — label, hint and save
+ *      block; a loaded rule that lists several is shown whole and cannot be saved. The payload carries the action
+ *      list AND its first action mirrored into the legacy pair — the wire shape the core-backend service tests
+ *      (tests/unit/automation-run-integration-job-editor-save-path.test.ts) drive through the real save.
  * The server/client save-validator byte parity itself lives in core-backend
  * (tests/unit/automation-run-integration-job-web-parity.test.ts), where both validators are imported live.
  */
@@ -22,8 +26,11 @@ import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomatio
 import MetaAutomationLogViewer from '../src/multitable/components/MetaAutomationLogViewer.vue'
 import type { AutomationExecution, AutomationRule } from '../src/multitable/types'
 import {
+  RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_REASON_LABELS,
   RUN_INTEGRATION_JOB_STEP_OUTCOMES,
+  checkRunIntegrationJobRuleSheetProjects,
   runIntegrationJobStepView,
 } from '../src/multitable/runIntegrationJobAuthoring'
 import { buildAutomationLogSupportPacket } from '../src/multitable/utils/automation-log-support-packet'
@@ -246,11 +253,18 @@ function rijRule(config: Record<string, unknown>, overrides: Partial<AutomationR
   return cronRule({ actionType: 'run_integration_job', actionConfig: config, actions: [{ type: 'run_integration_job', config }], ...overrides })
 }
 
+// R-69 I6d: a saveable rule lists exactly one project (the project its sheet is registered to).
 const STORED_CONFIG = {
-  job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002'], applyMode: 'dry_run_only' },
+  job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' },
   timeoutMs: 20 * 60_000,
   binding: { principalId: 'creator-sentinel', tenantId: TENANT_SENTINEL },
 }
+/** A rule stored before the one-project rule: it lists two. The editor shows both and cannot save it as it is. */
+const STORED_TWO_PROJECTS = { ...STORED_CONFIG, job: { ...STORED_CONFIG.job, projectNos: ['P-001', 'P-002'] } }
+const projectsTextOf = (container: HTMLElement) =>
+  (container.querySelector('[data-field="rijProjectNosText"] textarea, textarea[data-field="rijProjectNosText"]') as HTMLTextAreaElement).value
+const blockTextOf = (container: HTMLElement, key: string) =>
+  container.querySelector(`[data-action="save-block-reason"][data-reason-key="${key}"]`)?.textContent?.trim() ?? ''
 
 function mountEditor(props: Record<string, unknown>) {
   const container = document.createElement('div')
@@ -320,11 +334,11 @@ describe('rule editor: run_integration_job item', () => {
     expect(cfg.textContent).not.toContain('apply_when_ready')
     const kinds = epOptions(cfg.querySelector('[data-field="rijKind"]')!.closest('.el-select') ?? cfg.querySelector('.el-select'))
     expect(kinds.map((k) => [k.value, k.disabled])).toEqual([['stock_prep_pull', false], ['pipeline', true]])
-    expect((cfg.querySelector('[data-field="rijProjectNosText"] textarea, textarea[data-field="rijProjectNosText"]') as HTMLTextAreaElement).value).toBe('P-001\nP-002')
+    expect(projectsTextOf(container)).toBe('P-001')
     expect(container.textContent).not.toContain(TENANT_SENTINEL)
   })
 
-  it('save sends the dry-run shape without binding, and the trigger keeps its timezone', async () => {
+  it('save sends the dry-run shape without binding — the action list AND its first action mirrored into the pair — and the trigger keeps its timezone', async () => {
     runActionFlag = true
     const onSave = vi.fn()
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG), onSave })
@@ -333,12 +347,60 @@ describe('rule editor: run_integration_job item', () => {
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
     const payload = onSave.mock.calls[0]?.[0] as AutomationRule
-    expect(payload.actions?.[0]).toEqual({
-      type: 'run_integration_job',
-      config: { job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002'], applyMode: 'dry_run_only' }, timeoutMs: 20 * 60_000 },
-    })
+    const sentConfig = { job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' }, timeoutMs: 20 * 60_000 }
+    expect(payload.actions).toEqual([{ type: 'run_integration_job', config: sentConfig }])
+    // R-69 I6d: the wire shape the server's save gate must accept — the job travels in `actions[]` (what the
+    // executor runs) and, as the first action, is mirrored into the legacy pair. Never the pair alone.
+    expect(payload.actionType).toBe('run_integration_job')
+    expect(payload.actionConfig).toEqual(sentConfig)
+    expect(payload.executionMode ?? null).toBeNull()
     expect(JSON.stringify(payload)).not.toContain('binding')
     expect(payload.triggerConfig?.timezone).toBe('Asia/Shanghai')
+  })
+
+  // ── R-69 I6d: exactly one project per rule (the server's rule-sheet guard; register R-90) ───────────────────────
+  it('the editor limit is ONE project — not the pure validator cap — and says so in the label and the hint', async () => {
+    expect(RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS).toBe(1)
+    // the parity-pinned mirror cap is a different number; the editor does not author against it
+    expect(RUN_INTEGRATION_JOB_MAX_PROJECTS).toBe(20)
+    const two = { job: { kind: 'stock_prep_pull', projectNos: ['P-1', 'P-2'], applyMode: 'dry_run_only' } }
+    expect(checkRunIntegrationJobRuleSheetProjects({ job: { ...two.job, projectNos: ['P-1'] } })).toBeNull()
+    expect(checkRunIntegrationJobRuleSheetProjects(two)?.code).toBe('projects_not_single')
+    runActionFlag = true
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    const cfg = container.querySelector('[data-action-config="run_integration_job"]') as HTMLElement
+    expect(cfg.querySelector('[data-field="rij-project-label"]')?.textContent).toContain('exactly one')
+    expect(cfg.querySelector('[data-field="rij-single-project-hint"]')?.textContent).toContain('One rule pulls one project')
+    expect(cfg.textContent).not.toContain('at most 20')
+    useLocale().setLocale('zh-CN')
+    await flushPromises()
+    expect(cfg.querySelector('[data-field="rij-project-label"]')?.textContent).toContain('恰一个')
+    expect(cfg.querySelector('[data-field="rij-single-project-hint"]')?.textContent).toContain('一条规则只拉取一个项目')
+    expect(cfg.textContent).not.toContain('最多 20')
+  })
+
+  it('a loaded rule that lists TWO projects is shown whole (never truncated) and cannot be saved until one is left', async () => {
+    runActionFlag = true
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: rijRule(STORED_TWO_PROJECTS), onSave })
+    await flushPromises()
+    expect(projectsTextOf(container)).toBe('P-001\nP-002')
+    expect(blockKeys(container)).toEqual(['runIntegrationJob:0'])
+    expect(blockTextOf(container, 'runIntegrationJob:0')).toBe('Action 1 (run integration job): list exactly one project number: the project this sheet is registered to.')
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flushPromises()
+    expect(onSave).not.toHaveBeenCalled()
+    // leaving one project clears the block, and that one project is what is sent
+    setTextarea(container, '[data-field="rijProjectNosText"]', 'P-002')
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
+    save.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect((payload.actions?.[0]?.config as { job: { projectNos: string[] } }).job.projectNos).toEqual(['P-002'])
   })
 
   it('switch OFF + a loaded action: listed, but save is blocked with a reason (the server would answer 403)', async () => {
@@ -368,6 +430,9 @@ describe('rule editor: run_integration_job item', () => {
   })
 
   it.each([
+    ['2 projects (one rule, one project)', '[data-field="rijProjectNosText"]', 'P-1\nP-2'],
+    ['2 projects on one line', '[data-field="rijProjectNosText"]', 'P-1, P-2'],
+    ['20 projects (the pure validator cap is not the editor limit)', '[data-field="rijProjectNosText"]', Array.from({ length: 20 }, (_, i) => `P-${i}`).join('\n')],
     ['21 projects', '[data-field="rijProjectNosText"]', Array.from({ length: 21 }, (_, i) => `P-${i}`).join('\n')],
     ['a repeated project', '[data-field="rijProjectNosText"]', 'P-1\nP-1'],
     ['no project', '[data-field="rijProjectNosText"]', ''],
@@ -381,6 +446,24 @@ describe('rule editor: run_integration_job item', () => {
     setTextarea(container, selector, value)
     await flushPromises()
     expect(blockKeys(container)).toContain('runIntegrationJob:0')
+  })
+
+  it('2, 20 and 21 projects all answer the SAME one-project line (never "at most 20"); one project of any number is accepted client-side', async () => {
+    runActionFlag = true
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    for (const count of [2, 20, 21]) {
+      setTextarea(container, '[data-field="rijProjectNosText"]', Array.from({ length: count }, (_, i) => `P-${i}`).join('\n'))
+      await flushPromises()
+      expect(blockTextOf(container, 'runIntegrationJob:0'), `${count} projects`).toBe('Action 1 (run integration job): list exactly one project number: the project this sheet is registered to.')
+    }
+    setTextarea(container, '[data-field="rijProjectNosText"]', '')
+    await flushPromises()
+    expect(blockTextOf(container, 'runIntegrationJob:0')).toBe('Action 1 (run integration job): enter the project number (exactly one: the project this sheet is registered to).')
+    // Which project the sheet is registered to is the server's answer (its rule-sheet guard): any single number passes here.
+    setTextarea(container, '[data-field="rijProjectNosText"]', 'P-ANOTHER')
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
   })
 
   it('55 minutes is accepted (the cap is inclusive)', async () => {
