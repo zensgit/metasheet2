@@ -570,9 +570,9 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
   beforeAll(async () => {
     for (const userId of allUserIds) {
       await query(
-        `INSERT INTO users (id, email, name, password_hash, role, is_active, is_admin)
-         VALUES ($1, $2, $1, 'x', 'user', true, false)`,
-        [userId, `${userId}@example.test`],
+        `INSERT INTO users (id, email, name, password_hash, role, is_active, is_admin, activation_status)
+         VALUES ($1, $2, $1, 'x', $3, true, $4, 'activated')`,
+        [userId, `${userId}@example.test`, userId === ids.platformAdmin ? 'admin' : 'user', userId === ids.platformAdmin],
       )
     }
     await ensureRole(roles.stockPrepAdmin, ['stock-prep:admin'])
@@ -714,6 +714,18 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     expect(status).toBe(200)
     expect(await holds(ids.target, roles.stockPrepAdmin)).toBe(true)
     await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, roles.stockPrepAdmin])
+  })
+
+  it('refuses a token claiming platform administration after the database authority is removed', async () => {
+    await query("UPDATE users SET role = 'user', is_admin = false WHERE id = $1", [ids.platformAdmin])
+    try {
+      const result = await delegationRole(tokens.platformAdmin, ids.target, 'assign', { roleId: roles.stockPrepAdmin })
+      expect(result.status).toBe(403)
+      expect(result.json?.error?.code).toBe('FORBIDDEN')
+      expect(await holds(ids.target, roles.stockPrepAdmin)).toBe(false)
+    } finally {
+      await query("UPDATE users SET role = 'admin', is_admin = true WHERE id = $1", [ids.platformAdmin])
+    }
   })
 
   it('a delegate cannot assign a role carrying a platform code; in-namespace-only roles still assign', async () => {

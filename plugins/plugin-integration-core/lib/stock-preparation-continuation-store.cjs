@@ -100,13 +100,37 @@
 // false`) only when no change plan was bound. The consult also reads the newest settlement subjects per scope, so a
 // subject is never pushed out of the consult window by transparent closes behind it.
 //
+// STEP 6a-2 (S6-2; register R-91; design §3.5-§3.7, §5.1, as amended by the 2026-11-09 rebaseline). Three methods for the
+// recovery of an UNFINISHED execution (the puller-reachable 「恢复入口」, F-16):
+//   readExecutionForRecovery  ONE REPEATABLE READ snapshot: the execution row (with 批次标识's unprefixed source digest —
+//                             projected HERE only), its intent journal re-admitted against the row's own digest (`ok`,
+//                             `missing` for a legacy row, `corrupt` otherwise), the bound change plan (PRIVATE record set)
+//                             and the pending written plan(s). An id of another scope reads as absent (never an oracle).
+//   closeExecution            ONE plugin-db transaction that re-decides every admissibility fact under its locks, in the
+//                             order state -> lock row (`holderWithin`) -> execution -> continuations -> plans -> 批次标识
+//                             link -> batch (`batchWithin`), then the execution close, decision_version + 1 and the audit
+//                             row. Its wait is bounded first (SET LOCAL lock_timeout); a 55P03 is classified by the step
+//                             that raised it: the lock-row step is 409 WRITE_LOCKED `holder_in_write`, every other step
+//                             409 STOCK_PREP_REFRESH_RECOVERY_BUSY { step } (retryable). The plan-bound cells P1-P11 of
+//                             design §3.7: a recovery-written plan (RW) carries the landed (or, for a runbook close, every)
+//                             write record of the confirmed plan and absorbs the pending written plan, which it supersedes
+//                             first. A `nothing_landed` close of an unbound execution is TRANSPARENT (settlement_subject
+//                             false); only a settlement subject may settle, re-checked under the state lock.
+//   listExecutions            the project's executions, newest first (started_at DESC, id DESC), values-free projection.
+// Every transaction handle must also bound its own lock wait (`setLocalLockTimeout`, the scoped helper's handle has it).
+//
 // NOT HERE: no route, no lane consult (PR-3), no `bumpGenerationWithin` (PR-4), no audit vocabulary (D9),
 // no env flag (D-3).
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
 
-const { sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.cjs')
+const {
+  PROJECT_WRITE_ERROR_CODES,
+  PROJECT_WRITE_ROW_LOCK_WAIT_MS,
+  StockPreparationProjectWriteLockError,
+  sheetWriteScopeKey,
+} = require('./stock-preparation-project-write-lock.cjs')
 const pairing = require('./stock-preparation-continuation-pairing.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require('./stock-preparation-templates.cjs')
 const { __internals: plannerInternals } = require('./stock-preparation-conflict-planner.cjs')
@@ -168,6 +192,24 @@ const CLOSED_MODES = Object.freeze(['self_verified', 'puller_verified', 'runbook
 const PRE_CLOSE_STATUSES = Object.freeze(['running', 'partial', 'failed', 'aborted', 'unrecorded'])
 // The finish statuses a self-verifying finish may close (a `partial` run landed rows by definition).
 const SELF_VERIFIABLE_FINISH_STATUSES = Object.freeze(['failed', 'aborted'])
+// Step 6a-2 (design §3.6, §3.8, §3.11): the two closes a recovery writes, and the results each may record.
+const RECOVERY_CLOSE_MODES = Object.freeze(['puller_verified', 'runbook'])
+const RECOVERY_CLOSE_RESULTS = Object.freeze({
+  puller_verified: Object.freeze(['landed', 'mixed', 'nothing_landed']),
+  runbook: Object.freeze(['unknown']),
+})
+// The classifier's closed count keys (lib/stock-preparation-execution-intent.cjs classifyExecutionIntent).
+const RECOVERY_COUNT_KEYS = Object.freeze(['intended', 'landed', 'notLanded', 'diverged', 'duplicate', 'vanished', 'replaced'])
+// A values-free ticket handle (design §3.8 step 6).
+const RUNBOOK_REF_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/
+const INTENT_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+// The recovery-written plan's fingerprint scheme (design §3.7 RW layout): distinct from a confirmed plan's.
+const RECOVERED_PLAN_SCHEME = 'stock-preparation/change-plan-recovered/v1'
+// §5.1: the executions page (newest first) is at most this long.
+const EXECUTION_LIST_LIMIT_DEFAULT = 20
+const EXECUTION_LIST_LIMIT_MAX = 20
+// The intent journal of one execution: at most this many chunks are read back (2000 entries each).
+const INTENT_CHUNK_CEILING = 1000
 // 批次标识's source digest (register R-65): 32 lowercase hex, no lane prefix (the migration 106 CHECK).
 const PULL_BATCH_SOURCE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
 const BUMP_REASONS = Object.freeze({ confirm: 'continuation_confirm', end: 'continuation_end', changePlan: 'change_plan_confirm' })
@@ -215,6 +257,13 @@ const REFRESH_STORE_ERROR_CODES = Object.freeze({
   // PR-8 review fix N1: the decisions' NOT_PILOT token (stock-preparation-refresh-decisions.cjs REFRESH_DECISION_ERROR_CODES
   // .NOT_PILOT), spelled here because the combined confirm re-decides the pilot marker under the state-row lock.
   NOT_PILOT: 'STOCK_PREP_CONTINUATION_CONFIRM_NOT_PILOT',
+  // Step 6a-2 (design §3.11): the recovery verify-and-close. One vocabulary for the store, the recovery lib and the routes.
+  EXECUTION_NOT_FOUND: 'STOCK_PREP_REFRESH_EXECUTION_NOT_FOUND',
+  EXECUTION_NOT_UNFINISHED: 'STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
+  RECOVERY_UNPROVABLE: 'STOCK_PREP_REFRESH_RECOVERY_UNPROVABLE',
+  RECOVERY_STALE: 'STOCK_PREP_REFRESH_RECOVERY_STALE',
+  RECOVERY_RECOMPUTE_INCOMPLETE: 'STOCK_PREP_REFRESH_RECOVERY_RECOMPUTE_INCOMPLETE',
+  RECOVERY_BUSY: 'STOCK_PREP_REFRESH_RECOVERY_BUSY',
 })
 
 // The consult's reads share ONE snapshot (review X-1): a lib/db.cjs whitelisted isolation level, pinned by the
@@ -387,6 +436,42 @@ function planStatusReason(status) {
   if (status === 'superseded') return 'plan_replaced'
   if (status === 'written' || status === 'reviewed') return 'plan_written'
   return 'plan_invalidated'
+}
+
+// Step 6a-2: an execution of another scope reads exactly like a missing one (never an existence oracle).
+function executionNotFound() {
+  return new StockPreparationRefreshStoreError(404, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_FOUND, 'this project has no such execution', { partial: false })
+}
+
+function executionNotUnfinished(reason) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_UNFINISHED, 'this execution is not unfinished; there is nothing to recover', { reason, partial: false })
+}
+
+// Step 6a-2 (design §3.6, RR G7): a bounded row-lock wait that ran out at a step other than the lock row — a
+// reconciliation holding the state row, a zombie finish holding the execution row, a continuation, a plan, a 批次标识 row,
+// the audit insert. Nothing was changed; retryable.
+function recoveryBusy(step) {
+  return new StockPreparationRefreshStoreError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_BUSY, 'another operation held a row this close needs; nothing was changed — retry shortly', {
+    step,
+    retryAfterMs: PROJECT_WRITE_ROW_LOCK_WAIT_MS,
+    partial: false,
+  })
+}
+
+// The lock row held by the holder's own fenced host write (FOR SHARE): the lock's own refusal, by name.
+function holderInWrite() {
+  return new StockPreparationProjectWriteLockError(409, PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED, 'a write of this sheet is still in flight; nothing was changed — retry shortly', {
+    reason: 'holder_in_write',
+    retryAfterMs: PROJECT_WRITE_ROW_LOCK_WAIT_MS,
+    partial: false,
+  })
+}
+
+// SQLSTATE 55P03 lock_not_available, raw or carried (values-free) by a typed store failure of this store, the lock or the
+// 批次标识 ledger.
+function isLockNotAvailable(error) {
+  if (sqlStateOf(error) === '55P03') return true
+  return Boolean(error && isPlainObject(error.details) && error.details.sqlState === '55P03')
 }
 
 function changePlanNotAllowed(reason, extra = {}) {
@@ -853,6 +938,54 @@ function rowToChangePlanSummary(row) {
   })
 }
 
+// ── step 6a-2: the recovery close's input ─────────────────────────────────────────────────────────
+
+function normalizeRecoveryClassification(input, mode) {
+  if (!isPlainObject(input)) throw inputInvalid('classification must be an object', 'classification')
+  if (!RECOVERY_CLOSE_RESULTS[mode].includes(input.result)) throw inputInvalid('classification.result is not a result this close may record', 'classification.result')
+  const intentDigest = input.intentDigest === undefined || input.intentDigest === null ? null : input.intentDigest
+  if (intentDigest !== null && (typeof intentDigest !== 'string' || !INTENT_DIGEST_PATTERN.test(intentDigest))) throw inputInvalid('classification.intentDigest must be 32 lowercase hex', 'classification.intentDigest')
+  if (mode === 'puller_verified' && intentDigest === null) throw inputInvalid('a puller close is bound to the intent digest', 'classification.intentDigest')
+  const counts = {}
+  const rawCounts = isPlainObject(input.counts) ? input.counts : {}
+  for (const [key, value] of Object.entries(rawCounts)) {
+    if (!RECOVERY_COUNT_KEYS.includes(key) || !Number.isSafeInteger(value) || value < 0) throw inputInvalid('classification.counts holds the classifier\'s integer counts only', 'classification.counts')
+    counts[key] = value
+  }
+  const recordIds = (name) => {
+    const list = input[name] === undefined || input[name] === null ? [] : input[name]
+    if (!Array.isArray(list) || !list.every((id) => nonBlankString(id))) throw inputInvalid(`classification.${name} must be a list of record ids`, `classification.${name}`)
+    return Object.freeze(Array.from(new Set(list.map((id) => id.trim()))).sort())
+  }
+  for (const name of ['landedAddCount', 'verifiedCreatedRows']) {
+    if (!Number.isSafeInteger(input[name]) || input[name] < 0) throw inputInvalid(`classification.${name} must be a non-negative integer`, `classification.${name}`)
+  }
+  return Object.freeze({
+    result: input.result,
+    intentDigest,
+    counts: Object.freeze(counts),
+    landedRecordIds: recordIds('landedRecordIds'),
+    landedAddCount: input.landedAddCount,
+    verifiedCreatedRows: input.verifiedCreatedRows,
+  })
+}
+
+function normalizeRecoveryLease(input) {
+  if (!isPlainObject(input) || !nonBlankString(input.leaseId) || !nonBlankString(input.leaseRunId)
+    || !Number.isSafeInteger(input.fencingEpoch) || input.fencingEpoch < 0) {
+    throw inputInvalid('the recovery close needs its lease facts (leaseId, leaseRunId, fencingEpoch)', 'lease')
+  }
+  return Object.freeze({ leaseId: input.leaseId.trim(), leaseRunId: input.leaseRunId.trim(), fencingEpoch: input.fencingEpoch })
+}
+
+function deepFreezeJson(value) {
+  if (value && typeof value === 'object') {
+    for (const inner of Object.values(value)) deepFreezeJson(inner)
+    Object.freeze(value)
+  }
+  return value
+}
+
 // ── input validation ──────────────────────────────────────────────────────────────────────────────
 
 function normalizeScope(input = {}) {
@@ -1205,10 +1338,12 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     ? idGenerator
     : (kind) => (kind === 'execution' ? `exec_${crypto.randomUUID()}` : `${kind}_${crypto.randomBytes(16).toString('hex')}`)
 
+  // Step 6a-2 (rebaseline S6-2): the handle must also bound its own row-lock wait (`setLocalLockTimeout`, the scoped
+  // helper's transaction handle) — the recovery close sets it as its first statement.
   function requireTrx(trx) {
     if (!trx || typeof trx.selectOneForUpdate !== 'function' || typeof trx.insertOne !== 'function' || typeof trx.updateRow !== 'function'
-      || typeof trx.select !== 'function' || typeof trx.selectOne !== 'function') {
-      throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the transaction handle must expose selectOneForUpdate, select, selectOne, insertOne and updateRow', { reason: 'transaction_handle' })
+      || typeof trx.select !== 'function' || typeof trx.selectOne !== 'function' || typeof trx.setLocalLockTimeout !== 'function') {
+      throw new StockPreparationRefreshStoreError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the transaction handle must expose selectOneForUpdate, select, selectOne, insertOne, updateRow and setLocalLockTimeout', { reason: 'transaction_handle' })
     }
     return trx
   }
@@ -1579,7 +1714,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
   // The state row after a DECISION: version + 1 AND decision_version + 1, hold_set_fingerprint recomputed
   // over the open holds that remain; CAS on the decision_version the transaction locked (defence in depth
   // under FOR UPDATE).
-  async function advanceDecision(trx, scope, stateRow, at) {
+  // Step 6a-2: `extra` (the recovery close's settled columns) rides the same CAS-guarded statement.
+  async function advanceDecision(trx, scope, stateRow, at, extra = {}) {
     const open = await openHoldsOf(trx, scope)
     const decisionVersion = intOrNull(stateRow.decision_version) || 0
     let rows
@@ -1589,6 +1725,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         decision_version: decisionVersion + 1,
         hold_set_fingerprint: holdSetFingerprintOf(open.map((row) => row.fingerprint)),
         updated_at: at,
+        ...extra,
       }, { id: stateRow.id, decision_version: decisionVersion }))
     } catch (error) {
       throw translate(error, 'state_advance')
@@ -2987,6 +3124,74 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     })
   }
 
+  // A succeeded finish and a `landed` recovery close (design §3.6 step 4): every continuation of the execution's refresh
+  // binding, at its bound revision and still claim_active, is stamped `executed_execution_id` (in binding order — the
+  // binding is sorted by id). Under the lease no decision can have moved a bound revision; a miss is a defect, never silent.
+  async function consumeBoundContinuationsWithin(trx, scope, executionRow, executionId, at) {
+    const binding = jsonOrNull(executionRow.refresh_binding)
+    const bound = binding && Array.isArray(binding.continuations) ? binding.continuations : []
+    let consumed = 0
+    for (const entry of bound) {
+      if (!isPlainObject(entry) || !nonBlankString(entry.id)) continue
+      let updated
+      try {
+        updated = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.continuation, { executed_execution_id: executionId, updated_at: at }, {
+          id: entry.id,
+          revision: entry.revision,
+          claim_active: true,
+          tenant_id: scope.tenantId,
+          sheet_id: scope.sheetId,
+          project_no: scope.projectNo,
+        }))
+      } catch (error) {
+        throw translate(error, 'continuation_consume')
+      }
+      if (updated.length !== 1) throw stateMoved('bound_continuation_moved')
+      consumed += 1
+    }
+    return consumed
+  }
+
+  // A confirmed plan becomes `written` (a succeeded finish, a `landed` recovery close — design §3.7 P1): the previous
+  // `written` plan (at most one) is SUPERSEDED FIRST and every field of it this plan does not write enters this plan's
+  // record set review-only (B1: a written change leaves `written` only by a review or by this absorption).
+  async function writePlanWithin(trx, scope, { planRow, executionId, at }) {
+    const older = await lockedPlansOf(trx, scope, 'written')
+    let recordSet = jsonArrayOf(planRow.record_set)
+    const absorbedIds = jsonArrayOf(planRow.absorbed_change_plan_ids).slice()
+    let absorbedFields = 0
+    for (const previous of older) {
+      const absorbed = absorbIntoRecordSet(recordSet, jsonArrayOf(previous.record_set))
+      recordSet = absorbed.recordSet
+      absorbedFields += absorbed.absorbedFields
+      for (const id of [previous.id, ...jsonArrayOf(previous.absorbed_change_plan_ids)]) if (!absorbedIds.includes(id)) absorbedIds.push(id)
+      let superseded
+      try {
+        superseded = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'superseded', superseded_at: at, superseded_by: planRow.id, updated_at: at }, { id: previous.id, status: 'written' }))
+      } catch (error) {
+        throw translate(error, 'change_plan_supersede')
+      }
+      if (superseded.length !== 1) throw stateMoved('change_plan_moved')
+    }
+    let written
+    try {
+      written = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
+        status: 'written',
+        execution_id: executionId,
+        written_at: at,
+        written_content_digest: plannedContentDigestOf(recordSet),
+        record_set: recordSet,
+        record_count: recordSet.length,
+        absorbed_change_plan_ids: absorbedIds,
+        updated_at: at,
+      }, { id: planRow.id, status: 'confirmed' }))
+    } catch (error) {
+      throw translate(error, 'change_plan_written')
+    }
+    if (written.length !== 1) throw stateMoved('change_plan_moved')
+    return { absorbedPlans: older.length, absorbedFields }
+  }
+
   /**
    * Close a `running` execution with its result. `succeeded` stamps `executed_execution_id` on every
    * continuation of its refresh binding (at the bound revision) and, when a `settlement` is given (the
@@ -3073,27 +3278,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
 
       let consumed = 0
       if (input.status === 'succeeded') {
-        const binding = jsonOrNull(row.refresh_binding)
-        const bound = binding && Array.isArray(binding.continuations) ? binding.continuations : []
-        for (const entry of bound) {
-          if (!isPlainObject(entry) || !nonBlankString(entry.id)) continue
-          let updated
-          try {
-            updated = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.continuation, { executed_execution_id: executionId, updated_at: at }, {
-              id: entry.id,
-              revision: entry.revision,
-              claim_active: true,
-              tenant_id: scope.tenantId,
-              sheet_id: scope.sheetId,
-              project_no: scope.projectNo,
-            }))
-          } catch (error) {
-            throw translate(error, 'continuation_consume')
-          }
-          // Under the lease no decision can have moved the bound revision; a miss is a defect, never silent.
-          if (updated.length !== 1) throw stateMoved('bound_continuation_moved')
-          consumed += 1
-        }
+        consumed = await consumeBoundContinuationsWithin(trx, scope, row, executionId, at)
         if (settlement) {
           let stateRows
           try {
@@ -3136,40 +3321,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
         if (!planRow || planRow.tenant_id !== scope.tenantId || planRow.sheet_id !== scope.sheetId || planRow.project_no !== scope.projectNo) throw stateMoved('change_plan_scope')
         if (planRow.status !== 'confirmed') throw stateMoved('change_plan_moved')
         if (input.status === 'succeeded') {
-          const older = await lockedPlansOf(trx, scope, 'written')
-          let recordSet = jsonArrayOf(planRow.record_set)
-          const absorbedIds = jsonArrayOf(planRow.absorbed_change_plan_ids).slice()
-          let absorbedFields = 0
-          for (const previous of older) {
-            const absorbed = absorbIntoRecordSet(recordSet, jsonArrayOf(previous.record_set))
-            recordSet = absorbed.recordSet
-            absorbedFields += absorbed.absorbedFields
-            for (const id of [previous.id, ...jsonArrayOf(previous.absorbed_change_plan_ids)]) if (!absorbedIds.includes(id)) absorbedIds.push(id)
-            let superseded
-            try {
-              superseded = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'superseded', superseded_at: at, superseded_by: planRow.id, updated_at: at }, { id: previous.id, status: 'written' }))
-            } catch (error) {
-              throw translate(error, 'change_plan_supersede')
-            }
-            if (superseded.length !== 1) throw stateMoved('change_plan_moved')
-          }
-          let written
-          try {
-            written = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
-              status: 'written',
-              execution_id: executionId,
-              written_at: at,
-              written_content_digest: plannedContentDigestOf(recordSet),
-              record_set: recordSet,
-              record_count: recordSet.length,
-              absorbed_change_plan_ids: absorbedIds,
-              updated_at: at,
-            }, { id: planRow.id, status: 'confirmed' }))
-          } catch (error) {
-            throw translate(error, 'change_plan_written')
-          }
-          if (written.length !== 1) throw stateMoved('change_plan_moved')
-          changePlanOutcome = Object.freeze({ id: planRow.id, status: 'written', absorbedPlans: older.length, absorbedFields })
+          const written = await writePlanWithin(trx, scope, { planRow, executionId, at })
+          changePlanOutcome = Object.freeze({ id: planRow.id, status: 'written', absorbedPlans: written.absorbedPlans, absorbedFields: written.absorbedFields })
         } else if (selfVerified) {
           // Step 6a-1 (T6-4, RR G2; design §3.7 P4): nothing landed, so the confirmation is intact — the plan STAYS
           // `confirmed` (asserted above under its row lock, never updated). The next reconcile matches it (a fresh preview
@@ -3207,6 +3360,432 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     })
   }
 
+  // ── step 6a-2 (S6-2; R-91): the recovery verify-and-close ──────────────────────────────────────────
+
+  /**
+   * Everything the recovery verifies against, in ONE REPEATABLE READ snapshot (design §3.5 step 4a): the execution row
+   * (+ 批次标识's unprefixed source digest, projected HERE only), its intent journal (chunks contiguous, Σ entry_count =
+   * intent_entry_count, the digest recomputed over the row's plan digest — `intentState` 'ok'; a legacy row without a
+   * journal 'missing'; anything else 'corrupt'), the bound change plan (the FULL row: PRIVATE record set — server-held for
+   * the classifier, never a response body) and the pending written plans. `null` when the id names no execution OF THIS
+   * SCOPE (another tenant / sheet / project reads exactly like a missing id). `includeIntent: false` reads the row only
+   * (the route's advisory prelude). Throws 503 on any read failure.
+   */
+  async function readExecutionForRecovery(input = {}) {
+    const scope = normalizeScope(input)
+    const executionId = trimmed(input.executionId)
+    if (!executionId) throw scopeInvalid('executionId')
+    const includeIntent = input.includeIntent !== false
+    const T = REFRESH_STORE_TABLES
+    return db.transaction(async (rawTrx) => {
+      const snapshot = await pinConsultSnapshot(rawTrx)
+      let row
+      try {
+        row = await snapshot.selectOne(T.execution, { id: executionId })
+      } catch (error) {
+        throw translate(error, 'read_execution')
+      }
+      if (!row || row.tenant_id !== scope.tenantId || row.sheet_id !== scope.sheetId || row.project_no !== scope.projectNo) return null
+      const execution = Object.freeze({ ...rowToExecution(row), pullBatchSourceDigest: row.pull_batch_source_digest ?? null })
+      if (!includeIntent) return Object.freeze({ execution, intent: null, intentState: null, changePlan: null, changePlanBound: execution.changePlanBound, writtenPlans: Object.freeze([]) })
+      let intent = null
+      let intentState = 'missing'
+      if (intOrNull(row.intent_version) !== null) {
+        intentState = 'corrupt'
+        const chunkRows = await selectAll(snapshot, T.intent, { execution_id: executionId }, { orderBy: ['chunk_index', 'ASC'], ceiling: INTENT_CHUNK_CEILING, operation: 'read_intent' })
+        const inScope = chunkRows.every((chunk) => chunk.tenant_id === scope.tenantId && chunk.sheet_id === scope.sheetId && chunk.project_no === scope.projectNo)
+        if (inScope) {
+          const candidate = {
+            version: intOrNull(row.intent_version),
+            digest: row.intent_digest,
+            entryCount: intOrNull(row.intent_entry_count),
+            chunks: chunkRows.map((chunk) => ({ chunkIndex: intOrNull(chunk.chunk_index), entryCount: intOrNull(chunk.entry_count), entries: jsonArrayOf(chunk.entries), fieldsets: jsonArrayOf(chunk.fieldsets) })),
+          }
+          try {
+            assertExecutionIntent(candidate, { planDigest: row.plan_digest })
+            intent = deepFreezeJson(candidate)
+            intentState = 'ok'
+          } catch {
+            intent = null
+          }
+        }
+      }
+      const changePlanId = changePlanIdOfBinding(row.refresh_binding)
+      let changePlan = null
+      if (changePlanId) {
+        let planRow
+        try {
+          planRow = await snapshot.selectOne(T.changePlan, { id: changePlanId })
+        } catch (error) {
+          throw translate(error, 'read_change_plan')
+        }
+        if (planRow && planRow.tenant_id === scope.tenantId && planRow.sheet_id === scope.sheetId && planRow.project_no === scope.projectNo) changePlan = rowToChangePlan(planRow)
+      }
+      const writtenRows = await selectAll(snapshot, T.changePlan, { sheet_id: scope.sheetId, project_no: scope.projectNo, status: 'written' }, { ceiling: READ_CEILINGS.changePlan, operation: 'read_change_plans' })
+      if (writtenRows.some((planRow) => planRow.tenant_id !== scope.tenantId)) throw tenantMismatch('change_plan')
+      return Object.freeze({
+        execution,
+        intent,
+        intentState,
+        changePlan,
+        changePlanBound: changePlanId !== null,
+        writtenPlans: Object.freeze(writtenRows.map(rowToChangePlan)),
+      })
+    })
+  }
+
+  /**
+   * Design §5.1: the executions of ONE (sheet, project), newest first (started_at DESC, id DESC), `limit` ≤ 20, `cursor` =
+   * the id of the last execution of the previous page (an id that is not one of this project's is 400). Values-free
+   * projection (rowToExecution: no business value; the route drops the principals). Throws 503 on a read failure.
+   */
+  async function listExecutions(input = {}) {
+    const scope = normalizeScope(input)
+    const limit = input.limit === undefined || input.limit === null ? EXECUTION_LIST_LIMIT_DEFAULT : input.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > EXECUTION_LIST_LIMIT_MAX) throw inputInvalid(`limit must be an integer 1..${EXECUTION_LIST_LIMIT_MAX}`, 'limit', 400)
+    const cursor = input.cursor === undefined || input.cursor === null ? null : trimmed(input.cursor)
+    if (input.cursor !== undefined && input.cursor !== null && !cursor) throw inputInvalid('cursor must be an execution id', 'cursor', 400)
+    const rows = await selectAll(db, REFRESH_STORE_TABLES.execution, { sheet_id: scope.sheetId, project_no: scope.projectNo }, { orderBy: ['started_at', 'DESC'], ceiling: READ_CEILINGS.execution, operation: 'list_executions' })
+    if (rows.some((row) => row.tenant_id !== scope.tenantId)) throw tenantMismatch('execution')
+    const at = (row) => (row.started_at ? new Date(row.started_at).getTime() : 0)
+    const ordered = rows.slice().sort((left, right) => (at(right) - at(left)) || (String(left.id) < String(right.id) ? 1 : (String(left.id) > String(right.id) ? -1 : 0)))
+    let start = 0
+    if (cursor) {
+      const index = ordered.findIndex((row) => row.id === cursor)
+      if (index < 0) throw inputInvalid('cursor is not an execution of this project', 'cursor', 400)
+      start = index + 1
+    }
+    const page = ordered.slice(start, start + limit)
+    const more = start + limit < ordered.length
+    return Object.freeze({
+      ok: true,
+      items: Object.freeze(page.map(rowToExecution)),
+      nextCursor: more && page.length > 0 ? page[page.length - 1].id : null,
+      total: ordered.length,
+    })
+  }
+
+  // ONE step of the recovery close: a 55P03 raised inside it is classified by the step (RR G7).
+  async function closeStep(step, fn) {
+    try {
+      return await fn()
+    } catch (error) {
+      if (isLockNotAvailable(error)) throw step === 'lock_row' ? holderInWrite() : recoveryBusy(step)
+      throw error
+    }
+  }
+
+  // The recovery-written plan RW (design §3.7 layout): the confirmed plan's records restricted to `recordIds` (baselines
+  // kept), the pending written plan(s) superseded FIRST and their unreviewed fields folded in review-only. Written only
+  // with ≥ 1 write record (migration 104's write_record_count >= 1); otherwise nothing is written and W0 is untouched.
+  async function insertRecoveredPlanWithin(trx, scope, { cp, recordIds, executionId, at }) {
+    const wanted = new Set(recordIds)
+    const subset = jsonArrayOf(cp.record_set).filter((record) => isPlainObject(record) && wanted.has(record.recordId))
+    if (writeRecordIdsOf(subset).length === 0) return null
+    const older = await lockedPlansOf(trx, scope, 'written')
+    const recoveredId = newId('chp')
+    let recordSet = subset
+    const absorbedIds = []
+    let absorbedFields = 0
+    for (const previous of older) {
+      const absorbed = absorbIntoRecordSet(recordSet, jsonArrayOf(previous.record_set))
+      recordSet = absorbed.recordSet
+      absorbedFields += absorbed.absorbedFields
+      for (const id of [previous.id, ...jsonArrayOf(previous.absorbed_change_plan_ids)]) if (!absorbedIds.includes(id)) absorbedIds.push(id)
+      let superseded
+      try {
+        superseded = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, { status: 'superseded', superseded_at: at, superseded_by: recoveredId, updated_at: at }, { id: previous.id, status: 'written' }))
+      } catch (error) {
+        throw translate(error, 'change_plan_supersede')
+      }
+      if (superseded.length !== 1) throw stateMoved('change_plan_moved')
+    }
+    const writeCount = writeRecordIdsOf(recordSet).length
+    const baseFingerprint = changePlanFingerprintOf({ projectNo: scope.projectNo, records: subset, sourceContentDigest: cp.source_content_digest })
+    try {
+      await trx.insertOne(REFRESH_STORE_TABLES.changePlan, {
+        id: recoveredId,
+        tenant_id: scope.tenantId,
+        sheet_id: scope.sheetId,
+        project_no: scope.projectNo,
+        write_scope_key: scope.writeScopeKey,
+        status: 'written',
+        plan_fingerprint: sha256(canonicalJson({ scheme: RECOVERED_PLAN_SCHEME, base: baseFingerprint })),
+        source_content_digest: cp.source_content_digest,
+        planned_content_digest: cp.planned_content_digest,
+        record_count: recordSet.length,
+        write_record_count: writeCount,
+        record_set: recordSet,
+        absorbed_change_plan_ids: absorbedIds,
+        hold_ids: jsonArrayOf(cp.hold_ids),
+        hold_set_fingerprint: cp.hold_set_fingerprint,
+        continuation_ids: jsonArrayOf(cp.continuation_ids),
+        review_baseline_digest: cp.review_baseline_digest,
+        confirmed_by: cp.confirmed_by,
+        confirmed_at: cp.confirmed_at,
+        confirmed_generation: cp.confirmed_generation,
+        confirmed_generation_token: cp.confirmed_generation_token,
+        confirmed_fencing_epoch: cp.confirmed_fencing_epoch,
+        execution_id: executionId,
+        written_at: at,
+        written_content_digest: plannedContentDigestOf(recordSet),
+        recovered_from_change_plan_id: cp.id,
+        created_at: at,
+        updated_at: at,
+      })
+    } catch (error) {
+      throw translate(error, 'change_plan_recovered_insert')
+    }
+    return Object.freeze({ id: recoveredId, writeRecordCount: writeCount, absorbedPlans: older.length, absorbedFields })
+  }
+
+  async function invalidatePlanForExecutionWithin(trx, planRow, executionId, at) {
+    let invalidated
+    try {
+      invalidated = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.changePlan, {
+        status: 'invalidated',
+        invalidated_reason: 'execution_failed',
+        invalidated_at: at,
+        execution_id: executionId,
+        updated_at: at,
+      }, { id: planRow.id, status: 'confirmed' }))
+    } catch (error) {
+      throw translate(error, 'change_plan_invalidate')
+    }
+    if (invalidated.length !== 1) throw stateMoved('change_plan_moved')
+  }
+
+  // Design §3.7 — the plan-bound cell, keyed by the plan status seen UNDER THE LOCK (no "any" row, so no two overlap):
+  //   P1 confirmed + landed          CP -> written (as a succeeded finish), W0 absorbed into CP
+  //   P2 confirmed + mixed           CP -> invalidated(execution_failed) + RW(landed write records), W0 absorbed into RW
+  //   P3 confirmed + nothing_landed  CP stays confirmed (T6-4), W0 untouched; the close stays a settlement subject
+  //   P5 confirmed + unknown         CP -> invalidated(execution_failed) FIRST + RW(EVERY write record, fail-safe)
+  //   P6 / P7 / P9 invalidated(execution_failed by THIS execution) + landed / mixed / unknown -> RW(all / landed / all)
+  //   P8 invalidated(execution_failed) + nothing_landed -> nothing (the close is a subject: 已执行待核对)
+  //   P10 / P11 any other plan status (or the plan absent / out of scope) -> 409 STATE_MOVED change_plan_moved (a defect)
+  // Answers the values-free outcome: { id, cell, status, outcome (closed token), recoveredPlanId, recoveredRecordCount }.
+  async function closePlanCellWithin(trx, scope, { planId, executionId, result, landedRecordIds, at }) {
+    let planRow
+    try {
+      planRow = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: planId })
+    } catch (error) {
+      throw translate(error, 'change_plan_lock')
+    }
+    if (!planRow || planRow.tenant_id !== scope.tenantId || planRow.sheet_id !== scope.sheetId || planRow.project_no !== scope.projectNo) throw stateMoved('change_plan_moved')
+    const confirmed = planRow.status === 'confirmed'
+    const failedByThis = planRow.status === 'invalidated' && planRow.invalidated_reason === 'execution_failed' && planRow.execution_id === executionId
+    if (!confirmed && !failedByThis) throw stateMoved('change_plan_moved')
+    const writeIds = writeRecordIdsOf(jsonArrayOf(planRow.record_set))
+    const landedSet = new Set(landedRecordIds)
+    const recoveredIds = result === 'mixed' ? writeIds.filter((id) => landedSet.has(id)) : writeIds
+    const answer = (cell, status, outcome, recovered = null, extra = {}) => Object.freeze({
+      id: planRow.id,
+      cell,
+      status,
+      outcome,
+      recoveredPlanId: recovered ? recovered.id : null,
+      recoveredRecordCount: recovered ? recovered.writeRecordCount : 0,
+      ...extra,
+    })
+    if (confirmed) {
+      if (result === 'landed') {
+        const written = await writePlanWithin(trx, scope, { planRow, executionId, at })
+        return answer('P1', 'written', 'written', null, { absorbedPlans: written.absorbedPlans, absorbedFields: written.absorbedFields })
+      }
+      if (result === 'nothing_landed') return answer('P3', 'confirmed', 'kept_confirmed')
+      await invalidatePlanForExecutionWithin(trx, planRow, executionId, at)
+      const recovered = await insertRecoveredPlanWithin(trx, scope, { cp: planRow, recordIds: recoveredIds, executionId, at })
+      return answer(result === 'mixed' ? 'P2' : 'P5', 'invalidated', recovered ? 'invalidated_recovered' : 'invalidated', recovered)
+    }
+    if (result === 'nothing_landed') return answer('P8', 'invalidated', 'unchanged')
+    const recovered = await insertRecoveredPlanWithin(trx, scope, { cp: planRow, recordIds: recoveredIds, executionId, at })
+    const cell = result === 'landed' ? 'P6' : (result === 'mixed' ? 'P7' : 'P9')
+    return answer(cell, 'invalidated', recovered ? 'recovered' : 'unchanged', recovered)
+  }
+
+  // Design §3.6 step 7, re-read under the state lock: zero open holds, no OTHER unfinished execution, and the state's
+  // settlement not newer than this execution's start.
+  async function recoverySettlementAdmissibleWithin(trx, scope, stateRow, executionRow, executionId) {
+    const open = await openHoldsOf(trx, scope)
+    if (open.length > 0) return false
+    for (const status of UNFINISHED_EXECUTION_STATUSES) {
+      const rows = await selectAll(trx, REFRESH_STORE_TABLES.execution, { sheet_id: scope.sheetId, project_no: scope.projectNo, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' })
+      if (rows.some((row) => row.id !== executionId)) return false
+    }
+    const settledAt = stateRow.settled_at ? new Date(stateRow.settled_at).getTime() : null
+    const startedAt = executionRow.started_at ? new Date(executionRow.started_at).getTime() : null
+    if (settledAt !== null && (startedAt === null || settledAt > startedAt)) return false
+    return true
+  }
+
+  /**
+   * THE RECOVERY CLOSE (design §3.6; S6-2). ONE transaction while the recovery holds its lease; every admissibility fact
+   * is decided HERE, under the locks, never from the verification's read:
+   *   0  SET LOCAL lock_timeout (the bounded wait of every later step)
+   *   1  refresh-state row FOR UPDATE (absent => 409 STATE_MOVED state_row_absent)
+   *   2  `holderWithin(trx)` — the lock row FOR UPDATE, the recovery's lease id + fencing epoch still the row's (else 409
+   *      LEASE_LOST, full rollback); a takeover's UPDATE queues behind it
+   *   3  the execution row FOR UPDATE: in scope (404), still unfinished (409 NOT_UNFINISHED execution_finished /
+   *      verified_closed), the intent digest the classification was made over (409 STATE_MOVED intent_moved);
+   *      `pre_close_status` = the status seen HERE
+   *   4  `landed` only: the bound continuations stamped as by a succeeded finish
+   *   5  the bound change plan and the pending written plan(s), then the §3.7 cell
+   *   6  `batchWithin(trx, …)` (批次标识's close hook, only when the route wired it: switch on and a ledger) with the
+   *      execution's UNPREFIXED pull-batch source digest; its outcome token rides the audit and the answer
+   *   7  settlement — a settlement subject only, when the input carries one and it is admissible under the lock
+   *   8  the execution UPDATE, CAS on the status seen in 3
+   *   9  the state row: version + 1, decision_version + 1 (+ the settled columns), CAS on decision_version
+   *  10  `auditWithin(trx, event)` — required; its failure rolls everything back (E09)
+   * A 55P03 at step 2 is 409 WRITE_LOCKED holder_in_write; at any other step 409 RECOVERY_BUSY { step }. A COMMIT failure
+   * is 503 STORE_FAILED `commit`. `classification`: `{ result, intentDigest, counts, landedRecordIds, landedAddCount,
+   * verifiedCreatedRows }` (values-free). `mode`: puller_verified (landed / mixed / nothing_landed) or runbook (unknown,
+   * with `runbookRef`).
+   */
+  async function closeExecution(input = {}, options = {}) {
+    const scope = normalizeScope(input)
+    const executionId = trimmed(input.executionId)
+    if (!executionId) throw scopeInvalid('executionId')
+    if (!RECOVERY_CLOSE_MODES.includes(input.mode)) throw inputInvalid('mode is not a recovery close mode', 'mode')
+    const mode = input.mode
+    const classification = normalizeRecoveryClassification(input.classification, mode)
+    const lease = normalizeRecoveryLease(input.lease)
+    const closedBy = trimmed(input.closedBy)
+    if (!closedBy) throw scopeInvalid('closedBy')
+    const runbookRef = mode === 'runbook' ? input.runbookRef : null
+    if (mode === 'runbook' && (typeof runbookRef !== 'string' || !RUNBOOK_REF_PATTERN.test(runbookRef))) throw inputInvalid('a runbook close needs a values-free runbookRef', 'runbookRef')
+    if (mode === 'runbook' && input.settlement !== undefined && input.settlement !== null) throw inputInvalid('a runbook close never settles', 'settlement')
+    const settlement = normalizeSettlement(input.settlement)
+    const opts = isPlainObject(options) ? options : {}
+    if (typeof opts.holderWithin !== 'function') throw inputInvalid('the recovery close needs the in-transaction holder assert', 'holderWithin')
+    if (opts.batchWithin !== undefined && opts.batchWithin !== null && typeof opts.batchWithin !== 'function') throw inputInvalid('batchWithin must be a function when given', 'batchWithin')
+    const auditWithin = auditHookOf(opts)
+    if (!auditWithin) throw inputInvalid('the recovery close appends its audit row in its own transaction', 'auditWithin')
+    const holderWithin = opts.holderWithin
+    const batchWithin = typeof opts.batchWithin === 'function' ? opts.batchWithin : null
+    const at = clock()
+
+    return decisionTransaction(async (rawTrx) => {
+      const trx = requireTrx(rawTrx)
+      // 0. Bound first, so the state-row wait of step 1 is bounded too (holderWithin re-sets the same value).
+      await closeStep('lock_timeout', async () => {
+        try {
+          await trx.setLocalLockTimeout(PROJECT_WRITE_ROW_LOCK_WAIT_MS)
+        } catch (error) {
+          throw translate(error, 'lock_timeout')
+        }
+      })
+      // 1.
+      const stateRow = await closeStep('state_row', () => lockStateRow(trx, scope, { at }))
+      if (!stateRow) throw stateMoved('state_row_absent')
+      // 2.
+      await closeStep('lock_row', () => holderWithin(trx))
+      // 3.
+      const row = await closeStep('execution', async () => {
+        try {
+          return await trx.selectOneForUpdate(REFRESH_STORE_TABLES.execution, { id: executionId })
+        } catch (error) {
+          throw translate(error, 'execution_lock')
+        }
+      })
+      if (!row || row.tenant_id !== scope.tenantId || row.sheet_id !== scope.sheetId || row.project_no !== scope.projectNo) throw executionNotFound()
+      if (row.status === 'succeeded') throw executionNotUnfinished('execution_finished')
+      if (row.status === 'verified_closed') throw executionNotUnfinished('verified_closed')
+      if (!UNFINISHED_EXECUTION_STATUSES.includes(row.status)) throw stateMoved('execution_moved')
+      if ((row.intent_digest ?? null) !== classification.intentDigest) throw stateMoved('intent_moved')
+      const seen = row.status
+      const boundPlanId = changePlanIdOfBinding(row.refresh_binding)
+      const transparent = classification.result === 'nothing_landed' && boundPlanId === null
+      // 4.
+      const consumed = classification.result === 'landed'
+        ? await closeStep('continuations', () => consumeBoundContinuationsWithin(trx, scope, row, executionId, at))
+        : 0
+      // 5.
+      const changePlan = boundPlanId
+        ? await closeStep('plans', () => closePlanCellWithin(trx, scope, { planId: boundPlanId, executionId, result: classification.result, landedRecordIds: classification.landedRecordIds, at }))
+        : null
+      // 6. 批次标识 (rebaseline (a), (b)): the hook only when wired; the digest as stored — unprefixed, or null.
+      const batchOutcome = batchWithin
+        ? await closeStep('pull_batch', () => batchWithin(trx, {
+          scope: { tenantId: scope.tenantId, sheetId: scope.sheetId, projectNo: scope.projectNo },
+          refreshExecutionId: executionId,
+          result: classification.result,
+          verifiedCreatedRows: classification.verifiedCreatedRows,
+          sourceDigest: row.pull_batch_source_digest ?? null,
+        }))
+        : null
+      // 7.
+      const settled = !transparent && settlement !== null
+        ? await closeStep('settlement', () => recoverySettlementAdmissibleWithin(trx, scope, stateRow, row, executionId))
+        : false
+      // 8.
+      const verifySummary = {
+        result: classification.result,
+        counts: { ...classification.counts },
+        landedAddCount: classification.landedAddCount,
+        verifiedCreatedRows: classification.verifiedCreatedRows,
+        changePlanCell: changePlan ? changePlan.cell : null,
+      }
+      const closedRows = await closeStep('execution_close', async () => {
+        try {
+          return rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.execution, {
+            status: 'verified_closed',
+            verified_result: classification.result,
+            verified_at: at,
+            verified_by: closedBy,
+            closed_mode: mode,
+            pre_close_status: seen,
+            verify_summary: verifySummary,
+            verify_lease_run_id: lease.leaseRunId,
+            verify_fencing_epoch: lease.fencingEpoch,
+            runbook_ref: runbookRef,
+            settlement_subject: !transparent,
+            finished_at: row.finished_at || at,
+            updated_at: at,
+          }, { id: executionId, status: seen }))
+        } catch (error) {
+          throw translate(error, 'execution_close')
+        }
+      })
+      if (closedRows.length !== 1) throw stateMoved('execution_moved')
+      // 9.
+      const state = await closeStep('state_advance', () => advanceDecision(trx, scope, stateRow, at, settled ? {
+        settled_at: at,
+        settled_execution_id: executionId,
+        settled_generation_token: settlement.generationToken,
+        settled_sheet_machine_digest: settlement.sheetMachineDigest,
+        settled_source_content_digest: settlement.sourceContentDigest,
+      } : {}))
+      // 10.
+      await closeStep('audit', () => runAudit(trx, auditWithin, {
+        operation: mode === 'runbook' ? 'execution_closed_unverified' : 'execution_verified_closed',
+        executionId,
+        result: classification.result,
+        preStatus: seen,
+        counts: { ...classification.counts },
+        changePlanOutcome: changePlan ? changePlan.outcome : 'none',
+        recoveredRecordCount: changePlan ? changePlan.recoveredRecordCount : 0,
+        ...(batchOutcome !== null ? { batchOutcome } : {}),
+        transparent,
+        settled,
+        continuationsConsumed: consumed,
+      }))
+      return Object.freeze({
+        executionId,
+        closed: true,
+        closedMode: mode,
+        preStatus: seen,
+        result: classification.result,
+        transparent,
+        settlementSubject: !transparent,
+        continuationsConsumed: consumed,
+        changePlan,
+        ...(batchOutcome !== null ? { batchOutcome } : {}),
+        settled,
+        decisionVersion: intOrNull(state.decision_version),
+      })
+    })
+  }
+
   return Object.freeze({
     readGovernanceRows,
     readSheetGovernanceMarks,
@@ -3224,6 +3803,10 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     reconcileHolds,
     beginExecution,
     finishExecution,
+    // Step 6a-2 (S6-2).
+    readExecutionForRecovery,
+    listExecutions,
+    closeExecution,
   })
 }
 

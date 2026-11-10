@@ -979,6 +979,47 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Reopen the project page.',
   }),
   /**
+   * 备料分批拉取第一期 step 6a-2 (S6-2; register R-91) — the recovery of an unfinished write (核对上次写入 / 结束这次执行).
+   * Minimal copy so every new backend code has its own two lines (RS-COPY); the recovery card and its fuller wording are
+   * S6-3's. A refused recovery changes nothing.
+   */
+  STOCK_PREP_REFRESH_EXECUTION_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这次执行记录。',
+    en: 'This project has no such execution.',
+    zhNext: '请重新打开「拉取待确认」查看执行记录。',
+    enNext: 'Reopen 「拉取待确认」 to see the executions.',
+  }),
+  STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED: Object.freeze({
+    zh: '这次执行已经结束,不需要恢复;什么都没有改动。',
+    en: 'This execution has already finished; there is nothing to recover and nothing was changed.',
+    zhNext: '请重新预览后再继续。',
+    enNext: 'Preview again before continuing.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_UNPROVABLE: Object.freeze({
+    zh: '无法从表格证明上次写入落了哪些行,这次执行仍保持未完成;正式导出继续暂停,什么都没有改动。',
+    en: 'The sheet cannot prove which rows the last write landed, so the execution stays unfinished; the formal export stays paused and nothing was changed.',
+    zhNext: '请平台管理员按手册处理。',
+    enNext: 'Ask the platform admin to handle it per the runbook.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_STALE: Object.freeze({
+    zh: '核对之后表格或数据源又有变化,这次没有结束执行。',
+    en: 'The sheet or the source changed after the check, so the execution was not closed.',
+    zhNext: '请重新核对上次写入,再结束这次执行。',
+    enNext: 'Check the last write again, then close the execution.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_RECOMPUTE_INCOMPLETE: Object.freeze({
+    zh: '核对时数据源没有完整读出,这次没有结束执行。',
+    en: 'The source could not be read completely during the check, so the execution was not closed.',
+    zhNext: '请等数据源能完整读取后再核对。',
+    enNext: 'Check again once the source reads completely.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_BUSY: Object.freeze({
+    zh: '正在处理中,另一个操作暂时占用了这个项目;这次什么都没有改动。',
+    en: 'Another operation is holding this project right now; nothing was changed.',
+    zhNext: '请稍后重试。',
+    enNext: 'Retry shortly.',
+  }),
+  /**
    * 备料分批拉取第一期 step 5 PR-8 (register R-63) — the change plan (变更计划确认 / 受控更新) and the review (变更复核).
    * Minimal copy; the pages are PR-9's. A confirm / review refusal changes nothing.
    *

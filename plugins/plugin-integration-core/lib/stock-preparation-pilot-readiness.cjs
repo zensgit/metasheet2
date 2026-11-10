@@ -18,9 +18,10 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 3 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// THE LIST (PILOT_READINESS_VERSION 4 — version 1 was the first fifteen; the pre-enable hardening of step-4
 // design §23.4 F-3 / F-5 added the three marked ★; 批次标识 BI-1b (design §8.7, S6 C-9; register R-65) added the six
-// marked ◆ in version 3, which only ever refuse more):
+// marked ◆ in version 3; batch-refresh step 6a-2 (S6-2, step-6 design §8 as rebaselined B-8; register R-91) added the
+// two marked ▲ in version 4 — each only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -65,6 +66,11 @@
 // ◆ pull_batch_ledger_readable     the pull-batch ledger answers for this sheet (migration 105)
 // ◆ pull_batch_history_resolved    the sheet's batch history is resolved (born_empty / backfilled) and no gap row
 //                                  exists. The six read ONE status (deps.readPullBatchStatus), once per evaluation.
+// ▲ change_plan_store_readable     the step-5 change-plan table (migration 104) is readable
+// ▲ execution_recovery_ready       the plan's 「恢复入口」: the step-6 intent journal (migration 106) is readable, the
+//                                  sheet write lock knows the `recovery_verify` purpose, the wired refresh store can read,
+//                                  close and list executions for recovery, and — while the pull-batch switch is on —
+//                                  批次标识's ledger offers its link read and its close hook (readBatchLink / batchWithin)
 //   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
@@ -89,8 +95,10 @@ const continuationSupport = require('./stock-preparation-continuation-support.cj
 const { PULL_BATCH_READINESS_CHECK_IDS, pullBatchReadinessChecks } = require('./stock-preparation-pull-batch-status.cjs')
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
+// Step 6a-2 (readiness v4): the lock's closed purpose list (the recovery lease must be a known purpose).
+const { PROJECT_WRITE_PURPOSES } = require('./stock-preparation-project-write-lock.cjs')
 
-const PILOT_READINESS_VERSION = 3
+const PILOT_READINESS_VERSION = 4
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -99,6 +107,12 @@ const STEP4_STORE_TABLES = Object.freeze({
   continuation: 'integration_stock_prep_continuation',
   refreshState: 'integration_stock_prep_refresh_state',
 })
+// Step 6a-2 (readiness v4): the change-plan ledger (migration 104) and the execution intent journal (migration 106).
+const STEP6_RECOVERY_TABLES = Object.freeze({
+  changePlan: 'integration_stock_prep_change_plan',
+  intent: 'integration_stock_prep_refresh_execution_intent',
+})
+const RECOVERY_STORE_METHODS = Object.freeze(['readExecutionForRecovery', 'closeExecution', 'listExecutions'])
 
 // Server config (NOT an env flag): `stockPreparationPilot.specReadPlanSlot` with the exact literal
 // 'not_applicable' declares that this deployment's source has no 规格 column to read. Anything else
@@ -130,6 +144,9 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'no_generic_writer_names_sheet',
   // 批次标识 BI-1b (P-8): immediately before the D-22 marker, which stays last.
   ...PULL_BATCH_READINESS_CHECK_IDS,
+  // Step 6a-2 (v4, rebaseline B-8): inserted before the D-22 marker as BI did.
+  'change_plan_store_readable',
+  'execution_recovery_ready',
   'continuation_support_version',
 ])
 
@@ -355,6 +372,24 @@ const CHECKS = Object.freeze({
     if (typeof deps.pullBatchStatusOnce !== 'function') return false
     return pullBatchReadinessChecks(await deps.pullBatchStatusOnce())[id] === true
   }])),
+  async change_plan_store_readable(deps) {
+    if (typeof deps.probeTableReadable !== 'function') return false
+    const probe = await deps.probeTableReadable(STEP6_RECOVERY_TABLES.changePlan)
+    return Boolean(probe && probe.readable === true)
+  },
+  async execution_recovery_ready(deps) {
+    if (typeof deps.probeTableReadable !== 'function') return false
+    const probe = await deps.probeTableReadable(STEP6_RECOVERY_TABLES.intent)
+    if (!probe || probe.readable !== true) return false
+    if (!PROJECT_WRITE_PURPOSES.includes('recovery_verify')) return false
+    const store = deps.recoveryStore
+    if (!store || !RECOVERY_STORE_METHODS.every((method) => typeof store[method] === 'function')) return false
+    if (deps.pullBatchEnabled === true) {
+      const ledger = deps.pullBatchStore
+      if (!ledger || typeof ledger.readBatchLink !== 'function' || typeof ledger.batchWithin !== 'function') return false
+    }
+    return true
+  },
   continuation_support_version() {
     const version = continuationSupport.CONTINUATION_SUPPORT_VERSION
     return Number.isInteger(version) && version >= REQUIRED_CONTINUATION_SUPPORT_VERSION
@@ -366,7 +401,8 @@ const CHECKS = Object.freeze({
  *   row, sheetId, objectId, projectId, projectNo, tenantId, action, target, recordsApi, provisioning,
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
- *   customerPackDeclaration, collectGenericWriterTargets
+ *   customerPackDeclaration, collectGenericWriterTargets, readPullBatchStatus, pullBatchBand,
+ *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2)
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
@@ -408,6 +444,7 @@ module.exports = {
   SPEC_READ_PLAN_SLOT_NOT_APPLICABLE,
   CUSTOMER_PACK_NOT_APPLICABLE,
   STEP4_STORE_TABLES,
+  STEP6_RECOVERY_TABLES,
   collectGenericWriterTargets,
   evaluatePilotReadiness,
   __internals: {
