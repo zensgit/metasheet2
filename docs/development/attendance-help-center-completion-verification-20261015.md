@@ -52,9 +52,9 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 服务端 `ATTENDANCE_ROLE_TEMPLATES` 另有 `importer` 模板：`attendance:read` + `attendance:import`（`packages/core-backend/src/routes/attendance-admin.ts:234-239`）。用户权限页的角色模板下拉只有员工、审批人、管理员：单人 `AttendanceView.vue:3834-3836`，批量 `3916-3918`。操作帮助故意不介绍 `importer`，因为界面没有入口，写进去会让用户找不到操作位置。
 
-### 3. 旧版管理员直接授权回退缺少导入权限（独立兼容性问题）
+### 3. 旧版管理员直接授权回退缺少导入权限（已修复）
 
-这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`，走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。仅当该接口被当作旧部署回退时，才使用前端 `provisionRolePermissions`。其中 `admin` 为 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:admin`，不含 `attendance:import`（`AttendanceView.vue:12828-12832`）。调用点在 `22515`、`22569`、`22705`、`22798`。这是旧版兼容路径上的缺口，本补丁只在维护文档记录，不修改任何授权逻辑。
+这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`，走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。仅当平台管理员遇到该接口 404 时，才回退到逐项 `POST /api/permissions/grant`（`AttendanceView.vue` 调用点 `22512`、`22702`）。该回退清单现已含 `attendance:import`，与服务端管理员模板五键一致（`apps/web/src/views/attendance/attendanceProvisionRolePermissions.ts`；`AttendanceView.vue:12829` 引用）。`POST /api/permissions/grant` 不以代码写死的允许名单拦截，只要求 `permissions` 表已有该 code（`packages/core-backend/src/routes/permissions.ts` 的 catalog 查询）；`attendance:import` 已由迁移 `zzzz20260117090000_add_attendance_permissions.ts` 与 `ensureAttendanceRoleTemplates`（`attendance-admin.ts` 权限 INSERT）写入目录。
 
 ## 2026-10-16 第五轮
 
@@ -159,7 +159,7 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 | 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47152-47158`；既有考勤组帮助 |
 | 请假类型 / 加班规则 | 「需要审批」只保存 | `attendanceApprovalOptionHint.ts:8-14` |
 | 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | 插入 `'pending'`：`index.cjs:34681-34694`；动态步骤抛出 `24412`；页面警告 `AttendanceView.vue:8065` |
-| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。服务端另有 `importer` 模板，操作帮助不介绍（界面无入口）。旧的直接授权回退清单不含 `attendance:import`，记为独立兼容性问题，本次不改授权逻辑 | 管理员模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；`importer` 模板 `234-239`；下拉 `AttendanceView.vue:3834-3836`、批量 `3916-3918`；回退清单 `12828-12832`。详见「#6426 合入后的指引补记」第 2、3 条 |
+| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。服务端另有 `importer` 模板，操作帮助不介绍（界面无入口）。旧的直接授权回退清单已含 `attendance:import`，与服务端管理员模板五键一致 | 管理员模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；`importer` 模板 `234-239`；下拉 `AttendanceView.vue:3834-3836`、批量 `3916-3918`；回退清单 `attendanceProvisionRolePermissions.ts`，引用 `AttendanceView.vue:12829`。详见「#6426 合入后的指引补记」第 2、3 条 |
 | 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | 抛出 `index.cjs:20399`；页面 `AttendanceView.vue:26773`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
 | 时区提示 | 默认规则缺失、冻结上下文、非法时区等固定人话 | `attendanceTimezoneError.ts:3-22` |
 | 导入 | 令牌只在 `ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'` 时要求，10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | `index.cjs:5967-5968`；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |
