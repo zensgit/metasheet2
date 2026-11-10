@@ -70,10 +70,11 @@ import {
 /**
  * History readability of a retired directory integration (real PostgreSQL).
  *
- * Invariant: when an integration row is kept with `status = 'retired'` and its accounts and
- * departments are inactive, every reader that serves history returns what it returned before,
- * through its own read function or route and without error, and every reader that selects live
- * sources no longer counts the retired one. Each case name carries its consumer number.
+ * Invariant, for each reader exercised in this file: when an integration row is kept with
+ * `status = 'retired'` and its accounts and departments are inactive, a reader that serves history
+ * returns what it returned before, through its own read function or route and without error, and a
+ * reader that selects live sources does not count the retired one. Each case name carries its
+ * consumer number.
  * Expected values are written by hand from the reader's code.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
