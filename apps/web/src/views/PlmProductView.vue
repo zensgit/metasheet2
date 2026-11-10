@@ -2311,11 +2311,20 @@ async function loadBomCompareSchema() {
   }
 }
 
+let compareLoadGeneration = 0
+watch([compareLeftId, compareRightId], () => {
+  compareLoadGeneration += 1
+  compareLoading.value = false
+}, { flush: 'sync' })
+
 async function loadBomCompare() {
   if (!compareLeftId.value || !compareRightId.value) return
+  const leftId = compareLeftId.value
+  const rightId = compareRightId.value
+  const generation = ++compareLoadGeneration
   syncQueryParams({
-    compareLeftId: compareLeftId.value,
-    compareRightId: compareRightId.value,
+    compareLeftId: leftId,
+    compareRightId: rightId,
     compareMode: compareMode.value || undefined,
     compareLineKey: compareLineKey.value || undefined,
     compareMaxLevels: compareMaxLevels.value,
@@ -2333,9 +2342,9 @@ async function loadBomCompare() {
       .map((value) => value.trim())
       .filter(Boolean)
     const effectiveAt = normalizeEffectiveAt(compareEffectiveAt.value)
-    bomCompare.value = await plmService.getBomCompare<ComparePayload>({
-      leftId: compareLeftId.value,
-      rightId: compareRightId.value,
+    const result = await plmService.getBomCompare<ComparePayload>({
+      leftId,
+      rightId,
       leftType: 'item',
       rightType: 'item',
       maxLevels: compareMaxLevels.value,
@@ -2347,11 +2356,16 @@ async function loadBomCompare() {
       includeRelationshipProps: relProps.length ? relProps : undefined,
       effectiveAt,
     })
+    if (generation !== compareLoadGeneration) return
+    bomCompare.value = result
   } catch (error: any) {
+    if (generation !== compareLoadGeneration) return
     handleAuthError(error)
     compareError.value = error?.message || 'BOM 对比失败'
   } finally {
-    compareLoading.value = false
+    if (generation === compareLoadGeneration) {
+      compareLoading.value = false
+    }
   }
 }
 
