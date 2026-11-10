@@ -826,10 +826,11 @@ async function confirm(ctx, body) {
   // PR-8 review fix N1-b (round 2): the candidate confirm creates a relationship, so the store re-reads the pilot marker
   // on its own transaction handle under the state-row lock (the route hands the governance reader's `readPilotWithin`,
   // bound to this scope); `assertPilot(consult)` above stays the fast, earlier picture. Without the hook the store
-  // refuses 501 `pilot_read_within` before any statement.
+  // refuses 501 `pilot_read_within` before any statement. Pre-pilot fix batch 8(a) (R-91): the RE-CONFIRM re-activates
+  // a relationship, so it hands the store the same in-transaction read — NOT_PILOT is decided under the lock on both.
   const decided = mode === 'confirm'
     ? await ctx.store.confirmContinuation({ ...ctx.scope, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, basis: input.basis, sourceIdentity }, { ...hooks, pilotWithin: ctx.readPilotWithin })
-    : await ctx.store.reconfirmContinuation({ ...ctx.scope, continuationId: input.continuation.id, revision: input.continuation.revision, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, sourceIdentity }, hooks)
+    : await ctx.store.reconfirmContinuation({ ...ctx.scope, continuationId: input.continuation.id, revision: input.continuation.revision, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, sourceIdentity }, { ...hooks, pilotWithin: ctx.readPilotWithin })
   return Object.freeze({
     continuationId: decided.continuationId,
     revision: decided.revision,
