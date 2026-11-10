@@ -456,9 +456,43 @@ describe('routes/attendance-admin.ts', () => {
     pgMocks.transaction.mockImplementation(async (handler) => handler({ query: pgMocks.query }))
   })
 
-  function installUserRolesRejection(error: unknown): void {
-    pgMocks.query.mockImplementation(async (sql: string) => {
+  function attendanceAuthorityRow(sql: string, params?: unknown[]): { rows: unknown[]; rowCount: number } | null {
+  if (/FOR UPDATE/.test(sql) && /FROM users/.test(sql)) {
+    const id = String(params?.[0] ?? '')
+    return {
+      rows: [{
+        id,
+        email: 'u@example.com',
+        name: 'U',
+        employeeNo: null,
+        department: null,
+        role: id === 'admin-1' ? 'admin' : 'user',
+        is_active: true,
+        activation_status: 'activated',
+        is_admin: id === 'admin-1',
+        access_generation: 0,
+        deleted_at: null,
+        purged_at: null,
+        last_login_at: null,
+        created_at: 'now',
+      }],
+      rowCount: 1,
+    }
+  }
+  if (/SELECT role_id/.test(sql) && /FROM user_roles/.test(sql)) {
+    const id = String(params?.[0] ?? '')
+    return id === 'admin-1'
+      ? { rows: [{ role_id: 'admin' }], rowCount: 1 }
+      : { rows: [], rowCount: 0 }
+  }
+  return null
+}
+
+function installUserRolesRejection(error: unknown): void {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/INSERT INTO user_roles/.test(sql)) throw error
+      const authority = attendanceAuthorityRow(sql, params)
+      if (authority) return authority
       if (/FROM users/.test(sql)) {
         return {
           rows: [{
@@ -519,8 +553,10 @@ describe('routes/attendance-admin.ts', () => {
 
   it('[recovery-census:attendance-admin:batch-assign] batch role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
     const batchUserId = '10000000-0000-4000-8000-000000000001'
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/INSERT INTO user_roles/.test(sql)) throw markerError()
+      const authority = attendanceAuthorityRow(sql, params)
+      if (authority) return authority
       if (/FROM users/.test(sql)) {
         return { rows: [{ id: batchUserId, email: 'u@example.com', name: 'U', is_active: true }] }
       }
@@ -544,8 +580,10 @@ describe('routes/attendance-admin.ts', () => {
   })
 
   it('[recovery-census:attendance-admin:unassign] single role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/DELETE FROM user_roles/.test(sql)) throw markerError()
+      const authority = attendanceAuthorityRow(sql, params)
+      if (authority) return authority
       if (/FROM users/.test(sql)) {
         return {
           rows: [{
@@ -576,8 +614,10 @@ describe('routes/attendance-admin.ts', () => {
   })
 
   it('single role unassign: non-40001 error → ORIGINAL 500 ROLE_UNASSIGN_FAILED, exactly as before', async () => {
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/DELETE FROM user_roles/.test(sql)) throw otherDbError()
+      const authority = attendanceAuthorityRow(sql, params)
+      if (authority) return authority
       if (/FROM users/.test(sql)) {
         return {
           rows: [{
@@ -611,8 +651,10 @@ describe('routes/attendance-admin.ts', () => {
 
   it('[recovery-census:attendance-admin:batch-unassign] batch role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
     const batchUserId = '10000000-0000-4000-8000-000000000002'
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/DELETE FROM user_roles/.test(sql)) throw markerError()
+      const authority = attendanceAuthorityRow(sql, params)
+      if (authority) return authority
       if (/FROM users/.test(sql)) {
         return { rows: [{ id: batchUserId, email: 'u@example.com', name: 'U', is_active: true }] }
       }
