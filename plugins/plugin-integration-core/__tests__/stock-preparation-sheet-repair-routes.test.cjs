@@ -11,18 +11,25 @@
 //   RR-01  (RP-06) the gate order: 403 below ADMIN whatever the switches say; then 404 with ZERO IO while the repair
 //          switch is not exactly 'true' or the project-sheets switch is off; a tenantless platform admin refused
 //   RR-02  the closed body and the typed project number (400 / 409 before any IO); absent / archived / not the
-//          registry's sheet (409); a missing service is 501 by name
+//          registry's sheet (409); a missing service is 501 by name; a missing migration 108 and a missing audit
+//          action (086 / 066) are 503 before any sheet or source read
 //   RR-03  end to end: preview (listing, then the component) -> execute under the real `sheet_repair` lease (fenced,
 //          version-conditional patches; the holder asserted in both ledger transactions) -> released -> bumped; the run
 //          list; then the restore of that run puts every stored row back byte-identically; values-free answers
-//   RR-04  (RP-01) a governed project: a preview refusal and 409 for an execute, nothing written
+//   RR-04  (RP-01) a governed project: a preview refusal and 409 for an execute, nothing written — for a retire and
+//          for the restore of a run whose project was governed afterwards
 //   RR-05  the installing gate through the route: enforced while the batch identifier is on; with it off the batch
 //          ledger is never touched
 //   RR-06  mutual exclusion with a pull, a recovery and an install: whoever holds the sheet, the repair is 409
 //          WRITE_LOCKED; while the repair holds it, a pull preview is 409 WRITE_LOCKED naming `sheet_repair`
 //   RR-07  a host that cannot honour the write fence refuses the execute (501) BEFORE the claim is spent; the old root
-//          still in the source refuses it too
+//          still in the source refuses it too; a moved row stops it; an incomplete source read refuses it
 //   RR-08  the fills report and the run list through their routes: values-free, audited before the answer
+//   RR-09  the server-held deps the routes hand the library, exercised directly: the fenced patch refuses a missing
+//          guard and a missing version before the host; after a takeover the pre-write holder CAS refuses the next
+//          patch before it reaches the host; the holder assert the ledger runs is the lock's own
+//   RR-10  the tenancy wall: a registry row that resolves onto ANOTHER tenant's sheet is refused 409 for all three
+//          routes before any sheet, source or ledger read
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -133,7 +140,7 @@ function makeRecords() {
  * Mount the route stack over a D1 sheet. `repair` / `pullBatch` are the two env switches' values; `ledger: 'untouchable'`
  * hands the routes a batch ledger that throws on any call.
  */
-async function mount({ switchOn = true, ledger = 'real', source = F.secondPullSource({ sLine: false }), serviceOverrides = {} } = {}) {
+async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source = F.secondPullSource({ sLine: false }), serviceOverrides = {} } = {}) {
   const clock = kit.createClock()
   const db = kit.createFakeRepairDb({ clock, pullBatch: true })
   const repairStore = createStockPreparationSheetRepairStore({ db, now: clock.now })
@@ -170,7 +177,7 @@ async function mount({ switchOn = true, ledger = 'real', source = F.secondPullSo
     auditsWithin.push(entry)
     return { ok: true }
   }
-  const seeded = switchOn ? h.seedRegistryRow(PROJECT) : null
+  const seeded = seed ? h.seedRegistryRow(PROJECT) : null
   const physical = seeded ? (fieldId) => h.provisioning.getFieldId(h.staging, seeded.objectId, fieldId) : null
   if (seeded) {
     // D1: the first pull's S-001 rows (a person's note on the root) AND the second pull's P-001 subtree with its nested
@@ -225,6 +232,8 @@ const repair = (st, body, options = {}) => call(st, 'POST', PATHS.repair, { body
 const preview = (st, extra = {}, options = {}) => repair(st, { mode: 'preview', recipe: RETIRE, componentHandle: HANDLE, ...extra }, options)
 const execute = (st, planDigest, extra = {}, options = {}) => repair(st, { mode: 'execute', recipe: RETIRE, componentHandle: HANDLE, planDigest, approvalRef: 'R-91:syn-window-1', ...extra }, options)
 const ON = Object.freeze({ [REPAIR_ENV]: 'true', [PULL_BATCH_ENV]: undefined })
+// Another process's clock, far enough ahead that it sees a live lease as lapsed and takes the sheet over.
+const LAPSED_MS = lockLib.PROJECT_WRITE_LEASE_TTL_MS + lockLib.PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS + 60000
 
 function dataOf(res) {
   assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode} ${JSON.stringify(res.body)}`)
@@ -393,6 +402,17 @@ test('RR-02 the closed body and the typed project number (before any IO); absent
     const error = expectRefusal(await withEnv(ON, () => preview(no108)), { status: 503, code: CODES.STORE_FAILED })
     assert.deepEqual([error.details.operation, error.details.sqlState, no108.records.calls, no108.sourceState.reads], ['probe', '42P01', [], 0])
   } finally { no108.h.restore() }
+  // The audit vocabulary: a database that does not accept one of the two audit actions yet (086 / 066 not applied)
+  // refuses before the sheet, the source or the repair ledger is read — nothing is repaired or reported unaudited.
+  for (const [missing, migration] of [['project_board_read', '086'], ['exception_resolve', '066']]) {
+    const noVocabulary = await mount()
+    try {
+      noVocabulary.h.services.stockPreparationAuditStore.supportsAction = async (action) => ({ supported: action !== missing })
+      noVocabulary.clearLogs()
+      const error = expectRefusal(await withEnv(ON, () => preview(noVocabulary)), { status: 503, code: 'STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE' })
+      assert.deepEqual([error.details.migration, noVocabulary.records.calls, noVocabulary.sourceState.reads, noVocabulary.db.log], [migration, [], 0, []], missing)
+    } finally { noVocabulary.h.restore() }
+  }
 })
 
 // ── RR-03 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -475,6 +495,22 @@ test('RR-04 (RP-01) a governed project is never repaired: the preview names proj
     assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims(), st.lockRow().lease_id], [false, [], [], null])
     for (const row of st.oldRows()) assert.strictEqual(st.cell(row, 'active'), true)
   } finally { st.h.restore() }
+  // A restore is refused the same way: the pilot was enabled after the retire, so nothing is put back.
+  const later = await mount()
+  try {
+    const plan = dataOf(await withEnv(ON, () => preview(later)))
+    const done = dataOf(await withEnv(ON, () => execute(later, plan.planDigest)))
+    const restorePlan = dataOf(await withEnv(ON, () => repair(later, { mode: 'preview', recipe: RESTORE, runId: done.runId })))
+    assert.equal(restorePlan.eligible, true)
+    later.governed()
+    const refused = dataOf(await withEnv(ON, () => repair(later, { mode: 'preview', recipe: RESTORE, runId: done.runId })))
+    assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest], [false, ['project_governed'], null])
+    const patchesBefore = later.records.calls.filter((entry) => entry === 'patchRecord').length
+    const error = expectRefusal(await withEnv(ON, () => repair(later, { mode: 'execute', recipe: RESTORE, runId: done.runId, planDigest: restorePlan.planDigest, approvalRef: 'R-91:syn-window-2' })), { status: 409, code: CODES.NOT_APPLICABLE })
+    assert.deepEqual(error.details.reasons, ['project_governed'])
+    assert.deepEqual([later.records.calls.filter((entry) => entry === 'patchRecord').length, later.runs().length, later.claims().length], [patchesBefore, 1, 1])
+    for (const row of later.oldRows()) assert.strictEqual(later.cell(row, 'active'), false, 'the retired rows stay retired')
+  } finally { later.h.restore() }
 })
 
 // ── RR-05 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -589,6 +625,16 @@ test('RR-07 a host that cannot honour the write fence refuses the execute (501) 
     assert.notEqual(next.planDigest, plan.planDigest)
     assert.equal(dataOf(await withEnv(ON, () => execute(moved, next.planDigest, { approvalRef: 'R-91:syn-window-1b' }))).written, 3)
   } finally { moved.h.restore() }
+  // The source cannot be read completely (a BOM line names a part the library does not hold): nothing is retired
+  // against an incomplete expansion.
+  const incomplete = await mount({ source: F.secondPullSource({ sLine: false, boms: { 'PART-B': [{ part: 'GHOST-1', usage: 1 }] } }) })
+  try {
+    const refused = dataOf(await withEnv(ON, () => preview(incomplete)))
+    assert.deepEqual([refused.eligible, refused.refusals], [false, ['source_incomplete']])
+    const error = expectRefusal(await withEnv(ON, () => execute(incomplete, 'a'.repeat(64))), { status: 409, code: CODES.NOT_APPLICABLE })
+    assert.deepEqual(error.details.reasons, ['source_incomplete'])
+    assert.deepEqual([incomplete.records.calls.includes('patchRecord'), incomplete.runs(), incomplete.claims()], [false, [], []])
+  } finally { incomplete.h.restore() }
 })
 
 // ── RR-08 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -615,6 +661,90 @@ test('RR-08 the fills report and the run list through their routes: values-free,
     st.h.services.stockPreparationAuditStore.append = async () => { throw Object.assign(new Error('audit down'), { status: 503, code: 'AUDIT_STORE_FAILED' }) }
     expectRefusal(await withEnv(ON, () => call(st, 'GET', PATHS.fills)), { status: 503, code: 'AUDIT_STORE_FAILED' })
     expectRefusal(await withEnv(ON, () => call(st, 'GET', PATHS.runs)), { status: 503, code: 'AUDIT_STORE_FAILED' })
+  } finally { st.h.restore() }
+})
+
+// ── RR-09 ────────────────────────────────────────────────────────────────────────────────────────────────
+
+test('RR-09 the server-held deps the routes hand the library: the fenced patch refuses a missing guard and a missing version before the host; after a takeover the pre-write holder CAS refuses the next patch before it reaches the host; the holder assert the ledger runs is the lock\'s own', async () => {
+  const st = await mount()
+  const real = R.runSheetRepairRequest
+  let deps = null
+  // The library entry the route calls is replaced for ONE request: what it is handed are the route's own deps.
+  R.runSheetRepairRequest = async (handed) => {
+    deps = handed
+    return { mode: 'preview' }
+  }
+  try {
+    await withEnv(ON, () => preview(st))
+  } finally { R.runSheetRepairRequest = real }
+  try {
+    assert.ok(deps && typeof deps.patchFor === 'function' && typeof deps.holderWithinFor === 'function' && typeof deps.withLease === 'function')
+    // No guard => no patch function at all.
+    assert.throws(() => deps.patchFor(null), (error) => error.status === 501 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.UNAVAILABLE && error.details.reason === 'write_fence_required')
+    const target = st.oldRows()[0]
+    const changes = { [st.physical('active')]: false }
+    const fences = st.h.context.api.multitable.records.fakeHostFences
+    st.clearLogs()
+    let taken = false
+    const outcome = await withEnv(ON, () => deps.withLease(`${R.SHEET_REPAIR_RUN_ID_PREFIX}00000000-0000-4000-8000-000000000000`, async (guard) => {
+      const patch = deps.patchFor(guard)
+      // A patch that does not name the version it was planned at is refused before the holder CAS and the host.
+      for (const expectedVersion of [undefined, null, 0, '1']) {
+        await assert.rejects(patch({ recordId: target.id, changes, expectedVersion }), (error) => error.status === 500 && error.code === CODES.UNAVAILABLE && error.details.field === 'expectedVersion')
+      }
+      assert.deepEqual([st.records.calls, fences.length, target.version], [[], 0, 1], 'nothing reached the host')
+      // The holder assert the ledger transactions run is the lock's own: it passes for the holder ...
+      await st.db.transaction((trx) => deps.holderWithinFor(guard)(trx))
+      assert.deepEqual(deps.leaseOf(guard), { leaseId: st.lockRow().lease_id, fencingEpoch: st.lockRow().fencing_epoch })
+      // ... a pull takes the sheet over (the repair's lease lapsed on its clock) ...
+      const other = lockLib.createStockPreparationProjectWriteLock({ db: st.db, now: () => new Date(Date.now() + LAPSED_MS) })
+      const taker = other.createGuard(await other.acquire(st.writeScope, { purpose: 'small_apply', runId: 'syn-pull-takeover', tenantId: TENANT }))
+      taken = true
+      // ... then the SAME assert refuses, and the next patch dies at the pre-write holder CAS: the host never sees it.
+      await assert.rejects(st.db.transaction((trx) => deps.holderWithinFor(guard)(trx)), (error) => error.status === 409 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+      await assert.rejects(patch({ recordId: target.id, changes, expectedVersion: 1 }), (error) => error.status === 409 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST && error.fence === true)
+      assert.deepEqual([st.records.calls, fences.length, target.version, st.cell(target, 'active')], [[], 0, 1, true], 'the zombie\'s patch never reached the host')
+      await taker.release()
+      return 'ran'
+    })).catch((error) => {
+      // The wrapper may report the lost lease at its own release; any other failure is the test's.
+      if (error && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST) return 'ran'
+      throw error
+    })
+    assert.deepEqual([outcome, taken], ['ran', true])
+  } finally { st.h.restore() }
+})
+
+// ── RR-10 ────────────────────────────────────────────────────────────────────────────────────────────────
+
+test('RR-10 the tenancy wall: a project whose registry row resolves onto ANOTHER tenant\'s sheet is refused 409 for the preview, the execute, the fills report and the run list, before any sheet, source or ledger read', async () => {
+  const OTHER = 'tenant-syn-rpr-other'
+  const st = await mount({ seed: false })
+  try {
+    // The OTHER tenant's sheet, provisioned in ITS staging project; then the caller's registry row is pointed at it
+    // (sheet and object both the other tenant's), so neither ownership nor the derived id attributes it to the caller.
+    const foreign = st.h.seedRegistryRow(PROJECT, { tenant: OTHER })
+    const planted = st.h.registryRows().find((row) => row.tenant_id === OTHER && row.project_no === PROJECT)
+    planted.tenant_id = TENANT
+    assert.notEqual(foreign.objectId, st.h.projectObjectId(PROJECT), 'the planted object is not the caller\'s derived one')
+    st.records.rows.push({ id: 'rec_foreign_1', sheetId: foreign.sheetId, version: 1, createdBy: null, locked: false, data: {} })
+    for (const [label, send] of [
+      ['preview', () => preview(st)],
+      ['execute', () => execute(st, 'a'.repeat(64))],
+      ['fills report', () => call(st, 'GET', PATHS.fills)],
+      ['run list', () => call(st, 'GET', PATHS.runs)],
+    ]) {
+      st.clearLogs()
+      const res = await withEnv(ON, send)
+      const error = expectRefusal(res, { status: 409, code: 'TABLE_ACTION_TARGET_TENANT_MISMATCH' })
+      assert.deepEqual({ ...error.details }, { objectId: foreign.objectId }, `${label}: the refusal names only the logical object id`)
+      assert.ok(st.h.provisioning.calls.some((entry) => entry[0] === 'isSheetOwnedByProject' && entry[1] === foreign.sheetId && entry[2] === st.h.staging), `${label}: the wall ran on the resolved sheet against the caller's staging project`)
+      assert.deepEqual([st.records.calls, st.sourceState.reads, st.db.log, st.auditsWithin, st.h.auditAppends], [[], 0, [], [], []], `${label}: nothing was read or written`)
+      const text = JSON.stringify(res.body)
+      for (const value of [OTHER, foreign.sheetId, PROJECT]) assert.equal(text.includes(value), false, `${label}: values-free`)
+    }
+    assert.equal(st.records.rows.find((row) => row.id === 'rec_foreign_1').version, 1, 'the foreign row is untouched')
   } finally { st.h.restore() }
 })
 

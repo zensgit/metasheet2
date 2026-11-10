@@ -20,7 +20,8 @@
 //   RP-07  a row that moved stops the run (never a blind retry); the rest needs a NEW digest and claim, and can be re-run
 //   RP-08  a locked / missing record and a host failure stop the run with their reason
 //   RP-09  a lease lost mid-run: the fence's own error with the partial counts; the run stays open and is closed
-//          `abandoned` by the next run that holds the sheet
+//          `abandoned` by the next run that holds the sheet (RP-09b: a takeover between the CAS and the host write, and
+//          after the last patch; RP-09c: a fence refusal that is not a lost lease keeps its own status and code)
 //   RP-10  the write surface is exactly the four repair cells (ruling C7), asserted at the send
 //   RP-11  the sequence nonce: a run that began makes every later preview a new digest
 //   RP-12  the generation is bumped after the release, only when something was written; a failed bump never fails the run
@@ -474,6 +475,14 @@ test('RP-04b restore: revived, restamped, missing and never-retired rows are tol
   assert.deepEqual([unknown.eligible, unknown.refusals, unknown.sourceRunId], [false, ['run_not_found'], null])
   const notRetire = await m.restorePreview(answer.runId)
   assert.deepEqual([notRetire.eligible, notRetire.refusals], [false, ['run_not_retire']])
+  // The library's OWN wall beside the store's scoped read: a run object of another sheet, project or tenant plans
+  // nothing (the same refusal as an unknown run, never naming which part differed).
+  const own = await m.store.readRun({ ...SCOPE, runId: retired.runId })
+  assert.equal(R.analyzeRestore({ scope: SCOPE, run: own, rows: m.host.rows(), sequence: 2, governed: false, installing: false }).sourceRunId, retired.runId)
+  for (const foreign of [{ sheetId: 'sheet_syn_other' }, { projectNo: 'SYN-OTHER' }, { tenantId: 'tenant_syn_other' }]) {
+    const verdict = R.analyzeRestore({ scope: SCOPE, run: { ...own, ...foreign }, rows: m.host.rows(), sequence: 2, governed: false, installing: false })
+    assert.deepEqual([verdict.eligible, verdict.refusals, verdict.sourceRunId, verdict.planDigest], [false, ['run_not_found'], null, null], JSON.stringify(foreign))
+  }
 })
 
 // ── RP-05 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -669,6 +678,27 @@ test('RP-09b a takeover AFTER the holder CAS and before the host write: the HOST
   assert.equal(late.db.rows(kit.T.run)[0].status, 'running', 'never recorded as completed by a holder that lost the sheet')
 })
 
+test('RP-09c a fence refusal that is NOT a lost lease (the lock store failing at a pre-write check) is answered under its own status and code with the partial counts; the run is not recorded as a host failure, and the next run closes it', async () => {
+  const m = mount()
+  const preview = await m.preview()
+  m.state.beforeFencedPatch = async (callIndex) => {
+    if (callIndex === 3) throw new lockLib.StockPreparationProjectWriteLockError(503, lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED, 'the write-lock store could not be read', { operation: 'before_write', partial: false }, { fence: true })
+  }
+  const failed = await rejects(m.execute(preview.planDigest), { status: 503, code: lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED })
+  assert.deepEqual([failed.details.written, failed.details.planned, failed.details.partial, failed.details.operation], [2, 4, true, 'before_write'])
+  assert.equal(m.host.calls.length, 2, 'nothing was sent after the refusal')
+  const open = m.db.rows(kit.T.run)[0]
+  assert.deepEqual([open.status, open.stop_reason, open.written_count], ['running', null, null], 'a fence refusal is never recorded as a host failure by the run itself')
+  assert.deepEqual(m.state.auditsWithin.map((entry) => entry.mode), ['sheet_repair_started'])
+  assert.deepEqual([m.db.rows(kit.T.lock)[0].lease_id, m.state.bumps], [null, 1], 'the lease was released; two rows were written, so the generation moved')
+  // The next run holds a NEW lease: its begin closes the open run (lease identity) and retires the rest.
+  m.state.beforeFencedPatch = null
+  const next = await m.preview()
+  assert.deepEqual([next.openRun, next.sequence, next.counts.toRetire, next.counts.alreadyRetired], [true, 1, 2, 2])
+  assert.equal((await m.execute(next.planDigest, { approvalRef: 'R-91:after-store-failure' })).status, 'completed')
+  assert.deepEqual(m.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((row) => [row.status, row.stop_reason]), [['stopped', 'abandoned'], ['completed', null]])
+})
+
 // ── RP-10 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 test('RP-10 the write surface is exactly the four repair cells (ruling C7): a fifth cell, a missing one or a non-boolean `active` is refused at the send, before any patch', async () => {
@@ -721,6 +751,23 @@ test('RP-12 the generation bump runs after the release and only when something w
   const answer = await m.execute((await m.preview()).planDigest)
   assert.deepEqual([answer.status, answer.written, answer.generationBumped, m.state.bumps], ['completed', 4, false, 1])
   assert.equal(m.db.rows(kit.T.lock)[0].generation_reason, null, 'the bump did not land')
+  // AFTER the release: when the bump runs, the sheet's lease is already free.
+  const ok = mount()
+  const bump = ok.deps.bumpAfterRelease
+  let leaseAtBump = 'never'
+  ok.deps.bumpAfterRelease = async () => {
+    leaseAtBump = ok.db.rows(kit.T.lock)[0].lease_id
+    return bump()
+  }
+  const done = await ok.execute((await ok.preview()).planDigest)
+  assert.deepEqual([done.generationBumped, leaseAtBump, ok.state.bumps, ok.db.rows(kit.T.lock)[0].generation_reason], [true, null, 1, R.SHEET_REPAIR_GENERATION_REASON])
+  // ONLY when something was written: a refusal before the begin and a run stopped on its first row move nothing.
+  const none = mount()
+  const plan = await none.preview()
+  await rejects(none.execute('c'.repeat(64)), { status: 409, code: CODES.PLAN_CHANGED })
+  none.host.beforePatch = () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
+  const stop = await rejects(none.execute(plan.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
+  assert.deepEqual([stop.details.written, none.state.bumps, none.db.rows(kit.T.lock)[0].generation_reason], [0, 0, null])
 })
 
 // ── RP-13 ────────────────────────────────────────────────────────────────────────────────────────────────

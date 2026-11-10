@@ -747,6 +747,31 @@ test('SL-G2 an unwired service or a malformed handle refuses 501 by name at cons
   assert.equal(w.source.state.calls.length, 0)
 })
 
+test('SL-RP1 (batch-refresh step 6d-2a, S6-6) the sheet repair\'s source read: never without a governance handle (501 before any source read); the verdict, completeness, the reader\'s rows and the expansion keys', async () => {
+  const w = await world()
+  const read = (world_, extra = {}) => tableActions.readStockPreparationSheetRepairSource({
+    action: world_.action, parameters: { projectNo: PROJECT }, tenantId: TENANT, sourceAdapter: world_.source.adapter, recordsApi: world_.sheet.api, plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: world_.handle(), ...extra,
+  })
+  // No handle (absent or null): refused by name BEFORE any source read — a repair never assumes "not governed".
+  for (const extra of [{ refreshGovernance: undefined }, { refreshGovernance: null }]) {
+    await expectCode(read(w, extra), { status: 501, code: 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE', reason: 'governance_handle' })
+  }
+  assert.equal(w.source.state.calls.length, 0)
+  // A pilot project reads governed; the rows are the reader's, the keys the current expansion's; the answer is frozen.
+  await w.firstPullApplied()
+  const governed = await read(w)
+  assert.deepEqual([governed.governed, governed.complete, governed.rows.length, governed.expansionKeys instanceof Set, governed.expansionKeys.size, Object.isFrozen(governed)], [true, true, 4, true, 4, true])
+  for (const row of governed.rows) assert.equal(governed.expansionKeys.has(row.idempotencyKey), true)
+  // An expansion that could not be completed (a BOM line names a part the library does not hold) is reported so.
+  w.source.state.data = F.project({ orders: [{ part: 'S-001', qty: 10 }], parts: F.PARTS.slice(), boms: { ...F.S_BOMS, 'PART-B': [{ part: 'GHOST-1', usage: 1 }] } })
+  const incomplete = await read(w)
+  assert.deepEqual([incomplete.governed, incomplete.complete, incomplete.rows.length], [true, false, 4])
+  // A project that is not a pilot reads not governed.
+  const plain = await world({ pilot: false })
+  const notGoverned = await read(plain)
+  assert.deepEqual([notGoverned.governed, notGoverned.complete, notGoverned.rows.length], [false, true, 0])
+})
+
 test('SL-G8 the planner input: a governed project hands BOTH planner calls exactly the 11 keys (O-16 + persistedHolds + changePlan, null without a confirmed plan, + expectedContent, [] without a reviewed / written plan) and the expander the recorder options; a not-governed project hands neither key', async () => {
   const w = await world()
   await w.firstPullApplied()
