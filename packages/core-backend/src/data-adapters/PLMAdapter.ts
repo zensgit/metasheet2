@@ -3590,47 +3590,13 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
-  async approveApproval(approvalId: string, version: number, comment?: string): Promise<QueryResult<Record<string, unknown>>> {
-    if (this.mockMode) {
-      return {
-        data: [{
-          id: approvalId,
-          status: 'approved',
-          version,
-          comment: comment || null,
-        }],
-        metadata: { totalCount: 1 },
-      }
-    }
-    if (this.apiMode !== 'yuantus') {
-      return { data: [], error: new Error('Approval actions are not supported for this PLM API mode') }
-    }
-    const payload = comment ? { version, comment } : { version }
-    return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/approve`, {
-      method: 'POST',
-      data: payload,
-    })
+  async approveApproval(_approvalId: string, _version: number, _comment?: string): Promise<QueryResult<Record<string, unknown>>> {
+    // Shared-account ECO decisions are refused in every mode. Personal card commands are the only write.
+    return { data: [], error: new Error('PLM_PERSONAL_BINDING_REQUIRED') }
   }
 
-  async rejectApproval(approvalId: string, version: number, comment: string): Promise<QueryResult<Record<string, unknown>>> {
-    if (this.mockMode) {
-      return {
-        data: [{
-          id: approvalId,
-          status: 'rejected',
-          version,
-          comment,
-        }],
-        metadata: { totalCount: 1 },
-      }
-    }
-    if (this.apiMode !== 'yuantus') {
-      return { data: [], error: new Error('Approval actions are not supported for this PLM API mode') }
-    }
-    return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/reject`, {
-      method: 'POST',
-      data: { version, comment },
-    })
+  async rejectApproval(_approvalId: string, _version: number, _comment: string): Promise<QueryResult<Record<string, unknown>>> {
+    return { data: [], error: new Error('PLM_PERSONAL_BINDING_REQUIRED') }
   }
 
   async getWhereUsed(
