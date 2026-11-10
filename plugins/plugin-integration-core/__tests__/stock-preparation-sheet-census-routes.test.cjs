@@ -21,6 +21,10 @@
 //   SC-06  an archived project cannot be acknowledged (409 ARCHIVED, nothing written)
 //   SC-07  no ruling ledger wired: the acknowledgement routes 501 by name; the census still answers its counts, with the
 //          acknowledgement counts null (never zero)
+//   SC-09  (#6842 fix round 1) an installed pack human column the action does NOT declare: the host field read answers no
+//          id, the cell sits under the PHYSICAL id (the host's getFieldId derivation); both forms count its hidden fills
+//   SC-10  the pack read is strict on both forms: a ledger, host field read or id-derivation failure is the list row
+//          incomplete / pack_unreadable with no counts and the project form 503 PACK_UNREADABLE (never template-only)
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -330,6 +334,87 @@ test('SC-07 no ruling ledger wired: the acknowledgement routes 501 by name; the 
     const pilot = dataOf(await call(h, 'GET', PATHS.pilot, { user: ADMIN, params: { projectNo: PROJECT }, query: {} }))
     assert.ok(pilot.readiness.failing.includes('no_unacknowledged_inactive_root_remnant'))
   } finally { h.restore() }
+})
+
+// Fix round 1 (#6842 review): an installed pack `ext_` HUMAN column the action does NOT declare. The host's field read
+// answers { name, type, property, order } and never an id; the reader keys the unmapped cell by its PHYSICAL id.
+const PACK_HUMAN = 'ext_scHumanNote'
+async function installPackHumanColumn(h, seeded) {
+  await h.provisioning.ensureMissingObjectFields({
+    projectId: h.staging,
+    objectId: seeded.objectId,
+    fields: [{ id: PACK_HUMAN, name: 'SC human note', type: 'string', property: { stockPreparation: { ownership: 'human_preserved', extension: true, preserveOnRefresh: false } } }],
+  })
+  await h.services.stockPreparationPackInstallStore.recordInstall({
+    tenantId: TENANT, projectId: h.staging, objectId: seeded.objectId, packId: 'pack_sc_synthetic', packVersion: '1',
+    installedFields: [{ fieldId: PACK_HUMAN, ownership: 'human_preserved', preserveOnRefresh: false, extension: true }],
+  })
+}
+// D2 on S1 with the hidden fills ONLY in the pack column, plus an inactive row with a template-band fill.
+const D2_PACK = [
+  r('P1'),
+  { ...r('S1', null, false), [PACK_HUMAN]: 'SC pack fill (old root)' },
+  { ...r('S1', 'P1'), [PACK_HUMAN]: 'SC pack fill (nested copy)' },
+  { ...r('X1', null, false), notes: 'SC template fill' },
+]
+
+test('SC-09 an installed pack human column the action does not declare: both census forms count its hidden fills under the PHYSICAL id (the host field read carries no id)', async () => {
+  const h = mount()
+  try {
+    const one = h.seedRegistryRow(PROJECT)
+    await installPackHumanColumn(h, one)
+    await seedSheetRows(h, one, PROJECT, D2_PACK)
+    // The recorded facts the fix rests on: the ledger lists the column; the host field read answers no id; the cell sits
+    // under the physical id; the target field map does not name the column.
+    assert.deepEqual((await h.services.stockPreparationPackInstallStore.listInstalledFieldIds({ tenantId: TENANT, projectId: h.staging, objectId: one.objectId })).fieldIds, [PACK_HUMAN])
+    const content = await h.provisioning.readObjectFieldsContent({ projectId: h.staging, objectId: one.objectId, fieldIds: [PACK_HUMAN] })
+    assert.deepEqual(Object.keys(content[PACK_HUMAN]).sort(), ['name', 'order', 'property', 'type'])
+    const physical = h.provisioning.getFieldId(h.staging, one.objectId, PACK_HUMAN)
+    const stored = await h.records.queryRecords({ sheetId: one.sheetId })
+    assert.equal(stored.filter((record) => typeof record.data[physical] === 'string').length, 2, 'the pack cells are stored under the physical id')
+    assert.ok(stored.every((record) => !(PACK_HUMAN in record.data)), 'never under the logical id')
+    const page = dataOf(await call(h, 'GET', PATHS.list, { user: ADMIN, query: {} }))
+    const [row] = page.items
+    assert.equal(row.status, 'complete', JSON.stringify(row))
+    assert.equal(row.inactiveRootRemnantComponents, 1)
+    assert.equal(row.inactiveRowsWithHumanCells, 2, 'the old root (pack fill) and X1 (template fill)')
+    assert.equal(row.nestedCopiesWithHumanCells, 1, 'the nested copy (pack fill)')
+    const project = dataOf(await call(h, 'GET', PATHS.project, { user: ADMIN, params: { projectNo: PROJECT }, query: {} }))
+    assert.equal(project.status, 'complete')
+    assert.equal(project.inactiveRowsWithHumanCells, 2)
+    assert.equal(project.nestedCopiesWithHumanCells, 1)
+    assert.ok(!JSON.stringify([page, project]).includes('SC pack fill'), 'values-free: no cell value')
+  } finally { h.restore() }
+})
+
+test('SC-10 the pack read is STRICT on both forms: a ledger / host field read / id derivation failure is the list row incomplete pack_unreadable with no counts and the project form 503 PACK_UNREADABLE — never a template-only count', async () => {
+  const failures = {
+    ledger: (h) => { h.services.stockPreparationPackInstallStore.listInstalledFieldIds = async () => { throw Object.assign(new Error('ledger down'), { code: 'SYN_DOWN' }) } },
+    ledgerShape: (h) => { h.services.stockPreparationPackInstallStore.listInstalledFieldIds = async () => ({ packIds: [] }) },
+    hostRead: (h) => { h.provisioning.readObjectFieldsContent = async () => { throw Object.assign(new Error('host down'), { code: 'SYN_DOWN' }) } },
+    hostShape: (h) => { h.provisioning.readObjectFieldsContent = async () => null },
+    derivation: (h) => { delete h.provisioning.getFieldId },
+    derivationBlank: (h) => { h.provisioning.getFieldId = () => '' },
+  }
+  for (const [name, inject] of Object.entries(failures)) {
+    const h = mount()
+    try {
+      const one = h.seedRegistryRow(PROJECT)
+      await installPackHumanColumn(h, one)
+      await seedSheetRows(h, one, PROJECT, D2_PACK)
+      inject(h)
+      const page = dataOf(await call(h, 'GET', PATHS.list, { user: ADMIN, query: {} }))
+      const [row] = page.items
+      assert.equal(row.status, 'incomplete', `${name}: ${JSON.stringify(row)}`)
+      assert.equal(row.reason, 'pack_unreadable', name)
+      for (const key of SHEET_CENSUS_COUNT_KEYS) assert.ok(!(key in row), `${name}: an incomplete row carries no ${key}`)
+      const res = await call(h, 'GET', PATHS.project, { user: ADMIN, params: { projectNo: PROJECT }, query: {} })
+      const error = expectRefusal(res, 503, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.PACK_UNREADABLE)
+      assert.equal(REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.PACK_UNREADABLE, 'STOCK_PREP_SHEET_CENSUS_PACK_UNREADABLE')
+      assert.ok(!JSON.stringify(res.body).includes('down'), `${name}: no error text`)
+      assert.ok(error, name)
+    } finally { h.restore() }
+  }
 })
 
 test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenant BEFORE the reader, and every census / acknowledgement handler reads rows only through it', () => {

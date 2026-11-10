@@ -5544,13 +5544,18 @@ function requireStockPreparationAudit() {
     if (fieldIds.length === 0) return stockPreparationRemnantAcknowledgement.censusHumanFieldIdsOf([])
     const provisioning = getPackReadbackProvisioning()
     if (!provisioning) throw new Error('host field read unavailable')
+    // The physical id is the host's PURE derivation (the derivePullBatchBand precedent): the field read answers
+    // { name, type, property, order } and never an id, and the reader keys an unmapped pack column's cell by it. Strict like
+    // the rest: a host without the derivation, or one answering no id, throws.
     const content = await provisioning.readObjectFieldsContent({ projectId, objectId: action.target.objectId, fieldIds })
     if (!isPlainObject(content)) throw new Error('host field read answered no map')
     const installed = []
     for (const fieldId of fieldIds) {
       const live = content[fieldId]
       if (!isPlainObject(live)) continue
-      installed.push({ fieldId, physicalId: typeof live.id === 'string' ? live.id : null, property: isPlainObject(live.property) ? live.property : {} })
+      const physicalId = provisioning.getFieldId(projectId, action.target.objectId, fieldId)
+      if (typeof physicalId !== 'string' || physicalId.trim() === '') throw new Error('host field id derivation answered no id')
+      installed.push({ fieldId, physicalId, property: isPlainObject(live.property) ? live.property : {} })
     }
     return stockPreparationRemnantAcknowledgement.censusHumanFieldIdsOf(installed)
   }

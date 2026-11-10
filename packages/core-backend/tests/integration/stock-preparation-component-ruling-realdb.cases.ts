@@ -25,6 +25,9 @@
  *              revoke makes readiness refuse it again. A handle that is not a remnant is 409 with nothing written.
  *              (The governed pilot-pull legs of S9D-01 / -04 / -05 are the existing planner's and run in S6-9's G9: an
  *              acknowledgement is not a planner input — pinned hermetically by RA-09.)
+ *   S9D-01p    an installed pack human column the action does NOT declare (#6842 fix round 1): the host's field read
+ *              answers no id and the reader keys the cell by its physical id; hidden fills only in that column on the old
+ *              root and the nested copy (plus one template-filled inactive row) count 2 / 1 on BOTH census forms.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -146,6 +149,7 @@ export function defineStockPreparationComponentRulingRealDbCases(): void {
       await q(`DELETE FROM ${TABLE} WHERE tenant_id = $1`, [TENANT]).catch(() => {})
       await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id = $1', [TENANT]).catch(() => {})
       await q('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [TENANT]).catch(() => {})
+      await q('DELETE FROM integration_stock_prep_pack_installs WHERE tenant_id = $1', [TENANT]).catch(() => {})
       for (const sheetId of sheets) {
         await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -398,6 +402,120 @@ export function defineStockPreparationComponentRulingRealDbCases(): void {
         expect(revoked.statusCode, JSON.stringify(revoked.body)).toBe(200)
         expect(revoked.body.data.status).toBe('revoked')
         expect(await failing()).toContain('no_unacknowledged_inactive_root_remnant')
+      } finally {
+        if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+        else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
+        await q(`DELETE FROM ${lockLib.PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [lockLib.sheetWriteScopeKey(sheetId)]).catch(() => {})
+      }
+    }, 120000)
+
+    test('S9D-01p an installed pack human column the action does not declare: both census forms count its hidden fills (the host field read carries no id; the cell sits under the physical id)', async () => {
+      const projectNo = 'SYN-S65-PACK'
+      const PACK_HUMAN = 'ext_s65HumanNote'
+      const projectId = `${TENANT}:integration-core`
+      const objectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(TENANT, projectNo)
+      const pluginContext = createProductionPluginContext()
+      const multitable: any = pluginContext.api.multitable
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      const sheetId: string = ensured.target.sheetId
+      sheets.push(sheetId)
+      await syncStockPreparationContractOptionsForObject({ provisioning: multitable.provisioning, projectId, objectId })
+      await projectTargetsLib.markProjectSheetPlmSystemColumns({ provisioning: multitable.provisioning, projectId, objectId })
+      const db = createDb({ database: pluginContext.api.database })
+      const registry = projectTargetStoreLib.createStockPreparationProjectTargetStore({ db })
+      await registry.create({ tenantId: TENANT, projectNo, sheetId, objectId, createdBy: 'u_s65' })
+      // The pack column, installed the way a pack lands: the host's additive field write and the ledger row.
+      const added = await multitable.provisioning.ensureMissingObjectFields({
+        projectId,
+        objectId,
+        fields: [{ id: PACK_HUMAN, name: 'S65 human note', type: 'string', property: { stockPreparation: { ownership: 'human_preserved', extension: true, preserveOnRefresh: false } } }],
+      })
+      expect(added.addedFieldIds).toHaveLength(1)
+      const packInstalls = packInstallStoreLib.createStockPreparationPackInstallStore({ db })
+      await packInstalls.recordInstall({
+        tenantId: TENANT, projectId, objectId, packId: 'pack_s65_synthetic', packVersion: '1',
+        installedFields: [{ fieldId: PACK_HUMAN, ownership: 'human_preserved', preserveOnRefresh: false, extension: true }],
+      })
+      // The recorded facts: the ledger lists it; the host field read answers no id; the target field map does not name it.
+      expect((await packInstalls.listInstalledFieldIds({ tenantId: TENANT, projectId, objectId })).fieldIds).toEqual([PACK_HUMAN])
+      const content = await multitable.provisioning.readObjectFieldsContent({ projectId, objectId, fieldIds: [PACK_HUMAN] })
+      expect(Object.keys(content[PACK_HUMAN]).sort()).toEqual(['name', 'order', 'property', 'type'])
+      const fields = ensured.target.fieldIdMap || {}
+      expect(fields[PACK_HUMAN]).toBeUndefined()
+      const packPhysical: string = multitable.provisioning.getFieldId(projectId, objectId, PACK_HUMAN)
+      const seed = async (cells: Record<string, unknown>, packFill?: string) => {
+        const created = await multitable.records.createRecord({ sheetId, data: { [fields.projectNo]: projectNo } })
+        const patch: Record<string, unknown> = {}
+        for (const [logical, value] of Object.entries(cells)) {
+          if (!fields[logical]) throw new Error(`no physical id for ${logical}`)
+          patch[fields[logical]] = value
+        }
+        if (packFill !== undefined) patch[packPhysical] = packFill
+        await q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [created.id, JSON.stringify(patch)])
+      }
+      // D2 on S with the hidden fills ONLY in the pack column, plus one inactive row with a template-band fill.
+      await seed({ idempotencyKey: 's65p-P', componentSourceId: 'S65P-P', parentSourceId: '', active: true })
+      await seed({ idempotencyKey: 's65p-S', componentSourceId: 'S65P-S', parentSourceId: '', active: false }, 'S65 pack fill (old root)')
+      await seed({ idempotencyKey: 's65p-P-S', componentSourceId: 'S65P-S', parentSourceId: 'S65P-P', active: true }, 'S65 pack fill (nested copy)')
+      await seed({ idempotencyKey: 's65p-X', componentSourceId: 'S65P-X', parentSourceId: '', active: false, notes: 'S65 template fill' })
+      const routes = new Map<string, any>()
+      const lock = lockLib.createStockPreparationProjectWriteLock({ db })
+      const continuationStore = continuationStoreLib.createStockPreparationContinuationStore({ db })
+      const envTarget = { sheetId: `sheet_env_s65p_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
+      const routeContext = {
+        api: {
+          http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+          multitable,
+          database: pluginContext.api.database,
+        },
+        storage: pluginContext.storage,
+        config: {
+          // The action declares NO extensionFieldIds: the pack column reaches the census only through the pack read.
+          stockPreparationTableActions: [{ actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, source: { externalSystemId: `s65p_source_${TOKEN}`, kind: 'data-source:sql-readonly' }, target: envTarget }],
+          stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
+        },
+      }
+      const base = projectSheetHarness.baseServices({ async read() { return { records: [], done: true, nextCursor: null } } })
+      const services = {
+        ...base,
+        stockPreparationProjectWriteLock: lock,
+        stockPreparationProjectTargetStore: registry,
+        stockPreparationAuditStore: auditLib.createStockPreparationAuditStore({ db }),
+        stockPreparationPackInstallStore: packInstalls,
+        stockPreparationContinuationStore: continuationStore,
+        stockPreparationRefreshGovernance: governanceLib.createStockPreparationRefreshGovernance({ continuationStore, projectTargetStore: registry, projectWriteLock: lock }),
+        stockPreparationComponentRulingStore: createStockPreparationComponentRulingStore({ db }),
+        tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+      }
+      const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+      process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+      const admin = { id: `u_s65p_admin_${TOKEN}`, tenantId: TENANT, permissions: ['stock-prep:admin'] }
+      const call = async (method: string, routePath: string, req: Record<string, unknown>) => {
+        const handler = routes.get(`${method} ${routePath}`)
+        if (!handler) throw new Error(`route ${method} ${routePath} is not registered`)
+        const res: any = { statusCode: 200, body: null, headers: {} }
+        res.status = (code: number) => { res.statusCode = code; return res }
+        res.json = (payload: unknown) => { res.body = payload; return res }
+        res.setHeader = () => res
+        await handler({ user: admin, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+        return res
+      }
+      try {
+        httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+        const list = await call('GET', '/api/integration/stock-preparation/project-targets/census', { query: {} })
+        expect(list.statusCode, JSON.stringify(list.body)).toBe(200)
+        const item = list.body.data.items.find((entry: any) => entry.objectId === objectId)
+        expect(item.status, JSON.stringify(item)).toBe('complete')
+        expect(item.inactiveRootRemnantComponents).toBe(1)
+        expect(item.inactiveRowsWithHumanCells, 'the old root (pack fill) and the template-filled inactive row').toBe(2)
+        expect(item.nestedCopiesWithHumanCells, 'the nested copy (pack fill)').toBe(1)
+        const project = await call('GET', '/api/integration/stock-preparation/projects/:projectNo/target/census', { params: { projectNo }, query: {} })
+        expect(project.statusCode, JSON.stringify(project.body)).toBe(200)
+        expect(project.body.data.status).toBe('complete')
+        expect(project.body.data.inactiveRowsWithHumanCells).toBe(2)
+        expect(project.body.data.nestedCopiesWithHumanCells).toBe(1)
+        expect(JSON.stringify([list.body, project.body])).not.toContain('S65 pack fill')
       } finally {
         if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
