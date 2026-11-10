@@ -1,6 +1,34 @@
 # 考勤帮助中心补全：设计与核验
 
-日期：2026-10-15，优化：2026-10-16。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
+日期：2026-10-15，优化：2026-10-16，更正：2026-11-10。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
+
+## 2026-11-10 三处业务指引更正
+
+Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出三处帮助与代码不符。本轮只改帮助内容和规格测试，未改业务逻辑。
+
+### 1. 「导出范围」不能代替查看他人报表的权限
+
+- 查看他人：`canAccessOtherUsers` 只在 `attendance:admin`（或平台管理员）或 `attendance:approve` 时为真。`plugins/plugin-attendance/index.cjs:24280-24283`。报表/记录查看在目标用户不是本人时只走这个检查，例如 `GET /api/attendance/reports/requests`（`index.cjs:32731-32736`）以及同文件中其他 `canAccessOtherUsers` 查看路径；这些路径不读取排班「导出」范围。
+- 导出他人：`GET /api/attendance/export` 先同样检查 `canAccessOtherUsers`；若没有该项权限，才回退到 `assertAttendanceRecordExportAllowed`，要求排班范围带 `export` 动作且覆盖该人（`index.cjs:26960-26991`、`52819-52828`）。因此「导出」范围只约束导出，不能用来在报表里查看他人。
+
+已改正：`reports`（含新 FAQ）、`scopes`、`permissions`。删除了「或一条覆盖该人的排班导出范围」「导出可以放宽一个人能下载哪些人的报表」等把导出范围写成查看权限的句子。
+
+### 2. 旧工作日的补卡额度不因提交到下个月而恢复
+
+- `computeMakeupCycleWindow` 按工作日期（规则时区下的 `workDate`）计算周期，注释写明 NOT submit time。`index.cjs:14848-14871`。
+- `enforceMakeupPunchPolicy` 统计的是同一主体、工作日期落在该周期内、状态计入额度的补卡申请。`index.cjs:14943-14966`。
+- 前端提示句「本周期的补卡次数已用完。」：`apps/web/src/views/attendance/makeupPunchRequestStatus.ts:35-39`。
+
+已改正：`makeup` 步骤、示例、失败处理、FAQ，以及 `errors` 中 `MAKEUP_PUNCH_QUOTA_EXCEEDED` 行。删除了「等到下个周期 / 等到下个自然月」这类会让人以为提交月份变化即可恢复旧工作日额度的指引。
+
+### 3. 已有下班卡时不要再点「上班打卡」
+
+- 写入后若 `last_out_at < first_in_at`，抛出 `HttpError(409, 'ATTENDANCE_PUNCH_ORDER_CONFLICT', 'Check-out cannot precede check-in; review the work date and existing punches')`。`hasReversedLivePunchOrder`：`plugins/plugin-attendance/lib/attendance-live-punch-order.cjs:5-8`；抛出点：`index.cjs:23618-23621`。
+- 已有下班卡后再点「上班打卡」，新的上班时间若晚于已有下班时间，会再次落入同一冲突。帮助改为引导「补卡」（漏打上班卡）或「时间更正」，明确不要重试「上班打卡」。
+
+已改正：`punch` 简介、失败步骤、新 FAQ，以及 `errors` 中 `ATTENDANCE_PUNCH_ORDER_CONFLICT` 行。
+
+规格 `apps/web/tests/attendanceAdminGuide.spec.ts` 新增 3 个业务指引断言，原有结构/导航/搜索 5 项和锁定短语保持不变。
 
 ## 2026-10-16 第五轮
 
@@ -113,12 +141,14 @@
 
 ## 测试
 
-相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。
+相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。2026-11-10 起另有 3 个业务指引测试：查看他人报表权限与导出范围、补卡额度按工作日周期、打卡顺序冲突引导补卡/更正。
 
 2026-10-16 第五轮之后重跑，均通过：
 
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（88ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
+
+2026-11-10 更正后的本地结果写在该次提交说明和 PR 回复中（预期 1 个文件、8 个测试）。
 
 `apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。
 

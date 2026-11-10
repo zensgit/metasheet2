@@ -576,7 +576,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Who can open Reports', '前提条件/权限'],
-        detail: ['attendance:read opens your own rows. Another person’s user id needs attendance:approve, attendance:admin, or a scheduler scope that includes export. See 权限说明.', 'attendance:read 打开自己的行。要填别人的用户 ID，需要 attendance:approve、attendance:admin，或包含导出的排班范围。见「权限说明」。'],
+        detail: ['attendance:read opens your own rows. Viewing another person’s user id needs attendance:approve or attendance:admin. A scheduler export scope does not replace that viewing permission; it only limits whose rows can be exported. See 权限说明.', 'attendance:read 打开自己的行。要查看别人的用户 ID，需要 attendance:approve 或 attendance:admin。排班范围里的「导出」不能代替这项查看权限，它只限制能导出哪些人的行。见「权限说明」。'],
       },
       {
         path: ['Watch-outs', '注意事项'],
@@ -588,6 +588,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
       'CSV 表头模式决定文件用字段名称还是字段编码。它在「技术信息」里，不在主工具条上。',
     ],
     faqs: [{
+      q: ['Does export scope let me view someone else’s report?', '有「导出范围」就可以查看他人报表吗？'],
+      a: ['No. Viewing another person’s rows needs attendance:approve or attendance:admin. Export scope cannot replace that permission; it only limits whose rows can be exported.', '不可以。查看他人的行需要 attendance:approve 或 attendance:admin。「导出范围」不能代替这项权限，它只限制能导出哪些人的行。'],
+    }, {
       q: ['I hid a column. Why is it still in the CSV?', '我藏了一列，为什么 CSV 里还有？'],
       a: ['The table is a local view. The export is the server dataset for the range and filters. Restore default only resets the columns in this browser. The file can include up to 5000 rows for that range.', '表格是本机视图。导出是该区间和筛选条件下的服务端数据集。「恢复默认」只重置这台浏览器里的显示字段。该区间的文件最多包含 5000 行。'],
     }, {
@@ -687,8 +690,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
       'The overview shows a live clock, today’s in and out, and two buttons: Check In and Check Out. A successful punch says 「上班打卡已记录。」 or 「下班打卡已记录。」. The request sends the event type and, when known, the rule timezone and organization. It does not send a client timestamp, a map location, or a photo.',
       '总览显示实时时钟、今日上班和下班，以及两个按钮：上班打卡、下班打卡。成功后提示「上班打卡已记录。」或「下班打卡已记录。」。请求提交打卡类型，并在已知时带上规则时区与组织。它不提交客户端时间、地图定位或照片。',
     ], [
-      'The same event type is limited by the minimum punch interval, one minute unless Settings changes it. Check In followed by Check Out is not held by that interval. Check Out before Check In on the same work date is rejected. An empty IP allowlist allows every address. An empty geofence is off. The web punch does not collect a location, so a configured fence treats that punch as outside the fence.',
-      '同一类打卡受最小打卡间隔限制，设置未改时是 1 分钟。先上班再下班不受这个间隔限制。同一工作日先下班后上班会被拒绝。IP 白名单留空则不限制地址。地理围栏留空则关闭。网页打卡不采集定位，因此一旦配置了围栏，这次打卡会按围栏外处理。',
+      'The same event type is limited by the minimum punch interval, one minute unless Settings changes it. Check In followed by Check Out is not held by that interval. If a check-out already exists, clicking Check In again can repeatedly raise ATTENDANCE_PUNCH_ORDER_CONFLICT; do not retry Check In. Use Makeup punch (missed check-in) or time correction instead. An empty IP allowlist allows every address. An empty geofence is off. The web punch does not collect a location, so a configured fence treats that punch as outside the fence.',
+      '同一类打卡受最小打卡间隔限制，设置未改时是 1 分钟。先上班再下班不受这个间隔限制。已有下班卡时再点「上班打卡」可能重复触发顺序冲突（ATTENDANCE_PUNCH_ORDER_CONFLICT），不要再点「上班打卡」。请走「补卡」（漏打上班卡）或「时间更正」。IP 白名单留空则不限制地址。地理围栏留空则关闭。网页打卡不采集定位，因此一旦配置了围栏，这次打卡会按围栏外处理。',
     ]],
     scenarios: [[
       'An employee records arrival or departure, or an administrator explains a rejected punch.',
@@ -709,7 +712,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['When it fails', '失败时怎么办'],
-        detail: ['PUNCH_TOO_SOON: wait out Min punch interval on 设置. LOCATION_RESTRICTED: ask an administrator to clear the geofence or turn on 外勤打卡需审批. OUTDOOR_NOTE_REQUIRED: fill 外勤打卡备注 and click 补充备注后重试打卡. ATTENDANCE_PUNCH_ORDER_CONFLICT: Check In before Check Out. IP_RESTRICTED: use an allowed address or edit IP allowlist. PUNCH_UNSCHEDULED_BLOCKED: publish a schedule, or set unscheduled punching back to allow. PUNCH_CLIENT_TIMESTAMP_FORBIDDEN: the page cannot type a time; use 补卡 for a past day. Full rows are in 错误码与提示.', 'PUNCH_TOO_SOON：等到「设置」里的最小打卡间隔过去。LOCATION_RESTRICTED：请管理员清空地理围栏，或打开「外勤打卡需审批」。OUTDOOR_NOTE_REQUIRED：填写「外勤打卡备注」，再点「补充备注后重试打卡」。ATTENDANCE_PUNCH_ORDER_CONFLICT：先上班打卡，再下班打卡。IP_RESTRICTED：换允许的地址，或改 IP 白名单。PUNCH_UNSCHEDULED_BLOCKED：先发布排班，或把未排班改回允许。PUNCH_CLIENT_TIMESTAMP_FORBIDDEN：页面不能手填时间；改过去某一天用「补卡」。完整对照见「错误码与提示」。'],
+        detail: ['PUNCH_TOO_SOON: wait out Min punch interval on 设置. LOCATION_RESTRICTED: ask an administrator to clear the geofence or turn on 外勤打卡需审批. OUTDOOR_NOTE_REQUIRED: fill 外勤打卡备注 and click 补充备注后重试打卡. ATTENDANCE_PUNCH_ORDER_CONFLICT: if a check-out already exists, do not retry Check In; use 补卡 (漏打上班卡) or 时间更正. IP_RESTRICTED: use an allowed address or edit IP allowlist. PUNCH_UNSCHEDULED_BLOCKED: publish a schedule, or set unscheduled punching back to allow. PUNCH_CLIENT_TIMESTAMP_FORBIDDEN: the page cannot type a time; use 补卡 for a past day. Full rows are in 错误码与提示.', 'PUNCH_TOO_SOON：等到「设置」里的最小打卡间隔过去。LOCATION_RESTRICTED：请管理员清空地理围栏，或打开「外勤打卡需审批」。OUTDOOR_NOTE_REQUIRED：填写「外勤打卡备注」，再点「补充备注后重试打卡」。ATTENDANCE_PUNCH_ORDER_CONFLICT：已有下班卡时不要再点「上班打卡」，请走「补卡」（漏打上班卡）或「时间更正」。IP_RESTRICTED：换允许的地址，或改 IP 白名单。PUNCH_UNSCHEDULED_BLOCKED：先发布排班，或把未排班改回允许。PUNCH_CLIENT_TIMESTAMP_FORBIDDEN：页面不能手填时间；改过去某一天用「补卡」。完整对照见「错误码与提示」。'],
       },
     ],
     callout: [
@@ -719,6 +722,9 @@ export const attendanceGuideTopics: GuideTopic[] = [
     faqs: [{
       q: ['Why is the punch outside the fence when I am in the office?', '人在办公地点，为什么仍提示在围栏外？'],
       a: ['The overview punch does not collect a location. With a fence configured and outdoor approval off, that punch is outside the fence. Clear the fence to turn the check off, or enable outdoor approval if those punches should wait for approval.', '总览打卡不采集定位。配置了围栏且外勤审批关闭时，这次打卡按围栏外处理。要关闭这项检查就清空围栏；若这类打卡应等待审批，则打开外勤审批。'],
+    }, {
+      q: ['A check-out already exists. Check In keeps saying there is an order conflict.', '已有下班卡，再点「上班打卡」一直提示顺序冲突，怎么办？'],
+      a: ['The code is ATTENDANCE_PUNCH_ORDER_CONFLICT. Do not click 上班打卡 again. Open Common → Makeup punch and choose missed check-in or time correction.', '代码是 ATTENDANCE_PUNCH_ORDER_CONFLICT。不要再点「上班打卡」。请在「常用 → 补卡」选择漏打上班卡或时间更正。'],
     }, {
       q: ['Can I choose the punch time?', '可以自己选打卡时间吗？'],
       a: ['The server records the time. A client-supplied occurred time is rejected as PUNCH_CLIENT_TIMESTAMP_FORBIDDEN.', '时间由服务器记录。客户端自带发生时间会被拒绝，代码是 PUNCH_CLIENT_TIMESTAMP_FORBIDDEN。'],
@@ -764,11 +770,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Who can submit', '前提条件/权限'],
-        detail: ['The employee needs attendance:write. Enforcement is off until an administrator turns on Enable makeup-punch enforcement and clicks Save makeup-punch policy. The cycle uses the work date in the policy timezone, not the clock time of submit.', '员工需要 attendance:write。管理员打开「启用补卡强约束」并点「保存补卡规则」之后，强约束才生效。周期按规则时区里的工作日期计算，不按提交那一刻的钟点。'],
+        detail: ['The employee needs attendance:write. Enforcement is off until an administrator turns on Enable makeup-punch enforcement and clicks Save makeup-punch policy. The quota cycle is counted by the work date’s period in the policy timezone, not by the submit date’s month. A makeup for an old workday does not reset just because it is submitted in the next month.', '员工需要 attendance:write。管理员打开「启用补卡强约束」并点「保存补卡规则」之后，强约束才生效。额度周期按规则时区里的工作日期所在周期计算，不按提交日期的月份。为旧工作日补卡时，不会因为提交时间到了下个月而换到新周期或恢复额度。'],
       },
       {
         path: ['Example: 3 per calendar month, start day 1', '示例：每自然月 3 次，起始日 1'],
-        detail: ['Timezone Asia/Shanghai, start day 1, 3 requests, counting pending and approved. Work dates 2026-03-02, 2026-03-18, and 2026-03-31 share the cycle 2026-03-01 through 2026-03-31. The fourth makeup in that cycle returns MAKEUP_PUNCH_QUOTA_EXCEEDED. A rejected or cancelled row stays out when those statuses are not checked. Start day 26 puts 2026-03-10 in 2026-02-26 through 2026-03-25, and 2026-03-26 in 2026-03-26 through 2026-04-25. Submit window 30 means a work date more than 30 calendar days before today in that timezone is refused. Window 0 allows today only.', '时区 Asia/Shanghai，起始日 1，次数 3，计入待审批和已通过。工作日期 2026-03-02、2026-03-18、2026-03-31 同属 2026-03-01 至 2026-03-31。这个周期里的第 4 次补卡返回 MAKEUP_PUNCH_QUOTA_EXCEEDED。未勾选的已驳回和已取消不计入。起始日 26 时，2026-03-10 落在 2026-02-26 至 2026-03-25，2026-03-26 落在 2026-03-26 至 2026-04-25。提交时限 30 表示，规则时区里比今天早超过 30 个自然日的工作日期会被拒绝。时限 0 只允许今天。'],
+        detail: ['Timezone Asia/Shanghai, start day 1, 3 requests, counting pending and approved. Work dates 2026-03-02, 2026-03-18, and 2026-03-31 share the cycle 2026-03-01 through 2026-03-31. The fourth makeup in that cycle returns MAKEUP_PUNCH_QUOTA_EXCEEDED, even if it is submitted in April for a March work date: that request still counts in the March cycle and does not get a new quota. A rejected or cancelled row stays out when those statuses are not checked. Start day 26 puts 2026-03-10 in 2026-02-26 through 2026-03-25, and 2026-03-26 in 2026-03-26 through 2026-04-25. Submit window 30 means a work date more than 30 calendar days before today in that timezone is refused. Window 0 allows today only.', '时区 Asia/Shanghai，起始日 1，次数 3，计入待审批和已通过。工作日期 2026-03-02、2026-03-18、2026-03-31 同属 2026-03-01 至 2026-03-31。这个周期里的第 4 次补卡返回 MAKEUP_PUNCH_QUOTA_EXCEEDED。即使在 4 月再为 3 月的工作日提交，仍计入 3 月这个周期，不会因提交月份而恢复额度。未勾选的已驳回和已取消不计入。起始日 26 时，2026-03-10 落在 2026-02-26 至 2026-03-25，2026-03-26 落在 2026-03-26 至 2026-04-25。提交时限 30 表示，规则时区里比今天早超过 30 个自然日的工作日期会被拒绝。时限 0 只允许今天。'],
       },
       {
         path: ['Watch-outs', '注意事项'],
@@ -776,7 +782,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['When it fails', '失败时怎么办'],
-        detail: ['MAKEUP_PUNCH_QUOTA_EXCEEDED: wait for the next cycle, or raise Requests per cycle. MAKEUP_PUNCH_WINDOW_EXPIRED: pick a work date inside Submit window. MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED: choose today or earlier. MAKEUP_PUNCH_TYPE_NOT_ALLOWED: change type or date, or edit Allowed anomaly types. MAKEUP_PUNCH_REASON_REQUIRED and MAKEUP_PUNCH_ATTACHMENT_REQUIRED: fill the field and submit again. MAKEUP_PUNCH_CROSS_USER_FORBIDDEN: the employee submits their own request. Sentences are in 错误码与提示.', 'MAKEUP_PUNCH_QUOTA_EXCEEDED：等到下个周期，或提高「每周期补卡次数」。MAKEUP_PUNCH_WINDOW_EXPIRED：改选「提交时限」内的工作日期。MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED：改选今天或更早。MAKEUP_PUNCH_TYPE_NOT_ALLOWED：改类型或日期，或调整「可补异常类型」。MAKEUP_PUNCH_REASON_REQUIRED 和 MAKEUP_PUNCH_ATTACHMENT_REQUIRED：补上原因或附件链接再提交。MAKEUP_PUNCH_CROSS_USER_FORBIDDEN：由员工本人提交。原句见「错误码与提示」。'],
+        detail: ['MAKEUP_PUNCH_QUOTA_EXCEEDED: the cycle is the work date’s period, and submitting next month does not restore quota for that old workday. Choose a work date whose cycle still has remaining count, cancel a pending request that counts in the same work-date cycle, or raise Requests per cycle. MAKEUP_PUNCH_WINDOW_EXPIRED: pick a work date inside Submit window. MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED: choose today or earlier. MAKEUP_PUNCH_TYPE_NOT_ALLOWED: change type or date, or edit Allowed anomaly types. MAKEUP_PUNCH_REASON_REQUIRED and MAKEUP_PUNCH_ATTACHMENT_REQUIRED: fill the field and submit again. MAKEUP_PUNCH_CROSS_USER_FORBIDDEN: the employee submits their own request. Sentences are in 错误码与提示.', 'MAKEUP_PUNCH_QUOTA_EXCEEDED：周期按工作日期划分，不会因提交时间到了下个月而恢复额度。可改选仍有剩余次数的工作日期、取消一条计入同一工作日周期的待处理申请，或提高「每周期补卡次数」。MAKEUP_PUNCH_WINDOW_EXPIRED：改选「提交时限」内的工作日期。MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED：改选今天或更早。MAKEUP_PUNCH_TYPE_NOT_ALLOWED：改类型或日期，或调整「可补异常类型」。MAKEUP_PUNCH_REASON_REQUIRED 和 MAKEUP_PUNCH_ATTACHMENT_REQUIRED：补上原因或附件链接再提交。MAKEUP_PUNCH_CROSS_USER_FORBIDDEN：由员工本人提交。原句见「错误码与提示」。'],
       },
     ],
     callout: [
@@ -785,7 +791,10 @@ export const attendanceGuideTopics: GuideTopic[] = [
     ],
     faqs: [{
       q: ['The quota says it is used up. Which rows count?', '提示次数已用完，哪些单会计入？'],
-      a: ['The message is 「本周期的补卡次数已用完。」. The policy checkboxes decide whether pending and approved rows count. Rejected and cancelled rows stay out when those statuses are not checked.', '提示是「本周期的补卡次数已用完。」。计入哪些状态由策略上的勾选决定。未勾选的已驳回和已取消不计入。'],
+      a: ['The message is 「本周期的补卡次数已用完。」. The policy checkboxes decide whether pending and approved rows count. Rejected and cancelled rows stay out when those statuses are not checked. The cycle is the work date’s period, so submitting in the next month does not restore quota for an old workday.', '提示是「本周期的补卡次数已用完。」。计入哪些状态由策略上的勾选决定。未勾选的已驳回和已取消不计入。周期按工作日期所在周期计算，不会因提交时间到了下个月而为旧工作日恢复额度。'],
+    }, {
+      q: ['If I submit next month, does an old workday get a new quota?', '到了下个月再为旧工作日提交，额度会恢复吗？'],
+      a: ['No. Quota is counted by the work date’s period, not by the submit month. A March work date submitted in April still belongs to the March cycle.', '不会。额度按工作日期所在周期计数，不按提交月份重置。3 月的工作日即使在 4 月提交，仍计入 3 月那个周期。'],
     }, {
       q: ['Why can people still submit while enforcement is off?', '强约束关着，为什么还能提交？'],
       a: ['Off means the quota and window checks are not run. The request still enters approval as pending.', '关闭表示不跑次数和时限检查。申请仍以待处理进入审批。'],
@@ -953,7 +962,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Reports → date range → reload', '报表 → 日期区间 → 重载'],
-        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Another person’s rows need attendance:approve, attendance:admin, or a scheduler scope that includes export for that person. Change the dates and reload before export; a stale filter blocks the file.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。看其他人需要 attendance:approve、attendance:admin，或一条覆盖该人的排班导出范围。改了日期要先重载再导出；筛选过期时导出会被拦住。'],
+        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Viewing another person’s rows needs attendance:approve or attendance:admin. A scheduler export scope does not replace that viewing permission; it only limits whose rows can be exported. Change the dates and reload before export; a stale filter blocks the file.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。查看其他人需要 attendance:approve 或 attendance:admin。排班范围里的「导出」不能代替这项查看权限，它只限制能导出哪些人的行。改了日期要先重载再导出；筛选过期时导出会被拦住。'],
       },
     ],
     faqs: [{
@@ -1082,7 +1091,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Which action covers which job', '哪个动作对应哪类操作'],
-        detail: ['Dispatch covers shift assignments, rotation assignments, publish, schedule-group membership, and fixed-schedule apply. Edit covers schedule-group details. Rebuild of a fixed schedule also needs clear. View filters the assignment list. Export can widen whose report rows a person may download. A missing match returns SCHEDULER_SCOPE_FORBIDDEN.', '调度覆盖排班分配、轮班分配、发布、排班组成员，以及固定排班的应用。编辑覆盖排班组资料。重建固定排班还要清空。查看用来过滤排班列表。导出可以放宽一个人能下载哪些人的报表。没有匹配的有效范围时返回 SCHEDULER_SCOPE_FORBIDDEN。'],
+        detail: ['Dispatch covers shift assignments, rotation assignments, publish, schedule-group membership, and fixed-schedule apply. Edit covers schedule-group details. Rebuild of a fixed schedule also needs clear. View filters the assignment list. The export action does not grant viewing others’ reports; viewing still needs attendance:approve or attendance:admin. Export scope only limits whose rows a person may download. A missing match returns SCHEDULER_SCOPE_FORBIDDEN.', '调度覆盖排班分配、轮班分配、发布、排班组成员，以及固定排班的应用。编辑覆盖排班组资料。重建固定排班还要清空。查看用来过滤排班列表。「导出」不能代替查看他人报表所需的权限，查看他人仍需要 attendance:approve 或 attendance:admin。该范围只限制能导出哪些人的行。没有匹配的有效范围时返回 SCHEDULER_SCOPE_FORBIDDEN。'],
       },
       {
         path: ['Who can create a scope', '前提条件/权限'],
@@ -1347,8 +1356,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelZh: '权限说明',
     sectionId: 'attendance-admin-user-access',
     intro: [[
-      'Attendance uses five permission keys. attendance:read views records, rules, one’s own balances, and reports. attendance:write punches and files or cancels one’s own requests. attendance:approve approves and can read other people’s records. attendance:import runs import and batches. attendance:admin manages settings, shifts, groups, rules, report fields, and annual-leave operations. A platform administrator bypasses these checks.',
-      '考勤使用五类权限。attendance:read 查看记录、规则、本人余额和报表。attendance:write 打卡，以及提交或取消自己的申请。attendance:approve 审批，并可以查看他人记录。attendance:import 执行导入和批次。attendance:admin 管理设置、班次、考勤组、规则、统计字段和年假操作。平台管理员绕过这些检查。',
+      'Attendance uses five permission keys. attendance:read views records, rules, one’s own balances, and reports. attendance:write punches and files or cancels one’s own requests. attendance:approve approves and can read other people’s records. attendance:import runs import and batches. attendance:admin manages settings, shifts, groups, rules, report fields, and annual-leave operations. A platform administrator bypasses these checks. A scheduler export scope cannot replace attendance:approve or attendance:admin for viewing others’ reports; it only limits export.',
+      '考勤使用五类权限。attendance:read 查看记录、规则、本人余额和报表。attendance:write 打卡，以及提交或取消自己的申请。attendance:approve 审批，并可以查看他人记录。attendance:import 执行导入和批次。attendance:admin 管理设置、班次、考勤组、规则、统计字段和年假操作。平台管理员绕过这些检查。排班范围里的「导出」不能代替 attendance:approve 或 attendance:admin 来查看他人报表，它只限制导出。',
     ]],
     scenarios: [[
       'Grant an employee the ability to punch, an approver the ability to decide requests, or an administrator the settings pages.',
@@ -1429,11 +1438,11 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['ATTENDANCE_PUNCH_ORDER_CONFLICT', 'ATTENDANCE_PUNCH_ORDER_CONFLICT'],
-        detail: ['Appears when check-out is recorded before check-in on the same work date. HTTP 409. Do: Check In first, then Check Out.', '出现：同一工作日先记下了下班、还没有上班。HTTP 409。处理：先点「上班打卡」，再点「下班打卡」。'],
+        detail: ['Appears when the projected check-out is earlier than check-in on the same work date. HTTP 409. The message is “Check-out cannot precede check-in; review the work date and existing punches”. If a check-out already exists, clicking Check In again can raise the same conflict repeatedly. Do not retry 上班打卡. Use 补卡 (漏打上班卡) or 时间更正.', '出现：同一工作日算出的下班时间早于上班时间。HTTP 409。英文句是 “Check-out cannot precede check-in; review the work date and existing punches”。已有下班卡时再点「上班打卡」可能重复触发该冲突。处理：不要再点「上班打卡」，请走「补卡」（漏打上班卡）或「时间更正」。'],
       },
       {
         path: ['MAKEUP_PUNCH_QUOTA_EXCEEDED', 'MAKEUP_PUNCH_QUOTA_EXCEEDED'],
-        detail: ['Appears when makeup enforcement is on and this cycle has no remaining count. HTTP 422. The sentence is 「本周期的补卡次数已用完。」. Do: wait for the next calendar month, cancel a pending request that counts, or raise Requests per cycle.', '出现：补卡强约束已开，且本周期次数用完。HTTP 422。句子是「本周期的补卡次数已用完。」。处理：等到下个自然月，或取消一条计入额度的待处理申请，或提高「每周期补卡次数」。'],
+        detail: ['Appears when makeup enforcement is on and the work date’s cycle has no remaining count. HTTP 422. The sentence is 「本周期的补卡次数已用完。」. Do not wait for the next calendar month to retry the same old workday: quota is counted by the work date’s period and does not reset when the submit month changes. Cancel a pending request that counts in that same cycle, raise Requests per cycle, or choose a work date in a cycle that still has remaining count.', '出现：补卡强约束已开，且该工作日期所在周期次数用完。HTTP 422。句子是「本周期的补卡次数已用完。」。处理：不要等到下个自然月再为同一个旧工作日提交——额度按工作日期所在周期计算，不会因提交月份恢复。可取消一条计入同一周期的待处理申请，提高「每周期补卡次数」，或改选仍有剩余次数的工作日期。'],
       },
       {
         path: ['MAKEUP_PUNCH_WINDOW_EXPIRED', 'MAKEUP_PUNCH_WINDOW_EXPIRED'],
