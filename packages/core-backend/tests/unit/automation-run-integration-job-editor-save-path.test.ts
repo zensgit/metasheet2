@@ -372,6 +372,8 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
     ['a nested job that brings its OWN binding (another tenant)', () => editorBody([updateRecord(), conditionBranch('defaultBranch', [rij('P-1', { binding: CLIENT_BINDING })])])],
     // Not a branch container, so the service's flattening does not see it: only the position walk refuses this one.
     ['a branch list smuggled under an action that is NOT a branch container (actions[0])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, defaultBranch: { key: 'otherwise', actions: [rij('P-1', { binding: CLIENT_BINDING })] } } }])],
+    // …and under a LATER action: the pair mirrors actions[0], which is clean, so only the walk of actions[1] sees it.
+    ['a branch list smuggled under a LATER action that is NOT a branch container (actions[1])', () => editorBody([updateRecord(), { type: 'update_record', config: { fields: { fld_1: 'y' }, defaultBranch: { key: 'otherwise', actions: [rij('P-1', { binding: CLIENT_BINDING })] } } }])],
     ['a branch list smuggled under a pair that is NOT a branch container (no actions[])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, branches: [{ key: 'b1', actions: [rij('P-1', { binding: CLIENT_BINDING })] }] } }], { actions: null })],
   ])('a genuinely NESTED occurrence is refused — %s — with the fixed message, before any tenant or registry read, and nothing is written', async (_label, build) => {
     const h = makeService()
