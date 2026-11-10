@@ -224,6 +224,7 @@ test('SC-04 the project census: the D2 components by their private handle with t
     assert.deepEqual(answer.components, [{ componentHandle: HANDLE_S1, acknowledgement: null }])
     assert.equal(answer.rulingsReadable, true)
     assert.equal(answer.unacknowledgedRemnantComponents, 1)
+    assert.equal(answer.governed, 'none', 'the refresh-state derivation\'s token (a not-governed project)')
     assert.ok(!JSON.stringify(answer).includes('"S1"'), 'no component id, only its handle')
     const entry = h.auditAppends[h.auditAppends.length - 1]
     assert.equal(entry.mode, 'sheet_census_read')
@@ -329,6 +330,24 @@ test('SC-07 no ruling ledger wired: the acknowledgement routes 501 by name; the 
     const pilot = dataOf(await call(h, 'GET', PATHS.pilot, { user: ADMIN, params: { projectNo: PROJECT }, query: {} }))
     assert.ok(pilot.readiness.failing.includes('no_unacknowledged_inactive_root_remnant'))
   } finally { h.restore() }
+})
+
+test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenant BEFORE the reader, and every census / acknowledgement handler reads rows only through it', () => {
+  const fs = require('node:fs')
+  const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const start = source.indexOf('async function readStockPreparationCensusRows(')
+  const body = source.slice(start, source.indexOf('\n  }\n', start))
+  const wall = body.indexOf('assertTableActionTargetBelongsToTenant(')
+  const read = body.indexOf('readExistingStockPreparationRows(')
+  assert.ok(start > 0 && wall > 0 && read > wall, 'the wall runs before the read')
+  assert.match(body, /targetProjectId: resolveIntegrationStagingProjectId\(tenantId, undefined\)/, 'the staging project is the scope\'s, never a request one')
+  for (const handler of ['stockPreparationSheetCensusList', 'stockPreparationProjectSheetCensusGet', 'stockPreparationProjectRemnantAcknowledge', 'stockPreparationProjectRemnantAcknowledgementRevoke']) {
+    const at = source.indexOf(`    async ${handler}(req, res) {`)
+    const text = source.slice(at, source.indexOf('\n    },\n', at))
+    assert.ok(at > 0, handler)
+    assert.ok(!text.includes('readExistingStockPreparationRows'), `${handler} reads rows only through the walled helper`)
+    assert.match(text, /requireAccess\(req, STOCK_PREP_ADMIN\)\n {6}requireProjectSheetsEnabled\(\)/, `${handler}: the ADMIN gate, then the switch, first`)
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-census-routes.test.cjs', tests)

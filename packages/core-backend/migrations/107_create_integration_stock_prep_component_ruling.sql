@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_component_ruling (
   CONSTRAINT integration_stock_prep_component_ruling_runbook_ref_shape_check
     CHECK (runbook_ref ~ '^[A-Za-z0-9._:-]{1,64}$'),
   CONSTRAINT integration_stock_prep_component_ruling_kind_shape_check CHECK (
-    (kind = 'remnant_acknowledged' AND basis = 'head_not_ordered' AND rules IS NULL AND position_fingerprint IS NULL)
+    (kind = 'remnant_acknowledged' AND basis IS NOT NULL AND basis = 'head_not_ordered' AND rules IS NULL AND position_fingerprint IS NULL)
     OR (kind = 'dropped_head_included' AND basis IS NULL AND rules IS NOT NULL AND jsonb_typeof(rules) = 'array'
         AND position_fingerprint IS NOT NULL AND position_fingerprint ~ '^[0-9a-f]{64}$')),
   CONSTRAINT integration_stock_prep_component_ruling_revoked_shape_check CHECK (
