@@ -714,6 +714,10 @@ const {
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
   // S3 follow-ups 2, fix round 1: 409 BUSY for a click while this process's refresh of the tenant is still running.
   projectOverviewBusyError,
+  // Pre-pilot fix batch 8(c): the directory's per-row refresh facts, derived as the overview derives them.
+  refreshBlockedToken,
+  refreshPostureInputOf,
+  readRefreshStateForOverview,
 } = require('./stock-preparation-project-overview.cjs')
 // 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
 // decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
@@ -846,9 +850,9 @@ const {
   auditableRefusalDetail,
   continuationExportInputOf,
   runFormalExportGate,
+  runHandoffTerminalGate,
 } = require('./stock-preparation-export-gate.cjs')
 const { machineBandFieldIds, sheetMachineDigest } = require('./stock-preparation-continuation-pairing.cjs')
-const { formalSurfaceVerdict } = require('./stock-preparation-refresh-state.cjs')
 const { StockPreparationRefreshGovernanceError } = require('./stock-preparation-refresh-governance.cjs')
 // The OTHER half of the pack line: a pack says WHICH tenant `ext_` columns exist, this says WHERE
 // their values come from. Server-held and built once at registration, exactly like the catalog
@@ -5057,30 +5061,80 @@ function requireStockPreparationAudit() {
       return { ready: false, byProjectNo: new Map() }
     }
   }
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): THE DIRECTORY'S PER-ROW REFRESH FACTS for the registry rows
+  // (switch on, union opt-in) — so a home card / 项目查询 row never says 「可以导出」 where the formal export refuses.
+  // Cost: ONE governed index (the registry's pilot markers + the store's state / relationship / open-hold project
+  // numbers: four bounded reads per directory response) and ONE consult per GOVERNED registry row — never per project:
+  // on today's build (CONTINUATION_SUPPORT_VERSION 0, no pilot) that is the index alone. `null` (governance or either
+  // index read not wired) adds no key (absent, not false); a failed index read is `{ ready: false }` (every registry
+  // row `unreadable`); a failed consult is that row's `unreadable` (readRefreshStateForOverview), the rest go on.
+  async function directoryRefreshFactsFor(tenantId, projectTargetRows) {
+    if (!Array.isArray(projectTargetRows)) return null
+    const reader = refreshStateReaderOrNull(tenantId)
+    const store = stockPreparationContinuationStore
+    const registry = stockPreparationProjectTargets
+    if (!reader || !store || typeof store.listGovernedProjectNos !== 'function' || !registry || typeof registry.listPilotStates !== 'function') return null
+    let candidates
+    try {
+      const [pilots, indexed] = [await registry.listPilotStates({ tenantId }), await store.listGovernedProjectNos({ tenantId })]
+      if (!Array.isArray(pilots) || !indexed || indexed.ok !== true || !(indexed.projectNos instanceof Set)) return { ready: false, byProjectNo: new Map() }
+      candidates = new Set(indexed.projectNos)
+      for (const pilot of pilots) if (pilot && pilot.pilot === true && typeof pilot.projectNo === 'string') candidates.add(pilot.projectNo)
+    } catch {
+      return { ready: false, byProjectNo: new Map() }
+    }
+    const byProjectNo = new Map()
+    for (const row of projectTargetRows) {
+      const no = row && typeof row.projectNo === 'string' ? row.projectNo : null
+      if (!no || !candidates.has(no) || byProjectNo.has(no)) continue
+      const state = await readRefreshStateForOverview(reader, { projectNo: no, sheetId: row.sheetId })
+      byProjectNo.set(no, Object.freeze({
+        refreshBlocked: refreshBlockedToken(refreshPostureInputOf(state)),
+        pendingReviewCount: state && state.readable === true && state.counts && Number.isInteger(state.counts.pendingReviews) ? state.counts.pendingReviews : null,
+      }))
+    }
+    return { ready: true, byProjectNo }
+  }
   // PR-5 (design §7.1 row 25, D-17): the handoff's TERMINAL hop is a formal handover and is refused while the
   // project's refresh state is unfinished or unreadable — the ONE predicate the export keys on
-  // (`formalSurfaceVerdict`: a not-governed project passes; a governed one only when complete AND settled). One
-  // fresh state read; the reader's own refusals (409 RETARGETED / TENANT_MISMATCH) propagate.
+  // (`formalSurfaceVerdict`: a not-governed project passes; a governed one only when complete AND settled). The
+  // reader's own refusals (409 RETARGETED / TENANT_MISMATCH) propagate.
+  // Pre-pilot fix batch 8(d) (register R-91): ONE consult is not enough (PR-5's stated residual — a whole failed run in
+  // the consult's snapshot-to-lock-read gap let the chain complete and ping while the export then refused). The hop now
+  // runs `runHandoffTerminalGate`: G0 lock generation -> C1 derived state -> (governed only) no lease at G0, and G1 with
+  // the same token AND fencing epoch and no lease. A not-governed project keeps today's answer (one consult, allowed).
+  // The lock is required (501 by name, like the export). Refusals: 503 unreadable / 409 state | not_settled |
+  // lease_in_flight | state_changed, all STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE.
   async function assertHandoffTerminalHopAllowed({ tenantId, projectNo, sheetId }) {
-    const read = await requireStockPreparationRefreshServices().governance.readRefreshState({ tenantId, projectNo, sheetId })
-    const state = read && read.state && typeof read.state === 'object' ? read.state : null
-    const verdict = formalSurfaceVerdict(state)
-    if (verdict.allowed) return state
-    const unreadable = verdict.reason === 'unreadable'
+    const services = requireStockPreparationRefreshServices()
+    const lock = requireStockPreparationProjectWriteLock()
+    const gate = await runHandoffTerminalGate({
+      readGeneration: () => lock.readGeneration(sheetWriteScopeKey(sheetId)),
+      readRefreshState: () => services.governance.readRefreshState({ tenantId, projectNo, sheetId }),
+    })
+    if (gate.allowed) return gate.state
+    const state = gate.state
+    const unreadable = gate.reason === 'unreadable'
     const failure = state && state.unreadable && typeof state.unreadable === 'object' ? state.unreadable : {}
+    const moved = gate.reason === 'state_changed'
     throw new HttpRouteError(
       unreadable ? 503 : 409,
       'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE',
       unreadable
         ? 'the project\'s refresh state could not be read; the final handoff step is refused'
-        : 'this project has an unfinished refresh state; the final handoff step is refused until it is complete and checked',
+        : (gate.reason === 'lease_in_flight'
+          ? 'a pull is writing this sheet or a crashed pull left its lease; the final handoff step is refused — retry after it finishes or run a preview with the pull tier'
+          : (moved
+            ? 'the project\'s write generation moved while the final handoff step was being checked; nothing was handed over — try again'
+            : 'this project has an unfinished refresh state; the final handoff step is refused until it is complete and checked')),
       {
-        reason: verdict.reason,
+        reason: gate.reason,
         status: state ? state.status : 'unreadable',
         governed: state ? state.governed : 'unknown',
         counts: state && state.counts ? { ...state.counts } : null,
         ...(typeof failure.store === 'string' ? { store: failure.store } : {}),
         ...(typeof failure.operation === 'string' ? { operation: failure.operation } : {}),
+        ...(moved ? { generationMoved: gate.generationMoved === true, epochMoved: gate.epochMoved === true, leaseAtG1: gate.leaseAtG1 === true } : {}),
         partial: false,
       },
     )
@@ -13458,6 +13512,8 @@ function requireStockPreparationAudit() {
         // PR-5 (design §11): `pendingDecisionCount` is the UNION of the confirmation ledger and the open refresh
         // holds; an unreadable hold table makes `ledgerReady` false, never "zero holds".
         refreshHoldCounts: await openHoldCountsFor(scope.tenantId),
+        // Pre-pilot fix batch 8(c) (R-91): per registry row, the hold count, the pending reviews and the blocked token.
+        refreshFacts: await directoryRefreshFactsFor(scope.tenantId, projectTargetRows),
       })
       // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
       // projectNo, no projectName, and no `projects` array — the row records THAT a directory read
@@ -13881,7 +13937,36 @@ function requireStockPreparationAudit() {
       // STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE while the project's refresh state is unfinished, through the
       // ONE predicate the formal export keys on; a not-governed project passes as today. Non-terminal hops are
       // untouched (no consult). Before the cursor, the trail row, the claim and the ping.
-      if (terminal) await assertHandoffTerminalHopAllowed({ tenantId, projectNo, sheetId: action.target.sheetId })
+      // Pre-pilot fix batch 8(d) (R-91): a REFUSED terminal hop leaves ONE values-free trail row (mode
+      // `terminal_refused`: the code and the closed reason / status / governed / store tokens, the cursor integers)
+      // before the refusal answers — the existence probe has passed, so the row says nothing the caller could not
+      // already see. No cursor move, no claim, no notification. An audit store that refuses the row answers its own
+      // error instead, still with nothing moved.
+      if (terminal) {
+        try {
+          await assertHandoffTerminalHopAllowed({ tenantId, projectNo, sheetId: action.target.sheetId })
+        } catch (refusal) {
+          if (refusal instanceof HttpRouteError && refusal.code === 'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE') {
+            await audit.append({
+              tenantId,
+              projectId: projectNo,
+              action: 'handoff_advance',
+              subjectId: fromStepKey,
+              mode: 'terminal_refused',
+              actor,
+              detail: {
+                operation: 'handoff_advance',
+                fromStepIndex,
+                stepCount: chain.steps.length,
+                terminal: true,
+                refusal: refusal.code,
+                ...auditableRefusalDetail(refusal.details),
+              },
+            })
+          }
+          throw refusal
+        }
+      }
 
       // STEP 5 — THE TURN. Cursor only: the notification claim is taken separately, after the trail
       // row lands, so that a failing audit cannot leave a hop permanently unnotifiable (RC1).

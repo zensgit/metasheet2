@@ -8071,6 +8071,75 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
           }, 300000)
 
+          // Pre-pilot fix batch 8(a) (register R-91): the S8-19 interleaving on the RE-CONFIRM (a relationship_reconfirm hold).
+          test('S8-21 (pre-pilot fix batch 8a, the V8PG-09 interleaving on PR-4\'s RE-CONFIRM) a relationship_reconfirm confirm with the pilot marker cleared AFTER the route\'s consult, just before the store takes the state row: 409 NOT_PILOT decided under the lock — the relationship stays needs_reconfirmation at revision 1, no bump, no decision audit, the hold open; the marker back => the same body 201 revision 2', async () => {
+            let fire: null | (() => Promise<void>) = null
+            const hook = async (event: StatementEvent) => {
+              if (fire && event.inTransaction && /integration_stock_prep_refresh_state[\s\S]*FOR UPDATE/i.test(String(event.sql))) {
+                const run = fire
+                fire = null
+                await run()
+              }
+            }
+            const st = await s3aStack('s8_21', { pilot: true, refresh: realRefreshServices(hostLikeDb(hook)) })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            const suspended = await st.dryRun()
+            const confirmed = await confirmOpenCandidate(st)
+            const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId, { confirmable: true, verdict: 'source_scope_changed' })
+            await seedOpenHolds(st.refresh.store, st.scope, [reconfirm], await decisionVersionOf(st.scope), { [confirmed.continuationId]: 'source_scope_changed' })
+            const row = (await openHoldRows(st)).find((entry: any) => entry.kind === 'relationship_reconfirm')
+            expect(row, 'an open re-confirm hold').toBeTruthy()
+            const page = okData(await cpCall(st, 'GET', CPR.holds, { query: { holdId: row.id } }))
+            const body = {
+              confirmProjectNo: st.projectNo,
+              holdId: row.id,
+              holdFingerprint: row.fingerprint,
+              comparisonFingerprint: row.comparison_fingerprint,
+              evidenceFingerprint: row.evidence_fingerprint,
+              readReceipt: page.readReceipt.id,
+              acknowledge: { historyUnknown: true },
+              continuation: { id: confirmed.continuationId, revision: 1 },
+            }
+            const lock0 = await lockRowFor(st.key)
+            const audits0 = (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length
+            const relationship = async () => (await q(`SELECT status, revision FROM ${RT.continuation} WHERE id = $1`, [confirmed.continuationId])).rows[0]
+            const before = await relationship().then((r: any) => r && `${r.status}:${r.revision}`)
+            fire = async () => { await st.pilotExit() }
+            const refused = await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body })
+            const lock1 = await lockRowFor(st.key)
+            const observed = {
+              suspended: suspended.body.data.status,
+              before,
+              fired: fire === null,
+              confirm: answer(refused),
+              decidedUnderLock: Boolean(errorOf(refused).details && errorOf(refused).details.decidedUnderLock === true),
+              relationshipAfter: await relationship().then((r: any) => `${r.status}:${r.revision}`),
+              bump: Number(lock1.generation) - Number(lock0.generation),
+              decisionAuditsAdded: (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length - audits0,
+              holdStillOpen: (await openHoldRows(st)).some((item: any) => item.id === row.id),
+              reEnabled: '',
+              relationshipFinal: '',
+            }
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s8_21_admin'])
+            observed.reEnabled = answer(await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body }))
+            observed.relationshipFinal = await relationship().then((r: any) => `${r.status}:${r.revision}`)
+            console.log(`[S8-21] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              before: 'needs_reconfirmation:1',
+              fired: true,
+              confirm: `409:${DC.NOT_PILOT}:`,
+              decidedUnderLock: true,
+              relationshipAfter: 'needs_reconfirmation:1',
+              bump: 0,
+              decisionAuditsAdded: 0,
+              holdStillOpen: true,
+              reEnabled: '201',
+              relationshipFinal: 'active:2',
+            })
+          }, 300000)
+
           // The store-level interleavings: the canonical changed read planned against the first-pull sheet (the REAL planner),
           // its content holds persisted on a synthetic sheet, the confirm's inputs derived from the persisted rows.
           async function storeScenario(label: string) {
