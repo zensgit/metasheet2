@@ -69,7 +69,7 @@ describe('WeCom client — app access-token cache (S4 design-lock 20260710, inde
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it('does not cross corp ids (cache key = corpid|baseUrl)', async () => {
+  it('does not cross corp ids, base URLs or credentials (cache keyed by corp, base URL and credential fingerprint)', async () => {
     __resetWeComAppAccessTokenCacheForTests()
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(tokenResponse('tok-a', 7200))
@@ -78,6 +78,19 @@ describe('WeCom client — app access-token cache (S4 design-lock 20260710, inde
 
     expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 's', agentId: '1' })).toBe('tok-a')
     expect(await fetchWeComAppAccessToken({ corpId: 'corp-b', corpSecret: 's', agentId: '1' })).toBe('tok-b')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not share a token between two secrets of the same corp and base URL', async () => {
+    __resetWeComAppAccessTokenCacheForTests()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(tokenResponse('tok-s1', 7200))
+      .mockResolvedValueOnce(tokenResponse('tok-s2', 7200))
+    global.fetch = fetchMock as typeof fetch
+
+    expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 'secret-one', agentId: '1' })).toBe('tok-s1')
+    expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 'secret-two', agentId: '1' })).toBe('tok-s2')
+    expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 'secret-one', agentId: '1' })).toBe('tok-s1')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
