@@ -3956,6 +3956,14 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   BI-R19 (R-65 / R-89) a RIGHT band ensured while the real template-column repair holds the canonical write fence
         //          waits on the fence and lands after the repaired columns and a person column above every known id; re-created
         //          under a person column above EVERY column (known ids included) it lands after that column too
+        //   Y8-C-A (R-89 × R-65) a pre-Y8 sheet (the two Y8 columns missing) with an ext_ column and a person column: the
+        //          Y8 repair route appends the two after both (max + 1 + i, locked); the RIGHT install then lands the band
+        //          after every column — no shared order, no existing column and no non-band cell changed
+        //   Y8-C-B (R-89 × R-65) a pre-Y8 sheet that already carries a RIGHT band: the install dry_run refuses
+        //          plm_lock_required; the repair appends the two AFTER the band (max + 1 + i, locked), the band's rows and
+        //          orders untouched, the lock check missing 0; the dry_run is then clean and the install keeps the band
+        //   Y8-C-C (R-89 × R-65, #6828) the repair, THEN a person column, then the RIGHT install: the band lands after the
+        //          person column (the pre-#6828 counter-example — a max over the known ids put the band on its order)
         describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
           const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
@@ -4355,6 +4363,172 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(gridTop.slice(-3)).toEqual([personTopId, ...bandPhysical])
             const afterTop = await fieldRows()
             for (const [id, text] of settledTop) expect(afterTop.get(id), `meta_fields ${id} byte-identical (leg 2)`).toBe(text)
+          }, 300000)
+
+          // Y8 (R-89) × the band (R-65, #6828), in sequence. Y8's two template columns (issueConfirmDate, projectSpecModel —
+          // the template's last two) reach an existing project sheet only through the REAL repair route (`POST
+          // …/options/sync`, addMissingColumns), inserted locked at the whole-sheet MAX(order) + 1 + i; a RIGHT band takes
+          // the whole-sheet max + 1 / + 2 read under the write fence. These cases inherit the run's fence setting (the
+          // ordering they pin needs no fence; BI-R19 pins the concurrent shape with the fence on).
+          const Y8_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
+          const Y8_REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const y8Sheet = {
+            // Every meta_fields row of the sheet, byte for byte (the row as PostgreSQL serialises it).
+            fieldRows: async (sheetId: string) => new Map<string, string>(
+              (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+            ),
+            orders: async (sheetId: string) => new Map<string, number>(
+              (await q('SELECT id, "order" FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows.map((row: any) => [String(row.id), Number(row.order)]),
+            ),
+            grid: async (sheetId: string) => (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [sheetId])).rows.map((row: any) => String(row.id)),
+            maxOrder: async (sheetId: string) => Number((await q('SELECT MAX("order") AS m FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows[0].m),
+            shared: async (sheetId: string) => (await q('SELECT "order", COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1 GROUP BY "order" HAVING COUNT(*) > 1 ORDER BY "order"', [sheetId])).rows,
+            lockOf: async (sheetId: string, id: string) => (await q('SELECT property FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sheetId, id])).rows[0]?.property?.humanWriteLock ?? null,
+          }
+          const y8Repair = (st: any, body: Record<string, unknown>) => withPull(false, () => callRoute(st.routes, 'POST', Y8_REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} }))
+          // A person's column (POST /fields mints a random id — never one of the known ids).
+          const y8PersonColumn = (st: any, id: string, order: number) => q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [id, st.sheetId, 'Person column', 'string', '{}', order])
+          // A first pull (switch off: rows land, no band), then the sheet aged to the pre-Y8 (33-column) template: the two
+          // Y8 columns leave meta_fields; their physical ids are the host's stable ids, so the repair re-creates exactly them.
+          async function y8PreY8Sheet(k: any) {
+            const st = k.st
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            expect(templateIds.slice(-2), 'the Y8 columns are the template tail').toEqual(Y8_COLUMNS)
+            await withPull(false, async () => { st.state.data = CF.firstPullSource(); await k.pull() })
+            const resolved = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: Y8_COLUMNS })
+            const physical: string[] = Y8_COLUMNS.map((id) => resolved[id])
+            expect(physical.every((id) => typeof id === 'string')).toBe(true)
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, physical])).rowCount).toBe(2)
+            const maxAged = await y8Sheet.maxOrder(st.sheetId)
+            expect(maxAged, 'the 33-column template ends at its last index').toBe(templateIds.length - 3)
+            expect((await st.rows()).length, 'the aged sheet carries rows').toBeGreaterThan(0)
+            return { physical, maxAged, band: [k.physical('firstPullBatch'), k.physical('pullBatch')] }
+          }
+          // The REAL install route with placement RIGHT (dry_run, then install with its digest), and what every right install
+          // must leave: the band at the whole-sheet max + 1 / + 2, after every other column, no shared order, every
+          // pre-existing meta_fields row byte-identical, exactly the two band rows added, every cell outside the band identical.
+          async function y8InstallRight(k: any, band: string[]) {
+            const st = k.st
+            const fieldsBefore = await y8Sheet.fieldRows(st.sheetId)
+            expect(band.some((id) => fieldsBefore.has(id)), 'precondition: no band yet').toBe(false)
+            const cellsBefore = await k.nonBand()
+            const maxBefore = await y8Sheet.maxOrder(st.sheetId)
+            const dry = await k.post({ mode: 'dry_run', placement: 'right' })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            expect(dry.body.data.refusals).toEqual([])
+            const answer = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: dry.body.data.requires.confirmHistoricalBatchCount.inferred, placement: 'right' })
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect((await k.sheetRow()).band_placement).toBe('right')
+            const orders = await y8Sheet.orders(st.sheetId)
+            expect(band.map((id) => orders.get(id)), 'the band at the whole-sheet max + 1 / + 2').toEqual([maxBefore + 1, maxBefore + 2])
+            expect([...orders].filter(([id]) => !band.includes(id)).every(([, order]) => order < maxBefore + 1), 'the band after every other column').toBe(true)
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order').toEqual([])
+            const after = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsBefore) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            expect([...after.keys()].filter((id) => !fieldsBefore.has(id)).sort()).toEqual([...band].sort())
+            expect(await k.nonBand(), 'every cell outside the band identical').toEqual(cellsBefore)
+          }
+
+          test('Y8-C-A (R-89 × R-65) a pre-Y8 sheet with an ext_ column and a person column: the Y8 repair appends the two after both (max + 1 + i, locked plm_system, nothing else moves); the RIGHT install then lands the band after every column — no shared order, no existing column or non-band cell changed', async () => {
+            const k = await installStack('y8ca')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            // A pack's ext_ column through the real host primitive, then a person's column.
+            await st.multitable.provisioning.ensureMissingObjectFields({ projectId: st.projectId, objectId: st.objectId, fields: [{ id: 'ext_site_note', name: 'Site note', type: 'string', order: maxAged + 1 }] })
+            const extId: string = (await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: ['ext_site_note'] })).ext_site_note
+            expect(typeof extId).toBe('string')
+            const personId = `fld_person_${TOKEN}_y8ca`
+            await y8PersonColumn(st, personId, maxAged + 2)
+            const fieldsAged = await y8Sheet.fieldRows(st.sheetId)
+            const rowsAged = await st.rows()
+
+            const added = await y8Repair(st, { addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(Y8_COLUMNS)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the repair appends after the ext_ and the person column: max + 1 + i').toEqual([maxAged + 3, maxAged + 4])
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order after the repair').toEqual([])
+            expect(await Promise.all(physical.map((id) => y8Sheet.lockOf(st.sheetId, id))), 'both inserted locked').toEqual(['plm_system', 'plm_system'])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsAged) expect(afterRepair.get(id), `meta_fields ${id} byte-identical across the repair`).toBe(text)
+            expect(sameJson(await st.rows(), rowsAged), 'the repair changes no row').toBe(true)
+
+            await y8InstallRight(k, band)
+            expect((await y8Sheet.grid(st.sheetId)).slice(-6), 'the grid: … ext_, person, the Y8 two, then the band').toEqual([extId, personId, ...physical, ...band])
+          }, 300000)
+
+          test('Y8-C-B (R-89 × R-65) a pre-Y8 sheet that already carries a RIGHT band: the install dry_run refuses plm_lock_required; the Y8 repair appends the two AFTER the band (max + 1 + i, locked plm_system), the band rows and orders untouched, the lock check missing 0; the dry_run then has no refusals and the install keeps the band where it is', async () => {
+            const installLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-install.cjs')) as any
+            const k = await installStack('y8cb')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            // The band a pre-Y8 install left: the install's own band step (ensureBandColumns, RIGHT) over the real host.
+            // Columns only — this sheet has no pull-batch ledger row.
+            const banded = await installLib.__internals.ensureBandColumns({
+              deps: {
+                provisioning: st.multitable.provisioning,
+                projectId: st.projectId,
+                target: { objectId: st.objectId },
+                band: { fieldIds: { pullBatch: k.physical('pullBatch'), firstPullBatch: k.physical('firstPullBatch') } },
+                knownFieldIds: templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id),
+                bandDescriptors: templatesLib.pullBatchBandFieldDescriptors,
+              },
+              keys: ['pullBatch', 'firstPullBatch'],
+              placement: 'right',
+              locale: 'zh-CN',
+            })
+            expect(banded.added).toBe(2)
+            const bandedOrders = await y8Sheet.orders(st.sheetId)
+            const bandOrders = band.map((id) => bandedOrders.get(id))
+            expect(bandOrders, 'precondition: a right band after the 33-column tail').toEqual([maxAged + 1, maxAged + 2])
+            const fieldsBanded = await y8Sheet.fieldRows(st.sheetId)
+            const rowsBanded = await st.rows()
+
+            const refused = await k.post({ mode: 'dry_run' })
+            expect(refused.statusCode, JSON.stringify(refused.body)).toBe(200)
+            expect(refused.body.data.refusals).toContain('plm_lock_required')
+            expect(refused.body.data.plmLock).toMatchObject({ missing: 2 })
+
+            const added = await y8Repair(st, { addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(Y8_COLUMNS)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the Y8 two after the band: max + 1 + i').toEqual([maxAged + 3, maxAged + 4])
+            expect(band.map((id) => repaired.get(id)), 'the band keeps its orders').toEqual(bandOrders)
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order').toEqual([])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsBanded) expect(afterRepair.get(id), `meta_fields ${id} byte-identical (the band rows included)`).toBe(text)
+            expect([...afterRepair.keys()].filter((id) => !fieldsBanded.has(id)).sort()).toEqual([...physical].sort())
+            expect(sameJson(await st.rows(), rowsBanded), 'the repair changes no row').toBe(true)
+            expect(await Promise.all(physical.map((id) => y8Sheet.lockOf(st.sheetId, id))), 'both inserted locked').toEqual(['plm_system', 'plm_system'])
+            const check = await y8Repair(st, { dryRun: true })
+            expect(check.statusCode, JSON.stringify(check.body)).toBe(200)
+            expect(check.body.data.plmColumnLock).toMatchObject({ checked: true, unmarked: 0, missing: 0 })
+
+            const { dry, answer } = await k.install()
+            expect(dry.body.data.refusals).toEqual([])
+            expect(dry.body.data.plmLock).toMatchObject({ missing: 0, unmarked: 0 })
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            const installed = await y8Sheet.orders(st.sheetId)
+            expect(band.map((id) => installed.get(id)), 'the install keeps the band where it is').toEqual(bandOrders)
+            expect(physical.map((id) => installed.get(id))).toEqual([maxAged + 3, maxAged + 4])
+            expect(await y8Sheet.shared(st.sheetId)).toEqual([])
+          }, 300000)
+
+          test('Y8-C-C (R-89 × R-65, #6828) the Y8 repair, THEN a person adds a column, then the RIGHT install: the band lands after the person column (a max over the known ids put it on that column\'s order — the pre-#6828 counter-example), no shared order, no existing column or non-band cell changed', async () => {
+            const k = await installStack('y8cc')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            const added = await y8Repair(st, { addMissingColumns: true })
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(Y8_COLUMNS)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the repair appends at max + 1 + i').toEqual([maxAged + 1, maxAged + 2])
+            const personId = `fld_person_${TOKEN}_y8cc`
+            await y8PersonColumn(st, personId, maxAged + 3)
+
+            await y8InstallRight(k, band)
+            expect((await y8Sheet.grid(st.sheetId)).slice(-5), 'the grid: … the Y8 two, the person column, then the band').toEqual([...physical, personId, ...band])
           }, 300000)
         })
 
