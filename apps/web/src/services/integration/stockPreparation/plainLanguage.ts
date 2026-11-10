@@ -1020,6 +1020,65 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Retry shortly.',
   }),
   /**
+   * 备料分批拉取第一期 step 6d-1b (S6-5; register R-91) — the doubled-sheet census (双份表普查) and the remnant
+   * acknowledgement (残留确认). Minimal copy so every new backend code has its own two lines (RS-COPY); S6-5 ships no page
+   * (the runbook drives these admin routes). A refused acknowledgement records nothing.
+   */
+  STOCK_PREP_SHEET_CENSUS_REQUEST_INVALID: Object.freeze({
+    zh: '普查或残留确认的请求内容不正确;什么都没有记录。',
+    en: 'The census or acknowledgement request is not valid; nothing was recorded.',
+    zhNext: '请按手册检查项目号、组件标识和工单号后重试。',
+    enNext: 'Check the project number, the component handle and the ticket handle per the runbook, then retry.',
+  }),
+  STOCK_PREP_SHEET_CENSUS_PACK_UNREADABLE: Object.freeze({
+    zh: '这张表的客户扩展列暂时读不出来,普查没有给出结果。',
+    en: 'The customer pack columns of this sheet could not be read, so the census gave no result.',
+    zhNext: '请稍后重试;仍失败请平台管理员检查扩展列安装记录。',
+    enNext: 'Retry shortly; if it keeps failing, ask the platform admin to check the pack install ledger.',
+  }),
+  STOCK_PREP_REMNANT_NOT_PRESENT: Object.freeze({
+    zh: '重新读取后,这个组件已经不是旧根行残留,这次没有记录确认。',
+    en: 'On a fresh read this component is no longer an inactive-root remnant, so no acknowledgement was recorded.',
+    zhNext: '请重新打开该项目的普查结果再确认。',
+    enNext: 'Reopen the project census before acknowledging.',
+  }),
+  STOCK_PREP_REMNANT_ALREADY_ACKNOWLEDGED: Object.freeze({
+    zh: '这个组件已经有一条有效的残留确认,这次没有重复记录。',
+    en: 'This component already carries an active acknowledgement; nothing was recorded again.',
+    zhNext: '如需更正,请先撤销原确认。',
+    enNext: 'To correct it, revoke the existing acknowledgement first.',
+  }),
+  STOCK_PREP_REMNANT_ACKNOWLEDGEMENT_NOT_FOUND: Object.freeze({
+    zh: '这个项目下没有这条残留确认。',
+    en: 'This project has no such acknowledgement.',
+    zhNext: '请重新打开该项目的普查结果查看确认记录。',
+    enNext: 'Reopen the project census to see its acknowledgements.',
+  }),
+  STOCK_PREP_REMNANT_ACKNOWLEDGEMENT_ALREADY_REVOKED: Object.freeze({
+    zh: '这条残留确认已经撤销,什么都没有改动。',
+    en: 'This acknowledgement is already revoked; nothing was changed.',
+    zhNext: '请重新打开该项目的普查结果。',
+    enNext: 'Reopen the project census.',
+  }),
+  STOCK_PREP_COMPONENT_RULING_STORE_UNAVAILABLE: Object.freeze({
+    zh: '当前部署没有接上残留确认记录表,无法记录或撤销确认。',
+    en: 'This deployment has no acknowledgement ledger wired, so nothing can be acknowledged or revoked.',
+    zhNext: '请平台管理员按手册检查部署(迁移 107)。',
+    enNext: 'Ask the platform admin to check the deployment per the runbook (migration 107).',
+  }),
+  STOCK_PREP_COMPONENT_RULING_STORE_FAILED: Object.freeze({
+    zh: '残留确认记录暂时读写失败,这次什么都没有改动。',
+    en: 'The acknowledgement ledger could not be read or written; nothing was changed.',
+    zhNext: '请稍后重试;仍失败请平台管理员检查迁移 107。',
+    enNext: 'Retry shortly; if it keeps failing, ask the platform admin to check migration 107.',
+  }),
+  STOCK_PREP_COMPONENT_RULING_INPUT_INVALID: Object.freeze({
+    zh: '残留确认记录收到的内容不完整,这次什么都没有改动。',
+    en: 'The acknowledgement ledger received an incomplete request; nothing was changed.',
+    zhNext: '请平台管理员处理。',
+    enNext: 'Ask the platform admin to handle it.',
+  }),
+  /**
    * 备料分批拉取第一期 step 5 PR-8 (register R-63) — the change plan (变更计划确认 / 受控更新) and the review (变更复核).
    * Minimal copy; the pages are PR-9's. A confirm / review refusal changes nothing.
    *

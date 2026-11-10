@@ -301,6 +301,27 @@ const ROUTES = [
   // only). The plan is persisted before the first cell write, the backfill is fill-blank only, a crash continues the
   // persisted plan. Every real run is owner gate ② per sheet. Audited under 088's `project_target_create`.
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', 'stockPreparationProjectPullBatchInstall'],
+  // Batch-refresh step 6d-1b (S6-5; step-6 design §6.5 as rebaselined 2026-11-09; register R-91) — THE DOUBLED-SHEET CENSUS
+  // and THE REMNANT ACKNOWLEDGEMENT. All four stock-prep:admin; all four 404 DISABLED after the gate while the
+  // project-sheets switch is off (zero IO); the tenant from the host-vouched operator scope (never a header).
+  //   GET  project-targets/census — per registry row (cursor = the last ordinal, limit <= 10): the census counts, the
+  //                  governed token and the acknowledgement counts; a row that cannot be read answers incomplete with
+  //                  a closed reason and NO counts. objectId is in this PRIVATE admin answer (never posted, RD G4).
+  //                  Audited project_board_read / sheet_census_read, counts only, before the answer.
+  //   GET  projects/:projectNo/target/census — one project: the counts and its D2 components by their PRIVATE handle,
+  //                  each with its active acknowledgement. Audited the same way.
+  //   POST projects/:projectNo/target/remnant-acknowledgements — `{ confirmProjectNo, componentHandle, basis:
+  //                  'head_not_ordered', runbookRef, acknowledge: { customerAnswered: true } }` (closed): re-proves on a
+  //                  fresh project read that the handle IS a D2 remnant now, then ONE transaction: the ruling row
+  //                  (migration 107) and the exception_resolve / remnant_acknowledged audit row. Recorded on site only on
+  //                  the customer's Q1 answer relayed by the owner (O6-5).
+  //   POST …/remnant-acknowledgements/:acknowledgementId/revoke — `{ confirmProjectNo, runbookRef }`: ONE transaction,
+  //                  status revoked + exception_resolve / remnant_acknowledgement_revoked.
+  // The static `project-targets/census` segment cannot collide with `project-targets` or `projects/:projectNo/...`.
+  ['GET', '/api/integration/stock-preparation/project-targets/census', 'stockPreparationSheetCensusList'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/census', 'stockPreparationProjectSheetCensusGet'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements', 'stockPreparationProjectRemnantAcknowledge'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements/:acknowledgementId/revoke', 'stockPreparationProjectRemnantAcknowledgementRevoke'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -853,6 +874,10 @@ const {
 const stockPreparationRefreshDecisions = require('./stock-preparation-refresh-decisions.cjs')
 // Batch-refresh step 6a-2 (S6-2; R-91): the recovery assessment, the bodies, the audited list and the close's audit entry.
 const stockPreparationExecutionRecovery = require('./stock-preparation-execution-recovery.cjs')
+// Batch-refresh step 6d-1b (S6-5; R-91): the census answers, the acknowledgement bodies / audit entries, and the ruling
+// store's typed codes (migration 107).
+const stockPreparationRemnantAcknowledgement = require('./stock-preparation-remnant-acknowledgement.cjs')
+const { COMPONENT_RULING_ERROR_CODES: STOCK_PREP_COMPONENT_RULING_ERROR_CODES } = require('./stock-preparation-component-ruling-store.cjs')
 const { UNFINISHED_EXECUTION_STATUSES: STOCK_PREP_UNFINISHED_EXECUTION_STATUSES, REFRESH_STORE_ERROR_CODES: STOCK_PREP_REFRESH_STORE_ERROR_CODES } = require('./stock-preparation-continuation-store.cjs')
 // Batch-refresh step 4 PR-5: the formal-export gate (G0 -> C1 -> rows + file -> C2 -> G1), the ONE machine digest
 // the settlement and the export share, and the ONE predicate every formal surface (export, handoff terminal hop)
@@ -2420,6 +2445,12 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationRefreshExecutions',
   'stockPreparationRefreshExecutionRecover',
   'stockPreparationRefreshExecutionCloseUnverified',
+  // Batch-refresh step 6d-1b (S6-5, R-91): the census (tenant-wide and one project) and the remnant acknowledgement /
+  // revoke — the ruling store's, the census lib's and the reader's typed refusals answer as themselves.
+  'stockPreparationSheetCensusList',
+  'stockPreparationProjectSheetCensusGet',
+  'stockPreparationProjectRemnantAcknowledge',
+  'stockPreparationProjectRemnantAcknowledgementRevoke',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -3100,6 +3131,12 @@ const VALID_STOCK_PREPARATION_REFRESH_CHANGE_REVIEW_KEYS = new Set(['tenantId', 
 const VALID_STOCK_PREPARATION_REFRESH_EXECUTIONS_QUERY_KEYS = new Set(['tenantId', 'limit', 'cursor'])
 const VALID_STOCK_PREPARATION_REFRESH_RECOVER_KEYS = new Set(['tenantId', 'confirmProjectNo', 'mode', 'verifyDigest', 'pageCursor'])
 const VALID_STOCK_PREPARATION_REFRESH_CLOSE_UNVERIFIED_KEYS = new Set(['tenantId', 'confirmProjectNo', 'mode', 'inspectDigest', 'runbookRef', 'acknowledge'])
+// Step 6d-1b (design §6.5): the census pages by the last ordinal; the acknowledgement names the typed project, the private
+// component handle the project census listed, the one basis, a values-free ticket handle and the customer-answered
+// statement; the revoke names the typed project and its own ticket handle. Nothing else selects anything.
+const VALID_STOCK_PREPARATION_SHEET_CENSUS_QUERY_KEYS = new Set(['tenantId', 'cursor', 'limit'])
+const VALID_STOCK_PREPARATION_REMNANT_ACKNOWLEDGEMENT_KEYS = new Set(['tenantId', 'confirmProjectNo', 'componentHandle', 'basis', 'runbookRef', 'acknowledge'])
+const VALID_STOCK_PREPARATION_REMNANT_REVOKE_KEYS = new Set(['tenantId', 'confirmProjectNo', 'runbookRef'])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -4923,6 +4960,10 @@ function requireStockPreparationAudit() {
   const stockPreparationContinuationStore = services.stockPreparationContinuationStore || null
   // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger store, read only while the pull-batch switch is on.
   const stockPreparationPullBatchStore = services.stockPreparationPullBatchStore || null
+  // Batch-refresh step 6d-1b (migration 107; register R-91): the component ruling ledger (remnant acknowledgements).
+  // Optional at registration: absent => the acknowledgement routes 501 by name, the census reads its counts as null and
+  // readiness v5's remnant check is ok:false (no enable).
+  const stockPreparationComponentRulingStore = services.stockPreparationComponentRulingStore || null
   // Batch-refresh step 4 PR-6: the governed-sheet probe the C6 multitable write-source is built with (index.cjs
   // builds it from the same stores). Absent => the write-source applies its not-wired rule (namespace objects 501).
   const stockPreparationGovernedSheetProbe = services.stockPreparationGovernedSheetProbe || null
@@ -5451,6 +5492,8 @@ function requireStockPreparationAudit() {
       pullBatchEnabled: pullBatchLanes.stockPrepPullBatchEnabled(),
       pullBatchStore: stockPreparationPullBatchStore,
       readPullBatchStatus: () => pullBatchStatus.readPullBatchReadinessStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target })),
+      // Batch-refresh step 6d-1b (readiness v5): the component ruling ledger the remnant check reads (migration 107).
+      componentRulingStore: stockPreparationComponentRulingStore,
       lock: stockPreparationProjectWriteLock,
       writeScope,
       countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
@@ -5466,6 +5509,115 @@ function requireStockPreparationAudit() {
       }),
     })
     return { action, projectId, writeScope, readiness }
+  }
+  // ── Batch-refresh step 6d-1b (S6-5; design §6.5; register R-91): the census and the remnant acknowledgement ──────────
+  function requireStockPreparationComponentRulingStore() {
+    const store = stockPreparationComponentRulingStore
+    if (!store || ['listActiveRulings', 'listRulings', 'recordRemnantAcknowledgement', 'revokeRemnantAcknowledgement'].some((method) => typeof store[method] !== 'function')) {
+      throw new HttpRouteError(501, STOCK_PREP_COMPONENT_RULING_ERROR_CODES.STORE_UNAVAILABLE, 'the component ruling ledger is not wired on this deployment; nothing is acknowledged without it', { reason: 'component_ruling_store' })
+    }
+    return store
+  }
+  // THE ONE project-scoped read of the census (both forms) and the acknowledgement's re-proof: the sheet is proven the
+  // caller's own first (the table-action wall, unconditionally — the readSheetRows posture), then the planner's own reader
+  // with the server-held band (RS-1). `progress.stage` names what failed for the tenant-wide census row.
+  async function readStockPreparationCensusRows(tenantId, action, projectNo, progress = {}) {
+    progress.stage = 'tenant_wall'
+    await assertTableActionTargetBelongsToTenant({
+      provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+      targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      target: action.target,
+    })
+    progress.stage = 'rows_unreadable'
+    return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo, { pullBatchBand: pullBatchBandFor(tenantId, action.target) })
+  }
+  // The human columns the census counts over (design §6.4): the template band plus every installed pack column the
+  // planner would treat as human or could not classify, read STRICTLY — a ledger or host failure throws (the row is then
+  // incomplete, never a silent template-only count). No ledger wired => no pack can be installed => the template band.
+  async function readStockPreparationCensusHumanFieldIds(tenantId, action) {
+    const ledger = stockPreparationPackInstalls
+    if (!ledger || typeof ledger.listInstalledFieldIds !== 'function') return stockPreparationRemnantAcknowledgement.censusHumanFieldIdsOf([])
+    const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+    const listed = await ledger.listInstalledFieldIds({ tenantId, projectId, objectId: action.target.objectId })
+    const fieldIds = isPlainObject(listed) && Array.isArray(listed.fieldIds) ? listed.fieldIds.filter((id) => typeof id === 'string' && id.trim() !== '') : null
+    if (!fieldIds) throw new Error('pack install ledger answered no list')
+    if (fieldIds.length === 0) return stockPreparationRemnantAcknowledgement.censusHumanFieldIdsOf([])
+    const provisioning = getPackReadbackProvisioning()
+    if (!provisioning) throw new Error('host field read unavailable')
+    const content = await provisioning.readObjectFieldsContent({ projectId, objectId: action.target.objectId, fieldIds })
+    if (!isPlainObject(content)) throw new Error('host field read answered no map')
+    const installed = []
+    for (const fieldId of fieldIds) {
+      const live = content[fieldId]
+      if (!isPlainObject(live)) continue
+      installed.push({ fieldId, physicalId: typeof live.id === 'string' ? live.id : null, property: isPlainObject(live.property) ? live.property : {} })
+    }
+    return stockPreparationRemnantAcknowledgement.censusHumanFieldIdsOf(installed)
+  }
+  // The governed token (the refresh-state derivation's; unreadable / unwired / a refusal => 'unreadable') and every ruling
+  // of the project (null when the ledger is unwired or cannot be read — the census still answers its counts).
+  async function readStockPreparationCensusGoverned(tenantId, projectNo, sheetId) {
+    const reader = refreshStateReaderOrNull(tenantId)
+    if (!reader) return 'unreadable'
+    try {
+      // The governance answers { consult, error, state }; the token is the derived state's.
+      const read = await reader({ projectNo, sheetId })
+      return stockPreparationRemnantAcknowledgement.governedTokenOf(isPlainObject(read) ? read.state : null)
+    } catch (error) {
+      return 'unreadable'
+    }
+  }
+  async function readStockPreparationCensusRulings(scope) {
+    const store = stockPreparationComponentRulingStore
+    if (!store || typeof store.listRulings !== 'function') return null
+    try {
+      return await store.listRulings(scope)
+    } catch (error) {
+      return null
+    }
+  }
+  // ONE row of the tenant-wide census; never throws for a row (fail closed: incomplete with a closed reason, no counts).
+  async function stockPreparationCensusRowOf(tenantId, registryRow, ordinal) {
+    const governed = await readStockPreparationCensusGoverned(tenantId, registryRow.projectNo, registryRow.sheetId)
+    const rulings = await readStockPreparationCensusRulings({ tenantId, sheetId: registryRow.sheetId, projectNo: registryRow.projectNo })
+    const progress = { stage: 'target_unresolved' }
+    let census = null
+    try {
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo: registryRow.projectNo,
+        targetPurpose: 'read',
+      }))
+      if (!action.target || action.target.sheetId !== registryRow.sheetId) {
+        progress.stage = 'sheet_mismatch'
+        throw new Error('the resolved sheet is not the registry row\'s')
+      }
+      const rows = await readStockPreparationCensusRows(tenantId, action, registryRow.projectNo, progress)
+      progress.stage = 'pack_unreadable'
+      const humanFieldIds = await readStockPreparationCensusHumanFieldIds(tenantId, action)
+      progress.stage = 'rows_unreadable'
+      census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo: registryRow.projectNo, humanFieldIds })
+    } catch (error) {
+      const reason = error && error.code === 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE' ? 'rows_too_large' : progress.stage
+      return stockPreparationRemnantAcknowledgement.censusRowAnswer({ ordinal, registryRow, incompleteReason: reason, governed, rulings })
+    }
+    return stockPreparationRemnantAcknowledgement.censusRowAnswer({ ordinal, registryRow, census, governed, rulings })
+  }
+  /** The acknowledgement routes' audit store: the in-transaction append is required (501 by name without it). */
+  function requireStockPreparationAuditWithin() {
+    const audit = requireStockPreparationAudit()
+    if (typeof audit.appendWithin !== 'function') {
+      throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'the audit store cannot append inside a transaction; nothing is acknowledged without it', { reason: 'append_within' })
+    }
+    return audit
+  }
+  /** The ruling store's audit hook: the entry on the store's own transaction handle, with the scope proof's flag. */
+  function remnantAcknowledgementAuditWithin(audit, scope) {
+    return (trx, event) => {
+      const entry = stockPreparationRemnantAcknowledgement.acknowledgementAuditEntryOf(event)
+      return audit.appendWithin(trx, { tenantId: scope.tenantId, actor: scope.actorId, ...entry, detail: { ...entry.detail, tenantClaimVerified: scope.tenantClaimVerified === true } })
+    }
   }
   /** The pilot read of the enable / read routes: a store failure is the gate's 503, never a 500 or "not pilot". */
   async function readStockPreparationProjectPilotRow(store, { tenantId, projectNo }) {
@@ -11920,6 +12072,188 @@ function requireStockPreparationAudit() {
       await assertResolvedProjectTargetTenancy(action, tenantId)
       const status = await pullBatchStatus.readPullBatchStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target, enabled }))
       return sendOk(res, { projectNo, status: 'active', ...status })
+    },
+
+    // ── Batch-refresh step 6d-1b (S6-5; step-6 design §6.5 as rebaselined; register R-91) — THE CENSUS AND THE REMNANT
+    // ACKNOWLEDGEMENT. Guard chain for all four: stock-prep:admin -> the project-sheets switch (404, zero IO) -> the closed
+    // keys and every pure check -> the host-vouched scope (ADMIN tier; a tenantless platform admin is refused) -> the audit
+    // vocabulary probe -> reads / the one transaction.
+    //
+    // The tenant-wide census: the registry in creation order, one page (ordinals stable across pages), each row through
+    // the walled project read; the audit row (counts only) before the answer.
+    async stockPreparationSheetCensusList(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const audits = stockPreparationRemnantAcknowledgement.SHEET_CENSUS_AUDIT
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_SHEET_CENSUS_QUERY_KEYS, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.REQUEST_INVALID)
+      const page = stockPreparationRemnantAcknowledgement.normalizeCensusQuery(input)
+      const audit = requireStockPreparationAudit()
+      const registry = requireStockPreparationProjectTargets()
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_ADMIN,
+      })
+      await requireStockPreparationAuditVocabulary(audit, audits.readAction, audits.readMigration, scope.tenantId)
+      const registryRows = await registry.list({ tenantId: scope.tenantId })
+      const rows = Array.isArray(registryRows) ? registryRows.filter((row) => row && row.tenantId === scope.tenantId) : []
+      const items = []
+      for (const [index, registryRow] of rows.slice(page.cursor, page.cursor + page.limit).entries()) {
+        items.push(await stockPreparationCensusRowOf(scope.tenantId, registryRow, page.cursor + index + 1))
+      }
+      const answer = stockPreparationRemnantAcknowledgement.censusPageAnswer({ items, total: rows.length, cursor: page.cursor, limit: page.limit })
+      await audit.append({
+        tenantId: scope.tenantId,
+        action: audits.readAction,
+        actor: scope.actorId,
+        mode: audits.modes.censusRead,
+        detail: { ...stockPreparationRemnantAcknowledgement.censusListAuditDetail(answer), tenantClaimVerified: scope.tenantClaimVerified === true },
+      })
+      return sendOk(res, answer)
+    },
+
+    // One project: the READ target (an archived project answers too), the tenant wall, the walled project read, the
+    // strict pack read, the census with its private handles, the governed token and the rulings; audited before the answer.
+    async stockPreparationProjectSheetCensusGet(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const audits = stockPreparationRemnantAcknowledgement.SHEET_CENSUS_AUDIT
+      const input = normalizeStockPreparationConfirmBody(requestQuery(req), VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID')
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      const audit = requireStockPreparationAudit()
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_ADMIN,
+      })
+      const tenantId = scope.tenantId
+      await requireStockPreparationAuditVocabulary(audit, audits.readAction, audits.readMigration, tenantId)
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose: 'read',
+      }))
+      await assertResolvedProjectTargetTenancy(action, tenantId)
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo)
+      let humanFieldIds
+      try {
+        humanFieldIds = await readStockPreparationCensusHumanFieldIds(tenantId, action)
+      } catch (error) {
+        throw new HttpRouteError(503, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.PACK_UNREADABLE, 'the pack columns of this sheet could not be read; the census is not answered from the template alone', { reason: 'pack_unreadable', partial: false })
+      }
+      const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo, humanFieldIds })
+      const sheetId = action.target.sheetId
+      const answer = stockPreparationRemnantAcknowledgement.projectCensusAnswer({
+        projectNo,
+        registryStatus: action.projectTarget && typeof action.projectTarget.status === 'string' ? action.projectTarget.status : 'active',
+        census,
+        governed: await readStockPreparationCensusGoverned(tenantId, projectNo, sheetId),
+        rulings: await readStockPreparationCensusRulings({ tenantId, sheetId, projectNo }),
+      })
+      await audit.append({
+        tenantId,
+        action: audits.readAction,
+        actor: scope.actorId,
+        mode: audits.modes.censusRead,
+        detail: { ...stockPreparationRemnantAcknowledgement.projectCensusAuditDetail(answer), tenantClaimVerified: scope.tenantClaimVerified === true },
+      })
+      return sendOk(res, answer)
+    },
+
+    // RECORD one acknowledgement: every pure check (the closed keys, the typed number, the body) first; the ledger and the
+    // in-transaction audit (501 by name); the scope; the 066 probe; the WRITE target (an archived project is 409); the
+    // tenant wall; the RE-PROOF on a fresh project read (409 NOT_PRESENT); then the store's ONE transaction (row + audit).
+    async stockPreparationProjectRemnantAcknowledge(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const audits = stockPreparationRemnantAcknowledgement.SHEET_CENSUS_AUDIT
+      const invalid = stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.REQUEST_INVALID
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REMNANT_ACKNOWLEDGEMENT_KEYS, invalid)
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      if (firstString(input.confirmProjectNo) !== projectNo) {
+        throw new HttpRouteError(400, invalid, 'confirmProjectNo must repeat the project number of the path', { field: 'confirmProjectNo' })
+      }
+      const body = stockPreparationRemnantAcknowledgement.normalizeAcknowledgementBody(input)
+      const store = requireStockPreparationComponentRulingStore()
+      const audit = requireStockPreparationAuditWithin()
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_ADMIN,
+      })
+      const tenantId = scope.tenantId
+      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose: 'write',
+      }))
+      await assertResolvedProjectTargetTenancy(action, tenantId)
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo)
+      const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
+      stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
+      const row = await store.recordRemnantAcknowledgement({
+        tenantId,
+        sheetId: action.target.sheetId,
+        projectNo,
+        componentDigest: body.componentHandle,
+        basis: body.basis,
+        runbookRef: body.runbookRef,
+        recordedBy: scope.actorId,
+        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      })
+      return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: true }), 201)
+    },
+
+    // REVOKE one acknowledgement: the pure checks, the ledger and the in-transaction audit, the scope, the 066 probe, the
+    // WRITE target and the tenant wall, then the store's ONE transaction (row FOR UPDATE, compare-and-set, audit).
+    async stockPreparationProjectRemnantAcknowledgementRevoke(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireProjectSheetsEnabled()
+      const audits = stockPreparationRemnantAcknowledgement.SHEET_CENSUS_AUDIT
+      const invalid = stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.REQUEST_INVALID
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_REMNANT_REVOKE_KEYS, invalid)
+      const projectNo = stockPreparationProjectFieldsProjectNo(req)
+      if (firstString(input.confirmProjectNo) !== projectNo) {
+        throw new HttpRouteError(400, invalid, 'confirmProjectNo must repeat the project number of the path', { field: 'confirmProjectNo' })
+      }
+      const body = stockPreparationRemnantAcknowledgement.normalizeRevokeBody(input, firstString(requestParams(req).acknowledgementId))
+      const store = requireStockPreparationComponentRulingStore()
+      const audit = requireStockPreparationAuditWithin()
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+        requiredTier: STOCK_PREP_ADMIN,
+      })
+      const tenantId = scope.tenantId
+      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+        tenantId,
+        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        projectNo,
+        targetPurpose: 'write',
+      }))
+      await assertResolvedProjectTargetTenancy(action, tenantId)
+      const row = await store.revokeRemnantAcknowledgement({
+        tenantId,
+        sheetId: action.target.sheetId,
+        projectNo,
+        rulingId: body.acknowledgementId,
+        runbookRef: body.runbookRef,
+        revokedBy: scope.actorId,
+        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      })
+      return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: false }))
     },
 
     // ── 批次标识 BI-7 — THE PULL-BATCH SETTINGS (design §5.5 / §7.1 / §11; rulings C2 / C6 / C8 / C10 / C12; register

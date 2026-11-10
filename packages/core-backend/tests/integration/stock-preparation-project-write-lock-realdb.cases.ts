@@ -1586,6 +1586,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const templatesModule = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
     const pullBatchStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
+    // Readiness v5 (batch-refresh step 6d-1b): the component ruling ledger store D20's readiness reads.
+    const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
 
     function routeResponse() {
       const res: any = { statusCode: 200, body: null, headers: {} }
@@ -1742,6 +1744,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           stockPreparationPullBatchStore: pullBatchStore,
           // Readiness v4 (batch-refresh step 6a-2, R-91): the real refresh store (execution_recovery_ready reads its methods).
           stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
+          // Readiness v5 (batch-refresh step 6d-1b, R-91): the real component ruling ledger (migration 107; nothing acknowledged).
+          stockPreparationComponentRulingStore: componentRulingStoreLib.createStockPreparationComponentRulingStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
