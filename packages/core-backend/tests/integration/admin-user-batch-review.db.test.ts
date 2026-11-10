@@ -2368,6 +2368,58 @@ describe('locked actor authority on attendance role writes and user status', () 
     },
   )
 
+  it.each(['single', 'batch'] as const)(
+    'refuses an attendance %s unassign when the actor loses authority while waiting for the user lock',
+    async (mode) => {
+      const ids: string[] = []
+      const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+      const pending: Array<Promise<Response>> = []
+      const roleId = 'attendance_employee'
+      const catalog = await snapshotOwnedCatalog([roleId], [])
+      try {
+        const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        await query(
+          'INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)',
+          [targetId, roleId],
+        )
+        await blocker.connect()
+        await blocker.query('BEGIN')
+        await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+        const blockerPid = await sessionPid(blocker)
+        pending.push(attendanceWrite(mode, 'unassign', actorId, targetId, roleId))
+        await waitForBlockedBy(blockerPid, 1)
+        await blocker.query(`UPDATE users SET role = 'user', is_admin = FALSE WHERE id = $1`, [actorId])
+        await blocker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [actorId])
+        await blocker.query('COMMIT')
+        const [response] = await Promise.all(pending)
+        pending.length = 0
+        expect(response.status).toBe(403)
+        expect(response.body.error.code).toBe('FORBIDDEN')
+        expect(await holdsRole(targetId, roleId)).toBe(true)
+        expect((await query(
+          'SELECT enabled, source FROM user_namespace_admissions WHERE user_id = $1',
+          [targetId],
+        )).rows).toEqual([])
+        const actor = await adminProfile(actorId)
+        expect(actor.profile.role).toBe('user')
+        expect(actor.roles.map((row) => row.role_id)).not.toContain('admin')
+      } finally {
+        await releaseBlocker(blocker, pending)
+        await query(
+          'DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+          [ids],
+        )
+        await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = $2', [ids, roleId])
+        await restoreOwnedCatalog(catalog, [roleId], [])
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
+
   it('refuses PATCH status when the actor is demoted under the user lock', async () => {
     const ids: string[] = []
     const blocker = new Client({ connectionString: process.env.DATABASE_URL })
