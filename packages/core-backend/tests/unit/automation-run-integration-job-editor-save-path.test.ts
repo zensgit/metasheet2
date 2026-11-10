@@ -26,7 +26,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AutomationExecutor, type AutomationStepResult, type ClassAActionIdentity, type ExecutionContext } from '../../src/multitable/automation-executor'
+import { AutomationExecutor } from '../../src/multitable/automation-executor'
 import type { IntegrationRunInput, IntegrationRunPort } from '../../src/core/integration-run-port'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { collectRunIntegrationJobOccurrences, parsePersistedRunIntegrationJobConfig } from '../../src/multitable/automation-run-integration-job'
@@ -243,6 +243,11 @@ describe('run_integration_job occurrences are decided by POSITION, never by obje
     ['the pair as a condition_branch, defaultBranch', 'condition_branch', conditionBranch('defaultBranch', [rij()]).config, null],
     ['two levels down (a branch inside a branch)', 'update_record', {}, [conditionBranch('branches', [conditionBranch('defaultBranch', [rij()])])]],
     ['a valid top-level occurrence beside a nested one', 'run_integration_job', rij().config, [rij(), conditionBranch('branches', [rij()])]],
+    // The walk does not ask what TYPE carries the branch list (a superset of the two containers the executor
+    // dispatches from): a list smuggled under any other action is refused all the same, at every level.
+    ['an actions[i] that is NOT a branch container but carries a branch list', 'update_record', {}, [{ type: 'update_record', config: { fields: {}, branches: [{ key: 'b1', actions: [rij()] }] } }]],
+    ['a pair that is NOT a branch container but carries a branch list', 'update_record', { fields: {}, defaultBranch: { key: 'otherwise', actions: [rij()] } }, null],
+    ['a NESTED action that is not a branch container but carries a branch list', 'update_record', {}, [conditionBranch('branches', [{ type: 'update_record', config: { defaultBranch: { actions: [rij()] } } }])]],
   ])('the walk finds a nested occurrence WITHOUT any flattened list: %s', (_label, actionType, actionConfig, actions) => {
     // `allActions` is the top-level list itself (what the trigger-only edit passes): only the walk can see the nesting.
     const result = collectRunIntegrationJobOccurrences(actionType, actionConfig as never, actions as never, actions as never)
@@ -305,10 +310,11 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
     h.service.unregisterSchedule(saved.id)
   })
 
-  it('the saved editor shape RUNS: the executor takes actions[0] of the stored rule to the port exactly once, for the one project', async () => {
-    const h = makeService()
-    const saved = await h.post('sheet_1', editorBody([rij()]))
-    h.service.unregisterSchedule(saved.id)
+  /**
+   * The WHOLE stored rule through the real executor (`execute`, the scheduler's entry: legacy mode, a record-less
+   * `_triggeredBy: 'schedule'` event) on the in-memory ledger model, with a port that answers at once.
+   */
+  async function runStoredRule(saved: AutomationRule) {
     vi.useFakeTimers()
     const ledger = createFakeJobDb()
     const calls: IntegrationRunInput[] = []
@@ -322,14 +328,39 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
       resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { id: CREATOR, permissions: ['workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }),
       integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300 },
     })
-    const rule = toExecutorRule(saved)
-    const context: ExecutionContext = { executionId: 'exec_editor', ruleId: rule.id, sheetId: rule.sheetId, recordId: '', recordData: {}, ruleCreatedBy: rule.createdBy, triggerEvent: {}, rootExecutionId: 'exec_editor' }
-    const step = await (executor as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i: ClassAActionIdentity): Promise<AutomationStepResult> })
-      .executeSingleAction(rule.actions[0], context, { structuralPath: '0', rootExecutionId: 'exec_editor' })
-    expect(step).toMatchObject({ status: 'success', output: { outcome: 'succeeded', reason: 'ready' } })
+    const execution = await executor.execute(toExecutorRule(saved), { _triggeredBy: 'schedule' })
+    return { execution, calls, ledger }
+  }
+
+  it('the saved editor shape RUNS: the executor takes the stored rule — its actions[0] — to the port exactly once, for the one project', async () => {
+    const h = makeService()
+    const saved = await h.post('sheet_1', editorBody([rij()]))
+    h.service.unregisterSchedule(saved.id)
+    const { execution, calls, ledger } = await runStoredRule(saved)
+    expect(execution.status).toBe('success')
+    expect(execution.steps.map((step) => [step.actionType, step.status])).toEqual([['run_integration_job', 'success']])
+    expect(execution.steps[0].output).toMatchObject({ outcome: 'succeeded', reason: 'ready' })
     expect(calls).toHaveLength(1)
     expect(calls[0].job).toEqual({ kind: 'stock_prep_pull', projectNo: 'P-1' })
     expect(calls[0].context.authenticatedTenantId).toBe('tenant_1')
+    expect(ledger.intentRows().map(([, row]) => row.status)).toEqual(['sent'])
+  })
+
+  it('as a LATER action it runs too: step 0 is the other action, step 1 is the job — once, under its own step position', async () => {
+    const h = makeService()
+    // record_click is the executor's inert action: a record-less schedule can run it, so step 1 is reached.
+    const saved = await h.post('sheet_1', editorBody([{ type: 'record_click', config: {} }, rij()]))
+    h.service.unregisterSchedule(saved.id)
+    expect(actionsColumn(h.writes[0].values)).toEqual([{ type: 'record_click', config: {} }, { type: 'run_integration_job', config: stamped() }])
+    const { execution, calls, ledger } = await runStoredRule(saved)
+    expect(execution.status).toBe('success')
+    expect(execution.steps.map((step) => [step.actionType, step.status])).toEqual([['record_click', 'success'], ['run_integration_job', 'success']])
+    expect(calls).toHaveLength(1)
+    expect(calls[0].job).toEqual({ kind: 'stock_prep_pull', projectNo: 'P-1' })
+    // one intent row, keyed by the step's structural path: position 1, not 0
+    const intents = ledger.intentRows()
+    expect(intents.map(([, row]) => row.status)).toEqual(['sent'])
+    expect(intents[0][0]).toContain(JSON.stringify(['1', 'run_integration_job']).slice(0, -1))
   })
 
   it.each([
@@ -339,6 +370,9 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
     ['the pair alone is a condition_branch whose DEFAULT branch carries the job (no actions[])', () => editorBody([conditionBranch('defaultBranch', [rij()])], { actions: null })],
     ['a VALID top-level job at actions[0] and a nested one inside actions[1]', () => editorBody([rij(), conditionBranch('branches', [rij()])])],
     ['a nested job that brings its OWN binding (another tenant)', () => editorBody([updateRecord(), conditionBranch('defaultBranch', [rij('P-1', { binding: CLIENT_BINDING })])])],
+    // Not a branch container, so the service's flattening does not see it: only the position walk refuses this one.
+    ['a branch list smuggled under an action that is NOT a branch container (actions[0])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, defaultBranch: { key: 'otherwise', actions: [rij('P-1', { binding: CLIENT_BINDING })] } } }])],
+    ['a branch list smuggled under a pair that is NOT a branch container (no actions[])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, branches: [{ key: 'b1', actions: [rij('P-1', { binding: CLIENT_BINDING })] }] } }], { actions: null })],
   ])('a genuinely NESTED occurrence is refused — %s — with the fixed message, before any tenant or registry read, and nothing is written', async (_label, build) => {
     const h = makeService()
     const refusal = await refusalOf(h.post('sheet_1', build()))
@@ -564,6 +598,7 @@ describe('integration.run_finished: no edit can plant the trigger binding — ev
     const updated = await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire(body), 'editor_2')
     expect(updated).not.toBeNull()
     expect(h.writes).toHaveLength(1)
+    expect(typeof h.writes[0].values.trigger_config, 'every update shape writes the re-stamped trigger_config').toBe('string')
     const written = JSON.parse(String(h.writes[0].values.trigger_config)) as { binding: unknown; job: unknown }
     expect(written.binding).toEqual(SERVER_BINDING)
     expect(written.job).toEqual({ kind: 'stock_prep_pull' })
