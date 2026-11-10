@@ -26,6 +26,7 @@ import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-pre
 import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
 import { defineStockPreparationExecutionIntentRealDbCases } from './stock-preparation-execution-intent-realdb.cases'
+import { defineStockPreparationExecutionRecoveryRealDbCases } from './stock-preparation-execution-recovery-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -525,3 +526,5 @@ defineMultitablePluginViewLandingRealDbCases()
 defineStockPreparationPullBatchBandRealDbCases()
 // Batch-refresh step 6a-1 (S6-1, R-91): migration 106, the intent journal's begin atomicity, the self-verifying finish and the settlement-subject window on real PG (S9R-106/01/02/03/30).
 defineStockPreparationExecutionIntentRealDbCases()
+// Batch-refresh step 6a-2 (S6-2, R-91): the recovery close under the lease on real PG — plan cells, 批次标识's close hook, lease lost, 55P03 by step, and the U07 stop conditions incl. a transparent close over an unsettled subject (S9R-CL1/15/BI-01/26/U07, RC-07r).
+defineStockPreparationExecutionRecoveryRealDbCases()
