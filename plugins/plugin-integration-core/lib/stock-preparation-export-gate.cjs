@@ -241,6 +241,52 @@ async function runFormalExportGate(deps = {}) {
 }
 
 /**
+ * Pre-pilot fix batch 8(d) (register R-91; PR-5 body residual "the handoff terminal hop's single consult gap") —
+ * THE HANDOFF'S TERMINAL HOP, bracketed the way the export is. The terminal hop is a formal handover (D-17: the same
+ * predicate as the export) but it delivers no file, so it has no R / C2 step: the order is
+ *
+ *   G0  a FRESH lock generation read;
+ *   C1  a FRESH derived state — the formal-surface verdict decides as before (unreadable / unfinished / unsettled
+ *       refuse; a NOT-governed project passes here, exactly as today: no lease check, no G1 — its behaviour does not
+ *       change);
+ *       (governed only) any lease at G0, live or abandoned => refused `lease_in_flight`;
+ *   G1  (governed only) a FRESH lock generation read: same presence, same `generationToken`, same `fencingEpoch`,
+ *       no lease — else refused `state_changed`. The epoch is what catches a WHOLE zero-write failed run that lands
+ *       in C1's snapshot-to-lock-read gap (C1 derives complete; nothing but the epoch moved).
+ *
+ * What it is NOT: an exclusion. A run that acquires the lease AFTER G1, before the route's cursor move commits, is
+ * outside the bracket — the same residual the export states for a writer arriving after its G1 (the hop then
+ * serialises as "the handover happened first"). Pure orchestration: `deps.readGeneration()` and
+ * `deps.readRefreshState()` are injected by the route; answers `{ allowed, reason, state, governed, ...moved }` and
+ * never throws a refusal itself (the route owns its own error code); a malformed lock answer is GATE_INVALID (500).
+ */
+async function runHandoffTerminalGate(deps = {}) {
+  for (const name of ['readGeneration', 'readRefreshState']) {
+    if (!isPlainObject(deps) || typeof deps[name] !== 'function') throw gateInvalid(`missing_${name}`)
+  }
+  const g0 = generationStamp(await deps.readGeneration(), 'g0')
+  const read = await deps.readRefreshState()
+  const state = isPlainObject(read) && isPlainObject(read.state) ? read.state : null
+  const verdict = formalSurfaceVerdict(state)
+  if (!verdict.allowed) return Object.freeze({ allowed: false, reason: verdict.reason, state, governed: Boolean(state && state.status !== 'not_governed') })
+  if (state.status === 'not_governed') return Object.freeze({ allowed: true, reason: null, state, governed: false })
+  if (g0.leaseId !== null) return Object.freeze({ allowed: false, reason: 'lease_in_flight', state, governed: true })
+  const g1 = generationStamp(await deps.readGeneration(), 'g1')
+  if (g1.leaseId !== null || !sameGeneration(g0, g1)) {
+    return Object.freeze({
+      allowed: false,
+      reason: 'state_changed',
+      state,
+      governed: true,
+      leaseAtG1: g1.leaseId !== null,
+      generationMoved: g1.generationToken !== g0.generationToken || g1.present !== g0.present,
+      epochMoved: g1.fencingEpoch !== g0.fencingEpoch,
+    })
+  }
+  return Object.freeze({ allowed: true, reason: null, state, governed: true })
+}
+
+/**
  * The 沿用说明 input of the export lib, projected from a consult (in process; the consult itself is private,
  * O-18): the live (non-ended) relationship headers and their claim_active members. `undefined` when the
  * project has no live relationship — the lib then emits no column (byte-identical headers).
@@ -290,6 +336,7 @@ module.exports = {
   auditableRefusalDetail,
   continuationExportInputOf,
   runFormalExportGate,
+  runHandoffTerminalGate,
   __internals: {
     generationStamp,
     sameGeneration,
