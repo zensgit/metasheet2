@@ -685,6 +685,20 @@ test('P-13 (F-4c) the audit row commits WITH the mark: a crash between them leav
       assert.equal(res.statusCode, 500, JSON.stringify(res.body))
       assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
       assert.equal(h.auditAppends.length, 0)
+      // Pre-pilot fix batch 8(g) / F-10 (R-91): THE REGISTRY STATE behind that 500, pinned (the runbook B.3 note F-7
+      // describes): such a store's mark DID land — the project IS pilot (stamped at / by / version) with ZERO audit rows,
+      // the stamp is in place and the lease is released; a re-POST answers alreadyEnabled and never writes the missing
+      // row (it is a wiring-only defect: a mismatched store build, never a database state the real store produces).
+      const row = h.registryRows()[0]
+      assert.ok(row.pilot_enabled_at instanceof Date, 'the mark landed without its row: the project IS pilot')
+      assert.equal(row.pilot_enabled_by, WORKBENCH_ADMIN.id)
+      assert.equal(row.pilot_readiness_version, PILOT_READINESS_VERSION)
+      assert.ok(h.provisioning.gridExportClosures.has(h.sheetId), 'the stamp is in place')
+      assert.equal((await h.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h.sheetId))).leaseHeld, false, 'the lease was released')
+      const again = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+      assert.equal(again.body.data.alreadyEnabled, true)
+      assert.equal(h.auditAppends.length, 0, 'a re-POST never repairs the missing row')
     } finally { h.restore() }
   }
 })
@@ -761,6 +775,36 @@ test('P-14 (F-3) no_open_large_job: a real approved (queued) checkpoint job on t
     assert.deepEqual(h3.auditAppends, [])
     assert.equal((await h3.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h3.sheetId))).leaseHeld, false, 'the lease was released')
   } finally { h3.restore() }
+  // Pre-pilot fix batch 8(g) / F-10 (R-91): THE UNATTRIBUTED CLAUSE UNDER THE LEASE, hermetically. An OPEN job whose
+  // target sheet cannot be read lands in the same window (a stored value with no target, and a value that is not an
+  // object): it proves nothing about another sheet, so the scan under the lease counts it `unattributed` and refuses —
+  // `open` alone is 0 here, so only the `unattributed` half of the in-lease condition can catch it.
+  for (const [label, value] of [['no target', { jobId: 'job-peh-unattr', ...JOB_SCOPE, status: 'paused' }], ['not an object', 'syn-garbage']]) {
+    const h4 = mountReady()
+    try {
+      const probeOriginal = h4.projectTargetStore.probeTableReadable
+      let landed = false
+      h4.projectTargetStore.probeTableReadable = async (table) => {
+        if (!landed) {
+          landed = true
+          await h4.context.storage.set(checkpointKey('job-peh-unattr'), value)
+        }
+        return probeOriginal.call(h4.projectTargetStore, table)
+      }
+      const scope = swlLockLib.sheetWriteScopeKey(h4.sheetId)
+      const raced = await enablePilot(h4, WORKBENCH_ADMIN)
+      assert.equal(landed, true, `${label}: calibration — the value landed after the readiness scan`)
+      const scan = await largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage: h4.context.storage, sheetId: h4.sheetId })
+      assert.deepEqual({ open: scan.open, unattributed: scan.unattributed }, { open: 0, unattributed: 1 }, `${label}: calibration — only the unattributed count can refuse`)
+      assert.equal(raced.statusCode, 409, `${label}: ${JSON.stringify(raced.body)}`)
+      assert.equal(raced.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+      assert.deepEqual(details(raced).failing, ['no_open_large_job'])
+      assert.equal(h4.provisioning.gridExportClosureCalls.length, 0, `${label}: no stamp`)
+      assert.equal(h4.registryRows()[0].pilot_enabled_at, undefined, `${label}: not marked`)
+      assert.deepEqual(h4.auditAppends, [], `${label}: no audit row`)
+      assert.equal((await h4.projectWriteLock.readState(scope)).leaseHeld, false, `${label}: the lease was released`)
+    } finally { h4.restore() }
+  }
 })
 
 /** Rows on the harness host (physical keys, the project's own number) — what the project-scoped read answers. */
@@ -803,6 +847,43 @@ test('P-15 (F-5 / O-6) no_two_copy_component: a sheet holding one component as a
   } finally { repaired.restore() }
 })
 
+// Pre-pilot fix batch 8(g) / F-10 (R-91): O-6 IS PROJECT-SCOPED through the real routes. The two-copy read is the
+// planner's own project-scoped read: ANOTHER project's active rows on this sheet that form the two-copy shape are that
+// project's business — they fail `single_project_on_sheet` (the foreign-project guard), never `no_two_copy_component`
+// of THIS project. And the scoping cuts both ways: this project's own two-copy shape is still seen while a foreign
+// project's clean rows sit beside it.
+test('P-15b (F-10 / O-6 project scoping) another project\'s active two-copy rows on the sheet fail only single_project_on_sheet, never no_two_copy_component; this project\'s own two-copy shape is still seen beside a foreign project\'s clean rows — values-free, nothing done', async () => {
+  const foreignShape = mountReady()
+  try {
+    await seedSheetRows(foreignShape, [
+      { idempotencyKey: 'syn-k-mine-root', componentSourceId: 'SYN-PEH-M1', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-root-c1', componentSourceId: 'SYN-PEH-F1', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-root-p1', componentSourceId: 'SYN-PEH-F2', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-p1-c1', componentSourceId: 'SYN-PEH-F1', parentSourceId: 'SYN-PEH-F2' },
+    ])
+    const seen = await getPilot(foreignShape, WORKBENCH_ADMIN)
+    assert.equal(seen.statusCode, 200, JSON.stringify(seen.body))
+    assert.deepEqual(seen.body.data.readiness.failing, ['single_project_on_sheet'], 'the foreign shape is not attributed to this project')
+    const refused = await enablePilot(foreignShape, WORKBENCH_ADMIN)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.deepEqual(details(refused).failing, ['single_project_on_sheet'])
+    assert.ok(!JSON.stringify(refused.body).includes('SYN-PEH') && !JSON.stringify(refused.body).includes(OTHER_PROJECT), 'values-free: no component id, no foreign project number')
+    assert.equal(foreignShape.provisioning.gridExportClosureCalls.length, 0)
+    assert.deepEqual(foreignShape.auditAppends, [])
+  } finally { foreignShape.restore() }
+  const ownShape = mountReady()
+  try {
+    await seedSheetRows(ownShape, [
+      { idempotencyKey: 'syn-k-root-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-root-p1', componentSourceId: 'SYN-PEH-P1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-p1-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: 'SYN-PEH-P1' },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-clean', componentSourceId: 'SYN-PEH-F9', parentSourceId: null },
+    ])
+    const seen = await getPilot(ownShape, WORKBENCH_ADMIN)
+    assert.deepEqual(seen.body.data.readiness.failing, ['single_project_on_sheet', 'no_two_copy_component'])
+  } finally { ownShape.restore() }
+})
+
 test('P-16 (F-5 / O-8) pack_columns_installed: an action declaring an ext_ column enables only once that column is listed live by the pack ledger AND present on the project sheet; no declaration at all refuses', async () => {
   const EXT = 'ext_synPehPack'
   const h = mountReady({
@@ -830,6 +911,58 @@ test('P-16 (F-5 / O-8) pack_columns_installed: an action declaring an ext_ colum
   try {
     assert.deepEqual((await getPilot(undeclared, WORKBENCH_ADMIN)).body.data.readiness.failing, ['pack_columns_installed'])
   } finally { undeclared.restore() }
+})
+
+// Pre-pilot fix batch 8(g) / F-12 (R-91; the BI checks of R-65 included): THE READINESS SCAN COST, pinned as IO COUNTS
+// (deterministic) with the harness wall time printed (measured on the in-memory harness, NOT on a real database). The
+// job-store scan lists EVERY plugin storage key and reads every checkpoint-apply value IN FULL, whatever its sheet or
+// status (terminal jobs are never deleted): once per GET, twice per POST (readiness + the in-lease rescan). The six
+// pull-batch checks share ONE ledger read per evaluation (memoized), so they add one read per GET, one per POST.
+test('P-17 (F-12) the readiness scan cost: GET pilot lists the storage keys once and reads each checkpoint-apply value once (POST: twice, readiness + the in-lease rescan); other keys are listed, never read; the six pull-batch checks cost one ledger read per evaluation — harness timings printed, not asserted', async () => {
+  const measured = []
+  for (const jobs of [0, 200, 2000]) {
+    const h = mountReady()
+    try {
+      // Terminal jobs of ANOTHER sheet (never deleted in production) plus unrelated plugin keys.
+      for (let index = 0; index < jobs; index += 1) {
+        await h.context.storage.set(checkpointKey(`job-peh-cost-${index}`), { jobId: `job-peh-cost-${index}`, ...JOB_SCOPE, status: 'succeeded', target: { sheetId: 'sheet_peh_other', objectId: 'obj_peh_other', fieldIdMap: {} }, chunks: Array.from({ length: 8 }, (_, chunk) => ({ index: chunk, status: 'succeeded' })) })
+        await h.context.storage.set(`syn-unrelated-key-${index}`, { n: index })
+      }
+      const storage = h.context.storage
+      const counts = { list: 0, checkpointGets: 0, otherGets: 0, ledgerReads: 0 }
+      const listOriginal = storage.list.bind(storage)
+      const getOriginal = storage.get.bind(storage)
+      storage.list = async () => { counts.list += 1; return listOriginal() }
+      storage.get = (key) => {
+        if (typeof key === 'string' && key.startsWith(largeBomJobs.__internals.LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX)) counts.checkpointGets += 1
+        else counts.otherGets += 1
+        return getOriginal(key)
+      }
+      const ledger = h.services.stockPreparationPullBatchStore
+      const readSheetStateOriginal = ledger.readSheetState.bind(ledger)
+      ledger.readSheetState = async (input) => { counts.ledgerReads += 1; return readSheetStateOriginal(input) }
+      const snapshot = () => ({ ...counts })
+      const t0 = process.hrtime.bigint()
+      const seen = await getPilot(h, WORKBENCH_ADMIN)
+      const getMs = Number(process.hrtime.bigint() - t0) / 1e6
+      assert.equal(seen.statusCode, 200, JSON.stringify(seen.body))
+      assert.deepEqual(seen.body.data.readiness.failing, [], `${jobs}: calibration — ready`)
+      const afterGet = snapshot()
+      const t1 = process.hrtime.bigint()
+      const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+      const postMs = Number(process.hrtime.bigint() - t1) / 1e6
+      assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+      const afterPost = snapshot()
+      assert.equal(afterGet.list, 1, `${jobs}: GET lists the keys once`)
+      assert.equal(afterGet.checkpointGets, jobs, `${jobs}: GET reads every checkpoint-apply value once, whatever its sheet or status`)
+      assert.equal(afterGet.ledgerReads, 1, `${jobs}: the six pull-batch checks share one ledger read`)
+      assert.equal(afterPost.list - afterGet.list, 2, `${jobs}: POST lists twice (readiness + the in-lease rescan)`)
+      assert.equal(afterPost.checkpointGets - afterGet.checkpointGets, 2 * jobs, `${jobs}: POST reads every value twice`)
+      assert.equal(afterPost.ledgerReads - afterGet.ledgerReads, 1, `${jobs}: POST evaluates readiness once`)
+      measured.push({ checkpointJobs: jobs, unrelatedKeys: jobs, getMs: Math.round(getMs), postMs: Math.round(postMs), getIo: afterGet, postIo: { list: afterPost.list - afterGet.list, checkpointGets: afterPost.checkpointGets - afterGet.checkpointGets, ledgerReads: afterPost.ledgerReads - afterGet.ledgerReads } })
+    } finally { h.restore() }
+  }
+  console.log(`[P-17 F-12 harness] ${JSON.stringify(measured)}`)
 })
 
 // ── the lane refusals ───────────────────────────────────────────────────────────────────────────────
