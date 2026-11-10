@@ -963,8 +963,9 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   STOCK_PREP_REFRESH_RECOVERY_PENDING: Object.freeze({
     zh: '上次写入没有正常结束,正在等待恢复;恢复之前这个项目不能写入、确认或结束沿用关系,这次什么都没有改动。',
     en: 'The last write did not finish cleanly and is awaiting recovery; until then this project cannot be written, confirmed or ended, and nothing was changed now.',
-    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
-    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+    // S6-3 (step-6 design §5.4, R-91): the puller recovers it on the recovery card; the runbook is the admin's escape.
+    zhNext: '这不是数据源的问题。请拉取人员到「拉取待确认」核对上次写入并结束这次执行;核对不了时由平台管理员按手册处理。',
+    enNext: 'This is not a data-source problem. A puller checks the last write on “Pull holds” and closes the execution; when the check cannot prove it, the platform admin handles it per the runbook.',
   }),
   STOCK_PREP_REFRESH_HOLD_NOT_FOUND: Object.freeze({
     zh: '这个项目下没有这条待确认项。',
@@ -992,7 +993,7 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
   STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED: Object.freeze({
     zh: '这次执行已经结束,不需要恢复;什么都没有改动。',
     en: 'This execution has already finished; there is nothing to recover and nothing was changed.',
-    zhNext: '请重新预览后再继续。',
+    zhNext: '请重新试算后再继续。',
     enNext: 'Preview again before continuing.',
   }),
   STOCK_PREP_REFRESH_RECOVERY_UNPROVABLE: Object.freeze({
@@ -1668,8 +1669,9 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
   // PR-5 pg review N1 — the one refusal an ORDINARY (not governed) project can meet: a write in flight, or an
   // abandoned lease of a crashed pull. Only a pull-tier preview clears an abandoned lease (the floor tier's is 403).
   'STOCK_PREP_EXPORT_BLOCKED/lease_in_flight': Object.freeze({
-    zh: '一次拉取正在写这张表,或一次中断的拉取还占着写入;这时不导出,免得交出半新半旧的数据。什么都没有导出。',
-    en: 'A pull is writing this sheet, or an interrupted pull still holds its write turn; nothing is exported now, so no half-old, half-new data is delivered.',
+    // S6-3 (the S6-2 follow-up, R-91): holder-neutral — a recovery check also holds the write turn.
+    zh: '这张表的写入正被占用(一次拉取正在写、一次恢复核对正在进行,或一次中断的拉取还占着写入);这时不导出,免得交出半新半旧的数据。什么都没有导出。',
+    en: 'This sheet’s write turn is held (a pull is writing, a recovery check is running, or an interrupted pull still holds it); nothing is exported now, so no half-old, half-new data is delivered.',
     // PR-7b (PR-7 review N9): only an APPLICABLE preview clears it — the generation bump that clears an abandoned
     // lease runs only when the preview is about to issue a result that can be applied (http-routes.cjs
     // `projectWriteGenerationBinder`); a suspended or refused preview clears nothing.
@@ -1695,10 +1697,37 @@ export const STOCK_PREP_ERROR_REASON_PLAIN: Record<string, StockPrepPlainEntry> 
     enNext: 'Export again shortly.',
   }),
   'STOCK_PREP_EXPORT_STATE_CHANGED/lease_in_flight': Object.freeze({
-    zh: '导出过程中有一次拉取开始写这张表,文件没有交付。',
-    en: 'A pull started writing this sheet while the export ran, so the file was not delivered.',
-    zhNext: '等这次拉取结束后再导出。',
-    enNext: 'Export again after that pull finishes.',
+    zh: '导出过程中这张表的写入被占用了(一次拉取开始写,或一次恢复核对开始),文件没有交付。',
+    en: 'This sheet’s write turn was taken while the export ran (a pull started writing, or a recovery check started), so the file was not delivered.',
+    zhNext: '等它结束后再导出。',
+    enNext: 'Export again after it finishes.',
+  }),
+  // S6-3 (the S6-2 follow-up, R-91): the handoff's TERMINAL hop refused on a held write turn — holder-neutral: during a
+  // recovery check (or right after its close, before the release) it is NOT a pull writing.
+  'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE/lease_in_flight': Object.freeze({
+    zh: '这张表的写入正被占用(一次拉取正在写、一次恢复核对正在进行,或一次中断的拉取还占着写入),最后一步通知暂不能发出;什么都没有发送。',
+    en: 'This sheet’s write turn is held (a pull is writing, a recovery check is running, or an interrupted pull still holds it), so the final notification cannot be sent yet; nothing was sent.',
+    zhNext: '稍后再发;如果一直如此,请拉取人员到「拉取待确认」看看有没有未结束的执行,或重新试算一次。',
+    enNext: 'Send it again shortly; if it persists, ask a puller to look for an unfinished execution on “Pull holds”, or to preview once more.',
+  }),
+  'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE/state_changed': Object.freeze({
+    zh: '检查最后一步时这张表的写入状态刚好变了,最后一步通知没有发出;什么都没有发送。',
+    en: 'This sheet’s write state moved while the final step was being checked, so the final notification was not sent; nothing was sent.',
+    zhNext: '稍后再发一次。',
+    enNext: 'Send it again shortly.',
+  }),
+  // S6-3 (step-6 design §3.6 step 3): why an execution is not unfinished any more.
+  'STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED/verified_closed': Object.freeze({
+    zh: '这次执行已经核对并结束了(可能是别人刚结束的);什么都没有改动。',
+    en: 'This execution has already been checked and closed (perhaps by someone else just now); nothing was changed.',
+    zhNext: '请重新读取执行记录;结束之后要重新试算。',
+    enNext: 'Read the executions again; preview again after a close.',
+  }),
+  'STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED/execution_finished': Object.freeze({
+    zh: '这次执行其实已经正常结束了,不需要恢复;什么都没有改动。',
+    en: 'This execution actually finished normally; there is nothing to recover and nothing was changed.',
+    zhNext: '请重新读取执行记录,再重新试算。',
+    enNext: 'Read the executions again, then preview again.',
   }),
   // F-19: 'preview again', with the reason shown — never 「没能连上取数」.
   'STOCK_PREP_PULL_STATE_MOVED/execution_finished_during_preview': Object.freeze({
@@ -2141,11 +2170,12 @@ export const STOCK_PREP_REFRESH_BANNER_PLAIN: Record<string, StockPrepPlainEntry
     zhNext: '拉取人员在「拉取待确认」里看过当前差异后完成复核;复核后如果项目显示「已执行待核对」,还要核对一次(再试算)才能正式导出。',
     enNext: 'The puller reads the current difference on “Pull holds” and completes the review; if the project then shows “written, awaiting check”, one more check (a preview) opens the formal export.',
   }),
+  // S6-3 (step-6 design §5.4, R-91): 「上次写入未完成,等待拉取人员核对;正式导出已暂停」 — the puller's recovery card.
   failed_pending_recovery: Object.freeze({
-    zh: '本项目上次写入没有正常结束,执行失败待恢复,正式导出已暂停。',
-    en: 'This project’s last write did not finish cleanly and awaits recovery; the formal export is paused.',
-    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
-    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+    zh: '本项目上次写入未完成,等待拉取人员核对;正式导出已暂停。',
+    en: 'This project’s last write did not finish; it awaits the puller’s check, and the formal export is paused.',
+    zhNext: '这不是数据源的问题。拉取人员在「拉取待确认」里核对上次写入并结束这次执行;核对不了时由平台管理员按手册处理。',
+    enNext: 'This is not a data-source problem. The puller checks the last write on “Pull holds” and closes the execution; when the check cannot prove it, the platform admin handles it per the runbook.',
   }),
   executed_pending_settlement: Object.freeze({
     zh: '本项目已写入、待核对,正式导出已暂停。',
@@ -2203,6 +2233,14 @@ export const STOCK_PREP_REFRESH_RENDERING_PLAIN: Record<string, StockPrepPlainEn
     en: 'No hold is open; a written content change awaits your review (below).',
     zhNext: '复核前正式导出暂停;复核后如果项目显示「已执行待核对」,再核对一次(再试算)。',
     enNext: 'The formal export stays paused until the review; if the project then shows “written, awaiting check”, check once more (a preview).',
+  }),
+  // S6-3 (step-6 design §5.4, R-91): no hold, but the last write did not finish — the recovery card renders below,
+  // never 「无待处理」.
+  recovery_pending: Object.freeze({
+    zh: '没有待确认项;本项目上次写入未完成,等您核对(见下面的「上次写入未完成」)。',
+    en: 'No hold is open; this project’s last write did not finish and awaits your check (see “Last write unfinished” below).',
+    zhNext: '核对并结束这次执行之前,写入、确认和正式导出都暂停。',
+    enNext: 'Until the execution is checked and closed, writing, confirming and the formal export stay paused.',
   }),
   none_pending: Object.freeze({
     zh: '无待处理:没有等拉取人员确认的项。',
@@ -2453,6 +2491,183 @@ export const STOCK_PREP_REFRESH_REVIEWED_NEXT: StockPrepPlainText = Object.freez
   zh: '复核已记录。复核不代替核对:如果写入之后还没有核对过,项目备料页会显示「已执行待核对」,请点「核对」(再试算一次);核对通过后才能正式导出。',
   en: 'The review is recorded. The review does not replace the check: if the write has not been checked yet, the project page shows “written, awaiting check” — press “Check” (one more preview); the formal export opens once it passes.',
 })
+
+// ---------------------------------------------------------------------------
+// 备料分批拉取第一期 step 6a-3 (S6-3; step-6 design §3.5, §3.8, §3.11, §5.4; register R-91) — the RECOVERY CARD of
+// 「拉取待确认」. Every closed token the card shows has words (RC-WORDS reads the plugin's live lists); a token outside a
+// map reads 「未识别」 with the token apart from the sentence (the RS-WORDS rule). Values-free: tokens and counts only.
+// ---------------------------------------------------------------------------
+
+/** The recovery's classification result (execution-intent.cjs `INTENT_RESULTS` + the store's `unknown`). */
+export const STOCK_PREP_RECOVERY_RESULT_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  landed: Object.freeze({ zh: '全部已写入:表格证明上次计划写的每一行都写进去了', en: 'All landed: the sheet proves every row the last write planned landed' }),
+  nothing_landed: Object.freeze({ zh: '都没写入:表格证明上次计划写的行一行都没写进去', en: 'Nothing landed: the sheet proves none of the planned rows landed' }),
+  mixed: Object.freeze({ zh: '写入了一部分:表格证明哪些行写进去了、哪些没有', en: 'Partly landed: the sheet proves which rows landed and which did not' }),
+  unprovable: Object.freeze({ zh: '证明不了:表格无法证明上次写入落了哪些行', en: 'Unprovable: the sheet cannot prove which rows the last write landed' }),
+  unknown: Object.freeze({ zh: '结果未知:按手册结束,没有核对', en: 'Unknown: closed per the runbook without a check' }),
+})
+
+/** Why a close is refused (execution-recovery.cjs `RECOVERY_REFUSAL_REASONS`). */
+export const STOCK_PREP_RECOVERY_REASON_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  intent_missing: Object.freeze({ zh: '这次执行没有留下写入计划记录(较早的版本写的)', en: 'This execution left no record of what it meant to write (an older build wrote it)' }),
+  intent_corrupt: Object.freeze({ zh: '这次执行留下的写入计划记录不完整', en: 'The record of what this execution meant to write is incomplete' }),
+  recompute_disagrees: Object.freeze({ zh: '重新计算的结果和表格对不上(系统自检发现的问题)', en: 'The recomputation disagrees with the sheet (a self-check found it)' }),
+  duplicate_rows: Object.freeze({ zh: '表格里同一行出现了不止一次', en: 'The same row appears more than once in the sheet' }),
+  record_vanished: Object.freeze({ zh: '要改的行在表格里已经不见了', en: 'A row the write meant to change is gone from the sheet' }),
+  record_replaced: Object.freeze({ zh: '要改的行在表格里被换成了另一条记录', en: 'A row the write meant to change was replaced by another record' }),
+  diverged: Object.freeze({ zh: '有的行既不是写入前的样子,也不是计划写成的样子(可能有人改过)', en: 'Some rows are neither as they were before nor as planned (someone may have edited them)' }),
+  pull_batch_moved: Object.freeze({ zh: '这次执行关联的拉取批次不是它自己的(系统自检发现的问题)', en: 'The pull batch linked to this execution is not its own (a self-check found it)' }),
+})
+
+/** One intended row's class (execution-intent.cjs `INTENT_ENTRY_CLASSES`). */
+export const STOCK_PREP_RECOVERY_CLASS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  landed: Object.freeze({ zh: '已写入', en: 'Landed' }),
+  not_landed: Object.freeze({ zh: '没写入', en: 'Not landed' }),
+  diverged: Object.freeze({ zh: '对不上', en: 'Diverged' }),
+  duplicate: Object.freeze({ zh: '重复', en: 'Duplicate' }),
+  vanished: Object.freeze({ zh: '已不见', en: 'Vanished' }),
+  replaced: Object.freeze({ zh: '被替换', en: 'Replaced' }),
+})
+
+/** What the write meant to do to the row (the intent entry's kind). */
+export const STOCK_PREP_RECOVERY_KIND_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  add: Object.freeze({ zh: '新增', en: 'Add' }),
+  update: Object.freeze({ zh: '更新', en: 'Update' }),
+  inactive: Object.freeze({ zh: '停用', en: 'Inactivate' }),
+})
+
+/** An execution's status (continuation-store.cjs `EXECUTION_STATUSES`). */
+export const STOCK_PREP_EXECUTION_STATUS_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  running: Object.freeze({ zh: '写入中', en: 'Writing' }),
+  succeeded: Object.freeze({ zh: '已完成', en: 'Succeeded' }),
+  partial: Object.freeze({ zh: '只写了一部分', en: 'Partly written' }),
+  failed: Object.freeze({ zh: '失败', en: 'Failed' }),
+  aborted: Object.freeze({ zh: '中途停止', en: 'Stopped part-way' }),
+  verified_closed: Object.freeze({ zh: '已核对结束', en: 'Checked and closed' }),
+})
+
+/** How an execution was closed (continuation-store.cjs `CLOSED_MODES`). */
+export const STOCK_PREP_EXECUTION_CLOSED_MODE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  self_verified: Object.freeze({ zh: '系统自动核对(一行都没写)', en: 'Self-checked (nothing was written)' }),
+  puller_verified: Object.freeze({ zh: '拉取人员核对后结束', en: 'Closed after the puller’s check' }),
+  runbook: Object.freeze({ zh: '平台管理员按手册结束', en: 'Closed by the platform admin per the runbook' }),
+  legacy_runbook: Object.freeze({ zh: '升级前按旧手册结束', en: 'Closed per the old runbook before the upgrade' }),
+})
+
+/** What the close did to a bound change plan (continuation-store.cjs `closePlanCellWithin` outcomes). */
+export const STOCK_PREP_RECOVERY_PLAN_OUTCOME_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  written: Object.freeze({ zh: '变更计划记为已写入,等复核', en: 'The change plan is marked written and awaits its review' }),
+  kept_confirmed: Object.freeze({ zh: '变更计划仍是已确认,重新试算后照常写入', en: 'The change plan stays confirmed; preview again and it is written as usual' }),
+  invalidated: Object.freeze({ zh: '变更计划已作废,下次试算会重新列出变化', en: 'The change plan is void; the next preview lists the changes again' }),
+  invalidated_recovered: Object.freeze({ zh: '变更计划已作废,已写进去的行转为待复核', en: 'The change plan is void; the rows that landed go to review' }),
+  recovered: Object.freeze({ zh: '已写进去的行转为待复核', en: 'The rows that landed go to review' }),
+  unchanged: Object.freeze({ zh: '变更计划没有变化', en: 'The change plan is unchanged' }),
+})
+
+/** What the close did to 批次标识's batch (pull-batch-store.cjs `batchWithin` outcomes) — shown only while the switch is on. */
+export const STOCK_PREP_RECOVERY_BATCH_OUTCOME_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  none: Object.freeze({ zh: '拉取批次没有变化', en: 'The pull batch is unchanged' }),
+  kept_open: Object.freeze({ zh: '拉取批次保持未结束,下次写入继续用它', en: 'The pull batch stays open; the next write continues it' }),
+  closed: Object.freeze({ zh: '拉取批次已结束', en: 'The pull batch is closed' }),
+  already_closed: Object.freeze({ zh: '拉取批次早已结束', en: 'The pull batch was already closed' }),
+})
+
+/** The card's lead (a puller's work, not a fault; what the two buttons do). */
+export const STOCK_PREP_RECOVERY_CARD_INTRO: StockPrepPlainText = Object.freeze({
+  zh: '上次写入没有正常结束。先点「核对上次写入」:系统按表格现在的内容核对上次写进去了哪些行(不会写任何东西);核对能证明时,再输入项目号点「结束这次执行」。',
+  en: 'The last write did not finish cleanly. First press “Check the last write”: the system checks the sheet as it is now for which rows landed (it writes nothing); when the check proves it, type the project number and press “Close this execution”.',
+})
+
+/**
+ * The card with NOTHING unfinished in the list while the page says 失败待恢复. The server derives that state from an
+ * abandoned lease alone (stock-preparation-refresh-state.cjs: a held, not live lease with no unfinished row) — a close
+ * that committed while its release failed, or a crashed pull that left no execution row. No recovery control exists for
+ * it, so the way out is named: re-read first (it may just have been closed); if it persists, ONE applicable pull-tier
+ * preview clears the abandoned lease (the generation bump on mint, http-routes.cjs `projectWriteGenerationBinder`; the
+ * preview's recovery answer counts unfinished ROWS only, stock-preparation-refresh-lanes.cjs `previewRecoveryOf`) —
+ * the same wording as `STOCK_PREP_EXPORT_BLOCKED/lease_in_flight`; otherwise the platform admin.
+ */
+export const STOCK_PREP_RECOVERY_CARD_NONE: StockPrepPlainEntry = Object.freeze({
+  zh: '执行记录里没有找到未完成的执行(可能刚被结束)。',
+  en: 'No unfinished execution is in the list (it may have just been closed).',
+  zhNext: '先点上面的「重新读取」。如果本项目仍显示「上次写入未完成」,可能是一次中断的写入还占着这张表的写入:请到项目备料页重新试算一次,而且要是一次能应用的试算(结果可以应用,没有被挂起或拒绝)——这样的试算会清掉中断留下的占用;还是这样,请联系平台管理员。',
+  enNext: 'Press “Read again” above first. If this project still shows “Last write unfinished”, an interrupted write may still hold this sheet’s write turn: preview once on the project page, and it must be a preview that can be applied (not suspended or refused) — such a preview clears what the interruption left; if it still persists, ask the platform admin.',
+})
+
+/** UNPROVABLE (design §5.4). */
+export const STOCK_PREP_RECOVERY_UNPROVABLE_HINT: StockPrepPlainText = Object.freeze({
+  zh: '表格证明不了写进了哪些行,不能在这里结束。请平台管理员按手册处理。',
+  en: 'The sheet cannot prove which rows landed, so it cannot be closed here. Ask the platform admin to handle it per the runbook.',
+})
+
+/** close-unverified's warning (design §3.8; admin only). */
+export const STOCK_PREP_RECOVERY_UNVERIFIED_WARNING: StockPrepPlainText = Object.freeze({
+  zh: '按手册结束不核对结果:结果记为「未知」,不算核对通过;变更计划要改的每一行都转为待复核,下次试算会重新挂起需要确认的行。',
+  en: 'A runbook close does not check the result: it is recorded as “unknown” and is not a passed check; every row a change plan meant to change goes to review, and the next preview suspends again on whatever needs a decision.',
+})
+
+/** After a close (design §5.4 「请重新预览」). */
+export const STOCK_PREP_REFRESH_RECOVERED_NEXT: StockPrepPlainText = Object.freeze({
+  zh: '这次执行已结束。请重新试算:以新的试算为准,不要沿用结束之前的试算结果。',
+  en: 'The execution is closed. Preview again: go by the new preview, never by one made before the close.',
+})
+
+/** RC-W5: the `recovery_closed` bump after the release did not land (T6-8) — the close itself stands. */
+export const STOCK_PREP_RECOVERY_GENERATION_NOT_BUMPED: StockPrepPlainText = Object.freeze({
+  zh: '结束已经记下了,但系统没能刷新写入标记(不影响结束本身)。更要重新试算一次,再写入。',
+  en: 'The close is recorded, but the system could not refresh the write marker (the close itself stands). All the more reason to preview once more before writing.',
+})
+
+/**
+ * The card's own readings of a refusal (the STOCK_PREP_LARGE_BOM_ERROR_PLAIN precedent): the generic copy of these
+ * codes talks about previews and syncs; inside a recovery the same code means "the check / close did not happen —
+ * check again". Resolution: card reason entry → card code entry → stockPrepErrorPlain (reason → code → generic).
+ */
+export const STOCK_PREP_RECOVERY_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  STOCK_PREP_PROJECT_WRITE_LOCKED: Object.freeze({
+    zh: '这张表的写入正被占用(一次拉取正在写,或另一次核对正在进行),这次没有核对也没有结束;什么都没有改动。',
+    en: 'This sheet’s write turn is held (a pull is writing, or another check is running), so nothing was checked or closed; nothing was changed.',
+    zhNext: '请稍后再点一次。',
+    enNext: 'Press it again shortly.',
+  }),
+  'STOCK_PREP_PROJECT_WRITE_LOCKED/holder_in_write': Object.freeze({
+    zh: '中断的那次写入还卡在一次表格写入里,这次没有核对也没有结束;什么都没有改动。',
+    en: 'The interrupted write is still stuck inside one sheet write, so nothing was checked or closed; nothing was changed.',
+    zhNext: '请稍后再点一次;一直这样请联系平台管理员。',
+    enNext: 'Press it again shortly; if it persists, ask the platform admin.',
+  }),
+  STOCK_PREP_PROJECT_WRITE_LEASE_LOST: Object.freeze({
+    zh: '核对期间这张表的写入被别的操作接管了,这次没有结束;什么都没有改动。',
+    en: 'Another operation took this sheet’s write turn during the check, so nothing was closed; nothing was changed.',
+    zhNext: '请重新核对上次写入。',
+    enNext: 'Check the last write again.',
+  }),
+  STOCK_PREP_PULL_STATE_MOVED: Object.freeze({
+    zh: '核对之后本项目的状态又变了(执行记录或变更计划刚被改动),这次没有结束;什么都没有改动。',
+    en: 'This project’s state moved after the check (the execution or the change plan just changed), so nothing was closed; nothing was changed.',
+    zhNext: '请重新核对上次写入。',
+    enNext: 'Check the last write again.',
+  }),
+  'STOCK_PREP_PULL_STATE_MOVED/intent_moved': Object.freeze({
+    zh: '核对之后这次执行的写入计划记录变了,这次没有结束;什么都没有改动。',
+    en: 'The record of what this execution meant to write changed after the check, so nothing was closed; nothing was changed.',
+    zhNext: '请重新核对上次写入。',
+    enNext: 'Check the last write again.',
+  }),
+  STOCK_PREP_REFRESH_RECOVERY_UNPROVABLE: Object.freeze({
+    zh: '结束时发现表格证明不了写进了哪些行,这次执行仍保持未完成;什么都没有改动。',
+    en: 'At the close the sheet could not prove which rows landed, so the execution stays unfinished; nothing was changed.',
+    zhNext: '请重新核对上次写入看原因;证明不了时请平台管理员按手册处理。',
+    enNext: 'Check the last write again to see why; when it cannot be proven, ask the platform admin to handle it per the runbook.',
+  }),
+})
+
+/** The card's reading of a refusal: its own entries first (reason, then code), then the shared lookup. */
+export function stockPrepRecoveryErrorPlain(code: string, reason?: string | null): StockPrepPlainEntry {
+  return (reason ? lookup(STOCK_PREP_RECOVERY_ERROR_PLAIN, `${code}/${reason}`) : null)
+    ?? lookup(STOCK_PREP_RECOVERY_ERROR_PLAIN, code)
+    ?? stockPrepErrorPlain(code, reason)
+}
 
 // ---------------------------------------------------------------------------
 // Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).
@@ -3449,8 +3664,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_RECOVERY_PENDING: Object.freeze({
     zh: '上次写入没有正常结束,这个项目在等恢复',
     en: 'The last write did not finish cleanly; this project awaits recovery',
-    zhNext: '这不是数据源的问题,也不是重试能解决的。请联系平台管理员按手册恢复;什么都没有写。',
-    enNext: 'This is not a data-source problem and retrying will not fix it. Ask the platform admin to recover it per the runbook; nothing was written.',
+    zhNext: '这不是数据源的问题,也不是重试能解决的。请到「拉取待确认」核对上次写入并结束这次执行;核对不了时由平台管理员按手册处理。什么都没有写。',
+    enNext: 'This is not a data-source problem and retrying will not fix it. Check the last write on “Pull holds” and close the execution; when the check cannot prove it, the platform admin handles it per the runbook. Nothing was written.',
   }),
   PLAN_STATE_MOVED: Object.freeze({
     zh: '试算期间项目状态变了(一次写入刚好结束,或有人刚确认/结束了沿用关系),这次试算作废',
@@ -3737,8 +3952,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   WRITE_RECOVERY_PENDING: Object.freeze({
     zh: '上次写入没有正常结束,这个项目在等恢复,没有写入',
     en: 'The last write did not finish cleanly; this project awaits recovery and nothing was written',
-    zhNext: '这不是数据源的问题。请联系平台管理员按手册恢复。',
-    enNext: 'This is not a data-source problem. Ask the platform admin to recover it per the runbook.',
+    zhNext: '这不是数据源的问题。请到「拉取待确认」核对上次写入并结束这次执行;核对不了时由平台管理员按手册处理。',
+    enNext: 'This is not a data-source problem. Check the last write on “Pull holds” and close the execution; when the check cannot prove it, the platform admin handles it per the runbook.',
   }),
   WRITE_STATE_MOVED: Object.freeze({
     zh: '试算之后项目状态变了,这次没有写入',
@@ -4028,11 +4243,12 @@ export const STOCK_PREP_SYNC_VERDICT_PLAIN: Record<string, StockPrepPlainEntry> 
     enNext: 'This is not an error: the puller completes the change review on “Pull holds”; the review does not replace the check — after it the project page decides: when it shows “written, awaiting check”, one more check (a preview) opens the formal export.',
   }),
   // PR-7 (F-19): awaiting recovery — not the source, not a retry.
+  // S6-3 (step-6 design §3.11, R-91): the recovery card is the way out; the runbook only when the check cannot prove it.
   awaiting_recovery: Object.freeze({
-    zh: '上次写入没有正常结束,这个项目在等恢复;这次什么都没有写。',
-    en: 'The last write did not finish cleanly and this project awaits recovery; nothing was written this time.',
-    zhNext: '请联系平台管理员按手册恢复,不是数据源的问题。',
-    enNext: 'Ask the platform admin to recover it per the runbook; it is not a data-source problem.',
+    zh: '上次写入未完成:请到「拉取待确认」核对并结束这次执行;这次什么都没有写。',
+    en: 'The last write did not finish: check it and close the execution on “Pull holds”; nothing was written this time.',
+    zhNext: '不是数据源的问题。核对不了(表格证明不了写进了哪些行)时,由平台管理员按手册处理。',
+    enNext: 'It is not a data-source problem. When the check cannot prove which rows landed, the platform admin handles it per the runbook.',
   }),
   /**
    * PR-8 review fix B1: the write STOPPED after a host write was attempted (or it is not known whether one was). Rows
