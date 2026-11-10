@@ -467,8 +467,9 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect(st.patchInputs.map((input) => [st.oldIds.includes(input.recordId), Object.keys(input.changes).sort(), typeof input.expectedVersion, Boolean(input.writeFence)])).toEqual(
         Array(4).fill([true, [st.fields.active, st.fields.lastPlmConflictSummary, st.fields.lastPlmRefreshDecision, st.fields.lastPlmRefreshRunId].sort(), 'number', true]),
       )
-      // The host's own trail: one revision per patched record, at the new version.
-      const revisions = (await q('SELECT record_id, version FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = ANY($2::text[]) ORDER BY record_id', [st.sheetId, st.oldIds])).rows
+      // The host's own trail: one revision per patched record at the new version (the create wrote version 1), none for
+      // any other row.
+      const revisions = (await q('SELECT record_id, version FROM meta_record_revisions WHERE sheet_id = $1 AND version > 1 ORDER BY record_id', [st.sheetId])).rows
       expect(revisions.map((row: any) => [String(row.record_id), Number(row.version)]).sort()).toEqual(st.oldIds.map((id) => [id, before.get(id)!.version + 1]).sort())
       // The ledger: the run row with its backup, the claim, both audit rows — and the lock.
       const run = (await st.runs())[0]
