@@ -71,7 +71,10 @@ export type PlanDeprovisionCandidateInput = Pick<
  */
 export type DeprovisionSuppressedByLocal = { membership: boolean; global: boolean }
 
-/** A plan read from candidate state also reports `suppressedByLocal`; skip plans do not. */
+/**
+ * A plan read from candidate state always reports `suppressedByLocal`. A skip plan may leave it
+ * out; absent means nothing was suppressed.
+ */
 export type DirectoryDeprovisionStatePlan = DirectoryDeprovisionPlan & {
   suppressedByLocal?: DeprovisionSuppressedByLocal
 }
