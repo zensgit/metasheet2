@@ -203,6 +203,9 @@ function assertParallelWorkflow(doc) {
         const deferAddition = '  tests/integration/attendance-notification-defer.db.test.ts \\\n'
         assert.equal(step.run.split(deferAddition).length - 1, 1, 'Delivery deferral DB suite must run exactly once')
         assert.ok(step.run.includes(providerEvidenceAddition + deferAddition), 'Keep the delivery deferral suite right after the deprovision provider evidence suite')
+        const departureVouchingAddition = '  tests/integration/directory-departure-vouching.db.test.ts \\\n'
+        assert.equal(step.run.split(departureVouchingAddition).length - 1, 1, 'Departure vouching DB suite must run exactly once')
+        assert.ok(step.run.includes(deferAddition + departureVouchingAddition), 'Keep the departure vouching suite right after the delivery deferral suite')
         const lifecycleHistoryAddition = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'
         assert.equal(step.run.split(lifecycleHistoryAddition).length - 1, 1, 'Directory integration lifecycle history DB suite must run exactly once')
         step.run = step.run.replace(addition, '')
@@ -216,6 +219,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
         step.run = step.run.replace(deferAddition, '')
+        step.run = step.run.replace(departureVouchingAddition, '')
         step.run = step.run.replace(lifecycleHistoryAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
@@ -301,6 +305,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-departure-vouching.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-departure-vouching.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-unbind-intent-persistence.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-adapter-golden-parity.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
