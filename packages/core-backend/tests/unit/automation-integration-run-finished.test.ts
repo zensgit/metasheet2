@@ -378,6 +378,49 @@ describe('integration.run_finished — the action layer emits EXACTLY ONE summar
     ])
   })
 
+  // R-69 I6a fix (re-review L3): the rule-sheet re-check (executor step 0.5) stops the step BEFORE any unit. That stop
+  // is still summarized — once per configured project — and the step's closed `cause` never rides in the event.
+  it.each<[label: string, arrange: (db: ReturnType<typeof createFakeJobDb>) => void, status: string, reason: string, cause: string | undefined]>([
+    ['the rule sheet was ARCHIVED', (db) => { db.projectTargets.get('sheet_1')!.status = 'archived' }, 'skipped', 'principal_unauthorized', 'rule_sheet_unregistered'],
+    ['the rule sheet is registered to ANOTHER tenant', (db) => { db.projectTargets.set('sheet_1', { tenantId: 'tenant_2', projectNo: 'P-1', status: 'active' }) }, 'skipped', 'principal_unauthorized', 'rule_sheet_tenant_mismatch'],
+    ['the registry is UNREADABLE', (db) => { db.setRegistryUnreadable('57P01') }, 'not_started', 'authority_unavailable', undefined],
+  ])('a step 0.5 stop — %s ⇒ ONE summary per project carrying the step\'s status and reason, never its cause; the port is never called', async (_label, arrange, status, reason, cause) => {
+    const events = captureSink()
+    const db = createFakeJobDb()
+    arrange(db)
+    const port = fakePort('immediate')
+    const { run } = harness(db, port.port)
+    const step = await run('exec_step05', CONFIG3)
+    // the STEP names the cause (or none, for an unreadable registry) …
+    expect(step.output).toEqual({ outcome: status, reason, ...(cause ? { cause } : {}) })
+    expect(port.run).not.toHaveBeenCalled()
+    expect(db.intentRows()).toHaveLength(0)
+    // … and every configured project gets exactly one summary of that stop
+    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.reason])).toEqual([
+      ['P-1', status, reason], ['P-2', status, reason], ['P-3', status, reason],
+    ])
+    const actionKey = deriveActionKey({ structuralPath: '0', actionType: 'run_integration_job', canonicalConfig: CONFIG3 })
+    for (const { event, route } of events) {
+      expect(route).toEqual({ tenantId: TENANT })
+      expect(event).toMatchObject({
+        canApply: false,
+        counts: { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS },
+        durationMs: 0,
+        attempts: 1,
+        triggeredBy: 'automation',
+        _automationDepth: 1,
+      })
+      expect(event.eventId).toBe(deriveAutomationRunFinishedEventId({ rootExecutionId: 'exec_step05', executionId: 'exec_step05', actionKey, projectNo: event.job.projectNo as string }))
+      // closed key set, values-free: no cause, no errorClass, no sheet / tenant / principal
+      expect(event).not.toHaveProperty('cause')
+      expect(event).not.toHaveProperty('errorClass')
+      expect(Object.keys(event).every((key) => (INTEGRATION_RUN_FINISHED_EVENT_KEYS as readonly string[]).includes(key))).toBe(true)
+      const text = JSON.stringify(event)
+      for (const needle of ['rule_sheet', 'cause', TENANT, 'tenant_2', 'sheet_1', 'svc_user', 'binding']) expect(text).not.toContain(needle)
+    }
+    expect(new Set(events.map((e) => e.event.eventId)).size).toBe(3)
+  })
+
   it('a timeout_unsettled unit: ONE outcome_unknown summary at the step; the late settlement (Tx B) emits nothing; unreached projects are not_started(timeout)', async () => {
     vi.useFakeTimers()
     const events = captureSink()

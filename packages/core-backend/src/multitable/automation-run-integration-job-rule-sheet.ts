@@ -5,6 +5,14 @@
  * assertRunIntegrationJobAtSave) and RE-CHECKED at every TRIGGER (AutomationExecutor, between the binding-principal
  * check and the port lookup). Dry-run only, default OFF; R-69 is OPEN.
  *
+ * WHICH SAVES RUN IT (re-review L1). `createRule`, and every `updateRule` that touches the action — `actionType`,
+ * `actionConfig`, `actions` or `executionMode`, the shapes that run assertRunIntegrationJobAtSave. An update that
+ * does NOT touch the action (enable / disable, rename, conditions only, trigger only) does not re-run it: such an
+ * edit cannot change the rule's sheet, its binding tenant or its project, and refusing it would leave the rule of
+ * an archived sheet impossible to switch off or rename. For those edits the TRIGGER re-check is the guard: a rule
+ * saved that way on a sheet archived since never reaches the port (tests/unit/automation-run-integration-job.test.ts,
+ * the L1 case).
+ *
  * THE AUTHORITY is the project-sheet registry (`integration_stock_prep_project_target`, migration 087), read through
  * the host's existing fixed-SQL read `readManualRowsProjectTarget` (stock-preparation-manual-rows-gate.ts) — the same
  * columns, the same SQLSTATE classification: 42P01 (table missing) = NOT REGISTERED, any other error = UNREADABLE.
@@ -12,9 +20,19 @@
  * (`stockPrepProjectSheetsEnabledForManualRows`, read per call); with the switch off there is no registered sheet
  * at all, so the verdict is `switch_off` (T-layer default R-90 (2): fail closed).
  *
+ * THE SHEET ID IS EXACT (re-review M1). The id is used AS GIVEN — never trimmed, case-folded or otherwise
+ * normalized. The route, the stored rule row and the trigger context all carry the raw id, and a sheet id is
+ * client-mintable text: a registered id plus one whitespace code point names a DIFFERENT, ordinary sheet, which
+ * must not pass as the registered one. Two independent layers, either failing is `unregistered`:
+ *   - the registry read is issued with the raw id (text `=` in PostgreSQL: byte equality);
+ *   - the row it answers must carry that same id, byte for byte — the sibling gate's re-compare
+ *     (stock-preparation-manual-rows-gate.ts evaluateManualRowsGate, condition 4) — whatever the database or the
+ *     query seam matched on (a non-deterministic collation, a normalizing wrapper).
+ *
  * THE PREDICATE (T-layer defaults R-90 (1)–(3)):
  *   - the switch is on;
- *   - the registry row for the rule's sheet is present and `status === 'active'` (an archived row is unregistered);
+ *   - the registry row for the rule's sheet is present, IS that sheet's (its `sheet_id` equals the raw id) and
+ *     `status === 'active'` (an archived row is unregistered);
  *   - the row's `tenant_id` equals the binding tenant stamped at save (§6.5);
  *   - (save only, `projectNos` given) the rule lists EXACTLY ONE project and it is the row's `project_no` — 087 has
  *     UNIQUE(sheet_id), so one sheet is one project's and "these projects' registered target sheet" can only hold
@@ -44,11 +62,15 @@ export async function checkRunIntegrationJobRuleSheet(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<RunIntegrationJobRuleSheetVerdict> {
   if (!stockPrepProjectSheetsEnabledForManualRows(env)) return refuse('switch_off')
-  const sheetId = typeof input.sheetId === 'string' ? input.sheetId.trim() : ''
-  if (!sheetId) return refuse('unregistered')
-  const read = await readManualRowsProjectTarget(query, sheetId)
+  // M1: the RAW id, exactly as the route, the stored rule row and the trigger context carry it — no trim, no
+  // normalization of any kind before the read.
+  const rawSheetId = input.sheetId
+  if (typeof rawSheetId !== 'string' || rawSheetId.length === 0) return refuse('unregistered')
+  const read = await readManualRowsProjectTarget(query, rawSheetId)
   if (read.kind === 'unreadable') return refuse('unreadable')
   if (read.kind === 'absent') return refuse('unregistered')
+  // M1: the row must be THIS sheet's — its `sheet_id` compared with the raw id, whatever the read matched on.
+  if (read.row.sheetId !== rawSheetId) return refuse('unregistered')
   if (read.row.status !== 'active') return refuse('unregistered')
   if (typeof read.row.tenantId !== 'string' || read.row.tenantId !== input.tenantId) return refuse('tenant_mismatch')
   if (input.projectNos !== undefined) {
