@@ -157,6 +157,24 @@ describe('attendance admin guide', () => {
     container.remove()
   })
 
+  it('tells the reader to reload after date, organization, or person filter changes before export', async () => {
+    const { container, app } = await mount()
+    const reloadWording = '日期、组织或人员筛选变化后，请重新加载数据再导出。'
+    for (const id of ['reports', 'records'] as const) {
+      container.querySelector<HTMLButtonElement>(`[data-attendance-guide-topic="${id}"]`)!.click()
+      await nextTick()
+      const article = container.querySelector(`[data-attendance-guide-article="${id}"]`)
+      expect(article?.textContent).toContain(reloadWording)
+      expect(article?.textContent).not.toContain('筛选过期时导出会被拦住')
+      if (id === 'reports') {
+        expect(article?.textContent).toContain('重载报表')
+        expect(article?.textContent).not.toContain('再导出。然后点')
+      }
+    }
+    app.unmount()
+    container.remove()
+  })
+
   it('directs a punch-order conflict to makeup or time correction instead of retrying check-in', async () => {
     const { container, app } = await mount()
     container.querySelector<HTMLButtonElement>('[data-attendance-guide-topic="punch"]')!.click()
