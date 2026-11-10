@@ -156,6 +156,32 @@ function installTransaction(options: {
       call.roleLockIds.push(String(params?.[0] ?? ''))
       return { rows: [{ id: params?.[0] }], rowCount: 1 }
     }
+    if (/FOR UPDATE/.test(text) && /FROM users/.test(text)) {
+      call.events.push('user-lock')
+      const id = String(params?.[0] ?? '')
+      return {
+        rows: [{
+          id,
+          role: id === ACTOR_ID ? 'admin' : 'user',
+          activation_status: 'activated',
+          is_active: true,
+          access_generation: 0,
+          deleted_at: null,
+          purged_at: null,
+          email: `${id}@example.test`,
+          name: 'Target',
+        }],
+        rowCount: 1,
+      }
+    }
+    if (/SELECT role_id/.test(text) && /FROM user_roles/.test(text)) {
+      call.events.push('actor-roles')
+      const id = String(params?.[0] ?? '')
+      return {
+        rows: id === ACTOR_ID ? [{ role_id: 'admin' }] : [],
+        rowCount: id === ACTOR_ID ? 1 : 0,
+      }
+    }
     if (/DELETE FROM user_roles/.test(text)) {
       call.events.push('delete')
       if (options.failOn === 'delete') throw options.failError ?? markerError()
@@ -448,6 +474,10 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'resolve-targets',
       'role-lock',
       'lock',
+      'lock',
+      'user-lock',
+      'user-lock',
+      'actor-roles',
       'resolve-targets',
       'delete',
       'list-namespaces',
@@ -458,8 +488,12 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     ])
     expect(call.roleLockIds).toEqual(['attendance_employee'])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
-    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.indexOf('lock'))
-    expect(call.lockKeys).toEqual([`namespace-admission:${SINGLE_USER_ID}`])
+    expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.lastIndexOf('user-lock'))
+    expect(call.lockKeys).toEqual([
+      `namespace-admission:${ACTOR_ID}`,
+      `namespace-admission:${SINGLE_USER_ID}`,
+    ])
     expect(call.namespaceRoleIds).toEqual(['attendance_employee'])
     expect(call.witnessParams).toEqual([
       [SINGLE_USER_ID, 'attendance', 'role_unassigned', ACTOR_ID, false],
@@ -499,6 +533,12 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'lock',
       'lock',
       'lock',
+      'lock',
+      'user-lock',
+      'user-lock',
+      'user-lock',
+      'user-lock',
+      'actor-roles',
       'resolve-targets',
       'delete',
       'list-namespaces',
@@ -514,8 +554,9 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     ])
     expect(call.roleLockIds).toEqual(['attendance_employee'])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
-    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.lastIndexOf('lock'))
-    expect(call.lockKeys).toEqual(BATCH_SORTED_ORDER.map((id) => `namespace-admission:${id}`))
+    expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    expect(call.events.lastIndexOf('resolve-targets')).toBeGreaterThan(call.events.lastIndexOf('user-lock'))
+    expect(call.lockKeys).toEqual([ACTOR_ID, ...BATCH_SORTED_ORDER].map((id) => `namespace-admission:${id}`))
     expect(call.namespaceRoleIds).toEqual([
       'attendance_employee',
       'attendance_employee',
@@ -553,8 +594,8 @@ describe('attendance-admin unassign witness failure and recovery conflict', () =
     expect(call.events.at(-1)).toBe('rollback')
     expect(mutationEvents(call.events).filter((event) => event !== 'rollback')).toEqual(
       entry.name === 'single'
-        ? ['lock', 'delete', 'witness']
-        : ['lock', 'lock', 'lock', 'delete', 'witness'],
+        ? ['lock', 'lock', 'delete', 'witness']
+        : ['lock', 'lock', 'lock', 'lock', 'delete', 'witness'],
     )
     expect(call.events).not.toContain('commit')
     expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
@@ -579,11 +620,11 @@ describe('attendance-admin unassign witness failure and recovery conflict', () =
     expect(call.events.at(-1)).toBe('rollback')
     expect(call.events).not.toContain('commit')
     if (entry.name === 'single') {
-      expect(mutationEvents(call.events)).toEqual(['lock', 'delete', 'rollback'])
+      expect(mutationEvents(call.events)).toEqual(['lock', 'lock', 'delete', 'rollback'])
       expect(call.witnessParams).toEqual([])
     } else {
-      expect(call.lockKeys).toEqual(BATCH_SORTED_ORDER.map((id) => `namespace-admission:${id}`))
-      expect(mutationEvents(call.events)).toEqual(['lock', 'lock', 'lock', 'delete', 'witness', 'rollback'])
+      expect(call.lockKeys).toEqual([ACTOR_ID, ...BATCH_SORTED_ORDER].map((id) => `namespace-admission:${id}`))
+      expect(mutationEvents(call.events)).toEqual(['lock', 'lock', 'lock', 'lock', 'delete', 'witness', 'rollback'])
     }
     expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
   })
