@@ -1204,6 +1204,18 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 // resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
 // the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
 const gridPageSizeUserId = ref<string | null>(null)
+// An attachment upload or delete is a write the grid's history does not hold yet: the drawer, and a grid upload,
+// patch the field once it is done (the grid's cell editor patches a remove or clear when it closes; the form view
+// keeps it in its draft). The grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
+let attachmentWrites = 0
+async function holdingHistory<T>(write: () => Promise<T>): Promise<T> {
+  attachmentWrites += 1
+  try {
+    return await write()
+  } finally {
+    attachmentWrites -= 1
+  }
+}
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
@@ -1216,6 +1228,7 @@ const grid = useMultitableGrid({
   // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
   // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
   resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
+  holdsHistory: () => attachmentWrites > 0,
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -2977,13 +2990,16 @@ const hierarchyParentFieldIds = computed(() =>
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
-  workbench.client.uploadAttachment(file, {
+  holdingHistory(() => workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
     recordId: context?.recordId,
     fieldId: context?.fieldId,
-  })
+  }))
 
-const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) => {
+const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  holdingHistory(() => deleteAttachment(attachmentId, context))
+
+async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
   if (context?.recordId && selectedRecordId.value === context.recordId) {
     const updatedIds = (selectedRecordResolved.value?.data[context.fieldId ?? ''] as unknown[] | undefined)

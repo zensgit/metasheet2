@@ -37,6 +37,9 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
     // #5795: the server-side mention search the workbench hands the inspector.
     mentionSearch: undefined as ((query: string) => Promise<{ items: unknown[]; requiresQuery: boolean; hasMore: boolean }>) | undefined,
+    // The attachment upload / delete the workbench hands the inspector (they hold the grid's undo).
+    uploadFn: undefined as ((file: File, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
+    deleteAttachmentFn: undefined as ((attachmentId: string, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
   },
   gridStubSeen: {
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
@@ -129,6 +132,8 @@ function createDeferred<T = void>() {
 
 let workbenchMock: any
 let gridMock: any
+// The options the workbench created its grid with (e.g. `holdsHistory`).
+let gridOptions: any
 let loadCommentsSpy: ReturnType<typeof vi.fn>
 let addCommentSpy: ReturnType<typeof vi.fn>
 let resolveCommentSpy: ReturnType<typeof vi.fn>
@@ -141,7 +146,10 @@ vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
 }))
 
 vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
-  useMultitableGrid: () => gridMock,
+  useMultitableGrid: (options: unknown) => {
+    gridOptions = options
+    return gridMock
+  },
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
@@ -585,6 +593,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
       mentionSearch: { type: Function, default: undefined },
+      uploadFn: { type: Function, default: undefined },
+      deleteAttachmentFn: { type: Function, default: undefined },
       // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
       // binding arrives as a typed prop and is rendered below as the same `[data-test=
       // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
@@ -626,6 +636,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
       inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
       inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
+      inspectorStubSeen.uploadFn = this.$props.uploadFn as typeof inspectorStubSeen.uploadFn
+      inspectorStubSeen.deleteAttachmentFn = this.$props.deleteAttachmentFn as typeof inspectorStubSeen.deleteAttachmentFn
       if (inspectorStubRealComments.realInspector) {
         // #5813: stays mounted while hidden, like the real shell at the workbench call site.
         const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
@@ -1445,6 +1457,9 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubSeen.renders = 0
     inspectorStubSeen.fieldLayout = undefined
     inspectorStubSeen.fetchRecord = undefined
+    inspectorStubSeen.uploadFn = undefined
+    inspectorStubSeen.deleteAttachmentFn = undefined
+    gridOptions = undefined
     inspectorStubRealComments.enabled = false
     inspectorStubRealComments.realInspector = false
     gridStubSeen.fetchRecord = undefined
@@ -6332,6 +6347,122 @@ describe('MultitableWorkbench view wiring', () => {
       edit(g.el, 'saved more')
       expect(key(g.el, z)).toBe('restored')
       expect(g.el.value).toBe('saved')
+      // a key that changes nothing between an undo made in flight and a redo, before or after the
+      // server accepted: still no step back past the commit
+      const noop = (el: HTMLElement) => el.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }), { inputType: 'deleteContentBackward' }))
+      for (const when of ['before the accept', 'after the accept']) {
+        const q = box()
+        edit(q.el, 'X')
+        pause(2000)
+        edit(q.el, 'XY')
+        const settleQ = undo.beginCommit([q.row])
+        expect(key(q.el, z), when).toBe('restored')
+        expect(q.el.value).toBe('X')
+        if (when === 'after the accept') settleQ()
+        noop(q.el)
+        expect(key(q.el, shiftZ), when).toBe('restored')
+        expect(q.el.value).toBe('XY')
+        if (when === 'before the accept') settleQ()
+        expect(key(q.el, z), when).toBe('swallow')
+        expect(q.el.value, when).toBe('XY')
+      }
+      // two such keys apart (each its own step) between an undo in flight and a redo, and two before a commit
+      const t = box()
+      edit(t.el, 'X')
+      pause(2000)
+      edit(t.el, 'XY')
+      const settleT = undo.beginCommit([t.row])
+      expect(key(t.el, z)).toBe('restored')
+      noop(t.el)
+      pause(2000)
+      noop(t.el)
+      expect(key(t.el, shiftZ)).toBe('restored')
+      settleT()
+      expect(key(t.el, z)).toBe('swallow')
+      expect(t.el.value).toBe('XY')
+      const u = box()
+      edit(u.el, 'X')
+      pause(2000)
+      edit(u.el, 'XY')
+      expect(key(u.el, z)).toBe('restored')
+      noop(u.el)
+      pause(2000)
+      noop(u.el)
+      const settleU = undo.beginCommit([u.row])
+      expect(key(u.el, shiftZ)).toBe('restored')
+      settleU()
+      expect(key(u.el, z)).toBe('restored')
+      expect(u.el.value).toBe('X')
+      // undo, a key that changes nothing, then the commit (of what the box shows), then a redo in flight:
+      // the redo is an edit since the commit, undoable back to the committed text
+      const m = box()
+      edit(m.el, 'X')
+      pause(2000)
+      edit(m.el, 'XY')
+      expect(key(m.el, z)).toBe('restored')
+      noop(m.el)
+      const settleM = undo.beginCommit([m.row])
+      expect(key(m.el, shiftZ)).toBe('restored')
+      expect(m.el.value).toBe('XY')
+      settleM()
+      expect(key(m.el, z)).toBe('restored')
+      expect(m.el.value).toBe('X')
+      expect(key(m.el, z)).toBe('swallow')
+      // two undos, that key, a redo, the commit, then a redo in flight: the same
+      const n = box()
+      edit(n.el, 'X')
+      pause(2000)
+      edit(n.el, 'XY')
+      expect(key(n.el, z)).toBe('restored')
+      expect(key(n.el, z)).toBe('restored')
+      expect(n.el.value).toBe('')
+      noop(n.el)
+      expect(key(n.el, shiftZ)).toBe('restored')
+      expect(n.el.value).toBe('X')
+      const settleN = undo.beginCommit([n.row])
+      expect(key(n.el, shiftZ)).toBe('restored')
+      expect(n.el.value).toBe('XY')
+      settleN()
+      expect(key(n.el, z)).toBe('restored')
+      expect(n.el.value).toBe('X')
+      expect(key(n.el, z)).toBe('swallow')
+      expect(n.el.value).toBe('X')
+      // typed, deleted, typed again (each its own step): an undo drops nothing, each one goes back one step
+      const k1 = box()
+      edit(k1.el, 'a')
+      edit(k1.el, '', 'deleteContentBackward')
+      edit(k1.el, 'a')
+      for (const expected of ['', 'a', '']) {
+        expect(key(k1.el, z)).toBe('restored')
+        expect(k1.el.value).toBe(expected)
+      }
+      expect(key(k1.el, z)).toBe('swallow')
+      // a redo after a key that changed nothing drops that step only: the steps below it stay
+      const k2 = box()
+      edit(k2.el, 'a')
+      pause(2000)
+      edit(k2.el, 'ab')
+      pause(2000)
+      edit(k2.el, 'abc')
+      expect(key(k2.el, z)).toBe('restored')
+      noop(k2.el)
+      expect(key(k2.el, shiftZ)).toBe('restored')
+      expect(k2.el.value).toBe('abc')
+      for (const expected of ['ab', 'a', '']) {
+        expect(key(k2.el, z)).toBe('restored')
+        expect(k2.el.value).toBe(expected)
+      }
+      expect(key(k2.el, z)).toBe('swallow')
+      // the same at a commit that is then rejected (never settled): the steps below it stay
+      const k3 = box()
+      edit(k3.el, 'a')
+      pause(2000)
+      edit(k3.el, 'ab')
+      expect(key(k3.el, z)).toBe('restored')
+      noop(k3.el)
+      undo.beginCommit([k3.row])
+      expect(key(k3.el, z)).toBe('restored')
+      expect(k3.el.value).toBe('')
     })
 
     it('reset drops every control\'s history (the drawer showing another record reuses its controls, maybe with equal content)', () => {
@@ -6364,7 +6495,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(drawerCommitContainers('fld_missing', null)).toEqual([])
     })
 
-    it('isWorkbenchGridSurface: the grid itself and its cells, the drawer\'s title and fields; not a button, link, menu item or file input there (Send, Resolve, Delete selected, an upload), nor the grid\'s footer and bars or the drawer\'s other panels', () => {
+    it('isWorkbenchGridSurface: the grid itself and its cells, the drawer\'s title and fields; not a button, link, menu item or file input there, or anything inside one (an icon pressed on a focused button), nor the grid\'s footer and bars or the drawer\'s other panels', () => {
       const { add } = rig()
       const host = add(document.createElement('div'))
       host.innerHTML = `
@@ -6373,7 +6504,7 @@ describe('MultitableWorkbench view wiring', () => {
           <table><tbody><tr>
             <td class="meta-grid__check-col"><input data-k="row-check" type="checkbox"></td>
             <td class="meta-grid__cell" data-k="cell"><span data-k="cell-text">v</span></td>
-            <td class="meta-grid__cell"><input data-k="cell-editor"><input type="file" data-k="cell-file"><button data-k="cell-button">x</button></td>
+            <td class="meta-grid__cell"><input data-k="cell-editor"><input type="file" data-k="cell-file"><button data-k="cell-button"><span data-k="cell-button-icon">x</span></button></td>
           </tr></tbody><tfoot><tr><td class="meta-grid__foot-cell"><select data-k="foot-select"></select></td></tr></tfoot></table>
           <div class="meta-grid__pagination"><select data-k="page-size"></select></div>
         </div>
@@ -6384,8 +6515,10 @@ describe('MultitableWorkbench view wiring', () => {
           <div class="meta-record-drawer__body"><button role="tab" data-k="tab">Details</button>
             <div role="tabpanel" tabindex="0" data-k="details-panel">
               <div class="meta-record-drawer__fields"><div class="meta-record-drawer__field">
-                <input data-k="field"><textarea data-k="field-text"></textarea><select data-k="field-select"></select><button data-k="comment-anchor"></button>
-                <a href="#x" data-k="link">link</a><div role="menuitem" data-k="menuitem">m</div><div role="button" data-k="role-button">r</div>
+                <input data-k="field"><textarea data-k="field-text"></textarea><select data-k="field-select"></select>
+                <button data-k="comment-anchor"><span><svg viewBox="0 0 16 16"><path data-k="anchor-path" d="M0 0h16v16H0z"></path></svg></span></button>
+                <a href="#x" data-k="link"><span data-k="link-label">link</span></a><div role="menuitem" data-k="menuitem"><span data-k="menuitem-label">m</span></div>
+                <div role="button" data-k="role-button"><span data-k="role-button-label">r</span></div>
                 <input type="file" data-k="field-file">
               </div></div>
               <div class="meta-record-approval-panel"><span data-k="approval">x</span></div>
@@ -6398,8 +6531,9 @@ describe('MultitableWorkbench view wiring', () => {
       expect(isWorkbenchGridSurface(at('cell-text').firstChild!), 'a text node').toBe(true)
       for (const k of ['grid', 'cell', 'cell-text', 'cell-editor', 'title', 'field', 'field-text', 'field-select']) expect(isWorkbenchGridSurface(at(k)), k).toBe(true)
       for (const k of [
-        'bulk-delete', 'bulk-delete-label', 'row-check', 'cell-file', 'cell-button', 'foot-select', 'page-size',
-        'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'link', 'menuitem', 'role-button', 'field-file', 'approval',
+        'bulk-delete', 'bulk-delete-label', 'row-check', 'cell-file', 'cell-button', 'cell-button-icon', 'foot-select', 'page-size',
+        'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'anchor-path', 'link', 'link-label', 'menuitem', 'menuitem-label',
+        'role-button', 'role-button-label', 'field-file', 'approval',
         'comments-panel', 'composer', 'send', 'file', 'drop-zone', 'remove',
       ]) {
         expect(isWorkbenchGridSurface(at(k)), k).toBe(false)
@@ -6624,6 +6758,61 @@ describe('MultitableWorkbench view wiring', () => {
           expect(fire(document.body, { key: 'z', metaKey: true }), el.textContent || el.tagName).toEqual({ prevented: true, undo: 0, redo: 0 })
           expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         }
+      })
+      it('an attachment upload or delete holds the grid\'s undo and redo until it settles, also when it fails (its patch comes only once it is done)', async () => {
+        mountWorkbench()
+        await flushUi()
+        const held = () => gridOptions.holdsHistory()
+        expect(typeof inspectorStubSeen.uploadFn).toBe('function')
+        expect(typeof inspectorStubSeen.deleteAttachmentFn).toBe('function')
+        expect(held()).toBe(false)
+        const context = { recordId: 'rec_1', fieldId: 'fld_files' }
+        // upload: held while the request is out; released when it lands
+        const upload = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn(() => upload.promise)
+        const uploading = inspectorStubSeen.uploadFn!(new File(['x'], 'a.txt'), context)
+        expect(held()).toBe(true)
+        upload.resolve({ id: 'att_1' })
+        await expect(uploading).resolves.toEqual({ id: 'att_1' })
+        expect(held()).toBe(false)
+        // an upload that fails releases it too
+        const failing = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn(() => failing.promise)
+        const failed = inspectorStubSeen.uploadFn!(new File(['x'], 'b.txt'), context)
+        expect(held()).toBe(true)
+        failing.reject(new Error('upload failed'))
+        await expect(failed).rejects.toThrow('upload failed')
+        expect(held()).toBe(false)
+        // two at once: held until both are done
+        const first = createDeferred<unknown>()
+        const second = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+        const one = inspectorStubSeen.uploadFn!(new File(['x'], 'c.txt'), context)
+        const two = inspectorStubSeen.uploadFn!(new File(['x'], 'd.txt'), context)
+        first.resolve({ id: 'att_c' })
+        await one
+        expect(held()).toBe(true)
+        second.resolve({ id: 'att_d' })
+        await two
+        expect(held()).toBe(false)
+        // delete: held through the request and the reload after it
+        const removal = createDeferred<unknown>()
+        const reload = createDeferred<void>()
+        workbenchMock.client.deleteAttachment = vi.fn(() => removal.promise)
+        gridMock.loadViewData = vi.fn(() => reload.promise)
+        const deleting = inspectorStubSeen.deleteAttachmentFn!('att_1', context)
+        expect(held()).toBe(true)
+        removal.resolve({ deleted: 'att_1' })
+        await flushUi()
+        expect(gridMock.loadViewData).toHaveBeenCalledTimes(1)
+        expect(held()).toBe(true)
+        reload.resolve()
+        await deleting
+        expect(held()).toBe(false)
+        // a delete that fails releases it too
+        workbenchMock.client.deleteAttachment = vi.fn(() => Promise.reject(new Error('delete failed')))
+        await expect(inspectorStubSeen.deleteAttachmentFn!('att_2', context)).rejects.toThrow('delete failed')
+        expect(held()).toBe(false)
       })
 
       it('wiring: a local refusal (the row cannot be edited; no server answer) is not a commit: the typing stays undoable', async () => {
