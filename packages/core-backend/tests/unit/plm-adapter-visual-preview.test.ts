@@ -71,6 +71,13 @@ describe('PLM visual-preview signed transport', () => {
     expect(redis.consume).toHaveBeenCalledWith(expect.stringMatching(/^plm-visual-preview:jti:/), 120)
   })
 
+  it.each([{ org_id: 'O2' }, { org_id: undefined }])('rejects an embed token outside the served org (%o) before provider I/O', async (override) => {
+    const token = jwt({ ...embedClaims, ...override, jti: `org-${String(override.org_id)}` })
+    expect((await adapter().listVisualPreviewFiles(token)).error).toBeDefined()
+    expect(await adapter().getVisualPreviewImage(token, 'F1', 'V1', origin)).toEqual({ render: 'unavailable' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it.each([undefined, false, 'true', 1])('source gate %s fails before outbound work', async (enabled) => {
     const a = adapter(enabled === undefined ? null : enabled)
     expect((await a.listVisualPreviewFiles(embedToken)).error).toBeDefined()

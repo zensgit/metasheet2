@@ -40,6 +40,7 @@ function mint(overrides: Record<string, unknown> = {}, kid = KID): string {
   const claims = {
     sub: '7',
     tenant_id: 'default',
+    org_id: 'org-1',
     part_id: 'P1',
     feature_key: 'bom_multitable',
     aud: AUD,
@@ -89,6 +90,7 @@ function fullAdapter(opts: {
   getDiscussionsWithReadToken?: ReturnType<typeof vi.fn>
   getDiscussionThreadWithReadToken?: ReturnType<typeof vi.fn>
   tenant?: string | undefined
+  org?: string | undefined
   connected?: boolean
   connect?: ReturnType<typeof vi.fn>
 } = {}) {
@@ -97,6 +99,7 @@ function fullAdapter(opts: {
     getDiscussionsWithReadToken: opts.getDiscussionsWithReadToken ?? vi.fn().mockResolvedValue({ data: [THREADS_LIST], metadata: { totalCount: 1 } }),
     getDiscussionThreadWithReadToken: opts.getDiscussionThreadWithReadToken ?? vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } }),
     getEffectiveTenantId: () => ('tenant' in opts ? opts.tenant : 'default'),
+    getEffectiveOrgId: () => ('org' in opts ? opts.org : 'org-1'),
     isConnected: () => opts.connected ?? true,
     connect: opts.connect ?? vi.fn().mockResolvedValue(undefined),
   }
@@ -340,6 +343,28 @@ describe('PLM embed discussion READ relay (Discussion read-auth line, sub-slice 
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(exchangeDiscussionReadSession).not.toHaveBeenCalled()
+  })
+
+  it.each([{ org_id: 'org-b' }, { org_id: undefined }])('token org outside the served org (%o) -> 403 before jti or exchange', async (claims) => {
+    const exchangeDiscussionReadSession = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionReadSession }))
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint(claims))
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(jtiMocks.consume).not.toHaveBeenCalled()
+    expect(exchangeDiscussionReadSession).not.toHaveBeenCalled()
+  })
+
+  it('a served org that is missing or ambiguous -> 403, jti never consumed', async () => {
+    const exchangeDiscussionReadSession = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ org: undefined, exchangeDiscussionReadSession }))
+    pinned.setApp(buildApp())
+    const res = await request(pinned.url()).get(THREADS_URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('EMBED_ORG_MISMATCH')
     expect(jtiMocks.consume).not.toHaveBeenCalled()
     expect(exchangeDiscussionReadSession).not.toHaveBeenCalled()
   })

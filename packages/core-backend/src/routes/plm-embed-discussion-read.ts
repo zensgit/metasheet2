@@ -26,7 +26,7 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
  * `consumeEmbedJti`/`embedJtiKey` from `../auth/embed-jti-store`, which is backed by the shared
  * Redis store -- so a jti consumed by a write call is unavailable to a read call and vice versa,
  * regardless of which file's guard code ran. No guard is weakened relative to the write relay: same
- * feature_key check, same origin allowlist, same data-source resolve+connect+tenant cross-check,
+ * feature_key check, same origin allowlist, same data-source resolve+connect+tenant/org cross-check,
  * same jti ttl/consume ordering (guards first, jti burned last, before any exchange/call).
  *
  * Unlike the write relay, the read credential exchange happens on EVERY GET, and the LIST route
@@ -56,9 +56,10 @@ interface PlmDiscussionReadAdapter {
   exchangeDiscussionReadSession(embedToken: string): Promise<QueryResult<DiscussionSessionCredential>>
   getDiscussionsWithReadToken(readToken: string, target: { targetType: string; targetId: string }): Promise<QueryResult<DiscussionThreadListResult>>
   getDiscussionThreadWithReadToken(readToken: string, threadId: string): Promise<QueryResult<DiscussionThreadDetail>>
-  // tenant/connect surface, same duck-type contract the write relay enforces
+  // tenant/org/connect surface, same duck-type contract the write relay enforces
   isVisualReviewEnabled?(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -69,13 +70,14 @@ function isPlmDiscussionReadAdapter(adapter: unknown): adapter is PlmDiscussionR
     && typeof a?.getDiscussionsWithReadToken === 'function'
     && typeof a?.getDiscussionThreadWithReadToken === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
 
 /**
  * Faithful copy of the write relay's `runEmbedWriteGuards` (feature_key -> embed_origin ->
- * data-source resolve -> connect -> tenant cross-check -> single-use jti consume), adapted to the
+ * data-source resolve -> connect -> tenant cross-check -> org cross-check -> single-use jti consume), adapted to the
  * read adapter duck-type. See the file docstring for why this is a copy rather than a shared
  * import. On failure it has already written the response and returns `null` -- callers must
  * return immediately without touching the response again.
@@ -123,6 +125,12 @@ async function runEmbedReadGuards(req: Request, res: Response): Promise<{ claims
   const servedTenantId = adapter.getEffectiveTenantId()
   if (!servedTenantId || claims.tenant_id !== servedTenantId) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
+    return null
+  }
+  // Same fail-closed org gate as the write relay, before the jti is consumed or the provider is called.
+  const servedOrgId = adapter.getEffectiveOrgId()
+  if (!servedOrgId || claims.org_id !== servedOrgId) {
+    res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH', message: 'token org does not match the embed data source org' } })
     return null
   }
 

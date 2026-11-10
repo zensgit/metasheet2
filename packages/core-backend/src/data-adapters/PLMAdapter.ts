@@ -2993,7 +2993,8 @@ export class PLMAdapter extends HTTPAdapter {
     const claims = verifyEmbedToken(token, { publicKeysByKid: embedPublicKeysByKid(), audience: embedAudience() })
     if (this.mockMode || this.apiMode !== 'yuantus' || !this.isVisualReviewEnabled(claims.tenant_id)
       || this.getEffectiveTenantId() !== claims.tenant_id
-      || !claims.tenant_id || claims.feature_key !== 'bom_multitable'
+      || this.getEffectiveOrgId() !== claims.org_id
+      || !claims.tenant_id || !claims.org_id || claims.feature_key !== 'bom_multitable'
       || typeof claims.embed_origin !== 'string' || !embedAllowedOrigins().includes(claims.embed_origin)
       || !Number.isSafeInteger(claims.exp) || claims.exp! <= Math.floor(Date.now() / 1000)) {
       throw new Error('Visual preview unavailable')
