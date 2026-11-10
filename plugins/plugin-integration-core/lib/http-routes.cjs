@@ -301,6 +301,22 @@ const ROUTES = [
   // only). The plan is persisted before the first cell write, the backfill is fill-blank only, a crash continues the
   // persisted plan. Every real run is owner gate ② per sheet. Audited under 088's `project_target_create`.
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch', 'stockPreparationProjectPullBatchInstall'],
+  // Batch-refresh step 6d-2a (S6-6; design §6.6; register R-91) — THE DOUBLED-SHEET REPAIR of one project sheet. All three
+  // stock-prep:admin; all three 404 after the gate, with zero IO, while the project-sheets switch or the repair switch
+  // (MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED, default OFF) is off — preview and reads included.
+  //   POST target/sheet-repair               `{ mode: preview | execute, recipe: retire_superseded_root_subtree |
+  //                                          restore_retired_rows, confirmProjectNo, componentHandle?, runId?,
+  //                                          planDigest?, approvalRef? }` (closed). An execute recomputes the preview
+  //                                          INSIDE the `sheet_repair` lease, requires the echoed digest, spends a
+  //                                          one-shot claim and backs every row up before the first fenced patch; it is
+  //                                          refused while the batch columns of the sheet are being installed. Every
+  //                                          real run is owner gate ② per sheet.
+  //   GET  target/sheet-repair/fills-report  which old row / copy pairs carry human fills and what the K2 carry could
+  //                                          do with each — values-free, audited before the answer.
+  //   GET  target/sheet-repair/runs          the values-free run list (the run ids a restore names).
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair', 'stockPreparationProjectSheetRepair'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report', 'stockPreparationProjectSheetRepairFillsReport'],
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs', 'stockPreparationProjectSheetRepairRuns'],
   // S3 (ADR §5; register R-37) — the O2(a) PROJECT-LEVEL COLUMNS and the PROJECT OVERVIEW (Q5). All
   // four 404 DISABLED after the gate while the switch is off. The GET / PATCH (OPERATE, as the ADR
   // writes them) are the ONLY surfaces that carry the three free texts (负责人 / 备注 / 计划完成) — the
@@ -576,6 +592,8 @@ const {
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   recoverStockPreparationExecution,
+  // Batch-refresh step 6d-2a (S6-6): the doubled-sheet repair's source read (preview, and in the lease for an execute).
+  readStockPreparationSheetRepairSource,
   STOCK_PREPARATION_SOURCE_CONTENT_DIGEST_PATTERN,
   stockPreparationSourceContentDigest,
   normalizeActionParameters,
@@ -606,6 +624,11 @@ const { manualPrefixRowsOf } = require('./stock-preparation-manual-rows.cjs')
 const { ensureStockPreparationFillView, ensureStockPreparationTodoView } = require('./stock-preparation-target-provisioning.cjs')
 const { assertHostFencedWriteSupported } = require('./stock-preparation-apply-writer.cjs')
 const { isHostWriteFenceError } = require('./stock-preparation-project-write-lock.cjs')
+// Batch-refresh step 6d-2a (S6-6; design §6.6; register R-91): the doubled-sheet repair library — the switch reader,
+// the retire / restore plans and digests, the run, the fills report (the routes below bind its server-held deps) — and the
+// writer's own logical -> physical field-id mapping for the four cells a repair writes.
+const stockPreparationSheetRepair = require('./stock-preparation-sheet-repair.cjs')
+const { __internals: { mapFieldName: stockPreparationPhysicalFieldIdOf } } = require('./stock-preparation-apply-writer.cjs')
 // 备料 batch identity — "物料创建日期(精确到小时)区分同一项目不同批次的物料". Pure and opt-in; see
 // stock-preparation-batch-identity.cjs for why the content-revision digest stays the default.
 const {
@@ -2420,6 +2443,11 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationRefreshExecutions',
   'stockPreparationRefreshExecutionRecover',
   'stockPreparationRefreshExecutionCloseUnverified',
+  // Batch-refresh step 6d-2a (S6-6, R-91): the doubled-sheet repair (preview / execute), its fills report and its run
+  // list — the repair library's, its ledger's and the lock's typed refusals answer as themselves.
+  'stockPreparationProjectSheetRepair',
+  'stockPreparationProjectSheetRepairFillsReport',
+  'stockPreparationProjectSheetRepairRuns',
   'stockPreparationAuditList',
   'stockPreparationSourceBindingGet',
   'stockPreparationSourceBindingSet',
@@ -4923,6 +4951,9 @@ function requireStockPreparationAudit() {
   const stockPreparationContinuationStore = services.stockPreparationContinuationStore || null
   // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger store, read only while the pull-batch switch is on.
   const stockPreparationPullBatchStore = services.stockPreparationPullBatchStore || null
+  // Batch-refresh step 6d-2a (migration 108; register R-91): the sheet-repair ledger (run rows with their backup, the
+  // one-shot claims), touched only while the repair switch is on.
+  const stockPreparationSheetRepairStore = services.stockPreparationSheetRepairStore || null
   // Batch-refresh step 4 PR-6: the governed-sheet probe the C6 multitable write-source is built with (index.cjs
   // builds it from the same stores). Absent => the write-source applies its not-wired rule (namespace objects 501).
   const stockPreparationGovernedSheetProbe = services.stockPreparationGovernedSheetProbe || null
@@ -6649,6 +6680,214 @@ function requireStockPreparationAudit() {
       pullBatchEnabled: pullBatchLanes.stockPrepPullBatchEnabled(),
       projectSheetsEnabled: stockPreparationProjectSheetsEnabled(process.env),
     })
+  }
+
+  // ── Batch-refresh step 6d-2a (S6-6; design §6.6; register R-91) — THE DOUBLED-SHEET REPAIR's server-held wiring. The
+  // library (lib/stock-preparation-sheet-repair.cjs) decides everything; these functions only bind it to this request.
+  //
+  // THE SWITCHES, each read PER REQUEST by its one reader: the project-sheets switch and the repair switch
+  // (MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED, exact 'true', default OFF). Either off => 404 before any IO — the
+  // whole repair surface (preview, fills report and run list included) is invisible.
+  function requireStockPreparationSheetRepairEnabled() {
+    requireProjectSheetsEnabled()
+    if (!stockPreparationSheetRepair.stockPrepSheetRepairWriteEnabled()) {
+      throw new HttpRouteError(404, stockPreparationSheetRepair.SHEET_REPAIR_ERROR_CODES.DISABLED, `the stock-preparation sheet repair is disabled on this deployment (${stockPreparationSheetRepair.STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV} is not 'true')`)
+    }
+  }
+  function requireStockPreparationSheetRepairStore() {
+    const store = stockPreparationSheetRepairStore
+    for (const method of ['probeReadable', 'listRunsOf', 'listRuns', 'readRun', 'readClaim', 'beginRun', 'finishRun']) {
+      if (!store || typeof store[method] !== 'function') {
+        throw new HttpRouteError(501, stockPreparationSheetRepair.SHEET_REPAIR_ERROR_CODES.UNAVAILABLE, 'the sheet-repair ledger is not wired on this server; nothing was done', { field: 'store', partial: false })
+      }
+    }
+    return store
+  }
+  /**
+   * The guard chain every repair route runs AFTER its gate, its switches and its closed input (all pure): the project
+   * number (and, for the POST, its typed repetition) -> services, each refused 501 by name (the audit store with its
+   * in-transaction append, the registry, the write lock with its holder assert, the refresh governance, the repair
+   * ledger) -> the host-vouched operator scope (a tenantless platform admin is refused) -> the audit vocabulary -> the
+   * registry row (ABSENT / ARCHIVED 409) -> the WRITE target, walled to the tenant, a project sheet and the registry's
+   * own -> the ledger probe (503 without migration 108). Never echoes the project number.
+   */
+  async function stockPreparationSheetRepairContext(req, user, { confirmProjectNo = null } = {}) {
+    const codes = stockPreparationSheetRepair.SHEET_REPAIR_ERROR_CODES
+    const audits = stockPreparationSheetRepair.SHEET_REPAIR_AUDIT
+    const projectNo = firstString(requestParams(req).projectNo)
+    if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+    }
+    if (confirmProjectNo !== null && confirmProjectNo !== projectNo) {
+      throw new HttpRouteError(409, codes.CONFIRM_MISMATCH, 'confirmProjectNo must repeat the project number of the path exactly', { field: 'confirmProjectNo' })
+    }
+    const audit = requireStockPreparationAudit()
+    if (typeof audit.appendWithin !== 'function') {
+      throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store cannot write inside the repair transactions; nothing is repaired without its audit rows')
+    }
+    const registry = requireStockPreparationProjectTargets()
+    const lock = requireStockPreparationProjectWriteLock()
+    if (typeof lock.assertHolderWithin !== 'function') {
+      throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet write lock offers no in-transaction holder assert; nothing is repaired without it', { reason: 'holder_within' })
+    }
+    requireStockPreparationRefreshServices()
+    const store = requireStockPreparationSheetRepairStore()
+    const scope = await resolveOperatorValueScope({
+      user,
+      authenticatedTenantId: req.authenticatedTenantId,
+      explicitTenantIds: collectExplicitTenantIds(req, {}),
+      tenantPrincipalDirectory,
+    })
+    const tenantId = scope.tenantId
+    await requireStockPreparationAuditVocabulary(audit, audits.readAction, audits.readMigration, tenantId)
+    await requireStockPreparationAuditVocabulary(audit, audits.writeAction, audits.writeMigration, tenantId)
+    const registryRow = await registry.get({ tenantId, projectNo })
+    if (!registryRow) {
+      throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'this project has no registered stock-preparation sheet in your tenant', { field: 'projectNo' })
+    }
+    if (registryRow.status === 'archived') {
+      throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNo' })
+    }
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+      tenantId,
+      workspaceId: null,
+      actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+      projectNo,
+      targetPurpose: 'write',
+    }))
+    await assertResolvedProjectTargetTenancy(action, tenantId)
+    if (!action.target || action.target.objectId !== registryRow.objectId || action.target.sheetId !== registryRow.sheetId || !isPlmLockTargetObjectId(action.target.objectId)) {
+      throw new HttpRouteError(409, codes.OBJECT_REFUSED, 'only this project\'s registered stock-preparation sheet can be repaired', { field: 'projectNo' })
+    }
+    await store.probeReadable()
+    return { tenantId, projectNo, action, actor: user.id || user.email, tenantClaimVerified: scope.tenantClaimVerified === true }
+  }
+  // The project's rows as every reader reads them: the project-scoped read with the batch band stripped (a repair never
+  // sees, hashes or writes a band cell — ruling C7).
+  function sheetRepairRowsReaderFor({ tenantId, projectNo, action }) {
+    const band = pullBatchBandFor(tenantId, action.target)
+    return () => tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo, { pullBatchBand: band })
+  }
+  function sheetRepairReadAuditFor({ tenantId, actor, tenantClaimVerified }) {
+    const audit = requireStockPreparationAudit()
+    return (entry) => audit.append({
+      tenantId,
+      action: stockPreparationSheetRepair.SHEET_REPAIR_AUDIT.readAction,
+      actor,
+      mode: entry.mode,
+      detail: { ...entry.detail, tenantClaimVerified },
+    })
+  }
+  // The fenced repair patch — the pull-batch install's `pullBatchFencedPatchFor` pattern (rebaseline B-18: no second
+  // fenced-patch runner): the host must honour the write fence (checked once, the writer's own assert), then per patch
+  // the pre-write holder CAS and the host-write bracket; a host fence refusal becomes the guard's own fence error. Unlike
+  // the install's, it has NO unfenced branch and NO unversioned one: a repair patch always carries the lease's fence and
+  // the version the row was planned at.
+  function sheetRepairFencedPatchFor(target, guard) {
+    const recordsApi = getMultitableRecordsApi()
+    if (!guard || typeof guard.beforeWrite !== 'function') {
+      throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet repair requires the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
+    }
+    assertHostFencedWriteSupported(recordsApi, guard)
+    return async ({ recordId, changes, expectedVersion }) => {
+      if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        throw new HttpRouteError(500, stockPreparationSheetRepair.SHEET_REPAIR_ERROR_CODES.UNAVAILABLE, 'a sheet-repair patch must name the version it was planned at; nothing was written', { field: 'expectedVersion', partial: false })
+      }
+      await guard.beforeWrite({ operation: 'patchRecord', decision: 'sheet_repair' })
+      try {
+        return await guard.withHostWrite(() => recordsApi.patchRecord({ sheetId: target.sheetId, recordId, changes, expectedVersion, writeFence: guard.hostWriteFence() }))
+      } catch (error) {
+        if (isHostWriteFenceError(error)) throw await guard.hostFenceRefused(error)
+        throw error
+      }
+    }
+  }
+  /**
+   * The repair's server-held deps, built per request. Nothing guard-bound is built eagerly: the fenced patch, the holder
+   * assert and the in-lease source read are FACTORIES the library calls inside the lease. The source read of a retire is
+   * the pull's own (B2a authorization, the source adapter, the governance consult) — for a preview without a guard, for
+   * an execute inside the `sheet_repair` lease. 批次标识 (rebaseline B-6 / B-9): the `installing` gate reads the pull-batch
+   * ledger ONLY while that switch is on; off, the dep is absent and the ledger is never read.
+   */
+  function sheetRepairDepsFor(req, ctx) {
+    const { tenantId, projectNo, action, actor, tenantClaimVerified } = ctx
+    const lock = requireStockPreparationProjectWriteLock()
+    const audit = requireStockPreparationAudit()
+    const audits = stockPreparationSheetRepair.SHEET_REPAIR_AUDIT
+    const target = action.target
+    const scope = { tenantId, sheetId: target.sheetId, projectNo }
+    const writeScope = sheetWriteScopeKey(target.sheetId)
+    const parameters = { projectNo }
+    const readRows = sheetRepairRowsReaderFor(ctx)
+    const pullBatchEnabled = pullBatchLanes.stockPrepPullBatchEnabled()
+    return {
+      scope,
+      actor,
+      store: requireStockPreparationSheetRepairStore(),
+      physicalFieldIds: Object.fromEntries(stockPreparationSheetRepair.SHEET_REPAIR_WRITE_FIELD_IDS.map((fieldId) => [fieldId, stockPreparationPhysicalFieldIdOf(fieldId, target.fieldIdMap)])),
+      ...(pullBatchEnabled ? {
+        installStateOf: async () => {
+          const state = await stockPreparationPullBatchStore.readSheetState(scope)
+          return { installing: Boolean(state && state.sheet && state.sheet.historyStatus === 'installing') }
+        },
+      } : {}),
+      readForRetire: async ({ guard } = {}) => {
+        const readRunId = b2aRunId('sheet-repair-read')
+        const authorized = await assertB2aStockPreparationReadAuthorized(action, parameters, {
+          req,
+          tenantScope: tenantId,
+          purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+          runId: readRunId,
+        })
+        const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: authorized.authorization })
+        return readStockPreparationSheetRepairSource({
+          action,
+          parameters,
+          tenantId,
+          sourceAdapter,
+          recordsApi: getMultitableRecordsApi(),
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          targetFieldExistence: targetFieldExistenceForTenant(tenantId),
+          extFieldMapping: stockPreparationExtFieldMapping,
+          policyStore: context.storage,
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: readRunId,
+          b2aSourceObjects: authorized.sourceObjects,
+          now: Date.now(),
+          refreshGovernance: refreshGovernanceFor(tenantId),
+          ...(guard ? { projectWriteGuard: guard } : {}),
+          // 批次标识 BI-1b: the band for the reader strip (the repair never stamps: no holder assert is bound here).
+          pullBatch: pullBatchContextFor(tenantId, target),
+        })
+      },
+      readForRestore: async () => {
+        const consult = await refreshGovernanceFor(tenantId).consult({ projectNo, sheetId: target.sheetId })
+        if (!isPlainObject(consult) || consult.ok !== true) {
+          throw new HttpRouteError(503, 'STOCK_PREP_REFRESH_STORE_FAILED', 'the refresh governance could not be read; nothing was restored', { store: 'governance', operation: 'consult', partial: false })
+        }
+        return { governed: consult.governed === true, rows: await readRows() }
+      },
+      assertNoLiveWriter: () => lock.assertNoLiveWriter(writeScope),
+      withLease: (runId, fn) => lock.withProjectWriteLease(writeScope, { purpose: stockPreparationSheetRepair.SHEET_REPAIR_LEASE_PURPOSE, runId, tenantId }, fn),
+      holderWithinFor: (guard) => (trx) => lock.assertHolderWithin(trx, guard.scopeKey, { leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch, reason: 'sheet_repair' }),
+      leaseOf: (guard) => ({ leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch }),
+      patchFor: (guard) => sheetRepairFencedPatchFor(target, guard),
+      bumpAfterRelease: () => lock.bumpGeneration(writeScope, { reason: stockPreparationSheetRepair.SHEET_REPAIR_GENERATION_REASON, tenantId }),
+      auditWithin: (trx, entry) => audit.appendWithin(trx, {
+        tenantId,
+        projectId: projectNo,
+        action: audits.writeAction,
+        subjectId: entry.subjectId,
+        mode: entry.mode,
+        actor,
+        detail: { ...entry.detail, tenantClaimVerified },
+      }),
+      auditRead: sheetRepairReadAuditFor(ctx),
+      newRunId: () => `${stockPreparationSheetRepair.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`,
+      logger: routeLogger,
+    }
   }
 
   // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
@@ -12104,6 +12343,46 @@ function requireStockPreparationAudit() {
       }
       if (enabled) await stockPreparationPullBatchStore.probeReadable()
       return sendOk(res, await pullBatchInstall.runPullBatchInstallRequest(pullBatchInstallDepsFor({ tenantId, projectNo, action, actor: user.id || user.email, enabled, registry }), requestBody(req)))
+    },
+
+    // Batch-refresh step 6d-2a (S6-6; design §6.6; register R-91) — THE DOUBLED-SHEET REPAIR (three handlers of their own;
+    // the logic is the repair library's). Every one: stock-prep:admin -> the project-sheets switch and the repair switch
+    // (404, zero IO) -> its closed input (pure) -> the shared guard chain (stockPreparationSheetRepairContext). A real run
+    // (`mode: execute`) is owner gate ② per sheet: the switch, the typed project, the echoed preview digest, an
+    // approvalRef and the one-shot claim; it is refused while the sheet's batch columns are being installed.
+    async stockPreparationProjectSheetRepair(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationSheetRepairEnabled()
+      const body = stockPreparationSheetRepair.normalizeSheetRepairBody(requestBody(req))
+      const ctx = await stockPreparationSheetRepairContext(req, user, { confirmProjectNo: body.confirmProjectNo })
+      return sendOk(res, await stockPreparationSheetRepair.runSheetRepairRequest(sheetRepairDepsFor(req, ctx), requestBody(req)))
+    },
+    // The fills report: the sheet only (no source read, no lease, no write), audited `project_board_read` /
+    // `sheet_fills_report_read` before the answer. Values-free: handles, closed tokens, booleans and counts.
+    async stockPreparationProjectSheetRepairFillsReport(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationSheetRepairEnabled()
+      const query = stockPreparationSheetRepair.normalizeFillsReportQuery(requestQuery(req))
+      const ctx = await stockPreparationSheetRepairContext(req, user)
+      return sendOk(res, await stockPreparationSheetRepair.readFillsReport({
+        scope: { tenantId: ctx.tenantId, sheetId: ctx.action.target.sheetId, projectNo: ctx.projectNo },
+        template: ctx.action.template,
+        installedFieldProperties: await resolveInstalledFieldProperties(req, ctx.action),
+        readRows: sheetRepairRowsReaderFor(ctx),
+        auditRead: sheetRepairReadAuditFor(ctx),
+      }, query))
+    },
+    // The run list: the ledger only, audited `project_board_read` / `sheet_repair_runs_read` before the answer.
+    async stockPreparationProjectSheetRepairRuns(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireStockPreparationSheetRepairEnabled()
+      stockPreparationSheetRepair.normalizeRunsQuery(requestQuery(req))
+      const ctx = await stockPreparationSheetRepairContext(req, user)
+      return sendOk(res, await stockPreparationSheetRepair.readRepairRuns({
+        scope: { tenantId: ctx.tenantId, sheetId: ctx.action.target.sheetId, projectNo: ctx.projectNo },
+        store: requireStockPreparationSheetRepairStore(),
+        auditRead: sheetRepairReadAuditFor(ctx),
+      }))
     },
 
     // ENABLE — set-once (NO unset: R-53 ②; a mistaken enable is an owner-approved runbook UPDATE, see

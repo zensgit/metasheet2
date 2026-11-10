@@ -398,6 +398,13 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'projectTarget.pullBatchSettingsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, expectedVersion: 0, firstPullBatchRule: 'material' } }),
   // 批次标识 BI-2 (R-65): the install's harmless mode — a dry-run (the gate is what the matrix proves).
   'projectTarget.pullBatchInstall': () => ({ params: { projectNo: PROJECT_NO }, body: { mode: 'dry_run', confirmProjectNo: PROJECT_NO } }),
+  // Batch-refresh step 6d-2a (S6-6; R-91): the doubled-sheet repair — its harmless mode (a preview that lists), the fills
+  // report and the run list. Well-formed shapes, so a 'pass' cell lands on the switch-off 404 (gate first, switches
+  // second) and never on a 400 that could mask the gate. Switches on, tier by tier, in
+  // stock-preparation-sheet-repair-routes.test.cjs (RR-01).
+  'projectTarget.sheetRepair': () => ({ params: { projectNo: PROJECT_NO }, body: { mode: 'preview', recipe: 'retire_superseded_root_subtree', confirmProjectNo: PROJECT_NO } }),
+  'projectTarget.sheetRepairFillsReport': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.sheetRepairRuns': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   // PR-4 (R-59): the six refresh routes. Well-formed shapes, so a 'pass' cell reaches the route's own answer
   // (an unconfigured action / no such hold on this bare mount) and never a 400 that could mask the gate.
   'refresh.holds': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
@@ -483,6 +490,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -530,6 +540,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -577,6 +590,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -624,6 +640,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -671,6 +690,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -718,6 +740,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -765,6 +790,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'pass',
     'projectTarget.pullBatchSettingsSet': 'pass',
     'projectTarget.pullBatchInstall': 'pass',
+    'projectTarget.sheetRepair': 'pass',
+    'projectTarget.sheetRepairFillsReport': 'pass',
+    'projectTarget.sheetRepairRuns': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -812,6 +840,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'pass',
     'projectTarget.pullBatchSettingsSet': 'pass',
     'projectTarget.pullBatchInstall': 'pass',
+    'projectTarget.sheetRepair': 'pass',
+    'projectTarget.sheetRepairFillsReport': 'pass',
+    'projectTarget.sheetRepairRuns': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -863,6 +894,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -910,6 +944,9 @@ const MATRIX = Object.freeze({
     'pullBatch.settingsSet': 'gate',
     'projectTarget.pullBatchSettingsSet': 'gate',
     'projectTarget.pullBatchInstall': 'gate',
+    'projectTarget.sheetRepair': 'gate',
+    'projectTarget.sheetRepairFillsReport': 'gate',
+    'projectTarget.sheetRepairRuns': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -1549,6 +1586,13 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // projectTarget.pullBatchSettingsSet / pullBatch.settingsRead / pullBatch.settingsSet, their controls on the
       // settings panel of 数据来源与体检: the values decide what every future batch label of the tenant means.
       'stockPreparationProjectPullBatchSettingsSet',
+      // Batch-refresh step 6d-2a (R-91, design §6.6): the doubled-sheet REPAIR (preview / execute — a real run is owner
+      // gate ② per sheet), its values-free fills report and its run list — manifest members projectTarget.sheetRepair /
+      // .sheetRepairFillsReport / .sheetRepairRuns (control: null — a repair has no web control). All three are 404
+      // while the repair switch is off.
+      'stockPreparationProjectSheetRepair',
+      'stockPreparationProjectSheetRepairFillsReport',
+      'stockPreparationProjectSheetRepairRuns',
       'stockPreparationPullBatchSettingsGet',
       'stockPreparationPullBatchSettingsSet',
       // Batch-refresh step 6a-2 (R-91, design §3.8): close-unverified — the runbook escape that closes an unfinished
@@ -1556,7 +1600,7 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // resultUnknown acknowledgement) — manifest member refresh.closeUnverified (control: null until S6-3's card).
       'stockPreparationRefreshExecutionCloseUnverified',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install, the three pull-batch settings handlers and close-unverified',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install, the three pull-batch settings handlers, the three sheet-repair handlers and close-unverified',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -2006,6 +2050,10 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectTarget.pullBatchSettingsSet',
   // 批次标识 BI-2 (R-65): the per-sheet install resolves the host-vouched operator scope too.
   'projectTarget.pullBatchInstall',
+  // Batch-refresh step 6d-2a (R-91): the three doubled-sheet repair routes resolve the host-vouched operator scope too.
+  'projectTarget.sheetRepair',
+  'projectTarget.sheetRepairFillsReport',
+  'projectTarget.sheetRepairRuns',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.
