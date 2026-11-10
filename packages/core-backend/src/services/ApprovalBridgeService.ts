@@ -1132,8 +1132,9 @@ export class ApprovalBridgeService {
       })
       dto.canDecideCurrentNode = canDecideCurrentNode
       // Process-evidence (过程附件) uploader affordance: the seat answer above, restricted to the
-      // seat-gated door. `canDecideCurrentNode` alone is `true` on a pending instance with no seat
-      // gate (legacy platform row, `plm:` mirror), where nothing binds process evidence — see the
+      // seat-gated door. `canDecideCurrentNode` is `true` on a pending non-PLM instance with no seat
+      // gate (legacy platform row, after-sales). A PLM mirror is `false` because the bridge refuses
+      // it, and nothing binds process evidence on either of those rows — see the
       // field's doc in `approval-bridge-types.ts`. Two existing exports composed, no new predicate.
       // THIS is the builder `GET /api/approvals/:id` serves; `ApprovalProductService.getApproval`
       // builds the action / create responses and carries the identical expression.

@@ -71,11 +71,12 @@ export interface UnifiedApprovalDTO {
    * so the client renders rather than re-derives and cannot drift from the server's answer.
    *
    * `false` when the instance is not pending, when the viewer holds no matching active seat at a
-   * decidable node key, and when no viewer identity was supplied. `true` for a pending instance
-   * whose decisions do NOT go through the seat-gated door (a legacy platform row with no published
-   * definition, a `plm:` mirror, an after-sales row): those dispatches do not gate on assignments,
-   * so `false` would hide controls the server accepts — and `true` is what those surfaces already
-   * do today.
+   * decidable node key, when no viewer identity was supplied, and when the instance is a PLM
+   * mirror (`id` starts with `plm:` or `source_system === 'plm'`). The bridge refuses those
+   * decisions, so this field must not advertise one. `true` for a pending non-PLM instance whose
+   * decisions do NOT go through the seat-gated door (a legacy platform row with no published
+   * definition, an after-sales row): those dispatches do not gate on assignments, so `false`
+   * would hide controls the server accepts.
    *
    * Presentation only — the 403 `APPROVAL_ASSIGNMENT_REQUIRED` remains the authority, and hiding a
    * button is never the guard. ABSENT means "this backend does not compute it" (an older server),
@@ -89,10 +90,11 @@ export interface UnifiedApprovalDTO {
    * `approval-seat-authorization.ts` — `decisionDoorIsSeatGated(instance)` AND
    * `resolveCanDecideCurrentNode(...)` — and nothing else.
    *
-   * WHY NOT `canDecideCurrentNode` ITSELF: that field reports `true` for a pending instance whose
-   * decisions do not go through the seat-gated door (a legacy platform row with no published
-   * definition, a `plm:` mirror, an after-sales row), because there is no seat predicate to mirror
-   * there. Process evidence is bound only by the template-runtime dispatch (the comment action's
+   * WHY NOT `canDecideCurrentNode` ITSELF: that field reports `true` for a pending non-PLM
+   * instance whose decisions do not go through the seat-gated door (a legacy platform row with no
+   * published definition, an after-sales row), because there is no seat predicate to mirror
+   * there. A PLM mirror is already `false` on that field. Process evidence is bound only by the
+   * template-runtime dispatch (the comment action's
    * `attachmentIds` rider), so on those instances an uploader would be an affordance nothing can
    * complete. The first conjunct removes exactly that case; the second is the door's own seat
    * answer, so USER seats, ROLE seats, delegated seats and the pending branch frontier of a
