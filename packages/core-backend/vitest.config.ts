@@ -84,6 +84,11 @@ export default defineConfig({
       // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
       'tests/integration/yida-host-connection-test-realdb.test.ts',
       'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // Permission lifecycle real-DB gate. Trust-off config; whole file in plugin-tests.yml runtime-db.
+      'tests/integration/permission-lifecycle-realdb.test.ts',
+      'tests/integration/permission-role-delete-realdb.test.ts',
+      // Real Chromium + HTTP + database; runs under its dedicated trust-off configuration.
+      'tests/integration/permission-browser-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -395,6 +400,19 @@ export default defineConfig({
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-capabilities-wiring.test.ts).
       'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Deprovision effect provider witness: the provider column migration (isolated schema:
+      // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
+      // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
+      // no-DB job cannot skip-green them, and wired as WHOLE FILES into the approval real-DB step
+      // in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
+      'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+      // Delivery worker deferral and lease headroom against real Postgres (requeue CAS, attempt
+      // restore, two-hour window, re-claimed rows never sent twice). DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/attendance-notification-defer.db.test.ts',
       // Real PostgreSQL x local HTTP harness feasibility for the Feishu integration: a database
       // transaction stays open while the Feishu transport talks to the local mock server, and nothing
       // leaves the loopback. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it,

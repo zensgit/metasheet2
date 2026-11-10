@@ -388,6 +388,16 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // the read also joins M-12 below.
   'projectTarget.manualRowsRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'projectTarget.manualRowsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, policy: 'disabled' } }),
+  // 批次标识 BI-1b (R-65): the pull-batch status read.
+  'projectTarget.pullBatchRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  // 批次标识 BI-7 (R-65): the pull-batch settings read and the two writes (ADMIN). Well-formed bodies, so a 'pass' cell
+  // lands on the switch-off 404 SETTINGS_DISABLED (gate first, switches second) and never on a 400 that could mask the
+  // gate. Switches on, tier by tier, in stock-preparation-pull-batch-settings-routes.test.cjs (SR-02).
+  'pullBatch.settingsRead': () => ({ query: {} }),
+  'pullBatch.settingsSet': () => ({ body: { expectedVersion: 0, firstPullBatchRule: 'material' } }),
+  'projectTarget.pullBatchSettingsSet': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, expectedVersion: 0, firstPullBatchRule: 'material' } }),
+  // 批次标识 BI-2 (R-65): the install's harmless mode — a dry-run (the gate is what the matrix proves).
+  'projectTarget.pullBatchInstall': () => ({ params: { projectNo: PROJECT_NO }, body: { mode: 'dry_run', confirmProjectNo: PROJECT_NO } }),
   // PR-4 (R-59): the six refresh routes. Well-formed shapes, so a 'pass' cell reaches the route's own answer
   // (an unconfigured action / no such hold on this bare mount) and never a 400 that could mask the gate.
   'refresh.holds': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
@@ -401,6 +411,11 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'refresh.changePlan': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'refresh.changePlanConfirm': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, holdIds: ['hold_synthetic'], holdSetFingerprint: 'a'.repeat(64), planFingerprint: 'b'.repeat(64), sourceContentDigest: 'c'.repeat(32), readReceipt: 'e'.repeat(32) } }),
   'refresh.reviewComplete': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, changePlanId: 'chp_synthetic', contentDigest: 'd'.repeat(64), conclusion: 'handled', readReceipt: 'e'.repeat(32) } }),
+  // Step 6a-2 (S6-2; R-91): the recovery routes. Well-formed shapes (a 'pass' cell reaches the route's own answer on this
+  // bare mount — an unconfigured action / no such execution — never a 400 that could mask the gate).
+  'refresh.executions': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'refresh.recover': () => ({ params: { projectNo: PROJECT_NO, executionId: 'exec_synthetic' }, body: { confirmProjectNo: PROJECT_NO, mode: 'verify' } }),
+  'refresh.closeUnverified': () => ({ params: { projectNo: PROJECT_NO, executionId: 'exec_synthetic' }, body: { confirmProjectNo: PROJECT_NO, mode: 'inspect' } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -463,6 +478,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -472,6 +492,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -502,6 +525,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -511,6 +539,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -541,6 +572,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -550,6 +586,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -580,6 +619,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -589,6 +633,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -619,6 +666,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -628,6 +680,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -658,6 +713,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -667,6 +727,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -697,6 +760,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'pass',
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'pass',
+    'projectTarget.pullBatchRead': 'pass',
+    'pullBatch.settingsRead': 'pass',
+    'pullBatch.settingsSet': 'pass',
+    'projectTarget.pullBatchSettingsSet': 'pass',
+    'projectTarget.pullBatchInstall': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -706,6 +774,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'pass',
     'refresh.changePlanConfirm': 'pass',
     'refresh.reviewComplete': 'pass',
+    'refresh.executions': 'pass',
+    'refresh.recover': 'pass',
+    'refresh.closeUnverified': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -736,6 +807,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'pass',
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'pass',
+    'projectTarget.pullBatchRead': 'pass',
+    'pullBatch.settingsRead': 'pass',
+    'pullBatch.settingsSet': 'pass',
+    'projectTarget.pullBatchSettingsSet': 'pass',
+    'projectTarget.pullBatchInstall': 'pass',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -745,6 +821,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'pass',
     'refresh.changePlanConfirm': 'pass',
     'refresh.reviewComplete': 'pass',
+    'refresh.executions': 'pass',
+    'refresh.recover': 'pass',
+    'refresh.closeUnverified': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -779,6 +858,11 @@ const MATRIX = Object.freeze({
     // 人工补充行 B4 fix round 1 (OQ4): the 拉取人员 READS the switch and the last pull's reminder; only the SET is ADMIN.
     'projectTarget.manualRowsRead': 'pass',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'pass',
     'refresh.evidence': 'pass',
     'refresh.keep': 'pass',
@@ -788,6 +872,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'pass',
     'refresh.changePlanConfirm': 'pass',
     'refresh.reviewComplete': 'pass',
+    'refresh.executions': 'pass',
+    'refresh.recover': 'pass',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -818,6 +905,11 @@ const MATRIX = Object.freeze({
     'projectTarget.pilotEnable': 'gate',
     'projectTarget.manualRowsRead': 'gate',
     'projectTarget.manualRowsSet': 'gate',
+    'projectTarget.pullBatchRead': 'gate',
+    'pullBatch.settingsRead': 'gate',
+    'pullBatch.settingsSet': 'gate',
+    'projectTarget.pullBatchSettingsSet': 'gate',
+    'projectTarget.pullBatchInstall': 'gate',
     'refresh.holds': 'gate',
     'refresh.evidence': 'gate',
     'refresh.keep': 'gate',
@@ -827,6 +919,9 @@ const MATRIX = Object.freeze({
     'refresh.changePlan': 'gate',
     'refresh.changePlanConfirm': 'gate',
     'refresh.reviewComplete': 'gate',
+    'refresh.executions': 'gate',
+    'refresh.recover': 'gate',
+    'refresh.closeUnverified': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1294,10 +1389,13 @@ async function orphanOperateGrantConfersNothing() {
       'refresh.changePlan',
       'refresh.changePlanConfirm',
       'refresh.reviewComplete',
+      // Batch-refresh step 6a-2 (R-91): the puller lists the executions and recovers one (close-unverified stays ADMIN).
+      'refresh.executions',
+      'refresh.recover',
       // 人工补充行 B4 fix round 1 (OQ4): the puller reads the switch and the last pull's reminder (the SET stays ADMIN).
       'projectTarget.manualRowsRead',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore / .manualRowsRead, projectOverview.ensure, the six refresh routes and the three change-plan routes to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore / .manualRowsRead, projectOverview.ensure, the six refresh routes, the three change-plan routes and the two recovery routes to the operator tier',
   )
   // …and the floor operator holds none of the five (archive / restore are the 拉取人员's, Q2; the reminder is for the
   // people who pull, OQ4).
@@ -1439,8 +1537,26 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationProjectManualRowsSet',
       'stockPreparationProjectPilotEnable',
       'stockPreparationProjectPilotGet',
+      // 批次标识 BI-1b (R-65): READING one project sheet's pull-batch status (columns, ledger, row classes) — manifest
+      // member projectTarget.pullBatchRead (control: null until BI-3 / BI-7 render it).
+      'stockPreparationProjectPullBatchGet',
+      // 批次标识 BI-2 (R-65): the per-sheet pull-batch INSTALL (dry_run / install / abort; owner gate ② per sheet) — manifest
+      // member projectTarget.pullBatchInstall (control: null — no web install control, design §7.2).
+      'stockPreparationProjectPullBatchInstall',
+      // 批次标识 BI-7 (R-65; ruling C6): the pull-batch SETTINGS — one captured sheet's rule / format write (typed
+      // confirmation; refused once the sheet carries a batch label), the settings read (the tenant default and every
+      // registered sheet's captured values) and the tenant-default write. Manifest members
+      // projectTarget.pullBatchSettingsSet / pullBatch.settingsRead / pullBatch.settingsSet, their controls on the
+      // settings panel of 数据来源与体检: the values decide what every future batch label of the tenant means.
+      'stockPreparationProjectPullBatchSettingsSet',
+      'stockPreparationPullBatchSettingsGet',
+      'stockPreparationPullBatchSettingsSet',
+      // Batch-refresh step 6a-2 (R-91, design §3.8): close-unverified — the runbook escape that closes an unfinished
+      // execution with result `unknown` (inspect / close; typed project, inspect digest echo, ticket handle, the
+      // resultUnknown acknowledgement) — manifest member refresh.closeUnverified (control: null until S6-3's card).
+      'stockPreparationRefreshExecutionCloseUnverified',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET and the two pilot handlers',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install, the three pull-batch settings handlers and close-unverified',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1475,11 +1591,15 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       'stockPreparationRefreshContinuationConfirm',
       'stockPreparationRefreshContinuationEnd',
       'stockPreparationRefreshContinuationGet',
+      // Batch-refresh step 6a-2 (R-91, design §3.5 / §5.1): the executions list and the verify-and-close — the same
+      // shared context (the puller recovers with their own account, G1); manifest members refresh.executions / .recover.
+      'stockPreparationRefreshExecutionRecover',
+      'stockPreparationRefreshExecutions',
       'stockPreparationRefreshHoldEvidence',
       'stockPreparationRefreshHoldKeep',
       'stockPreparationRefreshHolds',
     ],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the manual-rows switch READ, the overview ensure, the six refresh routes and the three change-plan routes',
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers, the manual-rows switch READ, the overview ensure, the six refresh routes, the three change-plan routes and the two recovery routes',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1853,6 +1973,11 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'projectFields.update',
   'projectOverview.refresh',
   'projectOverview.ensure',
+  // Batch-refresh step 6a-2 (R-91): the executions list, the recovery and close-unverified share the refresh routes'
+  // decision context (the host-vouched operator scope at the PULL / ADMIN tier).
+  'refresh.executions',
+  'refresh.recover',
+  'refresh.closeUnverified',
   // PR-4 (R-59): the six refresh routes resolve the host-vouched operator scope at the PULL tier, before any
   // host work; a carried tenant is already refused with the door open.
   'refresh.holds',
@@ -1873,6 +1998,14 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   // so the door adds nothing to them.
   'projectTarget.manualRowsRead',
   'projectTarget.manualRowsSet',
+  // 批次标识 BI-1b (R-65): the pull-batch status read resolves the host-vouched operator scope too.
+  'projectTarget.pullBatchRead',
+  // 批次标识 BI-7 (R-65): the three pull-batch settings routes resolve the host-vouched operator scope too.
+  'pullBatch.settingsRead',
+  'pullBatch.settingsSet',
+  'projectTarget.pullBatchSettingsSet',
+  // 批次标识 BI-2 (R-65): the per-sheet install resolves the host-vouched operator scope too.
+  'projectTarget.pullBatchInstall',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.

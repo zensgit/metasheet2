@@ -2781,3 +2781,141 @@ describe('项目备料页 — the operator project board', () => {
     expect(navigateStageSpy).toHaveBeenCalledWith('getting-started')
   })
 })
+
+// ---- 批次标识 BI-3 (R-65; design §11, §5.5): the board's pull-batch line and meaning copy ----------------------
+//
+//   BOARD-PB-OFF    C6 — with the switch off the server sends no `pullBatch` key: no element, no 批次 words (and the
+//                   design's older `{ enabled: false }` shape reads the same).
+//   BOARD-PB-STATES one mount per §4.1 row: `data-pull-batch-state` and the zh line.
+//   BOARD-PB-RULE   the meaning copy follows the CAPTURED rule, exactly once; none for not_installed / unknown.
+// Synthetic only: labels 第2批（2026-11-08）, no real project, sheet or field id.
+
+describe('项目备料页 — 批次标识 lines (BI-3)', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
+    h.roles = []
+    routeApi()
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountWith(pullBatch: unknown): Promise<HTMLElement> {
+    routeApi({ board: () => ok(boardPayload(pullBatch === undefined ? {} : { pullBatch })) })
+    app = createApp(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: PROJECT_NO })
+    app.mount(container!)
+    await flush()
+    return container!
+  }
+
+  function unmount(): void {
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+  }
+
+  function stanza(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return { enabled: true, ready: true, latest: { label: '第2批（2026-11-08）', batchNo: 2 }, batchCount: 2, paused: null, firstPullBatchRule: 'material', ...overrides }
+  }
+
+  const PB_SELECTOR = '[data-testid^="stock-prep-project-board-pull-batch"]'
+
+  it('BOARD-PB-OFF: no pullBatch key (switch off) or { enabled: false } renders nothing and no 批次 words', async () => {
+    let root = await mountWith(undefined)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]'), 'the board rendered').not.toBeNull()
+    const offText = root.textContent ?? ''
+    expect(root.querySelectorAll(PB_SELECTOR).length).toBe(0)
+    expect(offText).not.toContain('首次批次')
+    expect(offText).not.toContain('批次标识')
+    expect(offText).not.toContain('拉取批次')
+    unmount()
+    root = await mountWith({ enabled: false })
+    expect(root.querySelectorAll(PB_SELECTOR).length).toBe(0)
+    expect(root.textContent ?? '', 'the older disabled shape: the same page').toBe(offText)
+    unmount()
+    root = await mountWith('true')
+    expect(root.querySelectorAll(PB_SELECTOR).length, 'a non-object reads as absent').toBe(0)
+  })
+
+  it('BOARD-PB-STATES: each §4.1 state renders its own line, a status line with no control', async () => {
+    const cases: Array<[Record<string, unknown>, string, string]> = [
+      [stanza(), 'ready', '最近拉取批次：第2批（2026-11-08） · 共 2 批'],
+      [stanza({ latest: null, batchCount: 0 }), 'ready', '批次标识已启用，还没有拉取批次；下一次有新增物料的拉取会记为一个新批次。'],
+      [{ enabled: true, ready: false, latest: null, batchCount: null, paused: 'not_installed' }, 'not_installed', '批次标识：未启用'],
+      [stanza({ ready: false, latest: null, batchCount: 0, paused: 'installing' }), 'installing', '批次标识安装中，暂停拉取'],
+      [stanza({ ready: false, paused: 'history_gap', gapRows: 3 }), 'gap', '批次标识暂停：有 3 行未登记批次，请联系管理员补登记'],
+      [stanza({ ready: false, paused: 'history_pending' }), 'pending', '批次标识尚未就绪：历史批次还没有登记完成'],
+      [{ enabled: true, ready: false, latest: null, batchCount: null, paused: 'columns_partial' }, 'partial', '批次标识异常：批次列不完整'],
+      [{ enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' }, 'unknown', '批次标识状态暂时读不到'],
+      [{ enabled: true, ready: false, latest: null, batchCount: null, paused: 'columns_unproven' }, 'unknown', '批次标识状态暂时读不到'],
+    ]
+    for (const [pullBatch, state, zh] of cases) {
+      const root = await mountWith(pullBatch)
+      const line = root.querySelectorAll('[data-testid="stock-prep-project-board-pull-batch"]')
+      expect(line.length, state).toBe(1)
+      expect(line[0].getAttribute('data-pull-batch-state')).toBe(state)
+      expect(line[0].getAttribute('role')).toBe('status')
+      expect(line[0].textContent ?? '').toContain(zh)
+      expect(line[0].querySelector('button, a'), 'no install control anywhere (P-7)').toBeNull()
+      unmount()
+    }
+  })
+
+  it('BOARD-PB-RULE: the meaning copy follows the captured rule exactly once; none where the columns are not there', async () => {
+    let root = await mountWith(stanza({ firstPullBatchRule: 'material' }))
+    let meaning = root.querySelectorAll('[data-testid="stock-prep-project-board-pull-batch-meaning"]')
+    expect(meaning.length).toBe(1)
+    expect(meaning[0].textContent).toContain('首次批次：这个物料在本项目第几批拉取时第一次出现；不表示这一行已经备过料。')
+    expect(meaning[0].textContent).toContain('本次拉取：这一行是在第几批拉取时建立的。')
+    expect(meaning[0].textContent).not.toContain('今天的「有效」状态')
+    expect((root.textContent ?? '').split('本次拉取：').length - 1, 'once on the page').toBe(1)
+    unmount()
+
+    root = await mountWith(stanza({ firstPullBatchRule: 'predecessor_suffix' }))
+    meaning = root.querySelectorAll('[data-testid="stock-prep-project-board-pull-batch-meaning"]')
+    expect(meaning.length).toBe(1)
+    expect(meaning[0].textContent).toContain('首次批次：这一位置的需求在本项目第几批拉取时第一次出现；不表示这一行已经备过料。')
+    expect(meaning[0].textContent).toContain('今天的「有效」状态')
+    expect(meaning[0].textContent, 'a rule-F sheet never reads rule-A copy').not.toContain('这个物料在本项目')
+    unmount()
+
+    // Absent rule (an older server, or no S-1): only the rule-independent sentence — never the 按物料 one.
+    root = await mountWith(stanza({ firstPullBatchRule: undefined }))
+    meaning = root.querySelectorAll('[data-testid="stock-prep-project-board-pull-batch-meaning"]')
+    expect(meaning.length).toBe(1)
+    expect(meaning[0].getAttribute('data-pull-batch-rule')).toBe('none')
+    expect(meaning[0].textContent?.trim()).toBe('本次拉取：这一行是在第几批拉取时建立的。')
+    unmount()
+
+    for (const pullBatch of [
+      { enabled: true, ready: false, latest: null, batchCount: null, paused: 'not_installed' },
+      { enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' },
+      { enabled: true, ready: false, latest: null, batchCount: null, paused: 'columns_partial' },
+    ]) {
+      root = await mountWith(pullBatch)
+      expect(root.querySelector('[data-testid="stock-prep-project-board-pull-batch"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-board-pull-batch-meaning"]'), String(pullBatch.paused)).toBeNull()
+      unmount()
+    }
+  })
+
+  it('BOARD-PB-EN: the en side renders the same state in English, the label verbatim', async () => {
+    h.locale = 'en'
+    const root = await mountWith(stanza({ latest: { label: 'Batch 2 (2026-11-08)', batchNo: 2 } }))
+    const line = root.querySelector('[data-testid="stock-prep-project-board-pull-batch"]')
+    expect(line?.textContent).toContain('Latest pull batch: Batch 2 (2026-11-08) · 2 in all')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-pull-batch-meaning"]')?.textContent).toContain('本次拉取 (this pull): the pull batch that created this row.')
+  })
+})

@@ -68,8 +68,15 @@ export const SYN_DRY_RUN_JOB_ID = 'syn-dry-run-job-0001'
  *                   (`content_change`); 「拉取待确认」's 「变更计划」 proposes it as one plan, and the confirm resolves it.
  *   governedReview —— PR-9: project A has NO hold and one WRITTEN change awaiting its review (two record pages of one
  *                   row each, confirmed by this actor); after the review the board says 已执行待核对 (the 「核对」 step).
+ *   governedRecovery —— 备料分批拉取第一期 step 6a-3 (S6-3, R-91): project A is a governed pilot whose last write did
+ *                   not finish (失败待恢复); 「拉取待确认」's recovery card lists ONE unfinished execution, its verify
+ *                   answers `mixed` with two pending rows, and the close (echoing the verify digest) leaves the project
+ *                   已执行待核对. The pull-batch switch is OFF here: no `batch` key anywhere (N-SWITCH).
+ *   pullBatch    —— 批次标识 BI-3 (R-65): `ready`, with the pull-batch switch ON — project A's board carries the
+ *                   `pullBatch` stanza (ready, latest 第2批（2026-11-08）, 2 batches, captured rule 按物料). Every other
+ *                   world's board sends NO `pullBatch` key (the switch-off shape), so their DOM is unchanged.
  */
-export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed' | 'governedChangePlan' | 'governedReview'
+export type StockPrepScenario = 'fresh' | 'ready' | 'readerOnly' | 'defaults500' | 'noProjects' | 'governed' | 'governedChangePlan' | 'governedReview' | 'governedRecovery' | 'pullBatch'
 
 export interface StockPrepRouteOptions {
   /**
@@ -351,6 +358,11 @@ function synBoard(projectNo: string, state: ScenarioState): Record<string, unkno
     // PR-7: the real server shape since PR-5 — `readProjectRefreshState`'s own values-free object. Every world is
     // `not_governed` (the board renders exactly as before) except the governed project of the `governed` world.
     refresh: synRefreshStanza(projectNo, state),
+    // 批次标识 BI-3: the board stanza exists ONLY while the switch is on (`readPullBatchBoardStanza`, status.cjs) — here
+    // only in the `pullBatch` world, on its one project. Synthetic label; the rule key is S-1's.
+    ...(state.pullBatchProjectNo === projectNo
+      ? { pullBatch: { enabled: true, ready: true, latest: { label: '第2批（2026-11-08）', batchNo: 2 }, batchCount: 2, paused: null, firstPullBatchRule: 'material' } }
+      : {}),
   }
 }
 
@@ -359,6 +371,12 @@ function synRefreshStanza(projectNo: string, state: ScenarioState): Record<strin
   const counts = (pending: number) => ({ pendingConfirm: pending, confirmable: pending, openExecutions: 0, pendingReviews: 0, continuations: 1 })
   if (state.governedProjectNo !== projectNo) {
     return { readable: true, status: 'not_governed', statusLabel: '未启用', governed: 'none', exportAllowed: true, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 } }
+  }
+  // S6-3: the last write did not finish; after the recovery close the project is written-not-checked.
+  if (state.recoveryPending) {
+    return state.recoveryClosed
+      ? { readable: true, status: 'executed_pending_settlement', statusLabel: '已执行待核对', governed: 'pilot', exportAllowed: false, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 0, pendingReviews: 0, continuations: 0 } }
+      : { readable: true, status: 'failed_pending_recovery', statusLabel: '失败待恢复', governed: 'pilot', exportAllowed: false, settled: false, counts: { pendingConfirm: 0, confirmable: 0, openExecutions: 1, pendingReviews: 0, continuations: 0 } }
   }
   // PR-9: a written change awaiting its review; after the review the project is written-not-checked (复核 ≠ 核对).
   if (state.reviewPlan) {
@@ -568,6 +586,62 @@ function synBodyProblem(body: Record<string, unknown>, allowed: string[], expect
   return null
 }
 
+// ── S6-3: the recovery card's three routes (execution-recovery.cjs `listExecutionsRead` / `recoveryReportOf` /
+// `pendingPageOf`, the store's close answer; every value synthetic, SYN-* only) ─────────────────────────────
+
+const SYN_EXECUTION_ID = 'syn-execution-0001'
+/** The closed allow-lists (http-routes.cjs `VALID_STOCK_PREPARATION_REFRESH_RECOVER_KEYS` / `…_CLOSE_UNVERIFIED_KEYS`). */
+const SYN_RECOVER_KEYS = ['tenantId', 'confirmProjectNo', 'mode', 'verifyDigest', 'pageCursor']
+const SYN_CLOSE_UNVERIFIED_KEYS = ['tenantId', 'confirmProjectNo', 'mode', 'inspectDigest', 'runbookRef', 'acknowledge']
+
+/** Each verify is a fresh in-lease recompute: a fresh digest (the close must echo the LAST one). */
+function synVerifyDigest(state: ScenarioState): string {
+  return String(state.recoveryVerifies % 10).repeat(64)
+}
+
+function synExecutionList(projectNo: string, state: ScenarioState): Record<string, unknown> {
+  if (state.governedProjectNo !== projectNo || !state.recoveryPending) return { items: [], nextCursor: null, total: 0 }
+  const item = {
+    id: SYN_EXECUTION_ID,
+    status: state.recoveryClosed ? 'verified_closed' : 'failed',
+    verifiedResult: state.recoveryClosed ? 'mixed' : null,
+    closedMode: state.recoveryClosed ? 'puller_verified' : null,
+    preCloseStatus: state.recoveryClosed ? 'failed' : null,
+    startedAt: '2026-11-09T00:00:00.000Z',
+    finishedAt: '2026-11-09T00:01:00.000Z',
+    verifiedAt: null,
+    plannedCounts: { add: 3 },
+    counts: { add: 1 },
+    written: 1,
+    attemptedWrites: 2,
+    abortCode: null,
+    errorCodes: ['WRITE_FAILED'],
+    binding: { continuationCount: 0, changePlanBound: false },
+    settlementSubject: true,
+    recoverable: !state.recoveryClosed,
+  }
+  return { items: [item], nextCursor: null, total: 1 }
+}
+
+function synRecoveryReport(state: ScenarioState): Record<string, unknown> {
+  const counts = { intended: 3, landed: 1, notLanded: 2, diverged: 0, duplicate: 0, vanished: 0, replaced: 0 }
+  const zero = { intended: 0, landed: 0, notLanded: 0, diverged: 0, duplicate: 0, vanished: 0, replaced: 0 }
+  return {
+    executionId: SYN_EXECUTION_ID,
+    preStatus: 'failed',
+    result: 'mixed',
+    counts,
+    byKind: { add: { ...counts }, update: { ...zero }, inactive: { ...zero } },
+    refusalReasons: [],
+    closeAdmissible: true,
+    remaining: { add: 2, update: 0, inactive: 0, manualConfirm: 0, suspended: false, holdCount: 0 },
+    settlesIfClosedNow: true,
+    changePlan: null,
+    pending: { total: 2, pageCount: 1 },
+    verifyDigest: synVerifyDigest(state),
+  }
+}
+
 /** PR-7: `GET …/refresh/holds` — page 1 (every hold's pair page 0) or one hold's pair page; the receipt accumulates. */
 function synHoldsPage(projectNo: string, url: URL, state: ScenarioState): Record<string, unknown> {
   const governed = state.governedProjectNo === projectNo
@@ -768,6 +842,12 @@ interface ScenarioState {
   reviewServed: number[]
   /** PR-9: a change plan was confirmed (governedChangePlan, after the confirm). */
   changePlanConfirmed: boolean
+  /** 批次标识 BI-3: the project whose board carries the pull-batch stanza (pullBatch world only; null = switch off). */
+  pullBatchProjectNo: string | null
+  /** S6-3: the governed project's last write did not finish (governedRecovery), whether it was closed, verify count. */
+  recoveryPending: boolean
+  recoveryClosed: boolean
+  recoveryVerifies: number
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -792,6 +872,10 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     reviewDone: false,
     reviewServed: [],
     changePlanConfirmed: false,
+    pullBatchProjectNo: null,
+    recoveryPending: false,
+    recoveryClosed: false,
+    recoveryVerifies: 0,
   }
 
   if (scenario === 'fresh') {
@@ -839,6 +923,18 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     return { ...base, projects: [], queueRows: [] }
   }
 
+  if (scenario === 'governedRecovery') {
+    return {
+      ...base,
+      projects: [
+        synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 0, heldLineCount: 0, readyLineCount: 1240 }),
+      ],
+      queueRows: [],
+      governedProjectNo: SYN_PROJECT_A,
+      recoveryPending: true,
+    }
+  }
+
   if (scenario === 'governedChangePlan' || scenario === 'governedReview') {
     return {
       ...base,
@@ -864,9 +960,10 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     }
   }
 
-  // ready
+  // ready (and pullBatch: the same world with the pull-batch switch on for project A)
   return {
     ...base,
+    pullBatchProjectNo: scenario === 'pullBatch' ? SYN_PROJECT_A : null,
     projects: [
       synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 3, heldLineCount: 0, readyLineCount: 1240 }),
       synProjectRow({ projectNo: SYN_PROJECT_B, projectName: SYN_PROJECT_B_NAME, pendingDecisionCount: 0, heldLineCount: 7, readyLineCount: 860 }),
@@ -1083,6 +1180,14 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
   },
   {
+    // 批次标识 BI-7 (R-65; ruling C6): 数据来源与体检's pull-batch settings panel reads its settings once on first render
+    // (stock-prep:admin). The acceptance deployment keeps STOCK_PREP_PULL_BATCH_ENABLED OFF, so the server answers the
+    // switch-off refusal with zero IO and the panel renders nothing. Its two POSTs never fire with the panel invisible.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -1128,6 +1233,8 @@ const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)
 /** PR-7: the puller's six routes under `…/projects/:projectNo/refresh/…` (PR-4). */
 // PR-9: plus the change plan's three (`change-plans/current`, `change-plans/confirm`, `change-reviews/complete`).
 const REFRESH_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/refresh\/(holds|holds\/([^/]+)\/(evidence|keep)|change-plans\/current|change-plans\/confirm|change-reviews\/complete|continuations\/confirm|continuations\/([^/]+)(\/end)?)$/
+/** S6-3: the recovery card's three routes (S6-2): the executions list, recover (verify / close), close-unverified. */
+const EXECUTIONS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/refresh\/executions(?:\/([^/]+)\/(recover|close-unverified))?$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
 function resolveResponder(method: string, path: string): Responder | null {
@@ -1140,6 +1247,55 @@ function resolveResponder(method: string, path: string): Responder | null {
     // the S3 project-fields pair included (GET is lazy — only after the sheet state said active/archived —
     // so the switch-off lanes never reach it; it is answered all the same).
     return ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
+  }
+  // S6-3: the recovery card. The list answers every world (empty outside governedRecovery — though the page reads it
+  // only while 失败待恢复); a verify / close checks its body against the closed allow-list and the typed number.
+  if (EXECUTIONS_PATTERN.test(path)) {
+    const match = EXECUTIONS_PATTERN.exec(path)!
+    const projectNo = decodeURIComponent(match[1])
+    if (method === 'GET' && !match[2]) {
+      return ({ route, state }) => json(route, 200, envelope(synExecutionList(projectNo, state)))
+    }
+    if (method === 'POST' && match[2] && match[3] === 'recover') {
+      return async ({ route, state }) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+        const problem = synBodyProblem(body, SYN_RECOVER_KEYS, { confirmProjectNo: projectNo })
+        if (problem || decodeURIComponent(match[2]) !== SYN_EXECUTION_ID || !state.recoveryPending || state.recoveryClosed) {
+          await json(route, problem ? 400 : 404, refusal(problem ? 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID' : 'STOCK_PREP_REFRESH_EXECUTION_NOT_FOUND'))
+          return
+        }
+        if (body.mode === 'verify') {
+          state.recoveryVerifies += 1
+          await json(route, 200, envelope({
+            operation: 'verify',
+            report: synRecoveryReport(state),
+            pending: {
+              pageIndex: 0,
+              entries: [
+                { decisionIndex: 1, kind: 'add', class: 'not_landed', componentCode: 'SYN-PART-0002', componentName: 'SYN-PART-NAME-0002', sourceGone: false },
+                { decisionIndex: 2, kind: 'add', class: 'not_landed', componentCode: 'SYN-PART-0003', componentName: 'SYN-PART-NAME-0003', sourceGone: true },
+              ],
+              nextCursor: null,
+            },
+          }))
+          return
+        }
+        if (body.mode === 'close' && body.verifyDigest === synVerifyDigest(state) && state.recoveryVerifies > 0) {
+          state.recoveryClosed = true
+          await json(route, 200, envelope({ operation: 'close', executionId: SYN_EXECUTION_ID, closed: true, closedMode: 'puller_verified', preStatus: 'failed', result: 'mixed', transparent: false, settlementSubject: true, continuationsConsumed: 0, changePlan: null, settled: false, decisionVersion: 5, generationBumped: true, nextStep: 'preview_again' }))
+          return
+        }
+        await json(route, 409, refusal('STOCK_PREP_REFRESH_RECOVERY_STALE'))
+      }
+    }
+    if (method === 'POST' && match[2] && match[3] === 'close-unverified') {
+      return async ({ route }) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+        const problem = synBodyProblem(body, SYN_CLOSE_UNVERIFIED_KEYS, { confirmProjectNo: projectNo })
+        // The acceptance actors never reach the runbook close (ADMIN tier); answered all the same.
+        await json(route, problem ? 400 : 403, refusal(problem ? 'STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID' : 'FORBIDDEN'))
+      }
+    }
   }
   // PR-7: 「拉取待确认」's six routes. A project the world does not govern answers the not-governed page (no
   // receipt, no holds); every decision answers `nextStep: 'preview_again'` and resolves the hold it decided.

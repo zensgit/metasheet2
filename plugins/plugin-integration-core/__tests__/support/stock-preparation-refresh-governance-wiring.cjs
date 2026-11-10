@@ -20,6 +20,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', '..', 'lib')
 const refreshKit = require('./stock-preparation-refresh-store-kit.cjs')
+const { emptyIntentFor } = refreshKit
 const { createStockPreparationContinuationStore, REFRESH_STORE_TABLES } = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const { createStockPreparationRefreshGovernance } = require(path.join(LIB, 'stock-preparation-refresh-governance.cjs'))
 const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
@@ -275,8 +276,9 @@ function createRefreshGovernanceEnv(options = {}) {
         plannedCounts: { add: 0, update: 0, inactive: 0 },
         refreshBinding,
         startedBy: 'u_rgw_puller',
+        intent: emptyIntentFor('plan_rgw_dead'),
       })
-      if (status !== 'running') await store.finishExecution({ ...scope, executionId: execution.id, status, written: 0, attemptedWrites: 0 })
+      if (status !== 'running') await store.finishExecution({ ...scope, executionId: execution.id, status, written: 0, attemptedWrites: status === 'succeeded' ? 0 : 1 })
       return execution
     },
   }

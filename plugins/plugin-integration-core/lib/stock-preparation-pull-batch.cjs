@@ -1,0 +1,1707 @@
+'use strict'
+
+// ---------------------------------------------------------------------------------------------------
+// 批次标识 (pull batch) — THE PORTABLE PURE CORE (batch-identifier design BI-1a; owner decisions 2026-10-27
+// and 2026-11-07). PURE AND NOT WIRED: nothing in the plugin requires this file yet. It holds the label
+// grammar, both 首次批次 rules, the history plan, the attested count, the content-only digest and the batch
+// CONFIGURATION VOCABULARY. The ledger, store, lanes, routes, template band and web come in later PRs.
+//
+// WHAT A 批次 IS (design §3.1). The set of rows of ONE project on ONE sheet whose CREATION was carried out by
+// one logical pull: one or more executions that share a content digest (`pullBatchSourceDigest`), up to the
+// first one that finishes `succeeded`. Numbered per (tenant, sheet, project) in opening order. It is NOT
+// `snapshotBatchId` / stock-preparation-batch-identity.cjs (the mvp archive's batch): nothing here reads,
+// writes or renames those. Identifiers say `pullBatch`, never a bare `batch`.
+//
+// THE TWO COLUMNS (design §4). 首次批次 (`firstPullBatch`) = the first batch in which this material appeared
+// in the project; 本次拉取 (`pullBatch`) = the batch of the pull that CREATED this row. The owner's approved
+// example: S-01 有效=否 首次=第1批 本次=第1批; S-01 有效=是 首次=第1批 本次=第2批; P-07 有效=是 首次=第2批
+// 本次=第2批 — so UPDATE and INACTIVE never restamp a band cell.
+//
+// THE CONFIGURATION (owner 2026-11-07: 「能否也做个页面配置项，默认就按我们10-27的方案…」; register row R-65,
+// ruling C2). Batch behaviour is a page-level admin configuration with a CLOSED key set of FOUR settings
+// (`normalizePullBatchConfig`, fail-closed). Its defaults (`DEFAULT_PULL_BATCH_CONFIG`) are exactly the 10-27
+// design. The facts that are NOT configurable in v1 (本次拉取 = the creating batch, formal export excluded,
+// trashed rows never evidence, the 首次 column shown) are `PULL_BATCH_FIXED_FACTS`; naming one of them as a
+// setting is refused like any unknown key. Each setting has its own lock (`PULL_BATCH_CONFIG_LOCKS`): the rule
+// and the format lock when the sheet first stamps (labels are never rewritten, design §8.4, so a change after
+// the first stamp would mix two meanings on one sheet); landing and placement lock once applied.
+// `refusedPullBatchConfigEdits` answers which edits the later store / route must refuse.
+//
+// RULE F HISTORY CAVEAT (R-65 C10; `PULL_BATCH_SETTINGS_HELP`). Under 'predecessor_suffix' (按位置) the history
+// backfill evaluates predecessors over TODAY's 有效 state (the read holds no historical active state, design §8.3
+// step 7), so an inferred 首次 can differ from what a live pull would have stamped at the time. Rule A ('material',
+// 按物料) does not depend on the active state and is time-consistent.
+//
+// THE LABEL GRAMMAR (design §3.2 + the configurable format). Eight strings, N = the batch number, D = the
+// process-local calendar day YYYY-MM-DD of the batch's opening:
+//
+//   labelFormat     kind       zh-CN                  en
+//   ordinal_date    live       第N批（D）              Batch N (D)
+//   ordinal_date    inferred   第N批（推定，D）         Batch N (inferred, D)
+//   ordinal         live       第N批                   Batch N
+//   ordinal         inferred   第N批（推定）            Batch N (inferred)
+//   (any)           unknown    历史批次未知             Unknown historical batch
+//   (any)           manual     人工补充                 Manual row
+//   (any)           blank      '' / absent
+//
+// `parsePullBatchLabel` accepts BOTH formats in BOTH locales whatever the sheet is configured with; anything
+// else (a bare date included: no format writes one) parses `unknown` (fail-safe: garbage can never become an
+// earlier batch). Every known label carries its number. Known labels of DIFFERENT formats on one matched set are
+// not comparable and decide 历史批次未知 (one sheet holds one format, the format being locked; a mix means a copy
+// from another sheet, and copying either label would spread it).
+//
+// PORTABLE (design §12.2, S6 C-1). This file is meant to be copied byte-identical onto the R maintenance line.
+// It loads NOTHING but node:crypto (a scan test pins it). The planner's created-by Symbol is read by its
+// `Symbol.for` key (equal by construction; the unit suite asserts the equality); the reserved `manual:` prefix is
+// the shared predicate of stock-preparation-manual-rows.cjs (`isManualPrefixKey`: raw startsWith, no trim; R-65
+// C3), spelled here and pinned equal to it by the unit suite; the canonical row order of the digest is injected
+// by the caller.
+//
+// VALUES. A label is an ordinal, a server calendar day and a closed marker. Nothing here puts a material id,
+// key, path or quantity into any answer meant to leave the server: the history plan carries record ids, times,
+// counts and labels only; the carry map is keyed by idempotency keys and stays SERVER-HELD.
+// ---------------------------------------------------------------------------------------------------
+
+const crypto = require('node:crypto')
+
+// ── the existing-row Symbol (design §4.4, D-BI-6) ─────────────────────────────────────────────────────
+// The project-scoped reader (later PR) strips BOTH band cells off every row onto this Symbol, so
+// stableStringify / JSON.stringify / Object.keys never see them. Value (frozen):
+//   { pullBatch, firstPullBatch }  two strings, '' when the cell is absent
+//   createdAt                      ISO string from the record ENVELOPE, or null
+//   locked                         boolean from the record ENVELOPE (a locked record is read-only to plugins)
+const EXISTING_ROW_PULL_BATCH = Symbol.for('metasheet.stock-preparation.existingRow.pullBatch')
+// The planner's created-by key (stock-preparation-conflict-planner.cjs EXISTING_ROW_CREATED_BY): present only
+// when the host surfaced a non-blank `created_by` (a person / REST / import create). A plugin INSERT leaves it
+// absent. Spelled by its registry key here so this file requires no planner.
+const EXISTING_ROW_CREATED_BY_KEY = Symbol.for('metasheet.stock-preparation.existingRow.createdBy')
+
+// ── the band's logical field ids (design §4.1; the template-side descriptors come with the band PR) ───
+const PULL_BATCH_BAND_FIELD_IDS = Object.freeze({ firstPullBatch: 'firstPullBatch', pullBatch: 'pullBatch' })
+
+// ── vocabularies (closed; pinned by the unit suite) ──────────────────────────────────────────────────
+const PULL_BATCH_LABEL_KINDS = Object.freeze(['live', 'inferred', 'unknown', 'manual', 'blank'])
+const PULL_BATCH_LOCALES = Object.freeze(['en', 'zh-CN'])
+const PULL_BATCH_UNKNOWN_LABELS = Object.freeze({ en: 'Unknown historical batch', 'zh-CN': '历史批次未知' })
+// 人工补充 (owner ruling 2026-10-27, manual rows): the manual-row series writes exactly the literal the band
+// property carries into both cells of a new manual row. It parses as `manual`, never `unknown` (R3).
+const PULL_BATCH_MANUAL_LABELS = Object.freeze({ en: 'Manual row', 'zh-CN': '人工补充' })
+const PULL_BATCH_EVIDENCE_CLASSES = Object.freeze(['plan_time', 'created_at'])
+const PULL_BATCH_HISTORY_MODES = Object.freeze(['inferred', 'unknown'])
+// Batch `closed_reason` (design §15; S6 C-3 adds `recovery_verified`).
+const PULL_BATCH_CLOSED_REASONS = Object.freeze([
+  'execution_succeeded',
+  'completed_by_later_execution',
+  'superseded_by_new_source',
+  'void_no_rows',
+  'backfill',
+  'recovery_verified',
+])
+// Why a pull did not stamp (design §15 "pull response reasons").
+const PULL_BATCH_RESPONSE_REASONS = Object.freeze([
+  'disabled',
+  'not_installed',
+  'columns_unproven',
+  'columns_partial',
+  'history_pending',
+  'history_gap',
+  'no_creates',
+])
+
+// The reserved namespace of rows people make (ADR adr-stock-prep-manual-rows-20261030 §2.2): EVERY key starting
+// with it, raw (stock-preparation-manual-rows.cjs MANUAL_ROW_KEY_PREFIX; the unit suite pins the equality).
+const MANUAL_ROW_KEY_PREFIX = 'manual:'
+// A pull-written 唯一键 is `JSON.stringify({ projectNo, componentSourceId, parentSourceId, path })` (the apply
+// writer's key shape), so it always starts with '{' (R-65 C4).
+const PLUGIN_ROW_KEY_PREFIX = '{'
+const DUPLICATE_RESOLVED_SEPARATOR = '::duplicate:'
+
+// ── error codes (design §15 + the configuration family; exported for the web's RS-COPY tripwire) ──────
+// The existing STOCK_PREP_PROJECT_WRITE_LEASE_LOST (§15) belongs to the write-lock module and is not repeated.
+const PULL_BATCH_ERROR_CODES = Object.freeze({
+  STORE_FAILED: 'STOCK_PREP_PULL_BATCH_STORE_FAILED',
+  CONFLICT: 'STOCK_PREP_PULL_BATCH_CONFLICT',
+  NOT_READY: 'STOCK_PREP_PULL_BATCH_NOT_READY',
+  INSTALL_IN_PROGRESS: 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS',
+  EXECUTION_CLOSED: 'STOCK_PREP_PULL_BATCH_EXECUTION_CLOSED',
+  JOB_REPLAN_REQUIRED: 'STOCK_PREP_PULL_BATCH_JOB_REPLAN_REQUIRED',
+  STAMP_INVALID: 'STOCK_PREP_PULL_BATCH_STAMP_INVALID',
+  DISABLED: 'STOCK_PREP_PULL_BATCH_DISABLED',
+  INSTALL_REQUEST_INVALID: 'STOCK_PREP_PULL_BATCH_INSTALL_REQUEST_INVALID',
+  INSTALL_CONFIRM_MISMATCH: 'STOCK_PREP_PULL_BATCH_INSTALL_CONFIRM_MISMATCH',
+  INSTALL_OBJECT_REFUSED: 'STOCK_PREP_PULL_BATCH_INSTALL_OBJECT_REFUSED',
+  INSTALL_ROWS_TOO_LARGE: 'STOCK_PREP_PULL_BATCH_INSTALL_ROWS_TOO_LARGE',
+  PLM_LOCK_REQUIRED: 'STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED',
+  PLAN_CHANGED: 'STOCK_PREP_PULL_BATCH_PLAN_CHANGED',
+  PLAN_CONFLICT: 'STOCK_PREP_PULL_BATCH_PLAN_CONFLICT',
+  HISTORY_COUNT_MISMATCH: 'STOCK_PREP_PULL_BATCH_HISTORY_COUNT_MISMATCH',
+  PLACEMENT_REQUIRED: 'STOCK_PREP_PULL_BATCH_PLACEMENT_REQUIRED',
+  CONFIG_INVALID: 'STOCK_PREP_PULL_BATCH_CONFIG_INVALID',
+  CONFIG_LOCKED: 'STOCK_PREP_PULL_BATCH_CONFIG_LOCKED',
+})
+
+const PULL_BATCH_ERROR_HTTP_STATUS = Object.freeze({
+  [PULL_BATCH_ERROR_CODES.STORE_FAILED]: 503,
+  [PULL_BATCH_ERROR_CODES.CONFLICT]: 409,
+  [PULL_BATCH_ERROR_CODES.NOT_READY]: 409,
+  [PULL_BATCH_ERROR_CODES.INSTALL_IN_PROGRESS]: 409,
+  [PULL_BATCH_ERROR_CODES.EXECUTION_CLOSED]: 409,
+  [PULL_BATCH_ERROR_CODES.JOB_REPLAN_REQUIRED]: 409,
+  [PULL_BATCH_ERROR_CODES.STAMP_INVALID]: 500,
+  [PULL_BATCH_ERROR_CODES.DISABLED]: 409,
+  [PULL_BATCH_ERROR_CODES.INSTALL_REQUEST_INVALID]: 400,
+  [PULL_BATCH_ERROR_CODES.INSTALL_CONFIRM_MISMATCH]: 409,
+  [PULL_BATCH_ERROR_CODES.INSTALL_OBJECT_REFUSED]: 409,
+  [PULL_BATCH_ERROR_CODES.INSTALL_ROWS_TOO_LARGE]: 422,
+  [PULL_BATCH_ERROR_CODES.PLM_LOCK_REQUIRED]: 409,
+  [PULL_BATCH_ERROR_CODES.PLAN_CHANGED]: 409,
+  [PULL_BATCH_ERROR_CODES.PLAN_CONFLICT]: 409,
+  [PULL_BATCH_ERROR_CODES.HISTORY_COUNT_MISMATCH]: 409,
+  [PULL_BATCH_ERROR_CODES.PLACEMENT_REQUIRED]: 409,
+  [PULL_BATCH_ERROR_CODES.CONFIG_INVALID]: 400,
+  [PULL_BATCH_ERROR_CODES.CONFIG_LOCKED]: 409,
+})
+
+class StockPreparationPullBatchError extends Error {
+  constructor(code, message, details = {}) {
+    super(message)
+    this.name = 'StockPreparationPullBatchError'
+    this.status = PULL_BATCH_ERROR_HTTP_STATUS[code] || 500
+    this.code = code
+    this.details = details
+  }
+}
+
+// ── the configuration vocabulary (owner 2026-11-07; R-65 C2 — the ONE token set migration 105 also uses) ──
+// CLOSED key set of four; every value is matched by strict equality (no trim, no case folding). First = default.
+//   firstPullBatchRule  'material' (§5.2, 按物料) | 'predecessor_suffix' (§5.3, 按位置)   locked when the sheet first stamps
+//   labelFormat         'ordinal_date' (第N批（YYYY-MM-DD）) | 'ordinal' (第N批)          locked when the sheet first stamps
+//   landing             'promote_prep_fill' (§10: 备料填写视图 becomes views[0]) | 'keep_current'   locked once applied
+//   placement           'left' (order -2/-1) | 'right' (after the last column)                     locked once applied
+// Refused fail-closed (never ignored): rule 'off', format 'date', and the keys formalExport,
+// trashedRowsAreEvidence and pullBatchMeaning — those are PULL_BATCH_FIXED_FACTS, not settings.
+const PULL_BATCH_CONFIG_VALUES = Object.freeze({
+  firstPullBatchRule: Object.freeze(['material', 'predecessor_suffix']),
+  labelFormat: Object.freeze(['ordinal_date', 'ordinal']),
+  landing: Object.freeze(['promote_prep_fill', 'keep_current']),
+  placement: Object.freeze(['left', 'right']),
+})
+const PULL_BATCH_CONFIG_KEYS = Object.freeze(Object.keys(PULL_BATCH_CONFIG_VALUES))
+const FIRST_PULL_BATCH_RULES = PULL_BATCH_CONFIG_VALUES.firstPullBatchRule
+const PULL_BATCH_LABEL_FORMATS = PULL_BATCH_CONFIG_VALUES.labelFormat
+
+// The 10-27 design, exactly.
+const DEFAULT_PULL_BATCH_CONFIG = Object.freeze({
+  firstPullBatchRule: 'material',
+  labelFormat: 'ordinal_date',
+  landing: 'promote_prep_fill',
+  placement: 'left',
+})
+
+// Not configurable in v1 (the settings page shows them as 「不可配置」). 本次拉取 = the batch that CREATED the row
+// (the 'latest pull' meaning is deferred); the formal export never carries the band (D-BI-17 / O-BI-6); trashed
+// rows are never evidence (Q-BI-16 / O-BI-10; no plugin trash read exists); the 首次 column is always shown.
+const PULL_BATCH_FIXED_FACTS = Object.freeze({
+  pullBatchMeaning: 'created',
+  formalExport: 'excluded',
+  trashedRowsAreEvidence: false,
+  firstPullBatchColumn: 'shown',
+})
+
+// Which state flag locks each setting (R-65 C2). hasStamped: any band cell of the sheet carries a label (the
+// store's settings_locked_at); landingApplied / placementApplied: the landing promotion / band placement ran.
+const PULL_BATCH_CONFIG_LOCKS = Object.freeze({
+  firstPullBatchRule: 'hasStamped',
+  labelFormat: 'hasStamped',
+  landing: 'landingApplied',
+  placement: 'placementApplied',
+})
+const PULL_BATCH_CONFIG_LOCK_STATES = Object.freeze(['hasStamped', 'landingApplied', 'placementApplied'])
+
+// The keys whose value decides what a label already written on the sheet MEANS (they move the history digest).
+const PULL_BATCH_MEANING_LOCKED_KEYS = Object.freeze(['firstPullBatchRule', 'labelFormat'])
+
+// Settings-page help copy this module owns (values-free). R-65 C10: rule F's history caveat.
+const PULL_BATCH_SETTINGS_HELP = Object.freeze({
+  firstPullBatchRule: Object.freeze({
+    material: Object.freeze({
+      'zh-CN': '按物料：同一物料在本项目第一次出现的批次。历史回填与实时拉取结果一致。',
+      en: 'By material: the batch in which this material first appeared in the project. History backfill gives the same result as live pulls.',
+    }),
+    predecessor_suffix: Object.freeze({
+      'zh-CN': '按位置：沿用同一位置上已失效前序行的首次批次。历史回填按今天的「有效」状态判断前序行，推定的首次批次可能与当时实时拉取会写入的不同。',
+      en: 'By position: carries the first batch of an inactive predecessor at the same position. History backfill judges predecessors by today\'s active state, so an inferred first batch can differ from what a live pull would have written at the time.',
+    }),
+  }),
+})
+
+function configInvalid(field, message) {
+  return new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.CONFIG_INVALID, message, { field })
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null))
+}
+
+/** Validate a (partial) config object against the closed vocabulary; answers its own keys only. */
+function validateConfigEntries(input, label) {
+  if (!isPlainObject(input)) throw configInvalid(label, 'a pull-batch configuration must be a plain object')
+  const out = {}
+  for (const key of Object.keys(input)) {
+    if (!Object.prototype.hasOwnProperty.call(PULL_BATCH_CONFIG_VALUES, key)) {
+      throw configInvalid(key, 'unknown pull-batch configuration key')
+    }
+    const value = input[key]
+    if (!PULL_BATCH_CONFIG_VALUES[key].includes(value)) {
+      throw configInvalid(key, 'unsupported pull-batch configuration value')
+    }
+    out[key] = value
+  }
+  return out
+}
+
+/**
+ * The one reader of a pull-batch configuration. `undefined` / `null` => the defaults. A partial object is
+ * merged over the defaults. Any unknown key, or any value outside the closed vocabulary, is refused
+ * (400 STOCK_PREP_PULL_BATCH_CONFIG_INVALID, `details.field` names it). Answers a frozen object with every key.
+ */
+function normalizePullBatchConfig(input) {
+  if (input === undefined || input === null) return DEFAULT_PULL_BATCH_CONFIG
+  const entries = validateConfigEntries(input, 'config')
+  const out = {}
+  for (const key of PULL_BATCH_CONFIG_KEYS) out[key] = Object.prototype.hasOwnProperty.call(entries, key) ? entries[key] : DEFAULT_PULL_BATCH_CONFIG[key]
+  return Object.freeze(out)
+}
+
+/**
+ * The lock helper (R-65 C2): which keys of a proposed edit are REFUSED (pure; the later store / route answers
+ * 409 STOCK_PREP_PULL_BATCH_CONFIG_LOCKED with this list).
+ *   captured  the sheet's captured configuration (null => the defaults: a sheet that stamped before any capture
+ *             stamped under the 10-27 design)
+ *   edit      a partial configuration; validated like `normalizePullBatchConfig` (unknown key / value => 400)
+ *   state     { hasStamped, landingApplied, placementApplied }, each a strict boolean (=> 400 naming the flag)
+ * A key is refused when its lock flag (`PULL_BATCH_CONFIG_LOCKS`) is true AND the proposed value differs from the
+ * captured one (repeating the captured value is no change). Answers them in `PULL_BATCH_CONFIG_KEYS` order.
+ */
+function refusedPullBatchConfigEdits({ captured, edit, state } = {}) {
+  const base = normalizePullBatchConfig(captured)
+  const proposed = validateConfigEntries(edit, 'edit')
+  if (!isPlainObject(state)) throw configInvalid('state', 'the lock state must be a plain object')
+  for (const flag of Object.keys(state)) {
+    if (!PULL_BATCH_CONFIG_LOCK_STATES.includes(flag)) throw configInvalid(flag, 'unknown pull-batch lock state')
+  }
+  for (const flag of PULL_BATCH_CONFIG_LOCK_STATES) {
+    if (typeof state[flag] !== 'boolean') throw configInvalid(flag, 'a pull-batch lock state must be a boolean')
+  }
+  return Object.freeze(PULL_BATCH_CONFIG_KEYS.filter((key) => (
+    state[PULL_BATCH_CONFIG_LOCKS[key]] === true
+    && Object.prototype.hasOwnProperty.call(proposed, key)
+    && proposed[key] !== base[key]
+  )))
+}
+
+// ── small helpers ─────────────────────────────────────────────────────────────────────────────────
+
+function nonBlankString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function timeMsOf(value) {
+  if (value === null || value === undefined || value === '') return null
+  if (value instanceof Date) {
+    const ms = value.getTime()
+    return Number.isFinite(ms) ? ms : null
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string') return null
+  const ms = Date.parse(value)
+  return Number.isFinite(ms) ? ms : null
+}
+
+function isoOf(ms) {
+  return new Date(ms).toISOString()
+}
+
+// Canonical JSON (sorted keys) for the digests: two lanes that hold the same rows in a different key order
+// must hash alike.
+function canonicalJson(value) {
+  if (value === undefined) return 'null'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (value instanceof Date) return JSON.stringify(value.toISOString())
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+function sha256Hex(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function stampInvalid(field, message) {
+  return new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STAMP_INVALID, message, { field })
+}
+
+function assertLocale(value) {
+  if (!PULL_BATCH_LOCALES.includes(value)) throw stampInvalid('locale', 'a pull-batch label locale must be en or zh-CN')
+  return value
+}
+
+// ── the label day (design §3.2, Q-BI-5) ──────────────────────────────────────────────────────────────
+// The PROCESS-LOCAL calendar day of an instant, from its local components (the registry's convention,
+// stock-preparation-project-target-store.cjs `dayOrNull`) — never `toISOString().slice(0, 10)`, which hands
+// back the previous day east of UTC.
+function pullBatchLabelDay(value) {
+  const ms = timeMsOf(value)
+  if (ms === null) return null
+  const date = new Date(ms)
+  const year = date.getFullYear()
+  if (year < 1 || year > 9999) return null
+  return `${String(year).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function isCalendarDay(text) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  return day <= daysInMonth
+}
+
+// ── the label grammar (design §3.2 + labelFormat; the table is in the header) ─────────────────────────
+/**
+ * Format one cell. `kind` live | inferred need a positive integer `n` AND a valid `day` whatever the format (a
+ * batch always has both; the format decides what the cell shows — 'ordinal' still needs the day). unknown |
+ * manual need only the locale.
+ * `labelFormat` defaults to the 10-27 'ordinal_date'. Malformed input => 500 STAMP_INVALID.
+ */
+function formatPullBatchLabel({ kind, n, day, locale, labelFormat } = {}) {
+  const lang = assertLocale(locale)
+  if (kind === 'unknown') return PULL_BATCH_UNKNOWN_LABELS[lang]
+  if (kind === 'manual') return PULL_BATCH_MANUAL_LABELS[lang]
+  if (kind !== 'live' && kind !== 'inferred') throw stampInvalid('kind', 'a pull-batch label kind must be live, inferred, unknown or manual')
+  const format = labelFormat === undefined ? DEFAULT_PULL_BATCH_CONFIG.labelFormat : labelFormat
+  if (!PULL_BATCH_LABEL_FORMATS.includes(format)) throw stampInvalid('labelFormat', 'unknown pull-batch label format')
+  if (!Number.isSafeInteger(n) || n < 1) throw stampInvalid('n', 'a pull-batch number must be a positive integer')
+  if (typeof day !== 'string' || !isCalendarDay(day)) throw stampInvalid('day', 'a pull-batch label day must be YYYY-MM-DD')
+  const inferred = kind === 'inferred'
+  if (format === 'ordinal_date') {
+    if (lang === 'zh-CN') return inferred ? `第${n}批（推定，${day}）` : `第${n}批（${day}）`
+    return inferred ? `Batch ${n} (inferred, ${day})` : `Batch ${n} (${day})`
+  }
+  if (lang === 'zh-CN') return inferred ? `第${n}批（推定）` : `第${n}批`
+  return inferred ? `Batch ${n} (inferred)` : `Batch ${n}`
+}
+
+const N = '([1-9][0-9]*)'
+const D = '([0-9]{4}-[0-9]{2}-[0-9]{2})'
+// [kind, format, regex, which groups are n / day (0 = not printed)]
+const LABEL_PATTERNS = Object.freeze([
+  { kind: 'live', format: 'ordinal_date', re: new RegExp(`^第${N}批（${D}）$`), n: 1, day: 2 },
+  { kind: 'inferred', format: 'ordinal_date', re: new RegExp(`^第${N}批（推定，${D}）$`), n: 1, day: 2 },
+  { kind: 'live', format: 'ordinal_date', re: new RegExp(`^Batch ${N} \\(${D}\\)$`), n: 1, day: 2 },
+  { kind: 'inferred', format: 'ordinal_date', re: new RegExp(`^Batch ${N} \\(inferred, ${D}\\)$`), n: 1, day: 2 },
+  { kind: 'live', format: 'ordinal', re: new RegExp(`^第${N}批$`), n: 1, day: 0 },
+  { kind: 'inferred', format: 'ordinal', re: new RegExp(`^第${N}批（推定）$`), n: 1, day: 0 },
+  { kind: 'live', format: 'ordinal', re: new RegExp(`^Batch ${N}$`), n: 1, day: 0 },
+  { kind: 'inferred', format: 'ordinal', re: new RegExp(`^Batch ${N} \\(inferred\\)$`), n: 1, day: 0 },
+])
+
+const BLANK = Object.freeze({ kind: 'blank' })
+const UNKNOWN = Object.freeze({ kind: 'unknown' })
+const MANUAL = Object.freeze({ kind: 'manual' })
+
+/**
+ * Parse one cell, whatever the configured format or locale. Answers a frozen object:
+ *   { kind: 'blank' } | { kind: 'unknown' } | { kind: 'manual' }
+ *   { kind: 'live' | 'inferred', format, n: number, day: 'YYYY-MM-DD' | null }
+ * ('ordinal' carries no day). Anything that is not exactly one of the grammar's strings (surrounding whitespace
+ * aside) parses `unknown` — a bare date included.
+ */
+function parsePullBatchLabel(value) {
+  if (value === undefined || value === null) return BLANK
+  if (typeof value !== 'string') return UNKNOWN
+  const text = value.trim()
+  if (text === '') return BLANK
+  if (text === PULL_BATCH_UNKNOWN_LABELS.en || text === PULL_BATCH_UNKNOWN_LABELS['zh-CN']) return UNKNOWN
+  if (text === PULL_BATCH_MANUAL_LABELS.en || text === PULL_BATCH_MANUAL_LABELS['zh-CN']) return MANUAL
+  for (const pattern of LABEL_PATTERNS) {
+    const match = pattern.re.exec(text)
+    if (!match) continue
+    const n = Number(match[pattern.n])
+    const day = pattern.day ? match[pattern.day] : null
+    if (!Number.isSafeInteger(n)) return UNKNOWN
+    if (day !== null && !isCalendarDay(day)) return UNKNOWN
+    return Object.freeze({ kind: pattern.kind, format: pattern.format, n, day })
+  }
+  return UNKNOWN
+}
+
+function isKnownPullBatchLabel(parsed) {
+  return Boolean(parsed) && (parsed.kind === 'live' || parsed.kind === 'inferred')
+}
+
+// ── the evidence set E (design §5.1) ─────────────────────────────────────────────────────────────────
+
+/** The normalized part id (design §5.1): String(componentSourceId).trim(); a blank never matches. */
+function normalizePartId(value) {
+  if (value === undefined || value === null) return ''
+  return String(value).trim()
+}
+
+// The shared raw predicate (stock-preparation-manual-rows.cjs isManualPrefixKey): no trim.
+function isManualRowKey(key) {
+  return typeof key === 'string' && key.startsWith(MANUAL_ROW_KEY_PREFIX)
+}
+
+// A pull-shaped 唯一键: raw startsWith '{' (no trim), the apply writer's JSON key.
+function isPluginRowKey(key) {
+  return typeof key === 'string' && key.startsWith(PLUGIN_ROW_KEY_PREFIX)
+}
+
+function cellText(value) {
+  if (value === undefined || value === null) return ''
+  return typeof value === 'string' ? value : String(value)
+}
+
+/** The band cells, createdAt and locked of a reader row (absent band => blanks). */
+function rowPullBatchFacts(row) {
+  const band = row && isPlainObject(row[EXISTING_ROW_PULL_BATCH]) ? row[EXISTING_ROW_PULL_BATCH] : null
+  return {
+    pullBatch: band ? cellText(band.pullBatch) : '',
+    firstPullBatch: band ? cellText(band.firstPullBatch) : '',
+    createdAt: band && typeof band.createdAt === 'string' ? band.createdAt : null,
+    locked: Boolean(band && band.locked === true),
+  }
+}
+
+/** A row people created (新建记录, imports, right-click duplicates): the envelope named a creator. */
+function isPersonCreatedRow(row) {
+  return Boolean(row) && typeof row[EXISTING_ROW_CREATED_BY_KEY] === 'string' && row[EXISTING_ROW_CREATED_BY_KEY].trim() !== ''
+}
+
+/**
+ * E (design §5.1, narrowed by R-65 C4 to PLUGIN rows only): a row is machine-created evidence only when ALL hold —
+ *   its envelope names no creator (rows people made are never evidence, whatever their cells say: R3; the 10-27
+ *     right-click duplicates copy part ids and even band cells);
+ *   its 唯一键 is a plugin key (raw '{', the apply writer's JSON key) and not in the reserved `manual:` namespace;
+ *   it carries a RUN decision stamp (`lastPlmRefreshDecision` non-blank);
+ *   its normalized part id is non-blank.
+ * A creator-less row is NOT proof of a pull on main: automation create_record, FWB and anonymous public forms
+ * insert rows without a creator, and they are never evidence (nor labelled as pulled batches).
+ */
+function isPullBatchEvidenceRow(row) {
+  if (!isPlainObject(row)) return false
+  if (isPersonCreatedRow(row)) return false
+  if (isManualRowKey(row.idempotencyKey)) return false
+  if (!isPluginRowKey(row.idempotencyKey)) return false
+  if (!nonBlankString(row.lastPlmRefreshDecision)) return false
+  return normalizePartId(row.componentSourceId) !== ''
+}
+
+/** A gap row (design §6.2): a row of E that is not locked and has a blank band cell (either one). */
+function isPullBatchGapRow(row) {
+  if (!isPullBatchEvidenceRow(row)) return false
+  const facts = rowPullBatchFacts(row)
+  if (facts.locked) return false
+  return facts.pullBatch.trim() === '' || facts.firstPullBatch.trim() === ''
+}
+
+function countPullBatchGapRows(rows) {
+  let count = 0
+  for (const row of Array.isArray(rows) ? rows : []) if (isPullBatchGapRow(row)) count += 1
+  return count
+}
+
+// ── path tokens for rule F (carry-policy precedent: `::duplicate:` stripped, blanks refused) ─────────
+function pathTokensOf(value) {
+  let tokens = value
+  if (typeof tokens === 'string') {
+    try {
+      tokens = JSON.parse(tokens)
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(tokens) || tokens.length === 0) return null
+  const out = []
+  for (const token of tokens) {
+    if (typeof token !== 'string') return null
+    const base = token.split(DUPLICATE_RESOLVED_SEPARATOR)[0].trim()
+    if (base === '') return null
+    out.push(base)
+  }
+  return out
+}
+
+function isProperSuffix(candidate, tokens) {
+  if (!Array.isArray(candidate) || !Array.isArray(tokens) || candidate.length >= tokens.length) return false
+  const offset = tokens.length - candidate.length
+  for (let index = 0; index < candidate.length; index += 1) {
+    if (candidate[index] !== tokens[offset + index]) return false
+  }
+  return true
+}
+
+// ── 首次批次: the carry rules (design §5.2 / §5.3) ───────────────────────────────────────────────────
+
+/**
+ * The opened_at (ms) of a label's ledger batch. Void batches are ignored. Should several non-void batches ever
+ * carry the SAME label (no v1 format makes two, since every label prints its number) the LATEST opening is
+ * answered: an open row between the two could predate the material's first appearance, so it must decide
+ * 历史批次未知 (fail-safe).
+ */
+function openedAtIndex(ledgerBatches) {
+  const byLabel = new Map()
+  for (const batch of Array.isArray(ledgerBatches) ? ledgerBatches : []) {
+    if (!batch || batch.status === 'void' || !nonBlankString(batch.label)) continue
+    const ms = timeMsOf(batch.openedAt)
+    if (ms === null) continue
+    const label = batch.label.trim()
+    if (!byLabel.has(label) || byLabel.get(label) < ms) byLabel.set(label, ms)
+  }
+  return byLabel
+}
+
+/**
+ * L* (design §5.2 step 3): the earliest known label, by number. Known labels of MORE THAN ONE format are not
+ * comparable (null => 历史批次未知): one sheet holds one locked format, so a mix is a copy from elsewhere, and
+ * copying either label would spread the mix (MF3).
+ */
+function earliestKnownLabel(known) {
+  if (new Set(known.map((entry) => entry.parsed.format)).size > 1) return null
+  let best = null
+  for (const entry of known) {
+    if (best === null || entry.parsed.n < best.parsed.n || (entry.parsed.n === best.parsed.n && entry.label < best.label)) best = entry
+  }
+  return best
+}
+
+/**
+ * Steps 2-6 of §5.2 over a matched set M (the rule decides how M is chosen).
+ *   M empty                            => null ("this batch")
+ *   no known row                       => 历史批次未知
+ *   known labels not comparable        => 历史批次未知   (mixed formats on one sheet; fail-safe)
+ *   an open row could predate L*       => 历史批次未知   (R6: createdAt missing, no ledger opened_at for L*, or
+ *                                                        created earlier than L*'s batch opened_at)
+ *   otherwise                          => L*'s label string, verbatim (a 推定 marker and the date travel with it)
+ */
+function decideFirstPullBatch(matched, { locale, openedAtByLabel }) {
+  if (!Array.isArray(matched) || matched.length === 0) return null
+  const known = []
+  const open = []
+  for (const entry of matched) {
+    const parsed = parsePullBatchLabel(entry.firstPullBatch)
+    if (isKnownPullBatchLabel(parsed)) known.push({ parsed, label: entry.firstPullBatch.trim() })
+    else open.push(entry)
+  }
+  const unknown = PULL_BATCH_UNKNOWN_LABELS[locale]
+  if (known.length === 0) return unknown
+  const best = earliestKnownLabel(known)
+  if (best === null) return unknown
+  if (open.length > 0) {
+    const openedAtMs = openedAtByLabel.has(best.label) ? openedAtByLabel.get(best.label) : null
+    for (const entry of open) {
+      const createdMs = timeMsOf(entry.createdAt)
+      if (createdMs === null || openedAtMs === null || createdMs < openedAtMs) return unknown
+    }
+  }
+  return best.label
+}
+
+/** One evidence entry of a reader row. */
+function evidenceEntryOf(row) {
+  const facts = rowPullBatchFacts(row)
+  return {
+    partId: normalizePartId(row.componentSourceId),
+    key: nonBlankString(row.idempotencyKey) ? row.idempotencyKey.trim() : null,
+    active: row.active,
+    path: pathTokensOf(row.path),
+    firstPullBatch: facts.firstPullBatch,
+    createdAt: facts.createdAt,
+  }
+}
+
+/**
+ * The carry map of one plan: idempotency key of every ADD decision -> 首次批次 label, or null ("this batch").
+ *
+ *   'material' (A, default):    M = rows of E whose normalized part id equals the new row's, active AND inactive.
+ *   'predecessor_suffix' (F):   M = rows of E that are predecessors (active === false, or swept INACTIVE by this
+ *                               plan) whose path is a PROPER suffix of the new row's path.
+ *
+ * `existingRows`: the reader rows of the in-lease read (the plan's own ADD records are not among them, so rows
+ * ADDed by the same run never feed M). Trashed rows are never evidence (PULL_BATCH_FIXED_FACTS). `ledgerBatches`:
+ * the project's ledger rows ({ label, openedAt, status }) for the R6 rule. `locale`: the sheet's captured label
+ * locale. Server-held: the map is keyed by idempotency keys (values-bearing) and is never answered, logged or hashed.
+ */
+function buildFirstPullBatchByKey({ decisions, existingRows, ledgerBatches, locale, config } = {}) {
+  const cfg = normalizePullBatchConfig(config)
+  const lang = assertLocale(locale)
+  const out = new Map()
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  const list = Array.isArray(decisions) ? decisions : []
+  const swept = new Set()
+  for (const decision of list) {
+    if (decision && decision.decision === 'inactive' && nonBlankString(decision.idempotencyKey)) swept.add(decision.idempotencyKey.trim())
+  }
+  const evidence = []
+  for (const row of Array.isArray(existingRows) ? existingRows : []) {
+    if (isPullBatchEvidenceRow(row)) evidence.push(evidenceEntryOf(row))
+  }
+  const byPart = new Map()
+  const predecessorsByPath = new Map()
+  for (const entry of evidence) {
+    if (!byPart.has(entry.partId)) byPart.set(entry.partId, [])
+    byPart.get(entry.partId).push(entry)
+    const predecessor = entry.active === false || (entry.key !== null && swept.has(entry.key))
+    if (predecessor && entry.path) {
+      const pathKey = JSON.stringify(entry.path)
+      if (!predecessorsByPath.has(pathKey)) predecessorsByPath.set(pathKey, [])
+      predecessorsByPath.get(pathKey).push(entry)
+    }
+  }
+  for (const decision of list) {
+    if (!decision || decision.decision !== 'add') continue
+    const record = isPlainObject(decision.record) ? decision.record : {}
+    const key = nonBlankString(decision.idempotencyKey)
+      ? decision.idempotencyKey.trim()
+      : (nonBlankString(record.idempotencyKey) ? record.idempotencyKey.trim() : null)
+    if (!key) continue
+    let matched = []
+    if (cfg.firstPullBatchRule === 'material') {
+      const partId = normalizePartId(record.componentSourceId)
+      matched = partId === '' ? [] : (byPart.get(partId) || [])
+    } else {
+      const tokens = pathTokensOf(record.path)
+      if (tokens) {
+        for (let start = 1; start < tokens.length; start += 1) {
+          const candidates = predecessorsByPath.get(JSON.stringify(tokens.slice(start)))
+          if (candidates) matched = matched.concat(candidates)
+        }
+      }
+    }
+    out.set(key, decideFirstPullBatch(matched, { locale: lang, openedAtByLabel }))
+  }
+  return out
+}
+
+// ── one content-only digest (design §3.7, R10) ─────────────────────────────────────────────────────────
+// sha256(['stock-preparation/pull-batch-source/v1', actionId, canonicalRows(rows without tenant ext_ keys)]),
+// first 32 hex. NO lane prefix: the same BOM content is the same logical pull on either lane (a small retry of a
+// failed large job joins its open batch). `canonicalRows` is injected (table-actions' canonical hash order) so
+// this file requires nothing; the serialization sorts object keys, so key order never moves the digest. Nothing
+// but the action id and the rows enters: parameters, read plan, principal, lane and run ids change nothing.
+const PULL_BATCH_SOURCE_DIGEST_SCHEME = 'stock-preparation/pull-batch-source/v1'
+const PULL_BATCH_SOURCE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
+
+function withoutTenantExtKeys(row) {
+  if (!isPlainObject(row)) return row
+  const out = {}
+  for (const key of Object.keys(row)) if (!key.startsWith('ext_')) out[key] = row[key]
+  return out
+}
+
+function pullBatchSourceDigest({ actionId, rows, canonicalRows } = {}) {
+  if (!nonBlankString(actionId)) throw stampInvalid('actionId', 'the pull-batch digest needs the action id')
+  if (!Array.isArray(rows)) throw stampInvalid('rows', 'the pull-batch digest needs the expansion rows')
+  if (typeof canonicalRows !== 'function') throw stampInvalid('canonicalRows', 'the pull-batch digest needs the canonical row order')
+  const ordered = canonicalRows(rows.map(withoutTenantExtKeys))
+  if (!Array.isArray(ordered)) throw stampInvalid('canonicalRows', 'the canonical row order must answer an array')
+  return sha256Hex(canonicalJson([PULL_BATCH_SOURCE_DIGEST_SCHEME, actionId, ordered])).slice(0, 32)
+}
+
+// ── the history plan (design §8.3; pure, persisted by the install in a later PR) ───────────────────────
+//
+// Input rows: the rows of E the run is to label, each { recordId, createdAt, decision, plannedAt, active,
+// partId, path } (createdAt from the envelope; decision / plannedAt are the RUN stamps lastPlmRefreshDecision /
+// lastPlmRefreshAt, read ONCE here and never again: membership afterwards is decided from the persisted cuts,
+// exceptions and coveredUntil only).
+const PULL_BATCH_HISTORY_SCHEME = 'pull-batch-history/v1'
+const HISTORY_CLOCK_SLACK_MS = 5000
+const HISTORY_DEGENERATE_SPREAD_MS = 2000
+const HISTORY_DEFAULT_GAP_MINUTES = 30
+
+function historyInvalid(field) {
+  return stampInvalid(field, 'the pull-batch history input is malformed')
+}
+
+function normalizeHistoryRows(rows) {
+  if (!Array.isArray(rows)) throw historyInvalid('rows')
+  const seen = new Set()
+  return rows.map((row, index) => {
+    if (!isPlainObject(row) || !nonBlankString(row.recordId)) throw historyInvalid(`rows[${index}].recordId`)
+    const recordId = row.recordId.trim()
+    if (seen.has(recordId)) throw historyInvalid(`rows[${index}].recordId`)
+    seen.add(recordId)
+    return {
+      recordId,
+      createdMs: timeMsOf(row.createdAt),
+      decision: typeof row.decision === 'string' ? row.decision : null,
+      plannedMs: timeMsOf(row.plannedAt),
+      active: row.active,
+      partId: normalizePartId(row.partId),
+      path: pathTokensOf(row.path),
+    }
+  })
+}
+
+/** The anchors (distinct add plan times, each one execution — F24′) and the degenerate test (steps 1-2). */
+function historyAnchors(rows) {
+  const anchors = new Set()
+  let lateAddStamps = 0
+  for (const row of rows) {
+    if (row.decision !== 'add' || row.plannedMs === null) continue
+    if (row.createdMs !== null && row.plannedMs <= row.createdMs + HISTORY_CLOCK_SLACK_MS) anchors.add(row.plannedMs)
+    else if (row.createdMs !== null) lateAddStamps += 1
+  }
+  const created = rows.map((row) => row.createdMs).filter((ms) => ms !== null)
+  const spread = created.length > 0 ? Math.max(...created) - Math.min(...created) : 0
+  const degenerate = (anchors.size > 1 && spread < HISTORY_DEGENERATE_SPREAD_MS) || lateAddStamps > 1
+  return { anchors: Array.from(anchors).sort((a, b) => a - b), degenerate }
+}
+
+function anchorOfRow(row, anchorSet) {
+  if (row.decision !== 'add' || row.plannedMs === null || row.createdMs === null) return null
+  if (row.plannedMs > row.createdMs + HISTORY_CLOCK_SLACK_MS) return null
+  return anchorSet.has(row.plannedMs) ? row.plannedMs : null
+}
+
+// THE 首次 POOL: the rows already labelled when a row is decided, indexed by normalized part id (rule A) and by the
+// path of every predecessor (rule F: active === false), so a match is a lookup, not a scan of the pool (a scan per row
+// is quadratic at the reader's bound). decideFirstPullBatch is order-independent, so the index changes no answer.
+function createHistoryPool() {
+  return { byPart: new Map(), byPath: new Map(), entries: [] }
+}
+
+function poolAdd(pool, entry) {
+  pool.entries.push(entry)
+  if (!pool.byPart.has(entry.partId)) pool.byPart.set(entry.partId, [])
+  pool.byPart.get(entry.partId).push(entry)
+  if (entry.active === false && entry.path) {
+    const key = JSON.stringify(entry.path)
+    if (!pool.byPath.has(key)) pool.byPath.set(key, [])
+    pool.byPath.get(key).push(entry)
+  }
+}
+
+function poolMatches(pool, rule, row) {
+  if (rule === 'material') return row.partId === '' ? [] : (pool.byPart.get(row.partId) || [])
+  if (!row.path) return []
+  let matched = []
+  for (let start = 1; start < row.path.length; start += 1) {
+    const candidates = pool.byPath.get(JSON.stringify(row.path.slice(start)))
+    if (candidates) matched = matched.concat(candidates)
+  }
+  return matched
+}
+
+// The 首次 pool of the rows already labelled (a gap pass's priorRows, an earlier segment's decided rows).
+function priorPoolOf(priorRows) {
+  const pool = createHistoryPool()
+  for (const prior of Array.isArray(priorRows) ? priorRows : []) {
+    if (!isPlainObject(prior)) continue
+    poolAdd(pool, {
+      partId: normalizePartId(prior.partId),
+      path: pathTokensOf(prior.path),
+      active: prior.active,
+      firstPullBatch: cellText(prior.firstPullBatch),
+      createdAt: prior.createdAt === undefined ? null : prior.createdAt,
+    })
+  }
+  return pool
+}
+
+/**
+ * Step 7 over ONE planned segment, shared by the planner and by `pullBatchHistoryAssignments` (so the re-run of a
+ * persisted plan labels exactly as the planning did — the crash-continuation contract is structural, not only
+ * sampled). `clusters` in ascending k, each `{ k, label, members }` of normalized history rows; `unplaced` the rows
+ * no cluster holds (本次 历史批次未知). 首次 of a cluster's row is decided over `pool` (rows of EARLIER clusters and
+ * the prior rows; its own cluster is "this batch"); every unplaced row over the pool after all clusters. Each
+ * cluster's decided rows join `pool` (mutated) once the cluster is done; the unplaced rows join it at the end (an
+ * extension segment planned later sees them as prior rows). `keepFirst` (rule F only, R-65 C12 choice (b)): a Map
+ * recordId -> the 首次 cell a row already carries, kept instead of recomputed (and fed to the pool as such).
+ */
+function labelHistorySegment({ clusters, unplaced, pool, rule, lang, openedAtByLabel, assignments, keepFirst }) {
+  const unknown = PULL_BATCH_UNKNOWN_LABELS[lang]
+  const firstFor = (row, fallback) => {
+    if (keepFirst && keepFirst.has(row.recordId)) return keepFirst.get(row.recordId)
+    const first = decideFirstPullBatch(poolMatches(pool, rule, row), { locale: lang, openedAtByLabel })
+    return first === null ? fallback : first
+  }
+  const entryOf = (row, firstPullBatch) => ({ partId: row.partId, path: row.path, active: row.active, firstPullBatch, createdAt: row.createdMs === null ? null : isoOf(row.createdMs) })
+  for (const cluster of clusters) {
+    const decided = []
+    for (const row of cluster.members) {
+      const firstPullBatch = firstFor(row, cluster.label)
+      assignments.set(row.recordId, { k: cluster.k, pullBatch: cluster.label, firstPullBatch })
+      decided.push(entryOf(row, firstPullBatch))
+    }
+    for (const entry of decided) poolAdd(pool, entry)
+  }
+  const after = []
+  for (const row of unplaced) {
+    const firstPullBatch = firstFor(row, unknown)
+    assignments.set(row.recordId, { k: null, pullBatch: unknown, firstPullBatch })
+    after.push(entryOf(row, firstPullBatch))
+  }
+  for (const entry of after) poolAdd(pool, entry)
+}
+
+/**
+ * Plan the history of `rows` (design §8.3).
+ *   base          0 at the first install; the ledger's max(batch_no, history_batch_count) in a gap pass
+ *   coveredUntil  the DATABASE clock of the read that produced the rows (a row is covered iff created_at ≤ it)
+ *   priorRows     rows already labelled (a gap pass) — they only feed 首次 ({ partId, path, active,
+ *                 firstPullBatch, createdAt })
+ *   gapMinutes    G, default 30, persisted with the plan
+ *   locale        the sheet's label locale; config: the sheet's captured configuration
+ * Trashed rows are never evidence (PULL_BATCH_FIXED_FACTS). Under rule F the predecessors are judged by the
+ * rows' CURRENT active state (R-65 C10, see the header).
+ * Answers { plan, assignments }: the persisted plan (values-free; its digest, `pullBatchHistoryPlanDigest`, covers
+ * the clustering and the meaning-locked configuration, not the clock) and the per-row assignment Map recordId ->
+ * { k, pullBatch, firstPullBatch } (recomputable from the plan; never persisted).
+ */
+function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil, locale, config, ledgerBatches } = {}) {
+  const cfg = normalizePullBatchConfig(config)
+  const lang = assertLocale(locale)
+  const input = normalizeHistoryRows(rows)
+  const gap = gapMinutes === undefined || gapMinutes === null ? HISTORY_DEFAULT_GAP_MINUTES : gapMinutes
+  if (!Number.isSafeInteger(gap) || gap < 1 || gap > 24 * 60) throw historyInvalid('gapMinutes')
+  const startBase = base === undefined || base === null ? 0 : base
+  if (!Number.isSafeInteger(startBase) || startBase < 0) throw historyInvalid('base')
+  const coveredMs = timeMsOf(coveredUntil)
+  if (coveredMs === null) throw historyInvalid('coveredUntil')
+  // MF1(c): every input row comes from the read that coveredUntil clocks, so none can be created after it; one that
+  // is would be counted in K while membership answers 'uncovered'. A caller defect: refused, never planned.
+  for (const row of input) if (row.createdMs !== null && row.createdMs > coveredMs) throw historyInvalid('coveredUntil')
+  const gapMs = gap * 60 * 1000
+  const { anchors, degenerate } = historyAnchors(input)
+  const anchorSet = new Set(anchors)
+
+  // Steps 3-4: intervals on the createdAt axis. Each anchor time is a cut point (S0 = (−∞, a1), Si = [ai, ai+1));
+  // inside a segment a createdAt gap longer than G splits it, UNLESS a later row of the segment is add-stamped with
+  // the segment's own anchor (a paused large job stays one execution). S0 splits at every gap. Degenerate createdAt
+  // (R2): no createdAt inference at all — the clusters are the anchors only, ordered by plan time.
+  const clusters = []
+  if (degenerate) {
+    for (const anchor of anchors) clusters.push({ anchorMs: anchor, segmentAnchorMs: anchor, startMs: anchor, endMs: anchor, members: [] })
+  } else {
+    const placed = input
+      .filter((row) => row.createdMs !== null)
+      .sort((a, b) => a.createdMs - b.createdMs || (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0))
+    const bounds = [-Infinity, ...anchors, Infinity]
+    for (let segmentIndex = 0; segmentIndex + 1 < bounds.length; segmentIndex += 1) {
+      const fromMs = bounds[segmentIndex]
+      const toMs = bounds[segmentIndex + 1]
+      const segmentAnchorMs = segmentIndex === 0 ? null : fromMs
+      const inside = placed.filter((row) => row.createdMs >= fromMs && row.createdMs < toMs)
+      let current = null
+      for (let index = 0; index < inside.length; index += 1) {
+        const row = inside[index]
+        let split = current === null
+        if (!split && row.createdMs - inside[index - 1].createdMs > gapMs) {
+          const continued = segmentAnchorMs !== null
+            && inside.slice(index).some((later) => anchorOfRow(later, anchorSet) === segmentAnchorMs)
+          split = !continued
+        }
+        if (split) {
+          // The first interval of an anchored segment carries its anchor; a later gap split inside it carries none.
+          current = { anchorMs: current === null ? segmentAnchorMs : null, segmentAnchorMs, startMs: row.createdMs, endMs: row.createdMs, members: [] }
+          clusters.push(current)
+        }
+        current.endMs = row.createdMs
+        current.members.push(row)
+      }
+    }
+  }
+
+  // Step 6: membership. A row belongs to the interval holding its createdAt; the ONE exception is an add-stamped
+  // row whose createdAt falls in ANOTHER anchor's segment (concurrent pulls on the R-line, or clock skew): it joins
+  // its own anchor's cluster and is listed in `exceptions`. An anchor whose segment holds none of its rows gets its
+  // cluster here, so every exception has one. The loop walks the input in its given order; nothing it builds is
+  // order-bearing: the bounds are recomputed from the members below, kept's sort is total, and the persisted
+  // exceptions / placements lists are sorted by record id (R2-1).
+  const anchorCluster = (anchorMs, row) => {
+    let cluster = clusters.find((entry) => entry.anchorMs === anchorMs)
+    if (!cluster) {
+      cluster = { anchorMs, segmentAnchorMs: anchorMs, startMs: row.createdMs, endMs: row.createdMs, members: [] }
+      clusters.push(cluster)
+    }
+    return cluster
+  }
+  // The time cluster of every placed row, indexed once (a linear lookup per row is quadratic at the reader's bound).
+  const timeClusterOf = new Map()
+  for (const cluster of clusters) for (const member of cluster.members) timeClusterOf.set(member, cluster)
+  const assignment = new Map()
+  const exceptionRows = []
+  const placementRows = []
+  let unplacedRows = 0
+  for (const row of input) {
+    if (degenerate) {
+      const own = anchorOfRow(row, anchorSet)
+      const cluster = own === null ? null : clusters.find((entry) => entry.anchorMs === own)
+      if (cluster) {
+        cluster.members.push(row)
+        assignment.set(row.recordId, cluster)
+        placementRows.push(row)
+      } else {
+        assignment.set(row.recordId, null)
+        unplacedRows += 1
+      }
+      continue
+    }
+    if (row.createdMs === null) {
+      assignment.set(row.recordId, null)
+      unplacedRows += 1
+      continue
+    }
+    const byTime = timeClusterOf.get(row)
+    const own = anchorOfRow(row, anchorSet)
+    if (own !== null && byTime && byTime.segmentAnchorMs !== own) {
+      byTime.members = byTime.members.filter((member) => member !== row)
+      const target = anchorCluster(own, row)
+      target.members.push(row)
+      exceptionRows.push(row)
+      assignment.set(row.recordId, target)
+      continue
+    }
+    assignment.set(row.recordId, byTime || null)
+  }
+  // The persisted bounds of a cluster are those of its TIME members only (`timeRows` of them): an exception is found
+  // by its record id first, so it must not widen an interval. The time intervals are disjoint (the time members
+  // partition the createdAt order: segments are half-open, and splits inside one need a gap longer than G). A
+  // cluster that holds ONLY exceptions (timeRows 0) takes its bounds — and so its label day — from them; its span can
+  // overlap another cluster's, which is why membership never matches a createdAt against it (MF1(b)). In a
+  // degenerate plan every member is a placement found by record id, and timeRows is 0 throughout.
+  const exceptionSet = new Set(exceptionRows)
+  for (const cluster of clusters) {
+    const timeMembers = degenerate ? [] : cluster.members.filter((member) => !exceptionSet.has(member))
+    cluster.timeRows = timeMembers.length
+    if (degenerate) continue
+    const span = timeMembers.length > 0 ? timeMembers : cluster.members
+    if (span.length === 0) continue
+    cluster.startMs = Math.min(...span.map((member) => member.createdMs))
+    cluster.endMs = Math.max(...span.map((member) => member.createdMs))
+  }
+  // Step 5: a time interval whose only rows became exceptions holds nothing and is no cluster. Number the rest in
+  // time order, base + 1 …; evidence = plan_time when the interval holds add rows of its anchor, else created_at.
+  // The order is TOTAL, so the numbering never depends on the input order (R2-1): by start, then anchored before
+  // unanchored, then by anchor time. Two anchored clusters never share an anchor (anchorCluster reuses one), and
+  // two unanchored ones never share a start (time intervals are disjoint), so no tie is left to insertion order —
+  // in particular not to the order in which the membership loop met the exceptions of exception-only clusters.
+  const kept = clusters
+    .filter((cluster) => cluster.members.length > 0)
+    .sort((a, b) => a.startMs - b.startMs
+      || (a.anchorMs === null ? 1 : 0) - (b.anchorMs === null ? 1 : 0)
+      || (a.anchorMs !== null && b.anchorMs !== null ? a.anchorMs - b.anchorMs : 0))
+  kept.forEach((cluster, index) => {
+    cluster.k = startBase + index + 1
+    cluster.label = formatPullBatchLabel({ kind: 'inferred', n: cluster.k, day: pullBatchLabelDay(cluster.startMs), locale: lang, labelFormat: cfg.labelFormat })
+    cluster.evidence = cluster.anchorMs !== null && cluster.members.some((row) => anchorOfRow(row, anchorSet) === cluster.anchorMs)
+      ? 'plan_time'
+      : 'created_at'
+  })
+
+  // Step 7: labels. 本次 = the cluster's inferred label; 首次 by the configured rule, in cluster order, over the rows
+  // already labelled (a gap pass's priorRows) and the rows of EARLIER clusters (rows of the same cluster are "this
+  // batch"). Rule F reads each row's CURRENT active state: there is no historical one (R-65 C10). The labelling is
+  // the shared `labelHistorySegment`, the same code `pullBatchHistoryAssignments` re-runs from the persisted plan
+  // (the crash-continuation contract, BI-2).
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  for (const cluster of kept) {
+    if (!openedAtByLabel.has(cluster.label) || openedAtByLabel.get(cluster.label) < cluster.startMs) openedAtByLabel.set(cluster.label, cluster.startMs)
+  }
+  const labelled = priorPoolOf(priorRows)
+  const assignments = new Map()
+  const keptMembers = new Set()
+  for (const cluster of kept) for (const member of cluster.members) keptMembers.add(member)
+  labelHistorySegment({
+    clusters: kept.map((cluster) => ({ k: cluster.k, label: cluster.label, members: cluster.members })),
+    unplaced: input.filter((row) => !keptMembers.has(row)),
+    pool: labelled,
+    rule: cfg.firstPullBatchRule,
+    lang,
+    openedAtByLabel,
+    assignments,
+    keepFirst: null,
+  })
+
+  const plan = {
+    scheme: PULL_BATCH_HISTORY_SCHEME,
+    locale: lang,
+    firstPullBatchRule: cfg.firstPullBatchRule,
+    labelFormat: cfg.labelFormat,
+    gapMinutes: gap,
+    degenerate,
+    base: startBase,
+    coveredUntil: isoOf(coveredMs),
+    cuts: anchors.map(isoOf),
+    clusters: kept.map((cluster) => ({
+      k: cluster.k,
+      evidence: cluster.evidence,
+      anchorAt: cluster.anchorMs === null ? null : isoOf(cluster.anchorMs),
+      startAt: isoOf(cluster.startMs),
+      endAt: isoOf(cluster.endMs),
+      rows: cluster.members.length,
+      timeRows: cluster.timeRows,
+      active: cluster.members.filter((row) => row.active !== false).length,
+      inactive: cluster.members.filter((row) => row.active === false).length,
+      label: cluster.label,
+    })),
+    exceptions: exceptionRows
+      .map((row) => ({ recordId: row.recordId, k: assignment.get(row.recordId).k }))
+      .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)),
+    // MF1(a): a degenerate plan places add rows by anchor, not by time: each placement is persisted by record id.
+    placements: placementRows
+      .map((row) => ({ recordId: row.recordId, k: assignment.get(row.recordId).k }))
+      .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)),
+    unplacedRows,
+    interleavedRows: exceptionRows.length,
+    K: kept.length,
+  }
+  plan.digest = pullBatchHistoryPlanDigest(plan)
+  return { plan: Object.freeze(plan), assignments }
+}
+
+/**
+ * The confirmation digest of a plan (design §8.3 step 8, §8.2 I0/I3/I5): its content without itself and WITHOUT
+ * `coveredUntil` (MF2). coveredUntil is the DB clock of the read, so the same rows read at the dry-run and again at
+ * the install would never share a digest; it stays in the persisted plan for I5 and for membership. Every other
+ * field moves it: cuts, clusters (and so the rows' counts), exceptions, placements, base, gap, locale, rule and
+ * format. The 首次 inputs that are not rows of the read (a gap pass's priorRows, the ledger's openings) are not
+ * part of the plan and do not move it.
+ */
+function pullBatchHistoryPlanDigest(plan) {
+  const { digest: _digest, coveredUntil: _coveredUntil, ...rest } = isPlainObject(plan) ? plan : {}
+  return sha256Hex(canonicalJson(rest))
+}
+
+/**
+ * Which cluster of a PERSISTED plan a row belongs to (design §8.3 step 6, §8.2 I3): the persisted exceptions
+ * first, then the persisted placements (a degenerate plan), then the persisted interval of TIME members that
+ * contains its createdAt (a cluster with timeRows 0 has no interval) — never a RUN stamp. A row created after
+ * `coveredUntil` is not covered (answers 'uncovered'); a row the plan could not place answers null. For every
+ * row of the plan's own input this equals its assignment's k (the crash-continuation contract, R8 / G1).
+ */
+function pullBatchHistoryMembership(plan, { recordId, createdAt } = {}) {
+  if (!isPlainObject(plan) || plan.scheme !== PULL_BATCH_HISTORY_SCHEME) throw historyInvalid('plan')
+  const exception = (plan.exceptions || []).find((entry) => entry.recordId === recordId)
+  if (exception) return exception.k
+  const placement = (plan.placements || []).find((entry) => entry.recordId === recordId)
+  if (placement) return placement.k
+  const createdMs = timeMsOf(createdAt)
+  if (createdMs === null) return null
+  if (createdMs > timeMsOf(plan.coveredUntil)) return 'uncovered'
+  if (plan.degenerate) return null
+  for (const cluster of plan.clusters || []) {
+    if (!(cluster.timeRows > 0)) continue
+    const startMs = timeMsOf(cluster.startAt)
+    const endMs = timeMsOf(cluster.endAt)
+    if (createdMs >= startMs && createdMs <= endMs) return cluster.k
+  }
+  return null
+}
+
+// ── the attested historical count (design §8.5; R7, G8(a)) ───────────────────────────────────────────
+/**
+ * The count rule of an install / gap pass, pure.
+ *   historyMode 'inferred' (default): `confirmHistoricalBatchCount` must EQUAL the plan's K (degenerate plans
+ *     too), else 409 HISTORY_COUNT_MISMATCH with K. The plan's inferred batches are written.
+ *   historyMode 'unknown': any integer ≥ 0. Every covered machine row gets 历史批次未知 in both cells and no
+ *     inferred batch is written.
+ * In either mode `historyBatchCount` = plan.base + the confirmed count (= K, or the confirmed count, at a first
+ * install where base is 0), and live numbering continues after max(batch_no, historyBatchCount).
+ * A malformed mode or count => 400 INSTALL_REQUEST_INVALID.
+ */
+function resolvePullBatchHistoryCount({ plan, historyMode, confirmHistoricalBatchCount } = {}) {
+  if (!isPlainObject(plan) || plan.scheme !== PULL_BATCH_HISTORY_SCHEME || !Number.isSafeInteger(plan.K) || !Number.isSafeInteger(plan.base)) {
+    throw historyInvalid('plan')
+  }
+  const mode = historyMode === undefined ? 'inferred' : historyMode
+  if (!PULL_BATCH_HISTORY_MODES.includes(mode)) {
+    throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.INSTALL_REQUEST_INVALID, 'historyMode must be inferred or unknown', { field: 'historyMode' })
+  }
+  const count = confirmHistoricalBatchCount
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.INSTALL_REQUEST_INVALID, 'confirmHistoricalBatchCount must be an integer of at least 0', { field: 'confirmHistoricalBatchCount' })
+  }
+  if (mode === 'inferred' && count !== plan.K) {
+    throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.HISTORY_COUNT_MISMATCH, 'the attested historical pull count differs from the plan; re-plan with another gap or use unknown mode', { K: plan.K, degenerate: plan.degenerate === true })
+  }
+  const historyBatchCount = plan.base + count
+  return Object.freeze({
+    historyMode: mode,
+    historyBatchCount,
+    writesInferredBatches: mode === 'inferred',
+    firstLiveBatchNo: historyBatchCount + 1,
+  })
+}
+
+// ── the per-sheet install (design §8.2-§8.6; BI-2) — pure, portable ─────────────────────────────────────────────
+//
+// THE PERSISTED INSTALL PLAN (`_sheet.history_plan`, the "envelope"). A `planPullBatchHistory` plan (scheme
+// pull-batch-history/v1, so `pullBatchHistoryMembership` and `resolvePullBatchHistoryCount` read it unchanged) plus:
+//   run        'first_install' | 'gap_pass'
+//   segments   [{ base, K, coveredUntil }] — segment 0 is the plan the dry-run showed; each later one an EXTENSION
+//              (design §8.2 I5: rows created after the plan's coveredUntil, planned after it and numbered after it).
+//              The top-level clusters / exceptions / placements / cuts / K / coveredUntil are the FLATTENED union, so
+//              the store's lock rule (every cluster label) and membership read one list.
+//   gapPass    (gap pass only) { rows: [recordId] — THE RUN SET of segment 0, sorted; joins: [{ recordId, label }]; interleaved:
+//              [{ recordId }]; newestOpenedAt } (design §8.6; critic BI-2 C1: a gap pass labels ITS rows only, never the rows
+//              already carrying live labels, whose membership in a gap-cluster interval means nothing)
+//   + the undigested run facts the install records: historyMode, previousHistoryStatus, aborted (and coveredUntil, the
+//   read's clock — MF2).
+// `digest` = `pullBatchInstallPlanDigest(envelope)` (critic C13: never the planner's own digest once a gap pass or an
+// extension is attached).
+//
+// THE RUN SET R (critic C1). First install: every evidence row the plan covers. Gap pass: `gapPass.rows` plus the rows of
+// the extension segments. The fixed-point check, the writes, unknown mode and the resolve's blank check walk R only; the
+// 首次 pool's prior rows are the evidence rows NOT in R, with their cells as read (stable while installing: every lane
+// refuses, and the install never writes them).
+//
+// RE-RUNS NEVER RECOMPUTE (P2-3). `pullBatchHistoryAssignments` re-labels R from the persisted plan through the planner's
+// own labelling code (`labelHistorySegment`), segment by segment, so a crash continuation writes byte-identical labels.
+// RULE F RESIDUAL (critic C12, choice (b), recorded under R-65): under 'predecessor_suffix' a row of R whose 首次 cell
+// is already set KEEPS it (and feeds the pool as such) — today's active state may have moved since the cell was written;
+// rule A ('material') never reads the active state and is fixed-point checked in full.
+const PULL_BATCH_APPROVAL_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$/
+// The planner's record-ref key (stock-preparation-conflict-planner.cjs EXISTING_ROW_RECORD_REF), spelled by its registry
+// key like the created-by key above (critic C2): the reader attaches `{ id, version }` from the record ENVELOPE.
+const EXISTING_ROW_RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+const PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS = Object.freeze(['digest', 'coveredUntil', 'previousHistoryStatus', 'historyMode', 'aborted'])
+const PULL_BATCH_INSTALL_PLAN_RUNS = Object.freeze(['first_install', 'gap_pass'])
+
+function planChanged(reason, extra = {}) {
+  return new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'the persisted pull-batch plan cannot be extended or replaced this way; preview again', { reason, ...extra })
+}
+
+function compareIds(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** The confirmation digest of an install envelope: everything but the undigested run facts (and each segment's clock). */
+function pullBatchInstallPlanDigest(envelope) {
+  if (!isPlainObject(envelope)) throw historyInvalid('plan')
+  const rest = {}
+  for (const key of Object.keys(envelope)) {
+    if (PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS.includes(key)) continue
+    rest[key] = envelope[key]
+  }
+  if (Array.isArray(rest.segments)) rest.segments = rest.segments.map((segment) => ({ base: segment && segment.base, K: segment && segment.K }))
+  return sha256Hex(canonicalJson(rest))
+}
+
+function sealEnvelope(envelope) {
+  const sealed = { ...envelope }
+  delete sealed.digest
+  sealed.digest = pullBatchInstallPlanDigest(sealed)
+  return Object.freeze(sealed)
+}
+
+function envelopeOf(plan, run, extra = {}) {
+  const { digest: _digest, ...rest } = plan
+  return sealEnvelope({ ...rest, run, segments: [{ base: plan.base, K: plan.K, coveredUntil: plan.coveredUntil }], ...extra })
+}
+
+/** A persisted install envelope, or 500 STAMP_INVALID { field: 'plan' } (a caller defect or a corrupt row). */
+function assertInstallEnvelope(plan) {
+  if (!isPlainObject(plan) || plan.scheme !== PULL_BATCH_HISTORY_SCHEME || !PULL_BATCH_INSTALL_PLAN_RUNS.includes(plan.run)
+    || !Array.isArray(plan.clusters) || !Array.isArray(plan.segments) || plan.segments.length === 0
+    || !Number.isSafeInteger(plan.K) || !Number.isSafeInteger(plan.base) || timeMsOf(plan.coveredUntil) === null
+    || !PULL_BATCH_LOCALES.includes(plan.locale)) {
+    throw historyInvalid('plan')
+  }
+  for (const segment of plan.segments) {
+    if (!isPlainObject(segment) || !Number.isSafeInteger(segment.base) || !Number.isSafeInteger(segment.K) || timeMsOf(segment.coveredUntil) === null) throw historyInvalid('plan')
+  }
+  if (plan.run === 'gap_pass' && (!isPlainObject(plan.gapPass) || !Array.isArray(plan.gapPass.rows))) throw historyInvalid('plan')
+  return plan
+}
+
+function configOfPlan(plan) {
+  return { firstPullBatchRule: plan.firstPullBatchRule, labelFormat: plan.labelFormat }
+}
+
+/** First install (design §8.3): every covered evidence row, base 0. Answers the sealed envelope. */
+function planPullBatchFirstInstall({ rows, gapMinutes, coveredUntil, locale, config } = {}) {
+  const { plan } = planPullBatchHistory({ rows, priorRows: [], gapMinutes, base: 0, coveredUntil, locale, config, ledgerBatches: [] })
+  return envelopeOf(plan, 'first_install')
+}
+
+// Joins and interleaved rows of a gap pass are decided over the PRIOR rows only (design §8.6), then join the pool.
+function labelGapPrePhase({ joins, interleaved, byId, pool, rule, lang, openedAtByLabel, assignments, keepFirst }) {
+  const unknown = PULL_BATCH_UNKNOWN_LABELS[lang]
+  const decided = []
+  const decide = (row, pullBatch) => {
+    let firstPullBatch
+    if (keepFirst && keepFirst.has(row.recordId)) firstPullBatch = keepFirst.get(row.recordId)
+    else {
+      const first = decideFirstPullBatch(poolMatches(pool, rule, row), { locale: lang, openedAtByLabel })
+      firstPullBatch = first === null ? pullBatch : first
+    }
+    assignments.set(row.recordId, { k: null, pullBatch, firstPullBatch })
+    decided.push({ partId: row.partId, path: row.path, active: row.active, firstPullBatch, createdAt: row.createdMs === null ? null : isoOf(row.createdMs) })
+  }
+  for (const join of joins) {
+    const row = byId.get(join.recordId)
+    if (row) decide(row, join.label)
+  }
+  for (const entry of interleaved) {
+    const row = byId.get(entry.recordId)
+    if (row) decide(row, unknown)
+  }
+  for (const entry of decided) poolAdd(pool, entry)
+}
+
+/**
+ * Gap pass (design §8.6). `gapRows`: the evidence rows to label (history rows); `priorRows`: every other evidence row
+ * with its cells as read ({ recordId, createdAt, decision, plannedAt, active, partId, path, pullBatch, firstPullBatch }).
+ * base = max(max non-void batch_no, historyBatchCount). EXACT JOIN first: a gap row add-stamped with plan time p joins
+ * the live label L when ≥ 1 prior row is add-stamped with the same p and carries a LIVE 本次, and every such row carries
+ * the same L (two labels for one plan time => no join). Then INTERLEAVED: a remaining gap row created before the newest
+ * non-void batch opened => 本次 历史批次未知. The rest are planned after base. Answers the sealed envelope.
+ */
+function planPullBatchGapPass({ gapRows, priorRows, ledgerBatches, historyBatchCount, gapMinutes, coveredUntil, locale, config } = {}) {
+  const cfg = normalizePullBatchConfig(config)
+  const lang = assertLocale(locale)
+  const input = normalizeHistoryRows(gapRows)
+  const priors = Array.isArray(priorRows) ? priorRows.filter(isPlainObject) : []
+  let maxBatchNo = 0
+  let newestOpenedMs = null
+  for (const batch of Array.isArray(ledgerBatches) ? ledgerBatches : []) {
+    if (!batch || batch.status === 'void') continue
+    if (Number.isSafeInteger(batch.batchNo) && batch.batchNo > maxBatchNo) maxBatchNo = batch.batchNo
+    const openedMs = timeMsOf(batch.openedAt)
+    if (openedMs !== null && (newestOpenedMs === null || openedMs > newestOpenedMs)) newestOpenedMs = openedMs
+  }
+  const floor = historyBatchCount === undefined || historyBatchCount === null ? 0 : historyBatchCount
+  if (!Number.isSafeInteger(floor) || floor < 0) throw historyInvalid('historyBatchCount')
+  const base = Math.max(maxBatchNo, floor)
+  // plan time -> the live 本次 labels of the prior add rows stamped with it
+  const liveByPlanTime = new Map()
+  for (const prior of priors) {
+    if (prior.decision !== 'add') continue
+    const plannedMs = timeMsOf(prior.plannedAt)
+    if (plannedMs === null) continue
+    const parsed = parsePullBatchLabel(prior.pullBatch)
+    if (parsed.kind !== 'live') continue
+    if (!liveByPlanTime.has(plannedMs)) liveByPlanTime.set(plannedMs, new Set())
+    liveByPlanTime.get(plannedMs).add(String(prior.pullBatch).trim())
+  }
+  const joins = []
+  const interleaved = []
+  const rest = []
+  const restSource = []
+  input.forEach((row, index) => {
+    const labels = row.decision === 'add' && row.plannedMs !== null ? liveByPlanTime.get(row.plannedMs) : undefined
+    if (labels && labels.size === 1) {
+      joins.push({ recordId: row.recordId, label: labels.values().next().value })
+      return
+    }
+    if (newestOpenedMs !== null && row.createdMs !== null && row.createdMs < newestOpenedMs) {
+      interleaved.push({ recordId: row.recordId })
+      return
+    }
+    rest.push(row)
+    restSource.push(gapRows[index])
+  })
+  joins.sort((a, b) => compareIds(a.recordId, b.recordId))
+  interleaved.sort((a, b) => compareIds(a.recordId, b.recordId))
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  const pool = priorPoolOf(priors)
+  const preAssignments = new Map()
+  labelGapPrePhase({ joins, interleaved, byId: new Map(input.map((row) => [row.recordId, row])), pool, rule: cfg.firstPullBatchRule, lang, openedAtByLabel, assignments: preAssignments, keepFirst: null })
+  const { plan } = planPullBatchHistory({ rows: restSource, priorRows: pool.entries, gapMinutes, base, coveredUntil, locale: lang, config: cfg, ledgerBatches })
+  return envelopeOf(plan, 'gap_pass', {
+    gapPass: {
+      rows: input.map((row) => row.recordId).sort(compareIds),
+      joins,
+      interleaved,
+      newestOpenedAt: newestOpenedMs === null ? null : isoOf(newestOpenedMs),
+    },
+  })
+}
+
+// Which segment a k belongs to; which segment an unplaced row's createdAt belongs to (null createdAt => segment 0).
+function segmentIndexOfK(segments, k) {
+  for (let index = 0; index < segments.length; index += 1) {
+    if (k > segments[index].base && k <= segments[index].base + segments[index].K) return index
+  }
+  return -1
+}
+
+function segmentIndexOfTime(segments, createdMs) {
+  if (createdMs === null) return 0
+  for (let index = 0; index < segments.length; index += 1) {
+    if (createdMs <= timeMsOf(segments[index].coveredUntil)) return index
+  }
+  return -1
+}
+
+function openedAtOfEnvelope(plan, ledgerBatches) {
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  for (const cluster of plan.clusters) {
+    const startMs = timeMsOf(cluster.startAt)
+    if (startMs === null || !nonBlankString(cluster.label)) continue
+    if (!openedAtByLabel.has(cluster.label) || openedAtByLabel.get(cluster.label) < startMs) openedAtByLabel.set(cluster.label, startMs)
+  }
+  return openedAtByLabel
+}
+
+// `pullBatchHistoryMembership` with its lookups indexed once (a find per row is quadratic at the reader's bound);
+// the same answer for every row (the unit suite pins the two equal).
+function membershipIndexOf(plan) {
+  const exceptions = new Map((plan.exceptions || []).map((entry) => [entry.recordId, entry.k]))
+  const placements = new Map((plan.placements || []).map((entry) => [entry.recordId, entry.k]))
+  const coveredMs = timeMsOf(plan.coveredUntil)
+  const intervals = (plan.clusters || [])
+    .filter((cluster) => cluster.timeRows > 0)
+    .map((cluster) => ({ k: cluster.k, startMs: timeMsOf(cluster.startAt), endMs: timeMsOf(cluster.endAt) }))
+  return (recordId, createdMs) => {
+    if (exceptions.has(recordId)) return exceptions.get(recordId)
+    if (placements.has(recordId)) return placements.get(recordId)
+    if (createdMs === null) return null
+    if (createdMs > coveredMs) return 'uncovered'
+    if (plan.degenerate) return null
+    for (const interval of intervals) {
+      if (createdMs >= interval.startMs && createdMs <= interval.endMs) return interval.k
+    }
+    return null
+  }
+}
+
+function runHistoryAssignments({ plan, rows, priorRows, ledgerBatches, keepFirst } = {}) {
+  assertInstallEnvelope(plan)
+  const lang = assertLocale(plan.locale)
+  const rule = normalizePullBatchConfig(configOfPlan(plan)).firstPullBatchRule
+  const keep = keepFirst instanceof Map && rule === 'predecessor_suffix' ? keepFirst : null
+  const input = normalizeHistoryRows(rows)
+  const byId = new Map(input.map((row) => [row.recordId, row]))
+  const openedAtByLabel = openedAtOfEnvelope(plan, ledgerBatches)
+  const pool = priorPoolOf(priorRows)
+  const assignments = new Map()
+  if (plan.run === 'gap_pass') {
+    labelGapPrePhase({ joins: plan.gapPass.joins || [], interleaved: plan.gapPass.interleaved || [], byId, pool, rule, lang, openedAtByLabel, assignments, keepFirst: keep })
+  }
+  const clustersBySegment = plan.segments.map(() => [])
+  const clusterByK = new Map()
+  for (const cluster of plan.clusters.slice().sort((a, b) => a.k - b.k)) {
+    const index = segmentIndexOfK(plan.segments, cluster.k)
+    if (index < 0) throw historyInvalid('plan')
+    const entry = { k: cluster.k, label: cluster.label, members: [] }
+    clustersBySegment[index].push(entry)
+    clusterByK.set(cluster.k, entry)
+  }
+  const unplacedBySegment = plan.segments.map(() => [])
+  const membershipOf = membershipIndexOf(plan)
+  for (const row of input) {
+    if (assignments.has(row.recordId)) continue
+    const k = membershipOf(row.recordId, row.createdMs)
+    if (k === 'uncovered') continue
+    if (k === null) {
+      const index = segmentIndexOfTime(plan.segments, row.createdMs)
+      if (index >= 0) unplacedBySegment[index].push(row)
+      continue
+    }
+    const cluster = clusterByK.get(k)
+    if (!cluster) throw historyInvalid('plan')
+    cluster.members.push(row)
+  }
+  plan.segments.forEach((_segment, index) => {
+    labelHistorySegment({ clusters: clustersBySegment[index], unplaced: unplacedBySegment[index], pool, rule, lang, openedAtByLabel, assignments, keepFirst: keep })
+  })
+  return { assignments, pool }
+}
+
+/**
+ * THE RE-RUN LABELLING (P2-3): Map recordId -> { k, pullBatch, firstPullBatch } for the rows of R, from the PERSISTED
+ * envelope only — 本次 by membership (joins / interleaved first in a gap pass), 首次 by the planner's own labelling, segment
+ * by segment, over `priorRows` (the evidence rows not in R, cells as read) and the decided rows of earlier clusters.
+ * Never reads a RUN stamp (`decision` / `plannedAt`). Contract: for a first install, on the planner's own input, it
+ * deepEquals `planPullBatchHistory(...).assignments`. `keepFirst` (rule F only): see the section header.
+ */
+function pullBatchHistoryAssignments(input = {}) {
+  return runHistoryAssignments(input).assignments
+}
+
+/**
+ * The run set R (critic C1): the record ids of `rows` (evidence, history-shaped) the persisted plan labels. First install:
+ * every row it covers. Gap pass: `gapPass.rows` plus the rows of its extension segments.
+ */
+function pullBatchInstallRunSet({ plan, rows } = {}) {
+  assertInstallEnvelope(plan)
+  const out = new Set()
+  const listed = plan.run === 'gap_pass' ? new Set(plan.gapPass.rows) : null
+  const seg0Ms = timeMsOf(plan.segments[0].coveredUntil)
+  const finalMs = timeMsOf(plan.coveredUntil)
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isPlainObject(row) || !nonBlankString(row.recordId)) continue
+    const recordId = row.recordId.trim()
+    const createdMs = timeMsOf(row.createdAt)
+    if (listed) {
+      if (listed.has(recordId) || (createdMs !== null && createdMs > seg0Ms && createdMs <= finalMs)) out.add(recordId)
+      continue
+    }
+    if (createdMs === null || createdMs <= finalMs) out.add(recordId)
+  }
+  return out
+}
+
+/**
+ * EXTENSION (design §8.2 I5; P2-10): plan `newRows` (evidence rows created after the persisted coveredUntil) after
+ * base + K, with the pool after every existing segment as prior rows (`runRows` = R of the persisted plan, `priorRows`
+ * = the evidence rows not in R), and append it as a new segment. A degenerate side is refused 409 PLAN_CHANGED
+ * `extension_degenerate` (membership of a flattened plan is by time; a degenerate segment has no time intervals).
+ */
+function extendPullBatchHistoryPlan({ persisted, runRows, newRows, priorRows, coveredUntil, ledgerBatches, keepFirst } = {}) {
+  assertInstallEnvelope(persisted)
+  if (persisted.degenerate) throw planChanged('extension_degenerate')
+  const { pool } = runHistoryAssignments({ plan: persisted, rows: runRows, priorRows, ledgerBatches, keepFirst })
+  const pseudoBatches = (Array.isArray(ledgerBatches) ? ledgerBatches.slice() : [])
+    .concat(persisted.clusters.map((cluster) => ({ label: cluster.label, openedAt: cluster.startAt, status: 'closed' })))
+  const base = persisted.base + persisted.K
+  const { plan: ext } = planPullBatchHistory({
+    rows: newRows,
+    priorRows: pool.entries,
+    gapMinutes: persisted.gapMinutes,
+    base,
+    coveredUntil,
+    locale: persisted.locale,
+    config: configOfPlan(persisted),
+    ledgerBatches: pseudoBatches,
+  })
+  if (ext.degenerate) throw planChanged('extension_degenerate')
+  const byRecord = (a, b) => compareIds(a.recordId, b.recordId)
+  const { digest: _digest, ...kept } = persisted
+  return sealEnvelope({
+    ...kept,
+    coveredUntil: ext.coveredUntil,
+    cuts: Array.from(new Set([...persisted.cuts, ...ext.cuts])).sort(),
+    clusters: [...persisted.clusters, ...ext.clusters],
+    exceptions: [...persisted.exceptions, ...ext.exceptions].sort(byRecord),
+    placements: [...(persisted.placements || []), ...(ext.placements || [])].sort(byRecord),
+    unplacedRows: persisted.unplacedRows + ext.unplacedRows,
+    interleavedRows: persisted.interleavedRows + ext.interleavedRows,
+    K: persisted.K + ext.K,
+    segments: [...persisted.segments, { base, K: ext.K, coveredUntil: ext.coveredUntil }],
+  })
+}
+
+/** The inferred ledger rows a resolved inferred-mode install writes: one per cluster (design §8.2 I6). */
+function pullBatchInstallInferredBatches(plan) {
+  assertInstallEnvelope(plan)
+  return plan.clusters
+    .slice()
+    .sort((a, b) => a.k - b.k)
+    .map((cluster) => Object.freeze({
+      batchNo: cluster.k,
+      label: cluster.label,
+      displayDay: pullBatchLabelDay(cluster.startAt),
+      evidence: cluster.evidence,
+      openedAt: cluster.startAt,
+      closedAt: cluster.endAt,
+    }))
+}
+
+/** Every label the plan writes (the store's C7 rule reads the same: each cluster label, 历史批次未知 in both locales). */
+function pullBatchInstallPlanLabels(plan) {
+  assertInstallEnvelope(plan)
+  const labels = new Set(Object.values(PULL_BATCH_UNKNOWN_LABELS))
+  for (const cluster of plan.clusters) if (nonBlankString(cluster.label)) labels.add(cluster.label)
+  return labels
+}
+
+// ── the writer's side input (design §3.4; BI-1b) — portable, so the R-line writer validates the same shape ──────
+
+/**
+ * The writer's `pullBatchStamp` side input, validated BEFORE any IO. `undefined` / `null` => null (the writer is
+ * byte-identical). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch }, firstPullBatchByKey, allocate }`:
+ *   fieldIds             the band's PHYSICAL ids — two distinct non-blank strings, never a key or a value of the
+ *                        target's `fieldIdMap` (a band id mapped onto a template column would overwrite that column);
+ *   firstPullBatchByKey  a Map: idempotency key (non-blank string) -> 首次批次 label (non-blank string) | null ("this
+ *                        batch"); server-held, never answered;
+ *   allocate             the lazily called ledger allocation (an async function).
+ * Anything else is 500 STAMP_INVALID { field } — a caller defect, never a skipped stamp.
+ */
+function normalizePullBatchStamp(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  if (!isPlainObject(value)) throw stampInvalid('pullBatchStamp', 'the pull-batch stamp must be an object')
+  const ids = value.fieldIds
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('fieldIds', 'the pull-batch stamp needs two distinct physical band ids')
+  }
+  const map = isPlainObject(fieldIdMap) ? fieldIdMap : {}
+  const taken = new Set([...Object.keys(map), ...Object.values(map)])
+  if (taken.has(ids.pullBatch) || taken.has(ids.firstPullBatch)) {
+    throw stampInvalid('fieldIds', 'a pull-batch band id must not be a template field of the target')
+  }
+  if (!(value.firstPullBatchByKey instanceof Map)) throw stampInvalid('firstPullBatchByKey', 'the 首次批次 carry must be a Map')
+  for (const [key, label] of value.firstPullBatchByKey) {
+    if (!nonBlankString(key)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry key must be a non-blank string')
+    if (label !== null && !nonBlankString(label)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry label must be null or a non-blank string')
+  }
+  if (typeof value.allocate !== 'function') throw stampInvalid('allocate', 'the pull-batch stamp needs its allocation function')
+  return Object.freeze({
+    fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }),
+    firstPullBatchByKey: value.firstPullBatchByKey,
+    allocate: value.allocate,
+  })
+}
+
+/**
+ * The ledger's allocation answer, checked before a single cell is written: `{ batchId, batchNo, label, joined }`
+ * with a positive batch number and a label the grammar reads as `live`. Anything else is 500 STAMP_INVALID — the
+ * writer never stamps a cell it cannot read back as this run's batch.
+ */
+function assertAllocatedBatch(answer) {
+  if (!isPlainObject(answer)) throw stampInvalid('allocation', 'the pull-batch allocation must answer an object')
+  if (!nonBlankString(answer.batchId)) throw stampInvalid('batchId', 'the pull-batch allocation must answer a batch id')
+  if (!Number.isSafeInteger(answer.batchNo) || answer.batchNo < 1) throw stampInvalid('batchNo', 'the pull-batch allocation must answer a positive batch number')
+  if (typeof answer.label !== 'string' || parsePullBatchLabel(answer.label).kind !== 'live') {
+    throw stampInvalid('label', 'the pull-batch allocation must answer a live batch label')
+  }
+  if (typeof answer.joined !== 'boolean') throw stampInvalid('joined', 'the pull-batch allocation must say whether it joined a batch')
+  return Object.freeze({ batchId: answer.batchId, batchNo: answer.batchNo, label: answer.label, joined: answer.joined })
+}
+
+// ── the reader's strip (design §4.4; BI-1b) — portable, so the R-line reader strips the same way ──────────────────
+
+/**
+ * The reader's `pullBatchBand` option, validated ONCE before the first page. `undefined` / `null` => null (the reader is
+ * byte-identical: no strip, no Symbol). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch } }` — the band's
+ * PHYSICAL ids, two distinct non-blank strings, neither equal to a value of the target's `fieldIdMap` (a band id mapped
+ * onto a template column would delete that column's cell from every row). Anything else is 500 STAMP_INVALID
+ * `{ field: 'pullBatchBand' }` — a caller defect; the routes derive the band so that no request can reach it.
+ */
+function normalizePullBatchReaderBand(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  const ids = isPlainObject(value) ? value.fieldIds : null
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('pullBatchBand', 'the reader band needs two distinct physical band ids')
+  }
+  const mapped = new Set(Object.values(isPlainObject(fieldIdMap) ? fieldIdMap : {}))
+  if (mapped.has(ids.pullBatch) || mapped.has(ids.firstPullBatch)) {
+    throw stampInvalid('pullBatchBand', 'a reader band id must not be a mapped template column of the target')
+  }
+  return Object.freeze({ fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }) })
+}
+
+function bandCellOf(row, physical, logical) {
+  if (Object.prototype.hasOwnProperty.call(row, physical)) return row[physical]
+  if (Object.prototype.hasOwnProperty.call(row, logical)) return row[logical]
+  return undefined
+}
+
+/**
+ * The strip (design §4.4): BOTH band cells leave the unmapped reader row — the physical key, and defensively the logical
+ * key (mapFieldName's raw-id fallback, design F9) — onto `EXISTING_ROW_PULL_BATCH`, so stableStringify / JSON / Object.keys
+ * never see them and every digest over reader rows is the digest of a band-less sheet. The Symbol is ENUMERABLE (the
+ * RECORD_REF / CREATED_BY precedent: spreads keep it). `createdAt` / `locked` come from the record ENVELOPE (never from
+ * `data`, so a cell cannot forge them). Mutates and answers `row`. `band` is a normalized reader band.
+ */
+function stripPullBatchBand(row, record, band) {
+  if (!row || typeof row !== 'object' || !band) return row
+  const { pullBatch: pullBatchId, firstPullBatch: firstPullBatchId } = band.fieldIds
+  const pullBatch = cellText(bandCellOf(row, pullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch))
+  const firstPullBatch = cellText(bandCellOf(row, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch))
+  for (const key of [pullBatchId, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch]) {
+    delete row[key]
+  }
+  const envelope = record && typeof record === 'object' && isPlainObject(record.data) ? record : null
+  row[EXISTING_ROW_PULL_BATCH] = Object.freeze({
+    pullBatch,
+    firstPullBatch,
+    createdAt: envelope && typeof envelope.createdAt === 'string' ? envelope.createdAt : null,
+    locked: Boolean(envelope && envelope.locked === true),
+  })
+  return row
+}
+
+/** Live numbering (design §3.5 step 4, Q-BI-11): max(max non-void batch_no, history_batch_count) + 1. */
+function nextLivePullBatchNo({ maxBatchNo, historyBatchCount } = {}) {
+  const max = maxBatchNo === undefined || maxBatchNo === null ? 0 : maxBatchNo
+  const floor = historyBatchCount === undefined || historyBatchCount === null ? 0 : historyBatchCount
+  if (!Number.isSafeInteger(max) || max < 0) throw stampInvalid('maxBatchNo', 'maxBatchNo must be an integer of at least 0')
+  if (!Number.isSafeInteger(floor) || floor < 0) throw stampInvalid('historyBatchCount', 'historyBatchCount must be an integer of at least 0')
+  return Math.max(max, floor) + 1
+}
+
+module.exports = {
+  DEFAULT_PULL_BATCH_CONFIG,
+  EXISTING_ROW_PULL_BATCH,
+  EXISTING_ROW_RECORD_REF,
+  FIRST_PULL_BATCH_RULES,
+  MANUAL_ROW_KEY_PREFIX,
+  PULL_BATCH_APPROVAL_REF_PATTERN,
+  PULL_BATCH_BAND_FIELD_IDS,
+  PULL_BATCH_CLOSED_REASONS,
+  PULL_BATCH_CONFIG_KEYS,
+  PULL_BATCH_CONFIG_LOCK_STATES,
+  PULL_BATCH_CONFIG_LOCKS,
+  PULL_BATCH_CONFIG_VALUES,
+  PULL_BATCH_ERROR_CODES,
+  PULL_BATCH_ERROR_HTTP_STATUS,
+  PULL_BATCH_EVIDENCE_CLASSES,
+  PULL_BATCH_FIXED_FACTS,
+  PULL_BATCH_HISTORY_MODES,
+  PULL_BATCH_HISTORY_SCHEME,
+  PULL_BATCH_INSTALL_PLAN_RUNS,
+  PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS,
+  PULL_BATCH_LABEL_FORMATS,
+  PULL_BATCH_LABEL_KINDS,
+  PULL_BATCH_LOCALES,
+  PULL_BATCH_MANUAL_LABELS,
+  PULL_BATCH_MEANING_LOCKED_KEYS,
+  PULL_BATCH_RESPONSE_REASONS,
+  PULL_BATCH_SETTINGS_HELP,
+  PULL_BATCH_SOURCE_DIGEST_PATTERN,
+  PULL_BATCH_SOURCE_DIGEST_SCHEME,
+  PULL_BATCH_UNKNOWN_LABELS,
+  StockPreparationPullBatchError,
+  assertAllocatedBatch,
+  buildFirstPullBatchByKey,
+  countPullBatchGapRows,
+  extendPullBatchHistoryPlan,
+  formatPullBatchLabel,
+  isPullBatchEvidenceRow,
+  isPullBatchGapRow,
+  nextLivePullBatchNo,
+  normalizePartId,
+  normalizePullBatchConfig,
+  normalizePullBatchReaderBand,
+  normalizePullBatchStamp,
+  parsePullBatchLabel,
+  planPullBatchFirstInstall,
+  planPullBatchGapPass,
+  planPullBatchHistory,
+  pullBatchHistoryAssignments,
+  pullBatchHistoryMembership,
+  pullBatchHistoryPlanDigest,
+  pullBatchInstallInferredBatches,
+  pullBatchInstallPlanDigest,
+  pullBatchInstallPlanLabels,
+  pullBatchInstallRunSet,
+  pullBatchLabelDay,
+  pullBatchSourceDigest,
+  refusedPullBatchConfigEdits,
+  resolvePullBatchHistoryCount,
+  rowPullBatchFacts,
+  stripPullBatchBand,
+  __internals: {
+    EXISTING_ROW_CREATED_BY_KEY,
+    assertInstallEnvelope,
+    canonicalJson,
+    decideFirstPullBatch,
+    isCalendarDay,
+    isManualRowKey,
+    isPluginRowKey,
+    isPersonCreatedRow,
+    isProperSuffix,
+    membershipIndexOf,
+    pathTokensOf,
+    timeMsOf,
+  },
+}

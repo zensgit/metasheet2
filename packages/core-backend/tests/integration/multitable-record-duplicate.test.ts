@@ -31,6 +31,9 @@ import { defineStockPreparationManualRowsSwitchRealDbCases } from './stock-prepa
 // field row): two cases modules, registered at the end of this file so they run in its existing real-DB lane.
 import { defineStockPreparationFieldPropertyRaceRealDbCases } from './stock-preparation-field-property-race-realdb.cases'
 import { defineMultitableFieldRowConcurrencyRealDbCases } from './multitable-field-row-concurrency-realdb.cases'
+// 备料 「查看子件」 / 「查看所有使用位置」: the /context block and the GET /view `viewerFilter` on a sheet the real plugin
+// provisioned — a cases module registered at the end of this file, so it runs in this file's existing real-DB lane.
+import { defineStockPreparationBomRelationsRealDbCases } from './stock-preparation-bom-relations-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -620,3 +623,5 @@ defineStockPreparationManualRowsSwitchRealDbCases()
 // interleavings (config revert, the shared column drag, one concurrent change per column).
 defineStockPreparationFieldPropertyRaceRealDbCases()
 defineMultitableFieldRowConcurrencyRealDbCases()
+// 备料 drawer BOM relations: the /context ids for a reader, and the never-stored viewer filter on GET /view + view-aggregate.
+defineStockPreparationBomRelationsRealDbCases()

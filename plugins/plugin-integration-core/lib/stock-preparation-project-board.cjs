@@ -204,6 +204,10 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'refresh',
 ])
 
+// 批次标识 BI-1b (design §8.7; P-7; register R-65): the keys the board answers ONLY when the route hands the optional
+// reader (the pull-batch switch is on). Off => exactly STOCK_PREPARATION_PROJECT_BOARD_KEYS, byte-identical.
+const STOCK_PREPARATION_PROJECT_BOARD_OPTIONAL_KEYS = Object.freeze(['pullBatch'])
+
 /**
  * PR-5: the board's `refresh` stanza. A reader that is not wired, or a project with no bound sheet to consult,
  * answers the `unreadable` state with a closed-shape reason. A reader REFUSAL (409 RETARGETED / TENANT_MISMATCH,
@@ -309,6 +313,9 @@ async function readOperatorProjectBoard({
   readRefreshState = null,
   // PR-5: the tenant's open refresh holds by project number (see listOperatorProjectDirectory).
   refreshHoldCounts = null,
+  // 批次标识 BI-1b: the pull-batch stanza reader (values-free, fail-soft) — passed by the route only while the switch is
+  // on. Absent => no `pullBatch` key.
+  readPullBatchStanza = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationProjectBoardError(
@@ -459,12 +466,24 @@ async function readOperatorProjectBoard({
     // not bound or the reader is not wired; three distinct answers, never zero (design D8 / §9.5).
     refresh: await readRefreshStanza({ readRefreshState, projectNo: wanted, boundTarget }),
   }
+  // 批次标识 BI-1b (G10): fail-soft — the board never fails for the stanza.
+  if (typeof readPullBatchStanza === 'function') board.pullBatch = await readPullBatchStanzaSoftly(readPullBatchStanza, { projectNo: wanted, boundTarget })
 
   return {
     board,
     mode: STOCK_PREPARATION_PROJECT_BOARD_MODES[0],
     projectCount: directory.projectCount,
   }
+}
+
+async function readPullBatchStanzaSoftly(reader, input) {
+  try {
+    const stanza = await reader(input)
+    if (stanza && typeof stanza === 'object') return stanza
+  } catch {
+    // fall through to the fail-soft answer
+  }
+  return Object.freeze({ enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' })
 }
 
 module.exports = {
@@ -474,6 +493,7 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
+  STOCK_PREPARATION_PROJECT_BOARD_OPTIONAL_KEYS,
   StockPreparationOperatorDirectoryError,
   StockPreparationProjectBoardError,
   readOperatorProjectBoard,
