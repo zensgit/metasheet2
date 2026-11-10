@@ -2578,6 +2578,22 @@ export const STOCK_PREP_RECOVERY_CARD_INTRO: StockPrepPlainText = Object.freeze(
   en: 'The last write did not finish cleanly. First press “Check the last write”: the system checks the sheet as it is now for which rows landed (it writes nothing); when the check proves it, type the project number and press “Close this execution”.',
 })
 
+/**
+ * The card with NOTHING unfinished in the list while the page says 失败待恢复. The server derives that state from an
+ * abandoned lease alone (stock-preparation-refresh-state.cjs: a held, not live lease with no unfinished row) — a close
+ * that committed while its release failed, or a crashed pull that left no execution row. No recovery control exists for
+ * it, so the way out is named: re-read first (it may just have been closed); if it persists, ONE applicable pull-tier
+ * preview clears the abandoned lease (the generation bump on mint, http-routes.cjs `projectWriteGenerationBinder`; the
+ * preview's recovery answer counts unfinished ROWS only, stock-preparation-refresh-lanes.cjs `previewRecoveryOf`) —
+ * the same wording as `STOCK_PREP_EXPORT_BLOCKED/lease_in_flight`; otherwise the platform admin.
+ */
+export const STOCK_PREP_RECOVERY_CARD_NONE: StockPrepPlainEntry = Object.freeze({
+  zh: '执行记录里没有找到未完成的执行(可能刚被结束)。',
+  en: 'No unfinished execution is in the list (it may have just been closed).',
+  zhNext: '先点上面的「重新读取」。如果本项目仍显示「上次写入未完成」,可能是一次中断的写入还占着这张表的写入:请到项目备料页重新试算一次,而且要是一次能应用的试算(结果可以应用,没有被挂起或拒绝)——这样的试算会清掉中断留下的占用;还是这样,请联系平台管理员。',
+  enNext: 'Press “Read again” above first. If this project still shows “Last write unfinished”, an interrupted write may still hold this sheet’s write turn: preview once on the project page, and it must be a preview that can be applied (not suspended or refused) — such a preview clears what the interruption left; if it still persists, ask the platform admin.',
+})
+
 /** UNPROVABLE (design §5.4). */
 export const STOCK_PREP_RECOVERY_UNPROVABLE_HINT: StockPrepPlainText = Object.freeze({
   zh: '表格证明不了写进了哪些行,不能在这里结束。请平台管理员按手册处理。',

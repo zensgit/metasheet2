@@ -11,6 +11,9 @@ import { createRequire } from 'node:module'
 //   RC-W1        visibility by state: the card (and the audited executions read) ONLY while the page's summary says
 //                failed_pending_recovery — never for not_governed / pending / complete / unreadable (dormancy); its own
 //                rendering (never 「无待处理」); a running execution under a live lease is shown but cannot be checked.
+//   RC-NONE      失败待恢复 with nothing unfinished on the pages read (an abandoned lease alone): the way out in words
+//                (re-read; then ONE applicable preview on the project page; then the platform admin), no 「核对上次写入」
+//                lead over it, and 更多执行记录 still offered while the list has a next page.
 //   RC-W2        verify (report + one page of the pending list, paged, each page a fresh digest) and close with a typed
 //                number, echoing the LAST digest; after the close 「请重新试算」 and the page re-reads.
 //   RC-W3        UNPROVABLE: the reasons in words + 「请平台管理员按手册处理」, no close; the admin's runbook flow (inspect,
@@ -22,7 +25,8 @@ import { createRequire } from 'node:module'
 //   RC-BODY      the bodies ⊆ the server's allow-lists (parsed out of http-routes.cjs) and pass the plugin's REAL
 //                normalizers; tenantId only when non-blank, never workspaceId; `limit` never sent.
 //   RC-CONTRACT  the mirrored constants (unfinished statuses, the runbook-ticket pattern, the page size).
-//   RC-SWITCH    N-SWITCH by KEY PRESENCE: no batch key => no batch line (list, report); a present null => 「没有关联」.
+//   RC-SWITCH    N-SWITCH by KEY PRESENCE: no batch key => no batch line (list, report, the admin's inspect report); a
+//                present null => 「没有关联」.
 //   RC-RELIST    NOT_UNFINISHED / NOT_FOUND => the page re-reads (the card follows its summary).
 //   RC-VALUES    the pending page's values on the page only — never in storage, an emit, the clipboard or any console call.
 //   RC-ALIGN     through the REAL shell, per actor: the three recovery control ids rendered == the manifest grant ∩ three.
@@ -182,6 +186,9 @@ interface ServerState {
   governed: string
   holds: Array<Record<string, unknown>>
   executions: Array<Record<string, unknown>>
+  /** The first executions page's `nextCursor` (null = one page); a read WITH a cursor answers `moreExecutions`. */
+  listNextCursor: string | null
+  moreExecutions: Array<Record<string, unknown>>
   /** Each verify answers the next digest (every verify is a fresh in-lease recompute). */
   verifies: number
   reportOverrides: Record<string, unknown>
@@ -200,6 +207,8 @@ function serverState(overrides: Partial<ServerState> = {}): ServerState {
     governed: 'pilot',
     holds: [],
     executions: [execution(), execution({ id: 'exec_syn_old', status: 'succeeded', verifiedResult: null, recoverable: false })],
+    listNextCursor: null,
+    moreExecutions: [],
     verifies: 0,
     reportOverrides: {},
     pendingEntries: [
@@ -246,7 +255,10 @@ function router(state: ServerState) {
     const pathProject = decodeURIComponent(url.pathname.split('/projects/')[1]?.split('/')[0] ?? '')
     if (url.pathname.includes('/refresh/executions')) {
       if (method === 'GET' && url.pathname.endsWith('/refresh/executions')) {
-        return json(200, { ok: true, data: { items: state.executions, nextCursor: null, total: state.executions.length } })
+        if (url.searchParams.get('cursor')) {
+          return json(200, { ok: true, data: { items: state.moreExecutions, nextCursor: null, total: state.executions.length + state.moreExecutions.length } })
+        }
+        return json(200, { ok: true, data: { items: state.executions, nextCursor: state.listNextCursor, total: state.executions.length + state.moreExecutions.length } })
       }
       if (method === 'POST') {
         const typed = typeof body?.confirmProjectNo === 'string' ? body.confirmProjectNo.trim() : ''
@@ -498,6 +510,44 @@ describe('「拉取待确认」 — the recovery card (RC)', () => {
     expect(q(container!, 'stock-prep-refresh-recover')).toBeNull()
   })
 
+  it('RC-NONE: 失败待恢复 with no unfinished execution on the first page names a way out (re-read, then ONE applicable preview, then the admin); 更多执行记录 still offered', async () => {
+    // The server derives 失败待恢复 from an abandoned lease alone (refresh-state.cjs), e.g. a close that committed but
+    // whose release failed, or a crashed pull with no execution row: the list then holds nothing unfinished.
+    const state = serverState({ executions: [execution({ id: 'exec_syn_old', status: 'verified_closed', recoverable: false })] })
+    const root = await mountView(state)
+    const none = q(root, 'stock-prep-refresh-recovery-none')
+    expect(none).not.toBeNull()
+    expect(none!.textContent).toContain('没有找到未完成的执行')
+    expect(none!.textContent).toContain('先点上面的「重新读取」')
+    expect(none!.textContent).toContain('中断的写入还占着这张表的写入')
+    expect(none!.textContent).toContain('项目备料页重新试算一次')
+    expect(none!.textContent).toContain('能应用的试算')
+    expect(none!.textContent).toContain('平台管理员')
+    // Never the instruction to press a button this state does not render.
+    expect(q(root, 'stock-prep-refresh-recovery-intro'), 'no 「核对上次写入」 intro in none').toBeNull()
+    expect(root.textContent).not.toContain('先点「核对上次写入」')
+    expect(q(root, 'stock-prep-refresh-recover')).toBeNull()
+    expect(q(root, 'stock-prep-refresh-recovery-more'), 'one page: no 更多').toBeNull()
+    // The page's 「重新读取」 re-reads the same picture (the copy above is what turns it into a way out).
+    await click(control(root, 'stock-prep-refresh-holds'))
+    expect(executionReads(state)).toHaveLength(2)
+    expect(q(root, 'stock-prep-refresh-recovery-none')).not.toBeNull()
+    // A later page may still hold the unfinished execution: 更多执行记录 renders in none, and reading it flips to ready.
+    teardown(); setup()
+    const paged = serverState({
+      executions: [execution({ id: 'exec_syn_old', status: 'verified_closed', recoverable: false })],
+      listNextCursor: 'cur_syn_2',
+      moreExecutions: [execution()],
+    })
+    const pagedRoot = await mountView(paged)
+    expect(q(pagedRoot, 'stock-prep-refresh-recovery-none')).not.toBeNull()
+    await click(control(pagedRoot, 'stock-prep-refresh-recovery-more'))
+    expect(executionReads(paged)[1].url).toContain('cursor=cur_syn_2')
+    expect(pagedRoot.querySelector('[data-testid="stock-prep-refresh-recovery"]')?.getAttribute('data-recovery-state')).toBe('ready')
+    expect(all(pagedRoot, 'stock-prep-refresh-recovery-execution')).toHaveLength(1)
+    expect(q(pagedRoot, 'stock-prep-refresh-recovery-intro')?.textContent).toContain('先点「核对上次写入」')
+  })
+
   it('RC-W2: verify needs the typed number; the report and the pending page render; page 2 is a fresh verify; close echoes the LAST digest; 「请重新试算」 after', async () => {
     const entries = Array.from({ length: 3 }, (_, index) => ({ decisionIndex: index * 2, kind: index === 2 ? 'update' : 'add', class: index === 1 ? 'diverged' : 'not_landed', componentCode: `SYN-PART-00${index}`, componentName: index === 0 ? SENTINEL : `SYN-NAME-${index}`, sourceGone: index === 2 }))
     const state = serverState({ pendingEntries: entries, pageSize: 2 })
@@ -657,6 +707,24 @@ describe('「拉取待确认」 — the recovery card (RC)', () => {
     root = await mountView(state)
     expect(q(root, 'stock-prep-refresh-recovery-execution-batch')?.textContent).toContain('SYN-BATCH-LABEL-2')
     // The helper is key presence, not truthiness.
+    // ADMIN leg (the runbook fieldset renders for the admin tier only): OFF — the inspect report sends no batch key, so
+    // no batch line and no 拉取批次 anywhere; ON — the inspect report's batch renders its line.
+    teardown(); setup()
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    state = serverState()
+    root = await mountView(state)
+    await typeInto(root, 'stock-prep-refresh-recovery-typed-project-no', PROJECT)
+    await click(control(root, 'stock-prep-refresh-close-unverified-inspect'))
+    expect(q(root, 'stock-prep-refresh-close-unverified-report'), 'admin inspect report').not.toBeNull()
+    expect(q(root, 'stock-prep-refresh-close-unverified-batch')).toBeNull()
+    expect(root.textContent).not.toContain('拉取批次')
+    teardown(); setup()
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    state = serverState({ executions: [execution({ batch: null })], inspectOverrides: { batch: { linked: true, batchNo: 4, statusSeen: 'open', verifiedCreatedRows: 2 } } })
+    root = await mountView(state)
+    await typeInto(root, 'stock-prep-refresh-recovery-typed-project-no', PROJECT)
+    await click(control(root, 'stock-prep-refresh-close-unverified-inspect'))
+    expect(q(root, 'stock-prep-refresh-close-unverified-batch')?.textContent).toContain('第 4 批')
     expect(stockPrepRecoveryBatchOf({}, 'batch')).toEqual({ shown: false })
     expect(stockPrepRecoveryBatchOf({ batch: undefined }, 'batch')).toEqual({ shown: true, value: null })
     expect(stockPrepRecoveryBatchOf({ batch: null }, 'batch')).toEqual({ shown: true, value: null })

@@ -21,7 +21,9 @@
         @click="readList()"
       >{{ busy ? bi('正在处理…', 'Working…') : bi('重新读取执行记录', 'Read the executions again') }}</button>
     </div>
-    <p class="sp-recovery__note" data-testid="stock-prep-refresh-recovery-intro">{{ bi(intro.zh, intro.en) }}</p>
+    <!-- The lead names 「核对上次写入」, so it renders only where that button can exist (loading / ready) — never over
+         the 'none' or 'unreadable' line, which name their own way out. -->
+    <p v-if="state === 'loading' || state === 'ready'" class="sp-recovery__note" data-testid="stock-prep-refresh-recovery-intro">{{ bi(intro.zh, intro.en) }}</p>
 
     <p v-if="errorCode" class="sp-recovery__error" data-testid="stock-prep-refresh-recovery-error" role="alert">
       {{ bi(errorText.zh, errorText.en) }}
@@ -40,8 +42,8 @@
       <span class="sp-recovery__hint">{{ bi('稍后点「重新读取执行记录」;一直这样请联系平台管理员。', 'Press “Read the executions again” shortly; if it persists, ask the platform admin.') }}</span>
     </p>
     <p v-else-if="state === 'none'" class="sp-recovery__state" data-testid="stock-prep-refresh-recovery-none">
-      {{ bi('执行记录里没有找到未完成的执行(可能刚被结束)。', 'No unfinished execution is in the list (it may have just been closed).') }}
-      <span class="sp-recovery__hint">{{ bi('请点上面的「重新读取」看本项目现在的状态。', 'Press “Read again” above to see this project’s state now.') }}</span>
+      {{ bi(noneCopy.zh, noneCopy.en) }}
+      <span class="sp-recovery__hint">{{ bi(noneCopy.zhNext ?? '', noneCopy.enNext ?? '') }}</span>
     </p>
 
     <ol v-if="state === 'ready'" class="sp-recovery__executions">
@@ -220,7 +222,7 @@
       </li>
     </ol>
     <button
-      v-if="state === 'ready' && nextCursor"
+      v-if="(state === 'ready' || state === 'none') && nextCursor"
       type="button"
       class="sp-recovery__link"
       data-testid="stock-prep-refresh-recovery-more"
@@ -241,6 +243,7 @@ import { StockPreparationConfirmApiError } from '../../../services/integration/s
 import {
   STOCK_PREP_EXECUTION_STATUS_PLAIN,
   STOCK_PREP_RECOVERY_CARD_INTRO,
+  STOCK_PREP_RECOVERY_CARD_NONE,
   STOCK_PREP_RECOVERY_CLASS_PLAIN,
   STOCK_PREP_RECOVERY_KIND_PLAIN,
   STOCK_PREP_RECOVERY_REASON_PLAIN,
@@ -307,6 +310,8 @@ const auth = useAuth()
 const canCloseUnverified = computed<boolean>(() => grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes('refresh.closeUnverified'))
 
 const intro = STOCK_PREP_RECOVERY_CARD_INTRO
+/** Nothing unfinished on the pages read while the page says 失败待恢复 (an abandoned lease alone): the way out, named. */
+const noneCopy = STOCK_PREP_RECOVERY_CARD_NONE
 const unprovableHint = STOCK_PREP_RECOVERY_UNPROVABLE_HINT
 const unverifiedWarning = STOCK_PREP_RECOVERY_UNVERIFIED_WARNING
 
