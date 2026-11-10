@@ -201,6 +201,12 @@ function makeService(options: { orgRows?: Array<{ org_id: string }>; registry?: 
 }
 
 const refusalOf = (work: Promise<unknown>) => work.then(() => null, (error: unknown) => error as Error)
+/** The save must be REFUSED as a validation error; answers its message. A save that goes through is a plain red here. */
+async function refusedWith(work: Promise<unknown>): Promise<string> {
+  const refusal = await refusalOf(work)
+  expect(refusal, 'the save must be refused, nothing written').toBeInstanceOf(AutomationRuleValidationError)
+  return (refusal as Error).message
+}
 const actionsColumn = (values: Record<string, unknown>) => JSON.parse(String(values.actions)) as Action[]
 const configColumn = (values: Record<string, unknown>) => JSON.parse(String(values.action_config)) as Record<string, unknown>
 const stamped = (projectNo = 'P-1') => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 30 * 60_000, binding: SERVER_BINDING })
@@ -372,16 +378,15 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
 
   it('the editor shape with two projects is refused (exactly one project per rule), also when the first is the sheet\'s', async () => {
     const h = makeService()
-    const refusal = await refusalOf(h.post('sheet_1', editorBody([rij('P-1\nP-2')])))
-    expect(refusal!.message).toBe(M.project_mismatch)
+    expect(await refusedWith(h.post('sheet_1', editorBody([rij('P-1\nP-2')])))).toBe(M.project_mismatch)
     expect(h.writes).toHaveLength(0)
   })
 
   it('the job ONLY at actions[1] (no pair occurrence) is still held to the guard: a wrong project, an unregistered sheet', async () => {
     const wrongProject = makeService()
-    expect((await refusalOf(wrongProject.post('sheet_1', editorBody([updateRecord(), rij('P-2')]))))!.message).toBe(M.project_mismatch)
+    expect(await refusedWith(wrongProject.post('sheet_1', editorBody([updateRecord(), rij('P-2')])))).toBe(M.project_mismatch)
     const unregistered = makeService()
-    expect((await refusalOf(unregistered.post('sheet_9', editorBody([updateRecord(), rij()]))))!.message).toBe(M.unregistered)
+    expect(await refusedWith(unregistered.post('sheet_9', editorBody([updateRecord(), rij()])))).toBe(M.unregistered)
     expect(wrongProject.writes.length + unregistered.writes.length).toBe(0)
     expect(wrongProject.registryReads()).toEqual([['sheet_1']])
   })
@@ -390,7 +395,7 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
     // The pair lists the sheet's project; actions[0] — the one the executor runs — does not.
     const project = makeService()
     const projectBody = wire({ ...editorBody([rij('P-2')]), actionConfig: projectOf('P-1') })
-    expect((await refusalOf(project.post('sheet_1', projectBody)))!.message).toBe(M.project_mismatch)
+    expect(await refusedWith(project.post('sheet_1', projectBody))).toBe(M.project_mismatch)
     expect(project.registryReads()).toEqual([['sheet_1'], ['sheet_1']])
     for (const [widened, message] of [
       [{ job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'apply_when_ready' } }, /^actions\[0\]\.config\.job\.applyMode 'apply_when_ready' is not accepted/],
@@ -411,7 +416,7 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
   it('and a valid actions[0] does not vouch for the pair: a widened pair is refused by ITS path', async () => {
     const h = makeService()
     const body = wire({ ...editorBody([rij()]), actionConfig: { job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'apply_when_ready' } } })
-    expect((await refusalOf(h.post('sheet_1', body)))!.message).toMatch(/^actionConfig\.job\.applyMode 'apply_when_ready' is not accepted/)
+    expect(await refusedWith(h.post('sheet_1', body))).toMatch(/^actionConfig\.job\.applyMode 'apply_when_ready' is not accepted/)
     expect(h.writes).toHaveLength(0)
   })
 
@@ -424,24 +429,24 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
 
     vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, '1')
     const sheetsOff = makeService()
-    expect((await refusalOf(sheetsOff.post('sheet_1', editorBody([rij()]))))!.message).toBe(M.switch_off)
+    expect(await refusedWith(sheetsOff.post('sheet_1', editorBody([rij()])))).toBe(M.switch_off)
     expect(sheetsOff.registryReads()).toEqual([])
     vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true')
 
     const unreadable = makeService({ registry: Object.assign(new Error('boom'), { code: '57P01' }) })
-    expect((await refusalOf(unreadable.post('sheet_1', editorBody([rij()]))))!.message).toBe(M.unreadable)
+    expect(await refusedWith(unreadable.post('sheet_1', editorBody([rij()])))).toBe(M.unreadable)
 
     const interval = makeService()
-    expect((await refusalOf(interval.post('sheet_1', editorBody([rij()], { triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }))))!.message)
+    expect(await refusedWith(interval.post('sheet_1', editorBody([rij()], { triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }))))
       .toMatch(/only allowed on a schedule.cron trigger/)
     const noZone = makeService()
-    expect((await refusalOf(noZone.post('sheet_1', editorBody([rij()], { triggerConfig: { cron: '0 6 * * *' } }))))!.message)
+    expect(await refusedWith(noZone.post('sheet_1', editorBody([rij()], { triggerConfig: { cron: '0 6 * * *' } }))))
       .toMatch(/must declare triggerConfig.timezone/)
 
     const tenantless = makeService({ orgRows: [] })
-    expect((await refusalOf(tenantless.post('sheet_1', editorBody([rij()]))))!.message).toMatch(/exactly one active tenant \(none found\)/)
+    expect(await refusedWith(tenantless.post('sheet_1', editorBody([rij()])))).toMatch(/exactly one active tenant \(none found\)/)
     const twoTenants = makeService({ orgRows: [{ org_id: 'tenant_1' }, { org_id: 'tenant_2' }] })
-    expect((await refusalOf(twoTenants.post('sheet_1', editorBody([rij()]))))!.message).toMatch(/several found/)
+    expect(await refusedWith(twoTenants.post('sheet_1', editorBody([rij()])))).toMatch(/several found/)
 
     for (const h of [off, sheetsOff, unreadable, interval, noZone, tenantless, twoTenants]) expect(h.writes).toHaveLength(0)
   })
@@ -494,20 +499,20 @@ describe('the editor wire shape through the real updateRule (I6d)', () => {
   it('an edit that only replaces actions[] is still held to the guard: another project, two projects, a sheet archived since the save', async () => {
     const h = makeService()
     h.seed(storedEditorRule())
-    expect((await refusalOf(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-2')] }), 'editor_2')))!.message).toBe(M.project_mismatch)
-    expect((await refusalOf(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-1\nP-2')] }), 'editor_2')))!.message).toBe(M.project_mismatch)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-2')] }), 'editor_2'))).toBe(M.project_mismatch)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-1\nP-2')] }), 'editor_2'))).toBe(M.project_mismatch)
     const archived = makeService({ registry: [REGISTERED('sheet_1', 'tenant_1', 'P-1', 'archived')] })
     archived.seed(storedEditorRule())
-    expect((await refusalOf(archived.patch('sheet_1', 'atr_1', editorBody([rij()]), 'editor_2')))!.message).toBe(M.unregistered)
+    expect(await refusedWith(archived.patch('sheet_1', 'atr_1', editorBody([rij()]), 'editor_2'))).toBe(M.unregistered)
     expect(h.writes.length + archived.writes.length).toBe(0)
   })
 
   it('a trigger-only edit sees the stored actions[] occurrence: dropping the timezone, or leaving cron, is refused', async () => {
     const h = makeService()
     h.seed(storedEditorRule({ action_type: 'update_record', action_config: updateRecord().config, actions: [updateRecord(), { type: 'run_integration_job', config: stamped() }] }))
-    expect((await refusalOf(h.patch('sheet_1', 'atr_1', wire({ triggerConfig: { cron: '0 7 * * *' } }), 'editor_2')))!.message)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerConfig: { cron: '0 7 * * *' } }), 'editor_2')))
       .toMatch(/must declare triggerConfig.timezone/)
-    expect((await refusalOf(h.patch('sheet_1', 'atr_1', wire({ triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }), 'editor_2')))!.message)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }), 'editor_2')))
       .toMatch(/only allowed on a schedule.cron trigger/)
     expect(h.writes).toHaveLength(0)
   })
@@ -521,6 +526,58 @@ describe('the editor wire shape through the real updateRule (I6d)', () => {
     const refusal = await refusalOf(h.patch('sheet_1', 'atr_1', wire({ triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } }), 'editor_2'))
     expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
     expect(refusal!.message).toBe(NESTED_MESSAGE)
+    expect(h.writes).toHaveLength(0)
+  })
+})
+
+// ── The I5 pointer of the I6a re-review, receive side (a pin, not a fix) ─────────────────────────────────────────
+//
+// "Can an integration.run_finished rule on sheet X receive another tenant's summaries?" The rule's tenant is ONLY
+// `trigger_config.binding.tenantId`; dispatch selects on it (loader SQL + the in-loop compare with the route tenant)
+// and then re-checks the creator's live membership in the route tenant. The rule's SHEET is not part of that — a
+// sheet carries no tenant, and an alert rule is not tied to a project sheet. So what must hold at save is that no
+// write shape can PLANT a binding: create stamps it (pinned in automation-integration-run-finished.test.ts) and EVERY
+// update shape re-stamps it from the stored creator. The update half had no test; these cases are it.
+describe('integration.run_finished: no edit can plant the trigger binding — every update shape re-stamps it from the stored creator (I6d pin)', () => {
+  const ALERT_ACTION = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
+  /** A stored alert rule whose binding names ANOTHER tenant (a planted row: it never passed the save gate). */
+  const plantedAlertRule = () => ({
+    id: 'atr_rf', sheet_id: 'sheet_not_a_project_sheet', created_by: CREATOR,
+    trigger_type: 'integration.run_finished', trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: CLIENT_BINDING },
+    action_type: 'send_dingtalk_group_message', action_config: ALERT_ACTION, actions: null,
+  })
+  function alertService() {
+    const h = makeService()
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    return h
+  }
+
+  it.each([
+    ['a trigger edit whose body names another tenant', { triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed', 'skipped'], binding: { principalId: 'editor_2', tenantId: 'tenant_foreign' } } }],
+    ['a rename', { name: 'renamed' }],
+    ['an on/off switch', { enabled: false }],
+    ['an action edit', { actionConfig: { ...ALERT_ACTION, titleTemplate: '{{run.reason}}' } }],
+    ['an execution-mode edit', { executionMode: null }],
+  ])('%s: the written trigger_config carries the creator\'s single tenant, never the planted or the posted one', async (_label, body) => {
+    const h = alertService()
+    h.seed(plantedAlertRule())
+    const updated = await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire(body), 'editor_2')
+    expect(updated).not.toBeNull()
+    expect(h.writes).toHaveLength(1)
+    const written = JSON.parse(String(h.writes[0].values.trigger_config)) as { binding: unknown; job: unknown }
+    expect(written.binding).toEqual(SERVER_BINDING)
+    expect(written.job).toEqual({ kind: 'stock_prep_pull' })
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('tenant_foreign')
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('editor_2')
+  })
+
+  it('and a creator who is no longer bound to exactly one tenant cannot be re-stamped at all: the edit is refused, the row untouched', async () => {
+    const h = makeService({ orgRows: [] })
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    h.seed(plantedAlertRule())
+    const refusal = await refusalOf(h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ name: 'renamed' }), 'editor_2'))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toMatch(/integration\.run_finished rules need a creator bound to exactly one active tenant/)
     expect(h.writes).toHaveLength(0)
   })
 })

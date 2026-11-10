@@ -517,8 +517,10 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
 
       // an edit that moves the job into a branch, or names another project in actions[]: refused, the row is unchanged
       const moved = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(editorBody([other, nestedIn(job(project))]))!, editorId))
+      expect(moved).toBeInstanceOf(AutomationRuleValidationError)
       expect(moved!.message).toBe(NESTED)
       const renamedProject = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(wire({ actions: [job(`${project}-x`)] }))!, editorId))
+      expect(renamedProject).toBeInstanceOf(AutomationRuleValidationError)
       expect(renamedProject!.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
       expect(await storedRow(rule.id)).toEqual(afterEdit)
 
