@@ -572,7 +572,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['After export → what to check', '做完后怎么确认'],
-        detail: ['Change the date range, then Reload report, then Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '改完日期后先点「重载报表」，再点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
+        detail: ['After the date, organization, or person filter changes, reload the data before exporting. When reloading, click Reload report, then Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '日期、组织或人员筛选变化后，请重新加载数据再导出。重新加载时点「重载报表」，再点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
       },
       {
         path: ['Who can open Reports', '前提条件/权限'],
@@ -962,7 +962,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Reports → date range → reload', '报表 → 日期区间 → 重载'],
-        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Viewing another person’s rows needs attendance:approve or attendance:admin. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. Change the dates and reload before export; a stale filter blocks the file.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。查看其他人需要 attendance:approve 或 attendance:admin。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。改了日期要先重载再导出；筛选过期时导出会被拦住。'],
+        detail: ['Reports is open to people with attendance:read. An empty user filter is the signed-in person. Viewing another person’s rows needs attendance:approve or attendance:admin. A scheduler export scope does not grant permission to view other people’s reports on the page. Ordinary record export checks that scope only when view-others permission is missing; someone who already has it is not limited by the scope. Payroll-cycle export does not use that fallback. After the date, organization, or person filter changes, reload the data before exporting.', '报表对拥有 attendance:read 的人开放。用户筛选留空就是当前登录人。查看其他人需要 attendance:approve 或 attendance:admin。排班“导出范围”不授予页面查看他人报表的权限。普通记录导出在缺少查看他人权限时，按该范围校验；已有查看他人权限者不受该范围限制。工资周期导出不采用这个后备检查。日期、组织或人员筛选变化后，请重新加载数据再导出。'],
       },
     ],
     faqs: [{
