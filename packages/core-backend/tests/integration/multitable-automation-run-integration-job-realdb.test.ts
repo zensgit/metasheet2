@@ -30,6 +30,9 @@
  *     TENANT / PROJECT, because the executor re-checks the rule sheet on every trigger; the I6a case proves the save
  *     refuses another tenant's registered sheet (nothing written) and a trigger after ARCHIVE is skipped with 0 port
  *     calls and no lease / intent row.
+ *     I6a fix (re-review M1): the sheet id is EXACT on the real registry read — the registered id plus one whitespace
+ *     code point is another sheet: refused at save (no rule row) and at every trigger (0 port calls, no intent row,
+ *     no lease), while the registered id itself saves and runs (the positive control of the same lookups).
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
@@ -388,6 +391,9 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     await q(`UPDATE users SET is_active = false WHERE id = $1`, [principalId])
     const refused = await A.run(`exec_prod2_${RUN}`, config)
     expect(refused).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized' } })
+    // I6a fix (L3): this is LIVE AUTHORITY's refusal (step 1) — the rule-sheet re-check passed, so no cause is named
+    // (the rule-sheet step and the binding check always name one).
+    expect(refused.output).not.toHaveProperty('cause')
     expect(state.calls).toBe(1)
     expect(await intentRow(intentOf(`exec_prod2_${RUN}`, config))).toBeUndefined()
     expect(await leaseRow()).toMatchObject({ fence: '1', holder: null })
@@ -467,16 +473,78 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
       const X = executorWith(port, poolTransaction, { leaseTtlMs: 2_000 }, { resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { ...PRINCIPAL, id: principalId } }) })
       expect((await X.run(`exec_i6a_ok_${RUN}`, config, sheet)).status).toBe('success')
       expect(state.calls).toBe(1)
+      // I6a fix (L3) — the POSITIVE CONTROL of the two "nothing was claimed" lookups below: the SAME intent lookup
+      // finds the ok run's row, and the SAME lease read finds its lease. An undefined intent / an unchanged lease
+      // after the archive is therefore a real absence, not a mis-keyed read.
+      const i6aIntent = (root: string): OutboundIntentIdentity => ({ ...intentOf(root, config), targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, project]) })
+      expect(await intentRow(i6aIntent(`exec_i6a_ok_${RUN}`))).toMatchObject({ status: 'sent' })
       // archive (the S4 shape: status + archived_at together, the CHECK holds) ⇒ the next trigger never reaches the port
       await q(`UPDATE integration_stock_prep_project_target SET status = 'archived', archived_at = now(), archived_by = 'syn' WHERE sheet_id = $1`, [sheet])
       const leaseBefore = (await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows
+      expect(leaseBefore).toEqual([{ fence: '1' }])
       const skipped = await X.run(`exec_i6a_archived_${RUN}`, config, sheet)
       expect(skipped).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
       expect(state.calls).toBe(1)
-      expect(await intentRow({ ...intentOf(`exec_i6a_archived_${RUN}`, config), targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, project]) })).toBeUndefined()
+      expect(await intentRow(i6aIntent(`exec_i6a_archived_${RUN}`))).toBeUndefined()
       expect((await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows).toEqual(leaseBefore)
     } finally {
       await q(`DELETE FROM automation_rules WHERE id = $1`, [rule.id]).catch(() => undefined)
+    }
+  }, 20_000)
+
+  test('R-69 I6a fix (re-review M1): the rule sheet id is EXACT on the real registry read — the registered id plus one whitespace code point is refused at save (no rule row) and at every trigger (0 port calls, no intent row, no lease); the registered id itself saves and runs', async () => {
+    // Its own principal, registered sheet + project and scope. A look-alike is the registered id plus ONE code point
+    // String.prototype.trim() strips, on either side: the sheet-create route takes such text as a client id, so each
+    // names a different, ordinary sheet — and a read with a TRIMMED id would find the registered row.
+    const principalId = `svc7_${RUN}`
+    const project = `P7-${RUN}`
+    const sheet = `sheet7_${RUN}`
+    const lookalikes = [`${sheet} `, ` ${sheet}`, `${sheet}\t`, `\u00a0${sheet}`]
+    const scope = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, projectNo: project })
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc7'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await registerRuleSheet(sheet, TENANT, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const ruleInput = {
+      triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+      actionType: 'run_integration_job', actionConfig: { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } },
+      createdBy: principalId, name: `i6a_m1_${RUN}`,
+    }
+    try {
+      // the premise on the real table: ONE registry row answers these ids — the registered id's own
+      expect((await q(`SELECT sheet_id FROM integration_stock_prep_project_target WHERE sheet_id = ANY($1::text[])`, [[sheet, ...lookalikes]])).rows).toEqual([{ sheet_id: sheet }])
+      // SAVE: every look-alike is refused as unregistered, and no rule row lands under any of them
+      for (const lookalike of lookalikes) {
+        expect(lookalike.trim()).toBe(sheet)
+        const saved = await service.createRule(lookalike, ruleInput as never).then((rule) => rule, (error: unknown) => error)
+        expect(saved).toBeInstanceOf(AutomationRuleValidationError)
+        expect((saved as Error).message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.unregistered)
+      }
+      expect((await q(`SELECT sheet_id FROM automation_rules WHERE sheet_id = ANY($1::text[])`, [lookalikes])).rows).toHaveLength(0)
+      // control: the registered id itself saves, under exactly that id
+      const rule = await service.createRule(sheet, ruleInput as never)
+      expect(rule.sheet_id).toBe(sheet)
+      const config = rule.action_config as unknown as typeof CONFIG
+      const m1Intent = (root: string): OutboundIntentIdentity => ({ ...intentOf(root, config), targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, project]) })
+      const leaseRows = async () => (await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows
+      const { port, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }])
+      const X = executorWith(port, poolTransaction, { leaseTtlMs: 2_000 }, { resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { ...PRINCIPAL, id: principalId } }) })
+      // TRIGGER: the saved rule's own config on each look-alike sheet id never reaches the port and claims nothing
+      for (const [index, lookalike] of lookalikes.entries()) {
+        const root = `exec_m1_lookalike${index}_${RUN}`
+        expect(await X.run(root, config, lookalike)).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+        expect(await intentRow(m1Intent(root))).toBeUndefined()
+      }
+      expect(state.calls).toBe(0)
+      expect(await leaseRows()).toEqual([])
+      // control: the registered id runs once — and the SAME lookups find its intent row and its lease
+      expect((await X.run(`exec_m1_ok_${RUN}`, config, sheet)).status).toBe('success')
+      expect(state.calls).toBe(1)
+      expect(await intentRow(m1Intent(`exec_m1_ok_${RUN}`))).toMatchObject({ status: 'sent' })
+      expect(await leaseRows()).toEqual([{ fence: '1' }])
+    } finally {
+      // by sheet id: a look-alike rule row exists only if the guard regressed — never leave one (or the control's) behind
+      await q(`DELETE FROM automation_rules WHERE sheet_id = ANY($1::text[])`, [[sheet, ...lookalikes]]).catch(() => undefined)
     }
   }, 20_000)
 })

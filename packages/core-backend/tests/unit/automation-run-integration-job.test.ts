@@ -84,6 +84,20 @@ function harness(db: ReturnType<typeof createFakeJobDb>, port: IntegrationRunPor
 const settle = () => vi.advanceTimersByTimeAsync(0)
 const unitOf = (step: AutomationStepResult, index = 0) => ((step.output as { units: Array<Record<string, unknown>> }).units[index])
 
+// ── R-69 I6a fix (re-review M1): the rule sheet id is EXACT ──────────────────────────────────────────────────
+// `sheet_1` is the registered sheet of every harness in this file. Each id below is that id plus ONE code point
+// String.prototype.trim() strips, on either side. The sheet-create route takes any such text as a client id, so each
+// names a DIFFERENT, ordinary sheet — which must never pass as the registered one, at save or at a trigger.
+const REGISTRY = /FROM integration_stock_prep_project_target WHERE sheet_id = \$1/
+const REGISTERED_SHEET_LOOKALIKES: Array<[label: string, sheetId: string]> = [
+  ['a trailing space', 'sheet_1 '],
+  ['a leading space', ' sheet_1'],
+  ['a trailing tab', 'sheet_1\t'],
+  ['a leading no-break space', '\u00a0sheet_1'],
+]
+/** What a registry reader that NORMALIZES its parameter does to it (a non-deterministic collation, a trimming query wrapper). */
+const normalizedByReader = (param: unknown): unknown => (typeof param === 'string' ? param.trim() : param)
+
 describe('run_integration_job — save-time vocabulary (pure)', () => {
   it('the switch reads the exact literal only; the three other switches have no read point', () => {
     expect(isIntegrationAutomationRunActionEnabled({ [FLAG]: 'true' } as NodeJS.ProcessEnv)).toBe(true)
@@ -141,15 +155,22 @@ describe('run_integration_job — AutomationService save gate', () => {
   const ORGS = /FROM user_orgs/i
   // R-69 I6a: every save now reads the project-sheet registry for the rule's sheet; 'sheet_1' is registered (active,
   // tenant_1, P-1) by default so the existing cases keep their meaning; the I6a cases pass their own registry.
-  const REGISTRY = /FROM integration_stock_prep_project_target WHERE sheet_id = \$1/
-  function makeService(orgRows: Array<{ org_id: string }>, registry: Record<string, Record<string, unknown>> | Error = { sheet_1: { tenant_id: 'tenant_1', project_no: 'P-1', status: 'active', object_id: 'obj_1' } }) {
+  // I6a fix (M1): a row is stored under its REAL sheet id and answers with THAT id — never the query parameter echoed
+  // back — and it matches the parameter byte for byte (PostgreSQL text `=`). `readAs` models a reader that normalizes
+  // the parameter first: it then answers a look-alike id with the registered sheet's row (whose id is the real one).
+  function makeService(
+    orgRows: Array<{ org_id: string }>,
+    registry: Record<string, Record<string, unknown>> | Error = { sheet_1: { tenant_id: 'tenant_1', project_no: 'P-1', status: 'active', object_id: 'obj_1' } },
+    readAs: (param: unknown) => unknown = (param) => param,
+  ) {
     const inserted: Record<string, unknown>[] = []
     const queryFn = vi.fn(async (sql: string, params: unknown[] = []) => {
       if (ORGS.test(sql)) return { rows: orgRows, rowCount: orgRows.length }
       if (REGISTRY.test(sql)) {
         if (registry instanceof Error) throw registry
-        const row = registry[String(params[0])]
-        return row ? { rows: [{ sheet_id: params[0], ...row }], rowCount: 1 } : { rows: [], rowCount: 0 }
+        const asked = readAs(params[0])
+        const storedSheetId = Object.keys(registry).find((id) => id === asked)
+        return storedSheetId !== undefined ? { rows: [{ ...registry[storedSheetId], sheet_id: storedSheetId }], rowCount: 1 } : { rows: [], rowCount: 0 }
       }
       return { rows: [], rowCount: 0 }
     })
@@ -272,6 +293,104 @@ describe('run_integration_job — AutomationService save gate', () => {
     expect(inserted).toHaveLength(0)
     expect(queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)).toEqual([['sheet_1']])
   })
+
+  /** A stored run_integration_job rule row (what getRule reads back) on the given sheet, saved by `svc_user`. */
+  const storedRule = (sheetId: string, overrides: Record<string, unknown> = {}) => ({
+    id: 'atr_1', sheet_id: sheetId, name: 'pull', trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    action_type: 'run_integration_job', action_config: { ...JOB, timeoutMs: 1_000, binding: BINDING },
+    enabled: true, created_by: 'svc_user', actions: null, conditions: null, execution_mode: null, ...overrides,
+  })
+  const registryReadsOf = (queryFn: ReturnType<typeof makeService>['queryFn']) => queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)
+
+  // ── R-69 I6a fix (re-review M1): the sheet id is EXACT — a look-alike of the registered id is another sheet ──
+  it.each(REGISTERED_SHEET_LOOKALIKES)('M1: saving on the registered sheet id plus %s is a 400 (unregistered), nothing is written, and the registry was read with the RAW id', async (_label, lookalike) => {
+    expect(lookalike).not.toBe('sheet_1')
+    expect(lookalike.trim()).toBe('sheet_1') // the premise: a read with the TRIMMED id would find the registered row
+    const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }])
+    const refusal = await service.createRule(lookalike, cronInput(JOB)).then(() => null, (error: unknown) => error)
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect((refusal as Error).message).toBe(M.unregistered)
+    expect(inserted).toHaveLength(0)
+    expect(registryReadsOf(queryFn)).toEqual([[lookalike]])
+  })
+  it.each(REGISTERED_SHEET_LOOKALIKES)('M1: an action update of a rule STORED on the registered sheet id plus %s is refused the same way (nothing written, RAW id read)', async (_label, lookalike) => {
+    const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }])
+    const chain = (service as unknown as { db: Record<string, ReturnType<typeof vi.fn>> }).db
+    chain.executeTakeFirst.mockImplementation(async () => storedRule(lookalike))
+    await expect(service.updateRule('atr_1', lookalike, { actionConfig: { ...JOB, timeoutMs: 120_000 } }, 'editor_2')).rejects.toThrow(M.unregistered)
+    expect(chain.set).not.toHaveBeenCalled()
+    expect(inserted).toHaveLength(0)
+    expect(registryReadsOf(queryFn)).toEqual([[lookalike]])
+  })
+  it("M1: a registry reader that answers the look-alike id with the REGISTERED sheet's row is still refused — the answered row is not this sheet's (the re-compare); the registered sheet itself saves through the same reader", async () => {
+    for (const [, lookalike] of REGISTERED_SHEET_LOOKALIKES) {
+      const { service, inserted, queryFn } = makeService([{ org_id: 'tenant_1' }], undefined, normalizedByReader)
+      await expect(service.createRule(lookalike, cronInput(JOB))).rejects.toThrow(M.unregistered)
+      expect(inserted).toHaveLength(0)
+      // the guard asked with the raw id; the READER normalized it and answered with sheet_1's own row
+      expect(registryReadsOf(queryFn)).toEqual([[lookalike]])
+      const answered = await queryFn.mock.results[queryFn.mock.calls.findIndex(([sql]) => REGISTRY.test(String(sql)))].value as { rows: unknown[] }
+      expect(answered.rows).toEqual([{ sheet_id: 'sheet_1', tenant_id: 'tenant_1', project_no: 'P-1', status: 'active', object_id: 'obj_1' }])
+    }
+    const control = makeService([{ org_id: 'tenant_1' }], undefined, normalizedByReader)
+    await control.service.createRule('sheet_1', cronInput(JOB))
+    expect(control.inserted).toHaveLength(1)
+  })
+
+  // ── re-review L1: an update that does not touch the action does NOT re-run the sheet check — the trigger does ──
+  // Stored: a run_integration_job rule on sheet_1, saved while the sheet was registered. The registry now says ARCHIVED.
+  const JSON_COLUMNS = new Set(['trigger_config', 'action_config', 'conditions', 'actions'])
+  it.each<[label: string, patch: Record<string, unknown>, expectedWrite: Record<string, unknown>]>([
+    ['enable (setRuleEnabled)', { enabled: true }, { enabled: true }],
+    ['rename', { name: 'renamed' }, { name: 'renamed' }],
+    ['conditions only', { conditions: { conjunction: 'AND', conditions: [] } }, { conditions: JSON.stringify({ conjunction: 'AND', conditions: [] }) }],
+    ['trigger only (a new cron)', { triggerConfig: { cron: '30 7 * * *', timezone: 'Asia/Shanghai' } }, { trigger_config: JSON.stringify({ cron: '30 7 * * *', timezone: 'Asia/Shanghai' }) }],
+  ])('L1: %s on a rule whose sheet was ARCHIVED after save is written without the sheet check — and the trigger re-check still stops that rule before the port', async (label, patch, expectedWrite) => {
+    const { service, queryFn } = makeService([{ org_id: 'tenant_1' }], { sheet_1: ROW('tenant_1', 'P-1', 'archived') })
+    const chain = (service as unknown as { db: Record<string, ReturnType<typeof vi.fn>> }).db
+    const stored = storedRule('sheet_1', { enabled: !('enabled' in patch) })
+    chain.executeTakeFirst.mockImplementation(async () => stored)
+    // UPDATE … RETURNING: the stored row with the written columns applied (jsonb columns come back parsed)
+    const writes: Array<Record<string, unknown>> = []
+    chain.set.mockImplementation((updates: Record<string, unknown>) => { writes.push(updates); return chain })
+    chain.execute.mockImplementation(async () => writes.map((updates) => ({
+      ...stored,
+      ...Object.fromEntries(Object.entries(updates).map(([column, value]) => [column, typeof value === 'string' && JSON_COLUMNS.has(column) ? JSON.parse(value) : value])),
+    })))
+    let updated: Awaited<ReturnType<AutomationService['updateRule']>> = null
+    try {
+      updated = 'enabled' in patch
+        ? await service.setRuleEnabled('atr_1', 'sheet_1', true, 'editor_2')
+        : await service.updateRule('atr_1', 'sheet_1', patch, 'editor_2')
+    } finally {
+      service.unregisterSchedule('atr_1')
+    }
+    // the edit WAS written (a null here would be "rule not found"), and it wrote exactly this shape's column
+    expect(updated).not.toBeNull()
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject(expectedWrite)
+    expect(Object.keys(writes[0]).sort()).toEqual([...Object.keys(expectedWrite), 'updated_at'].sort())
+    // L1: NO registry read — the save-time sheet check does not run for this write shape (archived: it would refuse)
+    expect(registryReadsOf(queryFn)).toEqual([])
+    // …while an ACTION-shaped update of the same rule, on the same registry, IS refused and writes nothing more
+    await expect(service.updateRule('atr_1', 'sheet_1', { actionConfig: { ...JOB, timeoutMs: 120_000 } }, 'editor_2')).rejects.toThrow(M.unregistered)
+    expect(writes).toHaveLength(1)
+
+    // The trigger, on the rule exactly as that update left it: step 0.5 refuses before anything is claimed or called.
+    const context = { sheetId: updated!.sheet_id, ruleCreatedBy: updated!.created_by ?? undefined }
+    const archivedDb = createFakeJobDb({ projectTargets: { sheet_1: { tenantId: 'tenant_1', projectNo: 'P-1', status: 'archived' } } })
+    const blockedPort = fakePort('immediate')
+    const blocked = await harness(archivedDb, blockedPort.port).run('exec_l1_archived', updated!.action_config, context)
+    expect(blocked).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+    expect(blockedPort.run).toHaveBeenCalledTimes(0)
+    expect(archivedDb.intentRows()).toHaveLength(0)
+    expect(archivedDb.lease(SCOPE)).toBeUndefined()
+    expect(archivedDb.registryReads).toEqual(['sheet_1'])
+    // control: the SAME rule row runs while its sheet is registered — the stop above is the archive, nothing else
+    const livePort = fakePort('immediate')
+    expect((await harness(createFakeJobDb(), livePort.port).run('exec_l1_live', updated!.action_config, context)).status).toBe('success')
+    expect(livePort.run).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('run_integration_job — executor state machine (fake DB, fake clock)', () => {
@@ -299,10 +418,18 @@ describe('run_integration_job — executor state machine (fake DB, fake clock)',
     expect(mismatch).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'binding_principal_mismatch' } })
     const noIdentity = await harness(db, port).run('exec_noid', CONFIG, {}, null)
     expect(noIdentity).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'identity_required' } })
-    const unauthorized = await harness(db, port, { resolveIntegrationRunPrincipal: async () => ({ ok: false, reason: 'principal_unauthorized' }) }).run('exec_unauth')
+    // I6a fix (L3): the next two refusals are STEP 1's (live authority) — the rule-sheet re-check PASSED. Step 0.5 and
+    // the binding check always name a `cause`; step 1 never does, and its resolver was consulted exactly once.
+    const denies = vi.fn(async () => ({ ok: false as const, reason: 'principal_unauthorized' as const }))
+    const unauthorized = await harness(db, port, { resolveIntegrationRunPrincipal: denies }).run('exec_unauth')
     expect(unauthorized).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized' } })
-    const unavailable = await harness(db, port, { resolveIntegrationRunPrincipal: async () => ({ ok: false, reason: 'authority_unavailable' }) }).run('exec_unavail')
+    expect(unauthorized.output).not.toHaveProperty('cause')
+    expect(denies).toHaveBeenCalledTimes(1)
+    const down = vi.fn(async () => ({ ok: false as const, reason: 'authority_unavailable' as const }))
+    const unavailable = await harness(db, port, { resolveIntegrationRunPrincipal: down }).run('exec_unavail')
     expect(unavailable).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'authority_unavailable' } })
+    expect(unavailable.output).not.toHaveProperty('cause')
+    expect(down).toHaveBeenCalledTimes(1)
     expect(run).not.toHaveBeenCalled()
     expect(db.intentRows()).toHaveLength(0)
     expect(db.lease(SCOPE)).toBeUndefined()
@@ -622,5 +749,104 @@ describe('R-69 I6a — the trigger re-checks the rule sheet before anything is c
     const other = await harness(db, port).run('exec_i6a_other_sheet', CONFIG, { sheetId: 'sheet_2' })
     expect(other).toMatchObject({ status: 'skipped', output: { cause: 'rule_sheet_unregistered' } })
     nothingHappened(db, run)
+  })
+
+  // ── fix round (re-review M1): the sheet id is EXACT at the trigger too ──
+  const REFUSED_BY_STEP_05 = { status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } }
+  it.each(REGISTERED_SHEET_LOOKALIKES)('M1: a rule whose sheet is the registered id plus %s => skipped(principal_unauthorized, rule_sheet_unregistered), 0 port calls; the registry was read with the RAW id', async (_label, lookalike) => {
+    const db = createFakeJobDb()
+    const { port, run } = fakePort('immediate')
+    const step = await harness(db, port).run('exec_m1_lookalike', CONFIG, { sheetId: lookalike })
+    expect(step).toMatchObject(REFUSED_BY_STEP_05)
+    nothingHappened(db, run)
+    expect(db.registryReads).toEqual([lookalike])
+  })
+  it("M1: a registry reader that answers the look-alike id with the REGISTERED sheet's row is still refused at the trigger (the re-compare); the registered sheet itself runs through the same reader", async () => {
+    const db = createFakeJobDb()
+    const { port, run } = fakePort('immediate')
+    const normalizing: AutomationDeps['queryFn'] = (sql, params = []) => db.query(sql, REGISTRY.test(sql) ? [normalizedByReader(params[0])] : params)
+    for (const [, lookalike] of REGISTERED_SHEET_LOOKALIKES) {
+      expect(await harness(db, port, { queryFn: normalizing }).run('exec_m1_recompare', CONFIG, { sheetId: lookalike })).toMatchObject(REFUSED_BY_STEP_05)
+    }
+    nothingHappened(db, run)
+    // the registry was asked for the TRIMMED id every time: the reader did find, and answer with, sheet_1's own row
+    expect(db.registryReads).toEqual(REGISTERED_SHEET_LOOKALIKES.map(() => 'sheet_1'))
+    const control = await harness(db, port, { queryFn: normalizing }).run('exec_m1_recompare_ok')
+    expect(control.status).toBe('success')
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  // ── fix round (re-review L3): the POSITION of step 0.5 — after the binding-principal check, before everything else.
+  // Each case below runs on an ARCHIVED rule sheet (step 0.5 refuses) and pins ONE boundary.
+  const AUTHORITY_UNAVAILABLE = { status: 'failed', output: { outcome: 'not_started', reason: 'authority_unavailable' } }
+  const archivedSheetDb = () => {
+    const db = createFakeJobDb()
+    db.projectTargets.get('sheet_1')!.status = 'archived'
+    return db
+  }
+  it('position: step 0.5 answers BEFORE the port lookup — the port factory is never called, and a missing port does not answer first', async () => {
+    const db = archivedSheetDb()
+    const { port, run } = fakePort('immediate')
+    const portFactory = vi.fn(() => port)
+    expect(await harness(db, port, { integrationRunPort: portFactory }).run('exec_pos_port')).toMatchObject(REFUSED_BY_STEP_05)
+    expect(portFactory).toHaveBeenCalledTimes(0)
+    expect(await harness(db, null).run('exec_pos_noport')).toMatchObject(REFUSED_BY_STEP_05) // not failed(port_inactive)
+    // an UNREADABLE registry stops at the same place
+    db.setRegistryUnreadable('57P01')
+    expect(await harness(db, port, { integrationRunPort: portFactory }).run('exec_pos_port_unreadable')).toMatchObject(AUTHORITY_UNAVAILABLE)
+    expect(await harness(db, null).run('exec_pos_noport_unreadable')).toMatchObject(AUTHORITY_UNAVAILABLE) // not failed(port_inactive)
+    expect(portFactory).toHaveBeenCalledTimes(0)
+    nothingHappened(db, run)
+  })
+  it('position: step 0.5 answers BEFORE the transaction seam and live authority — neither the resolver seam nor the production authority transaction is reached', async () => {
+    const db = archivedSheetDb()
+    const { port, run } = fakePort('immediate')
+    const transaction = vi.fn(db.transaction)
+    const resolver = vi.fn(async () => ({ ok: true as const, user: PRINCIPAL }))
+    expect(await harness(db, port, { transaction, resolveIntegrationRunPrincipal: resolver }).run('exec_pos_seam')).toMatchObject(REFUSED_BY_STEP_05)
+    // the production path (no resolver seam) would open its own authority transaction
+    expect(await harness(db, port, { transaction, resolveIntegrationRunPrincipal: undefined }).run('exec_pos_prod')).toMatchObject(REFUSED_BY_STEP_05)
+    expect(resolver).toHaveBeenCalledTimes(0)
+    expect(transaction).toHaveBeenCalledTimes(0)
+    // precedence: a later stage that WOULD refuse on its own does not answer first
+    expect(await harness(db, port, { transaction: undefined }).run('exec_pos_notx')).toMatchObject(REFUSED_BY_STEP_05) // not failed(transaction_seam_required)
+    expect(await harness(db, port, { resolveIntegrationRunPrincipal: async () => ({ ok: false, reason: 'authority_unavailable' }) }).run('exec_pos_authdown')).toMatchObject(REFUSED_BY_STEP_05) // not failed(authority_unavailable)
+    // an UNREADABLE registry ends exactly like step 1's authority_unavailable — only the call counts tell the two apart
+    db.setRegistryUnreadable('57P01')
+    expect(await harness(db, port, { transaction, resolveIntegrationRunPrincipal: resolver }).run('exec_pos_unreadable')).toMatchObject(AUTHORITY_UNAVAILABLE)
+    expect(resolver).toHaveBeenCalledTimes(0)
+    expect(transaction).toHaveBeenCalledTimes(0)
+    nothingHappened(db, run)
+  })
+  it('position: step 0.5 answers BEFORE the intent claim and the job lease — not one statement reaches the ledgers', async () => {
+    const db = archivedSheetDb()
+    const { port, run } = fakePort('immediate')
+    expect(await harness(db, port).run('exec_pos_ledgers')).toMatchObject(REFUSED_BY_STEP_05)
+    db.setRegistryUnreadable('57P01')
+    expect(await harness(db, port).run('exec_pos_ledgers_unreadable')).toMatchObject(AUTHORITY_UNAVAILABLE)
+    expect(db.log).toEqual([]) // no BEGIN, no intent:claim, no lease:claim — nothing at all
+    nothingHappened(db, run)
+    expect(db.registryReads).toEqual(['sheet_1', 'sheet_1'])
+    // control: on the registered sheet the same harness does claim, lease and call
+    db.setRegistryUnreadable(null)
+    db.projectTargets.get('sheet_1')!.status = 'active'
+    expect((await harness(db, port).run('exec_pos_ledgers_ok')).status).toBe('success')
+    expect(db.log).toEqual(expect.arrayContaining(['intent:claim', 'lease:claim']))
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+  it('position: the gates BEFORE step 0.5 answer first and never read the registry — action switch off, unparsable config, no identity, binding ≠ creator', async () => {
+    const db = archivedSheetDb() // step 0.5 WOULD refuse every run below
+    const { port, run } = fakePort('immediate')
+    vi.stubEnv(FLAG, 'false')
+    expect(await harness(db, port).run('exec_pre_off')).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'action_disabled' } })
+    vi.stubEnv(FLAG, 'true')
+    expect(await harness(db, port).run('exec_pre_config', { ...CONFIG, binding: undefined })).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'config_invalid' } })
+    expect(await harness(db, port).run('exec_pre_identity', CONFIG, {}, null)).toMatchObject({ status: 'failed', output: { outcome: 'not_started', reason: 'identity_required' } })
+    expect(await harness(db, port).run('exec_pre_binding', CONFIG, { ruleCreatedBy: 'someone_else' })).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'binding_principal_mismatch' } })
+    expect(db.registryReads).toEqual([])
+    nothingHappened(db, run)
+    // control: once those four gates pass, the same harness does reach step 0.5
+    expect(await harness(db, port).run('exec_pre_reached')).toMatchObject(REFUSED_BY_STEP_05)
+    expect(db.registryReads).toEqual(['sheet_1'])
   })
 })
