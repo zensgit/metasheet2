@@ -413,6 +413,13 @@ export default defineConfig({
       // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
       // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/attendance-notification-defer.db.test.ts',
+      // History readability of a retired directory integration against real PostgreSQL: every
+      // reader that serves history returns its rows through its own read function or route.
+      // DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
+      // (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-lifecycle-ci-wiring.test.ts).
+      'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
