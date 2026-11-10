@@ -77,6 +77,14 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // action here that records a decision about the WORK rather than about the data. Values-free:
   // `subject_id` is a step key from the closed handoff vocabulary, `detail` carries cursor integers
   // and booleans only (see stock-preparation-handoff.cjs and the route, its only caller).
+  // HANDOFF MODES ADDED AFTER 085 (085 is shipped and never edited; its header lists the first four modes, this
+  // addendum the rest — the handoff suite's J7 reads both):
+  //   terminal_refused  pre-pilot fix batch 8(d) (register R-91): the LAST hop was refused by the refresh-state gate
+  //                     (STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE) after the existence probe — no cursor move, no
+  //                     claim, no notification. detail { operation: 'handoff_advance', fromStepIndex, stepCount,
+  //                     terminal: true, refusal, reason, status, governed, store?, storeOperation?, sqlState?,
+  //                     generationMoved?, epochMoved? } — closed tokens, integers and booleans only.
+  // END HANDOFF MODES ADDED AFTER 085
   'handoff_advance',
   // 项目备料页 (migration 086): an operator opened ONE project's board — the page that strings the
   // pull, the queue, the export and the handoff together. It is the fourth value-bearing read on

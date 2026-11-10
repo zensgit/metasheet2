@@ -211,6 +211,8 @@ const READ_CEILINGS = Object.freeze({ continuation: 5000, member: 20000, hold: 5
 const REVIEWED_CELL_CONFLICT_COLUMNS = Object.freeze(['sheet_id', 'project_no', 'record_key_digest', 'field_id'])
 const REVIEWED_CELL_UPDATE_COLUMNS = Object.freeze(['record_id', 'reviewed_cell', 'change_plan_id', 'reviewed_at', 'updated_at'])
 const NEWEST_EXECUTIONS = 5
+// Pre-pilot fix batch 8(c): one state row per governed project; the registry caps a tenant at 200 projects.
+const GOVERNED_INDEX_STATE_CEILING = 1000
 
 class StockPreparationRefreshStoreError extends Error {
   constructor(status, code, message, details = {}) {
@@ -1406,6 +1408,26 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     return Object.freeze({ ok: true, byProjectNo })
   }
 
+  /**
+   * Pre-pilot fix batch 8(c) (register R-91): the project numbers of one tenant that hold a refresh-state row, a
+   * relationship (any status — ended ones still govern, D3) or an OPEN hold — with the registry's pilot markers, the
+   * operator directory's governed-candidate index (only those projects are consulted). Why these three suffice next
+   * to the marker: the state row is created by the hold reconciliation alone (`lockStateRow` createIfAbsent), a hold
+   * only by that reconciliation, a relationship only by a confirm that requires the state row; an execution or a
+   * change plan only on a governed project, and a governed project is a pilot (the marker has no unset path, R-53 ②)
+   * or already holds one of these. Throws 503 on any failure — never an empty set.
+   */
+  async function listGovernedProjectNos(input = {}) {
+    const tenantId = trimmed(input.tenantId)
+    if (!tenantId) throw scopeInvalid('tenantId')
+    const out = new Set()
+    const add = (rows) => { for (const row of rows) { const no = trimmed(row.project_no); if (no) out.add(no) } }
+    add(await selectAll(db, REFRESH_STORE_TABLES.state, { tenant_id: tenantId }, { ceiling: GOVERNED_INDEX_STATE_CEILING, operation: 'list_governed_states' }))
+    add(await selectAll(db, REFRESH_STORE_TABLES.continuation, { tenant_id: tenantId }, { ceiling: READ_CEILINGS.continuation, operation: 'list_governed_continuations' }))
+    add(await selectAll(db, REFRESH_STORE_TABLES.hold, { tenant_id: tenantId, status: 'open' }, { ceiling: READ_CEILINGS.hold, operation: 'list_governed_holds' }))
+    return Object.freeze({ ok: true, projectNos: out })
+  }
+
   /** One hold by id, scoped (any status). */
   async function readHold(input = {}) {
     const scope = normalizeScope(input)
@@ -1826,6 +1848,13 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * continuation's status_reason is one of RECONFIRMABLE_REASONS AND the hold (`relationship_reconfirm`
    * about this continuation) is confirmable. S25 and O-22 are re-checked under the lock exactly as in
    * `confirmContinuation` (the open holds before the bump, the unfinished executions after it).
+   *
+   * Pre-pilot fix batch 8(a) (register R-91; the PR-4 rule — every admissibility fact under the lock): a re-confirm
+   * re-activates a relationship, so it needs the pilot marker exactly as the plain confirm does (N1-b). The route's
+   * NOT_PILOT is the consult's picture; `options.pilotWithin` (REQUIRED — unwired is 501 `pilot_read_within` before any
+   * statement) re-decides it on THIS transaction's handle after the state-row lock and the hold re-read, before the
+   * bump and before any row moves. Cleared, or a pilot row on another sheet => 409 NOT_PILOT `{ decidedUnderLock: true }`
+   * and nothing is written; a failed read throws (never "not pilot").
    */
   async function reconfirmContinuation(input = {}, options = {}) {
     const scope = normalizeScope(input)
@@ -1839,6 +1868,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     const echo = normalizeEcho(input.echo)
     const sourceIdentity = normalizeSourceIdentity(input.sourceIdentity)
     const bumpWithin = requireBumpWithin(options)
+    const pilotWithin = requirePilotWithin(options)
     const auditWithin = auditHookOf(options)
     const at = clock()
 
@@ -1857,6 +1887,8 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (!nonBlankString(hold.pairingFingerprint) || !nonBlankString(hold.comparisonFingerprint) || !nonBlankString(hold.evidenceFingerprint)) throw holdMalformed('fingerprints_missing')
       const detail = isPlainObject(hold.detail) ? hold.detail : {}
       const history = EVIDENCE_HISTORY_STATUSES.includes(detail.history) ? detail.history : 'history_unknown'
+      // Pre-pilot fix batch 8(a): the pilot marker re-decided on this handle, after the state lock and the hold re-read.
+      await assertPilotWithin(trx, pilotWithin)
 
       // S25 under the lock: the last read before the bump (PR-4 review N2).
       const runbookOpen = runbookOnlyOf(await openHoldsOf(trx, scope))
@@ -3069,6 +3101,7 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     confirmChangePlan,
     completeChangeReview,
     countOpenHoldsByProjectNo,
+    listGovernedProjectNos,
     confirmContinuation,
     reconfirmContinuation,
     endContinuation,
