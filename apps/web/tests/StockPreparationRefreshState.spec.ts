@@ -88,7 +88,8 @@ import {
   recordStockPrepProjectVisit,
 } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import { buildOperatorHomeCards } from '../src/services/integration/stockPreparation/operatorHomeCards'
-import type { StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import type { StockPreparationOperatorDirectory, StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import { buildStockPrepProjectQueryRows, filterStockPrepProjectQueryRows } from '../src/services/integration/stockPreparation/projectQuery'
 
 const nodeRequire = createRequire(import.meta.url)
 const PLUGIN_LIB = '../../../plugins/plugin-integration-core/lib/'
@@ -886,5 +887,58 @@ describe('OH — 今天要处理 keeps 刷新未完成', () => {
     // A live pending count still decides on its own.
     const live = buildOperatorHomeCards([registryRow({ pendingDecisionCount: 2 })], [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
     expect(live[0].posture.key).toBe('pending_decision')
+  })
+
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): the registry row carries the server's blocked token.
+  it('OH-DIR (8c): a registry row\'s server token decides before 「可以导出」 — 变更待复核 / 待核对 / 状态读取失败 / 刷新未完成; null is the live 「可以导出」 even over a remembered block; the count badges still rank first; a row without the key keeps the fold', () => {
+    const card = (overrides: Partial<StockPreparationOperatorProject>, memory: Array<{ projectNo: string; updatedAt: string; postureKey: 'blocked_pull_state' | 'ready' }> = []) => buildOperatorHomeCards([registryRow(overrides)], memory)[0]
+    const review = card({ refreshBlocked: 'change_pending_review', pendingReviewCount: 1, openRefreshHoldCount: 0 })
+    expect([review.posture.key, review.posture.zh, review.postureFromMemory]).toEqual(['blocked_pull_state', '变更待复核', false])
+    expect(card({ refreshBlocked: 'unsettled', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('待核对')
+    expect(card({ refreshBlocked: 'failed_pending_recovery', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('上次写入未完成')
+    // 「状态读取失败」 even on a row the overview never stamped (no counts): never 「看不到」, never 「可以导出」.
+    const unreadable = card({ refreshBlocked: 'unreadable', pendingReviewCount: null, openRefreshHoldCount: null, pulledRowCount: null })
+    expect([unreadable.posture.key, unreadable.posture.zh]).toEqual(['blocked_pull_state', '状态读取失败'])
+    expect(card({ refreshBlocked: 'made_up_token', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('刷新未完成')
+    // The open holds already fold into the live pending count, which still ranks first.
+    expect(card({ refreshBlocked: 'pending_confirmation', openRefreshHoldCount: 2, pendingReviewCount: 0, pendingDecisionCount: 2 }).posture.key).toBe('pending_decision')
+    // null = the server says the export would not refuse on the state: the LIVE answer beats a remembered block.
+    const ready = card({ refreshBlocked: null, pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
+    expect([ready.posture.key, ready.postureFromMemory]).toEqual(['ready', false])
+    // And a live block beats a remembered 「可以导出」.
+    expect(card({ refreshBlocked: 'executing', pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'ready' }]).posture.zh).toBe('正在写入')
+    // An older server (no key): the PR-7 fold, unchanged.
+    expect(card({}, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }]).posture.key).toBe('blocked_pull_state')
+  })
+
+  it('OH-DIR-MIRROR (8c): for EVERY status × settled the server derives, the token the directory row carries renders on the home card exactly what the server overview posture says — 「可以导出」 only where the formal-surface verdict allows', () => {
+    const overview = nodeRequire(`${PLUGIN_LIB}stock-preparation-project-overview.cjs`) as {
+      refreshBlockedToken: (input: Record<string, unknown>) => string | null
+      projectOverviewPosture: (input: Record<string, unknown>) => { key: string; zh: string; en: string; tone: string }
+      REFRESH_BLOCKED_TOKENS: readonly string[]
+    }
+    for (const status of [...STOCK_PREP_REFRESH_STATUS_TOKENS, 'made_up']) {
+      for (const settled of [true, false]) {
+        const token = overview.refreshBlockedToken({ refreshStatus: status, refreshSettled: settled })
+        if (token !== null) expect(overview.REFRESH_BLOCKED_TOKENS).toContain(token)
+        const server = overview.projectOverviewPosture({ pulledRowCount: 12, refreshStatus: status, refreshSettled: settled, refreshPendingConfirmCount: 0 })
+        const web = buildOperatorHomeCards([registryRow({ refreshBlocked: token, openRefreshHoldCount: 0, pendingReviewCount: 0 })], [])[0].posture
+        expect({ status, settled, posture: web }).toEqual({ status, settled, posture: server })
+        expect(web.key === 'ready').toBe(status !== 'made_up' && backendState.formalSurfaceVerdict({ readable: status !== 'unreadable', status, settled }).allowed === true)
+      }
+    }
+  })
+
+  it('OH-DIR-QUERY (8c): 项目查询 inherits it — the 「可以导出」 chip never lists a row the server says is blocked', () => {
+    const directory = {
+      tenantId: 'tenant-syn', directoryReady: true, ledgerReady: true,
+      projects: [
+        registryRow({ projectNo: 'SYN-Q-READY', refreshBlocked: null, openRefreshHoldCount: 0, pendingReviewCount: 0 }),
+        registryRow({ projectNo: 'SYN-Q-REVIEW', refreshBlocked: 'change_pending_review', openRefreshHoldCount: 0, pendingReviewCount: 1 }),
+      ],
+    } as unknown as StockPreparationOperatorDirectory
+    const rows = buildStockPrepProjectQueryRows(directory, [])
+    const ready = filterStockPrepProjectQueryRows(rows, { status: 'ready', source: 'all', search: '' } as never).map((row) => row.projectNo)
+    expect(ready).toEqual(['SYN-Q-READY'])
   })
 })

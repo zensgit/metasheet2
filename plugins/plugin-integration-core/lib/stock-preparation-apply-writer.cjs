@@ -1231,14 +1231,12 @@ async function applyStockPreparationPlan(input = {}) {
 }
 
 /**
- * 批次标识 BI-1b (design §3.4): the per-run stamping state. null without a stamp. Every ADD decision the plan can key
- * must have its 首次批次 entry (null = "this batch"): a map built from another plan is a defect, refused before the
- * first write (500 STAMP_INVALID) rather than guessed per row; a decision without a usable key fails in the loop as
- * today. `ensure()` is memoized (the first create allocates or joins; every later create reuses the answer) and runs
- * the allocation INSIDE the guard's host-write bracket (P-5: the ledger transaction's holder assert holds the lease
- * row FOR UPDATE; the heartbeat must not queue behind it — the N6 rule).
+ * 批次标识 BI-1b / F-7 (R-65): the ZERO-IO checks the writer applies to its `pullBatchStamp` side input — the stamp's
+ * own shape (normalizePullBatchStamp against the target's fieldIdMap) and the ADD coverage below. null without a
+ * stamp. ONE copy: pullBatchRunOf runs it, and the large chunk gate pre-runs it (assertWriterAdmitsPullBatchStamp)
+ * BEFORE the job turns `running`, so a stamp the writer would refuse can never strand a running job (F-7).
  */
-function pullBatchRunOf(value, { plan, target, writeFence }) {
+function admittedPullBatchStampOf(value, { plan, target }) {
   const stamp = normalizePullBatchStamp(value, { fieldIdMap: target.fieldIdMap })
   if (!stamp) return null
   for (const entry of plan.decisions) {
@@ -1253,6 +1251,30 @@ function pullBatchRunOf(value, { plan, target, writeFence }) {
       throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'the pull-batch stamp does not cover every ADD of this plan; nothing was written', { field: 'pullBatchStamp.firstPullBatchByKey', partial: false })
     }
   }
+  return stamp
+}
+
+/**
+ * 批次标识 F-7 (R-65): the writer's stamp checks, run by a caller BEFORE it commits to a write — the large chunk gate,
+ * before the job turns `running` (the assertWriterAdmitsPlan rule: anything the writer would refuse is refused before
+ * the job runs). The plan and the target are normalized exactly as applyStockPreparationPlan normalizes them. Throws
+ * what the writer would throw (500 STAMP_INVALID for the stamp); answers nothing. Zero IO.
+ */
+function assertWriterAdmitsPullBatchStamp({ pullBatchStamp, plan, target } = {}) {
+  admittedPullBatchStampOf(pullBatchStamp, { plan: normalizePlan(plan), target: normalizeTarget(target) })
+}
+
+/**
+ * 批次标识 BI-1b (design §3.4): the per-run stamping state. null without a stamp. Every ADD decision the plan can key
+ * must have its 首次批次 entry (null = "this batch"): a map built from another plan is a defect, refused before the
+ * first write (500 STAMP_INVALID) rather than guessed per row; a decision without a usable key fails in the loop as
+ * today. `ensure()` is memoized (the first create allocates or joins; every later create reuses the answer) and runs
+ * the allocation INSIDE the guard's host-write bracket (P-5: the ledger transaction's holder assert holds the lease
+ * row FOR UPDATE; the heartbeat must not queue behind it — the N6 rule).
+ */
+function pullBatchRunOf(value, { plan, target, writeFence }) {
+  const stamp = admittedPullBatchStampOf(value, { plan, target })
+  if (!stamp) return null
   let allocation = null
   const run = {
     stamped: 0,
@@ -1332,6 +1354,8 @@ module.exports = {
   // PR-3a (AW-2): the large chunk pre-runs it BEFORE the job turns `running`, so no writer refusal can fire
   // after the job is stored as running (a throw there would strand it — F-7 class).
   assertWriterAdmitsPlan,
+  // 批次标识 F-7 (R-65): the large chunk gate pre-runs the writer's stamp checks before the job turns `running`.
+  assertWriterAdmitsPullBatchStamp,
   summarizeApplyResultForEvidence,
   countAttemptedHostWrites,
   __internals: {
