@@ -119,8 +119,43 @@ const REFRESH_DECISION_AUDIT = Object.freeze({
     changePlanConfirmed: 'change_plan_confirmed',
     changeReviewCompleted: 'change_review_completed',
     changePlanInvalidated: 'change_plan_invalidated',
+    // Step 6a-1 (design §3.3, D9 — no vocabulary migration): the SYSTEM row a self-verifying execution finish appends on
+    // its own transaction.
+    executionSelfVerified: 'execution_self_verified',
   }),
 })
+
+// Step 6a-1 (design §3.3): the closed map of the SYSTEM events the refresh store appends through the route-wired
+// `auditWithin` hook (no actor), event -> the values-free entry (subject handle, mode, flat detail). An event outside it
+// is a defect: 500, the write rolls back. `change_plan_invalidated` is byte-identical to its PR-8 row (CP-S08 / S8-03).
+const REFRESH_SYSTEM_AUDIT_EVENTS = Object.freeze({
+  change_plan_invalidated: (event) => ({
+    subjectId: event.changePlanId,
+    mode: REFRESH_DECISION_AUDIT.modes.changePlanInvalidated,
+    detail: {
+      operation: event.operation,
+      reason: event.reason,
+      lane: event.lane,
+      recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
+    },
+  }),
+  execution_self_verified: (event) => ({
+    subjectId: event.executionId,
+    mode: REFRESH_DECISION_AUDIT.modes.executionSelfVerified,
+    detail: {
+      operation: event.operation,
+      finishStatus: event.finishStatus,
+      changePlanBound: event.changePlanBound === true,
+      intendedEntries: Number.isInteger(event.intendedEntries) ? event.intendedEntries : 0,
+    },
+  }),
+})
+
+function refreshSystemAuditEntryOf(event) {
+  const build = event && Object.prototype.hasOwnProperty.call(REFRESH_SYSTEM_AUDIT_EVENTS, event.operation) ? REFRESH_SYSTEM_AUDIT_EVENTS[event.operation] : null
+  if (!build) throw new StockPreparationRefreshDecisionError(500, 'STOCK_PREP_REFRESH_INPUT_INVALID', 'the refresh store handed an audit event outside the closed system-event map', { reason: 'audit_event_unknown', partial: false })
+  return { action: REFRESH_DECISION_AUDIT.decisionAction, ...build(event) }
+}
 
 const HOLD_PAGE_LIMIT_DEFAULT = 20
 const HOLD_PAGE_LIMIT_MAX = 50
@@ -826,10 +861,11 @@ async function confirm(ctx, body) {
   // PR-8 review fix N1-b (round 2): the candidate confirm creates a relationship, so the store re-reads the pilot marker
   // on its own transaction handle under the state-row lock (the route hands the governance reader's `readPilotWithin`,
   // bound to this scope); `assertPilot(consult)` above stays the fast, earlier picture. Without the hook the store
-  // refuses 501 `pilot_read_within` before any statement.
+  // refuses 501 `pilot_read_within` before any statement. Pre-pilot fix batch 8(a) (R-91): the RE-CONFIRM re-activates
+  // a relationship, so it hands the store the same in-transaction read — NOT_PILOT is decided under the lock on both.
   const decided = mode === 'confirm'
     ? await ctx.store.confirmContinuation({ ...ctx.scope, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, basis: input.basis, sourceIdentity }, { ...hooks, pilotWithin: ctx.readPilotWithin })
-    : await ctx.store.reconfirmContinuation({ ...ctx.scope, continuationId: input.continuation.id, revision: input.continuation.revision, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, sourceIdentity }, hooks)
+    : await ctx.store.reconfirmContinuation({ ...ctx.scope, continuationId: input.continuation.id, revision: input.continuation.revision, holdId: hold.id, confirmedBy: ctx.actorId, echo: input.echo, sourceIdentity }, { ...hooks, pilotWithin: ctx.readPilotWithin })
   return Object.freeze({
     continuationId: decided.continuationId,
     revision: decided.revision,
@@ -1425,6 +1461,9 @@ module.exports = {
   READ_RECEIPT_TTL_MS,
   REFRESH_DECISION_AUDIT,
   REFRESH_DECISION_ERROR_CODES,
+  // Step 6a-1.
+  REFRESH_SYSTEM_AUDIT_EVENTS,
+  refreshSystemAuditEntryOf,
   StockPreparationRefreshDecisionError,
   confirm,
   // Step 5 PR-8.

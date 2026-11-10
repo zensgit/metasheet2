@@ -36,6 +36,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const refreshKit = require(path.join(__dirname, 'support', 'stock-preparation-refresh-store-kit.cjs'))
+const { emptyIntentFor } = refreshKit
 const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const registryModule = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
 const probeModule = require(path.join(LIB, 'stock-preparation-governed-sheet-probe.cjs'))
@@ -115,6 +116,7 @@ async function beginExecution(w, scope = w.scope) {
     plannedCounts: { add: 1 },
     refreshBinding: { continuations: [] },
     startedBy: PULLER,
+    intent: emptyIntentFor('digest_gsp'),
   })
 }
 
