@@ -116,7 +116,7 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 ## 各节核验
 
-行号对本次合并 `origin/main`（`078b0ed68`）之后的当前树。2026-10-16 写下来、后来已经挪位的行，以下表和缺口清单已改成现位置。
+行号对本次合并 `origin/main`（`a6fbdca73`，#6838）之后的当前树。#6838 只改管理员角色写入的锁内复核，没有改 `plugins/plugin-attendance/index.cjs` 和本注引用的前端文件，所以上表行号未移动。2026-10-16 写下来、后来已经挪位的行，以下表和缺口清单已改成现位置。
 
 | 帮助文章 | 核对到的行为 | 代码 |
 | --- | --- | --- |
@@ -151,11 +151,13 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（88ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
 
-2026-11-10 按合并后的当前树重跑，均通过：
+2026-11-10 按合并 `078b0ed68` 后的树重跑，均通过：
 
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、8 个测试通过（221ms）。
 - `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts tests/attendanceAdminGuide.spec.ts --max-warnings=0`：退出码 0。`apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以这是对改动文件的直接检查；`pnpm --filter @metasheet/web lint` 同样退出码 0。
 - `pnpm --filter @metasheet/web type-check`（`vue-tsc -b`，以及 approval / stock-prep 两份 verification tsconfig）：退出码 0。
+
+合并 `a6fbdca73`（#6838）之后又跑了同一组命令。行号没有变化。规格 8 个测试通过（153ms）；对改动文件的 eslint、`pnpm --filter @metasheet/web lint`、`pnpm --filter @metasheet/web type-check` 退出码都是 0。
 
 ## 缺口清单
 
