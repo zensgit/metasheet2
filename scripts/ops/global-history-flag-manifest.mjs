@@ -879,6 +879,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled',
   },
   {
+    key: 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH',
+    type: 'enum',
+    activationValue: "a path to a deploy-local JSON object file (trimmed); unset / blank = no pilot declarations (today's behaviour); set but unreadable / not JSON / not an object = the plugin fails to load (logged), never 'nothing declared'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "备料分批拉取 pilot declarations (pre-pilot fix batch 8(f), batch-refresh pre-flip; register R-91): a DEPLOY-FILE key — the env names a JSON object file on the deployment's own machine, read once at plugin activation by readDeployJsonObjectFile into config.stockPreparationPilot, the same reader and fail-closed posture as the customer-pack, ext-field-mapping, B2a-registry and handoff path keys. Default OFF: unset (or blank) omits the key, both declarations read null and pilot readiness answers exactly as before this key existed. The plugin honours two keys of that object and only as the EXACT literal 'not_applicable' (anything else declares nothing): specReadPlanSlot — this deployment's source has no 规格 column to read (readiness spec_read_plan_slot then passes without part.specField); customerPack — this deployment runs without a customer pack (readiness pack_columns_installed then passes only while no ext_ column is declared or installed). It enables nothing by itself: the pilot is still the admin POST behind every readiness check and CONTINUATION_SUPPORT_VERSION. Danger=medium: a declaration is a SITE FACT the owner states (never guessed, O-8 / B-M8); declaring the 规格 slot not applicable on a site whose source does have the column means that column is never read for a pilot project. The four sibling _PATH deploy-file keys are not registered here (pre-existing).",
+    source: 'packages/core-backend/src/plugin-runtime-config.ts#resolvePluginRuntimeConfig',
+  },
+  {
     key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
     type: 'boolean',
     activationValue: 'true',

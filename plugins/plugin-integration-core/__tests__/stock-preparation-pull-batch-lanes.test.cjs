@@ -42,6 +42,11 @@
 //   LN-25  (MF-3) lib level, two chunks: the link is finished ONCE, at the terminal status, with the JOB total
 //   LN-26  (MF-5) the defensive guards: a probed id that is not the derived physical id, a not_found preview, a later
 //          chunk that allocates nothing, the reader-only lane, a holder assert that is not a function
+//   LN-27  F-7 (R-65): a ready stored plan whose stamp the WRITER would refuse (a carry that misses an ADD; a band id
+//          that is a key of the job's stored fieldIdMap) is refused by the chunk gate 500 STAMP_INVALID BEFORE `running`
+//          — the stored job byte-identical, nothing written, zero ledger IO — and the job resumes once the plan is
+//          repaired (on main it stayed `running` and answered 409 RUN_IN_PROGRESS forever); the check covers the
+//          decisions from the checkpoint on; switch OFF ⇒ the gate never reads the malformed plan
 //
 // Every value is synthetic.
 
@@ -1073,6 +1078,109 @@ test('LN-26 (MF-5) the defensive guards: a probed id that is not the derived phy
       JSON.stringify(holderWithin),
     )
     assert.throws(() => lanes.readerOnlyLaneOf({ enabled: true, band, tenantId: TENANT, holderWithin }), (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID)
+  }
+})
+
+test('LN-27 F-7 (R-65): a stored plan whose stamp the writer would refuse is refused by the chunk gate 500 STAMP_INVALID BEFORE running — job untouched, nothing written, zero ledger IO — and the job resumes once repaired; the check starts at the checkpoint; switch OFF never reads it', async () => {
+  const chunkOf = (h, flow) => call(h, 'POST', CHUNK, { params: { jobId: flow.jobId, applyJobId: flow.approved.body.data.jobId } })
+  const keyOf = (h, applyJobId) => [...h.context.storage.keys()].find((entry) => entry.includes(applyJobId))
+  // (a) / (b) route level, through the REAL chunk route, gate, store and writer.
+  for (const [label, corrupt, field] of [
+    ['a carry that misses the ADD', (job) => { job.pullBatchPlan.firstPullBatchByKey = {} }, 'pullBatchStamp.firstPullBatchByKey'],
+    ['a band id that is a key of the stored fieldIdMap', (job, h) => { job.target.fieldIdMap = { ...job.target.fieldIdMap, [h.physical('pullBatch')]: 'fld_syn_ln27_unused' } }, 'fieldIds'],
+    // The stored fieldIdMap is read as the writer normalizes it (values trimmed): a padded band id stored as a VALUE
+    // is still a band id the template maps, and is refused here, not only inside the chunk.
+    ['a padded band id stored as a fieldIdMap VALUE', (job, h) => { job.target.fieldIdMap = { ...job.target.fieldIdMap, fld_syn_ln27_extra: ` ${h.physical('firstPullBatch')} ` } }, 'fieldIds'],
+  ]) {
+    const h = mount()
+    try {
+      await withSwitch('true', async () => {
+        const flow = await largeFlow(h, { run: false })
+        assert.equal(flow.approved.statusCode, 202, `${label}: ${JSON.stringify(flow.approved.body)}`)
+        const applyJobId = flow.approved.body.data.jobId
+        const key = keyOf(h, applyJobId)
+        const pristine = await h.context.storage.get(key)
+        assert.equal(pristine.pullBatchPlan.ready, true, `${label}: calibration — a ready plan`)
+        assert.ok(pristine.plan.decisions.some((decision) => decision && decision.decision === 'add'), `${label}: calibration — the job has an ADD`)
+        const corrupted = JSON.parse(JSON.stringify(pristine))
+        corrupt(corrupted, h)
+        await h.context.storage.set(key, corrupted)
+        const before = await storedJobText(h, applyJobId)
+        h.ledgerDb.log.length = 0
+        const refused = await chunkOf(h, flow)
+        assert.equal(refused.statusCode, 500, `${label}: ${JSON.stringify(refused.body)}`)
+        assert.equal(refused.body.error.code, PULL_BATCH_ERROR_CODES.STAMP_INVALID, label)
+        assert.equal(refused.body.error.details.field, field, label)
+        assert.equal(await storedJobText(h, applyJobId), before, `${label}: the job is exactly as it was — never stored as running`)
+        assert.equal((await h.context.storage.get(key)).status, 'queued', `${label}: still runnable`)
+        assert.equal(hostWrites(h).length, 0, `${label}: nothing written`)
+        assert.deepEqual(h.ledgerDb.log, [], `${label}: zero ledger IO (refused before the ledger read)`)
+        // Repaired, the SAME job runs: no RUN_IN_PROGRESS strand.
+        await h.context.storage.set(key, pristine)
+        const resumed = await chunkOf(h, flow)
+        assert.equal(resumed.statusCode, 200, `${label}: ${JSON.stringify(resumed.body)}`)
+        assert.equal(resumed.body.data.status, 'succeeded', label)
+        assert.equal(resumed.body.data.pullBatch.stamped, true, `${label}: the repaired job stamps`)
+      })
+    } finally { h.restore() }
+  }
+  // (c) lib level: the check covers the decisions FROM THE CHECKPOINT ON (the writer's chunks still to run), zero IO.
+  const band = { fieldIds: { pullBatch: 'fld_syn_ln27_pb', firstPullBatch: 'fld_syn_ln27_fpb' } }
+  const probe = { fieldIds: band.fieldIds, mode: 'db', present: { pullBatch: true, firstPullBatch: true } }
+  let reads = 0
+  const lane = { enabled: true, band, tenantId: TENANT, holderWithin: null, store: { async readSheetState() { reads += 1; return { sheet: { historyStatus: 'born_empty' }, batches: [] } } } }
+  const add = (key) => ({ decision: 'add', idempotencyKey: key, record: { idempotencyKey: key } })
+  const jobAt = (nextDecisionIndex) => ({
+    jobId: 'ln27-apply-1',
+    target: { sheetId: 'sheet_syn_ln27', keyField: 'idempotencyKey', fieldIdMap: {} },
+    plan: { decisions: [add('ln27-k1'), add('ln27-k2')] },
+    checkpoint: { nextDecisionIndex, completedChunks: nextDecisionIndex },
+    pullBatchPlan: { ready: true, firstPullBatchByKey: { 'ln27-k2': null }, sourceDigest: 'a'.repeat(32), labelsOnSheet: [], expectedRule: 'material' },
+  })
+  await assert.rejects(
+    lanes.largeChunkPullBatchGate({ lane, probe, job: jobAt(0), projectNo: PROJECT }),
+    (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.status === 500 && error.details.field === 'pullBatchStamp.firstPullBatchByKey' && error.details.partial === false,
+    'checkpoint 0: ln27-k1 is still to run and the carry misses it',
+  )
+  assert.equal(reads, 0, 'refused before the ledger read')
+  const admitted = await lanes.largeChunkPullBatchGate({ lane, probe, job: jobAt(1), projectNo: PROJECT })
+  assert.ok(admitted && admitted.stamp, 'checkpoint 1: only ln27-k2 is still to run, and the carry covers it')
+  assert.deepEqual(admitted.stamp.fieldIds, band.fieldIds)
+  assert.deepEqual([...admitted.stamp.firstPullBatchByKey], [['ln27-k2', null]])
+  assert.equal(reads, 1, 'calibration: the admitted gate read the ledger once')
+  // (c') the uncovered ADD is NOT the first remaining decision: the carry covers ln27-k1 only, ln27-k2 is a LATER one
+  // (the chunk that would refuse it is not this one). It is refused NOW, before any chunk writes, zero ledger IO.
+  {
+    let laterReads = 0
+    const laterLane = { ...lane, store: { async readSheetState() { laterReads += 1; return { sheet: { historyStatus: 'born_empty' }, batches: [] } } } }
+    const job = jobAt(0)
+    job.pullBatchPlan = { ...job.pullBatchPlan, firstPullBatchByKey: { 'ln27-k1': null } }
+    await assert.rejects(
+      lanes.largeChunkPullBatchGate({ lane: laterLane, probe, job, projectNo: PROJECT }),
+      (error) => error.code === PULL_BATCH_ERROR_CODES.STAMP_INVALID && error.status === 500 && error.details.field === 'pullBatchStamp.firstPullBatchByKey',
+      'checkpoint 0: ln27-k2 is a LATER decision the carry misses — refused now, before any chunk writes',
+    )
+    assert.equal(laterReads, 0, 'the later-decision refusal comes before the ledger read')
+  }
+  // (d) switch OFF: the gate is inert — it never reads the malformed plan; the chunk runs unstamped.
+  assert.equal(await lanes.largeChunkPullBatchGate({ lane: { ...lane, enabled: false }, probe, job: jobAt(0), projectNo: PROJECT }), null)
+  assert.equal(await lanes.largeChunkPullBatchGate({ lane: { ...lane, enabled: false }, probe, job: { ...jobAt(0), pullBatchPlan: 'not a plan' }, projectNo: PROJECT }), null)
+  {
+    const h = mount()
+    try {
+      const flow = await withSwitch('true', () => largeFlow(h, { run: false }))
+      assert.equal(flow.approved.statusCode, 202, JSON.stringify(flow.approved.body))
+      const key = keyOf(h, flow.approved.body.data.jobId)
+      const job = await h.context.storage.get(key)
+      job.pullBatchPlan.firstPullBatchByKey = {}
+      await h.context.storage.set(key, job)
+      h.ledgerDb.log.length = 0
+      const chunk = await withSwitch(undefined, () => chunkOf(h, flow))
+      assert.equal(chunk.statusCode, 200, JSON.stringify(chunk.body))
+      assert.equal(chunk.body.data.status, 'succeeded')
+      assert.equal(hasKeyDeep(chunk.body, 'pullBatch'), false, 'no pullBatch key while OFF')
+      assert.deepEqual(h.ledgerDb.log, [], 'zero ledger IO while OFF')
+    } finally { h.restore() }
   }
 })
 

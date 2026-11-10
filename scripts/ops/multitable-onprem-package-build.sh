@@ -110,6 +110,11 @@ REQUIRED_PATHS=(
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
+  # Batch identifier (R-65): the per-sheet pull-batch install client (BI-2) and the scheduled
+  # PLM-pull client. Both are plain HTTP clients over node built-ins; the install client imports
+  # a helper from the scheduled-pull client by relative path, so the two always ship together.
+  "scripts/ops/stock-preparation-pull-batch-install.mjs"
+  "scripts/ops/stock-preparation-scheduled-pull.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   # Legacy SQL readonly Bridge Agent tooling. BA-M0.5 proves the approved
@@ -715,6 +720,15 @@ Multitable permission-list closeout smoke (#3408):
   the script considers only token-visible bases with an explicit perf/smoke/test
   name and fails closed before mutation if no safe reusable base exists. It
   deletes its temporary sheet and emits values-free evidence only.
+
+Stock-preparation batch identifier and scheduled pull clients (Node 18+ only):
+  node scripts/ops/stock-preparation-pull-batch-install.mjs --help
+    -> per-sheet pull-batch install client. The default is a values-free
+       dry-run; install and abort act on one project and each run needs its
+       own owner approval.
+  node scripts/ops/stock-preparation-scheduled-pull.mjs --help
+    -> scheduled PLM pull client for the OS timer; dry-run unless --apply.
+  Both read their API address and token from the environment (see --help).
 
 K3 WISE PoC operator tools (Node only; no Docker needed to run these):
   Runtime plugin:
