@@ -413,6 +413,14 @@ export default defineConfig({
       // here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
       // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs).
       'tests/integration/attendance-notification-defer.db.test.ts',
+      // Departure vouching single source: every statement that asks "does another source still
+      // vouch for this person" (candidate selection, state read, write-time recheck, membership
+      // helper) against real Postgres, per call site and per scope variant. DATABASE_URL-gated
+      // with the EXPECT_DB sentinel; excluded here so the no-DB job cannot skip-green it, and
+      // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs and
+      // directory-deprovision-provider-scope-ci-wiring.test.mjs).
+      'tests/integration/directory-departure-vouching.db.test.ts',
       // Real PostgreSQL x local HTTP harness feasibility for the Feishu integration: a database
       // transaction stays open while the Feishu transport talks to the local mock server, and nothing
       // leaves the loopback. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it,
