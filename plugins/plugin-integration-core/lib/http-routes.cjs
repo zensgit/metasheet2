@@ -6818,8 +6818,13 @@ function requireStockPreparationAudit() {
     const scope = { tenantId, sheetId: target.sheetId, projectNo }
     const writeScope = sheetWriteScopeKey(target.sheetId)
     const parameters = { projectNo }
-    const readRows = sheetRepairRowsReaderFor(ctx)
     const pullBatchEnabled = pullBatchLanes.stockPrepPullBatchEnabled()
+    // While the batch identifier is on, the `installing` gate MUST be answerable: an unwired batch ledger refuses the
+    // request by name before the sheet, the source or the repair ledger is touched (never "not installing").
+    if (pullBatchEnabled && (!stockPreparationPullBatchStore || typeof stockPreparationPullBatchStore.readSheetState !== 'function')) {
+      throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger is not wired on this server; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'store_unwired', partial: false })
+    }
+    const readRows = sheetRepairRowsReaderFor(ctx)
     return {
       scope,
       actor,

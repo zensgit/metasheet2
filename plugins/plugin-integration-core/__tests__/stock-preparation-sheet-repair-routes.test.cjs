@@ -19,7 +19,7 @@
 //   RR-04  (RP-01) a governed project: a preview refusal and 409 for an execute, nothing written — for a retire and
 //          for the restore of a run whose project was governed afterwards
 //   RR-05  the installing gate through the route: enforced while the batch identifier is on; with it off the batch
-//          ledger is never touched
+//          ledger is never touched; on with the ledger unwired, 503 by name before anything is read
 //   RR-06  mutual exclusion with a pull, a recovery and an install: whoever holds the sheet, the repair is 409
 //          WRITE_LOCKED; while the repair holds it, a pull preview is 409 WRITE_LOCKED naming `sheet_repair`
 //   RR-07  a host that cannot honour the write fence refuses the execute (501) BEFORE the claim is spent; the old root
@@ -541,6 +541,18 @@ test('RR-05 the installing gate through the route (rebaseline B-9): enforced whi
     assert.deepEqual([done.status, done.written], ['completed', 4])
     assert.deepEqual(off.db.log.filter(([, args]) => args && typeof args.table === 'string' && args.table.includes('pull_batch')), [], 'zero batch-ledger statements')
   } finally { off.h.restore() }
+  // The batch identifier ON but its ledger not wired: the gate cannot be answered, so the request is refused by name
+  // before the sheet, the source or the repair ledger's runs are read (never "not installing").
+  const unwired = await mount({ serviceOverrides: { stockPreparationPullBatchStore: null } })
+  try {
+    for (const send of [() => preview(unwired), () => execute(unwired, 'a'.repeat(64))]) {
+      unwired.clearLogs()
+      const error = expectRefusal(await withEnv(BOTH, send), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+      assert.deepEqual([error.details.operation, error.details.partial, unwired.records.calls, unwired.sourceState.reads, unwired.runs(), unwired.claims(), unwired.lockRow()], ['store_unwired', false, [], 0, [], [], null])
+    }
+    // Off, the same deployment repairs: the ledger is not asked for.
+    assert.equal(dataOf(await withEnv(ON, () => preview(unwired))).eligible, true)
+  } finally { unwired.h.restore() }
 })
 
 // ── RR-06 ────────────────────────────────────────────────────────────────────────────────────────────────
