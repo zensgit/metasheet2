@@ -374,7 +374,9 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         },
         runs: async () => (await q(`SELECT * FROM ${RT.run} WHERE tenant_id = $1 ORDER BY sequence_no`, [tenantId])).rows,
         claims: async () => (await q(`SELECT * FROM ${RT.claim} WHERE tenant_id = $1 ORDER BY claimed_at`, [tenantId])).rows,
-        audits: async () => (await q(`SELECT action, mode, subject_id, project_id, actor, detail FROM ${AUDIT_TABLE} WHERE tenant_id = $1 ORDER BY created_at, id`, [tenantId])).rows,
+        // `created_at` is the transaction's NOW(): the rows of ONE transaction (a begin that closes an abandoned run and
+        // starts its own) tie, so the mode breaks the tie (`…_abandoned` sorts before `…_started`) — never the random id.
+        audits: async () => (await q(`SELECT action, mode, subject_id, project_id, actor, detail FROM ${AUDIT_TABLE} WHERE tenant_id = $1 ORDER BY created_at, mode`, [tenantId])).rows,
         lockRow: async () => (await q(`SELECT * FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [scopeKey])).rows[0] || null,
         readerRows: () => readExistingStockPreparationRows(multitable.records, target, PROJECT),
         /** Another process's lock module on the same table; `aheadMs` skews its clock (a holder whose lease it sees as lapsed). */
