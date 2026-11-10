@@ -27,7 +27,7 @@ import {
   validateRunIntegrationJobTriggerCoupling,
 } from '../../src/multitable/automation-run-integration-job'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
-import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES, checkRunIntegrationJobRuleSheet } from '../../src/multitable/automation-run-integration-job-rule-sheet'
 import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
 import { createFakeJobDb } from '../utils/run-integration-job-fake-db'
 
@@ -804,9 +804,9 @@ describe('R-69 I6a — the trigger re-checks the rule sheet before anything is c
     const transaction = vi.fn(db.transaction)
     const resolver = vi.fn(async () => ({ ok: true as const, user: PRINCIPAL }))
     expect(await harness(db, port, { transaction, resolveIntegrationRunPrincipal: resolver }).run('exec_pos_seam')).toMatchObject(REFUSED_BY_STEP_05)
+    expect(resolver).toHaveBeenCalledTimes(0)
     // the production path (no resolver seam) would open its own authority transaction
     expect(await harness(db, port, { transaction, resolveIntegrationRunPrincipal: undefined }).run('exec_pos_prod')).toMatchObject(REFUSED_BY_STEP_05)
-    expect(resolver).toHaveBeenCalledTimes(0)
     expect(transaction).toHaveBeenCalledTimes(0)
     // precedence: a later stage that WOULD refuse on its own does not answer first
     expect(await harness(db, port, { transaction: undefined }).run('exec_pos_notx')).toMatchObject(REFUSED_BY_STEP_05) // not failed(transaction_seam_required)
@@ -848,5 +848,38 @@ describe('R-69 I6a — the trigger re-checks the rule sheet before anything is c
     // control: once those four gates pass, the same harness does reach step 0.5
     expect(await harness(db, port).run('exec_pre_reached')).toMatchObject(REFUSED_BY_STEP_05)
     expect(db.registryReads).toEqual(['sheet_1'])
+  })
+})
+
+describe('R-69 I6a fix (re-review M1) — the rule-sheet guard called directly: the sheet id is exact', () => {
+  const ON = { [STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]: 'true' } as NodeJS.ProcessEnv
+  const REGISTERED_ROW = { sheet_id: 'sheet_1', project_no: 'P-1', status: 'active', object_id: 'obj_1', tenant_id: 'tenant_1' }
+  const UNREGISTERED = { ok: false, refusal: 'unregistered' }
+
+  it('an empty or non-string sheet id is unregistered WITHOUT a registry read', async () => {
+    const query = vi.fn(async () => ({ rows: [REGISTERED_ROW], rowCount: 1 }))
+    for (const sheetId of ['', undefined, null, 7, true, {}, ['sheet_1']]) {
+      expect(await checkRunIntegrationJobRuleSheet(query, { sheetId, tenantId: 'tenant_1' }, ON)).toEqual(UNREGISTERED)
+    }
+    expect(query).not.toHaveBeenCalled()
+  })
+  it("a reader that answers EVERY parameter with the registered sheet's row: only the exact id passes — whatever the read matched on, the answered row must be this sheet's", async () => {
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [REGISTERED_ROW], rowCount: 1 }))
+    const verdict = (sheetId: unknown) => checkRunIntegrationJobRuleSheet(query, { sheetId, tenantId: 'tenant_1', projectNos: ['P-1'] }, ON)
+    expect(await verdict('sheet_1')).toEqual({ ok: true })
+    const others = [...REGISTERED_SHEET_LOOKALIKES.map(([, sheetId]) => sheetId), 'SHEET_1', 'Sheet_1', 'sheet_1x', 'xsheet_1', 'sheet_', '   ']
+    for (const sheetId of others) expect(await verdict(sheetId)).toEqual(UNREGISTERED)
+    // each of them WAS read — with the id exactly as given, nothing normalized on the way
+    expect(query.mock.calls.map(([, params]) => params)).toEqual([['sheet_1'], ...others.map((sheetId) => [sheetId])])
+  })
+  it("a row that names no sheet id, or a non-string one, is not this sheet's — even when the exact id was asked for", async () => {
+    for (const sheet_id of [undefined, null, 7, ['sheet_1'], { toString: () => 'sheet_1' }]) {
+      const query = vi.fn(async () => ({ rows: [{ ...REGISTERED_ROW, sheet_id }], rowCount: 1 }))
+      expect(await checkRunIntegrationJobRuleSheet(query, { sheetId: 'sheet_1', tenantId: 'tenant_1' }, ON)).toEqual(UNREGISTERED)
+      expect(query).toHaveBeenCalledTimes(1)
+    }
+    // control: the same row with its real id passes
+    const control = vi.fn(async () => ({ rows: [REGISTERED_ROW], rowCount: 1 }))
+    expect(await checkRunIntegrationJobRuleSheet(control, { sheetId: 'sheet_1', tenantId: 'tenant_1' }, ON)).toEqual({ ok: true })
   })
 })
