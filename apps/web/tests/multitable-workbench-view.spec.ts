@@ -780,6 +780,15 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'patch-removed',
         )),
+        // A clear-all that ended after the drawer moved on: every id it took out goes with it.
+        h(
+          'button',
+          {
+            'data-patch-cleared-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_files', [], 'rec_1', ['att_1', 'att_2']),
+          },
+          'patch-cleared',
+        ),
         h(
           'button',
           {
@@ -5743,6 +5752,38 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchRemovedFor('rec_remote')
       expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4]])
+    })
+
+    // In the app the delete comes first, and it takes the id out of the deep-linked copy: the rebuild then has
+    // nothing left to take out, and nothing is written.
+    it('a remove naming the deep-linked rec_remote after its delete went through the workbench: nothing written', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2'])
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+    })
+
+    async function patchClearedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-cleared-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    // A late clear-all names every id it took out: all of them come out of the list as it is now, and an
+    // attachment added meanwhile stays.
+    it.each([
+      ['both still listed', ['att_1', 'att_2', 'att_x'], ['att_x']],
+      ['one already taken out', ['att_1', 'att_x'], ['att_x']],
+      ['both still listed, nothing else', ['att_1', 'att_2'], []],
+    ])('a clear-all naming rec_1 (no longer shown), %s: rec_1\'s list as it is now minus every cleared id', async (_label, files, expected) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: files }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchClearedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7]])
     })
 
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---

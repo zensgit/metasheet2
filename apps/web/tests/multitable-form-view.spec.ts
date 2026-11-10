@@ -839,6 +839,29 @@ describe('MetaFormView attachment record binding', () => {
     view.unmount()
   })
 
+  // A form that moves between create mode and a record (a deep link with its discard prompt accepted, or the record
+  // removed under it) is another form too: the late upload stays out of it.
+  it.each([
+    ['create mode, then rec_B', null, REC_B],
+    ['rec_A, then create mode', REC_A, null],
+  ] as const)('keeps an upload that ends after the form moved from %s out of the form now shown', async (_label, first, second) => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: first && first(), uploadFn: upload.fn })
+    await flushUi()
+
+    pickFiles(view.fileInput(), [new File(['late'], 'late.pdf', { type: 'application/pdf' })])
+    await flushUi()
+    view.record.value = second && second()
+    await flushUi()
+    upload.pending[0].resolve(attachment('att_late', 'late.pdf'))
+    await flushUi()
+
+    expect(view.container.textContent).not.toContain('late.pdf')
+    expect((await submitted(view)).fld_files ?? []).not.toContain('att_late')
+
+    view.unmount()
+  })
+
   it('lands an upload in a create-mode form (no record) even when the prefill arrives during the upload', async () => {
     const upload = deferredFn<ReturnType<typeof attachment>>()
     const view = mountForm({ record: null, uploadFn: upload.fn })

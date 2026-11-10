@@ -1224,6 +1224,21 @@ describe('inspector patch relay: the record an attachment write was made on', ()
     expect(onPatch.mock.calls).toEqual([['fld_files', [], 'rec_A', ['att_a1']]])
   })
 
+  it('attachments tab: the same remove, switched to rec_B before it ends, reaches onPatch with all four arguments', async () => {
+    const { container, set, onPatch, deleteAttachmentFn, settleDelete } = mountAB()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-attachments-panel .meta-attachment-list__remove')!.click()
+    await flushUi()
+    expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    set({ record: REC_B })
+    await flushUi()
+    settleDelete()
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_files', [], 'rec_A', ['att_a1']]])
+  })
+
   it('a text-field edit in the details tab still reaches onPatch with exactly two arguments', async () => {
     const { container, onPatch } = mountAB()
     await flushUi()

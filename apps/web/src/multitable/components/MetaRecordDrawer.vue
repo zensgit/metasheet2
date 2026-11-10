@@ -7,10 +7,10 @@
   both still barrel-exported from `apps/web/src/multitable/index.ts` and there is no audited inventory
   of out-of-repo consumers (lock §6bis Medium-4 caveat) -- retiring it is a later, consumer-audited
   major cleanup, not this slice. `MultitableWorkbench.vue` itself now renders `MetaRecordInspector`
-  directly (S3 diff); this shell exists for barrel-export / external consumers only. Every existing
-  `MetaRecordDrawer`-mounting spec (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts)
-  is UNCHANGED and stays green — it now exercises this shell -> MetaRecordInspector delegation, which
-  IS the compat contract this file promises.
+  directly (S3 diff); this shell exists for barrel-export / external consumers only. The
+  `MetaRecordDrawer`-mounting specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts)
+  exercise this shell -> MetaRecordInspector delegation, which IS the compat contract this file promises.
+  One change since: an attachment write's `patch` names its record (see `MetaDrawerPatchArgs`).
 -->
 <template>
   <MetaRecordInspector
@@ -83,8 +83,8 @@ import MetaRecordInspector from './MetaRecordInspector.vue'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 
 // W2 S3 (OD-W2-7=b): props/emits below are the drawer's PUBLIC compat contract, unchanged from
-// pre-shell — kept byte-identical so every existing MetaRecordDrawer consumer (in-repo specs, any
-// out-of-repo barrel-export consumer) needs zero changes. All values are forwarded 1:1 to
+// pre-shell except that an attachment write's `patch` now names its record (and a late remove the ids it
+// took out; `MetaDrawerPatchArgs` says how a listener uses them). All values are forwarded 1:1 to
 // MetaRecordInspector above; this file owns no state and no logic of its own.
 withDefaults(defineProps<{
   visible: boolean

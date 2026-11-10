@@ -3001,8 +3001,9 @@ const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, 
 
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
-  // The deep-linked copy (not in the page, so the reload below does not refresh it) follows the server, also
-  // when the drawer has moved on: the patch after the delete is that record's and carries its version.
+  // The deep-linked copy (the reload below refreshes the page's rows only) takes the delete as the server does for
+  // an attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on:
+  // a later patch of that record starts from it.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
     const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
@@ -3704,9 +3705,9 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
   if (!record) return
   const shown = record.id === selectedRecordResolved.value?.id
   // A remove or clear-all that ended after the drawer moved on names the ids it took out: they come out of the
-  // record's list as it is now (the delete's reload refreshed it, and it may hold an attachment added meanwhile),
-  // not the list it started from. With none of them left in it, there is nothing to write (the server already
-  // took them out with the delete).
+  // record's list as it is now (the delete's reload, or its update of a deep-linked copy, refreshed it, and it may
+  // hold an attachment added meanwhile), not the list it started from. With none of them left in it, there is
+  // nothing to write.
   let patchValue = value
   if (removed && !shown) {
     const raw = record.data[fieldId]
