@@ -105,8 +105,9 @@ function hostIsInternal(hostname: string): boolean {
 /**
  * Origin of this request as MetaSheet sees it behind the gateway.
  *
- * The public host is the Host header the gateway accepted (this repo's nginx sets Host to
- * $host). X-Forwarded-Proto may supply a single http or https scheme after TLS termination.
+ * The public host is the Host header the gateway accepted. docker/nginx.conf forwards
+ * $http_host (port kept) and the incoming X-Forwarded-Proto when the outer gateway set one.
+ * X-Forwarded-Proto may supply a single http or https scheme after TLS termination.
  * A differing X-Forwarded-Host is ignored when Host is already a public name, so a caller
  * cannot rename the request onto a foreign origin. It is used only when Host is an internal
  * upstream (localhost, a single-label service name, or a private address) and the forwarded
