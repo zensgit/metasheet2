@@ -66,7 +66,7 @@ const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const gateLib = require(path.join(LIB, 'stock-preparation-export-gate.cjs'))
-const { runFormalExportGate, EXPORT_GATE_ERROR_CODES, EXPORT_GATE_REASONS, StockPreparationExportGateError, continuationExportInputOf, auditableRefusalDetail } = gateLib
+const { runFormalExportGate, runHandoffTerminalGate, EXPORT_GATE_ERROR_CODES, EXPORT_GATE_REASONS, StockPreparationExportGateError, continuationExportInputOf, auditableRefusalDetail } = gateLib
 const { readProjectRefreshState, formalSurfaceVerdict, STATUS_TOKENS, FORMAL_SURFACE_REFUSALS } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
 const { machineBandFieldIds, sheetMachineDigest } = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
@@ -90,6 +90,7 @@ const { withRefreshGovernance } = require('./support/stock-preparation-refresh-g
 const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
 const { emptyIntentFor } = refreshKit
 const CF = require('./support/stock-preparation-continuation-fixtures.cjs')
+const { sheetWriteScopeKey: handoffScopeKeyOf } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const projectSheet = require('./support/stock-preparation-project-sheet-harness.cjs')
 
 const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
@@ -458,7 +459,7 @@ function makeHandoffMemoryDb() {
   return api
 }
 
-function mountHandoff({ withGovernance = true } = {}) {
+function mountHandoff({ withGovernance = true, afterReadRefreshState = null } = {}) {
   const routes = new Map()
   const auditAppends = []
   const notifications = []
@@ -491,7 +492,8 @@ function mountHandoff({ withGovernance = true } = {}) {
   services.stockPreparationHandoffStore = createStockPreparationHandoffStore({ db, idGenerator: (() => { let n = 0; return () => `handoff-xg-${(n += 1)}` })() })
   services.stockPreparationHandoffNotifier = { async sendToDestinations(request) { notifications.push(request); return { delivered: request.destinationIds.length, failed: 0 } } }
   services.tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } }
-  services.stockPreparationProjectWriteLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
+  const handoffLock = createInMemoryProjectWriteLock({ timers: 'real' }).lock
+  services.stockPreparationProjectWriteLock = handoffLock
   let env = null
   const consults = []
   if (withGovernance) {
@@ -500,13 +502,19 @@ function mountHandoff({ withGovernance = true } = {}) {
     const governance = services.stockPreparationRefreshGovernance
     services.stockPreparationRefreshGovernance = Object.freeze({
       ...governance,
-      readRefreshState: async (scope) => { consults.push({ ...scope }); return governance.readRefreshState(scope) },
+      readRefreshState: async (scope) => {
+        consults.push({ ...scope })
+        const read = await governance.readRefreshState(scope)
+        // Pre-pilot fix batch 8(d): a hook that runs AFTER the consult answered — the gap a single consult cannot see.
+        if (typeof afterReadRefreshState === 'function') await afterReadRefreshState(consults.length, read)
+        return read
+      },
       consult: async (scope) => { consults.push({ ...scope, raw: true }); return governance.consult(scope) },
     })
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
   return {
-    routes, auditAppends, notifications, env, consults, db,
+    routes, auditAppends, notifications, env, consults, db, lock: handoffLock,
     async advance(user, fromStepKey) {
       const handler = routes.get(`POST ${ADVANCE_PATH}`)
       assert.ok(handler, 'the advance route is registered')
@@ -1255,7 +1263,7 @@ async function main() {
   })
 
   // ── XH-01..04 ──────────────────────────────────────────────────────────────────────────────────
-  await run('XH-01 the handoff TERMINAL hop of a governed project with an open hold is refused 409 STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE — no cursor move, no trail row, no notification; the two non-terminal hops before it completed WITHOUT a consult', async () => {
+  await run('XH-01 the handoff TERMINAL hop of a governed project with an open hold is refused 409 STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE — no cursor move, ONE values-free terminal_refused trail row (8d), no notification; the two non-terminal hops before it completed WITHOUT a consult', async () => {
     const h = mountHandoff()
     const { hold } = await refreshKit.candidateHoldFixture()
     await h.env.seedHolds(H_SCOPE, [hold])
@@ -1271,7 +1279,12 @@ async function main() {
     assert.equal(errorOf(res).code, 'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE')
     assert.deepEqual(errorOf(res).details, { reason: 'state', status: 'pending_confirmation', governed: 'protected', counts: { pendingConfirm: 1, confirmable: 1, openExecutions: 0, pendingReviews: 0, continuations: 0 }, partial: false })
     assert.equal(JSON.stringify(h.db.rows), rowsBefore, 'the cursor did not move')
-    assert.equal(h.auditAppends.length, auditBefore, 'no trail row for a refused hop')
+    // Pre-pilot fix batch 8(d) (R-91): a refused terminal hop leaves exactly ONE values-free trail row.
+    assert.equal(h.auditAppends.length, auditBefore + 1, 'one trail row for the refused hop')
+    assert.deepEqual(h.auditAppends.slice(auditBefore).map((entry) => ({ action: entry.action, mode: entry.mode, subjectId: entry.subjectId, projectId: entry.projectId, detail: entry.detail })), [{
+      action: 'handoff_advance', mode: 'terminal_refused', subjectId: 'final_review', projectId: H_PROJECT,
+      detail: { operation: 'handoff_advance', fromStepIndex: 2, stepCount: 3, terminal: true, refusal: 'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE', reason: 'state', status: 'pending_confirmation', governed: 'protected' },
+    }])
     assert.equal(h.notifications.filter((n) => n.destinationIds.includes('dest-xg-warehouse')).length, 0, 'no terminal notification')
     assert.deepEqual(h.consults.map((c) => ({ projectNo: c.projectNo, sheetId: c.sheetId })), [{ projectNo: H_PROJECT, sheetId: H_SHEET }], 'exactly one consult, for the terminal hop, on the bound sheet')
     assert.equal(JSON.stringify(res.body).includes('D100-01'), false, 'values-free')
@@ -1320,6 +1333,127 @@ async function main() {
     const res = await h.advance(WANG, 'final_review')
     assert.equal(res.statusCode, 501, JSON.stringify(res.body))
     assert.equal(errorOf(res).code, 'STOCK_PREP_REFRESH_STORE_UNAVAILABLE')
+  })
+
+  // ── XH-05 / XH-06 / XG-H (pre-pilot fix batch 8(d), R-91) ─────────────────────────────────────
+  await run('XG-H the PURE terminal-hop gate: G0 -> C1 -> (governed) G1; a not-governed project reads ONE generation and passes (no lease check, today); a governed one passes only with no lease at G0 and the same token AND epoch and no lease at G1; an unfinished state refuses before G1; a malformed lock answer is GATE_INVALID', async () => {
+    const env = (generations, reads) => gateEnv({ generations, reads })
+    const ok = env([GEN(), GEN()], [readOf(COMPLETE_SETTLED())])
+    assert.deepEqual(await runHandoffTerminalGate(ok.deps).then((v) => ({ allowed: v.allowed, governed: v.governed })), { allowed: true, governed: true })
+    assert.deepEqual(ok.calls, ['readGeneration', 'readRefreshState', 'readGeneration'])
+    const notGoverned = env([GEN({ leaseId: 'lease_live' })], [readOf(consult())])
+    const ng = await runHandoffTerminalGate(notGoverned.deps)
+    assert.deepEqual({ allowed: ng.allowed, governed: ng.governed }, { allowed: true, governed: false }, 'a not-governed project passes as today, even with a lease at G0')
+    assert.deepEqual(notGoverned.calls, ['readGeneration', 'readRefreshState'], 'no G1 for a not-governed project')
+    const leased = await runHandoffTerminalGate(env([GEN({ leaseId: 'lease_abandoned' }), GEN()], [readOf(COMPLETE_SETTLED())]).deps)
+    assert.deepEqual({ allowed: leased.allowed, reason: leased.reason }, { allowed: false, reason: 'lease_in_flight' })
+    const epoch = await runHandoffTerminalGate(env([GEN(), GEN({ fencingEpoch: 8 })], [readOf(COMPLETE_SETTLED())]).deps)
+    assert.deepEqual({ allowed: epoch.allowed, reason: epoch.reason, epochMoved: epoch.epochMoved, generationMoved: epoch.generationMoved, leaseAtG1: epoch.leaseAtG1 }, { allowed: false, reason: 'state_changed', epochMoved: true, generationMoved: false, leaseAtG1: false })
+    const token = await runHandoffTerminalGate(env([GEN(), GEN({ generationToken: 'tok_2' })], [readOf(COMPLETE_SETTLED())]).deps)
+    assert.deepEqual({ reason: token.reason, generationMoved: token.generationMoved }, { reason: 'state_changed', generationMoved: true })
+    const g1Lease = await runHandoffTerminalGate(env([GEN(), GEN({ leaseId: 'lease_new' })], [readOf(COMPLETE_SETTLED())]).deps)
+    assert.deepEqual({ reason: g1Lease.reason, leaseAtG1: g1Lease.leaseAtG1 }, { reason: 'state_changed', leaseAtG1: true })
+    for (const [status, build] of Object.entries(UNFINISHED)) {
+      const e = env([GEN(), GEN()], [readOf(build())])
+      const v = await runHandoffTerminalGate(e.deps)
+      assert.equal(v.allowed, false, status)
+      assert.equal(v.reason, 'state', status)
+      assert.deepEqual(e.calls, ['readGeneration', 'readRefreshState'], `${status}: refused before G1`)
+    }
+    const unsettled = await runHandoffTerminalGate(env([GEN()], [readOf(consult({ pilot: PILOT }))]).deps)
+    assert.equal(unsettled.reason, 'not_settled')
+    const unreadable = await runHandoffTerminalGate(env([GEN()], [{ state: null }]).deps)
+    assert.equal(unreadable.reason, 'unreadable')
+    await assert.rejects(runHandoffTerminalGate(env([{ present: true }], [readOf(COMPLETE_SETTLED())]).deps), (error) => error instanceof StockPreparationExportGateError && error.code === EXPORT_GATE_ERROR_CODES.GATE_INVALID)
+    await assert.rejects(runHandoffTerminalGate({ readGeneration: async () => GEN() }), (error) => error instanceof StockPreparationExportGateError && error.code === EXPORT_GATE_ERROR_CODES.GATE_INVALID)
+  })
+
+  // The governed, complete-and-settled project of XH-02 (the hop would pass), with a hook into the consult's gap.
+  async function settledHandoff(options = {}) {
+    const h = mountHandoff(options)
+    const { hold } = await refreshKit.candidateHoldFixture()
+    const confirmed = await h.env.seedConfirmedContinuation(H_SCOPE, hold, { sourceIdentity: CF.SOURCE_IDENTITY })
+    const execution = await h.env.seedExecution(H_SCOPE, { status: 'succeeded', refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }] } })
+    await h.env.store.reconcileHolds({ ...H_SCOPE, decisionVersionObserved: h.decisionVersion(), holds: [], computation: { lane: 'small_preview', suspended: false, generationToken: null, sourceContentDigest: 'c'.repeat(64) }, settlement: { executionId: execution.id, sheetMachineDigest: 'd'.repeat(64) } })
+    assert.equal((await h.advance(ZHANG, 'prep_entry')).statusCode, 200)
+    assert.equal((await h.advance(LI, 'process')).statusCode, 200)
+    return h
+  }
+
+  await run('XH-05 THE SINGLE-CONSULT GAP (PR-5 residual): a WHOLE zero-write FAILED run lands after the terminal hop\'s consult answered complete — G1\'s epoch refuses 409 state_changed (epochMoved): no cursor move, no claim, no terminal notification, ONE values-free terminal_refused trail row; the next press is refused failed_pending_recovery', async () => {
+    let h = null
+    let fired = false
+    h = await settledHandoff({
+      afterReadRefreshState: async (n, read) => {
+        if (fired || !read || !read.state || read.state.status !== 'complete') return
+        fired = true
+        const scopeKey = handoffScopeKeyOf(H_SHEET)
+        const grant = await h.lock.acquire(scopeKey, { purpose: 'small_apply', runId: 'run_xh5', tenantId: H_TENANT })
+        const gen = await h.lock.readGeneration(scopeKey)
+        const begun = await h.env.store.beginExecution({
+          ...H_SCOPE, lane: 'small_apply',
+          guard: { leaseRunId: 'run_xh5', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
+          tokenRevision: 'rev_xh5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: 'u_xh5',
+        })
+        await h.env.store.finishExecution({ ...H_SCOPE, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 0 })
+        await h.lock.createGuard(grant).release()
+      },
+    })
+    const rowsBefore = JSON.stringify(h.db.rows)
+    const auditBefore = h.auditAppends.length
+    const res = await h.advance(WANG, 'final_review')
+    assert.equal(fired, true, 'calibration: the whole failed run landed after the consult answered complete')
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(errorOf(res).code, 'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE')
+    assert.deepEqual({ reason: errorOf(res).details.reason, status: errorOf(res).details.status, epochMoved: errorOf(res).details.epochMoved, leaseAtG1: errorOf(res).details.leaseAtG1 }, { reason: 'state_changed', status: 'complete', epochMoved: true, leaseAtG1: false })
+    assert.equal(JSON.stringify(h.db.rows), rowsBefore, 'the cursor did not move and no claim was taken')
+    assert.equal(h.notifications.filter((n) => n.destinationIds.includes('dest-xg-warehouse')).length, 0, 'no terminal notification')
+    const rows = h.auditAppends.slice(auditBefore)
+    assert.deepEqual(rows.map((entry) => ({ mode: entry.mode, reason: entry.detail.reason, epochMoved: entry.detail.epochMoved })), [{ mode: 'terminal_refused', reason: 'state_changed', epochMoved: true }])
+    // Afterwards the state is honest: the next press is refused by the state itself.
+    const next = await h.advance(WANG, 'final_review')
+    assert.equal(next.statusCode, 409, JSON.stringify(next.body))
+    assert.equal(errorOf(next).details.status, 'failed_pending_recovery')
+    assert.equal(h.notifications.filter((n) => n.destinationIds.includes('dest-xg-warehouse')).length, 0)
+  })
+
+  await run('XH-06 a lease taken AND released in the same gap (no execution row: only the epoch moved) refuses state_changed once; the retry, with nothing unfinished, completes the chain and pings; a NOT-governed project with the same gap completes on the first press (no G1 — today)', async () => {
+    let h = null
+    let shots = 1
+    h = await settledHandoff({
+      afterReadRefreshState: async () => {
+        if (shots <= 0) return
+        shots -= 1
+        const scopeKey = handoffScopeKeyOf(H_SHEET)
+        const grant = await h.lock.acquire(scopeKey, { purpose: 'small_apply', runId: 'run_xh6', tenantId: H_TENANT })
+        await h.lock.createGuard(grant).release()
+      },
+    })
+    const first = await h.advance(WANG, 'final_review')
+    assert.equal(first.statusCode, 409, JSON.stringify(first.body))
+    assert.equal(errorOf(first).details.reason, 'state_changed')
+    const retry = await h.advance(WANG, 'final_review')
+    assert.equal(retry.statusCode, 200, JSON.stringify(retry.body))
+    assert.equal(retry.body.data.terminal, true)
+    assert.equal(h.notifications.filter((n) => n.destinationIds.includes('dest-xg-warehouse')).length, 1)
+    assert.deepEqual(h.auditAppends.filter((entry) => entry.mode === 'terminal_refused').length, 1)
+    // Not governed: the same lease in the gap is invisible to the hop, exactly as before this fix.
+    let ng = null
+    let ngShots = 1
+    ng = mountHandoff({
+      afterReadRefreshState: async () => {
+        if (ngShots <= 0) return
+        ngShots -= 1
+        const grant = await ng.lock.acquire(handoffScopeKeyOf(H_SHEET), { purpose: 'small_apply', runId: 'run_xh6_ng', tenantId: H_TENANT })
+        await ng.lock.createGuard(grant).release()
+      },
+    })
+    assert.equal((await ng.advance(ZHANG, 'prep_entry')).statusCode, 200)
+    assert.equal((await ng.advance(LI, 'process')).statusCode, 200)
+    const done = await ng.advance(WANG, 'final_review')
+    assert.equal(ngShots, 0, 'calibration: the lease ran in the gap')
+    assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+    assert.equal(ng.auditAppends.filter((entry) => entry.mode === 'terminal_refused').length, 0)
   })
 
   // ── XP-01 ──────────────────────────────────────────────────────────────────────────────────────

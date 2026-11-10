@@ -2113,6 +2113,10 @@ function projectWriteAbortError(applyResult) {
 // (`withExistingRowRecordRef`). Built from THIS request's read (O-10), never from the token, a preview or a stored
 // artifact. A key whose existing group is not exactly one row with an integer version gets no entry, and the writer
 // patches it exactly as before. Every small apply passes it, governed or not (register R-63 ①).
+// Pre-pilot fix batch 8(e) (R-91): for a DUPLICATED key "exactly as before" means NOT AT ALL — the writer's lookup
+// (per key and the batched prefetch alike) refuses a key matching more than one row `duplicate_target_key` before any
+// patch (stock-preparation-apply-writer.cjs findExistingRecord), so no unfenced UPDATE / INACTIVE of a duplicated key is
+// ever sent (EV-12). The remaining unfenced case is a single row whose record carries no integer version.
 function expectedRecordsOf(dryRun) {
   const groups = new Map()
   for (const row of Array.isArray(dryRun.existingRows) ? dryRun.existingRows : []) {
