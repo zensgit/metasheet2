@@ -879,6 +879,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled',
   },
   {
+    key: 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "备料分批拉取第一期 step 6d-2a — doubled-sheet repair (step-6 design §6.6; register R-91): the operator switch for the repair of a project sheet that holds a component twice (its own root subtree AND a copy nested under another parent). Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the plugin routes through the repair library (plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs#stockPrepSheetRepairWriteEnabled), never by the host. OFF: the three stock-prep:admin routes (POST …/projects/:projectNo/target/sheet-repair, GET …/target/sheet-repair/fills-report, GET …/target/sheet-repair/runs) answer 404 STOCK_PREP_SHEET_REPAIR_DISABLED after their gate and before any IO — preview, fills report and run list included — so the whole repair surface is invisible, migration 108's two tables are never read or written, and no existing route, answer or readiness check changes. They are also 404 while MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is off (not modeled as dependsOn: the combination is inert, not illegal). ON: stock-prep:admin (or a platform admin) may preview a retire of a superseded root subtree or the restore of one earlier retire run, read the values-free fills report, and EXECUTE a previewed plan. An execute is a production write of four machine cells (有效 as the boolean false / true and three RUN stamps; never a human cell, never a batch column) on rows of a customer sheet and needs, each refused before the first write: the typed project number, the preview's planDigest echoed and still equal after the recompute INSIDE the sheet write lease (purpose sheet_repair), an approvalRef, a project that is not governed, and a one-shot claim of that digest (migration 108, PRIMARY KEY: an approved plan runs at most once — 409 STOCK_PREP_SHEET_REPAIR_ALREADY_CONSUMED). Every row is backed up in the run row before the first patch; each patch is host-fenced and version-conditional, and a row that moved stops the run. While the pull-batch switch is on, a sheet whose batch columns are being installed is refused (409 STOCK_PREP_SHEET_REPAIR_INSTALL_IN_PROGRESS): repair and install windows never interleave. Danger=medium: it writes customer production sheets, bounded by the gates above and undone byte-identically by the restore recipe; turning it ON is owner gate ② per sheet (O6-6: one approvalRef per approved preview digest, the project's pulls paused for the window) and it is turned OFF again when the window closes. The switch is not the approval: an approvalRef is recorded, not verified, so the owner's window is what authorizes a run.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs#stockPrepSheetRepairWriteEnabled',
+  },
+  {
     key: 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH',
     type: 'enum',
     activationValue: "a path to a deploy-local JSON object file (trimmed); unset / blank = no pilot declarations (today's behaviour); set but unreadable / not JSON / not an object = the plugin fails to load (logged), never 'nothing declared'",
