@@ -387,7 +387,7 @@ function isMachineSummary(text) {
  */
 function stampCellsOf(row) {
   for (const fieldId of SHEET_REPAIR_STAMP_FIELD_IDS) {
-    if (!Object.prototype.hasOwnProperty.call(row, fieldId) || row[fieldId] === undefined) return null
+    // An ABSENT cell reads `undefined`: neither null nor a string, so it is refused here with every other foreign type.
     if (row[fieldId] !== null && typeof row[fieldId] !== 'string') return null
   }
   const runId = row.lastPlmRefreshRunId
