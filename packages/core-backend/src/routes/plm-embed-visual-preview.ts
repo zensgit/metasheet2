@@ -2,14 +2,14 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
+import { embedDataSourceId, isEmbedOriginAllowed, isPlmEmbedSameOrigin, isPlmEmbedVisualPreviewEnabled, requestOwnOrigin } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { VisualPreviewFileList, VisualPreviewImage } from '../data-adapters/PLMAdapter'
 
 interface PreviewAdapter {
-  listVisualPreviewFiles(token: string): Promise<QueryResult<VisualPreviewFileList>>
-  getVisualPreviewImage(token: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage>
+  listVisualPreviewFiles(token: string, observedOrigin?: string | null): Promise<QueryResult<VisualPreviewFileList>>
+  getVisualPreviewImage(token: string, fileId: string, versionId: string, origin: string, observedOrigin?: string | null): Promise<VisualPreviewImage>
   isVisualReviewEnabled(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
   getEffectiveOrgId(): string | undefined
@@ -35,8 +35,7 @@ function unavailable(res: Response): null {
 
 async function guardedAdapter(req: Request, res: Response): Promise<PreviewAdapter | null> {
   const claims = req.embedToken!
-  if (claims.feature_key !== 'bom_multitable' || !claims.embed_origin
-    || !embedAllowedOrigins().includes(claims.embed_origin)) {
+  if (claims.feature_key !== 'bom_multitable' || !isEmbedOriginAllowed(claims.embed_origin, req)) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_SCOPE_MISMATCH' } })
     return null
   }
@@ -90,7 +89,10 @@ export default function plmEmbedVisualPreviewRouter(): Router {
     res.setHeader('Cache-Control', 'no-store')
     const adapter = await guardedAdapter(req, res)
     if (!adapter) return
-    const result = await adapter.listVisualPreviewFiles(req.embedTokenRaw!)
+    const observed = isPlmEmbedSameOrigin() ? requestOwnOrigin(req) : undefined
+    const result = observed === undefined
+      ? await adapter.listVisualPreviewFiles(req.embedTokenRaw!)
+      : await adapter.listVisualPreviewFiles(req.embedTokenRaw!, observed)
     if (!await isCurrentVisualSource(adapter, req.embedToken!.tenant_id)) return unavailable(res)
     const listing = result.data[0]
     if (result.error || !listing || !Array.isArray(listing.files) || listing.files.length > 50
@@ -114,7 +116,10 @@ export default function plmEmbedVisualPreviewRouter(): Router {
     }
     const adapter = await guardedAdapter(req, res)
     if (!adapter) return
-    const image = await adapter.getVisualPreviewImage(req.embedTokenRaw!, fileId, versionId, req.embedToken!.embed_origin)
+    const observed = isPlmEmbedSameOrigin() ? requestOwnOrigin(req) : undefined
+    const image = observed === undefined
+      ? await adapter.getVisualPreviewImage(req.embedTokenRaw!, fileId, versionId, req.embedToken!.embed_origin)
+      : await adapter.getVisualPreviewImage(req.embedTokenRaw!, fileId, versionId, req.embedToken!.embed_origin, observed)
     if (!await isCurrentVisualSource(adapter, req.embedToken!.tenant_id)) return unavailable(res)
     if (image.render !== 'available') return res.json({ ok: true, data: { render: 'unavailable' } })
     // The adapter constructs this descriptor only from a verified provider JWT.

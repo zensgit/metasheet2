@@ -57,7 +57,9 @@ The remaining latent reds need security dispositions that only their owners shou
 
 ### 5. Flag registration (`f46c317`)
 
-`PLM_EMBED_VISUAL_PREVIEW_ENABLED` (added in #6424 as two inline reads) is now read only through `isPlmEmbedVisualPreviewEnabled()` (`auth/embed-config.ts:62`). It is registered in `scripts/ops/global-history-flag-manifest.mjs`, and the source-derived completeness census covers it, as `AGENTS.md` requires for new env flags.
+`PLM_EMBED_VISUAL_PREVIEW_ENABLED` (added in #6424 as two inline reads) is now read only through `isPlmEmbedVisualPreviewEnabled()` (`auth/embed-config.ts`). It is registered in `scripts/ops/global-history-flag-manifest.mjs`, and the source-derived completeness census covers it, as `AGENTS.md` requires for new env flags.
+
+`PLM_EMBED_SAME_ORIGIN` is the same env name Yuantus #443 documents for the combined gateway. Exact `true` only, read through `isPlmEmbedSameOrigin()`. While it is on, BOM review embed admission (`/api/plm-embed/bom-review/context`, the discussion relays, and the visual-preview relay) also accepts an `embed_origin` equal to this request's own origin. The configured `PLM_EMBED_ALLOWED_ORIGINS` list is unchanged, and a foreign origin is still rejected. `/api/plm-embed/config` adds that origin to `allowed_origins` and reports `frame-ancestors 'self'` so a new tunnel hostname does not need a pinned allow-list or CSP host. The origin is taken from `Host` and a single `X-Forwarded-Proto`. A differing `X-Forwarded-Host` applies only when `Host` is an internal upstream, and the browser `Origin` must then match. The HTTP `Origin` header is never itself the request origin.
 
 ### 6. Write-back audit (this pass)
 

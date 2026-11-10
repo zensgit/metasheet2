@@ -1,5 +1,5 @@
 import { hasVisualMarkupInput, validVisualMarkupBody, type VisualMarkupInput, type VisualMarkupRead } from '../auth/visual-review-markup'
-import { embedAllowedOrigins, embedAudience, embedPublicKeysByKid } from '../auth/embed-config'
+import { embedAudience, embedPublicKeysByKid, isEmbedOriginAllowed } from '../auth/embed-config'
 import { verifyEmbedToken, type EmbedTokenClaims } from '../auth/embed-token-verify'
 import { consumeVisualPreviewJti, verifyVisualPreviewToken, type VisualPreviewDescriptor } from '../auth/visual-preview-token'
 import { visualReviewSourceConfigured } from '../auth/visual-review-source'
@@ -2989,13 +2989,13 @@ export class PLMAdapter extends HTTPAdapter {
     return visualReviewSourceConfigured(this.config, tenantId)
   }
 
-  private verifyVisualEmbed(token: string): EmbedTokenClaims {
+  private verifyVisualEmbed(token: string, observedOrigin?: string | null): EmbedTokenClaims {
     const claims = verifyEmbedToken(token, { publicKeysByKid: embedPublicKeysByKid(), audience: embedAudience() })
     if (this.mockMode || this.apiMode !== 'yuantus' || !this.isVisualReviewEnabled(claims.tenant_id)
       || this.getEffectiveTenantId() !== claims.tenant_id
       || this.getEffectiveOrgId() !== claims.org_id
       || !claims.tenant_id || !claims.org_id || claims.feature_key !== 'bom_multitable'
-      || typeof claims.embed_origin !== 'string' || !embedAllowedOrigins().includes(claims.embed_origin)
+      || !isEmbedOriginAllowed(claims.embed_origin, null, observedOrigin)
       || !Number.isSafeInteger(claims.exp) || claims.exp! <= Math.floor(Date.now() / 1000)) {
       throw new Error('Visual preview unavailable')
     }
@@ -3040,16 +3040,16 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
-  async listVisualPreviewFiles(embedToken: string): Promise<QueryResult<VisualPreviewFileList>> {
-    try { this.verifyVisualEmbed(embedToken) } catch { return { data: [], error: new Error('Visual preview unavailable') } }
+  async listVisualPreviewFiles(embedToken: string, observedOrigin?: string | null): Promise<QueryResult<VisualPreviewFileList>> {
+    try { this.verifyVisualEmbed(embedToken, observedOrigin) } catch { return { data: [], error: new Error('Visual preview unavailable') } }
     const result = await this.visualPreviewJson({ embed_token: embedToken, action: 'list' })
     if (result.error) return { data: [], error: result.error }
     return { data: [result.data[0] as unknown as VisualPreviewFileList], metadata: result.metadata }
   }
 
-  async getVisualPreviewImage(embedToken: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage> {
+  async getVisualPreviewImage(embedToken: string, fileId: string, versionId: string, origin: string, observedOrigin?: string | null): Promise<VisualPreviewImage> {
     try {
-      const embed = this.verifyVisualEmbed(embedToken)
+      const embed = this.verifyVisualEmbed(embedToken, observedOrigin)
       if (embed.embed_origin !== origin) return { render: 'unavailable' }
       const minted = await this.visualPreviewJson({ embed_token: embedToken, file_id: fileId, version_id: versionId })
       const capability = minted.data[0]

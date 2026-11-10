@@ -102,7 +102,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     pinned.setApp(buildApp())
   })
   afterEach(() => {
-    for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
+    for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID', 'PLM_EMBED_SAME_ORIGIN']) delete process.env[k]
   })
 
   it('the embed path is whitelisted from the global session gate (else it would 401 before embedTokenAuth)', () => {
@@ -378,6 +378,91 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     const res = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
     expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
+  describe('PLM_EMBED_SAME_ORIGIN', () => {
+    const TUNNEL = 'https://tunnel.example'
+    const tunnelHeaders = {
+      Host: 'tunnel.example',
+      'X-Forwarded-Proto': 'https',
+      Origin: TUNNEL,
+    }
+
+    it('flag off keeps the exact allow-list and does not accept the request origin', async () => {
+      delete process.env.PLM_EMBED_SAME_ORIGIN
+      dsMocks.getDataSource.mockReturnValue(fullAdapter())
+      const listed = await request(pinned.url()).get(URL).set('X-PLM-Embed-Token', mint()).set('Host', 'other.example')
+      expect(listed.status).toBe(200)
+      const sameHost = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-tunnel' }))
+        .set(tunnelHeaders)
+      expect(sameHost.status).toBe(403)
+      expect(sameHost.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
+      const config = await request(pinned.url()).get('/api/plm-embed/config').set(tunnelHeaders)
+      expect(config.body.data.allowed_origins).toEqual([ORIGIN])
+      expect(config.body.data.frame_ancestors).toBe(`frame-ancestors ${ORIGIN}`)
+    })
+
+    it('flag on accepts this request origin and still rejects a foreign origin', async () => {
+      process.env.PLM_EMBED_SAME_ORIGIN = 'true'
+      process.env.PLM_EMBED_ALLOWED_ORIGINS = ''
+      const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+      dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+      const same = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-same' }))
+        .set(tunnelHeaders)
+      expect(same.status).toBe(200)
+      expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+
+      const foreign = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example', jti: 'j-evil' }))
+        .set({ ...tunnelHeaders, Origin: 'https://evil.example' })
+      expect(foreign.status).toBe(403)
+      expect(foreign.body.error.code).toBe('EMBED_ORIGIN_NOT_ALLOWED')
+      expect(getBomMultitableContext).toHaveBeenCalledTimes(1)
+
+      const spoofed = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: 'https://evil.example', jti: 'j-spoof' }))
+        .set({ ...tunnelHeaders, 'X-Forwarded-Host': 'evil.example', Origin: 'https://evil.example' })
+      expect(spoofed.status).toBe(403)
+
+      const crossOriginCaller = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-cross' }))
+        .set({ ...tunnelHeaders, Origin: 'https://evil.example' })
+      expect(crossOriginCaller.status).toBe(403)
+
+      const viaUpstream = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-upstream' }))
+        .set({ Host: 'localhost:8900', 'X-Forwarded-Host': 'tunnel.example', 'X-Forwarded-Proto': 'https', Origin: TUNNEL })
+      expect(viaUpstream.status).toBe(200)
+
+      const forwardedWithoutOrigin = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-no-origin' }))
+        .set({ Host: 'localhost:8900', 'X-Forwarded-Host': 'tunnel.example', 'X-Forwarded-Proto': 'https' })
+      expect(forwardedWithoutOrigin.status).toBe(403)
+
+      const ambiguousProto = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-proto' }))
+        .set({ Host: 'tunnel.example', 'X-Forwarded-Proto': 'https,http', Origin: TUNNEL })
+      expect(ambiguousProto.status).toBe(403)
+    })
+
+    it('flag on publishes this request origin and frame-ancestors self', async () => {
+      process.env.PLM_EMBED_SAME_ORIGIN = 'true'
+      process.env.PLM_EMBED_ALLOWED_ORIGINS = ORIGIN
+      const config = await request(pinned.url()).get('/api/plm-embed/config').set(tunnelHeaders)
+      expect(config.body.data.allowed_origins).toEqual([ORIGIN, TUNNEL])
+      expect(config.body.data.frame_ancestors).toBe(`frame-ancestors 'self' ${ORIGIN}`)
+      expect(config.headers['cache-control']).toBe('no-store')
+    })
+
+    it.each(['TRUE', '1', ' true', 'true '])('non-exact flag %j stays on the allow-list', async (value) => {
+      process.env.PLM_EMBED_SAME_ORIGIN = value
+      const res = await request(pinned.url()).get(URL)
+        .set('X-PLM-Embed-Token', mint({ embed_origin: TUNNEL, jti: 'j-off' }))
+        .set(tunnelHeaders)
+      expect(res.status).toBe(403)
+    })
   })
 
   it('a token with no jti -> 401 (cannot be tracked for single-use)', async () => {

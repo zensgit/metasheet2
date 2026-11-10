@@ -86,6 +86,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/auth/embed-config.ts#isPlmEmbedVisualPreviewEnabled',
   },
   {
+    key: 'PLM_EMBED_SAME_ORIGIN', type: 'boolean', activationValue: 'true',
+    dependsOn: [], conflictsWith: [], danger: 'medium',
+    purpose: 'Default-off combined-gateway embed mode, same name as Yuantus PLM_EMBED_SAME_ORIGIN. Exact true only. An embed origin is accepted when it equals this request\'s own origin (Host, plus a single X-Forwarded-Proto). A differing X-Forwarded-Host is used only when Host is an internal upstream, and then the browser Origin must match. A foreign origin stays rejected. The configured PLM_EMBED_ALLOWED_ORIGINS list is unchanged. Off: that list is the only match.',
+    source: 'packages/core-backend/src/auth/embed-config.ts#isPlmEmbedSameOrigin',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

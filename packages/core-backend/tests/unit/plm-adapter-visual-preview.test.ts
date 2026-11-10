@@ -71,6 +71,19 @@ describe('PLM visual-preview signed transport', () => {
     expect(redis.consume).toHaveBeenCalledWith(expect.stringMatching(/^plm-visual-preview:jti:/), 120)
   })
 
+  it('same-origin mode admits only the observed origin', async () => {
+    vi.stubEnv('PLM_EMBED_SAME_ORIGIN', 'true')
+    vi.stubEnv('PLM_EMBED_ALLOWED_ORIGINS', 'https://listed.example')
+    fetchMock.mockResolvedValueOnce(Response.json({ files: [], has_more: false }))
+    const a = adapter()
+    expect((await a.listVisualPreviewFiles(embedToken, origin)).error).toBeUndefined()
+    expect((await a.listVisualPreviewFiles(embedToken, 'https://foreign.example')).error).toBeDefined()
+    expect((await a.listVisualPreviewFiles(embedToken)).error).toBeDefined()
+    vi.stubEnv('PLM_EMBED_SAME_ORIGIN', 'false')
+    expect((await a.listVisualPreviewFiles(embedToken, origin)).error).toBeDefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it.each([{ org_id: 'O2' }, { org_id: undefined }])('rejects an embed token outside the served org (%o) before provider I/O', async (override) => {
     const token = jwt({ ...embedClaims, ...override, jti: `org-${String(override.org_id)}` })
     expect((await adapter().listVisualPreviewFiles(token)).error).toBeDefined()

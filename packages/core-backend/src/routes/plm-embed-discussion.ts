@@ -35,7 +35,7 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId } from '../auth/embed-config'
+import { embedDataSourceId, isEmbedOriginAllowed } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type {
@@ -105,7 +105,7 @@ async function runEmbedWriteGuards(req: Request, res: Response): Promise<{ claim
     return null
   }
   const origin = typeof claims.embed_origin === 'string' ? claims.embed_origin : ''
-  if (!origin || !embedAllowedOrigins().includes(origin)) {
+  if (!isEmbedOriginAllowed(origin, req)) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_ORIGIN_NOT_ALLOWED', message: 'embed origin not allowed' } })
     return null
   }
