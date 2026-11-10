@@ -5016,18 +5016,11 @@ function requireStockPreparationAudit() {
       // change plan appends ONE values-free `exception_resolve` / `change_plan_invalidated` row ON ITS OWN reconcile
       // transaction (a system event: no actor). Resolved lazily — a deployment without the audit store refuses only
       // that invalidation (501 by name), never an ordinary computation; a missing vocabulary fails the insert (503).
+      // Step 6a-1: the same hook carries the self-verifying finish's `execution_self_verified` row — one closed event map.
       auditWithin: (trx, event) => requireStockPreparationAudit().appendWithin(trx, {
         tenantId,
-        action: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.decisionAction,
         actor: null,
-        subjectId: event.changePlanId,
-        mode: stockPreparationRefreshDecisions.REFRESH_DECISION_AUDIT.modes.changePlanInvalidated,
-        detail: {
-          operation: event.operation,
-          reason: event.reason,
-          lane: event.lane,
-          recordCount: Number.isInteger(event.recordCount) ? event.recordCount : 0,
-        },
+        ...stockPreparationRefreshDecisions.refreshSystemAuditEntryOf(event),
       }),
     })
   }

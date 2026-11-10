@@ -102,6 +102,8 @@ const {
   reconcileComputation,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
+// Batch-refresh step 6a-1 (S6-1; R-91): the execution intent journal, built from the in-lease recompute.
+const { buildExecutionIntent } = require('./stock-preparation-execution-intent.cjs')
 const {
   applyStockPreparationPlan,
   countAttemptedHostWrites,
@@ -2141,11 +2143,15 @@ function expectedRecordsOf(dryRun) {
 // token, or `apply_threw`), best effort. A finish that fails here leaves the row `running` — after the
 // release it derives 失败待恢复 and blocks the next apply (RECOVERY_PENDING) until step 6 — and is logged
 // values-free (codes only). The caller rethrows the ORIGINAL error either way.
+// Step 6a-1 (design §3.3, RR G8): ONLY a throw the writer itself marked `writerPhase === 'pre_io'` (its closed
+// WRITER_PRE_IO_REASONS list) reports `written: 0, attemptedWrites: 0` — then the store self-verifies the run. Any other
+// throw (a `details.partial === false` included) reports no counts and stays recoverable.
 const EXECUTION_ERROR_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/
 async function finishExecutionFailedBestEffort(handle, input, error, logger) {
   const code = error && typeof error.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(error.code) ? error.code : 'apply_threw'
+  const preIo = Boolean(error) && error.writerPhase === 'pre_io'
   try {
-    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code] })
+    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code], ...(preIo ? { written: 0, attemptedWrites: 0 } : {}) })
   } catch (finishError) {
     const finishCode = finishError && typeof finishError.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(finishError.code) ? finishError.code : 'finish_threw'
     if (logger && typeof logger.warn === 'function') {
@@ -3381,9 +3387,27 @@ async function applyStockPreparationAction(input = {}) {
   const governedApply = Boolean(dryRun.refresh && dryRun.refresh.governed)
   const refreshScope = governedApply ? dryRun.refresh.consult.scope : null
   const storeScope = refreshScope ? { tenantId: refreshScope.tenantId, sheetId: refreshScope.sheetId, projectNo: refreshScope.projectNo } : null
+  // Batch-refresh step 6a-1 (S6-1, design §3.2; R-91): the values-free INTENT JOURNAL of this execution, from THIS
+  // in-lease recompute (O-10: the plan the writer receives, the versions it fences on, the writer's own pack-aware band)
+  // — never the token or a preview. Governed only: a not-governed apply begins no execution and journals nothing (C09).
+  const executionPlanDigest = governedApply ? planDigestOf(dryRun.plan) : null
+  const intentExpectedRecords = governedApply ? expectedRecordsOf(dryRun) : null
+  const executionIntent = governedApply
+    ? buildExecutionIntent({
+      plan: dryRun.plan,
+      planDigest: executionPlanDigest,
+      // The SAME versions the writer fences on (expectedRecordsOf is a pure function of this dryRun; the writer call below
+      // computes its own copy, so EV-10's one-writer-call pin stays exact).
+      expectedRecords: intentExpectedRecords,
+      template: action.template,
+      installedFieldProperties: dryRun.refresh.installedFieldProperties,
+    })
+    : null
   // PR-3a (O-13; design §4.2 / §9.3): THE EXECUTION LEDGER — governed only (TD-4), begun BEFORE the first
   // write, bound to the lease grant (its lease id only through the host fence), the token, the plan digest and
   // the refresh binding the apply just verified. A begin failure refuses before any write (partial: false).
+  // Step 6a-1: ONE transaction with the journal; 批次标识's unprefixed source digest rides along only when this run
+  // stamps (R-65; the switch off => no pull-batch run => no key at all).
   const execution = governedApply
     ? await dryRun.refresh.handle.store.beginExecution({
       ...storeScope,
@@ -3396,10 +3420,12 @@ async function applyStockPreparationAction(input = {}) {
         generationToken: projectWriteGuard.generationToken,
       },
       tokenRevision: tokenRecord.revision,
-      planDigest: planDigestOf(dryRun.plan),
+      planDigest: executionPlanDigest,
       plannedCounts: dryRun.plan.counts,
       refreshBinding: refreshOutcome.binding,
       startedBy: input.startedBy,
+      intent: executionIntent,
+      ...(pullBatchRun && pullBatchRun.evaluation.ready && typeof pullBatchRun.sourceDigest === 'string' ? { pullBatchSourceDigest: pullBatchRun.sourceDigest } : {}),
     })
     : null
   // From the moment the execution exists, every way out finishes it (P3-X3): a throw — the writer's or anything
@@ -3536,6 +3562,8 @@ module.exports = {
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
   __internals: {
+    // Step 6a-1 (XS-03): the best-effort failed finish and its pre-IO rule.
+    finishExecutionFailedBestEffort,
     assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,

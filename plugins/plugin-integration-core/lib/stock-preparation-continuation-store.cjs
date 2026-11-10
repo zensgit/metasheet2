@@ -91,6 +91,15 @@
 // `beginExecution` re-asserts the plan under the lock; `finishExecution` marks it `written` (absorbing the unreviewed
 // fields of the previous written plan, so no written change ever escapes review) or `invalidated(execution_failed)`.
 //
+// STEP 6a-1 (S6-1, migration 106; register R-91). `beginExecution` is ONE transaction for every governed begin: the
+// execution row AND its values-free intent journal (lib/stock-preparation-execution-intent.cjs) commit together, before
+// the first sheet write — a begin without an intent is refused 500 before any statement. `finishExecution`
+// SELF-VERIFIES a failed / aborted journaled run that wrote and attempted nothing (integers, both zero): `verified_closed
+// / nothing_landed / self_verified`; a change plan it was bound to STAYS `confirmed` (asserted under its row lock, never
+// invalidated: nothing landed, so the confirmation is intact — T6-4). The close is TRANSPARENT (`settlement_subject =
+// false`) only when no change plan was bound. The consult also reads the newest settlement subjects per scope, so a
+// subject is never pushed out of the consult window by transparent closes behind it.
+//
 // NOT HERE: no route, no lane consult (PR-3), no `bumpGenerationWithin` (PR-4), no audit vocabulary (D9),
 // no env flag (D-3).
 // ---------------------------------------------------------------------------------------------------
@@ -101,6 +110,8 @@ const { sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.c
 const pairing = require('./stock-preparation-continuation-pairing.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require('./stock-preparation-templates.cjs')
 const { __internals: plannerInternals } = require('./stock-preparation-conflict-planner.cjs')
+// Step 6a-1: the store admits the lane's journal through the intent module's own shape check (never re-derived here).
+const { assertExecutionIntent } = require('./stock-preparation-execution-intent.cjs')
 
 const {
   CONTINUATION_ERROR_CODES,
@@ -127,6 +138,8 @@ const REFRESH_STORE_TABLES = Object.freeze({
   execution: 'integration_stock_prep_refresh_execution',
   // Step 5 PR-8 (migration 104).
   changePlan: 'integration_stock_prep_change_plan',
+  // Step 6a-1 (migration 106): the execution intent journal — written only by beginExecution, never deleted.
+  intent: 'integration_stock_prep_refresh_execution_intent',
   // PR-8 review fix N3-b (round 2, migration 104): the reviewed-cell register — written only by the review, read only by
   // the consult (after a review), never deleted.
   reviewedCell: 'integration_stock_prep_reviewed_cell',
@@ -150,6 +163,13 @@ const EXECUTION_STATUSES = Object.freeze(['running', 'succeeded', 'partial', 'fa
 const EXECUTION_FINISH_STATUSES = Object.freeze(['succeeded', 'partial', 'failed', 'aborted'])
 const UNFINISHED_EXECUTION_STATUSES = Object.freeze(['running', 'partial', 'failed', 'aborted'])
 const VERIFIED_RESULTS = Object.freeze(['landed', 'nothing_landed', 'mixed', 'unknown'])
+// Step 6a-1 (migration 106 CHECKs): how a verified_closed row was closed, and the statuses a close may start from.
+const CLOSED_MODES = Object.freeze(['self_verified', 'puller_verified', 'runbook', 'legacy_runbook'])
+const PRE_CLOSE_STATUSES = Object.freeze(['running', 'partial', 'failed', 'aborted', 'unrecorded'])
+// The finish statuses a self-verifying finish may close (a `partial` run landed rows by definition).
+const SELF_VERIFIABLE_FINISH_STATUSES = Object.freeze(['failed', 'aborted'])
+// 批次标识's source digest (register R-65): 32 lowercase hex, no lane prefix (the migration 106 CHECK).
+const PULL_BATCH_SOURCE_DIGEST_PATTERN = /^[0-9a-f]{32}$/
 const BUMP_REASONS = Object.freeze({ confirm: 'continuation_confirm', end: 'continuation_end', changePlan: 'change_plan_confirm' })
 const BASIS_NOTE_MAX_LENGTH = 2000
 // Step 5 PR-8 (migration 104 CHECKs; pinned against the SQL by the change-plan store suite).
@@ -659,7 +679,22 @@ function rowToExecution(row) {
     verifiedBy: row.verified_by ?? null,
     verifiedAt: isoOrNull(row.verified_at),
     verifiedResult: row.verified_result ?? null,
+    // Step 6a-1 (migration 106), values-free. `settlementSubject` is false ONLY for a stored transparent close (a row
+    // without the column — never on a 106 database — reads as a subject: fail safe). 批次标识's source digest is NOT
+    // projected here (an off feature stays invisible; step 6a-2 reads it on its own row read).
+    intentVersion: intOrNull(row.intent_version),
+    intentDigest: row.intent_digest ?? null,
+    intentEntryCount: intOrNull(row.intent_entry_count),
+    closedMode: row.closed_mode ?? null,
+    preCloseStatus: row.pre_close_status ?? null,
+    settlementSubject: row.settlement_subject !== false,
+    changePlanBound: changePlanIdOfBinding(row.refresh_binding) !== null,
   }
+}
+
+function changePlanIdOfBinding(value) {
+  const binding = jsonOrNull(value)
+  return isPlainObject(binding) && nonBlankString(binding.changePlanId) ? binding.changePlanId : null
 }
 
 function jsonArrayOf(value) {
@@ -1287,6 +1322,11 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       const executionLists = [
         await selectLimited(snapshot, T.execution, { where: bySheetProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
         await selectLimited(snapshot, T.execution, { where: byProject, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
+        // Step 6a-1 (design §3.4, RR G4): the newest SETTLEMENT SUBJECTS per scope too, so the subject the derivation and
+        // the settlement name is always in this answer however many transparent closes follow it (a database without
+        // migration 106 fails here 42703: 503, the 104 posture).
+        await selectLimited(snapshot, T.execution, { where: { ...bySheetProject, settlement_subject: true }, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
+        await selectLimited(snapshot, T.execution, { where: { ...byProject, settlement_subject: true }, orderBy: ['started_at', 'DESC'], limit: NEWEST_EXECUTIONS }, 'read_executions'),
       ]
       for (const status of UNFINISHED_EXECUTION_STATUSES) {
         executionLists.push(await selectAll(snapshot, T.execution, { ...bySheetProject, status }, { ceiling: READ_CEILINGS.execution, operation: 'read_executions' }))
@@ -2852,6 +2892,18 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       throw inputInvalid('refreshBinding.changePlanId must be a string when given', 'refreshBinding.changePlanId')
     }
     const changePlanId = nonBlankString(binding.changePlanId) ? binding.changePlanId.trim() : null
+    // Step 6a-1 (design §3.2): the journal is REQUIRED (every begin is governed) and admitted by the intent module's own
+    // shape + digest check; 批次标识's source digest is optional (NULL unless the run stamps) and 32 lowercase hex.
+    let intent
+    try {
+      intent = assertExecutionIntent(input.intent, { planDigest: input.planDigest })
+    } catch (error) {
+      throw inputInvalid(error && error.message ? error.message : 'the execution intent is malformed', error && error.details && error.details.field ? error.details.field : 'intent')
+    }
+    const pullBatchSourceDigest = input.pullBatchSourceDigest === undefined || input.pullBatchSourceDigest === null ? null : input.pullBatchSourceDigest
+    if (pullBatchSourceDigest !== null && (typeof pullBatchSourceDigest !== 'string' || !PULL_BATCH_SOURCE_DIGEST_PATTERN.test(pullBatchSourceDigest))) {
+      throw inputInvalid('pullBatchSourceDigest must be 32 lowercase hex when given', 'pullBatchSourceDigest')
+    }
     const at = clock()
     const id = newId('execution')
     const executionRow = {
@@ -2879,38 +2931,57 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       started_at: at,
       created_at: at,
       updated_at: at,
+      // Step 6a-1 (migration 106).
+      intent_version: intent.version,
+      intent_digest: intent.digest,
+      intent_entry_count: intent.entryCount,
+      pull_batch_source_digest: pullBatchSourceDigest,
     }
-    if (!changePlanId) {
-      let row
-      try {
-        row = firstRow(await db.insertOne(REFRESH_STORE_TABLES.execution, executionRow))
-      } catch (error) {
-        throw translate(error, 'execution_begin')
-      }
-      return rowToExecution(row || { id })
-    }
-    // Step 5 PR-8 (refutation B2): an execution bound to a change plan is begun UNDER THE STATE-ROW LOCK with the plan
-    // asserted `confirmed` — the lock every reconciliation takes first, so a concurrent computation either invalidated
-    // the plan before this begin (refused here, nothing written) or sees this `running` row and leaves the plan alone.
+    // Step 6a-1 (design §3.2): ONE transaction for every begin — [state row FOR UPDATE, plan FOR UPDATE: plan-bound only,
+    // as PR-8 (refutation B2): the lock every reconciliation takes first, so a concurrent computation either invalidated
+    // the plan before this begin (refused here, nothing written) or sees this `running` row and leaves the plan alone] ->
+    // the execution INSERT -> one INSERT per intent chunk, in chunk order. A failure anywhere leaves no execution row and
+    // no chunk (the apply refuses before any write, `partial: false`).
     return db.transaction(async (rawTrx) => {
       const trx = requireTrx(rawTrx)
-      const stateRow = await lockStateRow(trx, scope, { at })
-      if (!stateRow) throw changePlanStale('state_row_absent')
-      let plan
-      try {
-        plan = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
-      } catch (error) {
-        throw translate(error, 'change_plan_lock')
+      if (changePlanId) {
+        const stateRow = await lockStateRow(trx, scope, { at })
+        if (!stateRow) throw changePlanStale('state_row_absent')
+        let plan
+        try {
+          plan = await trx.selectOneForUpdate(REFRESH_STORE_TABLES.changePlan, { id: changePlanId })
+        } catch (error) {
+          throw translate(error, 'change_plan_lock')
+        }
+        if (!plan) throw changePlanStale('plan_absent')
+        if (plan.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
+        if (plan.sheet_id !== scope.sheetId || plan.project_no !== scope.projectNo) throw changePlanStale('plan_scope')
+        if (plan.status !== 'confirmed') throw changePlanStale(planStatusReason(plan.status), { status: plan.status })
       }
-      if (!plan) throw changePlanStale('plan_absent')
-      if (plan.tenant_id !== scope.tenantId) throw tenantMismatch('change_plan')
-      if (plan.sheet_id !== scope.sheetId || plan.project_no !== scope.projectNo) throw changePlanStale('plan_scope')
-      if (plan.status !== 'confirmed') throw changePlanStale(planStatusReason(plan.status), { status: plan.status })
       let row
       try {
         row = firstRow(await trx.insertOne(REFRESH_STORE_TABLES.execution, executionRow))
       } catch (error) {
         throw translate(error, 'execution_begin')
+      }
+      for (const chunk of intent.chunks) {
+        try {
+          await trx.insertOne(REFRESH_STORE_TABLES.intent, {
+            id: `${id}:${chunk.chunkIndex}`,
+            execution_id: id,
+            chunk_index: chunk.chunkIndex,
+            tenant_id: scope.tenantId,
+            sheet_id: scope.sheetId,
+            project_no: scope.projectNo,
+            write_scope_key: scope.writeScopeKey,
+            entry_count: chunk.entryCount,
+            entries: chunk.entries,
+            fieldsets: chunk.fieldsets,
+            created_at: at,
+          })
+        } catch (error) {
+          throw translate(error, 'intent_insert')
+        }
       }
       return rowToExecution(row || { id })
     })
@@ -2920,8 +2991,11 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
    * Close a `running` execution with its result. `succeeded` stamps `executed_execution_id` on every
    * continuation of its refresh binding (at the bound revision) and, when a `settlement` is given (the
    * self-settling zero-write run, §9.2), the state row's settled_* columns in the same transaction.
+   * Step 6a-1: a failed / aborted journaled run with `written === 0 && attemptedWrites === 0` (integers) is closed
+   * `verified_closed / nothing_landed / self_verified` instead; a change plan it was bound to stays `confirmed`.
+   * `options.auditWithin(trx, event)` (optional) appends the self-verification's audit row on this transaction.
    */
-  async function finishExecution(input = {}) {
+  async function finishExecution(input = {}, options = {}) {
     const scope = normalizeScope(input)
     const executionId = trimmed(input.executionId)
     if (!executionId) throw scopeInvalid('executionId')
@@ -2933,6 +3007,14 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
     if (input.errorCodes !== undefined && input.errorCodes !== null && !Array.isArray(input.errorCodes)) throw inputInvalid('errorCodes must be an array when given', 'errorCodes')
     const settlement = normalizeSettlement(input.settlement)
     if (settlement && input.status !== 'succeeded') throw inputInvalid('only a succeeded execution settles', 'settlement')
+    // Step 6a-1: the self-verification audit hook (optional — a provable close is bookkeeping, never refused for want of
+    // it; when wired, its row is appended inside this transaction and its failure rolls the finish back, E09).
+    const auditWithin = auditHookOf(options)
+    // Step 6a-1 (design §3.3, T6-3): nothing landed is PROVABLE when the run wrote nothing AND attempted no host write —
+    // both stated as integers (absent / null never qualifies) — and it ended failed / aborted (never partial).
+    const provablyNothingLanded = SELF_VERIFIABLE_FINISH_STATUSES.includes(input.status)
+      && Number.isInteger(input.written) && input.written === 0
+      && Number.isInteger(input.attemptedWrites) && input.attemptedWrites === 0
     const at = clock()
 
     return db.transaction(async (rawTrx) => {
@@ -2953,18 +3035,36 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
       if (row.tenant_id !== scope.tenantId) throw tenantMismatch('execution')
       if (row.sheet_id !== scope.sheetId || row.project_no !== scope.projectNo) throw stateMoved('execution_scope')
       if (row.status !== 'running') throw stateMoved('execution_not_running')
+      // A legacy row begun before migration 106 carries no journal: it finishes as before (step 6a-2's runbook path).
+      const selfVerified = provablyNothingLanded && intOrNull(row.intent_version) !== null
+      const boundPlanId = changePlanIdOfBinding(row.refresh_binding)
+      const finishSet = {
+        status: input.status,
+        finished_at: at,
+        written: input.written === undefined ? null : input.written,
+        attempted_writes: input.attemptedWrites === undefined ? null : input.attemptedWrites,
+        counts: isPlainObject(input.counts) ? input.counts : null,
+        abort_code: input.abortCode || null,
+        error_codes: Array.isArray(input.errorCodes) ? input.errorCodes : null,
+        updated_at: at,
+      }
+      if (selfVerified) {
+        // `verified_closed / nothing_landed / self_verified` (migration 106's self-verified shape); TRANSPARENT to
+        // settlement only when no change plan was bound (design §3.4: a plan-bound close stays a settlement subject).
+        Object.assign(finishSet, {
+          status: 'verified_closed',
+          verified_result: 'nothing_landed',
+          verified_at: at,
+          verified_by: null,
+          closed_mode: 'self_verified',
+          pre_close_status: input.status,
+          verify_summary: { selfVerified: true, finishStatus: input.status, intendedEntries: intOrNull(row.intent_entry_count) || 0 },
+          settlement_subject: boundPlanId !== null,
+        })
+      }
       let rows
       try {
-        rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.execution, {
-          status: input.status,
-          finished_at: at,
-          written: input.written === undefined ? null : input.written,
-          attempted_writes: input.attemptedWrites === undefined ? null : input.attemptedWrites,
-          counts: isPlainObject(input.counts) ? input.counts : null,
-          abort_code: input.abortCode || null,
-          error_codes: Array.isArray(input.errorCodes) ? input.errorCodes : null,
-          updated_at: at,
-        }, { id: executionId, status: 'running' }))
+        rows = rowsOf(await trx.updateRow(REFRESH_STORE_TABLES.execution, finishSet, { id: executionId, status: 'running' }))
       } catch (error) {
         throw translate(error, 'execution_finish')
       }
@@ -3070,6 +3170,11 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
           }
           if (written.length !== 1) throw stateMoved('change_plan_moved')
           changePlanOutcome = Object.freeze({ id: planRow.id, status: 'written', absorbedPlans: older.length, absorbedFields })
+        } else if (selfVerified) {
+          // Step 6a-1 (T6-4, RR G2; design §3.7 P4): nothing landed, so the confirmation is intact — the plan STAYS
+          // `confirmed` (asserted above under its row lock, never updated). The next reconcile matches it (a fresh preview
+          // mints and the next apply binds it again) or invalidates it `source_changed` with its new holds (F6-10).
+          changePlanOutcome = Object.freeze({ id: planRow.id, status: 'confirmed', kept: true })
         } else {
           let invalidated
           try {
@@ -3087,7 +3192,18 @@ function createStockPreparationContinuationStore({ db, idGenerator, now } = {}) 
           changePlanOutcome = Object.freeze({ id: planRow.id, status: 'invalidated', reason: 'execution_failed' })
         }
       }
-      return Object.freeze({ ...rowToExecution(finished), continuationsConsumed: consumed, settled: Boolean(settlement), changePlan: changePlanOutcome })
+      // Step 6a-1 (design §3.3): the self-verification's values-free audit row (exception_resolve /
+      // execution_self_verified, a system event), inside this transaction when the handle wires the hook.
+      if (selfVerified) {
+        await runAudit(trx, auditWithin, {
+          operation: 'execution_self_verified',
+          executionId,
+          finishStatus: input.status,
+          changePlanBound: boundPlanId !== null,
+          intendedEntries: intOrNull(row.intent_entry_count) || 0,
+        })
+      }
+      return Object.freeze({ ...rowToExecution(finished), continuationsConsumed: consumed, settled: Boolean(settlement), changePlan: changePlanOutcome, selfVerified })
     })
   }
 
@@ -3128,6 +3244,10 @@ module.exports = {
   EXECUTION_FINISH_STATUSES,
   UNFINISHED_EXECUTION_STATUSES,
   VERIFIED_RESULTS,
+  // Step 6a-1 (migration 106).
+  CLOSED_MODES,
+  PRE_CLOSE_STATUSES,
+  SELF_VERIFIABLE_FINISH_STATUSES,
   BUMP_REASONS,
   BASIS_NOTE_MAX_LENGTH,
   // Step 5 PR-8 (migration 104).

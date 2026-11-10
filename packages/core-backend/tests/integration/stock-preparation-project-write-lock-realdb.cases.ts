@@ -222,6 +222,10 @@ function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () =
 // because the writer now refuses a fenced write without a consulted verdict (E-1 layer (b)).
 const refreshLanes = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-lanes.cjs')) as any
 const continuationStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
+// Batch-refresh step 6a-1 (S6-1, R-91): every begin carries its intent journal; a seeded begin that is not about the
+// journal carries the journal of an EMPTY plan bound to its own plan digest (the real builder, the store's admission).
+const executionIntentLib = require(path.join(PLUGIN_LIB, 'stock-preparation-execution-intent.cjs')) as any
+const emptyIntentFor = (planDigest: string) => executionIntentLib.buildExecutionIntent({ plan: { decisions: [] }, planDigest })
 const refreshGovernanceLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
 const projectTargetStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
 const packInstallStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
@@ -3407,6 +3411,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               plannedCounts: { add: 1, update: 0, inactive: 0 },
               refreshBinding: { continuations: [], holdSetFingerprint: null },
               startedBy: 'u_s3a_dead',
+              intent: emptyIntentFor('a'.repeat(64)),
             })
             if (variant === 'failed') await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S3A'] })
             // Review round 1 item 4: the preview says so — the same rows the apply refuses on.
@@ -3611,6 +3616,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               plannedCounts: { add: 0, update: 0, inactive: 0 },
               refreshBinding: { continuations: [{ id: C, revision: confirmed.revision || 1 }], holdSetFingerprint: null },
               startedBy: 'u_s3a_17',
+              intent: emptyIntentFor('b'.repeat(64)),
             })
             const settlement = { executionId: execution.id, generationToken: lockRow.generation_token, sourceContentDigest: 'src_s3a_17', sheetMachineDigest: 'machine_s3a_17' }
             return {
@@ -4394,6 +4400,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: 'run_s3a_22_dead', leaseId: 'lease_s3a_22_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_22' },
               tokenRevision: 'rev_s3a_22', planDigest: 'c'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_22',
+              intent: emptyIntentFor('c'.repeat(64)),
             })
             await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_22'] })
             const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
@@ -4549,6 +4556,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: 'run_s3a_28_dead', leaseId: 'lease_s3a_28_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_28' },
               tokenRevision: 'rev_s3a_28', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_28',
+              intent: emptyIntentFor('d'.repeat(64)),
             })
             await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_28'] })
             const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
@@ -4572,6 +4580,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             ...envScope, lane: 'small_apply',
             guard: { leaseRunId: 'run_s3a_29_dead', leaseId: 'lease_s3a_29_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_29' },
             tokenRevision: 'rev_s3a_29', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_29',
+            intent: emptyIntentFor('d'.repeat(64)),
           })
           await st.refresh.store.finishExecution({ ...envScope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_29'] })
           const physical = (logical: string) => (env.fieldIdMap && env.fieldIdMap[logical]) || logical
@@ -4654,6 +4663,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             ...st.scope, lane: 'small_apply',
             guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
             tokenRevision: 'rev_s3a_30', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_30',
+            intent: emptyIntentFor('e'.repeat(64)),
           })
           // 3. The snapshot is taken now (it holds the running row); the preview stops at its lock read.
           lockGate.armed = true
@@ -5652,6 +5662,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 ...st.scope, lane: 'small_apply',
                 guard: { leaseRunId: 's4-01b-dead', leaseId: 'lease_s4_01b_dead', fencingEpoch: 1, generation: Number(lock0.generation), generationToken: lock0.generation_token },
                 tokenRevision: 'rev_s4_01b', planDigest: 'plan_s4_01b', plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: st.users.puller.id,
+                intent: emptyIntentFor('plan_s4_01b'),
               })
               const res = await confirmViaRoute(st, row)
               observed.b = {
@@ -6175,7 +6186,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const recoveryAtConsult = refreshLanes.previewRecoveryOf(consultT0)
               const grant = await w.st.lock.acquire(w.st.key, { purpose: 'small_apply', runId: 's4-08c-apply', tenantId: w.st.tenantId })
               const guard = w.st.lock.createGuard(grant)
-              const execution = await w.store.beginExecution({ ...w.st.scope, lane: 'small_apply', guard: { leaseRunId: 's4-08c-apply', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: grant.generation, generationToken: grant.generationToken }, tokenRevision: 'rev_s408c', planDigest: 'plan_s408c', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: w.st.users.puller.id })
+              const execution = await w.store.beginExecution({ ...w.st.scope, lane: 'small_apply', guard: { leaseRunId: 's4-08c-apply', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: grant.generation, generationToken: grant.generationToken }, tokenRevision: 'rev_s408c', planDigest: 'plan_s408c', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: w.st.users.puller.id, intent: emptyIntentFor('plan_s408c') })
               await w.store.finishExecution({ ...w.st.scope, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['SYNTHETIC'] })
               await guard.release()
               const lock0 = await lockRowOf(w.st.key)
@@ -6367,7 +6378,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             return { confirmed }
           }
 
-          /** A WHOLE zero-write execution on the real lock and store: acquire (epoch + 1), begin, finish, release. */
+          /** A WHOLE zero-write execution on the real lock and store: acquire (epoch + 1), begin, finish, release. Step 6a-1
+           *  (S6-1, R-91): a failed run is seeded as having ATTEMPTED one host call (unprovable: it stays failed) — a 0/0
+           *  failed run now self-verifies transparent (XS-02 / S9R-01). */
           async function zeroWriteRun(st: any, status: 'failed' | 'succeeded', { settle = false }: { settle?: boolean } = {}) {
             const runId = `s5_${status}_${TOKEN}_${Date.now().toString(36)}`
             const grant = await st.rawLock.acquire(st.key, { purpose: 'small_apply', runId, tenantId: st.tenantId })
@@ -6376,9 +6389,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
               tokenRevision: 'rev_s5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5',
+              intent: emptyIntentFor('e'.repeat(64)),
             })
             await st.refresh.store.finishExecution({
-              ...st.scope, executionId: begun.id, status, written: 0, attemptedWrites: 0,
+              ...st.scope, executionId: begun.id, status, written: 0, attemptedWrites: status === 'failed' ? 1 : 0,
               ...(settle ? { settlement: { generationToken: gen.generationToken, sourceContentDigest: 'c'.repeat(64), sheetMachineDigest: await st.settledDigest() } } : {}),
             })
             await st.rawLock.createGuard(grant).release()
@@ -6417,6 +6431,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 ...st.scope, lane: 'small_apply',
                 guard: { leaseRunId: `run_s5_dead_${TOKEN}`, leaseId: `lease_s5_dead_${TOKEN}`, fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken },
                 tokenRevision: 'rev_s5_dead', planDigest: 'a'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5_dead',
+                intent: emptyIntentFor('a'.repeat(64)),
               })
               await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S5'] })
               const res2 = await st.exportLines()
@@ -6742,9 +6757,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //         fields; the plan written by a bound execution.
         //   S8-04b (A12 / F15, human) a person's cell committed by another session INSIDE the host's patch (SHARE lock on
         //         meta_records, pg_blocking_pids): one conflict, one retry, the person's value kept.
-        //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution
-        //         aborted, the plan invalidated(execution_failed), failed_pending_recovery: the page blocked, a confirm 409
-        //         RECOVERY_PENDING, the export 409.
+        //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved. RE-PINNED by
+        //         step 6a-1 (S6-1, R-91; T6-4) — the stop wrote and attempted nothing (0 / 0), so the execution SELF-VERIFIES
+        //         (verified_closed / nothing_landed / self_verified, a settlement subject) and the plan STAYS confirmed: the
+        //         project derives confirmed_pending_execution, never failed_pending_recovery; the export 409. Also S9R-01b:
+        //         the next preview finds the moved cell — the plan invalidated(source_changed) with a new content hold in ONE
+        //         reconcile.
         //   S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token's apply 409
         //         REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt;
         //         the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new
@@ -7193,7 +7211,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(observed).toEqual({ hostWaitedOnTheLock: true, applied: '200:succeeded', personKept: true, materialWritten: true, versionStep: 2, plan: 'written' })
           }, 300000)
 
-          test('S8-04c (A12, machine) a plugin-owned cell committed INSIDE the host\'s patch: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution aborted, the plan invalidated(execution_failed), failed_pending_recovery — the page blocked, a confirm 409 RECOVERY_PENDING, the export 409', async () => {
+          test('S8-04c / S9R-01b (A12, machine; re-pinned by step 6a-1, R-91) a plugin-owned cell committed INSIDE the host\'s patch: 409 CHANGE_PLAN_STALE machine_columns_moved; the 0/0 stop SELF-VERIFIES (verified_closed / nothing_landed / self_verified, a settlement subject) and the plan STAYS confirmed — confirmed_pending_execution, never failed_pending_recovery; the export 409; the next preview invalidates the plan source_changed with a new content hold in one reconcile', async () => {
             const { st, confirmed } = await s8Confirmed('s8_04c')
             const replan = await st.dryRun()
             const partA0 = await rowOf(st, 'PART-A')
@@ -7203,7 +7221,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             )
             const applied = (result as any).ok ? (result as any).value : null
             const plan = await planById(confirmed.changePlanId)
-            const execution = (await q(`SELECT status FROM ${RT.execution} WHERE id = $1`, [plan.execution_id])).rows[0]
+            // The plan stays confirmed (no execution id on it): the bound execution is found by its refresh binding.
+            const execution = (await q(`SELECT status, verified_result, closed_mode, pre_close_status, settlement_subject, written, attempted_writes, intent_version, intent_entry_count FROM ${RT.execution} WHERE tenant_id = $1 AND refresh_binding ->> 'changePlanId' = $2`, [st.tenantId, confirmed.changePlanId])).rows
+            const intentChunks = Number((await q('SELECT count(*)::int AS n FROM integration_stock_prep_refresh_execution_intent WHERE tenant_id = $1', [st.tenantId])).rows[0].n)
             const page = okData(await cpCall(st, 'GET', CPR.current))
             const confirm = await cpCall(st, 'POST', CPR.confirm, { body: { confirmProjectNo: st.projectNo, holdIds: ['hold_s8_04c'], holdSetFingerprint: 'a', planFingerprint: 'b', sourceContentDigest: 'c', readReceipt: 'e'.repeat(32) } })
             const exported = await st.exportLines()
@@ -7211,8 +7231,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               hostWaitedOnTheLock: blocked,
               applied: applied ? answer(applied) : 'threw',
               partial: applied && errorOf(applied).details ? typeof errorOf(applied).details.written : 'none',
-              execution: execution && execution.status,
-              plan: `${plan.status}:${plan.invalidated_reason}`,
+              execution: execution.map((row: any) => `${row.status}:${row.verified_result}:${row.closed_mode}:${row.pre_close_status}:${row.settlement_subject}:${row.written}/${row.attempted_writes}`),
+              journaled: execution.length === 1 && Number(execution[0].intent_version) === 1 && Number(execution[0].intent_entry_count) >= 1 && intentChunks >= 1,
+              plan: `${plan.status}:${plan.invalidated_reason}:${plan.execution_id}`,
               derived: (await derivedOf(st)).status,
               pageBlocked: page.proposal.blocked,
               confirm: answer(confirm),
@@ -7223,13 +7244,22 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               hostWaitedOnTheLock: true,
               applied: `409:${DC.CHANGE_PLAN_STALE}:machine_columns_moved`,
               partial: 'number',
-              execution: 'aborted',
-              plan: 'invalidated:execution_failed',
-              derived: 'failed_pending_recovery',
-              pageBlocked: 'recovery_pending',
-              confirm: `409:${DC.RECOVERY_PENDING}:`,
-              exported: `409:${EXPORT_BLOCKED}:state:failed_pending_recovery`,
+              execution: ['verified_closed:nothing_landed:self_verified:aborted:true:0/0'],
+              journaled: true,
+              plan: 'confirmed:null:null',
+              derived: 'confirmed_pending_execution',
+              pageBlocked: 'no_content_hold',
+              confirm: `409:${DC.CHANGE_PLAN_STALE}:no_content_hold`,
+              exported: `409:${EXPORT_BLOCKED}:state:confirmed_pending_execution`,
             })
+            // S9R-01b: the next preview reads the moved cell — the plan's change set no longer matches, so ONE reconcile
+            // invalidates it source_changed (no running bound execution defers it) and opens the new content hold.
+            const next = await st.dryRun()
+            const after = await planById(confirmed.changePlanId)
+            const openHolds = (await q(`SELECT kind FROM ${RT.hold} WHERE tenant_id = $1 AND status = 'open'`, [st.tenantId])).rows.map((row: any) => row.kind).sort()
+            const nextObserved = { preview: `${next.statusCode}:${next.body.data && next.body.data.status}`, plan: `${after.status}:${after.invalidated_reason}`, openHolds, derived: (await derivedOf(st)).status }
+            console.log(`[S9R-01b] ${JSON.stringify(nextObserved)}`)
+            expect(nextObserved).toEqual({ preview: '200:suspended', plan: 'invalidated:source_changed', openHolds: ['content_change'], derived: 'pending_confirmation' })
           }, 300000)
 
           test('S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token 409 REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt; the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new change => export 409 again', async () => {
@@ -8251,7 +8281,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             const guardFor = (label: string) => ({ leaseRunId: `run_${label}`, leaseId: `lease_${label}`, fencingEpoch: 1, generation: 1, generationToken: `tok_${label}` })
             const beginInput = (scenario: any, label: string, changePlanId: string) => ({
               ...scenario.scope, lane: 'small_apply', guard: guardFor(label), tokenRevision: `rev_${label}`, planDigest: `plan_${label}`,
-              plannedCounts: { add: 0, update: 2, inactive: 0 }, refreshBinding: { continuations: [], changePlanId, holdSetFingerprint: null }, startedBy: `u_${label}`,
+              plannedCounts: { add: 0, update: 2, inactive: 0 }, refreshBinding: { continuations: [], changePlanId, holdSetFingerprint: null }, startedBy: `u_${label}`, intent: emptyIntentFor(`plan_${label}`),
             })
             const staleReconcile = (store: any, scenario: any, changePlanId: string, dv: number, label: string) => store.reconcileHolds({
               ...scenario.scope, decisionVersionObserved: dv, holds: [], computation: computation({ suspended: false, sourceContentDigest: `src_${label}_next` }),

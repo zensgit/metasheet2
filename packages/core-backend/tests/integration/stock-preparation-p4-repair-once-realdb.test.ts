@@ -25,6 +25,7 @@ import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-
 import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
 import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
+import { defineStockPreparationExecutionIntentRealDbCases } from './stock-preparation-execution-intent-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -522,3 +523,5 @@ defineStockPreparationPullBatchSiteProbeRealDbCases()
 defineMultitablePluginViewLandingRealDbCases()
 // 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
 defineStockPreparationPullBatchBandRealDbCases()
+// Batch-refresh step 6a-1 (S6-1, R-91): migration 106, the intent journal's begin atomicity, the self-verifying finish and the settlement-subject window on real PG (S9R-106/01/02/03/30).
+defineStockPreparationExecutionIntentRealDbCases()
