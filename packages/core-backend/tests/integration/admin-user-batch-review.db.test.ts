@@ -1168,6 +1168,49 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
     }
   })
 
+  it('rolls back a bulk admission when a locked target is recycled while the write is queued', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const firstId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      const secondId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, firstId, secondId)
+      const [earlierId, laterId] = [firstId, secondId].sort()
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [laterId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(app)
+          .post('/api/admin/users/namespaces/crm/admission/bulk')
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ userIds: [laterId, earlierId], enabled: true }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query('UPDATE users SET deleted_at = NOW() WHERE id = $1', [laterId])
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('USER_IN_RECYCLE_BIN')
+      expect((await query(
+        'SELECT user_id FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+        [[earlierId, laterId, actorId]],
+      )).rows).toEqual([])
+      expect((await adminProfile(earlierId)).profile.deleted_at).toBeNull()
+      expect((await adminProfile(laterId)).profile.deleted_at).not.toBeNull()
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await query(
+        'DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+        [ids],
+      ).catch(() => undefined)
+      await removeOwnedUsers(ids)
+    }
+  })
+
   it('rolls back the first bulk admission when a later upsert fails', async () => {
     const ids: string[] = []
     const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
@@ -1322,9 +1365,22 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
 
   it.each([
     ['assign', 'namespace', 'ROLE_DELEGATION_FORBIDDEN'],
-    ['unassign', 'audience', 'ROLE_DELEGATION_SCOPE_REQUIRED'],
-    ['admission', 'target-membership', 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'],
+    ['assign', 'audience', 'ROLE_DELEGATION_SCOPE_REQUIRED'],
+    ['assign', 'target-membership', 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'],
+    ['assign', 'inactive-actor', 'ROLE_DELEGATION_FORBIDDEN'],
     ['assign', 'disabled-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['assign', 'pending-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['unassign', 'namespace', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['unassign', 'audience', 'ROLE_DELEGATION_SCOPE_REQUIRED'],
+    ['unassign', 'target-membership', 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'],
+    ['unassign', 'inactive-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['unassign', 'disabled-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['unassign', 'pending-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['admission', 'namespace', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['admission', 'audience', 'ROLE_DELEGATION_SCOPE_REQUIRED'],
+    ['admission', 'target-membership', 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'],
+    ['admission', 'inactive-actor', 'ROLE_DELEGATION_FORBIDDEN'],
+    ['admission', 'disabled-actor', 'ROLE_DELEGATION_FORBIDDEN'],
     ['admission', 'pending-actor', 'ROLE_DELEGATION_FORBIDDEN'],
   ] as const)('rechecks delegated %s authority after %s is revoked under the lock', async (operation, revocation, code) => {
     const ids: string[] = []
@@ -1401,10 +1457,14 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
           } else if (revocation === 'audience') {
             await revoker.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = $1', [actorId])
             await revoker.query('DELETE FROM delegated_role_admin_scopes WHERE admin_user_id = $1', [actorId])
+          } else if (revocation === 'inactive-actor') {
+            await revoker.query('UPDATE users SET is_active = FALSE WHERE id = $1', [actorId])
           } else if (revocation === 'disabled-actor') {
             await revoker.query(`UPDATE users SET role = 'disabled' WHERE id = $1`, [actorId])
-          } else {
+          } else if (revocation === 'pending-actor') {
             await revoker.query(`UPDATE users SET activation_status = 'pending_activation' WHERE id = $1`, [actorId])
+          } else {
+            throw new Error(`unhandled delegated revocation ${revocation}`)
           }
           await revoker.query('COMMIT')
         } finally {
@@ -1440,10 +1500,14 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
           'SELECT 1 FROM platform_member_group_members WHERE user_id = $1',
           [targetId],
         )).rows).toEqual([])
+      } else if (revocation === 'inactive-actor') {
+        expect((await adminProfile(actorId)).profile.is_active).toBe(false)
       } else if (revocation === 'disabled-actor') {
         expect((await adminProfile(actorId)).profile.role).toBe('disabled')
-      } else {
+      } else if (revocation === 'pending-actor') {
         expect((await adminProfile(actorId)).profile.activation_status).toBe('pending_activation')
+      } else {
+        throw new Error(`unhandled delegated revocation ${revocation}`)
       }
     } finally {
       await releaseBlocker(blocker, pending)
@@ -1586,6 +1650,292 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
     }
   })
 
+  it.each([
+    ['platform-assign', 'recycled'],
+    ['platform-assign', 'purged'],
+    ['platform-unassign', 'recycled'],
+    ['platform-unassign', 'purged'],
+    ['delegation-assign', 'recycled'],
+    ['delegation-assign', 'purged'],
+    ['delegation-unassign', 'recycled'],
+    ['delegation-unassign', 'purged'],
+    ['department-scope-unassign', 'recycled'],
+    ['department-scope-unassign', 'purged'],
+    ['group-scope-unassign', 'recycled'],
+    ['group-scope-unassign', 'purged'],
+    ['member-group-unassign', 'recycled'],
+    ['member-group-unassign', 'purged'],
+    ['template-merge', 'recycled'],
+    ['template-merge', 'purged'],
+    ['delegation-admission', 'recycled'],
+    ['delegation-admission', 'purged'],
+    ['platform-admission', 'recycled'],
+    ['platform-admission', 'purged'],
+  ] as const)('refuses %s when the locked target is %s and writes nothing', async (operation, stage) => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const namespace = `g${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const adminRoleId = `${namespace}_admin`
+    const readerRoleId = `${namespace}_reader`
+    const catalog = await snapshotOwnedCatalog([adminRoleId, readerRoleId], [])
+    const integrationId = randomUUID()
+    const departmentId = randomUUID()
+    const templateId = randomUUID()
+    let groupId: string | null = null
+    const unassignsNamespaceAdmin = operation === 'platform-unassign' || operation === 'delegation-unassign'
+    const needsDepartment = operation === 'department-scope-unassign' || operation === 'template-merge' || unassignsNamespaceAdmin
+    const needsGroup = operation === 'group-scope-unassign' || operation === 'member-group-unassign' || unassignsNamespaceAdmin
+    const auditResources = [readerRoleId, adminRoleId, templateId]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      auditResources.push(
+        `${targetId}:${readerRoleId}`,
+        `${targetId}:${namespace}`,
+        `${targetId}:${namespace}:${departmentId}`,
+        `${targetId}:${namespace}:template:${templateId}`,
+      )
+      await query(
+        'INSERT INTO roles(id, name) VALUES ($1, $1), ($2, $2)',
+        [adminRoleId, readerRoleId],
+      )
+      await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [targetId, adminRoleId])
+      if (needsDepartment) {
+        await query(
+          `INSERT INTO directory_integrations(id, org_id, provider, name, corp_id, sync_enabled)
+           VALUES ($1::uuid, 'default', 'dingtalk', $1::text, $1::text, FALSE)`,
+          [integrationId],
+        )
+        await query(
+          `INSERT INTO directory_departments(id, integration_id, external_department_id, name, is_active, raw)
+           VALUES ($1::uuid, $2::uuid, $1::text, $1::text, TRUE, '{}'::jsonb)`,
+          [departmentId, integrationId],
+        )
+      }
+      if (needsDepartment) {
+        await query(
+          `INSERT INTO delegated_role_admin_scopes(
+             admin_user_id, namespace, directory_department_id, created_by
+           ) VALUES ($1, $2, $3::uuid, $1)`,
+          [targetId, namespace, departmentId],
+        )
+      }
+      if (operation === 'template-merge') {
+        await query(
+          'INSERT INTO delegated_role_scope_templates(id, name) VALUES ($1::uuid, $2)',
+          [templateId, `gap-template-${namespace}`],
+        )
+        await query(
+          `INSERT INTO delegated_role_scope_template_departments(template_id, directory_department_id)
+           VALUES ($1::uuid, $2::uuid)`,
+          [templateId, departmentId],
+        )
+      }
+      if (needsGroup) {
+        groupId = (await query<{ id: string }>(
+          'INSERT INTO platform_member_groups(name) VALUES ($1) RETURNING id',
+          [`gap-group-${namespace}`],
+        )).rows[0].id
+        auditResources.push(operation === 'group-scope-unassign'
+          ? `${targetId}:${namespace}:group:${groupId}`
+          : `${groupId}:${targetId}`)
+      }
+      if ((operation === 'group-scope-unassign' || unassignsNamespaceAdmin) && groupId) {
+        await query(
+          `INSERT INTO delegated_role_admin_member_groups(
+             admin_user_id, namespace, group_id, created_by
+           ) VALUES ($1, $2, $3, $1)`,
+          [targetId, namespace, groupId],
+        )
+      }
+      if ((operation === 'member-group-unassign' || unassignsNamespaceAdmin) && groupId) {
+        await query(
+          'INSERT INTO platform_member_group_members(group_id, user_id) VALUES ($1, $2)',
+          [groupId, targetId],
+        )
+      }
+      const beforeRoles = (await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id',
+        [targetId],
+      )).rows
+      const beforeScopes = (await query(
+        `SELECT namespace, directory_department_id::text AS directory_department_id, created_by
+         FROM delegated_role_admin_scopes WHERE admin_user_id = $1 ORDER BY namespace, directory_department_id`,
+        [targetId],
+      )).rows
+      const beforeGroups = (await query(
+        `SELECT namespace, group_id::text AS group_id, created_by
+         FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 ORDER BY namespace, group_id`,
+        [targetId],
+      )).rows
+      const beforeMembers = (await query(
+        'SELECT group_id::text AS group_id FROM platform_member_group_members WHERE user_id = $1 ORDER BY group_id',
+        [targetId],
+      )).rows
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      const blockerPid = await sessionPid(blocker)
+      const started = operation === 'platform-assign' || operation === 'platform-unassign'
+        ? request(app).post(`/api/admin/users/${targetId}/roles/${operation === 'platform-assign' ? 'assign' : 'unassign'}`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ roleId: unassignsNamespaceAdmin ? adminRoleId : readerRoleId })
+        : operation === 'delegation-assign' || operation === 'delegation-unassign'
+          ? request(app).post(`/api/admin/role-delegation/users/${targetId}/roles/${operation === 'delegation-assign' ? 'assign' : 'unassign'}`)
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ roleId: unassignsNamespaceAdmin ? adminRoleId : readerRoleId })
+          : operation === 'department-scope-unassign'
+            ? request(app).post(`/api/admin/role-delegation/users/${targetId}/scopes/unassign`)
+              .auth(token(actorId), { type: 'bearer' })
+              .send({ namespace, directoryDepartmentId: departmentId })
+            : operation === 'group-scope-unassign'
+              ? request(app).post(`/api/admin/role-delegation/users/${targetId}/scope-groups/unassign`)
+                .auth(token(actorId), { type: 'bearer' })
+                .send({ namespace, groupId })
+              : operation === 'member-group-unassign'
+                ? request(app).post(`/api/admin/role-delegation/users/${targetId}/member-groups/unassign`)
+                  .auth(token(actorId), { type: 'bearer' })
+                  .send({ groupId })
+                : operation === 'template-merge'
+                  ? request(app).post(`/api/admin/role-delegation/users/${targetId}/scope-templates/apply`)
+                    .auth(token(actorId), { type: 'bearer' })
+                    .send({ namespace, templateId, mode: 'merge' })
+                  : operation === 'delegation-admission'
+                    ? request(app).patch(`/api/admin/role-delegation/users/${targetId}/namespaces/${namespace}/admission`)
+                      .auth(token(actorId), { type: 'bearer' })
+                      .send({ enabled: true })
+                    : request(app).patch(`/api/admin/users/${targetId}/namespaces/${namespace}/admission`)
+                      .auth(token(actorId), { type: 'bearer' })
+                      .send({ enabled: true })
+      pending.push(Promise.resolve(started))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(
+        stage === 'purged'
+          ? 'UPDATE users SET deleted_at = NOW(), purged_at = NOW() WHERE id = $1'
+          : 'UPDATE users SET deleted_at = NOW() WHERE id = $1',
+        [targetId],
+      )
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('USER_IN_RECYCLE_BIN')
+      expect((await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id',
+        [targetId],
+      )).rows).toEqual(beforeRoles)
+      expect((await query(
+        `SELECT namespace, directory_department_id::text AS directory_department_id, created_by
+         FROM delegated_role_admin_scopes WHERE admin_user_id = $1 ORDER BY namespace, directory_department_id`,
+        [targetId],
+      )).rows).toEqual(beforeScopes)
+      expect((await query(
+        `SELECT namespace, group_id::text AS group_id, created_by
+         FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 ORDER BY namespace, group_id`,
+        [targetId],
+      )).rows).toEqual(beforeGroups)
+      expect((await query(
+        'SELECT group_id::text AS group_id FROM platform_member_group_members WHERE user_id = $1 ORDER BY group_id',
+        [targetId],
+      )).rows).toEqual(beforeMembers)
+      expect((await query(
+        'SELECT namespace FROM user_namespace_admissions WHERE user_id = $1',
+        [targetId],
+      )).rows).toEqual([])
+      const after = await adminProfile(targetId)
+      expect(after.profile.deleted_at).not.toBeNull()
+      if (stage === 'purged') expect(after.profile.purged_at).not.toBeNull()
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await removeOwnedUsers(ids)
+      await query('DELETE FROM delegated_role_scope_template_departments WHERE template_id = $1::uuid', [templateId])
+      await query('DELETE FROM delegated_role_scope_templates WHERE id = $1::uuid', [templateId])
+      await query('DELETE FROM directory_departments WHERE integration_id = $1::uuid', [integrationId])
+      await query('DELETE FROM directory_integrations WHERE id = $1::uuid', [integrationId])
+      if (groupId) {
+        await query('DELETE FROM delegated_role_admin_member_groups WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+      }
+      await restoreOwnedCatalog(catalog, [adminRoleId, readerRoleId], [])
+      await deleteNewAudits(auditResources, auditsBefore)
+    }
+  })
+
+  it('serializes reciprocal scope assignments on the sorted created_by user row', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const namespace = `r${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const adminRoleId = `${namespace}_admin`
+    const actorA = `a-recip-${randomUUID()}`
+    const actorZ = `z-recip-${randomUUID()}`
+    const catalog = await snapshotOwnedCatalog([adminRoleId], [])
+    const integrationId = randomUUID()
+    const departmentId = randomUUID()
+    const auditResources = [
+      `${actorA}:${namespace}:${departmentId}`,
+      `${actorZ}:${namespace}:${departmentId}`,
+    ]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      ids.push(actorA, actorZ)
+      await seedPhaseUser({ id: actorA, role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      await seedPhaseUser({ id: actorZ, role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      await query('INSERT INTO roles(id, name) VALUES ($1, $1)', [adminRoleId])
+      await query(
+        'INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2), ($3, $2)',
+        [actorA, adminRoleId, actorZ],
+      )
+      await query(
+        `INSERT INTO directory_integrations(id, org_id, provider, name, corp_id, sync_enabled)
+         VALUES ($1::uuid, 'default', 'dingtalk', $1::text, $1::text, FALSE)`,
+        [integrationId],
+      )
+      await query(
+        `INSERT INTO directory_departments(id, integration_id, external_department_id, name, is_active, raw)
+         VALUES ($1::uuid, $2::uuid, $1::text, $1::text, TRUE, '{}'::jsonb)`,
+        [departmentId, integrationId],
+      )
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      // actorA sorts first. Both writers take that admission lock, then this user row,
+      // which is also the created_by foreign key, before either insert.
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorA])
+      const blockerPid = await sessionPid(blocker)
+      const assign = (actor: string, target: string) => request(app)
+        .post(`/api/admin/role-delegation/users/${target}/scopes/assign`)
+        .auth(token(actor), { type: 'bearer' })
+        .send({ namespace, directoryDepartmentId: departmentId })
+      pending.push(Promise.resolve(assign(actorA, actorZ)), Promise.resolve(assign(actorZ, actorA)))
+      await waitForBlockedChain(blockerPid, 2)
+      await blocker.query('COMMIT')
+      const responses = await Promise.all(pending)
+      pending.length = 0
+      expect(responses.map((response) => response.status)).toEqual([200, 200])
+      expect((await query(
+        `SELECT admin_user_id, created_by
+         FROM delegated_role_admin_scopes
+         WHERE directory_department_id = $1::uuid
+         ORDER BY admin_user_id`,
+        [departmentId],
+      )).rows).toEqual([
+        { admin_user_id: actorA, created_by: actorZ },
+        { admin_user_id: actorZ, created_by: actorA },
+      ])
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await removeOwnedUsers(ids)
+      await query('DELETE FROM directory_departments WHERE integration_id = $1::uuid', [integrationId])
+      await query('DELETE FROM directory_integrations WHERE id = $1::uuid', [integrationId])
+      await restoreOwnedCatalog(catalog, [adminRoleId], [])
+      await deleteNewAudits(auditResources, auditsBefore)
+    }
+  })
+
   it.each(['single', 'batch'] as const)(
     'shares every attendance template role before the %s assign target locks',
     async (mode) => {
@@ -1631,6 +1981,263 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
           `SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
           [targetId],
         )).rows).toEqual([{ role_id: 'attendance_employee' }])
+      } finally {
+        await releaseBlocker(blocker, pending)
+        await query(
+          'DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = ANY($2::text[])',
+          [ids, ATTENDANCE_TEMPLATE_ROLE_IDS],
+        )
+        await restoreOwnedCatalog(catalog, ATTENDANCE_TEMPLATE_ROLE_IDS, ATTENDANCE_PERMISSION_CODES)
+        await deleteNewAudits(auditResources, auditsBefore)
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
+
+  it('rechecks a lost target namespace after the scope waits, while the same actor grants an unrelated role', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const namespace = `n${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const adminRoleId = `${namespace}_admin`
+    const readerRoleId = `${namespace}_reader`
+    const targetId = `a-target-${randomUUID()}`
+    const actorId = `z-actor-${randomUUID()}`
+    const otherId = `m-other-${randomUUID()}`
+    const catalog = await snapshotOwnedCatalog([adminRoleId, readerRoleId], [])
+    const integrationId = randomUUID()
+    const departmentId = randomUUID()
+    const auditResources = [
+      `${targetId}:${namespace}:${departmentId}`,
+      `${otherId}:${readerRoleId}`,
+      adminRoleId,
+      readerRoleId,
+    ]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    let progressTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // Target sorts before the actor, so the scope writer takes the target admission
+      // lock before the actor lock. Holding only that lock leaves the actor free.
+      expect(targetId < actorId).toBe(true)
+      ids.push(targetId, actorId, otherId)
+      await seedPhaseUser({ id: targetId, role: 'user', isAdminFlag: false, rbacAdmin: false })
+      await seedPhaseUser({ id: actorId, role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      await seedVisibleUser(otherId)
+      await query(
+        'INSERT INTO roles(id, name) VALUES ($1, $1), ($2, $2)',
+        [adminRoleId, readerRoleId],
+      )
+      await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [targetId, adminRoleId])
+      await query(
+        `INSERT INTO directory_integrations(id, org_id, provider, name, corp_id, sync_enabled)
+         VALUES ($1::uuid, 'default', 'dingtalk', $1::text, $1::text, FALSE)`,
+        [integrationId],
+      )
+      await query(
+        `INSERT INTO directory_departments(id, integration_id, external_department_id, name, is_active, raw)
+         VALUES ($1::uuid, $2::uuid, $1::text, $1::text, TRUE, '{}'::jsonb)`,
+        [departmentId, integrationId],
+      )
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await lockNamespaceAdmissionWrites(blocker, targetId)
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(app).post(`/api/admin/role-delegation/users/${targetId}/scopes/assign`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ namespace, directoryDepartmentId: departmentId }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      expect(await advisoryLockIsFree(`namespace-admission:${actorId}`)).toBe(true)
+      expect(await userRowLockIsFree(actorId)).toBe(true)
+      // Scope stays pending[0]. The grant is not HTTP-aborted: a 4s race only bounds this wait.
+      const unrelatedPending: Promise<Response> = Promise.resolve(
+        request(app)
+          .post(`/api/admin/users/${otherId}/roles/assign`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ roleId: readerRoleId }),
+      )
+      pending.push(unrelatedPending)
+      const progressBound = new Promise<never>((_resolve, reject) => {
+        progressTimer = setTimeout(() => {
+          reject(new Error('unrelated role grant did not finish within 4s'))
+        }, 4000)
+      })
+      void progressBound.catch(() => undefined)
+      const unrelated = await Promise.race([unrelatedPending, progressBound])
+      expect(unrelated.status).toBe(200)
+      expect((await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = $2',
+        [otherId, readerRoleId],
+      )).rows).toEqual([{ role_id: readerRoleId }])
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(
+        'DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2',
+        [targetId, adminRoleId],
+      )
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('ROLE_DELEGATION_NAMESPACE_NOT_HELD')
+      expect((await query(
+        'SELECT 1 FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND directory_department_id = $2::uuid',
+        [targetId, departmentId],
+      )).rows).toEqual([])
+      expect((await query(
+        'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2',
+        [targetId, adminRoleId],
+      )).rows).toEqual([])
+      expect((await query(
+        'SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = $2',
+        [otherId, readerRoleId],
+      )).rows).toEqual([{ role_id: readerRoleId }])
+    } finally {
+      if (progressTimer !== undefined) clearTimeout(progressTimer)
+      await releaseBlocker(blocker, pending)
+      await removeOwnedUsers(ids)
+      await query('DELETE FROM directory_departments WHERE integration_id = $1::uuid', [integrationId])
+      await query('DELETE FROM directory_integrations WHERE id = $1::uuid', [integrationId])
+      await restoreOwnedCatalog(catalog, [adminRoleId, readerRoleId], [])
+      await deleteNewAudits(auditResources, auditsBefore)
+    }
+  })
+
+  it('lets a current non-platform delegate assign, admit, and unassign an in-scope user', async () => {
+    const ids: string[] = []
+    const catalog = await snapshotOwnedCatalog(['crm_admin', 'crm_reader'], ['crm:read'])
+    let groupId: string | null = null
+    const targetId = `delegate-target-${randomUUID()}`
+    const auditResources = [`${targetId}:crm_reader`, `${targetId}:crm`, 'crm_reader', 'crm_admin']
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const actorId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      await seedVisibleUser(targetId)
+      await query(
+        `INSERT INTO roles(id, name) VALUES ('crm_admin', 'CRM admin'), ('crm_reader', 'CRM reader')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        `INSERT INTO permissions(code, name, description) VALUES ('crm:read', 'CRM read', 'synthetic')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        `INSERT INTO role_permissions(role_id, permission_code) VALUES ('crm_reader', 'crm:read')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [actorId, 'crm_admin'])
+      groupId = (await query<{ id: string }>(
+        'INSERT INTO platform_member_groups(name) VALUES ($1) RETURNING id',
+        [`phaseb-current-delegate-${randomUUID()}`],
+      )).rows[0].id
+      await query(
+        'INSERT INTO platform_member_group_members(group_id, user_id) VALUES ($1, $2)',
+        [groupId, targetId],
+      )
+      await query(
+        `INSERT INTO delegated_role_admin_member_groups(admin_user_id, namespace, group_id, created_by)
+         VALUES ($1, 'crm', $2, $1)`,
+        [actorId, groupId],
+      )
+      const actor = await adminProfile(actorId)
+      expect(actor.profile.role).toBe('user')
+      expect(actor.profile.is_admin).toBe(false)
+      expect(actor.roles.map((row) => row.role_id)).not.toContain('admin')
+      const assigned = await request(app)
+        .post(`/api/admin/role-delegation/users/${targetId}/roles/assign`)
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ roleId: 'crm_reader' })
+      expect(assigned.status).toBe(200)
+      expect(assigned.body.data.isPlatformAdmin).toBe(false)
+      expect((await query(
+        `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'crm_reader'`,
+        [targetId],
+      )).rows).toHaveLength(1)
+      const admitted = await request(app)
+        .patch(`/api/admin/role-delegation/users/${targetId}/namespaces/crm/admission`)
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ enabled: true })
+      expect(admitted.status).toBe(200)
+      expect(admitted.body.data.isPlatformAdmin).toBe(false)
+      expect((await query(
+        `SELECT enabled FROM user_namespace_admissions WHERE user_id = $1 AND namespace = 'crm'`,
+        [targetId],
+      )).rows).toEqual([{ enabled: true }])
+      const removed = await request(app)
+        .post(`/api/admin/role-delegation/users/${targetId}/roles/unassign`)
+        .auth(token(actorId), { type: 'bearer' })
+        .send({ roleId: 'crm_reader' })
+      expect(removed.status).toBe(200)
+      expect(removed.body.data.isPlatformAdmin).toBe(false)
+      expect((await query(
+        `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'crm_reader'`,
+        [targetId],
+      )).rows).toEqual([])
+    } finally {
+      if (groupId) {
+        await query('DELETE FROM delegated_role_admin_member_groups WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_group_members WHERE group_id = $1', [groupId])
+        await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+      }
+      await restoreOwnedCatalog(catalog, ['crm_admin', 'crm_reader'], ['crm:read'])
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it.each(['single', 'batch'] as const)(
+    'attendance %s unassign takes the namespace lock before the target user share',
+    async (mode) => {
+      const ids: string[] = []
+      const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+      const pending: Array<Promise<Response>> = []
+      const catalog = await snapshotOwnedCatalog(ATTENDANCE_TEMPLATE_ROLE_IDS, ATTENDANCE_PERMISSION_CODES)
+      let auditResources: string[] = []
+      let auditsBefore: string[] = []
+      try {
+        const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        auditResources = [...ATTENDANCE_TEMPLATE_ROLE_IDS, targetId, `${targetId}:attendance_employee`]
+        auditsBefore = await snapshotAuditIds(auditResources)
+        for (const roleId of ATTENDANCE_TEMPLATE_ROLE_IDS) {
+          await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        }
+        await query(
+          `INSERT INTO user_roles(user_id, role_id) VALUES ($1, 'attendance_employee')`,
+          [targetId],
+        )
+        await blocker.connect()
+        await blocker.query('BEGIN')
+        await lockNamespaceAdmissionWrites(blocker, targetId)
+        const blockerPid = await sessionPid(blocker)
+        const started = mode === 'batch'
+          ? request(attendanceApp).post('/api/attendance-admin/users/batch/roles/unassign')
+            .query({ scope: 'global' })
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ userIds: [targetId], template: 'employee' })
+          : request(attendanceApp).post(`/api/attendance-admin/users/${targetId}/roles/unassign`)
+            .query({ scope: 'global' })
+            .auth(token(actorId), { type: 'bearer' })
+            .send({ template: 'employee' })
+        pending.push(Promise.resolve(started))
+        await waitForBlockedBy(blockerPid, 1)
+        await blocker.query("SET LOCAL statement_timeout = '1s'")
+        const lockedUser = await blocker.query(
+          'SELECT id FROM users WHERE id = $1 FOR UPDATE',
+          [targetId],
+        )
+        expect(lockedUser.rows).toEqual([{ id: targetId }])
+        await blocker.query('COMMIT')
+        const [response] = await Promise.all(pending)
+        pending.length = 0
+        expect(response.status).toBe(200)
+        expect((await query(
+          `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+          [targetId],
+        )).rows).toEqual([])
       } finally {
         await releaseBlocker(blocker, pending)
         await query(
@@ -1754,6 +2361,58 @@ describe('locked actor authority on attendance role writes and user status', () 
         expect(await holdsRole(targetId, roleId)).toBe(false)
       } finally {
         await releaseBlocker(blocker, pending)
+        await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = $2', [ids, roleId])
+        await restoreOwnedCatalog(catalog, [roleId], [])
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
+
+  it.each(['single', 'batch'] as const)(
+    'refuses an attendance %s unassign when the actor loses authority while waiting for the user lock',
+    async (mode) => {
+      const ids: string[] = []
+      const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+      const pending: Array<Promise<Response>> = []
+      const roleId = 'attendance_employee'
+      const catalog = await snapshotOwnedCatalog([roleId], [])
+      try {
+        const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        await query(
+          'INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)',
+          [targetId, roleId],
+        )
+        await blocker.connect()
+        await blocker.query('BEGIN')
+        await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+        const blockerPid = await sessionPid(blocker)
+        pending.push(attendanceWrite(mode, 'unassign', actorId, targetId, roleId))
+        await waitForBlockedBy(blockerPid, 1)
+        await blocker.query(`UPDATE users SET role = 'user', is_admin = FALSE WHERE id = $1`, [actorId])
+        await blocker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [actorId])
+        await blocker.query('COMMIT')
+        const [response] = await Promise.all(pending)
+        pending.length = 0
+        expect(response.status).toBe(403)
+        expect(response.body.error.code).toBe('FORBIDDEN')
+        expect(await holdsRole(targetId, roleId)).toBe(true)
+        expect((await query(
+          'SELECT enabled, source FROM user_namespace_admissions WHERE user_id = $1',
+          [targetId],
+        )).rows).toEqual([])
+        const actor = await adminProfile(actorId)
+        expect(actor.profile.role).toBe('user')
+        expect(actor.roles.map((row) => row.role_id)).not.toContain('admin')
+      } finally {
+        await releaseBlocker(blocker, pending)
+        await query(
+          'DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])',
+          [ids],
+        )
         await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = $2', [ids, roleId])
         await restoreOwnedCatalog(catalog, [roleId], [])
         await removeOwnedUsers(ids)

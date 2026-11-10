@@ -490,28 +490,28 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
   }),
   // 备料分批拉取第一期 step 6a-2 (S6-2; step-6 design §3.5, §3.8, §5.1; register R-91) — THE RECOVERY of an unfinished
   // execution: the values-free executions list and the verify-and-close (PULL tier: the puller recovers with their own
-  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). `control: null` is deliberate:
-  // the recovery card that renders them is S6-3's (the PR-4 precedent: rows first, controls with their view).
+  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). Step 6a-3 (S6-3) assigned the
+  // control ids: they live on 「拉取待确认」's recovery card (StockPreparationRefreshRecoveryCard.vue).
   Object.freeze({
     capability: 'refresh.executions',
     code: STOCK_PREP_PULL,
     method: 'GET',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions',
-    control: null,
+    control: 'stock-prep-refresh-executions',
   }),
   Object.freeze({
     capability: 'refresh.recover',
     code: STOCK_PREP_PULL,
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover',
-    control: null,
+    control: 'stock-prep-refresh-recover',
   }),
   Object.freeze({
     capability: 'refresh.closeUnverified',
     code: STOCK_PREP_ADMIN,
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
-    control: null,
+    control: 'stock-prep-refresh-close-unverified',
   }),
   // 备料分批拉取第一期 step 6d-1b (S6-5; step-6 design §6.5; register R-91) — THE DOUBLED-SHEET CENSUS and THE REMNANT
   // ACKNOWLEDGEMENT, all ADMIN: the census answers objectId and (the project form) the PRIVATE component handles, and an
