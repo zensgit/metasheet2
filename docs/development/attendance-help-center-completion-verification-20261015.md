@@ -1,6 +1,6 @@
 # 考勤帮助中心补全：设计与核验
 
-日期：2026-10-15，优化：2026-10-16，更正：2026-11-10。只改帮助内容。业务逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
+日期：2026-10-15，优化：2026-10-16，更正：2026-11-10。#6426 合入后补记：2026-11-10。只改帮助内容、规格测试和本核验文档。业务逻辑、授权逻辑、迁移、工作流、vitest 配置、`src/index.ts`、`univer-meta.ts`、hash/pin 登记均未改。
 
 ## 2026-11-10 三处业务指引更正
 
@@ -33,6 +33,28 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 已改正：`punch` 简介、失败步骤、新 FAQ，以及 `errors` 中 `ATTENDANCE_PUNCH_ORDER_CONFLICT` 行。
 
 规格 `apps/web/tests/attendanceAdminGuide.spec.ts` 新增 3 个业务指引断言，原有结构/导航/搜索 5 项和锁定短语保持不变。
+
+## 2026-11-10 #6426 合入后的指引补记
+
+#6426 已以 squash `4b2cc28f3271076bf3fb147d650cdd8308787908` 合入 `main`。本轮从该 `origin/main` 切分支，只改帮助措辞、规格测试和本核验文档，不改授权逻辑或其他业务代码。行号对这份 `main` 树重新核对。
+
+### 1. 导出前重载：筛选比较、按钮禁用、函数拦截
+
+帮助不再写「改了日期要先重载再导出；筛选过期时导出会被拦住。」。`reports`（做完后怎么确认）和 `records` 统一为：「日期、组织或人员筛选变化后，请重新加载数据再导出。」这覆盖日期、组织和人员三项筛选，而不是只提日期。
+
+代码依据（`apps/web/src/views/AttendanceView.vue`，`4b2cc28f`）：
+
+- 筛选比较：`currentReportsQueryKey`（`12923-12929`）由 `from`、`to`、`orgId`、`userId` 组成。`reportsDataStale`（`12931-12933`）为 `reportsPartialDataStale`，或 `loadedReportsQueryKey` 与 `currentReportsQueryKey` 不一致。`reportsExportBlocked`（`12934-12935`）在报表不可用、尚未加载（`loadedReportsQueryKey` 为空），或筛选已过期时为真。
+- 按钮禁用：导出 CSV（`124`）为 `:disabled="exporting || loading || reportsExportBlocked"`；导出 Excel（`127`）为 `:disabled="exportingXlsx || loading || reportsExportBlocked"`。
+- 导出函数拦截：`exportCsv`（`24313-24326`）和 `exportXlsx`（`24399-24412`）在 `reportsExportBlocked` 时直接返回。不可用时提示「请先重载报表再导出。」；筛选已变时提示「筛选条件已变化，请先重载报表再导出。」。
+
+### 2. 服务端 `importer` 模板与界面差异（不写入操作帮助）
+
+服务端 `ATTENDANCE_ROLE_TEMPLATES` 另有 `importer` 模板：`attendance:read` + `attendance:import`（`packages/core-backend/src/routes/attendance-admin.ts:234-239`）。用户权限页的角色模板下拉只有员工、审批人、管理员：单人 `AttendanceView.vue:3834-3836`，批量 `3916-3918`。操作帮助故意不介绍 `importer`，因为界面没有入口，写进去会让用户找不到操作位置。
+
+### 3. 旧版管理员直接授权回退缺少导入权限（独立兼容性问题）
+
+这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`，走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。仅当该接口被当作旧部署回退时，才使用前端 `provisionRolePermissions`。其中 `admin` 为 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:admin`，不含 `attendance:import`（`AttendanceView.vue:12828-12832`）。调用点在 `22515`、`22569`、`22705`、`22798`。这是旧版兼容路径上的缺口，本补丁只在维护文档记录，不修改任何授权逻辑。
 
 ## 2026-10-16 第五轮
 
@@ -130,14 +152,14 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 | 出差 | 独立卡片：目的地时区与当地起止；`POST /api/attendance/business-trip-requests` | `index.cjs:37735` |
 | 加班 | 最小/取整/每日上限；跨一个当地午夜可拆；多于一个午夜拒绝；加班银行不收法定节假日 | `applyOvertimeRule` `index.cjs:11963-11977`；午夜拆分 `12284-12310`；加班规则页 `AttendanceView.vue` 加班规则区块；银行说明见设置区加班银行文案 |
 | 换班 | 已发布单日常规班；对方先同意；专用路由 | `AttendanceEmployeeShiftSwapRequestCard.vue:28-40`；同意/拒绝 `index.cjs:39115-39122` |
-| 查看记录 | 「我的申请」是本人；报表三个数字是当前页；导出忽略本地列显隐，上限 5000。查看他人不看导出范围 | 导出上限 `index.cjs:52832-52833` 与 `AttendanceView.vue:22913`；查看他人见上文第 1 条 |
+| 查看记录 | 「我的申请」是本人；报表三个数字是当前页；导出忽略本地列显隐，上限 5000。查看他人不看导出范围。日期、组织或人员筛选变化后须重新加载再导出 | 导出上限 `index.cjs:52832-52833` 与 `AttendanceView.vue:22913`；查看他人见上文第 1 条；筛选比较/按钮禁用/导出拦截见「#6426 合入后的指引补记」第 1 条（`AttendanceView.vue:12923-12935`、`124`、`127`、`24313-24326`、`24399-24412`） |
 | 班次 | 单段可排班；多段在「仅供预览」时不能分配/轮班/换班/调度/发布 | `AttendanceShiftSegmentsEditor.vue:114-126`；`AttendanceView.vue:28327-28331` |
 | 排班 | 草稿后发布；临时替班须再发布；高级排班与综合工时只读；合规阻断 `SHIFT_COMPLIANCE_CAP_EXCEEDED`；一天多班次默认关 | 合规应答 `index.cjs:19713-19724`，强制函数 `19665-19672`；一天多班次默认 `multiShiftDay.enabled: false`、`maxSlots: 3`（`index.cjs:449-454`）。`427-431` 现在是最小打卡间隔和排班编辑窗口，不是一天多班次 |
 | 排班范围 | 动作：查看、编辑、导入、导出、清空、审批、调度、提醒；无匹配范围 `SCHEDULER_SCOPE_FORBIDDEN`。导出动作不能查看他人报表 | 动作文案 `AttendanceView.vue:30891-30899`；拒绝 `index.cjs:26406-26413` |
 | 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47152-47158`；既有考勤组帮助 |
 | 请假类型 / 加班规则 | 「需要审批」只保存 | `attendanceApprovalOptionHint.ts:8-14` |
 | 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | 插入 `'pending'`：`index.cjs:34681-34694`；动态步骤抛出 `24412`；页面警告 `AttendanceView.vue:8065` |
-| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。旧的直接授权回退清单不含 `attendance:import` | 模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；下拉 `AttendanceView.vue:3834-3836`；回退清单 `12828-12832` |
+| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。服务端另有 `importer` 模板，操作帮助不介绍（界面无入口）。旧的直接授权回退清单不含 `attendance:import`，记为独立兼容性问题，本次不改授权逻辑 | 管理员模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；`importer` 模板 `234-239`；下拉 `AttendanceView.vue:3834-3836`、批量 `3916-3918`；回退清单 `12828-12832`。详见「#6426 合入后的指引补记」第 2、3 条 |
 | 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | 抛出 `index.cjs:20399`；页面 `AttendanceView.vue:26773`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
 | 时区提示 | 默认规则缺失、冻结上下文、非法时区等固定人话 | `attendanceTimezoneError.ts:3-22` |
 | 导入 | 令牌只在 `ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'` 时要求，10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | `index.cjs:5967-5968`；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |
@@ -145,7 +167,7 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 ## 测试
 
-相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。2026-11-10 起另有 3 个业务指引测试：查看他人报表权限与导出范围、补卡额度按工作日周期、打卡顺序冲突引导补卡/更正。
+相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。2026-11-10 起另有业务指引测试：查看他人报表权限与导出范围、补卡额度按工作日周期、打卡顺序冲突引导补卡/更正，以及日期/组织/人员筛选变化后须重新加载再导出（锁定新句，禁止旧句「筛选过期时导出会被拦住」）。既有锁定短语保持不变。
 
 2026-10-16 第五轮之后重跑，均通过：
 
@@ -161,6 +183,12 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 合并 `a6fbdca73`（#6838）之后又跑了同一组命令。行号没有变化。规格 8 个测试通过（153ms）；对改动文件的 eslint、`pnpm --filter @metasheet/web lint`、`pnpm --filter @metasheet/web type-check` 退出码都是 0。
 
 拉取 GitHub update-branch 后的 `5ebac5e64` 之后，只改了导出范围说明和管理员模板清单。规格 8 个测试通过（163ms）；对改动文件的 eslint、`pnpm --filter @metasheet/web lint`、`pnpm --filter @metasheet/web type-check` 退出码都是 0。
+
+#6426 合入 `4b2cc28f` 之后的本轮补记，在该 `main` 树上重跑：
+
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、9 个测试通过（171ms）。
+- `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts tests/attendanceAdminGuide.spec.ts --max-warnings=0`：退出码 0。
+
 
 ## 缺口清单
 
