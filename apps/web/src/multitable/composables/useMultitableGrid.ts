@@ -585,9 +585,10 @@ export function useMultitableGrid(opts: {
   // (which would answer 403). Absent ⇒ every cell writes through /patch, exactly as before. Range fill / paste
   // (patchRange) never consult it: those keep treating the cells as read-only.
   resolveManualCellWrite?: (recordId: string, fieldId: string) => ManualCellWrite | null
-  // A write that ends in a cell patch but starts outside patchCell (an attachment upload or delete: the field is
-  // patched once it is done). While this returns true, undo and redo do nothing, as during a cell patch: the
-  // history does not hold that write yet, so a step would replay an earlier, unrelated edit to the server.
+  // A write that starts outside patchCell and that the history does not hold yet (an attachment upload or delete;
+  // in the drawer, and on a grid upload, the field is patched once it is done). While this returns true, undo and
+  // redo do nothing, as during a cell patch (a step would replay an earlier, unrelated edit to the server), also
+  // for an edit made since it began.
   holdsHistory?: () => boolean
 }) {
   const client = opts.client ?? multitableClient

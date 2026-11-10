@@ -1204,8 +1204,9 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 // resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
 // the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
 const gridPageSizeUserId = ref<string | null>(null)
-// An attachment upload or delete ends in a cell patch (the field is patched once it is done), but its own
-// request is not one: the grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
+// An attachment upload or delete is a write the grid's history does not hold yet: the drawer, and a grid upload,
+// patch the field once it is done (the grid's cell editor patches a remove or clear when it closes; the form view
+// keeps it in its draft). The grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
 let attachmentWrites = 0
 async function holdingHistory<T>(write: () => Promise<T>): Promise<T> {
   attachmentWrites += 1

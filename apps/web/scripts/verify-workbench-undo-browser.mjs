@@ -53,7 +53,7 @@ const SCENARIOS = {
     await page.locator('#drawer_field_fld_name').click(); await page.keyboard.press('End'); await page.keyboard.type('XYZ'); await page.keyboard.press('Enter'); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('value', s.name, 'alphaXYZ'); check('grid', s.grid, { undo: 0, redo: 0 })
   },
-  async 'commit with Enter into the date input, Cmd+Z: the grid undo (undoes the commit)'(page) {
+  async 'commit with Enter into the date input, Cmd+Z: the grid undo (here it replays the grid\'s last cell edit; in the workbench, the commit)'(page) {
     await page.locator('#drawer_field_fld_note').click(); await page.keyboard.press('End'); await page.keyboard.type('Q'); await page.keyboard.press('Enter'); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('grid', s.grid, { undo: 1, redo: 0 }); check('replayed to the server', s.replays, 1)
   },
@@ -154,7 +154,7 @@ const SCENARIOS = {
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
     check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
   },
-  async 'an attachment upload, then a press on the details panel and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there replays the last cell edit'(page) {
+  async 'an attachment upload, then a press on the details panel and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there runs it (here it replays the grid\'s last cell edit; in the workbench, the upload)'(page) {
     const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
     const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
     await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })

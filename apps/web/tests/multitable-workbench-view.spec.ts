@@ -6427,6 +6427,42 @@ describe('MultitableWorkbench view wiring', () => {
       expect(n.el.value).toBe('X')
       expect(key(n.el, z)).toBe('swallow')
       expect(n.el.value).toBe('X')
+      // typed, deleted, typed again (each its own step): an undo drops nothing, each one goes back one step
+      const k1 = box()
+      edit(k1.el, 'a')
+      edit(k1.el, '', 'deleteContentBackward')
+      edit(k1.el, 'a')
+      for (const expected of ['', 'a', '']) {
+        expect(key(k1.el, z)).toBe('restored')
+        expect(k1.el.value).toBe(expected)
+      }
+      expect(key(k1.el, z)).toBe('swallow')
+      // a redo after a key that changed nothing drops that step only: the steps below it stay
+      const k2 = box()
+      edit(k2.el, 'a')
+      pause(2000)
+      edit(k2.el, 'ab')
+      pause(2000)
+      edit(k2.el, 'abc')
+      expect(key(k2.el, z)).toBe('restored')
+      noop(k2.el)
+      expect(key(k2.el, shiftZ)).toBe('restored')
+      expect(k2.el.value).toBe('abc')
+      for (const expected of ['ab', 'a', '']) {
+        expect(key(k2.el, z)).toBe('restored')
+        expect(k2.el.value).toBe(expected)
+      }
+      expect(key(k2.el, z)).toBe('swallow')
+      // the same at a commit that is then rejected (never settled): the steps below it stay
+      const k3 = box()
+      edit(k3.el, 'a')
+      pause(2000)
+      edit(k3.el, 'ab')
+      expect(key(k3.el, z)).toBe('restored')
+      noop(k3.el)
+      undo.beginCommit([k3.row])
+      expect(key(k3.el, z)).toBe('restored')
+      expect(k3.el.value).toBe('')
     })
 
     it('reset drops every control\'s history (the drawer showing another record reuses its controls, maybe with equal content)', () => {

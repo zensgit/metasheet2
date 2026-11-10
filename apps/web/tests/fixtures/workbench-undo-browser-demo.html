@@ -11,7 +11,9 @@
 // it (its control is disabled while the request is out, then the change lands). The grid's undo/redo
 // are counted; they run the REAL useMultitableGrid on a stand-in server whose history holds one earlier
 // cell edit, so a replay of it reaches the server (`replays`), and an attachment upload holds them the
-// way the workbench holds them (`holdsHistory`). The browser's own undo/redo (`input` with inputType
+// way the workbench holds them (`holdsHistory`). The drawer's patches do not enter that history (they
+// do not go through patchCell), so a replay here is always that earlier edit; in the workbench the
+// grid's undo after a drawer commit or an upload would undo that write itself. The browser's own undo/redo (`input` with inputType
 // historyUndo / historyRedo) are counted anywhere on the page. #grid-area stands for the grid (.meta-grid), #bulk-delete for its bulk bar's
 // Delete selected (disabled once pressed), #foot-select for its footer's aggregation select (gone once
 // its last aggregation is removed); the attachment field uploads the way the drawer does (its file input

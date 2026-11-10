@@ -29,8 +29,8 @@
  *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
  *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid itself and its
  *   cells, and the drawer's title and fields, whose edits are cell patches). A button, link or file input
- *   there, or anything inside one (Delete selected, a section toggle, a comment anchor, an upload), the
- *   grid's footer and bars, the drawer's comments (Send, Resolve), history, approval, task or attachments
+ *   there, or anything inside one (a section toggle, a comment anchor, an upload), the grid's footer and
+ *   bars (Delete selected), the drawer's comments (Send, Resolve), history, approval, task or attachments
  *   panels, a rename in the rail or a manager, a picker, or a press in a dialog does not make the page
  *   itself the grid's. Outside the workbench (a teleported dialog or popover, the app shell) nothing runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
@@ -87,9 +87,9 @@ export function drawerCommitContainers(fieldId: string, primaryFieldId: string |
  *  drawer the title and the fields panel (not the grid's footer or bars, nor the drawer's comments,
  *  history, approval, task or attachments panels). */
 const CELL_EDIT_SURFACES = '.meta-grid__cell, .meta-record-drawer__titleblock, .meta-record-drawer__fields'
-/** Controls on those parts whose action is not a cell patch (Send, Resolve, Delete selected, a section
- *  toggle…), or not yet one (a file input: its patch comes once the upload ends). One that disables or
- *  removes itself when pressed leaves focus on the page itself. */
+/** Controls on those parts whose action is not a cell patch (a section toggle, a comment anchor, a link…),
+ *  or not yet one (a file input: its patch comes once the upload ends). One that disables or removes itself
+ *  when pressed leaves focus on the page itself. */
 const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href], input[type="file"]'
 
 /** The workbench's `isGridSurface`: whether, after a press or focus on `node`, a chord on the page itself
