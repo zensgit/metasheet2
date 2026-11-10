@@ -2993,7 +2993,10 @@ export class AutomationService {
    * R-69 1b-ii save gate for `run_integration_job` (ADR §3.1, §3.5, §6.1 ①③, §6.2, §7; baseline §10.2.2 ②,
    * §10.2.4). Returns null when the rule carries no such action (nothing touched); otherwise the rule's action
    * columns with the SERVER-STAMPED binding, or throws:
-   *   - nested occurrence (inside a branch) → 400;
+   *   - nested occurrence (inside a branch) → 400. R-69 I6d: decided by POSITION (the branch lists of the pair and of
+   *     every `actions[i]`, plus the occurrence count of `allActions`, the caller's flattening of the same rule) —
+   *     never by object identity, so the rule editor's shape (`actions[]` with `actions[0]` mirrored into the pair)
+   *     reaches every check below, for EVERY occurrence, and both persisted columns are stamped;
    *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);
    *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
    *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
@@ -3305,7 +3308,11 @@ export class AutomationService {
     return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), INTEGRATION_RUN_FINISHED_TRIGGER)
   }
 
-  /** Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. */
+  /**
+   * Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. No flattened
+   * list exists on this path (R-69 I6d): the position walk alone decides a nested occurrence — a stored row that
+   * carries one never passed the save gate, and its trigger is not edited forward.
+   */
   private runIntegrationJobTriggerCouplingError(
     triggerType: string,
     triggerConfig: Record<string, unknown> | null,
@@ -3313,7 +3320,7 @@ export class AutomationService {
     actionConfig: Record<string, unknown> | null,
     actions: AutomationAction[] | null,
   ): string | null {
-    const { occurrences, error } = collectRunIntegrationJobOccurrences(actionType, actionConfig, actions, actions)
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(actionType, actionConfig, actions, null)
     if (error) return error
     if (occurrences.length === 0) return null
     return validateRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)

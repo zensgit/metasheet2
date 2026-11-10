@@ -49,7 +49,7 @@ import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { up as leasesUp } from '../../src/db/migrations/zzzz20261106111100_create_automation_job_leases'
 import { down as runFinishedTriggerDown, up as runFinishedTriggerUp } from '../../src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type'
-import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { AutomationRuleValidationError, AutomationService, parseCreateRuleInput, parseUpdateRuleInput, toExecutorRule } from '../../src/multitable/automation-service'
 import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
 import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
 import { clearIntegrationRunFinishedSinkForTest, registerIntegrationRunFinishedSink } from '../../src/core/integration-run-events'
@@ -437,6 +437,105 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     expect(await intentRow(intentOf(`exec_frozen_A_${RUN}`))).toMatchObject({ status: 'pending' })
     expect(await leaseRow()).toMatchObject({ fence: '2', holder: null })
     await Promise.all(A.tracked)
+  }, 30_000)
+
+  // ── R-69 I6d: the EDITOR's wire shape on the real tables ─────────────────────────────────────────────────────
+  //
+  // The rule editor posts the job in `actions[]` and mirrors `actions[0]` into the legacy pair. The save gate used to
+  // refuse that shape as "nested" (it compared object identity against a list the service had already copied), so no
+  // case before this one put an `actions[]` occurrence through a real INSERT / UPDATE. Here the wire body (JSON
+  // round-tripped: no shared object) goes through the route's own parsers into the real createRule / updateRule.
+  test('R-69 I6d: the editor wire shape (actions[] + its mirrored pair) saves on the real tables with BOTH JSONB columns stamped, is re-stamped from the stored creator on edit, refuses nested and wrong-project occurrences without a row or a change, and its stored actions[0] runs once', async () => {
+    const principalId = `svc6d_${RUN}`
+    const editorId = `editor6d_${RUN}`
+    const project = `P6D-${RUN}`
+    const sheet = `sheet6d_${RUN}`
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc6d'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await registerRuleSheet(sheet, TENANT, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+
+    type WireAction = { type: string; config: Record<string, unknown> }
+    const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+    const jobConfig = (projectNo: string, extra: Record<string, unknown> = {}) => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 60_000, ...extra })
+    const job = (projectNo: string, extra: Record<string, unknown> = {}): WireAction => ({ type: 'run_integration_job', config: jobConfig(projectNo, extra) })
+    const other: WireAction = { type: 'update_record', config: { fields: { fld_syn: 'x' } } }
+    /** MetaAutomationRuleEditor.vue buildPayload: the action list, the pair mirrored from actions[0], the trigger twice. */
+    const editorBody = (actions: WireAction[], overrides: Record<string, unknown> = {}) => {
+      const triggerConfig = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }
+      const jobMode = actions.some((action) => action.type === 'condition_branch')
+      return wire({
+        name: `i6d_${RUN}`, triggerType: 'schedule.cron', triggerConfig, trigger: { type: 'schedule.cron', config: triggerConfig },
+        actions, actionType: actions[0].type, actionConfig: actions[0].config, executionMode: jobMode ? 'workflow_job_v1' : null, ...overrides,
+      })
+    }
+    const nestedIn = (nested: WireAction): WireAction => ({
+      type: 'condition_branch',
+      config: { branches: [{ key: 'b1', conditions: { conjunction: 'AND', conditions: [] }, actions: [other] }], defaultBranch: { key: 'otherwise', actions: [nested] } },
+    })
+    const foreignBinding = { principalId, tenantId: `${TENANT}_other` }
+    const NESTED = 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)'
+    const storedRow = async (ruleId: string) => (await q(`SELECT name, action_type, action_config, actions, created_by FROM automation_rules WHERE id = $1`, [ruleId])).rows[0] as
+      { name: string; action_type: string; action_config: Record<string, unknown>; actions: WireAction[]; created_by: string }
+    const rulesOnSheet = async () => (await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [sheet])).rows.length
+    const refusalOf = (work: Promise<unknown>) => work.then(() => null, (error: unknown) => error as Error)
+
+    // a NESTED occurrence that brings its own binding (another tenant): refused, nothing inserted
+    const nestedRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(editorBody([other, nestedIn(job(project, { binding: foreignBinding }))]), principalId)))
+    expect(nestedRefusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(nestedRefusal!.message).toBe(NESTED)
+    // an actions[] occurrence that names a project the sheet is not registered to: refused by the real registry
+    const projectRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(editorBody([other, job(`${project}-x`)]), principalId)))
+    expect(projectRefusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(projectRefusal!.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
+    expect(await rulesOnSheet()).toBe(0)
+
+    // the editor shape itself: saved, BOTH columns carry the server binding, the client one is gone
+    const rule = await service.createRule(sheet, parseCreateRuleInput(editorBody([job(project, { binding: foreignBinding })]), principalId))
+    try {
+      const stamped = { ...jobConfig(project), binding: { principalId, tenantId: TENANT } }
+      const inserted = await storedRow(rule.id)
+      expect(inserted.action_type).toBe('run_integration_job')
+      expect(inserted.action_config).toEqual(stamped)
+      expect(inserted.actions).toEqual([{ type: 'run_integration_job', config: stamped }])
+      expect(inserted.created_by).toBe(principalId)
+
+      // an edit by someone else, through the real UPDATE … RETURNING: re-stamped from the STORED creator
+      const updated = await service.updateRule(
+        rule.id, sheet,
+        parseUpdateRuleInput(editorBody([job(project, { timeoutMs: 120_000, binding: { principalId: editorId, tenantId: `${TENANT}_other` } })], { name: `i6d_${RUN}_renamed` }))!,
+        editorId,
+      )
+      expect(updated).not.toBeNull()
+      const restamped = { ...stamped, timeoutMs: 120_000 }
+      const afterEdit = await storedRow(rule.id)
+      expect(afterEdit.name).toBe(`i6d_${RUN}_renamed`)
+      expect(afterEdit.action_config).toEqual(restamped)
+      expect(afterEdit.actions).toEqual([{ type: 'run_integration_job', config: restamped }])
+      expect(afterEdit.created_by).toBe(principalId)
+      expect(JSON.stringify(afterEdit)).not.toContain(editorId)
+
+      // an edit that moves the job into a branch, or names another project in actions[]: refused, the row is unchanged
+      const moved = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(editorBody([other, nestedIn(job(project))]))!, editorId))
+      expect(moved!.message).toBe(NESTED)
+      const renamedProject = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(wire({ actions: [job(`${project}-x`)] }))!, editorId))
+      expect(renamedProject!.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
+      expect(await storedRow(rule.id)).toEqual(afterEdit)
+
+      // what the executor runs is the stored actions[0]: once, to the port, for the one project
+      const runnable = toExecutorRule(updated!).actions
+      expect(runnable).toHaveLength(1)
+      const { port, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }])
+      const X = executorWith(port, poolTransaction, { leaseTtlMs: 2_000 }, { resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { ...PRINCIPAL, id: principalId } }) })
+      const step = await X.run(`exec_i6d_${RUN}`, runnable[0].config as unknown as typeof CONFIG, sheet)
+      expect(step).toMatchObject({ status: 'success', output: { outcome: 'succeeded' } })
+      expect(state.calls).toBe(1)
+      expect(state.inputs[0].job).toEqual({ kind: 'stock_prep_pull', projectNo: project })
+      expect(state.inputs[0].context.authenticatedTenantId).toBe(TENANT)
+    } finally {
+      service.unregisterSchedule(rule.id)
+      await q(`DELETE FROM automation_rules WHERE id = $1`, [rule.id]).catch(() => undefined)
+    }
   }, 30_000)
 
   test("R-69 I6a (ADR §3.1 + §6.5): the save refuses ANOTHER tenant's registered sheet (nothing written); a trigger after the rule sheet is ARCHIVED is skipped(rule_sheet_unregistered) with 0 port calls, no intent row, no lease", async () => {

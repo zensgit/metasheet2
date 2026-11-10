@@ -194,9 +194,58 @@ export interface RunIntegrationJobOccurrence {
   config: Record<string, unknown>
 }
 
+const RUN_INTEGRATION_JOB_NESTED_ERROR = 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)'
+
 /**
- * Every top-level occurrence of the action. NESTED occurrences (inside condition_branch / parallel_branch
- * branches) are refused: the job's lifecycle (lease, heartbeat, shutdown drain) is wired for top-level steps.
+ * R-69 I6d — is the action carried inside a BRANCH LIST of this action config, at any depth? The branch lists are
+ * `branches[*].actions[*]` and `defaultBranch.actions[*]`: the two lists the executor dispatches branch steps from
+ * (automation-executor.ts executeConditionBranch / executeParallelBranch). Decided by POSITION only — the object's
+ * identity says nothing (the service validates copies). Iterative, each object visited once: no recursion depth to
+ * exhaust, and a config that is not an object, a list that is not a list or an entry that is not an action holds
+ * nothing the executor could run.
+ */
+function branchListsCarryRunIntegrationJob(config: unknown): boolean {
+  const pending: unknown[] = [config]
+  const visited = new WeakSet<object>()
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (!isRecord(current) || visited.has(current)) continue
+    visited.add(current)
+    const lists: unknown[] = []
+    if (Array.isArray(current.branches)) {
+      for (const branch of current.branches) if (isRecord(branch)) lists.push(branch.actions)
+    }
+    if (isRecord(current.defaultBranch)) lists.push(current.defaultBranch.actions)
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue
+      for (const nested of list) {
+        if (!isRecord(nested)) continue
+        if (nested.type === RUN_INTEGRATION_JOB_ACTION_TYPE) return true
+        pending.push(nested.config)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Every TOP-LEVEL occurrence of the action — the legacy pair (`actionConfig`) and each entry of the rule's `actions`
+ * list (`actions[i].config`) — and the refusal of every NESTED one.
+ *
+ * Top-level only, because the save gate's binding stamp and per-occurrence checks (closed config, the rule-sheet
+ * guard) cover exactly those positions, and the job's lifecycle (lease, heartbeat, shutdown drain) is wired for
+ * top-level steps. A nested occurrence would run with whatever `binding` its author wrote, and that binding's tenant
+ * also routes the step's integration.run_finished summaries.
+ *
+ * R-69 I6d: NESTED is decided by POSITION, two independent ways, either one refusing:
+ *   1. the walk — the action sits in a branch list (`branches[*].actions[*]` / `defaultBranch.actions[*]`, any depth)
+ *      of the pair's config or of any `actions[i].config`, whatever that action's type (a superset of what the
+ *      executor dispatches from: over-refusal is the fail-closed side);
+ *   2. the flattening count — `allActions`, when given, is the service's own flattening of the same rule
+ *      (collectNestedAutomationActions: every `actions[i]` plus every action it found nested). More occurrences
+ *      there than at the top level of `actions` means the service knows a nesting this walk does not.
+ * It was decided by object identity against `allActions` before, and the service always hands in COPIES — so every
+ * `actions[]` occurrence, the shape the rule editor sends, was refused as nested. `allActions` null ⇒ only the walk.
  */
 export function collectRunIntegrationJobOccurrences(
   actionType: string,
@@ -205,22 +254,24 @@ export function collectRunIntegrationJobOccurrences(
   allActions: AutomationAction[] | null | undefined,
 ): { occurrences: RunIntegrationJobOccurrence[]; error: string | null } {
   const occurrences: RunIntegrationJobOccurrence[] = []
+  let nested = branchListsCarryRunIntegrationJob(actionConfig)
   if (actionType === RUN_INTEGRATION_JOB_ACTION_TYPE) {
     occurrences.push({ path: 'actionConfig', config: isRecord(actionConfig) ? actionConfig : {} })
   }
-  const topLevel = new Set<unknown>()
+  let topLevelInActions = 0
   for (const [index, action] of (actions ?? []).entries()) {
-    topLevel.add(action)
-    if (action && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+    if (!action) continue
+    if (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+      topLevelInActions += 1
       occurrences.push({ path: `actions[${index}].config`, config: isRecord(action.config) ? action.config : {} })
     }
+    if (branchListsCarryRunIntegrationJob(action.config)) nested = true
   }
-  for (const action of allActions ?? []) {
-    if (action && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE && !topLevel.has(action)) {
-      return { occurrences, error: 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)' }
-    }
+  if (Array.isArray(allActions)) {
+    const flattened = allActions.filter((action) => action && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE).length
+    if (flattened > topLevelInActions) nested = true
   }
-  return { occurrences, error: null }
+  return { occurrences, error: nested ? RUN_INTEGRATION_JOB_NESTED_ERROR : null }
 }
 
 /** A fresh, opaque holder id for a job-lease claim (the executor uses the execution id + a suffix). */
