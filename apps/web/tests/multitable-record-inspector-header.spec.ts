@@ -1218,4 +1218,35 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(pressThenChord(title())).toBe(1)
     expect(pressThenChord(container.querySelector('.meta-comment-composer__submit'))).toBe(0)
   })
+
+  it('isWorkbenchGridSurface on the REAL drawer\'s attachments: a press on a file input (the fields panel\'s or the attachments tab\'s; disabled for the whole upload) never leaves Cmd+Z on the page to the grid', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const fields: MetaField[] = [...FIELDS, { id: 'fld_files', name: 'Files', type: 'attachment' } as MetaField]
+    const record = { ...RECORD, data: { ...RECORD.data, fld_files: [] } } as MetaRecord
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record, fields, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+        uploadFn: vi.fn(() => new Promise(() => {})),
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]'))).toBe(0)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel input[type="file"]'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel'))).toBe(0)
+  })
 })
