@@ -206,6 +206,9 @@ function assertParallelWorkflow(doc) {
         const departureVouchingAddition = '  tests/integration/directory-departure-vouching.db.test.ts \\\n'
         assert.equal(step.run.split(departureVouchingAddition).length - 1, 1, 'Departure vouching DB suite must run exactly once')
         assert.ok(step.run.includes(deferAddition + departureVouchingAddition), 'Keep the departure vouching suite right after the delivery deferral suite')
+        const feishuSmokeAddition = '  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n'
+        assert.equal(step.run.split(feishuSmokeAddition).length - 1, 1, 'Feishu mock harness smoke DB suite must run exactly once')
+        assert.ok(step.run.includes(departureVouchingAddition + feishuSmokeAddition), 'Keep the Feishu mock harness smoke suite right after the departure vouching suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -213,6 +216,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(membershipGateAddition, '')
         step.run = step.run.replace(proofAddition, '')
         step.run = step.run.replace(goldenParityAddition, '')
+        step.run = step.run.replace(feishuSmokeAddition, '')
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
@@ -316,6 +320,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capabilities.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/attendance-notification-defer.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/attendance-notification-defer.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
