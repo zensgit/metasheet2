@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Logger } from '../../src/core/logger'
+import { importSpecifiers } from '../helpers/import-edge-allowlist'
 import {
   buildWeComExternalKey,
   createWeComIdentityAdapter,
@@ -80,13 +81,16 @@ function loginSpec(over: WeComStubSpec = {}): WeComStubSpec {
   return { userinfo: ok(userinfoPayload()), member: ok(memberPayload()), ...over }
 }
 
-function setup(spec: WeComStubSpec, fetchWrapper?: (fetchFn: typeof fetch) => typeof fetch) {
+function setup(spec: WeComStubSpec, fetchWrapper?: (fetchFn: typeof fetch) => typeof fetch, baseUrl?: string) {
   const stub = createWeComFetchStub(spec)
   const fetchFn = fetchWrapper ? fetchWrapper(stub.fetchFn) : stub.fetchFn
   const requestOptions: WeComRequestOptions = { fetchFn, ...seams(createClock()) }
-  const adapter = createWeComIdentityAdapter({ redirectUri: REDIRECT, requestOptions })
+  const adapter = createWeComIdentityAdapter({ redirectUri: REDIRECT, requestOptions, baseUrl })
   return { stub, adapter, requestOptions }
 }
+
+/** Test-name prefix for an assertion that rests on a platform fact not yet confirmed against a real tenant. */
+const assumes = (flag: boolean): string => (flag ? 'assumes: ' : '')
 
 const exchange = (adapter: WeComIdentityAdapter, code = CODE) =>
   adapter.exchangeCode({ connection: CONNECTION, credentials: CREDENTIALS, code })
@@ -241,12 +245,14 @@ describe('WeCom identity adapter: authorization URL', () => {
     }
 
     it('does not echo the rejected value', () => {
+      let thrown: unknown
       try {
         normalizeWeComLoginRedirectUri('https://user:secret-canary@app.example.test/cb')
-        throw new Error('expected a rejection')
       } catch (error) {
-        expect(describeError(error)).not.toContain('secret-canary')
+        thrown = error
       }
+      expect(thrown).toBeInstanceOf(WeComRedirectUriError)
+      expect(describeError(thrown)).not.toContain('secret-canary')
     })
 
     it('normalises the host and a default port', () => {
@@ -319,12 +325,15 @@ describe('WeCom identity adapter: login-code exchange shapes', () => {
     ['an empty openid', ok({ errcode: 0, openid: '' })],
     ['both userid and openid', ok(userinfoPayload({ openid: 'fixture-openid-canary' }))],
     ['both userid and external_userid', ok(userinfoPayload({ external_userid: 'fixture-external-canary' }))],
+    ['no errcode', ok({ userid: 'Zhang.San' })],
+    ['a non-numeric errcode', ok({ errcode: 'ok', userid: 'Zhang.San' })],
+    ['a null errcode', ok({ errcode: null, userid: 'Zhang.San' })],
     ['an array body', ok([])],
     ['a null body', ok(null)],
     ['a body that is not JSON', rawBody('<html>gateway</html>')],
   ]
   for (const [name, responder] of faults) {
-    it(`treats ${name} as an incomplete response and never as a pass`, async () => {
+    it(`${assumes(name.startsWith('both userid'))}treats ${name} as an incomplete response and never as a pass`, async () => {
       const { stub, adapter } = setup({ userinfo: responder })
       expectUnavailable(await exchange(adapter), 'incomplete_response')
       expect(stub.count('userinfo')).toBe(1)
@@ -413,7 +422,7 @@ describe('WeCom identity adapter: userid rules', () => {
     ['x'.repeat(64), 'x'.repeat(64)],
   ]
   for (const [userid, key] of accepted) {
-    it(`keeps ${userid.slice(0, 20)} as the provider id and lower-cases the key`, async () => {
+    it(`assumes: keeps ${userid.slice(0, 20)} as the provider id and lower-cases the key`, async () => {
       const { stub, adapter } = setup(loginSpec({ userinfo: ok(userinfoPayload({}, userid)), member: ok(memberPayload(userid)) }))
       const result = await exchange(adapter)
       expect(result.ok).toBe(true)
@@ -425,7 +434,7 @@ describe('WeCom identity adapter: userid rules', () => {
   }
 
   for (const userid of ['corp/zhangsan', 'x'.repeat(65), 'bad char', '_lead', '-lead', '.lead', 'a/b', 'a;b', 'zhang\nsan']) {
-    it(`rejects ${JSON.stringify(userid.slice(0, 20))} without an online check`, async () => {
+    it(`assumes: rejects ${JSON.stringify(userid.slice(0, 20))} without an online check`, async () => {
       const { stub, adapter } = setup(loginSpec({ userinfo: ok(userinfoPayload({}, userid)) }))
       expectRejected(await exchange(adapter), 'subject_invalid')
       expect(stub.count('member')).toBe(0)
@@ -438,7 +447,7 @@ describe('WeCom identity adapter: userid rules', () => {
     expect(stub.count('member')).toBe(0)
   })
 
-  it('normalises with the member-id rule', () => {
+  it('assumes: normalises with the member-id rule', () => {
     expect(normalizeWeComSubjectKey('Zhang.San')).toBe('zhang.san')
     expect(() => normalizeWeComSubjectKey('corp/zhangsan')).toThrow(WeComInvalidInputError)
     expect(() => normalizeWeComSubjectKey('')).toThrow(WeComInvalidInputError)
@@ -470,8 +479,9 @@ describe('WeCom identity adapter: online member check', () => {
     ['an unknown errcode', errcodeReply(99999), 'provider_error'],
     ['HTTP 403', httpStatus(403), 'provider_error'],
   ]
+  const assumedDenials = new Set(['60011', '50002', '60123', 'a different echoed userid'])
   for (const [name, responder, reason] of denials) {
-    it(`denies with ${reason} on ${name} and returns no subject`, async () => {
+    it(`${assumes(assumedDenials.has(name))}denies with ${reason} on ${name} and returns no subject`, async () => {
       const { stub, adapter } = setup(loginSpec({ member: responder }))
       const result = await exchange(adapter)
       expectRejected(result, reason)
@@ -486,7 +496,7 @@ describe('WeCom identity adapter: online member check', () => {
     expectRejected(await exchange(adapter), 'config_fault', 'trusted_ip')
   })
 
-  it('passes status 1 when the echo differs only in case, keeping the provider case', async () => {
+  it('assumes: passes status 1 when the echo differs only in case, keeping the provider case', async () => {
     const { adapter } = setup(loginSpec({ member: ok(memberPayload('zhang.SAN')) }))
     const result = await exchange(adapter)
     expect(result.ok).toBe(true)
@@ -497,6 +507,8 @@ describe('WeCom identity adapter: online member check', () => {
     ['a missing status', ok(memberPayload('Zhang.San', 1, { status: undefined }))],
     ['a string status', ok(memberPayload('Zhang.San', '1'))],
     ['a missing userid', ok({ errcode: 0, status: 1 })],
+    ['no errcode', ok({ userid: 'Zhang.San', status: 1 })],
+    ['a non-numeric errcode', ok({ errcode: 'ok', userid: 'Zhang.San', status: 1 })],
     ['an array body', ok([])],
     ['a body that is not JSON', rawBody('nope')],
   ]
@@ -590,7 +602,7 @@ describe('WeCom identity adapter: stale token and single attempt', () => {
     })
   }
 
-  it('turns a consumed code after the refetch into a code rejection', async () => {
+  it('assumes: turns a consumed code after the refetch into a code rejection', async () => {
     const { stub, adapter } = tokenTracking(loginSpec({ userinfo: (call) => (call === 1 ? errcodeReply(42001) : errcodeReply(40029)) }))
     expectRejected(await exchange(adapter), 'code_invalid')
     expect(stub.count('userinfo')).toBe(2)
@@ -638,12 +650,13 @@ describe('WeCom identity adapter: error mapping', () => {
     ['errcode -1', errcodeReply(-1), 'unavailable', 'busy'],
     ['HTTP 500', httpStatus(500), 'unavailable', 'busy'],
     ['HTTP 429', httpStatus(429), 'unavailable', 'rate_limited'],
+    ['HTTP 408', httpStatus(408), 'unavailable', 'busy'],
     ['a timeout', failWith(abortError()), 'unavailable', 'timeout'],
     ['a network failure', failWith(new Error('socket hang up')), 'unavailable', 'transport'],
     ['40013', errcodeReply(40013), 'rejected', 'config_fault', 'invalid_corp'],
     ['40056', errcodeReply(40056), 'rejected', 'config_fault', 'invalid_agent'],
     ['41001', errcodeReply(41001), 'rejected', 'config_fault', 'config_fault'],
-    ['301002', errcodeReply(301002), 'rejected', 'config_fault', 'config_fault'],
+    ['301002', errcodeReply(301002), 'rejected', 'config_fault', 'invalid_agent'],
     ['60020', errcodeReply(60020), 'rejected', 'config_fault', 'trusted_ip'],
     ['50001', errcodeReply(50001), 'rejected', 'config_fault', 'redirect_domain'],
     ['48001', errcodeReply(48001), 'rejected', 'permission_fault'],
@@ -654,8 +667,9 @@ describe('WeCom identity adapter: error mapping', () => {
     ['an unknown errcode', errcodeReply(99999), 'rejected', 'provider_error'],
     ['HTTP 403', httpStatus(403), 'rejected', 'provider_error'],
   ]
+  const assumedExchange = new Set(['HTTP 429', '60011'])
   for (const [name, responder, outcome, reason, adminReason] of exchangeOutcomes) {
-    it(`maps ${name} on getuserinfo to ${outcome} ${reason}`, async () => {
+    it(`${assumes(assumedExchange.has(name))}maps ${name} on getuserinfo to ${outcome} ${reason}`, async () => {
       const { adapter } = setup(loginSpec({ userinfo: responder }))
       const result = await exchange(adapter)
       if (outcome === 'rejected') expectRejected(result, reason, adminReason)
@@ -669,6 +683,10 @@ describe('WeCom identity adapter: error mapping', () => {
     ['a network failure', failWith(new Error('socket hang up')), 'unavailable', 'token_unavailable', undefined, 3],
     ['45033', errcodeReply(45033), 'unavailable', 'token_unavailable', undefined, 3],
     ['45009', errcodeReply(45009), 'unavailable', 'token_unavailable', undefined, 1],
+    ['HTTP 408', httpStatus(408), 'unavailable', 'token_unavailable', undefined, 1],
+    ['HTTP 429', httpStatus(429), 'unavailable', 'token_unavailable', undefined, 1],
+    ['HTTP 403', httpStatus(403), 'rejected', 'config_fault', 'config_fault', 1],
+    ['HTTP 404', httpStatus(404), 'rejected', 'config_fault', 'config_fault', 1],
     ['a malformed token body', ok({ errcode: 0 }), 'unavailable', 'token_unavailable', undefined, 1],
     ['40013', errcodeReply(40013), 'rejected', 'config_fault', 'invalid_corp', 1],
     ['60020', errcodeReply(60020), 'rejected', 'config_fault', 'trusted_ip', 1],
@@ -698,7 +716,14 @@ describe('WeCom identity adapter: error mapping', () => {
     const { adapter } = setup(loginSpec())
     await expect(adapter.exchangeCode({ connection: { ...CONNECTION, corpId: 'bad corp' }, credentials: CREDENTIALS, code: CODE })).rejects.toBeInstanceOf(WeComInvalidInputError)
     await expect(adapter.exchangeCode({ connection: { ...CONNECTION, wecomAgentId: '0' }, credentials: CREDENTIALS, code: CODE })).rejects.toBeInstanceOf(WeComInvalidInputError)
-    await expect(adapter.exchangeCode({ connection: CONNECTION, credentials: { corpSecret: '' }, code: CODE })).rejects.toBeInstanceOf(WeComInvalidInputError)
+  })
+
+  it('denies a connection without a secret as a configuration fault, before any request', async () => {
+    for (const corpSecret of ['', undefined as unknown as string]) {
+      const { stub, adapter } = setup(loginSpec())
+      expectRejected(await adapter.exchangeCode({ connection: CONNECTION, credentials: { corpSecret }, code: CODE }), 'config_fault', 'config_fault')
+      expect(stub.requests).toHaveLength(0)
+    }
   })
 })
 
@@ -749,6 +774,95 @@ describe('WeCom identity adapter: nothing leaves through errors, results or logs
   }
 })
 
+describe('WeCom identity adapter: request addressing', () => {
+  const recordRaw = (raw: string[]) => (fetchFn: typeof fetch) => ((input: unknown, init?: RequestInit) => {
+    raw.push(String(input))
+    return fetchFn(input as Parameters<typeof fetch>[0], init)
+  }) as typeof fetch
+
+  it('percent-encodes the access token and the userid of both calls', async () => {
+    const raw: string[] = []
+    const { adapter } = setup(
+      loginSpec({
+        token: ok({ errcode: 0, errmsg: 'ok', access_token: 'tok&en=1#x+y', expires_in: 7200 }),
+        userinfo: ok(userinfoPayload({}, 'a@b.c')),
+        member: ok(memberPayload('a@b.c')),
+      }),
+      recordRaw(raw),
+    )
+    expect((await exchange(adapter)).ok).toBe(true)
+    const login = raw.find((url) => url.includes('/auth/getuserinfo'))!
+    const member = raw.find((url) => url.includes('/user/get'))!
+    expect(login).toContain('access_token=tok%26en%3D1%23x%2By&code=')
+    expect(member).toContain('access_token=tok%26en%3D1%23x%2By&userid=a%40b.c')
+    expect(new URL(member).searchParams.get('access_token')).toBe('tok&en=1#x+y')
+  })
+
+  it('sends every request to the origin fixed at construction, whatever the connection or credentials carry', async () => {
+    const hostile = { baseUrl: 'https://attacker.example.test', base_url: 'https://attacker.example.test' }
+    const { stub, adapter } = setup(loginSpec(), undefined, 'https://gateway.example.test/')
+    const result = await adapter.exchangeCode({
+      connection: { ...CONNECTION, ...hostile },
+      credentials: { ...CREDENTIALS, ...hostile },
+      code: CODE,
+    })
+    expect(result.ok).toBe(true)
+    expect(stub.requests.map((request) => request.route)).toEqual(['gettoken', 'userinfo', 'member'])
+    expect(new Set(stub.requests.map((request) => request.origin))).toEqual(new Set(['https://gateway.example.test']))
+  })
+
+  it('uses the default host when no base address is configured, whatever the credentials carry', async () => {
+    const { stub, adapter } = setup(loginSpec())
+    await adapter.exchangeCode({
+      connection: CONNECTION,
+      credentials: { ...CREDENTIALS, baseUrl: 'https://attacker.example.test' } as typeof CREDENTIALS,
+      code: CODE,
+    })
+    expect(stub.requests).toHaveLength(3)
+    expect(new Set(stub.requests.map((request) => request.origin))).toEqual(new Set(['https://qyapi.weixin.qq.com']))
+  })
+
+  it('does not share an app token between two base addresses', async () => {
+    const first = setup(loginSpec(), undefined, 'https://gateway-a.example.test')
+    const second = setup(loginSpec(), undefined, 'https://gateway-b.example.test')
+    expect((await exchange(first.adapter)).ok).toBe(true)
+    expect((await exchange(second.adapter)).ok).toBe(true)
+    expect(first.stub.count('gettoken')).toBe(1)
+    expect(second.stub.count('gettoken')).toBe(1)
+  })
+})
+
+describe('WeCom identity adapter: failure stage after a stale token', () => {
+  const refetchFails: Array<[string, WeComStubSpec]> = [
+    ['the exchange', {
+      userinfo: errcodeReply(42001),
+      token: (call) => (call === 1 ? ok({ errcode: 0, errmsg: 'ok', access_token: WECOM_FIXTURE_TOKEN, expires_in: 7200 }) : httpStatus(500)),
+    }],
+    ['the member check', {
+      userinfo: ok(userinfoPayload()),
+      member: errcodeReply(42001),
+      token: (call) => (call === 1 ? ok({ errcode: 0, errmsg: 'ok', access_token: WECOM_FIXTURE_TOKEN, expires_in: 7200 }) : httpStatus(500)),
+    }],
+  ]
+  for (const [name, spec] of refetchFails) {
+    it(`reports a failing token refetch for ${name} as token_unavailable`, async () => {
+      const { stub, adapter } = setup(spec)
+      expectUnavailable(await exchange(adapter), 'token_unavailable')
+      expect(stub.count('userinfo')).toBe(1)
+      expect(stub.count('gettoken')).toBeGreaterThan(1)
+    })
+  }
+
+  it('marks the error of a failing refetch as token-stage at the client', async () => {
+    const stub = createWeComFetchStub({
+      userinfo: errcodeReply(42001),
+      token: (call) => (call === 1 ? ok({ errcode: 0, errmsg: 'ok', access_token: WECOM_FIXTURE_TOKEN, expires_in: 7200 }) : httpStatus(500)),
+    })
+    const error = await exchangeWeComLoginCode(TOKEN_CONFIG, CODE, { fetchFn: stub.fetchFn, ...seams(createClock()) }).catch((e) => e)
+    expect(isWeComTokenStageError(error)).toBe(true)
+  })
+})
+
 describe('WeCom identity adapter: zero real network and source boundaries', () => {
   const source = () => fs.readFileSync(ADAPTER_SOURCE, 'utf8')
 
@@ -759,11 +873,10 @@ describe('WeCom identity adapter: zero real network and source boundaries', () =
 
   it('holds no HTTP call, provider host, environment read, database or route import', () => {
     const text = source()
-    expect(text).not.toMatch(/(^|[^.\w])fetch\(/m)
+    expect(text).not.toMatch(/\bfetch\b/)
     expect(text).not.toContain('qyapi.weixin.qq.com')
     expect(text).not.toContain('process.env')
-    const imports = [...text.matchAll(/^import[\s\S]*?from '([^']+)'/gm)].map((match) => match[1])
-    expect(imports).toEqual(['../../integrations/wecom/client'])
+    expect(importSpecifiers(text, ADAPTER_SOURCE)).toEqual(['../../integrations/wecom/client'])
   })
 
   it('writes neither a message nor a stack of an error and logs nothing', () => {

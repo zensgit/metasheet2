@@ -1034,6 +1034,7 @@ export type WeComLoginCodeResult =
   | { kind: 'non_member' }
 
 function parseLoginCodeResponse(payload: Record<string, unknown>): WeComLoginCodeResult {
+  if (readErrcode(payload) !== 0) throw new WeComIncompleteResponseError('login')
   const userid = payload.userid
   const otherIdentifiers = [payload.openid, payload.external_userid].filter((value) => !isAbsent(value))
   if (!otherIdentifiers.every((value) => typeof value === 'string' && value.length > 0)) {
@@ -1082,6 +1083,7 @@ export interface WeComMemberStatus {
 }
 
 function parseMemberResponse(payload: Record<string, unknown>): WeComMemberStatus {
+  if (readErrcode(payload) !== 0) throw new WeComIncompleteResponseError('member')
   if (typeof payload.userid !== 'string' || payload.userid.length === 0) throw new WeComIncompleteResponseError('member')
   if (!isSafeInt(payload.status)) throw new WeComIncompleteResponseError('member')
   return { userid: payload.userid, status: payload.status }

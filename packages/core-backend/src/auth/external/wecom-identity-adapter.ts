@@ -44,9 +44,9 @@ export interface WeComIdentityConnection {
   wecomAgentId: string
 }
 
+/** The per-connection credential. The API base address is never part of it; see `WeComIdentityAdapterOptions`. */
 export interface WeComIdentityCredentials {
   corpSecret: string
-  baseUrl?: string
 }
 
 /** The subject a successful exchange resolves: configuration-derived scope plus the scanned member. */
@@ -185,6 +185,7 @@ function adminReasonOf(errcode: number): WeComIdentityAdminReason {
     case 40013:
       return 'invalid_corp'
     case 40056:
+    case 301002:
       return 'invalid_agent'
     case 50001:
       return 'redirect_domain'
@@ -197,7 +198,12 @@ type FailurePhase = 'login' | 'member'
 
 /** Maps a client failure to a result. Every failure denies; a transient one is `unavailable`, never a pass. */
 function resultOfFailure(error: unknown, phase: FailurePhase): WeComIdentityResult {
-  if (error instanceof WeComInvalidInputError) throw error
+  if (error instanceof WeComInvalidInputError) {
+    // An absent secret is a state of the stored connection, so it denies as a value; every other
+    // invalid input is a fault of the caller and stays thrown.
+    if (error.field === 'corpSecret') return rejected('config_fault', 'config_fault')
+    throw error
+  }
   const tokenStage = isWeComTokenStageError(error)
   const transient = (reason: WeComIdentityUnavailableReason): WeComIdentityResult =>
     unavailable(tokenStage ? 'token_unavailable' : reason)
@@ -244,6 +250,11 @@ function resultOfFailure(error: unknown, phase: FailurePhase): WeComIdentityResu
 export interface WeComIdentityAdapterOptions {
   /** The deployment-level redirect address; validated here and never taken from a request. */
   redirectUri: string
+  /**
+   * The WeCom API base address. It is fixed once per adapter, comes from the deployment (never from a
+   * connection or its credentials) and defaults to the public host when absent.
+   */
+  baseUrl?: string
   /** Test seams of the client (`fetchFn`, clock, sleep). */
   requestOptions?: WeComRequestOptions
   /** Accepts an `http` loopback redirect address. Only a test injects it. */
@@ -265,6 +276,7 @@ export interface WeComIdentityAdapter {
 export function createWeComIdentityAdapter(options: WeComIdentityAdapterOptions): WeComIdentityAdapter {
   const redirectUri = normalizeWeComLoginRedirectUri(options.redirectUri, { allowLoopbackHttp: options.allowLoopbackHttp })
   const requestOptions = options.requestOptions
+  const baseUrl = options.baseUrl
 
   return {
     provider: 'wecom',
@@ -284,7 +296,7 @@ export function createWeComIdentityAdapter(options: WeComIdentityAdapterOptions)
     async exchangeCode({ connection, credentials, code }) {
       assertConnection(connection)
       if (!isValidWeComLoginCode(code)) return rejected('code_invalid')
-      const tokenConfig = { corpId: connection.corpId, corpSecret: credentials.corpSecret, baseUrl: credentials.baseUrl }
+      const tokenConfig = { corpId: connection.corpId, corpSecret: credentials.corpSecret, baseUrl }
 
       let exchanged: Awaited<ReturnType<typeof exchangeWeComLoginCode>>
       try {
