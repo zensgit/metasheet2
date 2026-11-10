@@ -1394,8 +1394,11 @@ async function main() {
           ...H_SCOPE, lane: 'small_apply',
           guard: { leaseRunId: 'run_xh5', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
           tokenRevision: 'rev_xh5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: 'u_xh5',
+          intent: emptyIntentFor('e'.repeat(64)),
         })
-        await h.env.store.finishExecution({ ...H_SCOPE, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 0 })
+        // Step 6a-1 (S6-1; R-91), as in XR-06: a failed run with zero writes AND zero attempts self-verifies (transparent),
+        // so the gap's run wrote nothing but ATTEMPTED one host call — unprovable, it stays failed (failed_pending_recovery).
+        await h.env.store.finishExecution({ ...H_SCOPE, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1 })
         await h.lock.createGuard(grant).release()
       },
     })
