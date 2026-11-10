@@ -204,4 +204,146 @@ describe('admin user batch plan', () => {
     expect(plan.rows).toHaveLength(0)
     expect(plan.failures[0]?.code).toBe('USER_IN_RECYCLE_BIN')
   })
+
+  it('rejects enabling a pending user and still plans a profile-only update', () => {
+    const pending: KnownBatchUser = {
+      ...lin,
+      id: 'user-pending',
+      email: 'pending@example.com',
+      name: '待激活',
+      isActive: false,
+      activationStatus: 'pending_activation',
+      hasAdminAuthority: false,
+    }
+    const ready: KnownBatchUser = {
+      ...lin,
+      id: 'user-ready',
+      email: 'ready@example.com',
+      name: '已激活',
+      isActive: false,
+      activationStatus: 'activated',
+      hasAdminAuthority: false,
+    }
+    const usersById = new Map([[pending.id, pending], [ready.id, ready]])
+    const usersByEmail = new Map([[pending.email!, pending], [ready.email!, ready]])
+    const update = planUpdateBatch({
+      body: {
+        items: [
+          { userId: pending.id, isActive: true },
+          { userId: pending.id, department: '质量部' },
+          { userId: ready.id, isActive: true },
+        ],
+      },
+      usersById,
+      usersByEmail,
+      knownRoleIds: new Set(['user']),
+    })
+    expect(update.ok).toBe(true)
+    if (!update.ok) return
+    expect(update.failures.map((row) => row.code)).toEqual(['PENDING_ACTIVATE_BYPASS_FORBIDDEN'])
+    expect(update.rows.map((row) => row.userId)).toEqual([pending.id, ready.id])
+    expect(update.rows[0]?.isActive).toBeUndefined()
+    expect(update.rows[0]?.changes).toEqual([{ field: 'department', before: '装配车间', after: '质量部' }])
+    expect(update.rows[1]?.isActive).toBe(true)
+
+    const status = planStatusBatch({
+      userIds: [pending.id, ready.id],
+      isActive: true,
+      actorId: 'admin-1',
+      knownIds: new Set([pending.id, ready.id]),
+      knownUsers: usersById,
+    })
+    expect(status.ok).toBe(true)
+    if (!status.ok) return
+    expect(status.failures.map((row) => row.code)).toEqual(['PENDING_ACTIVATE_BYPASS_FORBIDDEN'])
+    expect(status.rows.map((row) => row.userId)).toEqual([ready.id])
+  })
+
+  it('counts only activated active admins in a mixed hard-delete preview and keeps the last valid admin', () => {
+    const pendingAdmin: KnownBatchUser = {
+      id: 'pending-admin',
+      email: 'pending-admin@example.com',
+      name: '待激活管理员',
+      role: 'admin',
+      department: null,
+      isActive: true,
+      activationStatus: 'pending_activation',
+      hasAdminAuthority: true,
+    }
+    const disabledAdmin: KnownBatchUser = {
+      id: 'disabled-admin',
+      email: 'disabled-admin@example.com',
+      name: '停用管理员',
+      role: 'admin',
+      department: null,
+      isActive: false,
+      activationStatus: 'activated',
+      hasAdminAuthority: true,
+    }
+    const flagOnly: KnownBatchUser = {
+      id: 'flag-only',
+      email: 'flag-only@example.com',
+      name: '仅标志',
+      role: 'user',
+      department: null,
+      isActive: true,
+      activationStatus: 'activated',
+      hasAdminAuthority: false,
+      isPlatformAdmin: true,
+    }
+    const validA: KnownBatchUser = {
+      id: 'valid-a',
+      email: 'valid-a@example.com',
+      name: '管理员甲',
+      role: 'admin',
+      department: null,
+      isActive: true,
+      activationStatus: 'activated',
+      hasAdminAuthority: true,
+    }
+    const validB: KnownBatchUser = {
+      id: 'valid-b',
+      email: 'valid-b@example.com',
+      name: '管理员乙',
+      role: 'user',
+      department: null,
+      isActive: true,
+      activationStatus: 'activated',
+      hasAdminAuthority: true,
+    }
+    const ordinary: KnownBatchUser = {
+      ...lin,
+      activationStatus: 'activated',
+      hasAdminAuthority: false,
+    }
+    const users = new Map<string, KnownBatchUser>([
+      [pendingAdmin.id, pendingAdmin],
+      [disabledAdmin.id, disabledAdmin],
+      [flagOnly.id, flagOnly],
+      [validA.id, validA],
+      [validB.id, validB],
+      [ordinary.id, ordinary],
+    ])
+    const plan = planDeleteBatch({
+      userIds: [pendingAdmin.id, disabledAdmin.id, flagOnly.id, validA.id, validB.id, ordinary.id],
+      mode: 'hard',
+      confirmText: HARD_DELETE_CONFIRM_TEXT,
+      actorId: 'admin-actor',
+      knownIds: new Set(users.keys()),
+      knownUsers: users,
+      livePlatformAdminCount: 2,
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.rows.map((row) => row.userId)).toEqual([
+      pendingAdmin.id,
+      disabledAdmin.id,
+      flagOnly.id,
+      validA.id,
+      ordinary.id,
+    ])
+    expect(plan.failures).toEqual([
+      expect.objectContaining({ userId: validB.id, code: 'LAST_PLATFORM_ADMIN', ok: false }),
+    ])
+  })
 })

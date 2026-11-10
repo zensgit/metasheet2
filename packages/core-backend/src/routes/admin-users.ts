@@ -28,7 +28,7 @@ import {
   lockNamespaceAdmissionWrites,
   normalizeNamespace,
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
-  setUserNamespaceAdmission,
+  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import {
   assignUserRoles,
@@ -43,6 +43,7 @@ import {
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
+  evaluateUserAuthenticationGate,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
 import { activatePendingUser, isActivateMode } from '../auth/user-activate'
@@ -61,9 +62,11 @@ import {
   LoginAliasClaimError,
 } from '../auth/login-alias-service'
 import {
+  AccessGraphUserUnavailableError,
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
   type AccessGraphTransactionClient,
+  type LockedAccessGraphUser,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { readOrgMembershipHistory } from '../directory/org-membership-history'
@@ -137,6 +140,33 @@ function readFailureCorrelationId(req: Request): string | undefined {
   return undefined
 }
 
+class DelegationAuthorityRefusal extends Error {
+  constructor(public readonly code: 'ROLE_DELEGATION_FORBIDDEN' | 'ROLE_DELEGATION_SCOPE_REQUIRED' | 'ROLE_DELEGATION_USER_OUT_OF_SCOPE') {
+    super(code === 'ROLE_DELEGATION_FORBIDDEN'
+      ? 'Namespace is outside your delegated admin scope'
+      : code === 'ROLE_DELEGATION_SCOPE_REQUIRED'
+        ? 'No delegated department or member-group scope is configured for your plugin admin role'
+        : 'User is outside your delegated department or member-group scope')
+    this.name = 'DelegationAuthorityRefusal'
+  }
+}
+
+class PlatformActorAuthorityLost extends Error {
+  readonly code = 'FORBIDDEN'
+  constructor() {
+    super('Admin access required')
+    this.name = 'PlatformActorAuthorityLost'
+  }
+}
+
+class RoleRowMissingError extends Error {
+  readonly code = 'ROLE_NOT_FOUND'
+  constructor() {
+    super('Role not found')
+    this.name = 'RoleRowMissingError'
+  }
+}
+
 function sendAdminUsersServerFailure(
   req: Request,
   res: Response,
@@ -144,6 +174,16 @@ function sendAdminUsersServerFailure(
   message: string,
   error: unknown,
 ): void {
+  if (error instanceof AccessGraphUserUnavailableError) {
+    if (error.code === 'NOT_FOUND') return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+    return jsonError(res, 409, 'USER_IN_RECYCLE_BIN', error.message)
+  }
+  if (error instanceof DelegationAuthorityRefusal || error instanceof PlatformActorAuthorityLost) {
+    return jsonError(res, 403, error.code, error.message)
+  }
+  if (error instanceof RoleRowMissingError) {
+    return jsonError(res, 404, error.code, error.message)
+  }
   const correlationId = readFailureCorrelationId(req)
   try {
     logger.error(
@@ -654,6 +694,83 @@ async function recheckDelegableNamespacesUnderAdmissionLock(
 ): Promise<string[]> {
   await lockNamespaceAdmissionWrites(executor, userId)
   return deriveDelegableNamespaces(await fetchUserRoleIds(userId, executor))
+}
+
+function sortedAccessIds(ids: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))).sort()
+}
+
+/** Admission locks, then visible user-row locks. Call only after any role-row lock. */
+async function lockSharedAccessSubjects(
+  client: AccessGraphTransactionClient,
+  ids: Array<string | null | undefined>,
+): Promise<Map<string, LockedAccessGraphUser>> {
+  const sorted = sortedAccessIds(ids)
+  for (const id of sorted) await lockNamespaceAdmissionWrites(client, id)
+  return lockUsersForAccessGraphWrite(client, sorted)
+}
+
+function requireWritableTarget(
+  locked: Map<string, LockedAccessGraphUser>,
+  targetId: string,
+): LockedAccessGraphUser {
+  const target = locked.get(targetId)
+  if (!target) throw new AccessGraphUserUnavailableError('NOT_FOUND')
+  if (target.deletedAt || target.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')
+  return target
+}
+
+async function lockRoleRowForShare(client: AccessGraphTransactionClient, roleId: string): Promise<boolean> {
+  const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+  return locked.rows.length > 0
+}
+
+/** Platform authority is legacy role admin or RBAC admin. The is_admin flag is not authority. */
+async function assertPlatformActorAuthority(
+  client: AccessGraphTransactionClient,
+  actor: LockedAccessGraphUser | undefined,
+): Promise<void> {
+  if (!actor || actor.deletedAt || actor.purgedAt || actor.isActive !== true || actor.activationStatus !== 'activated') {
+    throw new PlatformActorAuthorityLost()
+  }
+  const roleIds = await fetchUserRoleIds(actor.id, client as unknown as RoleIdExecutor)
+  if (actor.role !== 'admin' && !roleIds.includes(PLATFORM_ADMIN_ROLE_ID)) {
+    throw new PlatformActorAuthorityLost()
+  }
+}
+
+async function recheckDelegatedAuthority(
+  client: AccessGraphTransactionClient,
+  actorId: string,
+  userId: string,
+  requestedNamespaces: string[],
+  actor: LockedAccessGraphUser | undefined,
+): Promise<string[]> {
+  if (!actor || evaluateUserAuthenticationGate({
+    role: actor.role,
+    is_active: actor.isActive,
+    activation_status: actor.activationStatus,
+    deleted_at: actor.deletedAt,
+    purged_at: actor.purgedAt,
+  })) {
+    throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
+  }
+  const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(actorId, client as unknown as RoleIdExecutor))
+  const matching = requestedNamespaces.filter((namespace) => namespaces.includes(namespace))
+  if (matching.length === 0) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
+  const audience = await client.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
+       UNION ALL
+       SELECT 1 FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
+     ) AS configured`,
+    [actorId, namespaces],
+  )
+  if (audience.rows[0]?.configured !== true) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_SCOPE_REQUIRED')
+  if (!await isUserWithinDelegatedScope(actorId, matching, userId, client.query)) {
+    throw new DelegationAuthorityRefusal('ROLE_DELEGATION_USER_OUT_OF_SCOPE')
+  }
+  return namespaces
 }
 
 async function fetchRoleCatalog() {
@@ -2064,10 +2181,15 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
   }
 }
 
-async function isUserWithinDelegatedScope(adminUserId: string, namespaces: string[], userId: string): Promise<boolean> {
+async function isUserWithinDelegatedScope(
+  adminUserId: string,
+  namespaces: string[],
+  userId: string,
+  runQuery: AccessGraphTransactionClient['query'] = query,
+): Promise<boolean> {
   if (namespaces.length === 0) return false
 
-  const result = await query<{ allowed: boolean }>(
+  const result = await runQuery(
     `WITH RECURSIVE seed_departments AS (
         SELECT DISTINCT d.id, d.integration_id, d.external_department_id
         FROM delegated_role_admin_scopes s
@@ -2365,8 +2487,22 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
   }
 }
 
-async function syncLegacyAdminProfile(userId: string, enabled: boolean): Promise<void> {
-  await query(
+class LastPlatformAdminConflict extends Error {
+  readonly code = 'LAST_PLATFORM_ADMIN'
+  constructor() {
+    super('至少保留一名可登录的平台管理员')
+    this.name = 'LastPlatformAdminConflict'
+  }
+}
+
+type LegacyProfileQuery = (sql: string, params?: unknown[]) => Promise<unknown>
+
+async function syncLegacyAdminProfile(
+  userId: string,
+  enabled: boolean,
+  runQuery: LegacyProfileQuery,
+): Promise<void> {
+  await runQuery(
     `UPDATE users
      SET role = CASE
        WHEN $2::boolean THEN 'admin'
@@ -3127,6 +3263,9 @@ export function adminUsersRouter(): Router {
       }
 
       const locked = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (action === 'assign' && !adminNamespaces.includes(namespace)) {
           return { refused: true as const, adminNamespaces }
@@ -3215,6 +3354,9 @@ export function adminUsersRouter(): Router {
       }
 
       const locked = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (action === 'assign' && !adminNamespaces.includes(namespace)) {
           return { refused: true as const, adminNamespaces }
@@ -3295,21 +3437,26 @@ export function adminUsersRouter(): Router {
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
       if (!groupRow.rows.length) return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT DO NOTHING`,
-          [groupId, userId],
-        )
-      } else {
-        await query(
-          `DELETE FROM platform_member_group_members
-           WHERE group_id = $1
-             AND user_id = $2`,
-          [groupId, userId],
-        )
-      }
+      await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO platform_member_group_members (group_id, user_id, created_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING`,
+            [groupId, userId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM platform_member_group_members
+             WHERE group_id = $1
+               AND user_id = $2`,
+            [groupId, userId],
+          )
+        }
+      })
 
       const [snapshot, memberGroups] = await Promise.all([
         fetchUserAccessSnapshot(userId),
@@ -3373,6 +3520,9 @@ export function adminUsersRouter(): Router {
       }
 
       const locked = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (!adminNamespaces.includes(namespace)) {
           return { refused: true as const, adminNamespaces }
@@ -3616,13 +3766,29 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      const namespaceAdmissions = await setUserNamespaceAdmission({
-        userId,
-        namespace,
-        enabled,
-        actorId: delegation.actorId,
-        source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
+      await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, delegation.actorId])
+        requireWritableTarget(subjects, userId)
+        if (delegation.isPlatformAdmin) {
+          await assertPlatformActorAuthority(client, subjects.get(delegation.actorId))
+        } else {
+          await recheckDelegatedAuthority(
+            client,
+            delegation.actorId,
+            userId,
+            [namespace],
+            subjects.get(delegation.actorId),
+          )
+        }
+        await writeUserNamespaceAdmission({
+          userId,
+          namespace,
+          enabled,
+          actorId: delegation.actorId,
+          source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
+        }, client)
       })
+      const namespaceAdmissions = await listUserNamespaceAdmissionSnapshots(userId)
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -3710,49 +3876,61 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      // The authority is the delegation this actor holds. A platform admin is unbounded here,
-      // matching the `delegation.isPlatformAdmin` short-circuit on the `roleIdMatchesNamespaces`
-      // check above; a delegated admin is bounded by the namespaces that check already computed,
-      // so the boundary re-states the route's own rule at the write rather than adding a
-      // second, separately-maintained one.
-      const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
-        ? { kind: 'platform-admin' }
-        : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
+      // Scope is rebuilt inside the transaction from the actor's locked authority.
       let membership: RoleAssignmentResult
       let disabledNamespaces: string[] = []
       try {
         membership = await transaction(async (client) => {
-          if (!delegation.isPlatformAdmin) {
-            // The role's codes are read INSIDE the transaction that writes the membership, with
-            // the role row held FOR SHARE: the role editor (`PUT`/`POST /api/roles`) takes the
-            // same row FOR UPDATE before it touches `role_permissions`, so a platform code cannot
-            // be added between this check and the write. Two statements on purpose — the code
-            // read runs after the lock is granted and therefore sees what a just-committed editor
-            // wrote, which a single joined statement locking `roles` would not.
-            const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
-            if (!locked.rows.length) throw new DelegatedRoleRefusal('ROLE_NOT_FOUND')
-            const codes = await client.query(
-              'SELECT permission_code FROM role_permissions WHERE role_id = $1',
-              [roleId],
+          const runQuery = (sql: string, params?: unknown[]) => client.query(sql, params)
+          // Last-admin refusal stays before admission and user locks.
+          if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID) {
+            await lockPlatformAdminInvariant(client)
+            if (await isLastSignInPlatformAdmin(client, userId)) throw new LastPlatformAdminConflict()
+          }
+          // Role share before subject locks. INSERT user_roles takes a key share on roles,
+          // and a platform unassign still removes an orphan membership when the row is gone.
+          const roleHeld = await lockRoleRowForShare(client, roleId)
+          if (!roleHeld && !(action === 'unassign' && delegation.isPlatformAdmin)) {
+            if (delegation.isPlatformAdmin) throw new RoleRowMissingError()
+            throw new DelegatedRoleRefusal('ROLE_NOT_FOUND')
+          }
+          const subjects = await lockSharedAccessSubjects(client, [userId, delegation.actorId])
+          requireWritableTarget(subjects, userId)
+          let activeScope: RoleAssignmentScope
+          if (delegation.isPlatformAdmin) {
+            await assertPlatformActorAuthority(client, subjects.get(delegation.actorId))
+            activeScope = { kind: 'platform-admin' }
+          } else {
+            const namespaces = await recheckDelegatedAuthority(
+              client,
+              delegation.actorId,
+              userId,
+              deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces),
+              subjects.get(delegation.actorId),
             )
-            const permissionCodes = (codes.rows as Array<{ permission_code: string | null }>)
-              .map((row) => (typeof row.permission_code === 'string' ? row.permission_code : ''))
-            // Admin-equivalent (an admin-level code of its own namespace) → refused both ways;
-            // codes outside the namespace → refused on assign, and on unassign only when
-            // admin-level (see `delegatedRoleCodeRefusalFor`).
-            const refusal = delegatedRoleCodeRefusalFor(
-              roleId,
-              permissionCodes,
-              delegation.delegableNamespaces,
-              action === 'assign' ? 'assign' : 'unassign',
-            )
-            if (refusal) throw refusal
+            if (roleHeld) {
+              const codes = await client.query(
+                'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+                [roleId],
+              )
+              const permissionCodes = (codes.rows as Array<{ permission_code: string | null }>)
+                .map((row) => (typeof row.permission_code === 'string' ? row.permission_code : ''))
+              const refusal = delegatedRoleCodeRefusalFor(
+                roleId,
+                permissionCodes,
+                namespaces,
+                action === 'assign' ? 'assign' : 'unassign',
+              )
+              if (refusal) throw refusal
+            }
+            activeScope = { kind: 'namespaces', namespaces }
           }
           if (action === 'assign') {
-            return assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+            const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: activeScope, executor: client })
+            if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, runQuery)
+            return assigned
           }
-          await lockNamespaceAdmissionWrites(client, userId)
-          const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: activeScope, executor: client })
           disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
             userId,
             namespaces: await listRoleNamespaces(roleId, client.query),
@@ -3760,9 +3938,13 @@ export function adminUsersRouter(): Router {
             source: 'role_unassigned',
             revokedRoleId: roleId,
           }, client.query)
+          if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, false, runQuery)
           return removed
         })
       } catch (error) {
+        if (error instanceof LastPlatformAdminConflict) {
+          return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', error.message)
+        }
         if (!(error instanceof DelegatedRoleRefusal)) throw error
         if (error.code !== 'ROLE_NOT_FOUND') {
           await auditDelegatedRoleRefusal({
@@ -3782,9 +3964,6 @@ export function adminUsersRouter(): Router {
         trigger: action === 'assign' ? 'role_appointed' : 'role_unassigned',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, action === 'assign')
-      }
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5036,13 +5215,19 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const namespaceAdmissions = await setUserNamespaceAdmission({
-        userId,
-        namespace,
-        enabled,
-        actorId: adminUserId,
-        source: 'platform_admin',
+      await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        await writeUserNamespaceAdmission({
+          userId,
+          namespace,
+          enabled,
+          actorId: adminUserId,
+          source: 'platform_admin',
+        }, client)
       })
+      const namespaceAdmissions = await listUserNamespaceAdmissionSnapshots(userId)
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5096,31 +5281,37 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
 
-      await Promise.all(userIds.map(async (userId) => {
-        await setUserNamespaceAdmission({
+      const sortedUserIds = [...userIds].sort()
+      await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [adminUserId, ...sortedUserIds])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        for (const targetId of sortedUserIds) requireWritableTarget(subjects, targetId)
+        for (const targetId of sortedUserIds) {
+          await writeUserNamespaceAdmission({
+            userId: targetId,
+            namespace,
+            enabled,
+            actorId: adminUserId,
+            source: 'platform_admin',
+          }, client)
+        }
+      })
+      for (const userId of userIds) invalidateUserPerms(userId)
+      await Promise.all(userIds.map((userId) => auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: enabled ? 'grant' : 'revoke',
+        resourceType: 'user-namespace-admission',
+        resourceId: `${userId}:${namespace}`,
+        meta: {
+          adminUserId,
           userId,
           namespace,
           enabled,
-          actorId: adminUserId,
-          source: 'platform_admin',
-        })
-        invalidateUserPerms(userId)
-        await auditLog({
-          actorId: adminUserId,
-          actorType: 'user',
-          action: enabled ? 'grant' : 'revoke',
-          resourceType: 'user-namespace-admission',
-          resourceId: `${userId}:${namespace}`,
-          meta: {
-            adminUserId,
-            userId,
-            namespace,
-            enabled,
-            mode: 'bulk',
-            selectionSize: userIds.length,
-          },
-        })
-      }))
+          mode: 'bulk',
+          selectionSize: userIds.length,
+        },
+      })))
 
       return jsonOk(res, {
         actorId: adminUserId,
@@ -5251,23 +5442,29 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      // One transaction so that a fresh main-admin appointment and the removal of any audience
-      // left over from an earlier tenure land together (see `assignUserRoles`).
-      const membership = await transaction((client) => assignUserRoles({
-        userIds: [userId],
-        roleId,
-        scope: { kind: 'platform-admin' },
-        executor: client,
-      }))
+      // Role share, then actor and target locks, then the membership and legacy profile.
+      const membership = await transaction(async (client) => {
+        if (!await lockRoleRowForShare(client, roleId)) throw new RoleRowMissingError()
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const assigned = await assignUserRoles({
+          userIds: [userId],
+          roleId,
+          scope: { kind: 'platform-admin' },
+          executor: client,
+        })
+        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
+          await syncLegacyAdminProfile(userId, true, (sql, params) => client.query(sql, params))
+        }
+        return assigned
+      })
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
         trigger: 'role_appointed',
         cleanup: membership?.delegatedAdminScopeCleanup,
       })
-      if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-        await syncLegacyAdminProfile(userId, true)
-      }
       const disabledNamespaces: string[] = []
       invalidateUserPerms(userId)
 
@@ -5312,14 +5509,17 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      // The role, scoped audience and revoke witness commit together. Bootstrap uses the
-      // same subject lock before reading eligibility, including when admission is absent.
+      // Last-admin refusal returns before the role share and before any subject lock.
+      // A missing role row still drops an orphan membership.
       const unassigned = await transaction(async (client) => {
         if (roleId === PLATFORM_ADMIN_ROLE_ID) {
           await lockPlatformAdminInvariant(client)
           if (await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
         }
-        await lockNamespaceAdmissionWrites(client, userId)
+        await lockRoleRowForShare(client, roleId)
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const membership = await unassignUserRoles({
           userIds: [userId],
           roleId,
@@ -5334,18 +5534,7 @@ export function adminUsersRouter(): Router {
           revokedRoleId: roleId,
         }, client.query)
         if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await client.query(
-            `UPDATE users
-             SET role = CASE
-               WHEN $2::boolean THEN 'admin'
-               WHEN role = 'admin' THEN 'user'
-               ELSE role
-             END,
-             is_admin = $2,
-             updated_at = NOW()
-             WHERE id = $1`,
-            [userId, false],
-          )
+          await syncLegacyAdminProfile(userId, false, (sql, params) => client.query(sql, params))
         }
         return { blocked: false as const, membership, disabledNamespaces }
       })
