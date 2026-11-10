@@ -600,6 +600,7 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
 interface WeComRecipientRow {
   integration_id: string
   external_user_id: string
+  corp_id: string
 }
 
 export interface WeComAttendanceDeliveryChannelOptions {
@@ -619,6 +620,12 @@ export interface WeComAttendanceDeliveryChannelOptions {
 }
 
 const WECOM_TOKEN_EXPIRED_ERRCODES: ReadonlySet<number> = new Set([42001, 40014])
+const WECOM_ENV_CORP_MISMATCH_ERROR = 'wecom_env_corp_mismatch'
+
+function weComCorpsEqual(credentialCorpId: string, recipientCorpId: string): boolean {
+  const credentialCorp = String(credentialCorpId ?? '').trim()
+  return credentialCorp.length > 0 && credentialCorp === recipientCorpId
+}
 
 export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
   readonly name = WECOM_WORK_NOTIFICATION_CHANNEL_NAME
@@ -654,6 +661,13 @@ export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel
       config = await this.readConfig(recipient.integrationId)
     } catch (error) {
       return classifyWeComConfigError(error)
+    }
+
+    // Corp-equality invariant: the corp of the credentials used to send must equal the corp of the
+    // recipient's connection. Checked before any token request; a missing recipient corp never
+    // matches. Same corp: unchanged. Different corp: permanent failure, nothing is sent.
+    if (!weComCorpsEqual(config.corpId, recipient.corpId)) {
+      return { ok: false, retryable: false, error: WECOM_ENV_CORP_MISMATCH_ERROR }
     }
 
     const deepLink = attendanceDeepLinkEnabled()
@@ -727,11 +741,12 @@ export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel
   }
 
   private async resolveRecipient(message: AttendanceDeliveryMessage): Promise<
-    | { ok: true; integrationId: string; weComUserId: string }
+    | { ok: true; integrationId: string; weComUserId: string; corpId: string }
     | { ok: false; result: AttendanceDeliveryChannelResult }
   > {
     const { rows } = await this.query<WeComRecipientRow>(
       `SELECT i.id::text AS integration_id,
+              i.corp_id AS corp_id,
               a.external_user_id
          FROM directory_account_links l
          JOIN directory_accounts a
@@ -806,6 +821,7 @@ export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel
       ok: true,
       integrationId: rows[0].integration_id,
       weComUserId,
+      corpId: String(rows[0].corp_id ?? '').trim(),
     }
   }
 }
