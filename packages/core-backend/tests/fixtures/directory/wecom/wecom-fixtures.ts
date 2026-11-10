@@ -1,7 +1,8 @@
 /**
  * Synthetic WeCom tenants and a recording `fetchFn` stub. Values are fabricated; nothing here
- * reaches a network. The stub records method, path and query with `access_token`, `corpsecret`
- * and `code` masked.
+ * reaches a network. The stub records the method exactly as passed (undefined when the caller
+ * passed none), origin, path, headers, body and query with `access_token`, `corpsecret` and `code`
+ * masked, and keeps the abort signal of each request.
  */
 
 export const WECOM_FIXTURE_CORP_ID = 'wwfixturecorp0001'
@@ -13,6 +14,9 @@ export type WeComStubReply =
   | { kind: 'json'; body: unknown; status: number }
   | { kind: 'raw'; text: string; status: number }
   | { kind: 'throw'; error: unknown }
+  | { kind: 'bodyError'; error: unknown; status: number }
+  /** Headers arrive, then the body stream errors with the request's abort reason once the signal fires. */
+  | { kind: 'stalledBody'; status: number }
 
 export type WeComStubResponder = WeComStubReply | ((call: number) => WeComStubReply)
 
@@ -20,6 +24,8 @@ export const ok = (body: unknown): WeComStubReply => ({ kind: 'json', body, stat
 export const httpStatus = (status: number, body: unknown = {}): WeComStubReply => ({ kind: 'json', body, status })
 export const rawBody = (text: string, status = 200): WeComStubReply => ({ kind: 'raw', text, status })
 export const failWith = (error: unknown): WeComStubReply => ({ kind: 'throw', error })
+export const bodyFailWith = (error: unknown, status = 200): WeComStubReply => ({ kind: 'bodyError', error, status })
+export const stalledBody = (status = 200): WeComStubReply => ({ kind: 'stalledBody', status })
 export const errcodeReply = (errcode: number, errmsg = 'provider-text-that-must-not-leak'): WeComStubReply =>
   ok({ errcode, errmsg })
 
@@ -30,10 +36,15 @@ export function abortError(): Error {
 }
 
 export interface RecordedRequest {
-  method: string
+  /** As passed to `fetch`; `undefined` when the caller passed none. */
+  method: string | undefined
   route: 'gettoken' | 'agent' | 'departments' | 'users' | 'other'
+  origin: string
   path: string
   query: Record<string, string>
+  headers: Record<string, string>
+  body: unknown
+  signal: AbortSignal | undefined
 }
 
 const MASKED_QUERY_KEYS = new Set(['access_token', 'corpsecret', 'code'])
@@ -78,12 +89,21 @@ export function createWeComFetchStub(spec: WeComStubSpec): WeComFetchStub {
     return typeof responder === 'function' ? responder(call) : responder
   }
 
-  const fetchFn = (async (input: unknown) => {
+  const fetchFn = (async (input: unknown, init?: RequestInit) => {
     const url = new URL(String(input))
     const query: Record<string, string> = {}
     for (const [key, value] of url.searchParams) query[key] = MASKED_QUERY_KEYS.has(key) ? '***' : value
     const route = routeOf(url.pathname)
-    const request: RecordedRequest = { method: 'GET', route, path: url.pathname, query }
+    const request: RecordedRequest = {
+      method: init?.method,
+      route,
+      origin: url.origin,
+      path: url.pathname,
+      query,
+      headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      body: init?.body,
+      signal: init?.signal ?? undefined,
+    }
     requests.push(request)
     spec.onRequest?.(request)
 
@@ -103,6 +123,22 @@ export function createWeComFetchStub(spec: WeComStubSpec): WeComFetchStub {
     }
 
     if (reply.kind === 'throw') throw reply.error
+    if (reply.kind === 'bodyError') {
+      const response = new Response('{}', { status: reply.status })
+      Object.defineProperty(response, 'json', { value: async () => { throw reply.error } })
+      return response
+    }
+    if (reply.kind === 'stalledBody') {
+      const signal = init?.signal
+      const body = new ReadableStream({
+        start(controller) {
+          const fail = () => controller.error(signal?.reason)
+          if (signal?.aborted) fail()
+          else signal?.addEventListener('abort', fail, { once: true })
+        },
+      })
+      return new Response(body, { status: reply.status })
+    }
     if (reply.kind === 'raw') return new Response(reply.text, { status: reply.status })
     return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { 'content-type': 'application/json' } })
   }) as unknown as typeof fetch

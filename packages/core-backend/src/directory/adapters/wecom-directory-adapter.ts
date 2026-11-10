@@ -9,9 +9,10 @@
  *
  * A member's canonical id is `lower(userid)` after the member-creation character rule; a member that
  * fails the rule is isolated (not returned, counted) and the round is refused above a threshold.
- * Members whose status is disabled (2) or left the company (5) are not returned. Contact values are
- * adopted only when the response carries them; when no member of the round carries a value for a
- * field, every member of the round is flagged so the caller retains the previously stored value.
+ * A member's `departmentIds` lists only departments of the round's department map. Members whose
+ * status is disabled (2) or left the company (5) are not returned. Contact values are adopted only
+ * when the response carries them; when no member of the round carries a value for a field, every
+ * member of the round is flagged so the caller retains the previously stored value.
  * Nothing is derived from names, ids or other fields, and no DingTalk-shaped approval key is written.
  */
 import { createHash } from 'node:crypto'
@@ -295,7 +296,9 @@ async function pullMembers(
       draft.email ??= nonEmpty(entry.email)
       if (entry.mainDepartment !== undefined) draft.mainDepartment ??= entry.mainDepartment
       draft.departments.add(departmentId)
-      for (const memberDepartment of entry.department ?? []) draft.departments.add(String(memberDepartment))
+      for (const memberDepartment of entry.department ?? []) {
+        if (departments.has(String(memberDepartment))) draft.departments.add(String(memberDepartment))
+      }
       if (entry.position !== undefined && !('position' in draft.passThrough)) draft.passThrough.position = entry.position
       if (entry.order !== undefined && !('order' in draft.passThrough)) draft.passThrough.order = entry.order
       if (entry.isLeaderInDept !== undefined && !('is_leader_in_dept' in draft.passThrough)) {

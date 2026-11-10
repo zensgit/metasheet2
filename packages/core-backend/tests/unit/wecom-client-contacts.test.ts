@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Logger } from '../../src/core/logger'
 import {
   __resetWeComAppAccessTokenCacheForTests,
+  __weComTokenCacheKeyForTests,
   classifyWeComErrcode,
   fetchWeComAppAccessToken,
   getWeComAgent,
@@ -34,6 +35,7 @@ import {
   WECOM_FIXTURE_TOKEN,
   abortError,
   agentPayload,
+  bodyFailWith,
   createWeComFetchStub,
   departmentsPayload,
   dept,
@@ -43,6 +45,7 @@ import {
   ok,
   person,
   rawBody,
+  stalledBody,
   usersPayload,
 } from '../fixtures/directory/wecom/wecom-fixtures'
 
@@ -169,6 +172,8 @@ describe('WeCom client read layer: closed-shape gates', () => {
       [{ errcode: 0, department: [{ id: 2, name: 'a', parentid: -1 }] }, 'department'],
       [{ errcode: 0, department: [{ id: 2, name: 'a', parentid: 1, order: 'x' }] }, 'department'],
       [{ errcode: 0, department: [{ id: 2, name: 'a', parentid: 1, department_leader: 'x' }] }, 'department'],
+      [{ errcode: 0, department: [{ id: 12345678901, name: 'a', parentid: 1 }] }, 'department'],
+      [{ errcode: 0, department: [{ id: 2, name: 'a', parentid: 12345678901 }] }, 'department'],
     ]
     for (const [body, location] of faults) {
       __resetWeComAppAccessTokenCacheForTests()
@@ -179,7 +184,7 @@ describe('WeCom client read layer: closed-shape gates', () => {
     }
   })
 
-  it('treats a missing userlist as incomplete and an empty userlist as empty', async () => {
+  it('assumes: treats a missing userlist as incomplete and an empty userlist as empty', async () => {
     const missing = createWeComFetchStub({ users: ok({ errcode: 0, errmsg: 'ok' }) })
     const error = await listWeComDepartmentMembers(CONFIG, '2', { fetchFn: missing.fetchFn }).catch((e) => e)
     expect(error).toBeInstanceOf(WeComIncompleteResponseError)
@@ -213,7 +218,13 @@ describe('WeCom client read layer: closed-shape gates', () => {
     expect(JSON.stringify(member)).not.toMatch(/CANARY/)
   })
 
-  it('returns userids that violate the id rules unchanged for the caller to isolate', async () => {
+  it('treats a null pass-through value as absent', async () => {
+    const stub = createWeComFetchStub({ users: ok(usersPayload([person('a', { order: null, is_leader_in_dept: null, direct_leader: null })])) })
+    const [member] = await listWeComDepartmentMembers(CONFIG, '2', { fetchFn: stub.fetchFn })
+    expect(member).toEqual({ userid: 'a', name: 'name-a', status: 1 })
+  })
+
+  it('assumes: returns userids that violate the id rules unchanged for the caller to isolate', async () => {
     const stub = createWeComFetchStub({ users: ok(usersPayload([person('A/b'), person(''), person('x'.repeat(70))])) })
     const members = await listWeComDepartmentMembers(CONFIG, '2', { fetchFn: stub.fetchFn })
     expect(members.map((m) => m.userid)).toEqual(['A/b', '', 'x'.repeat(70)])
@@ -228,6 +239,12 @@ describe('WeCom client read layer: closed-shape gates', () => {
     ['status that is not an integer', { userid: 'a', status: '1' }],
     ['mobile that is not a string', { userid: 'a', mobile: 5 }],
     ['main_department that is not an integer', { userid: 'a', main_department: 'x' }],
+    ['order that is a string', { userid: 'a', order: '1,2' }],
+    ['order holding a boolean', { userid: 'a', order: [true] }],
+    ['is_leader_in_dept that is a string', { userid: 'a', is_leader_in_dept: '1,0' }],
+    ['is_leader_in_dept holding booleans', { userid: 'a', is_leader_in_dept: [true, false] }],
+    ['direct_leader holding a number', { userid: 'a', direct_leader: [5] }],
+    ['direct_leader that is an object', { userid: 'a', direct_leader: { id: 'x' } }],
   ]
   for (const [name, entry] of memberFaults) {
     it(`rejects a member list with a ${name}`, async () => {
@@ -282,7 +299,7 @@ describe('WeCom client read layer: input validation before any request', () => {
     expect(isValidWeComAgentId(1000002)).toBe(false)
   })
 
-  it('validates userid with the creation rule', () => {
+  it('assumes: validates userid with the creation rule', () => {
     for (const good of ['a', 'A1', 'zhang.san', 'a_b-c@d', `a${'b'.repeat(63)}`]) expect(isValidWeComUserId(good)).toBe(true)
     for (const bad of ['', '_a', '-a', '.a', 'a/b', 'Corp/user', 'a b', '中文', `a${'b'.repeat(64)}`]) expect(isValidWeComUserId(bad)).toBe(false)
   })
@@ -367,6 +384,80 @@ describe('WeCom client read layer: token cache', () => {
       listWeComDepartments(CONFIG, { fetchFn: stub.fetchFn }),
     ])
     expect(tokenCalls(stub)).toBe(1)
+  })
+
+  it('shares one request between the single-attempt call and a read call running together', async () => {
+    const stub = createWeComFetchStub({ agent: ok(agentPayload()) })
+    const options = { fetchFn: stub.fetchFn }
+    await Promise.all([
+      fetchWeComAppAccessToken(CONFIG, options),
+      getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, options),
+    ])
+    expect(tokenCalls(stub)).toBe(1)
+    __resetWeComAppAccessTokenCacheForTests()
+    const reverse = createWeComFetchStub({ agent: ok(agentPayload()) })
+    await Promise.all([
+      getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: reverse.fetchFn }),
+      fetchWeComAppAccessToken(CONFIG, { fetchFn: reverse.fetchFn }),
+    ])
+    expect(tokenCalls(reverse)).toBe(1)
+  })
+
+  it('keeps each layer its own error shape when a token request is shared', async () => {
+    const stub = createWeComFetchStub({ token: errcodeReply(40013, 'provider-token-text') })
+    const [single, read] = await Promise.all([
+      fetchWeComAppAccessToken(CONFIG, { fetchFn: stub.fetchFn }).catch((e) => e),
+      listWeComDepartments(CONFIG, { fetchFn: stub.fetchFn }).catch((e) => e),
+    ])
+    expect(single.message).toBe('provider-token-text')
+    expect(read).toBeInstanceOf(WeComBusinessError)
+    expect(read.message).not.toContain('provider-token-text')
+    expect(read.responseBody).toBeNull()
+  })
+
+  it('separates secrets of the same length that differ only in the last character', async () => {
+    const first = { ...CONFIG, corpSecret: 'same-length-secret-0' }
+    const second = { ...CONFIG, corpSecret: 'same-length-secret-1' }
+    const secretsOf = (stub: ReturnType<typeof createWeComFetchStub>) => stub.requests.filter((r) => r.route === 'gettoken').length
+    const sequential = createWeComFetchStub({ agent: ok(agentPayload()) })
+    await getWeComAgent(first, WECOM_FIXTURE_AGENT_ID, { fetchFn: sequential.fetchFn })
+    await getWeComAgent(second, WECOM_FIXTURE_AGENT_ID, { fetchFn: sequential.fetchFn })
+    expect(secretsOf(sequential)).toBe(2)
+
+    __resetWeComAppAccessTokenCacheForTests()
+    const concurrent = createWeComFetchStub({ agent: ok(agentPayload()) })
+    await Promise.all([
+      getWeComAgent(first, WECOM_FIXTURE_AGENT_ID, { fetchFn: concurrent.fetchFn }),
+      getWeComAgent(second, WECOM_FIXTURE_AGENT_ID, { fetchFn: concurrent.fetchFn }),
+    ])
+    expect(secretsOf(concurrent)).toBe(2)
+  })
+
+  it('builds a cache key from corp, base URL and a 16-hex fingerprint, never the secret', async () => {
+    const key = __weComTokenCacheKeyForTests({ ...CONFIG, baseUrl: 'https://proxy.example.test/' })
+    const fingerprint = createHash('sha256').update(WECOM_FIXTURE_SECRET).digest('hex').slice(0, 16)
+    expect(key).toBe(`${WECOM_FIXTURE_CORP_ID}|https://proxy.example.test|${fingerprint}`)
+    expect(key).not.toContain(WECOM_FIXTURE_SECRET)
+    expect(key).not.toContain(WECOM_FIXTURE_SECRET.slice(0, 8))
+
+    const keysSeen: string[] = []
+    const originals = { set: Map.prototype.set, get: Map.prototype.get, delete: Map.prototype.delete }
+    for (const method of ['set', 'get', 'delete'] as const) {
+      vi.spyOn(Map.prototype, method).mockImplementation(function (this: Map<unknown, unknown>, ...args: unknown[]) {
+        if (typeof args[0] === 'string') keysSeen.push(args[0])
+        return (originals[method] as (...a: unknown[]) => unknown).apply(this, args)
+      } as never)
+    }
+    const stub = createWeComFetchStub({ agent: ok(agentPayload()) })
+    try {
+      await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn })
+    } finally {
+      vi.restoreAllMocks()
+    }
+    const cacheKeys = keysSeen.filter((seen) => seen.startsWith(`${WECOM_FIXTURE_CORP_ID}|`))
+    expect(cacheKeys.length).toBeGreaterThan(0)
+    for (const seen of cacheKeys) expect(seen).not.toContain(WECOM_FIXTURE_SECRET)
+    expect(cacheKeys.every((seen) => seen.endsWith(`|${fingerprint}`))).toBe(true)
   })
 
   it('invalidates by the same key (corp, base URL and secret)', async () => {
@@ -664,6 +755,289 @@ describe('WeCom client read layer: defaults and mapping', () => {
       [81013, 'recipient_invalid'], [82001, 'recipient_invalid'], [12345, 'other'],
     ]
     for (const [code, category] of table) expect(classifyWeComErrcode(code)).toBe(category)
+  })
+})
+
+describe('WeCom client read layer: request shape', () => {
+  const AGENT = WECOM_FIXTURE_AGENT_ID
+
+  async function runAllThree(options: WeComRequestOptions & { baseUrl?: string }) {
+    const { baseUrl, ...requestOptions } = options
+    const config = { ...CONFIG, baseUrl }
+    await getWeComAgent(config, AGENT, requestOptions)
+    await listWeComDepartments(config, requestOptions)
+    await listWeComDepartmentMembers(config, '7', requestOptions)
+  }
+
+  const stubAll = () => createWeComFetchStub({
+    agent: ok(agentPayload()),
+    departments: ok(departmentsPayload([dept(1, 0)])),
+    users: ok(usersPayload([])),
+  })
+
+  it('issues GET with a JSON Accept header, no body and an abort signal on every request', async () => {
+    const stub = stubAll()
+    await runAllThree({ fetchFn: stub.fetchFn })
+    expect(stub.requests.map((request) => request.route)).toEqual(['gettoken', 'agent', 'departments', 'users'])
+    for (const request of stub.requests) {
+      expect(request.method).toBe('GET')
+      expect(request.headers.accept).toBe('application/json')
+      expect(request.body).toBeUndefined()
+      expect(request.signal).toBeInstanceOf(AbortSignal)
+    }
+  })
+
+  it('sends exactly the documented query keys, and department/list carries no id', async () => {
+    const stub = stubAll()
+    await runAllThree({ fetchFn: stub.fetchFn })
+    const keysOf = (route: string) => Object.keys(stub.requests.find((request) => request.route === route)?.query ?? {})
+    expect(keysOf('gettoken')).toEqual(['corpid', 'corpsecret'])
+    expect(keysOf('agent')).toEqual(['access_token', 'agentid'])
+    expect(keysOf('departments')).toEqual(['access_token'])
+    expect(keysOf('users')).toEqual(['access_token', 'department_id'])
+    expect(stub.requests.find((request) => request.route === 'users')?.query.department_id).toBe('7')
+  })
+
+  it('sends every request to the origin of the configured base URL', async () => {
+    const custom = stubAll()
+    await runAllThree({ fetchFn: custom.fetchFn, baseUrl: 'https://gateway.example.test///' })
+    expect(new Set(custom.requests.map((request) => request.origin))).toEqual(new Set(['https://gateway.example.test']))
+
+    __resetWeComAppAccessTokenCacheForTests()
+    const fallback = stubAll()
+    await runAllThree({ fetchFn: fallback.fetchFn })
+    expect(new Set(fallback.requests.map((request) => request.origin))).toEqual(new Set(['https://qyapi.weixin.qq.com']))
+  })
+})
+
+describe('WeCom client read layer: abort signal and body reads', () => {
+  const hangUntilAborted = (): { fetchFn: typeof fetch; aborts: number[] } => {
+    const aborts: number[] = []
+    const fetchFn = ((_input: unknown, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const startedAt = Date.now()
+      init?.signal?.addEventListener('abort', () => {
+        aborts.push(Date.now() - startedAt)
+        reject(init.signal?.reason)
+      }, { once: true })
+    })) as unknown as typeof fetch
+    return { fetchFn, aborts }
+  }
+
+  it('aborts a request that never answers through the attempt signal', async () => {
+    const hung = hangUntilAborted()
+    const error = await listWeComDepartments(CONFIG, { fetchFn: hung.fetchFn, timeoutMs: 25, ...seams(createClock()) }).catch((e) => e)
+    expect(error).toBeInstanceOf(WeComTimeoutError)
+    expect(error.timeoutMs).toBe(25)
+    expect(hung.aborts).toHaveLength(3)
+    for (const elapsed of hung.aborts) expect(elapsed).toBeGreaterThanOrEqual(15)
+  })
+
+  it('caps the attempt signal at the remaining budget', async () => {
+    const clock = createClock()
+    const hung = hangUntilAborted()
+    const fetchFn = ((input: unknown, init?: RequestInit) => {
+      if (String(input).includes('/gettoken')) {
+        clock.advance(WECOM_READ_CALL_DEADLINE_MS - 40)
+        return Promise.resolve(new Response(JSON.stringify({ errcode: 0, access_token: WECOM_FIXTURE_TOKEN, expires_in: 7200 }), { status: 200 }))
+      }
+      return hung.fetchFn(input as string, init)
+    }) as typeof fetch
+    const startedAt = Date.now()
+    const error = await listWeComDepartments(CONFIG, { fetchFn, timeoutMs: 4_000, ...seams(clock) }).catch((e) => e)
+    expect(error).toBeInstanceOf(WeComTimeoutError)
+    expect(error.timeoutMs).toBe(40)
+    expect(hung.aborts.length).toBeGreaterThan(0)
+    for (const elapsed of hung.aborts) expect(elapsed).toBeLessThan(1_000)
+    expect(Date.now() - startedAt).toBeLessThan(3_000)
+  })
+
+  it('reports a body that stalls after the headers as a timeout and retries it', async () => {
+    const stub = createWeComFetchStub({ agent: stalledBody() })
+    const error = await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn, timeoutMs: 30, ...seams(createClock()) }).catch((e) => e)
+    expect(error).toBeInstanceOf(WeComTimeoutError)
+    expect(stub.count('agent')).toBe(3)
+  })
+
+  it('maps an abort while the body is read to a timeout and a reset body to a transport fault', async () => {
+    const reasons: string[] = []
+    const aborted = createWeComFetchStub({ agent: bodyFailWith(abortError()) })
+    const timeout = await observeWeComTransportRetries((event) => reasons.push(event.reason), () => getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: aborted.fetchFn, ...seams(createClock()) }).catch((e) => e))
+    expect(timeout).toBeInstanceOf(WeComTimeoutError)
+    expect(aborted.count('agent')).toBe(3)
+    expect(reasons).toEqual(['network_error', 'network_error'])
+
+    __resetWeComAppAccessTokenCacheForTests()
+    const reset = createWeComFetchStub({ agent: bodyFailWith(new TypeError('terminated')) })
+    const transport = await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: reset.fetchFn, ...seams(createClock()) }).catch((e) => e)
+    expect(transport).toBeInstanceOf(WeComTransportError)
+    expect(reset.count('agent')).toBe(3)
+  })
+
+  it('keeps a non-JSON body an incomplete response that is not retried', async () => {
+    const stub = createWeComFetchStub({ agent: rawBody('<html>gateway</html>') })
+    const error = await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn, ...seams(createClock()) }).catch((e) => e)
+    expect(error).toBeInstanceOf(WeComIncompleteResponseError)
+    expect(error.location).toBe('response')
+    expect(stub.count('agent')).toBe(1)
+  })
+})
+
+describe('WeCom client read layer: token lifetime', () => {
+  const T0 = 1_800_000_000_000
+
+  async function gettokenCallsAfter(expiresIn: unknown, laterMs: number): Promise<number> {
+    __resetWeComAppAccessTokenCacheForTests()
+    const stub = createWeComFetchStub({
+      agent: ok(agentPayload()),
+      token: ok({ errcode: 0, access_token: 'lifetime-token', ...(expiresIn === undefined ? {} : { expires_in: expiresIn }) }),
+    })
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(T0)
+    try {
+      await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn })
+      clock.mockReturnValue(T0 + laterMs)
+      await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn })
+    } finally {
+      clock.mockRestore()
+    }
+    return stub.count('gettoken')
+  }
+
+  it('serves a 7200 second token until 120 seconds before it expires', async () => {
+    expect(await gettokenCallsAfter(7200, 7_080_000 - 1)).toBe(1)
+    expect(await gettokenCallsAfter(7200, 7_080_000)).toBe(2)
+  })
+
+  it('keeps a short-lived token for at least 30 seconds', async () => {
+    expect(await gettokenCallsAfter(60, 30_000 - 1)).toBe(1)
+    expect(await gettokenCallsAfter(60, 30_000)).toBe(2)
+  })
+
+  it('falls back to 3300 seconds when expires_in is missing or not a positive number', async () => {
+    for (const expiresIn of [undefined, 0, -5, 'soon']) {
+      expect(await gettokenCallsAfter(expiresIn, 3_300_000 - 1)).toBe(1)
+      expect(await gettokenCallsAfter(expiresIn, 3_300_000)).toBe(2)
+    }
+  })
+})
+
+describe('WeCom client read layer: token stage statuses', () => {
+  // The retried set is 45033, -1, HTTP 5xx, network errors and timeouts; the token stage uses the same set.
+  const attempts = async (token: ReturnType<typeof ok>) => {
+    __resetWeComAppAccessTokenCacheForTests()
+    const stub = createWeComFetchStub({ token, agent: ok(agentPayload()) })
+    const error = await getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, { fetchFn: stub.fetchFn, ...seams(createClock()) }).catch((e) => e)
+    return { error, tokenCalls: stub.count('gettoken'), agentCalls: stub.count('agent') }
+  }
+
+  it('does not retry HTTP 408 or HTTP 429 when the token is requested', async () => {
+    for (const status of [408, 429]) {
+      const { error, tokenCalls, agentCalls } = await attempts(httpStatus(status))
+      expect(error).toBeInstanceOf(WeComRequestError)
+      expect(error.statusCode).toBe(status)
+      expect(tokenCalls).toBe(1)
+      expect(agentCalls).toBe(0)
+    }
+  })
+
+  it('does not retry a malformed token response', async () => {
+    const { error, tokenCalls } = await attempts(rawBody('<html>gateway</html>'))
+    expect(error).toBeInstanceOf(WeComIncompleteResponseError)
+    expect(error.location).toBe('response')
+    expect(tokenCalls).toBe(1)
+  })
+
+  it('retries HTTP 5xx and 45033 when the token is requested', async () => {
+    const serverError = await attempts(httpStatus(502))
+    expect(serverError.tokenCalls).toBe(3)
+    const busy = await attempts(errcodeReply(45033))
+    expect(busy.tokenCalls).toBe(3)
+  })
+})
+
+describe('WeCom client read layer: thrown errors carry no request values', () => {
+  const LEAK = 'LEAK-PROVIDER-TEXT-203.0.113.9'
+  const DECLARED = new Set(['stack', 'message', 'name', 'location', 'field', 'timeoutMs', 'errcode', 'statusCode', 'responseBody'])
+  const FORBIDDEN = [LEAK, WECOM_FIXTURE_SECRET, WECOM_FIXTURE_TOKEN, 'corpsecret', 'access_token', 'https://', 'http://', 'qyapi']
+
+  function expectValuesFree(error: any): void {
+    expect(error).toBeInstanceOf(Error)
+    expect(error.cause).toBeUndefined()
+    expect(Object.getOwnPropertyNames(error).filter((name) => !DECLARED.has(name))).toEqual([])
+    if ('responseBody' in error) expect(error.responseBody).toBeNull()
+    const text = [error.message, error.stack, JSON.stringify(error), Object.getOwnPropertyNames(error).join(',')].join('\n')
+    for (const forbidden of FORBIDDEN) expect(text).not.toContain(forbidden)
+  }
+
+  const echoUrlError = (input: unknown) => new TypeError(`Failed to parse URL from ${String(input)}`)
+
+  const operations: Array<[string, (options: WeComRequestOptions) => Promise<unknown>]> = [
+    ['agent', (options) => getWeComAgent(CONFIG, WECOM_FIXTURE_AGENT_ID, options)],
+    ['departments', (options) => listWeComDepartments(CONFIG, options)],
+    ['users', (options) => listWeComDepartmentMembers(CONFIG, '2', options)],
+  ]
+  const faults: Array<[string, ReturnType<typeof ok>]> = [
+    ['timeout', failWith(abortError())],
+    ['5xx', httpStatus(503, { errmsg: LEAK })],
+    ['business errcode', errcodeReply(48002, LEAK)],
+    ['unreadable body', bodyFailWith(new TypeError(`terminated ${LEAK}`))],
+    ['malformed body', rawBody(LEAK)],
+    ['shape fault', ok({ errcode: 0, errmsg: LEAK, department: [null], userlist: [null], agentid: LEAK })],
+  ]
+
+  for (const [operationName, run] of operations) {
+    for (const [faultName, fault] of faults) {
+      it(`keeps ${operationName} values-free on ${faultName}`, async () => {
+        const stub = createWeComFetchStub({ agent: fault, departments: fault, users: fault })
+        const error = await run({ fetchFn: stub.fetchFn, ...seams(createClock()) }).catch((e) => e)
+        expectValuesFree(error)
+      })
+    }
+
+    it(`keeps ${operationName} values-free when the transport error echoes the request URL`, async () => {
+      const stub = createWeComFetchStub({ agent: ok(agentPayload()), departments: ok(departmentsPayload([])), users: ok(usersPayload([])) })
+      const fetchFn = ((input: unknown, init?: RequestInit) => {
+        if (String(input).includes('/gettoken')) return stub.fetchFn(input as string, init)
+        throw echoUrlError(input)
+      }) as typeof fetch
+      const error = await run({ fetchFn, ...seams(createClock()) }).catch((e) => e)
+      expect(error).toBeInstanceOf(WeComTransportError)
+      expectValuesFree(error)
+    })
+
+    it(`keeps ${operationName} values-free when the token request echoes its URL`, async () => {
+      const fetchFn = ((input: unknown) => { throw echoUrlError(input) }) as typeof fetch
+      const error = await run({ fetchFn, ...seams(createClock()) }).catch((e) => e)
+      expect(error).toBeInstanceOf(WeComTransportError)
+      expectValuesFree(error)
+    })
+  }
+
+  it('keeps the logged lines free of the echoed URL as well', async () => {
+    const spies = spyOnLogger()
+    const fetchFn = ((input: unknown) => { throw echoUrlError(input) }) as typeof fetch
+    await listWeComDepartments(CONFIG, { fetchFn, ...seams(createClock()) }).catch((e) => e)
+    const text = loggedText(spies)
+    for (const forbidden of FORBIDDEN) expect(text).not.toContain(forbidden)
+  })
+})
+
+describe('WeCom client read layer: single request path', () => {
+  const clientSource = () => fs.readFileSync(path.resolve(HERE, '../../src/integrations/wecom/client.ts'), 'utf8')
+
+  it('has exactly one fetch call site', () => {
+    const source = clientSource()
+    expect(source.match(/\bfetch\)\(/g)).toHaveLength(1)
+    expect(source.match(/(^|[^.\w])fetch\(/gm)).toBeNull()
+  })
+
+  it('reads the process environment only in the known places', () => {
+    const lines = clientSource().split('\n').filter((line) => line.includes('process.env')).map((line) => line.trim())
+    expect(lines).toEqual([
+      'const raw = Number(process.env.WECOM_REQUEST_TIMEOUT_MS)',
+      'export function readWeComMessageConfigFromEnv(env: NodeJS.ProcessEnv = process.env): WeComMessageConfig {',
+      'env: NodeJS.ProcessEnv = process.env,',
+      'export function readWeComBaseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {',
+    ])
   })
 })
 

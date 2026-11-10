@@ -82,12 +82,21 @@ function manyUsers(count: number, prefix: string, extra: Record<string, unknown>
   return Array.from({ length: count }, (_, index) => person(`${prefix}${index}`, { department: [2], main_department: 2, ...extra }))
 }
 
+const ENV_KEYS = ['WECOM_BASE_URL', 'WECOM_CORP_ID', 'WECOM_CORP_SECRET', 'WECOM_AGENT_ID'] as const
+let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
+
 beforeEach(() => {
+  savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
+  for (const key of ENV_KEYS) delete process.env[key]
   __resetWeComAppAccessTokenCacheForTests()
   globalThis.fetch = (() => { throw new Error('real network is not available in this test') }) as unknown as typeof fetch
 })
 
 afterEach(() => {
+  for (const key of ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key]
+    else process.env[key] = savedEnv[key]
+  }
   globalThis.fetch = realFetch
   __directoryAdapterRegistryForTests.restore()
   vi.restoreAllMocks()
@@ -135,6 +144,17 @@ describe('WeCom directory adapter: baseline tenant (FX-01)', () => {
     expect(telemetry.apiCalls).toEqual({ departmentListCalls: 1, departmentDetailCalls: 0, userListPageCalls: 4, userDetailCalls: 0 })
     expect(stub.count('gettoken')).toBe(1)
     expect(stub.pathsOf('users')).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('issues GET requests with exactly the documented query keys and no id on department/list', async () => {
+    const { stub } = await pull(baselineSpec())
+    for (const request of stub.requests) expect(request.method).toBe('GET')
+    const keysOf = (route: string) => stub.requests.filter((request) => request.route === route).map((request) => Object.keys(request.query))
+    expect(keysOf('gettoken')).toEqual([['corpid', 'corpsecret']])
+    expect(keysOf('agent')).toEqual([['access_token', 'agentid'], ['access_token', 'agentid']])
+    expect(keysOf('departments')).toEqual([['access_token']])
+    expect(keysOf('users')).toEqual([['access_token', 'department_id'], ['access_token', 'department_id'], ['access_token', 'department_id'], ['access_token', 'department_id']])
+    expect(stub.requests.filter((request) => request.route === 'agent').map((request) => request.query.agentid)).toEqual([WECOM_FIXTURE_AGENT_ID, WECOM_FIXTURE_AGENT_ID])
   })
 
   it('works without telemetry', async () => {
@@ -244,6 +264,18 @@ describe('WeCom directory adapter: contact fields (FX-02 to FX-05, FX-07)', () =
     for (const member of members.values()) expect(member.preserveContact).toBeUndefined()
   })
 
+  it('never repeats a contact value in the source (FX-02)', async () => {
+    const base = withContacts({ alice: { mobile: '13800000001', email: 'alice@example.test', telephone: '010-1', biz_mail: 'a@corp.example.test' }, bob: { mobile: '13800000002', email: 'bob@example.test' } })
+    const { members } = await pull({ ...base, users: { ...base.users, '4': ok(usersPayload([])) } })
+    expect(members.get('alice')?.source).toEqual({ useridRaw: 'alice', main_department: 4 })
+    expect(members.get('bob')?.source).toEqual({ useridRaw: 'bob', main_department: 2 })
+    for (const member of members.values()) {
+      expect(Object.keys(member.source)).not.toContain('mobile')
+      expect(Object.keys(member.source)).not.toContain('email')
+      expect(JSON.stringify(member.source)).not.toMatch(/13800000|example\.test|010-1/)
+    }
+  })
+
   it('observes per round: one value anywhere means no flag for anyone (FX-03)', async () => {
     const { members } = await pull(withContacts({ alice: { mobile: '13800000001', email: 'alice@example.test' } }))
     expect(members.get('alice')?.mobile).toBe('13800000001')
@@ -280,7 +312,7 @@ describe('WeCom directory adapter: contact fields (FX-02 to FX-05, FX-07)', () =
     expect(await flagsOf()).toBeUndefined()
   })
 
-  it('treats a missing key, an empty string and blanks alike (FX-05)', async () => {
+  it('assumes: treats a missing key, an empty string and blanks alike (FX-05)', async () => {
     const { members } = await pull(withContacts({ alice: { mobile: '', email: '' }, bob: { mobile: '   ' } }))
     for (const member of members.values()) {
       expect(member.mobile).toBeUndefined()
@@ -420,7 +452,7 @@ describe('WeCom directory adapter: member ids (FX-11)', () => {
     expect(members.get('a2')?.source.nameUnavailable).toBe(true)
   })
 
-  it('isolates ids that break the character rule and never lets a slash into a member id', async () => {
+  it('assumes: isolates ids that break the character rule and never lets a slash into a member id', async () => {
     const { members } = await pull(specWith([
       person('ok1'),
       person('Corp/zhang'),
@@ -541,14 +573,14 @@ describe('WeCom directory adapter: department anomalies (FX-12)', () => {
 })
 
 describe('WeCom directory adapter: empty departments (FX-13)', () => {
-  it('accepts an empty userlist', async () => {
+  it('assumes: accepts an empty userlist', async () => {
     const base = baselineSpec()
     const { members } = await pull({ ...base, users: { ...base.users, '3': ok(usersPayload([])) } })
     expect(members.has('carol')).toBe(false)
     expect(members.has('alice')).toBe(true)
   })
 
-  it('rejects a missing userlist key with an incomplete-response error and returns no map', async () => {
+  it('assumes: rejects a missing userlist key with an incomplete-response error and returns no map', async () => {
     const base = baselineSpec()
     const { adapter } = adapterFor({ ...base, users: { ...base.users, '3': ok({ errcode: 0, errmsg: 'ok' }) } })
     const departments = await adapter.fetchDepartments(CONFIG, 'Acme')
@@ -572,13 +604,13 @@ describe('WeCom directory adapter: member status (FX-14)', () => {
     }
   }
 
-  it('does not return members that are disabled (2) or left the company (5)', async () => {
+  it('assumes: does not return members that are disabled (2) or left the company (5)', async () => {
     const { members } = await pull(statusSpec([['active', 1], ['disabled', 2], ['inactive', 4], ['left', 5]]))
     expect([...members.keys()]).toEqual(['active', 'inactive'])
     for (const member of members.values()) expect(member.providerStatus).toBeUndefined()
   })
 
-  it('returns the same shape when the response carries no such members', async () => {
+  it('assumes: returns the same shape when the response carries no such members', async () => {
     const withBoth = await pull(statusSpec([['active', 1], ['disabled', 2], ['inactive', 4], ['left', 5]]))
     const without = await pull(statusSpec([['active', 1], ['inactive', 4]]))
     expect(Object.fromEntries(withBoth.members)).toEqual(Object.fromEntries(without.members))
@@ -588,5 +620,154 @@ describe('WeCom directory adapter: member status (FX-14)', () => {
     const base = baselineSpec()
     const { members } = await pull({ ...base, users: { '1': ok(usersPayload([{ userid: 'nostatus', name: 'N' }])), '2': ok(usersPayload([])), '3': ok(usersPayload([])), '4': ok(usersPayload([])) } })
     expect(members.has('nostatus')).toBe(true)
+  })
+})
+
+describe('WeCom directory adapter: department order of a member', () => {
+  const zed = () => ok(usersPayload([person('zed', { department: [10, 2, 9], main_department: 100, name: 'Zed' })]))
+  const spec = (): WeComStubSpec => ({
+    ...baselineSpec(),
+    departments: ok(departmentsPayload([dept(1, 0), dept(2, 1), dept(9, 1), dept(10, 1), dept(100, 1)])),
+    users: { '1': ok(usersPayload([])), '2': zed(), '9': zed(), '10': zed(), '100': ok(usersPayload([])) },
+  })
+
+  it('lists members of the departments in numeric order, not string order', async () => {
+    const { stub } = await pull(spec())
+    expect(stub.pathsOf('users')).toEqual(['1', '2', '9', '10', '100'])
+  })
+
+  it('orders the remaining department ids by numeric value', async () => {
+    const { members } = await pull(spec())
+    expect(members.get('zed')?.departmentIds).toEqual(['2', '9', '10'])
+  })
+
+  it('puts main_department first only when it is one of the departments of the member', async () => {
+    const inside = await pull({
+      ...spec(),
+      users: { '1': ok(usersPayload([])), '2': ok(usersPayload([])), '9': ok(usersPayload([])), '10': ok(usersPayload([person('amy', { department: [2, 9, 10], main_department: 10 })])), '100': ok(usersPayload([])) },
+    })
+    expect(inside.members.get('amy')?.departmentIds).toEqual(['10', '2', '9'])
+    const outside = await pull({
+      ...spec(),
+      users: { '1': ok(usersPayload([])), '2': ok(usersPayload([person('bea', { department: [2, 9], main_department: 100 })])), '9': ok(usersPayload([])), '10': ok(usersPayload([])), '100': ok(usersPayload([])) },
+    })
+    expect(outside.members.get('bea')?.departmentIds).toEqual(['2', '9'])
+  })
+})
+
+describe('WeCom directory adapter: member departments outside the round', () => {
+  const subtreeSpec = (users: WeComStubSpec['users']): WeComStubSpec => ({
+    ...baselineSpec(),
+    departments: ok(departmentsPayload([dept(1, 0), dept(7, 1), dept(8, 7), dept(5, 1)])),
+    users,
+  })
+  const subtreeConfig = { ...CONFIG, rootDepartmentId: '7' }
+
+  it('never lets a department of another branch or an unknown department lead', async () => {
+    const { members, departments } = await pull(
+      subtreeSpec({
+        '7': ok(usersPayload([])),
+        '8': ok(usersPayload([
+          person('amy', { department: [5, 8] }),
+          person('bea', { department: [8, 3], main_department: 5 }),
+          person('cat', { department: [8, 7, 5], main_department: 7 }),
+        ])),
+      }),
+      subtreeConfig,
+    )
+    expect([...departments.keys()]).toEqual(['7', '8'])
+    expect(members.get('amy')?.departmentIds).toEqual(['8'])
+    expect(members.get('bea')?.departmentIds).toEqual(['8'])
+    expect(members.get('cat')?.departmentIds).toEqual(['7', '8'])
+    for (const member of members.values()) {
+      for (const id of member.departmentIds) expect(departments.has(id)).toBe(true)
+    }
+  })
+})
+
+describe('WeCom directory adapter: userid rules apply to the raw value', () => {
+  const withVariants = (variants: string[]): WeComStubSpec => ({
+    ...baselineSpec(),
+    users: {
+      '1': ok(usersPayload([])),
+      '2': ok(usersPayload([
+        ...manyUsers(120, 'valid'),
+        person('alice', { department: [2], main_department: 2 }),
+        person('key', { department: [2], main_department: 2 }),
+        ...variants.map((userid) => person(userid, { department: [2], main_department: 2 })),
+      ])),
+      '3': ok(usersPayload([person('alice', { department: [3], main_department: 3 })])),
+      '4': ok(usersPayload([])),
+    },
+  })
+
+  it('isolates padded, newline-terminated and case-folding ids instead of merging them into a valid id', async () => {
+    const { members } = await pull(withVariants([' alice', 'alice ', 'alice\n', 'alice ', 'Key', 'ａlice']))
+    expect(members.size).toBe(122)
+    expect(members.get('alice')?.departmentIds).toEqual(['2', '3'])
+    expect(members.get('alice')?.source.useridRaw).toBe('alice')
+    expect(members.get('key')?.source.useridRaw).toBe('key')
+    for (const key of members.keys()) expect(key).toMatch(/^[a-z0-9][a-z0-9_@.-]*$/)
+  })
+
+  it('counts each such id toward the threshold', async () => {
+    const variants = Array.from({ length: 11 }, (_, index) => `alice${'\n'.repeat(index + 1)}`)
+    const refused = await caught(() => pull(withVariants(variants)))
+    expect(refused).toBeInstanceOf(WeComMemberShapeViolationError)
+    expect(refused.count).toBe(11)
+    const tolerated = await pull(withVariants(variants.slice(0, 10)))
+    expect(tolerated.members.get('alice')?.departmentIds).toEqual(['2', '3'])
+  })
+
+  it('accepts an upper-case id and merges it with its lower-case form', async () => {
+    const { members } = await pull(withVariants(['Key']))
+    expect(members.get('key')?.source.useridRaw).toBe('key')
+    expect(members.size).toBe(122)
+  })
+
+  it('exposes only the count on a shape violation', async () => {
+    const bad = Array.from({ length: 12 }, (_, index) => `bad/${index}`)
+    const error = await caught(() => pull(withVariants(bad)))
+    expect(error).toBeInstanceOf(WeComMemberShapeViolationError)
+    expect(Object.keys(error).filter((key) => key !== 'name')).toEqual(['count'])
+    expect(`${error.message} ${error.stack} ${JSON.stringify(error)}`).not.toContain('bad/')
+    expect(error.cause).toBeUndefined()
+  })
+})
+
+describe('WeCom directory adapter: deployment environment', () => {
+  it('sends every request to the deployment base URL', async () => {
+    process.env.WECOM_BASE_URL = 'https://gateway.example.test/'
+    const { stub } = await pull(baselineSpec())
+    expect(stub.requests.length).toBeGreaterThan(0)
+    expect(new Set(stub.requests.map((request) => request.origin))).toEqual(new Set(['https://gateway.example.test']))
+  })
+
+  it('uses the default host when no base URL is set', async () => {
+    const { stub } = await pull(baselineSpec())
+    expect(new Set(stub.requests.map((request) => request.origin))).toEqual(new Set(['https://qyapi.weixin.qq.com']))
+  })
+
+  it('takes credentials only from the configuration, never from WECOM_CORP_* variables', async () => {
+    process.env.WECOM_CORP_ID = 'envcorp'
+    process.env.WECOM_CORP_SECRET = 'env-secret'
+    process.env.WECOM_AGENT_ID = '999'
+    for (const [override, field] of [
+      [{ corpSecret: '' }, 'corpSecret'],
+      [{ corpId: '' }, 'corpId'],
+      [{ wecomAgentId: '' }, 'wecomAgentId'],
+    ] as const) {
+      const { adapter, stub } = adapterFor(baselineSpec())
+      const error = await caught(() => adapter.fetchDepartments({ ...CONFIG, ...override }, 'Acme'))
+      expect(error).toBeInstanceOf(WeComInvalidInputError)
+      expect(error.field).toBe(field)
+      expect(stub.requests).toHaveLength(0)
+    }
+  })
+
+  it('reads no environment variable in the adapter modules', () => {
+    for (const file of ['wecom-directory-adapter.ts', 'wecom-directory-errors.ts']) {
+      expect(fs.readFileSync(path.resolve(HERE, '../../src/directory/adapters', file), 'utf8')).not.toContain('process.env')
+    }
   })
 })

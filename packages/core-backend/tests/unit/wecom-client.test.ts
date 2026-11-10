@@ -69,7 +69,7 @@ describe('WeCom client — app access-token cache (S4 design-lock 20260710, inde
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it('does not cross corp ids, base URLs or credentials (cache keyed by corp, base URL and credential fingerprint)', async () => {
+  it('does not share a token between corp ids', async () => {
     __resetWeComAppAccessTokenCacheForTests()
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(tokenResponse('tok-a', 7200))
@@ -79,6 +79,19 @@ describe('WeCom client — app access-token cache (S4 design-lock 20260710, inde
     expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 's', agentId: '1' })).toBe('tok-a')
     expect(await fetchWeComAppAccessToken({ corpId: 'corp-b', corpSecret: 's', agentId: '1' })).toBe('tok-b')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not share a token between base URLs', async () => {
+    __resetWeComAppAccessTokenCacheForTests()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(tokenResponse('tok-default', 7200))
+      .mockResolvedValueOnce(tokenResponse('tok-proxy', 7200))
+    global.fetch = fetchMock as typeof fetch
+
+    expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 's', agentId: '1' })).toBe('tok-default')
+    expect(await fetchWeComAppAccessToken({ corpId: 'corp-a', corpSecret: 's', agentId: '1', baseUrl: 'https://proxy.example.test' })).toBe('tok-proxy')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1][0]).toContain('https://proxy.example.test/cgi-bin/gettoken')
   })
 
   it('does not share a token between two secrets of the same corp and base URL', async () => {

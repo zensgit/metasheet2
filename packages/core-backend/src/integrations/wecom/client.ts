@@ -112,12 +112,25 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
+function readErrcode(payload: Record<string, unknown> | null): number | null {
+  const raw = payload?.errcode
+  if (typeof raw === 'number') return raw
+  if (typeof raw === 'string' && raw.trim().length > 0 && !Number.isNaN(Number(raw))) return Number(raw)
+  return null
+}
+
+/**
+ * The single WeCom HTTP call site. `strict` selects the read-layer behaviour (opt-in per call): the
+ * request fails typed without provider text, URL or credentials, and a response that is not a JSON
+ * object is an incomplete response. Without it the request path is the original one.
+ */
 async function requestWeComJson(
   path: string,
   init: RequestInit,
   fallbackError: string,
   baseUrl: string | undefined,
   options?: WeComRequestOptions,
+  strict = false,
 ): Promise<Record<string, unknown>> {
   const timeoutMs = options?.timeoutMs ?? WECOM_REQUEST_TIMEOUT_MS
   const url = `${normalizeWeComBaseUrl(baseUrl)}${path}`
@@ -129,11 +142,16 @@ async function requestWeComJson(
     })
   } catch (error) {
     if (isAbortError(error)) {
-      logger.warn(`WeCom request timed out after ${timeoutMs}ms`)
+      logger.warn(strict ? `WeCom read request timed out after ${timeoutMs}ms` : `WeCom request timed out after ${timeoutMs}ms`)
       throw new WeComTimeoutError(timeoutMs)
+    }
+    if (strict) {
+      logger.warn('WeCom read request failed before a response')
+      throw new WeComTransportError()
     }
     throw error
   }
+  if (strict) return readStrictWeComPayload(response, timeoutMs)
   const payload = await readJson(response)
 
   if (!response.ok) {
@@ -142,17 +160,47 @@ async function requestWeComJson(
     throw new WeComRequestError(message, response.status, payload)
   }
 
-  const errcodeRaw = payload?.errcode
-  const errcode = typeof errcodeRaw === 'number'
-    ? errcodeRaw
-    : typeof errcodeRaw === 'string' && errcodeRaw.trim().length > 0 && !Number.isNaN(Number(errcodeRaw))
-      ? Number(errcodeRaw)
-      : null
+  const errcode = readErrcode(payload)
   if (errcode !== null && errcode !== 0) {
     throw new WeComBusinessError(normalizeErrorMessage(payload, fallbackError), errcode, payload)
   }
 
   return payload ?? {}
+}
+
+/** Read-layer response handling: a body that fails mid-read is a timeout or a transport fault, never an empty body. */
+async function readStrictWeComPayload(response: Response, timeoutMs: number): Promise<Record<string, unknown>> {
+  if (!response.ok) {
+    logger.warn(`WeCom read request answered HTTP ${response.status}`)
+    try {
+      await response.body?.cancel()
+    } catch {
+      // the status alone decides the outcome
+    }
+    throw new WeComRequestError(WECOM_READ_REQUEST_FAILURE_MESSAGE, response.status, null)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch (error) {
+    if (isAbortError(error)) {
+      logger.warn(`WeCom read response timed out after ${timeoutMs}ms`)
+      throw new WeComTimeoutError(timeoutMs)
+    }
+    if (error instanceof SyntaxError) throw new WeComIncompleteResponseError('response')
+    logger.warn('WeCom read response could not be read')
+    throw new WeComTransportError()
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new WeComIncompleteResponseError('response')
+  }
+  const record = payload as Record<string, unknown>
+  const errcode = readErrcode(record)
+  if (errcode !== null && errcode !== 0) {
+    logger.warn(`WeCom read request rejected (errcode ${errcode})`)
+    throw new WeComBusinessError(WECOM_READ_BUSINESS_FAILURE_MESSAGE, errcode, null)
+  }
+  return record
 }
 
 // ── App access-token cache ──────────────────────────────────────────────────
@@ -164,8 +212,8 @@ async function requestWeComJson(
 const WECOM_TOKEN_EXPIRY_MARGIN_MS = 120 * 1000
 const WECOM_TOKEN_FALLBACK_TTL_MS = 3300 * 1000
 const wecomTokenCache = new Map<string, { token: string; expiresAt: number }>()
-const wecomTokenInFlight = new Map<string, Promise<string>>()
-const wecomReadTokenInFlight = new Map<string, Promise<string>>()
+type WeComTokenLayer = 'single' | 'read'
+const wecomTokenInFlight = new Map<string, { layer: WeComTokenLayer; promise: Promise<string> }>()
 
 function wecomTokenTtlMs(expiresInSeconds: number | null): number {
   return expiresInSeconds !== null
@@ -190,7 +238,6 @@ export function invalidateWeComAppAccessTokenCache(config?: WeComTokenConfig | W
 export function __resetWeComAppAccessTokenCacheForTests(): void {
   wecomTokenCache.clear()
   wecomTokenInFlight.clear()
-  wecomReadTokenInFlight.clear()
 }
 
 async function fetchWeComAppAccessTokenUncached(
@@ -214,32 +261,51 @@ async function fetchWeComAppAccessTokenUncached(
   return { token, expiresInSeconds: Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null }
 }
 
+/** Exposed for tests: the cache key never contains the secret itself. */
+export function __weComTokenCacheKeyForTests(config: WeComTokenConfig | WeComMessageConfig): string {
+  return wecomTokenCacheKey(config)
+}
+
+/**
+ * The one token cache and in-flight registry. Callers of the same layer under one key share a single
+ * request. A caller of the other layer waits for it to settle and then uses the cached token, or makes
+ * its own request, so each layer keeps its own error shape and time budget.
+ */
+async function obtainCachedWeComToken(
+  config: WeComTokenConfig | WeComMessageConfig,
+  layer: WeComTokenLayer,
+  fetchToken: () => Promise<{ token: string; expiresInSeconds: number | null }>,
+): Promise<string> {
+  const key = wecomTokenCacheKey(config)
+  for (;;) {
+    const cached = wecomTokenCache.get(key)
+    if (cached && cached.expiresAt > Date.now()) return cached.token
+    wecomTokenCache.delete(key)
+    const flight = wecomTokenInFlight.get(key)
+    if (!flight) break
+    if (layer === 'single' && flight.layer === 'single') return flight.promise
+    await flight.promise.then(() => undefined, () => undefined)
+  }
+
+  const request = (async () => {
+    const { token, expiresInSeconds } = await fetchToken()
+    wecomTokenCache.set(key, { token, expiresAt: Date.now() + wecomTokenTtlMs(expiresInSeconds) })
+    return token
+  })()
+  const entry = { layer, promise: request }
+  wecomTokenInFlight.set(key, entry)
+  try {
+    return await request
+  } finally {
+    if (wecomTokenInFlight.get(key) === entry) wecomTokenInFlight.delete(key)
+  }
+}
+
 export async function fetchWeComAppAccessToken(
   config: WeComTokenConfig | WeComMessageConfig,
   options?: WeComRequestOptions,
 ): Promise<string> {
-  const key = wecomTokenCacheKey(config)
-  const cached = wecomTokenCache.get(key)
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.token
-  }
-  wecomTokenCache.delete(key)
-
-  const inFlight = wecomTokenInFlight.get(key)
-  if (inFlight) return inFlight
-
-  const request = (async () => {
-    const { token, expiresInSeconds } = await fetchWeComAppAccessTokenUncached(config, options)
-    const ttlMs = wecomTokenTtlMs(expiresInSeconds)
-    wecomTokenCache.set(key, { token, expiresAt: Date.now() + ttlMs })
-    return token
-  })()
-  wecomTokenInFlight.set(key, request)
-  try {
-    return await request
-  } finally {
-    wecomTokenInFlight.delete(key)
-  }
+  return obtainCachedWeComToken(config, 'single', () => fetchWeComAppAccessTokenUncached(config, options))
 }
 
 // ── Config (env-only; G7 scopes DB/directory-stored WeCom app config out of S4) ────────────────
@@ -593,13 +659,6 @@ function createWeComReadContext(options?: WeComRequestOptions): WeComReadContext
   }
 }
 
-function readErrcode(payload: Record<string, unknown>): number | null {
-  const raw = payload.errcode
-  if (typeof raw === 'number') return raw
-  if (typeof raw === 'string' && raw.trim().length > 0 && !Number.isNaN(Number(raw))) return Number(raw)
-  return null
-}
-
 async function readWeComReadAttempt(
   path: string,
   baseUrl: string | undefined,
@@ -607,35 +666,14 @@ async function readWeComReadAttempt(
   remainingMs: number,
 ): Promise<Record<string, unknown>> {
   const timeoutMs = Math.max(1, Math.floor(Math.min(ctx.timeoutMs, remainingMs)))
-  let response: Response
-  try {
-    response = await (ctx.fetchFn ?? fetch)(`${normalizeWeComBaseUrl(baseUrl)}${path}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    if (isAbortError(error)) {
-      logger.warn(`WeCom read request timed out after ${timeoutMs}ms`)
-      throw new WeComTimeoutError(timeoutMs)
-    }
-    logger.warn('WeCom read request failed before a response')
-    throw new WeComTransportError()
-  }
-  const payload = await readJson(response)
-
-  if (!response.ok) {
-    logger.warn(`WeCom read request answered HTTP ${response.status}`)
-    throw new WeComRequestError(WECOM_READ_REQUEST_FAILURE_MESSAGE, response.status, null)
-  }
-  if (payload === null || Array.isArray(payload)) throw new WeComIncompleteResponseError('response')
-
-  const errcode = readErrcode(payload)
-  if (errcode !== null && errcode !== 0) {
-    logger.warn(`WeCom read request rejected (errcode ${errcode})`)
-    throw new WeComBusinessError(WECOM_READ_BUSINESS_FAILURE_MESSAGE, errcode, null)
-  }
-  return payload
+  return requestWeComJson(
+    path,
+    { method: 'GET', headers: { Accept: 'application/json' } },
+    WECOM_READ_REQUEST_FAILURE_MESSAGE,
+    baseUrl,
+    { fetchFn: ctx.fetchFn, timeoutMs },
+    true,
+  )
 }
 
 function weComRetryReason(error: unknown): string | null {
@@ -678,15 +716,7 @@ async function readWeComJson(
 }
 
 async function readWeComAccessToken(config: WeComTokenConfig, ctx: WeComReadContext): Promise<string> {
-  const key = wecomTokenCacheKey(config)
-  const cached = wecomTokenCache.get(key)
-  if (cached && cached.expiresAt > Date.now()) return cached.token
-  wecomTokenCache.delete(key)
-
-  const inFlight = wecomReadTokenInFlight.get(key)
-  if (inFlight) return inFlight
-
-  const request = (async () => {
+  return obtainCachedWeComToken(config, 'read', async () => {
     const payload = await readWeComJson(
       `/cgi-bin/gettoken?corpid=${encodeURIComponent(config.corpId)}&corpsecret=${encodeURIComponent(config.corpSecret)}`,
       config.baseUrl,
@@ -695,16 +725,8 @@ async function readWeComAccessToken(config: WeComTokenConfig, ctx: WeComReadCont
     const token = typeof payload.access_token === 'string' ? payload.access_token : ''
     if (!token) throw new WeComIncompleteResponseError('token')
     const expiresRaw = Number(payload.expires_in)
-    const ttlMs = wecomTokenTtlMs(Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null)
-    wecomTokenCache.set(key, { token, expiresAt: Date.now() + ttlMs })
-    return token
-  })()
-  wecomReadTokenInFlight.set(key, request)
-  try {
-    return await request
-  } finally {
-    wecomReadTokenInFlight.delete(key)
-  }
+    return { token, expiresInSeconds: Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null }
+  })
 }
 
 function assertWeComReadCredentials(config: WeComTokenConfig): void {
@@ -810,9 +832,13 @@ function parseDepartmentListResponse(payload: Record<string, unknown>): WeComDep
   if (!Array.isArray(list)) throw new WeComIncompleteResponseError('department_list')
   return list.map((item) => {
     if (!isRecord(item)) throw new WeComIncompleteResponseError('department')
-    if (!isSafeInt(item.id) || item.id < 1) throw new WeComIncompleteResponseError('department')
+    if (!isSafeInt(item.id) || item.id < 1 || !isValidWeComDepartmentId(String(item.id))) {
+      throw new WeComIncompleteResponseError('department')
+    }
     if (typeof item.name !== 'string') throw new WeComIncompleteResponseError('department')
-    if (!isSafeInt(item.parentid) || item.parentid < 0) throw new WeComIncompleteResponseError('department')
+    if (!isSafeInt(item.parentid) || item.parentid < 0 || !isValidWeComDepartmentId(String(item.parentid))) {
+      throw new WeComIncompleteResponseError('department')
+    }
     const entry: WeComDepartmentEntry = { id: item.id, name: item.name, parentId: item.parentid }
     if (!isAbsent(item.order)) {
       if (!isSafeInt(item.order)) throw new WeComIncompleteResponseError('department')
@@ -854,17 +880,20 @@ function readOptionalString(value: unknown): string | undefined {
   return value
 }
 
-/** A pass-through value is kept only as a number, a string, or an array of one kind. */
+/** A pass-through value is absent, a number, or an array of numbers; any other present value is a shape fault. */
 function readPassThroughNumbers(value: unknown): number | number[] | undefined {
+  if (isAbsent(value)) return undefined
   if (isSafeInt(value)) return value
   if (Array.isArray(value) && value.every(isSafeInt)) return [...value] as number[]
-  return undefined
+  throw new WeComIncompleteResponseError('user')
 }
 
+/** A pass-through value is absent, a string, or an array of strings; any other present value is a shape fault. */
 function readPassThroughStrings(value: unknown): string | string[] | undefined {
+  if (isAbsent(value)) return undefined
   if (typeof value === 'string') return value
   if (Array.isArray(value) && value.every((v) => typeof v === 'string')) return [...value] as string[]
-  return undefined
+  throw new WeComIncompleteResponseError('user')
 }
 
 function parseUserListResponse(payload: Record<string, unknown>): WeComDirectoryMemberEntry[] {
