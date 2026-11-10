@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import express from 'express'
+import jwt from 'jsonwebtoken'
 import request, { type Response } from 'supertest'
 import { Client } from 'pg'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
+import { resolveRuntimeJwtSecret } from '../../src/security/auth-runtime-config'
+import { secretManager } from '../../src/security/SecretManager'
 
 import { HARD_DELETE_CONFIRM_TEXT } from '../../src/admin/user-batch-plan'
 import { countLivePlatformAdmins, isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
@@ -86,6 +89,18 @@ async function seedDeprovision(userId: string, actorId: string) {
 
 function token(userId: string) {
   return authService.createToken({ id: userId, email: `${userId}@example.test`, name: 'Synthetic user', role: 'admin', permissions: [], created_at: new Date(), updated_at: new Date() })
+}
+
+/** A JWT whose claims say admin while verification is not required to load that from the database. */
+function claimOnlyAdminToken(userId: string): string {
+  const secret = resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false }))
+  return jwt.sign({
+    id: userId,
+    userId,
+    email: `${userId}@example.test`,
+    roles: ['admin'],
+    perms: ['admin:all'],
+  }, secret, { expiresIn: '1h' })
 }
 
 function update(actorId: string, items: Array<Record<string, unknown>>) {
@@ -1628,4 +1643,224 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
       }
     },
   )
+})
+
+describe('locked actor authority on attendance role writes and user status', () => {
+  function attendanceWrite(
+    mode: 'single' | 'batch',
+    action: 'assign' | 'unassign',
+    actorId: string,
+    targetId: string,
+    roleId = 'attendance_employee',
+  ): Promise<Response> {
+    const path = mode === 'batch'
+      ? `/api/attendance-admin/users/batch/roles/${action}`
+      : `/api/attendance-admin/users/${targetId}/roles/${action}`
+    const body = mode === 'batch'
+      ? { userIds: [targetId], roleId }
+      : { roleId }
+    return Promise.resolve(
+      request(attendanceApp)
+        .post(path)
+        .query({ scope: 'global' })
+        .auth(token(actorId), { type: 'bearer' })
+        .send(body),
+    )
+  }
+
+  async function holdsRole(userId: string, roleId: string): Promise<boolean> {
+    const rows = await query(
+      'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2',
+      [userId, roleId],
+    )
+    return rows.rows.length > 0
+  }
+
+  it.each([
+    ['single', 'assign'],
+    ['batch', 'assign'],
+    ['single', 'unassign'],
+    ['batch', 'unassign'],
+  ] as const)(
+    'refuses an attendance %s %s when the token claims admin and the database does not',
+    async (mode, action) => {
+      const ids: string[] = []
+      const roleId = 'attendance_employee'
+      const catalog = await snapshotOwnedCatalog([roleId], [])
+      try {
+        const actorId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        if (action === 'unassign') {
+          await query('INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2)', [targetId, roleId])
+        }
+        // Trust stays off for the rest of this file. This request is the service-token
+        // case: the claim says admin, and verification does not replace it from the database.
+        const previousTrust = process.env.RBAC_TOKEN_TRUST
+        process.env.RBAC_TOKEN_TRUST = 'true'
+        let response: Response
+        try {
+          const path = mode === 'batch'
+            ? `/api/attendance-admin/users/batch/roles/${action}`
+            : `/api/attendance-admin/users/${targetId}/roles/${action}`
+          response = await request(attendanceApp)
+            .post(path)
+            .query({ scope: 'global' })
+            .auth(claimOnlyAdminToken(actorId), { type: 'bearer' })
+            .send(mode === 'batch' ? { userIds: [targetId], roleId } : { roleId })
+        } finally {
+          process.env.RBAC_TOKEN_TRUST = previousTrust
+        }
+        expect(response.status).toBe(403)
+        expect(response.body.error.code).toBe('FORBIDDEN')
+        expect(await holdsRole(targetId, roleId)).toBe(action === 'unassign')
+      } finally {
+        await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = $2', [ids, roleId])
+        await restoreOwnedCatalog(catalog, [roleId], [])
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
+
+  it.each(['single', 'batch'] as const)(
+    'refuses an attendance %s assign when the actor loses authority while waiting for the user lock',
+    async (mode) => {
+      const ids: string[] = []
+      const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+      const pending: Array<Promise<Response>> = []
+      const roleId = 'attendance_employee'
+      const catalog = await snapshotOwnedCatalog([roleId], [])
+      try {
+        const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+        const targetId = randomUUID()
+        await seedVisibleUser(targetId)
+        ids.push(actorId, targetId)
+        await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
+        await blocker.connect()
+        await blocker.query('BEGIN')
+        await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+        const blockerPid = await sessionPid(blocker)
+        pending.push(attendanceWrite(mode, 'assign', actorId, targetId, roleId))
+        await waitForBlockedBy(blockerPid, 1)
+        await blocker.query(`UPDATE users SET role = 'user', is_admin = FALSE WHERE id = $1`, [actorId])
+        await blocker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [actorId])
+        await blocker.query('COMMIT')
+        const [response] = await Promise.all(pending)
+        pending.length = 0
+        expect(response.status).toBe(403)
+        expect(response.body.error.code).toBe('FORBIDDEN')
+        expect(await holdsRole(targetId, roleId)).toBe(false)
+      } finally {
+        await releaseBlocker(blocker, pending)
+        await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = $2', [ids, roleId])
+        await restoreOwnedCatalog(catalog, [roleId], [])
+        await removeOwnedUsers(ids)
+      }
+    },
+  )
+
+  it('refuses PATCH status when the actor is demoted under the user lock', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    try {
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const targetId = await seedPhaseUser({ role: 'user', isAdminFlag: false, rbacAdmin: false })
+      ids.push(actorId, targetId)
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(app)
+          .patch(`/api/admin/users/${targetId}/status`)
+          .auth(token(actorId), { type: 'bearer' })
+          .send({ isActive: false }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      await blocker.query(`UPDATE users SET role = 'user', is_admin = FALSE WHERE id = $1`, [actorId])
+      await blocker.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [actorId])
+      await blocker.query('COMMIT')
+      const [response] = await Promise.all(pending)
+      pending.length = 0
+      expect(response.status).toBe(403)
+      expect(response.body.error.code).toBe('FORBIDDEN')
+      expect((await query('SELECT is_active FROM users WHERE id = $1', [targetId])).rows).toEqual([{ is_active: true }])
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await removeOwnedUsers(ids)
+    }
+  })
+
+  it('an attendance unassign waits on a protected role delete without deadlocking or holding the other member', async () => {
+    const ids: string[] = []
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    const pending: Array<Promise<Response>> = []
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const roleId = `attendance_lk${suffix}_admin`
+    const catalog = await snapshotOwnedCatalog([roleId], ['attendance:admin'])
+    const auditResources = [roleId]
+    const auditsBefore = await snapshotAuditIds(auditResources)
+    try {
+      const deleterId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const actorId = await seedPhaseUser({ role: 'admin', isAdminFlag: true, rbacAdmin: true })
+      const memberAId = `a-attlock-${randomUUID()}`
+      const memberBId = `b-attlock-${randomUUID()}`
+      ids.push(deleterId, actorId, memberAId, memberBId)
+      auditResources.push(`${memberBId}:${roleId}`)
+      for (const userId of [memberAId, memberBId]) await seedVisibleUser(userId)
+      await query('INSERT INTO roles(id, name) VALUES ($1, $1)', [roleId])
+      await query(
+        `INSERT INTO permissions(code, name, description) VALUES ('attendance:admin', 'Attendance admin', 'synthetic')
+         ON CONFLICT DO NOTHING`,
+      )
+      await query(
+        'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [roleId, 'attendance:admin'],
+      )
+      await query(
+        'INSERT INTO user_roles(user_id, role_id) VALUES ($1, $2), ($3, $2)',
+        [memberAId, roleId, memberBId],
+      )
+      await blocker.connect()
+      await blocker.query('BEGIN')
+      await lockNamespaceAdmissionWrites(blocker, memberAId)
+      const blockerPid = await sessionPid(blocker)
+      pending.push(Promise.resolve(
+        request(rolesApp).delete(`/api/roles/${roleId}`).auth(token(deleterId), { type: 'bearer' }),
+      ))
+      await waitForBlockedBy(blockerPid, 1)
+      const deletePid = Number((await query<{ pid: number }>(
+        `SELECT pid
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND $1::int = ANY(pg_blocking_pids(pid))
+         LIMIT 1`,
+        [blockerPid],
+      )).rows[0].pid)
+      pending.push(attendanceWrite('single', 'unassign', actorId, memberBId, roleId))
+      await waitForBlockedBy(deletePid, 1)
+      expect(await advisoryLockIsFree(`namespace-admission:${memberBId}`)).toBe(true)
+      expect(await userRowLockIsFree(memberBId)).toBe(true)
+      expect(await advisoryLockIsFree(`namespace-admission:${actorId}`)).toBe(true)
+      expect(await userRowLockIsFree(actorId)).toBe(true)
+      await blocker.query('ROLLBACK')
+      const [deleteResponse, unassignResponse] = await Promise.all(pending)
+      pending.length = 0
+      expect(deleteResponse.status).toBe(200)
+      expect(unassignResponse.status).toBe(200)
+      expect((await query('SELECT id FROM roles WHERE id = $1', [roleId])).rows).toEqual([])
+      expect((await query(
+        'SELECT user_id FROM user_roles WHERE role_id = $1',
+        [roleId],
+      )).rows).toEqual([])
+    } finally {
+      await releaseBlocker(blocker, pending)
+      await restoreOwnedCatalog(catalog, [roleId], ['attendance:admin'])
+      await deleteNewAudits(auditResources, auditsBefore)
+      await removeOwnedUsers(ids)
+    }
+  })
 })
