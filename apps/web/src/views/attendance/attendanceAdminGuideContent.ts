@@ -572,7 +572,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['After export → what to check', '做完后怎么确认'],
-        detail: ['After the date, organization, or person filter changes, reload the data before exporting. Then click Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '日期、组织或人员筛选变化后，请重新加载数据再导出。然后点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
+        detail: ['After the date, organization, or person filter changes, reload the data before exporting. When reloading, click Reload report, then Export CSV or Export Excel. A hidden column remains in the file. The file is the server dataset for that range and filters, up to 5000 rows.', '日期、组织或人员筛选变化后，请重新加载数据再导出。重新加载时点「重载报表」，再点「导出 CSV」或「导出 Excel」。藏起的列仍在文件里。文件是该区间和筛选条件下的服务端数据，最多 5000 行。'],
       },
       {
         path: ['Who can open Reports', '前提条件/权限'],

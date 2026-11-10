@@ -166,6 +166,10 @@ describe('attendance admin guide', () => {
       const article = container.querySelector(`[data-attendance-guide-article="${id}"]`)
       expect(article?.textContent).toContain(reloadWording)
       expect(article?.textContent).not.toContain('筛选过期时导出会被拦住')
+      if (id === 'reports') {
+        expect(article?.textContent).toContain('重载报表')
+        expect(article?.textContent).not.toContain('再导出。然后点')
+      }
     }
     app.unmount()
     container.remove()
