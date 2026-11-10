@@ -1,0 +1,40 @@
+{
+  "comment": "Batch-refresh step 6 S6-9a (register R-91; 批次标识 R-65): the G9 frozen-candidate acceptance matrix of the step-6 design section 9.5. ONE list read by the real-DB cases module (stock-preparation-g9-acceptance-realdb.cases.ts: every realDb id must have exactly one registered case) and by the runner (scripts/ops/stock-prep-g9-frozen-candidate.mjs: every realDb id must print one '[G9] <id> ok' line in the CI log of the frozen sha). Values-free: ids and words only.",
+  "version": 1,
+  "registerRows": ["R-91", "R-65"],
+  "realDb": [
+    "S3A-02",
+    "S3A-03",
+    "S3A-04",
+    "S3A-05",
+    "S3A-09",
+    "S3A-10",
+    "S3A-14",
+    "S3A-15",
+    "S3A-16",
+    "S3A-20",
+    "S3A-21",
+    "S3A-24",
+    "S3A-25",
+    "S3A-26",
+    "G9-U08",
+    "G9-U03",
+    "G9-S9X-01",
+    "G9-U07",
+    "G9-PE"
+  ],
+  "pending": [
+    { "id": "G9-S65-V5", "owner": "S6-5", "what": "readiness v5: the positive leg also proves no_unacknowledged_inactive_root_remnant on the prepared sheet, and a sheet carrying an inactive-root remnant fails ONLY that id until acknowledged" },
+    { "id": "G9-S65-U03", "owner": "S6-5", "what": "U03: the census route and the remnant acknowledgement join the drilled capability set" },
+    { "id": "G9-S66-U03", "owner": "S6-6", "what": "U03: the repair routes (preview / retire / restore) join the drilled capability set" },
+    { "id": "G9-S66-U07", "owner": "S6-6", "what": "U07: a repair run left running makes its stop-condition query non-zero; the drill refuses the rollback while it is" },
+    { "id": "G9-S66-INSTALLING", "owner": "S6-6", "what": "B-9: a repair is refused while the sheet's pull-batch row is installing" }
+  ],
+  "manual": [
+    { "id": "U07-OLD-BUILD", "what": "the section 7.5 drill proper: a pre-step-6 build (the parent of migration 106's first commit) against a database migrated by the candidate and carrying the G9-U07 artifacts; preview / apply / export refused where the stop queries say so; no ADD or INACTIVE written (runner: --old-build-drill prints the commands)" },
+    { "id": "U09", "what": "the pilot pages in a real browser on a deployment built from the frozen sha" },
+    { "id": "MUTANTS", "what": "the plan section 9 mutant list (step-4 section 19, step-6 section 11, BI section 11.4), each turning its named case red on a scratch copy, restored byte-identical" },
+    { "id": "PE-DEPLOY", "what": "the positive pilot-enable leg on a real deployment built from the frozen sha, values-free evidence" },
+    { "id": "PR-ONLY-CONTEXTS", "what": "the required contexts that run only on pull requests come from the S6-9 PR at the same sha, not from the tag dispatch" }
+  ]
+}
