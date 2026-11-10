@@ -77,4 +77,26 @@ describe('personal binding JWT owner route', () => {
       ).status,
     ).toBe(404)
   })
+  it('a disabled package still accepts owner unbind and still hides list, bind, and sync', async () => {
+    const { service } = fixture()
+    vi.stubEnv('PLM_APPROVAL_CARD_ENABLED', 'false')
+    const id = '00000000-0000-4000-8000-000000000001'
+    const removed = await request(pinned.url())
+      .delete(`/api/me/plm-approval-bindings/${id}`)
+      .set('Authorization', `Bearer ${loginJwt}`)
+    expect(removed.status).toBe(204)
+    expect(service.unbind).toHaveBeenCalledWith('current-owner', id)
+    for (const call of [
+      request(pinned.url()).get('/api/me/plm-approval-bindings'),
+      request(pinned.url()).post('/api/me/plm-approval-bindings').send({}),
+      request(pinned.url()).post(`/api/me/plm-approval-bindings/${id}/sync`).send({}),
+    ]) {
+      const res = await call.set('Authorization', `Bearer ${loginJwt}`)
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('PLM_CARD_DISABLED')
+    }
+    expect(service.list).not.toHaveBeenCalled()
+    expect(service.bind).not.toHaveBeenCalled()
+    expect(service.sync).not.toHaveBeenCalled()
+  })
 })
