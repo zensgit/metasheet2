@@ -1019,3 +1019,129 @@ test('both packaging lanes carry the same front-end base-path guards, byte for b
     'a workflow that feeds Vite a base path can ship a white-screen package. Exactly two exist and this test holds both to the same guards. If this list changed, guard the new lane the same way (GUARD 1 + GUARD 2 + GUARD 3, run bodies copied verbatim) and add it to the lanes list above -- deliberately, not by editing this inventory until the red goes away',
   )
 })
+
+// Batch identifier (R-65): the two stock-preparation HTTP clients an operator runs from the deploy
+// root. Until this pair was listed, the package carried neither (onprem-r83 included), so on site the
+// install-window runbook's script path did not exist and the direct POST was the only way in.
+const PULL_BATCH_OPS_SCRIPTS = Object.freeze([
+  'scripts/ops/stock-preparation-pull-batch-install.mjs',
+  'scripts/ops/stock-preparation-scheduled-pull.mjs',
+])
+
+// The quoted entries of a top-level bash array (`NAME=(` ... `)`), comment lines skipped. Scoped to
+// the array on purpose: a path that only appears in a comment or in INSTALL.txt is not packaged.
+function shellArrayEntries(script, name) {
+  const text = script.replace(/\r\n/g, '\n')
+  const start = text.indexOf(`\n${name}=(\n`)
+  assert.ok(start > -1, `${name}=( must open a top-level array`)
+  const end = text.indexOf('\n)\n', start)
+  assert.ok(end > start, `${name}=( must be closed`)
+  return text
+    .slice(start, end)
+    .split('\n')
+    .map((line) => line.trim().match(/^"([^"]+)"$/))
+    .filter(Boolean)
+    .map((match) => match[1])
+}
+
+// Every module specifier a file names: static import/export-from, side-effect import, dynamic
+// import() and require(). A script that loads code any other way is not covered by this scan.
+function moduleSpecifiers(source) {
+  const specifiers = []
+  const patterns = [
+    /^\s*(?:import|export)\s[^'"]*?\sfrom\s*['"]([^'"]+)['"]/gm,
+    /^\s*import\s*['"]([^'"]+)['"]/gm,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ]
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) specifiers.push(match[1])
+  }
+  return specifiers
+}
+
+test('on-prem package lists the pull-batch install and scheduled-pull clients in build and verify (R-65)', () => {
+  const built = shellArrayEntries(buildScript, 'REQUIRED_PATHS')
+  const required = shellArrayEntries(verifyScript, 'required')
+  for (const relativePath of PULL_BATCH_OPS_SCRIPTS) {
+    assert.ok(built.includes(relativePath), `the build list must package ${relativePath}`)
+    assert.ok(required.includes(relativePath), `the verifier must require ${relativePath}`)
+  }
+})
+
+test('pull-batch install and scheduled-pull clients run from an extracted package with no node_modules (R-65)', () => {
+  const built = shellArrayEntries(buildScript, 'REQUIRED_PATHS')
+  // realpath: a symlinked temp dir (macOS /var) would make argv[1] differ from import.meta.url and
+  // the scripts' entry-point check would skip main() — a silent exit 0, which the stdout checks below
+  // would then catch as a failure rather than pass.
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ms2-pkg-pull-batch-'))
+  try {
+    // Copy only what the build list packages, exactly as copy_path does (no package.json, no
+    // node_modules, nothing else from the repository).
+    for (const relativePath of PULL_BATCH_OPS_SCRIPTS) {
+      if (!built.includes(relativePath)) continue
+      const target = path.join(root, relativePath)
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(path.join(repoRoot, relativePath), target)
+    }
+    for (let dir = root; ; dir = path.dirname(dir)) {
+      assert.equal(fs.existsSync(path.join(dir, 'node_modules')), false, 'the extracted package and its parents must have no node_modules')
+      if (path.dirname(dir) === dir) break
+    }
+
+    // Static scan: node built-ins and files inside the extracted package only.
+    for (const relativePath of PULL_BATCH_OPS_SCRIPTS) {
+      const file = path.join(root, relativePath)
+      assert.ok(fs.existsSync(file), `${relativePath} must be in the extracted package`)
+      const specifiers = moduleSpecifiers(fs.readFileSync(file, 'utf8'))
+      assert.ok(specifiers.length > 0, `${relativePath}: the import scan found nothing, so it is not reading this file`)
+      for (const specifier of specifiers) {
+        if (specifier.startsWith('node:')) continue
+        assert.ok(
+          specifier.startsWith('./') || specifier.startsWith('../'),
+          `${relativePath} imports ${specifier}, which is neither a node: built-in nor a packaged file`,
+        )
+        const resolved = path.resolve(path.dirname(file), specifier)
+        assert.ok(resolved.startsWith(root + path.sep), `${relativePath} imports ${specifier} from outside the package`)
+        assert.ok(fs.existsSync(resolved), `${relativePath} imports ${specifier}, which the package does not carry`)
+      }
+    }
+
+    // Run each one's help and usage-error paths from the package root, with no API settings in the
+    // environment, so nothing can reach a network.
+    const env = { ...process.env }
+    for (const name of Object.keys(env)) if (name.startsWith('MS_')) delete env[name]
+    const run = (relativePath, args) => spawnSync(process.execPath, [path.join(root, relativePath), ...args], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      timeout: 30000,
+    })
+    const [installScript, scheduledScript] = PULL_BATCH_OPS_SCRIPTS
+    const bogus = '--not-a-flag-sentinel-6x9'
+
+    const installHelp = run(installScript, ['--help'])
+    assert.equal(installHelp.status, 0, installHelp.stderr)
+    assert.match(installHelp.stdout, /^Usage: node scripts\/ops\/stock-preparation-pull-batch-install\.mjs --projects-file/)
+    const installBare = run(installScript, [])
+    assert.equal(installBare.status, 2, installBare.stderr)
+    assert.match(installBare.stderr, /--projects-file is required/)
+    const installBogus = run(installScript, [bogus])
+    assert.equal(installBogus.status, 2, installBogus.stderr)
+    assert.match(installBogus.stderr, /unrecognized argument at position 0/)
+    assert.ok(!`${installBogus.stdout}${installBogus.stderr}`.includes(bogus), 'argv values are never echoed')
+
+    const scheduledHelp = run(scheduledScript, ['--help'])
+    assert.equal(scheduledHelp.status, 0, scheduledHelp.stderr)
+    assert.match(scheduledHelp.stdout, /^stock-preparation-scheduled-pull\.mjs — ops-side scheduled PLM pull/)
+    const scheduledBare = run(scheduledScript, [])
+    assert.equal(scheduledBare.status, 1, scheduledBare.stderr)
+    assert.match(scheduledBare.stderr, /missing required environment variable\(s\): MS_API/)
+    const scheduledBogus = run(scheduledScript, [bogus])
+    assert.equal(scheduledBogus.status, 1, scheduledBogus.stderr)
+    assert.match(scheduledBogus.stderr, /unrecognized argument at position 0/)
+    assert.ok(!`${scheduledBogus.stdout}${scheduledBogus.stderr}`.includes(bogus), 'argv values are never echoed')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
