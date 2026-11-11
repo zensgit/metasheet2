@@ -18,10 +18,11 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 4 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// THE LIST (PILOT_READINESS_VERSION 5 — version 1 was the first fifteen; the pre-enable hardening of step-4
 // design §23.4 F-3 / F-5 added the three marked ★; 批次标识 BI-1b (design §8.7, S6 C-9; register R-65) added the six
 // marked ◆ in version 3; batch-refresh step 6a-2 (S6-2, step-6 design §8 as rebaselined B-8; register R-91) added the
-// two marked ▲ in version 4 — each only ever refuses more):
+// two marked ▲ in version 4; batch-refresh step 6d-1b (S6-5, rebaseline B-8: ONLY the remnant check) added the one
+// marked ● in version 5 — each only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -71,6 +72,14 @@
 //                                  sheet write lock knows the `recovery_verify` purpose, the wired refresh store can read,
 //                                  close and list executions for recovery, and — while the pull-batch switch is on —
 //                                  批次标识's ledger offers its link read and its close hook (readBatchLink / batchWithin)
+// ● no_unacknowledged_inactive_root_remnant  the project's doubled-sheet "item-10" remnants (design §6.1 D2: a component
+//                                  with an INACTIVE root row, no active root row and an active nested copy — the census
+//                                  module's own definition, over the SAME project read as O-6) minus those with an ACTIVE
+//                                  `remnant_acknowledged` row in the component ruling ledger (migration 107) must be
+//                                  empty. The ledger is read on EVERY evaluation (a missing table / unwired store is
+//                                  ok:false, never "nothing acknowledged"). `dropped_head_included` exempts nothing
+//                                  until S6-7. It does not read the source: the first governed computation is the
+//                                  authoritative observation of the order head, and it fails closed (design §6.3)
 //   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
@@ -97,8 +106,11 @@ const { PULL_BATCH_READINESS_CHECK_IDS, pullBatchReadinessChecks } = require('./
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
 // Step 6a-2 (readiness v4): the lock's closed purpose list (the recovery lease must be a known purpose).
 const { PROJECT_WRITE_PURPOSES } = require('./stock-preparation-project-write-lock.cjs')
+// Step 6d-1b (readiness v5): the census module's D2 handles and the ONE exemption rule the census routes share.
+const { censusOfRows } = require('./stock-preparation-sheet-census.cjs')
+const { unacknowledgedRemnantHandles } = require('./stock-preparation-remnant-acknowledgement.cjs')
 
-const PILOT_READINESS_VERSION = 4
+const PILOT_READINESS_VERSION = 5
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -147,6 +159,8 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   // Step 6a-2 (v4, rebaseline B-8): inserted before the D-22 marker as BI did.
   'change_plan_store_readable',
   'execution_recovery_ready',
+  // Step 6d-1b (v5, rebaseline B-8): inserted before the D-22 marker as BI did.
+  'no_unacknowledged_inactive_root_remnant',
   'continuation_support_version',
 ])
 
@@ -299,10 +313,7 @@ const CHECKS = Object.freeze({
     return true
   },
   async no_two_copy_component(deps) {
-    // The project-scoped read the planner itself plans from (same page bounds; past them it throws ⇒ false).
-    if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) return false
-    // 批次标识 BI-1b (design §4.4): the server-held band, so a band-bearing sheet reads exactly like a band-less one.
-    const rows = await deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo, ...(deps.pullBatchBand ? [{ pullBatchBand: deps.pullBatchBand }] : []))
+    const rows = await deps.projectRowsOnce()
     if (!Array.isArray(rows)) return false
     return countTwoCopyComponents(rows) === 0
   },
@@ -390,6 +401,19 @@ const CHECKS = Object.freeze({
     }
     return true
   },
+  async no_unacknowledged_inactive_root_remnant(deps) {
+    if (!nonEmptyString(deps.tenantId) || !nonEmptyString(deps.projectNo) || !nonEmptyString(deps.sheetId)) return false
+    const rows = await deps.projectRowsOnce()
+    if (!Array.isArray(rows)) return false
+    const handles = censusOfRows(rows, { tenantId: deps.tenantId, projectNo: deps.projectNo }).private.inactiveRootRemnantComponentHandles
+    if (!Array.isArray(handles)) return false
+    // EVERY evaluation reads the ledger, remnants or not: positive evidence that migration 107 is there.
+    const store = deps.componentRulingStore
+    if (!store || typeof store.listActiveRulings !== 'function') return false
+    const rulings = await store.listActiveRulings({ tenantId: deps.tenantId, sheetId: deps.sheetId, projectNo: deps.projectNo })
+    if (!Array.isArray(rulings)) return false
+    return unacknowledgedRemnantHandles(handles, rulings).length === 0
+  },
   continuation_support_version() {
     const version = continuationSupport.CONTINUATION_SUPPORT_VERSION
     return Number.isInteger(version) && version >= REQUIRED_CONTINUATION_SUPPORT_VERSION
@@ -402,14 +426,31 @@ const CHECKS = Object.freeze({
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
  *   customerPackDeclaration, collectGenericWriterTargets, readPullBatchStatus, pullBatchBand,
- *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2)
+ *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2), componentRulingStore (step 6d-1b)
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
   // 批次标识 BI-1b: ONE pull-batch status per evaluation (memoized; a throw is `ok: false` for each of the six).
   let pullBatchStatus = null
+  // Step 6d-1b: ONE project-scoped read per evaluation, shared by O-6 and the v5 remnant check (the planner's own read:
+  // same page bounds, past them it throws ⇒ both false).
+  let projectRows = null
   const evaluationDeps = {
     ...deps,
+    projectRowsOnce: () => {
+      if (!projectRows) {
+        projectRows = Promise.resolve().then(() => {
+          if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) {
+            throw new Error('project rows read not wired')
+          }
+          // 批次标识 BI-1b (design §4.4): the server-held band, so a band-bearing sheet reads exactly like a band-less one.
+          return deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo, ...(deps.pullBatchBand ? [{ pullBatchBand: deps.pullBatchBand }] : []))
+        })
+        // The shared promise is awaited inside each check's try; this keeps an early rejection from being unhandled.
+        projectRows.catch(() => {})
+      }
+      return projectRows
+    },
     pullBatchStatusOnce: () => {
       if (!pullBatchStatus) {
         pullBatchStatus = typeof deps.readPullBatchStatus === 'function'

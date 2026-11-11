@@ -524,7 +524,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1247,6 +1247,58 @@ test('DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED: exact true (no case folding), 
   assert.match(spec.purpose, /Default OFF/)
   assert.equal(isActivated(spec, 'true'), true)
   for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+})
+
+// ── User notification preferences (AGENTS.md: every env flag is registered) ──
+// Derived from READ SITES: every `USER_NOTIFICATION_*_ENABLED` token under packages/core-backend/src
+// joins the population as soon as source reads it, so a sibling switch added to this family later
+// fails completeness until it is registered.
+function userNotificationFlagsInSource() {
+  return grepFlagTokens('USER_NOTIFICATION_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED'))
+    .sort()
+}
+
+test('user notification preferences: the read-site scan finds the registered key (non-vacuous)', () => {
+  assert.deepEqual(userNotificationFlagsInSource(), ['USER_NOTIFICATION_PREFERENCES_ENABLED'])
+})
+
+test('user notification preferences: a key absent from the manifest is reported by the completeness comparison', () => {
+  const manifestKeys = new Set(GLOBAL_HISTORY_FLAG_KEYS.filter((key) => key !== 'USER_NOTIFICATION_PREFERENCES_ENABLED'))
+  const missing = userNotificationFlagsInSource().filter((flag) => !manifestKeys.has(flag))
+  assert.deepEqual(missing, ['USER_NOTIFICATION_PREFERENCES_ENABLED'])
+})
+
+test('USER_NOTIFICATION_PREFERENCES_ENABLED: exact true (no case folding), danger medium, independent, predicate source compares the literal', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.USER_NOTIFICATION_PREFERENCES_ENABLED
+  assert.ok(spec, 'USER_NOTIFICATION_PREFERENCES_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact family: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/notifications/notification-flags.ts#isUserNotificationPreferencesEnabled',
+  )
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isUserNotificationPreferencesEnabled\(/)
+  assert.ok(
+    module.includes("env.USER_NOTIFICATION_PREFERENCES_ENABLED === 'true'"),
+    'the reader compares the exact literal (no trim, no lowercase)',
+  )
+  assert.doesNotMatch(module.replace(/\/\*[\s\S]*?\*\//g, ''), /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
     assert.equal(isActivated(spec, value), false, String(value))
   }
   for (const value of ['TRUE', '1', 'yes', 'on']) {
