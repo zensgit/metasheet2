@@ -152,7 +152,7 @@ const DEFAULT_TIMEOUT_MS = 20_000
 // ---------------------------------------------------------------------------
 // THE SURFACE LEDGER
 //
-// Every one of the 55 census sites in
+// Every one of the 58 census sites in
 // packages/core-backend/tests/unit/lib/recovery-census-table.ts appears EXACTLY ONCE below —
 // either attached to a driven surface, or in NOT_DRIVEN_SITES with a concrete reason. The
 // hermetic guard re-parses that census file and asserts set-equality, so a newly-registered
@@ -948,6 +948,16 @@ export const NOT_DRIVEN_SITES = Object.freeze([
     reason: 'orthogonal-fixture-cost',
     detail:
       'The read-path RBAC backfill in resolveRbacProfile writes user_roles — the SAME table and the SAME lease key as admin-users:role-assign, which IS driven. Excused because reaching it needs a user that is MISSING the self-service role while attendance self-service is enabled, a state the battery does not construct. Like the register site, it surfaces a typed throw, not a 409.',
+  },
+  // POST /api/permissions/legacy/revoke updates users.permissions only when the locked
+  // row already contains the named code. This battery never plants that entry: create-user
+  // writes permissions [] (no preset), and the grant seed writes user_permissions, which
+  // this route does not read. The call 404s before UPDATE, so it is not a driven surface.
+  {
+    site: 'permissions:legacy-revoke',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'POST /api/permissions/legacy/revoke removes one code from users.permissions and issues UPDATE users SET permissions only when that locked column already contains the code; otherwise revokeLegacyUserPermission returns changed:false and the route answers 404 Legacy permission not found for user before any UPDATE. This battery creates its user with an empty permissions array (POST /api/admin/users, no preset) and its permission seeds write user_permissions via POST /api/permissions/grant, a different table this route does not read. The current battery therefore does not drive this HTTP route against a held recovery lease. Reaching the UPDATE needs a matching legacy permission entry, which this fixture does not build. The real router/service/classifier unit leg is separate evidence, not an end-to-end proof of this route. The driven admin-users-status surface updates users.is_active under the same users UPDATE trigger and is not coverage of this HTTP route.',
   },
 ])
 
