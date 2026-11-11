@@ -268,10 +268,13 @@ function branchListsCarryRunIntegrationJob(config: unknown): boolean {
  * the job is not the ONLY action (validateRunIntegrationJobSoleAction). A nested occurrence answers the nested
  * message first.
  *
- * Top-level only, because the save gate's binding stamp and per-occurrence checks (closed config, the rule-sheet
- * guard) cover exactly those positions, and the job's lifecycle (lease, heartbeat, shutdown drain) is wired for
- * top-level steps. A nested occurrence would run with whatever `binding` its author wrote, and that binding's tenant
- * also routes the step's integration.run_finished summaries.
+ * Top-level only, because the save gate applies its binding stamp and its per-occurrence checks (closed config, the
+ * rule-sheet guard) to those positions and to no other, and the job's lifecycle (lease, heartbeat, shutdown drain) is
+ * wired for top-level steps. A nested occurrence would be stored with whatever `binding` its author wrote.
+ * SCOPE OF THAT STATEMENT: the occurrences of the ONE request being saved. What a row holds after two saves
+ * interleave is not decided here — AutomationService.updateRule binds its write to the row version it validated
+ * (fix round 2, F1) — and whatever a stored binding says, the executor routes a summary only to a tenant its own
+ * trigger verified (F1b). A row written by anything other than createRule / updateRule is outside all three.
  *
  * R-69 I6d: NESTED is decided by POSITION, two independent ways, either one refusing:
  *   1. the walk — the action sits in a branch list (`branches[*].actions[*]` / `defaultBranch.actions[*]`, any depth)

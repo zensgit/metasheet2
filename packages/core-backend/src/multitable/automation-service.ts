@@ -3067,7 +3067,9 @@ export class AutomationService {
    *   - nested occurrence (inside a branch) → 400. R-69 I6d: decided by POSITION (the branch lists of the pair and of
    *     every `actions[i]`, plus the occurrence count of `allActions`, the caller's flattening of the same rule) —
    *     never by object identity, so the rule editor's shape (`actions[]` with `actions[0]` mirrored into the pair)
-   *     reaches every check below, for EVERY occurrence, and both persisted columns are stamped;
+   *     reaches the checks below. Each of them runs for every occurrence of the request being saved, and both
+   *     columns THIS save persists are stamped. That is a statement about one save; a row that two saves raced for
+   *     is held to it by updateRule's row-version predicate (fix round 2, F1), not by this method;
    *   - fix round 2 (F2): the job is not the rule's ONLY action — anything else in `actions`, a second job, or a
    *     pair that is another action → 400, same code, its own fixed message (validateRunIntegrationJobSoleAction);
    *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);

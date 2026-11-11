@@ -1437,7 +1437,9 @@
 
             <!-- R-69 1b-iii run_integration_job config: DRY RUN ONLY. Job kind is the closed set (pipeline shown,
                  not selectable yet), the apply mode is a fixed display (no other mode is authorable), the timeout
-                 is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly.
+                 is in whole minutes (≤ 55, default 30). Save blocks mirror the checks of the server gate a client
+                 can decide (the pure validators, byte parity pinned in core-backend, and the switch as the session
+                 feature reports it); the project-sheet registry and the creator's tenant stay the server's answer.
                  R-69 I6d: EXACTLY ONE project per rule — the project this sheet is registered to (the server's
                  rule-sheet guard, register R-90). A loaded rule that lists several is shown whole and blocks save.
                  R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — no action is added beside it, and a

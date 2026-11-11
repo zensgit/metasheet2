@@ -17,12 +17,24 @@
  * action config is built by the editor's own `buildRunIntegrationJobConfig`, imported LIVE across the package
  * boundary (the web module has no runtime import; precedent: automation-run-integration-job-web-parity.test.ts).
  *
- * WHAT "NESTED" MEANS (the rule this slice makes structural): the binding stamp and the per-occurrence gate cover the
- * legacy pair and the top level of `actions[]` only. An occurrence inside a branch container
- * (`config.branches[*].actions[*]`, `config.defaultBranch.actions[*]` — the two lists the executor dispatches branch
- * steps from) would run with whatever `binding` the client wrote. That binding's tenant also ROUTES the step's
- * integration.run_finished summaries (automation-executor.ts emitRunIntegrationJobSummaries), so the nested refusal
- * is what keeps Bridge 2's tenant routing server-derived. Refused by position, at any depth.
+ * WHAT "NESTED" MEANS (the rule this slice makes structural): the save gate applies its binding stamp and its
+ * per-occurrence checks to the legacy pair and to the top level of `actions[]`, and to no other position. An
+ * occurrence inside a branch container (`config.branches[*].actions[*]`, `config.defaultBranch.actions[*]` — the two
+ * lists the executor dispatches branch steps from) would be stored with whatever `binding` the client wrote, so it is
+ * refused by position, at any depth.
+ *
+ * WHAT THESE CASES PROVE, AND WHAT THEY DO NOT (fix round 2; the round-1 refuter's finding 1). Each case here is ONE
+ * save, or saves one after the other: for those, every occurrence the save stores went through the gate and carries
+ * the server binding. That says nothing about two saves that interleave. Three other things carry that, each with
+ * its own cases:
+ *   - F1 — updateRule binds its write to the row version it validated; a write whose row changed is validated again
+ *     (the F1 block below on the in-memory store; the real statement on the real table, two backends, in
+ *     tests/integration/multitable-automation-run-integration-job-realdb.test.ts);
+ *   - F1b — whatever a stored binding says, the executor publishes a summary only to a tenant its own trigger
+ *     verified (tests/unit/automation-integration-run-finished.test.ts), so the summary route does not rest on the
+ *     nested refusal alone;
+ *   - F2 — the job is its rule's ONLY action (the F2 block below): no later step, nothing beside it.
+ * Not covered by any of them: a row written by something other than createRule / updateRule.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -413,7 +425,8 @@ describe('the editor wire shape through the real createRule (I6d)', () => {
     expect(h.writes).toHaveLength(0)
   })
 
-  // ── every occurrence passes the FULL gate: the executor runs `actions[]`, not the pair ──────────────────────────
+  // ── in ONE save, each occurrence goes through the gate's checks: the executor runs `actions[]`, not the pair ────
+  // (Saves one at a time. Two saves that interleave are the F1 block's and the real-DB file's subject.)
   const projectOf = (projectNo: string) => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 30 * 60_000 })
 
   it.each([
@@ -872,10 +885,14 @@ describe('updateRule — a write whose stored row changed under it is validated 
 // "Can an integration.run_finished rule on sheet X receive another tenant's summaries?" The rule's tenant is ONLY
 // `trigger_config.binding.tenantId`; dispatch selects on it (loader SQL + the in-loop compare with the route tenant)
 // and then re-checks the creator's live membership in the route tenant. The rule's SHEET is not part of that — a
-// sheet carries no tenant, and an alert rule is not tied to a project sheet. So what must hold at save is that no
-// write shape can PLANT a binding: create stamps it (pinned in automation-integration-run-finished.test.ts) and EVERY
-// update shape re-stamps it from the stored creator. The update half had no test; these cases are it.
-describe('integration.run_finished: no edit can plant the trigger binding — every update shape re-stamps it from the stored creator (I6d pin)', () => {
+// sheet carries no tenant, and an alert rule is not tied to a project sheet. So what the save path has to do is
+// re-stamp that binding on every write: create stamps it (pinned in automation-integration-run-finished.test.ts) and
+// an update re-stamps it from the stored creator. The update half had no test; the five update shapes below are it.
+// WHAT THEY PROVE: for each of these shapes, saved one at a time, the written trigger_config carries the creator's
+// tenant. An edit that races another edit is not these cases' subject — updateRule's row-version predicate is (fix
+// round 2, F1: the re-stamp is part of what the retried attempt runs again) — and a receive-side re-check stands
+// behind both (the dispatch re-checks the creator's live membership in the route tenant).
+describe('integration.run_finished: each of these update shapes re-stamps the trigger binding from the stored creator — saved one at a time, none leaves a planted one (I6d pin)', () => {
   const ALERT_ACTION = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
   /** A stored alert rule whose binding names ANOTHER tenant (a planted row: it never passed the save gate). */
   const plantedAlertRule = () => ({
@@ -901,7 +918,7 @@ describe('integration.run_finished: no edit can plant the trigger binding — ev
     const updated = await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire(body), 'editor_2')
     expect(updated).not.toBeNull()
     expect(h.writes).toHaveLength(1)
-    expect(typeof h.writes[0].values.trigger_config, 'every update shape writes the re-stamped trigger_config').toBe('string')
+    expect(typeof h.writes[0].values.trigger_config, 'this update shape writes the re-stamped trigger_config').toBe('string')
     const written = JSON.parse(String(h.writes[0].values.trigger_config)) as { binding: unknown; job: unknown }
     expect(written.binding).toEqual(SERVER_BINDING)
     expect(written.job).toEqual({ kind: 'stock_prep_pull' })
