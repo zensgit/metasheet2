@@ -31,6 +31,7 @@ const { createStockPreparationContinuationStore } = require('./lib/stock-prepara
 const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
 const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createStockPreparationPullBatchStore } = require('./lib/stock-preparation-pull-batch-store.cjs')
+const { createStockPreparationComponentRulingStore } = require('./lib/stock-preparation-component-ruling-store.cjs')
 const { createStockPreparationSheetRepairStore } = require('./lib/stock-preparation-sheet-repair-store.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
@@ -101,6 +102,7 @@ let stockPreparationContinuationStore = null
 let stockPreparationRefreshGovernance = null
 let stockPreparationGovernedSheetProbe = null
 let stockPreparationPullBatchStore = null
+let stockPreparationComponentRulingStore = null
 let stockPreparationSheetRepairStore = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
@@ -397,6 +399,10 @@ module.exports = {
     // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger (首次批次 / 本次拉取). The routes hand it to a
     // lane only while the pull-batch switch is exactly 'true' (read per request); off, nothing ever touches it.
     stockPreparationPullBatchStore = createStockPreparationPullBatchStore({ db })
+    // Batch-refresh step 6d-1b (migration 107; register R-91): the component ruling ledger — the admin's recorded
+    // acknowledgement that a doubled-sheet remnant is no longer separately ordered. The census / acknowledgement routes
+    // and readiness v5's remnant check read it; absent (no SQL db) the acknowledgement routes answer 501 by name.
+    stockPreparationComponentRulingStore = createStockPreparationComponentRulingStore({ db })
     // Batch-refresh step 6d-2a (migration 108; register R-91): the doubled-sheet repair ledger — run rows with their
     // backup and the one-shot claims. The repair routes reach it only while the repair switch is exactly 'true' (read per
     // request); off, nothing ever touches it.
@@ -595,6 +601,7 @@ module.exports = {
         stockPreparationRefreshGovernance,
         stockPreparationGovernedSheetProbe,
         stockPreparationPullBatchStore,
+        stockPreparationComponentRulingStore,
         stockPreparationSheetRepairStore,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
@@ -743,6 +750,7 @@ module.exports = {
     stagingInstaller = null
     stockPreparationGovernedSheetProbe = null
     stockPreparationPullBatchStore = null
+    stockPreparationComponentRulingStore = null
     stockPreparationSheetRepairStore = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null

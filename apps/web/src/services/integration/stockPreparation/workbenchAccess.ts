@@ -570,6 +570,38 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
     control: 'stock-prep-refresh-close-unverified',
   }),
+  // 备料分批拉取第一期 step 6d-1b (S6-5; step-6 design §6.5; register R-91) — THE DOUBLED-SHEET CENSUS and THE REMNANT
+  // ACKNOWLEDGEMENT, all ADMIN: the census answers objectId and (the project form) the PRIVATE component handles, and an
+  // acknowledgement exempts a remnant from readiness v5 — recorded on site only on the customer's Q1 answer relayed by
+  // the owner. `control: null` is deliberate: S6-5 ships no web page (the runbook drives these routes).
+  Object.freeze({
+    capability: 'projectTarget.census',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.censusRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantAcknowledge',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantRevoke',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements/:acknowledgementId/revoke',
+    control: null,
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

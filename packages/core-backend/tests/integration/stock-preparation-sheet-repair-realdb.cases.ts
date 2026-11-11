@@ -19,15 +19,16 @@
  *   S9D-108  migration 108 applied: both tables, the JSONB backup, every closed CHECK refuses with 23514 under its own
  *            constraint name (a close approval on a run that is not `completed` among them), a second OPEN run of a
  *            sheet and a repeated sequence are 23505, the claim key is a PRIMARY KEY.
- *   S9D-11   D1 -> retire -> a clean governed pull. Before the retire the governed planner SUSPENDS the sheet
- *            (`candidate_target_occupied`); the retire through the route writes the BOOLEAN false
+ *   S9D-11   D1 -> retire -> acknowledgement -> a clean governed pull (the design's §10 line, whole since S6-5 #6842 is on
+ *            main). Before the retire the governed planner SUSPENDS the sheet (`candidate_target_occupied`) and
+ *            readiness refuses the two-copy component; the retire through the route writes the BOOLEAN false
  *            (`jsonb_typeof = 'boolean'`) and the three RUN stamps on exactly the four old rows, version + 1 each, one
  *            host revision each, the run / claim / audit rows committed, the lease released and the generation bumped;
  *            the census then reads the component as an inactive-root remnant and the SAME governed computation over the
- *            rows read back from PostgreSQL is clean (no hold, nothing written on the component).
- *            TODO(S6-5, #6842, migration 107): the design's S9D-11 runs "retire -> acknowledgement -> clean governed
- *            pull". The remnant acknowledgement is S6-5's and was not on main when this case was written; add the
- *            acknowledgement step here once it is (coordinator ruling C-6).
+ *            rows read back from PostgreSQL is clean (no hold, nothing written on the component). In between, the
+ *            acknowledgement (S6-5's route and migration 107; coordinator ruling C-6): the retire turned the two-copy
+ *            refusal of readiness v5 into the unacknowledged-remnant one, and the admin's recorded acknowledgement of
+ *            that component (the SAME private handle the repair named) lifts exactly that check.
  *   S9D-12   backup -> retire -> restore: with one retired row's version moved by a person's edit, the restore (its own
  *            digest, approval and claim) writes all four rows at their CURRENT versions; every stored row is
  *            byte-identical to before the retire (`data::text`), version + 2 — the edited row carries the edit, version
@@ -97,6 +98,7 @@ const continuationStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-co
 const refreshGovernanceLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
 const packInstallStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
 const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
+const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
 const { ensureStockPreparationSandboxTarget } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
 const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGIN_LIB, 'stock-preparation-option-sync.cjs')) as any
 const harnessLib = require(path.join(PLUGIN_SUPPORT, 'stock-preparation-project-sheet-harness.cjs')) as any
@@ -116,6 +118,10 @@ const PROJECT_SHEETS_SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
 const PULL_BATCH_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
 const BASE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair'
 const PATHS = { repair: BASE_PATH, fills: `${BASE_PATH}/fills-report`, runs: `${BASE_PATH}/runs` }
+// S6-5's surfaces (#6842): the pilot readiness read and the remnant acknowledgement.
+const PILOT_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pilot'
+const ACKNOWLEDGE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements'
+const RULING_TABLE: string = componentRulingStoreLib.COMPONENT_RULING_TABLE
 const BI_SHEET_TABLE = 'integration_stock_prep_pull_batch_sheet'
 const AUDIT_TABLE = 'integration_stock_prep_audit'
 const REGISTRY_TABLE = 'integration_stock_prep_project_target'
@@ -303,6 +309,7 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         await q(`DELETE FROM ${RT.claim} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
         await q(`DELETE FROM ${RT.run} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
         await q(`DELETE FROM ${BI_SHEET_TABLE} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
+        await q(`DELETE FROM ${RULING_TABLE} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
         await q(`DELETE FROM ${AUDIT_TABLE} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
         await q(`DELETE FROM ${REGISTRY_TABLE} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
       }
@@ -403,6 +410,8 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
             target: { sheetId: `sheet_env_s66_${label}_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} },
           }],
           stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['plm_stock_preparation_sandbox_synthetic_env'] },
+          // The pilot readiness read (S9D-11's acknowledgement step) needs the two site facts answered.
+          stockPreparationPilot: { specReadPlanSlot: 'not_applicable', customerPack: 'not_applicable' },
         },
       }
       const base = harnessLib.baseServices(sourceAdapter)
@@ -419,6 +428,8 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         stockPreparationRefreshGovernance: refreshGovernanceLib.createStockPreparationRefreshGovernance({ continuationStore, projectTargetStore: registry, projectWriteLock: lock }),
         stockPreparationPullBatchStore: pullBatchStore,
         stockPreparationSheetRepairStore: repairStore,
+        // S6-5's ruling ledger (migration 107): the remnant acknowledgement and readiness v5's remnant check.
+        stockPreparationComponentRulingStore: componentRulingStoreLib.createStockPreparationComponentRulingStore({ db }),
       }
       httpRoutesLib.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
       const admin = { id: `u_s66_admin_${label}`, tenantId, permissions: ['stock-prep:admin'] }
@@ -538,8 +549,14 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       await expectSqlState(q(`INSERT INTO ${RT.claim} (claim_key, tenant_id, sheet_id, project_no, recipe, plan_digest, run_id, approval_ref, claimed_by) VALUES ($1, $2, $3, 'SYN-108', 'delete_rows', $4, 'run_syn', 'R-91', 'syn')`, [`claim_s66_b_${TOKEN}`, tenantId, sheetId, digest]), '23514', 'integration_stock_prep_sheet_repair_claim_recipe_check')
     })
 
-    test('S9D-11 D1 -> retire -> a clean governed pull: the boolean false and three stamps on exactly the four old rows, the run / claim / audit rows, the lease released and bumped; the governed planner suspended before and clean after', async () => {
+    test('S9D-11 D1 -> retire -> acknowledgement -> a clean governed pull: the boolean false and three stamps on exactly the four old rows, the run / claim / audit rows, the lease released and bumped; readiness refuses the two-copy component before, the unacknowledged remnant after the retire, and neither after the acknowledgement; the governed planner suspended before and clean after', async () => {
       const st = await world('d11')
+      // Readiness v5 (S6-5) as the pilot read answers it: the checks that FAIL for this project now.
+      const failing = async () => {
+        const res = await st.call('GET', PILOT_PATH)
+        expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+        return res.body.data.readiness.failing as string[]
+      }
       const governed = async () => {
         const expansion = await CF.expand(CF.secondPullSource({ sLine: false }))
         return CF.plan(expansion, await st.readerRows(), { continuation: CF.continuationInput({ pilot: true, demandEvidence: expansion.demandEvidence }) })
@@ -548,6 +565,8 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const suspended = await governed()
       expect([suspended.suspended, suspended.holds.map((hold: any) => hold.kind)]).toEqual([true, ['candidate_target_occupied']])
       expect(censusLib.publicCensusOf(censusLib.censusOfRows(await st.readerRows()))).toMatchObject({ twoCopyComponents: 1, inactiveRootRemnantComponents: 0 })
+      const failingBefore = await failing()
+      expect([failingBefore.includes('no_two_copy_component'), failingBefore.includes('no_unacknowledged_inactive_root_remnant')], 'D1: readiness refuses the two-copy component; there is no remnant yet').toEqual([true, false])
       const before = await st.stored()
 
       const plan = dataOf(await st.preview())
@@ -592,6 +611,19 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
 
       // After: the census reads an inactive-root remnant; the governed computation over the rows PostgreSQL holds is clean.
       expect(censusLib.publicCensusOf(censusLib.censusOfRows(await st.readerRows()))).toMatchObject({ twoCopyComponents: 0, inactiveRootRemnantComponents: 1 })
+      // THE ACKNOWLEDGEMENT (design §10 S9D-11; S6-5's route over migration 107). The retire turned readiness's
+      // two-copy refusal into the unacknowledged-remnant one; the admin's acknowledgement of that component — the SAME
+      // private handle the repair named — lifts exactly that check. It writes the ruling ledger, never the sheet.
+      const failingAfterRetire = await failing()
+      expect([failingAfterRetire.includes('no_two_copy_component'), failingAfterRetire.includes('no_unacknowledged_inactive_root_remnant')], 'D2: the two-copy refusal is gone; the remnant is not acknowledged yet').toEqual([false, true])
+      const sheetBeforeAck = await st.stored()
+      const ack = await st.call('POST', ACKNOWLEDGE_PATH, { body: { confirmProjectNo: PROJECT, componentHandle: st.handle, basis: 'head_not_ordered', runbookRef: 'R-91.s66-d11', acknowledge: { customerAnswered: true } } })
+      expect(ack.statusCode, JSON.stringify(ack.body)).toBe(201)
+      const rulings = (await q(`SELECT id, project_no, component_digest, kind, status, recorded_by FROM ${RULING_TABLE} WHERE tenant_id = $1`, [st.tenantId])).rows
+      expect(rulings).toEqual([{ id: ack.body.data.acknowledgementId, project_no: PROJECT, component_digest: st.handle, kind: 'remnant_acknowledged', status: 'active', recorded_by: st.admin.id }])
+      const failingAfterAck = await failing()
+      expect([failingAfterAck.includes('no_two_copy_component'), failingAfterAck.includes('no_unacknowledged_inactive_root_remnant')], 'acknowledged: neither doubled-sheet check refuses the pilot now').toEqual([false, false])
+      expect(await st.stored(), 'the acknowledgement wrote no sheet row').toEqual(sheetBeforeAck)
       const clean = await governed()
       expect([clean.suspended, clean.holds]).toEqual([false, []])
       const touched = clean.decisions.filter((decision: any) => ['add', 'update', 'inactive'].includes(decision.decision)).map((decision: any) => decision.decision)

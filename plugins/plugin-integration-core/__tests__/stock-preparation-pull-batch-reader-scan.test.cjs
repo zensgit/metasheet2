@@ -140,10 +140,13 @@ test('RS-1 every occurrence of the reader is reviewed; every CALL passes the ser
     // the change-plan / review read (R2), the large plan (R4), the export gate (R5): calls with the band; readiness
     // deps and the status deps hand the reader on by reference (their consumers pass the band, below).
     // (each deps line spells the name twice: the key and the value). 批次标识 BI-2 (R-65): the install deps and the birth deps
-    // each read the project's rows with the band (two more calls). Batch-refresh step 6d-2a (S6-6, R-91): the doubled-sheet
-    // repair's rows reader (ONE call: the restore's read and the fills report share it; the retire's read is computeDryRun's).
-    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
-    // readiness's O-6 read (R3).
+    // each read the project's rows with the band (two more calls).
+    // Batch-refresh step 6d-1b (S6-5, R-91; rebaseline B-12): the census's ONE walled project read (both census forms and
+    // the acknowledgement's re-proof go through readStockPreparationCensusRows) — the sixth call, with the band.
+    // Batch-refresh step 6d-2a (S6-6, R-91): the doubled-sheet repair's rows reader (ONE call: the restore's read, the
+    // continuation's verification and the fills report share it; the retire's read is computeDryRun's) — the seventh.
+    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
+    // readiness's ONE project read (R3), shared since v5 by O-6 and the remnant check (projectRowsOnce).
     'lib/stock-preparation-pilot-readiness.cjs': sorted(['call:band', 'ref:typeof']),
     // the status / board / readiness v3 rows read (R6).
     'lib/stock-preparation-pull-batch-status.cjs': sorted(['call:band', 'ref:status-param', 'ref:typeof']),

@@ -305,6 +305,9 @@ describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwir
     codes.add((nodeRequire(`${PLUGIN_LIB}stock-preparation-project-target-store.cjs`) as { PROJECT_TARGET_PILOT_STATE_MOVED_CODE: string }).PROJECT_TARGET_PILOT_STATE_MOVED_CODE)
     // 批次标识 BI-1b (R-65): every pull-batch code (install / config codes included), read LIVE from the pure module.
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-pull-batch.cjs`) as { PULL_BATCH_ERROR_CODES: Record<string, string> }).PULL_BATCH_ERROR_CODES)
+    // Batch-refresh step 6d-1b (R-91): the component ruling ledger's codes and the census / acknowledgement lib's, read LIVE.
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-component-ruling-store.cjs`) as { COMPONENT_RULING_ERROR_CODES: Record<string, string> }).COMPONENT_RULING_ERROR_CODES)
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-remnant-acknowledgement.cjs`) as { REMNANT_ACKNOWLEDGEMENT_ERROR_CODES: Record<string, string> }).REMNANT_ACKNOWLEDGEMENT_ERROR_CODES)
     for (const literal of [
       'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE',
       'LARGE_BOM_APPLY_PLAN_SUSPENDED',
