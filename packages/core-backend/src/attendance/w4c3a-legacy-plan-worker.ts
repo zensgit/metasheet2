@@ -1,3 +1,6 @@
+import {
+  requireAttendancePunchDetailStoredPlanBindingV1,
+} from './w4c3a-punch-detail-command'
 /**
  * Private P07/P08 processor for a persisted LegacyImportExecutionPlanV1.
  *
@@ -312,7 +315,13 @@ function verifyPlan(
   ) {
     fail('ATTENDANCE_IMPORT_LEGACY_PLAN_IDENTITY_MISMATCH')
   }
-  return Object.freeze({ manifest, chunks: Object.freeze(chunks), ...assembled })
+  const plan = Object.freeze({ manifest, chunks: Object.freeze(chunks), ...assembled })
+  try {
+    requireAttendancePunchDetailStoredPlanBindingV1(job, plan)
+  } catch {
+    fail('ATTENDANCE_IMPORT_LEGACY_PLAN_DIGEST_MISMATCH')
+  }
+  return plan
 }
 
 function verifiedReservationIdentities(
@@ -600,3 +609,6 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
     },
   })
 }
+
+// Shared pure verifier for current-admission public job replay; no worker effects.
+export { verifyPlan as verifyAttendanceLegacyImportStoredPlanV1 }
