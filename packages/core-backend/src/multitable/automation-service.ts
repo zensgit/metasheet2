@@ -1511,15 +1511,23 @@ export class AutomationService {
         // rule disabled or deleted through ANOTHER instance kept firing here until this process restarted.
         // One indexed primary-key read per fire closes that; a missing row (deleted elsewhere) skips too.
         // Kept a separate read from the liveness check below so `loadSheetLiveness` stays the one definition
-        // of "live" (sheet-liveness.ts). A failed read throws and that tick does not run (fail-closed, the
-        // same way a failed liveness read already behaves here). The executor is not touched: `simulate`
-        // stays DB-free and the other lanes keep their own gates.
-        const storedState = await this.loadScheduledRuleEnabledState(rule.id)
+        // of "live" (sheet-liveness.ts). A failed read skips that tick (FAIL-CLOSED: an unconfirmed rule
+        // does not send) and is logged values-free — the error class / SQLSTATE, never the driver text.
+        // The executor is not touched: `simulate` stays DB-free and the other lanes keep their own gates.
+        let storedState: 'enabled' | 'disabled' | 'absent' | 'lookup_failed'
+        let lookupError: ReturnType<typeof describeLookupError> | undefined
+        try {
+          storedState = await this.loadScheduledRuleEnabledState(rule.id)
+        } catch (err) {
+          storedState = 'lookup_failed'
+          lookupError = describeLookupError(err)
+        }
         if (storedState !== 'enabled') {
           console.warn('[automation] skipping a scheduled rule that is not enabled in the database', {
             ruleId: rule.id,
             sheetId: rule.sheetId,
             reason: storedState,
+            ...(lookupError ?? {}),
           })
           return
         }

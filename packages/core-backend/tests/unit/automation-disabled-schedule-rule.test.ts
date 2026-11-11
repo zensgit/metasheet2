@@ -23,6 +23,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { Logger } from '../../src/core/logger'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { AutomationService } from '../../src/multitable/automation-service'
 
@@ -307,14 +308,20 @@ describe('D — the scheduled lane re-checks the stored `enabled` flag at fire s
     expect(h.execute).not.toHaveBeenCalled()
   })
 
-  it('the enabled read FAILS → that tick does not run (fail-closed), and no new log carries the error text', async () => {
+  it('the enabled read FAILS → that tick does not run (fail-closed); the WARN carries the error class, never its text', async () => {
     const h = makeHarness({ enabledReadThrows: true })
     const warn = vi.mocked(console.warn)
+    // The scheduler's own catch-all (`runScheduledRule`) logs `err.message` through Logger.error; a read
+    // failure must be handled inside the gate so the driver text (host, user) never reaches that sink.
+    const loggerError = vi.spyOn(Logger.prototype, 'error')
     const rule = await h.service.createRule('sheet_1', createInput('interval') as never)
     await vi.advanceTimersByTimeAsync(MIN)
     expect(h.enabledReads).toEqual([rule.id])
-    expect(h.execute).not.toHaveBeenCalled()
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('db.internal')
+    expect(h.execute, 'an unconfirmed rule does not send').not.toHaveBeenCalled()
+    expect(loggerError, 'handled in the gate, not by the scheduler catch-all').not.toHaveBeenCalled()
+    expect(JSON.stringify([...warn.mock.calls, ...loggerError.mock.calls])).not.toContain('db.internal')
+    const skip = warn.mock.calls.find((c) => String(c[0]).includes('not enabled'))
+    expect(skip?.[1]).toEqual({ ruleId: rule.id, sheetId: 'sheet_1', reason: 'lookup_failed', errorClass: 'Error' })
   })
 
   it('the skip WARN is values-free: ids and a reason only', async () => {
