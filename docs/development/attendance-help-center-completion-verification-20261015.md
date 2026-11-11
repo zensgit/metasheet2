@@ -56,6 +56,12 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`，走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。仅当平台管理员遇到该接口 404 时，才回退到逐项 `POST /api/permissions/grant`（`AttendanceView.vue` 调用点 `22512`、`22702`）。该回退清单现已含 `attendance:import`，与服务端管理员模板五键一致（`apps/web/src/views/attendance/attendanceProvisionRolePermissions.ts`；`AttendanceView.vue:12829` 引用）。`POST /api/permissions/grant` 不以代码写死的允许名单拦截，只要求 `permissions` 表已有该 code（`packages/core-backend/src/routes/permissions.ts` 的 catalog 查询）；`attendance:import` 已由迁移 `zzzz20260117090000_add_attendance_permissions.ts` 与 `ensureAttendanceRoleTemplates`（`attendance-admin.ts` 权限 INSERT）写入目录。
 
+### 4. 2026-11-11 对齐最新 main（#6849）
+
+Harold 同意将 #6849 对齐最新 `origin/main`。分支原基于 `5920de5b2`（#6846）。此前已知 tip `331b87960`（#6847）之后 main 又前进到 `0232a25f220d7fdae7aa42a7d3caa40e82d1844d`（#6842，2026-11-11 17:17:17 +08）。
+
+`331b87960..0232a25f2` 共 10 个提交。其中触及敏感路径的是：`a77016971`（#6809）改 `.github/workflows/plugin-tests.yml` 与 `packages/core-backend/vitest.config.ts`；`b10632007`（#6850）同上两处；`e2823e93b`（#6851）改 `plugin-tests.yml`；`58e1af6ea`（#6853）改 `plugin-tests.yml`；`0232a25f2`（#6842）新增迁移 `packages/core-backend/migrations/107_create_integration_stock_prep_component_ruling.sql`。#6847 本身也改过 `plugin-tests.yml`、`approval-realdb-departure-transfer.yml` 和 `packages/core-backend/vitest.config.ts`。这些都不改 `attendance-web-guard.yml`、`web-tests.yml`、apps/web 的 vitest/vite 配置，或 `run-required-web-tests` 脚本，因此帮助规格与 `attendanceLegacyPermissionPayload` 的跑法不变。本修复文件的行号在对齐后仍指向同一处（回退清单模块与 `AttendanceView.vue:12829`、grant 调用点）。
+
 ## 2026-10-16 第五轮
 
 三份排查按「现象 → 原因 → 怎么改」写进现有文章，并新增 `troubleshoot`（排查）。
