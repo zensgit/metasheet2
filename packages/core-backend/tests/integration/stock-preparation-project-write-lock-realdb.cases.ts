@@ -114,6 +114,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { createPluginDurableStorage } from '../../src/plugins/plugin-durable-storage'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
+import { defineStockPreparationG9AcceptanceRealDbCases } from './stock-preparation-g9-acceptance-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
@@ -3039,8 +3040,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         // PR-5 (S5): `routeLock` replaces the lock the ROUTES are handed (a hookable view over the same table); `serviceExtras`
         // are merged last (the S5 xlsx builder with its hook). Both additive; every earlier case passes neither.
         // S6-2 (R-91): `routeMultitable` wraps the multitable the ROUTES are handed (a create / patch hook over the real host);
-        // additive, every earlier case passes none.
-        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any; routeLock?: any; serviceExtras?: Record<string, any>; routeMultitable?: (multitable: any) => any } = {}) {
+        // additive, every earlier case passes none. S6-9a (R-91): `routeConfigExtras` is merged into the route config last (the
+        // G9 positive leg's `stockPreparationPilot` declarations); additive, every earlier case passes none.
+        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any; routeLock?: any; serviceExtras?: Record<string, any>; routeMultitable?: (multitable: any) => any; routeConfigExtras?: Record<string, any> } = {}) {
           const { pilot = true, register = true, switchOn = true } = options
           const tenantId = tenantFor(`s3a_${label}`)
           const projectNo: string = CF.PROJECT_NO
@@ -3096,6 +3098,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             config: {
               stockPreparationTableActions: [actionConfig],
               stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envObjectId] },
+              ...(options.routeConfigExtras || {}),
             },
           }
           const base = harnessLib.baseServices(sourceAdapter)
@@ -7375,6 +7378,15 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           // A person's cell through SQL (the grid's effect: the cell and the version move).
           const personSql = (client: PoolClient, recordId: string, fieldId: string, value: string) =>
             client.query('UPDATE meta_records SET data = jsonb_set(data, ARRAY[$2::text], to_jsonb($3::text)), version = version + 1 WHERE id = $1', [recordId, fieldId, value])
+
+          // Batch-refresh step 6 S6-9a (R-91 / R-65): the G9 frozen-candidate acceptance matrix rides THIS scope — the S3A stack,
+          // the S8 change-plan helpers and the S2 store helpers (stock-preparation-g9-acceptance-realdb.cases.ts; the ids are
+          // stock-preparation-g9-matrix.json's). One call, before S8-01, so later appends to this file never touch it.
+          defineStockPreparationG9AcceptanceRealDbCases({
+            TOKEN, CF, SWITCH, MVP_SWITCH, s3aStack, firstPullApplied, confirmOpenCandidate, errorOf, sameJson, decisionVersionOf, derive, derivedOf,
+            testBumpWithin, refreshKit, realRefreshServices, seedOpenHolds, callRoute, cpCall, CPR, boundBody, reviewBody, planById, plansOf, stateOf,
+            sourceWith, withSwitch, carryDecision, seedCarryPair, kvTokens, stepFour, createProductionPluginContext, dropSheet,
+          })
 
           test('S8-01 migration 104 on PostgreSQL: INTEGER counters, the status / reason / shape CHECKs and the two partial uniques are DB facts; a confirmed and a written plan of one project coexist', async () => {
             const cols = (await q('SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1', [RT.changePlan])).rows
