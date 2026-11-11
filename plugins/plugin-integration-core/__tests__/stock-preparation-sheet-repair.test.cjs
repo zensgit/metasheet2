@@ -1192,6 +1192,15 @@ test('CL-01 the continuation\'s verification, pure: every planned row against th
     const verdict = R.analyzeClose({ scope: SCOPE, run: restore, sourceRun, rows: restoredSheet.rows, governed: false })
     assert.deepEqual([verdict.eligible, verdict.refusals], [false, ['backup_unreadable']], label)
   }
+  // The restore run's OWN backup must name its source run: entries that name another run are not vouched for by it,
+  // even when that source did back the same records up.
+  const otherRunId = `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`
+  const misnamed = R.analyzeClose({ scope: SCOPE, run: { ...restore, backup: restore.backup.map((entry) => [entry[0], entry[1], entry[2], otherRunId, entry[4], entry[5]]) }, sourceRun: source, rows: restoredSheet.rows, governed: false })
+  assert.deepEqual([misnamed.eligible, misnamed.refusals, misnamed.planDigest], [false, ['backup_unreadable'], null])
+  // A run whose recipe is not one of the ledger's two is never read as a restore run — also when its backup has a
+  // restore run's shape and a real retire run stands behind it.
+  const unknownRecipe = R.analyzeClose({ scope: SCOPE, run: { ...restore, recipe: 'delete_rows' }, sourceRun: source, rows: restoredSheet.rows, governed: false })
+  assert.deepEqual([unknownRecipe.eligible, unknownRecipe.refusals, unknownRecipe.runRecipe, unknownRecipe.planDigest], [false, ['backup_unreadable'], null, null])
 })
 
 test('CL-02 the dead end closed: a run left `running` after EVERY row was written is verified and finished `completed` — no row write, its own approval and audit row, inside the bracket, then the bump the run never got', async () => {
@@ -1339,6 +1348,16 @@ test('CL-03 the continuation refuses, with counts, while ANY planned row is not 
   m.deps.auditRead = async () => { throw Object.assign(new Error('audit down'), { status: 503, code: 'AUDIT_STORE_FAILED' }) }
   await rejects(m.closePreview(runId), { status: 503, code: 'AUDIT_STORE_FAILED' })
   m.deps.auditRead = auditRead
+  // The read the continuation verifies against must be the reader's shape: a wiring defect is named, never guessed
+  // around (no rows => nothing verified; no governance answer => nothing answered).
+  const readForRestore = m.deps.readForRestore
+  for (const answer of [null, { rows: [] }, { rows: 'none', governed: false }, { governed: false }]) {
+    m.deps.readForRestore = async () => answer
+    await rejects(m.closePreview(runId), { status: 500, code: CODES.UNAVAILABLE, field: 'readForRestore' })
+    await rejects(m.closeExecute(runId, good.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'readForRestore' })
+  }
+  m.deps.readForRestore = readForRestore
+  assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.db.rows(kit.T.lock)[0].lease_id], ['running', null])
   // A guard without the host-write bracket closes nothing (N6).
   const withLease = m.deps.withLease
   m.deps.withLease = (id, fn) => withLease(id, (guard) => {
