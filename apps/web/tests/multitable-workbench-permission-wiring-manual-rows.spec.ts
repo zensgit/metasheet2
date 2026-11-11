@@ -589,6 +589,32 @@ describe('W-10 the drawer on a manual row', () => {
     await onPatch(F.notes, 'note')
     expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_plm', F.notes, 'note', 5)
   })
+
+  // A drawer write that names its record (an attachment write that ended after the drawer moved on) takes that
+  // record's route: the manual row's one-at-a-time route, or a PLM row's plain /patch, whichever row is shown.
+  async function selectThen(first: string, second: string): Promise<(fieldId: string, value: unknown, recordId?: string) => Promise<void>> {
+    await mount('grid', withBlock())
+    const select = captured.MetaGridTable!.onSelectRecord as (id: string) => Promise<void>
+    await select(first)
+    await flushUi()
+    await select(second)
+    await flushUi()
+    expect((captured.MetaRecordInspector!.record as { id: string } | null)?.id).toBe(second)
+    return captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown, recordId?: string) => Promise<void>
+  }
+
+  it('the manual row\'s named write after a move to the PLM row goes to the manual row, through the manual route (its version, onCommitted)', async () => {
+    const onPatch = await selectThen('rec_wb_manual', 'rec_wb_plm')
+    await onPatch(F.notes, 'late', 'rec_wb_manual')
+    expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+    expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_manual', F.notes, 'late', 3, expect.objectContaining({ onCommitted: expect.any(Function) }))
+  })
+
+  it('the reverse: the PLM row\'s named write while the manual row is shown is a plain /patch call for the PLM row', async () => {
+    const onPatch = await selectThen('rec_wb_plm', 'rec_wb_manual')
+    await onPatch(F.notes, 'late', 'rec_wb_plm')
+    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_plm', F.notes, 'late', 5]])
+  })
 })
 
 // ── W-11 the three in-place entries (fix round 2; R74's footer kept) ─────────────────────────────────────────────────

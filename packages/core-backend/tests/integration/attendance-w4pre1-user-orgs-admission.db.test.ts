@@ -151,8 +151,30 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     })
     baseUrl = `http://127.0.0.1:${port}`
 
+    const adminUserId = `${NS}-admin`
+    // PATCH /api/admin/users/:id/status re-reads authority from the locked user row.
+    // The dev token's admin claim is not enough; this suite's actor has to be one in the database.
+    await query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, is_active, is_admin, activation_status
+       ) VALUES ($1, $2, $1, 'W4PRE1 Admin', 'x', 'admin', true, true, 'activated')
+       ON CONFLICT (id) DO UPDATE SET
+         role = 'admin',
+         is_active = true,
+         is_admin = true,
+         activation_status = 'activated',
+         deleted_at = NULL,
+         purged_at = NULL`,
+      [adminUserId, emailFor('suite-admin')],
+    )
+    await query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')
+       ON CONFLICT DO NOTHING`,
+      [adminUserId],
+    )
+
     const tokenRes = await fetch(
-      `${baseUrl}/api/auth/dev-token?userId=${NS}-admin&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
     )
     const tokenJson = await tokenRes.json()
     adminToken = tokenJson.token as string
@@ -162,12 +184,15 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     if (httpServer) {
       await new Promise<void>((resolve) => httpServer.close(() => resolve()))
     }
+    const adminUserId = `${NS}-admin`
+    await query(`DELETE FROM user_roles WHERE user_id = $1`, [adminUserId])
     if (createdUserIds.length) {
       await query(`DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
     }
+    await query(`DELETE FROM users WHERE id = $1`, [adminUserId])
     if (createdGroupIds.length) {
       await query(`DELETE FROM attendance_groups WHERE id = ANY($1::uuid[])`, [createdGroupIds])
     }

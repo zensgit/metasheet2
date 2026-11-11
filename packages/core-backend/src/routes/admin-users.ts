@@ -83,6 +83,11 @@ import {
   handleAdminUserBatchDisable,
   handleAdminUserBatchUpdate,
 } from './admin-user-batch'
+import {
+  assertPlatformActorAuthority,
+  lockSharedAccessSubjects,
+  PlatformActorAuthorityLost,
+} from '../admin/platform-actor-authority'
 import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../admin/user-recycle'
 import { visibleUserPredicate } from '../admin/user-visibility'
 import { registerAdminUserRecycleRoutes } from './admin-user-recycle'
@@ -148,14 +153,6 @@ class DelegationAuthorityRefusal extends Error {
         ? 'No delegated department or member-group scope is configured for your plugin admin role'
         : 'User is outside your delegated department or member-group scope')
     this.name = 'DelegationAuthorityRefusal'
-  }
-}
-
-class PlatformActorAuthorityLost extends Error {
-  readonly code = 'FORBIDDEN'
-  constructor() {
-    super('Admin access required')
-    this.name = 'PlatformActorAuthorityLost'
   }
 }
 
@@ -696,20 +693,6 @@ async function recheckDelegableNamespacesUnderAdmissionLock(
   return deriveDelegableNamespaces(await fetchUserRoleIds(userId, executor))
 }
 
-function sortedAccessIds(ids: Array<string | null | undefined>): string[] {
-  return Array.from(new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))).sort()
-}
-
-/** Admission locks, then visible user-row locks. Call only after any role-row lock. */
-async function lockSharedAccessSubjects(
-  client: AccessGraphTransactionClient,
-  ids: Array<string | null | undefined>,
-): Promise<Map<string, LockedAccessGraphUser>> {
-  const sorted = sortedAccessIds(ids)
-  for (const id of sorted) await lockNamespaceAdmissionWrites(client, id)
-  return lockUsersForAccessGraphWrite(client, sorted)
-}
-
 function requireWritableTarget(
   locked: Map<string, LockedAccessGraphUser>,
   targetId: string,
@@ -723,20 +706,6 @@ function requireWritableTarget(
 async function lockRoleRowForShare(client: AccessGraphTransactionClient, roleId: string): Promise<boolean> {
   const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
   return locked.rows.length > 0
-}
-
-/** Platform authority is legacy role admin or RBAC admin. The is_admin flag is not authority. */
-async function assertPlatformActorAuthority(
-  client: AccessGraphTransactionClient,
-  actor: LockedAccessGraphUser | undefined,
-): Promise<void> {
-  if (!actor || actor.deletedAt || actor.purgedAt || actor.isActive !== true || actor.activationStatus !== 'activated') {
-    throw new PlatformActorAuthorityLost()
-  }
-  const roleIds = await fetchUserRoleIds(actor.id, client as unknown as RoleIdExecutor)
-  if (actor.role !== 'admin' && !roleIds.includes(PLATFORM_ADMIN_ROLE_ID)) {
-    throw new PlatformActorAuthorityLost()
-  }
 }
 
 async function recheckDelegatedAuthority(
@@ -5592,9 +5561,13 @@ export function adminUsersRouter(): Router {
       }
 
       const updateResult = await transaction(async (client) => {
+        // Disable shares the platform-admin lease with recycle and demotion.
+        // Then admission locks and user rows, actor included, sorted. The token
+        // claim that passed ensurePlatformAdmin is not re-read here.
         if (isActive === false) await lockPlatformAdminInvariant(client)
-        const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
-        const lockedUser = lockedUsers.get(userId)
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const lockedUser = subjects.get(userId)
         if (!lockedUser) return null
 
         assertPendingUserCannotBeActivatedViaGenericStatusApi(
