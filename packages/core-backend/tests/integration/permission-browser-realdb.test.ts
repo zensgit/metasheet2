@@ -94,6 +94,146 @@ async function expectRoleFeedback(page: Page, roleId: string, held: boolean): Pr
   }
 }
 
+type AuthorizationPreview = {
+  targetUserId: string
+  targetName: string
+  roleId: string
+  roleTitle: string | null
+  inheritedCodes: readonly string[]
+  admissionEffect: string
+  notes: readonly string[]
+}
+
+async function expectPendingAuthorization(page: Page, preview: AuthorizationPreview): Promise<void> {
+  const dialog = page.getByTestId('admin-authorization-dialog')
+  await expectUi(dialog).toBeVisible()
+  const target = dialog.getByTestId('admin-authorization-target')
+  await expectUi(target).toContainText('对象：')
+  await expectUi(target).toContainText(preview.targetName)
+  await expectUi(target).toContainText(preview.targetUserId)
+  const role = dialog.getByTestId('admin-authorization-role')
+  await expectUi(role).toContainText('角色：')
+  await expectUi(role).toContainText(preview.roleId)
+  if (preview.roleTitle && preview.roleTitle !== preview.roleId) {
+    await expectUi(role).toContainText(preview.roleTitle)
+  }
+  const inherited = dialog.getByTestId('admin-authorization-inherited-permissions')
+  for (const code of preview.inheritedCodes) {
+    await expectUi(inherited).toContainText(code)
+  }
+  await expectUi(dialog.getByTestId('admin-authorization-direct-permissions')).toContainText('无')
+  await expectUi(dialog.getByTestId('admin-authorization-admissions')).toContainText(preview.admissionEffect)
+  for (const note of preview.notes) {
+    await expectUi(dialog).toContainText(note)
+  }
+  await expectUi(dialog.getByTestId('admin-authorization-confirm')).toBeEnabled()
+}
+
+async function confirmPendingAuthorization(
+  page: Page,
+  source: { mutations: () => PermissionBrowserMutation[] },
+  preview: AuthorizationPreview,
+  reopen: () => Promise<void>,
+  baseline: number,
+  cancelFirst = false,
+): Promise<void> {
+  await expectPendingAuthorization(page, preview)
+  expect(source.mutations().length).toBe(baseline)
+  if (cancelFirst) {
+    await page.getByTestId('admin-authorization-cancel').click()
+    await expectUi(page.getByTestId('admin-authorization-dialog')).toHaveCount(0)
+    expect(source.mutations().length).toBe(baseline)
+    await reopen()
+    await expectPendingAuthorization(page, preview)
+    expect(source.mutations().length).toBe(baseline)
+  }
+  await expectUi(page.getByTestId('admin-authorization-confirm')).toBeEnabled()
+  await page.getByTestId('admin-authorization-confirm').click()
+  await expectUi(page.getByTestId('admin-authorization-dialog')).toHaveCount(0)
+}
+
+async function selectedMemberName(page: Page): Promise<string> {
+  const heading = (await page.getByTestId('selected-user-heading').innerText()).trim()
+  if (!heading) throw new Error('selected user heading is empty')
+  return heading
+}
+
+async function selectedRoleTitle(page: Page, roleId: string): Promise<string> {
+  const label = (await page.getByTestId('user-role-select').locator('option:checked').innerText()).trim()
+  const suffix = ` (${roleId})`
+  if (!label.endsWith(suffix)) throw new Error(`selected role option did not identify ${roleId}`)
+  const title = label.slice(0, -suffix.length).trim()
+  if (!title) throw new Error(`selected role option has no title for ${roleId}`)
+  return title
+}
+
+async function confirmRoleMembership(
+  page: Page,
+  source: { mutations: () => PermissionBrowserMutation[] },
+  action: 'assign' | 'unassign',
+  userId: string,
+  roleId: string,
+  inheritedCodes: readonly string[],
+  cancelFirst = false,
+): Promise<void> {
+  const targetName = await selectedMemberName(page)
+  const roleTitle = await selectedRoleTitle(page, roleId)
+  const buttonId = action === 'assign' ? 'assign-role-button' : 'unassign-role-button'
+  const open = async () => {
+    await page.getByTestId(buttonId).click()
+  }
+  const baseline = source.mutations().length
+  await open()
+  await confirmPendingAuthorization(page, source, {
+    targetUserId: userId,
+    targetName,
+    roleId,
+    roleTitle,
+    inheritedCodes,
+    admissionEffect: action === 'assign'
+      ? '不会改变插件使用。'
+      : '如果没有其他角色仍覆盖该范围，可能会关闭插件使用：stock-prep',
+    notes: action === 'assign'
+      ? [
+        '只把该用户加入这个角色的成员，不写入直接权限，也不开通插件使用。',
+        '下列权限码是这个角色会继承的权限。',
+      ]
+      : [
+        '只移除这个角色的成员关系，不改直接权限。',
+        '如果该用户不再持有这些范围的其他角色，可能会关闭对应的插件使用。',
+      ],
+  }, open, baseline, cancelFirst)
+}
+
+async function confirmAdmissionEnable(
+  page: Page,
+  source: { mutations: () => PermissionBrowserMutation[] },
+  userId: string,
+  roleId: string,
+  inheritedCodes: readonly string[],
+  cancelFirst = false,
+): Promise<void> {
+  const targetName = await selectedMemberName(page)
+  const open = async () => {
+    await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
+  }
+  const baseline = source.mutations().length
+  await open()
+  await confirmPendingAuthorization(page, source, {
+    targetUserId: userId,
+    targetName,
+    roleId,
+    roleTitle: null,
+    inheritedCodes,
+    admissionEffect: '将开通插件使用：stock-prep',
+    notes: [
+      '只开通「stock-prep」的插件使用。',
+      '不分配角色，也不写入直接权限。',
+      '下列权限码来自这些角色在角色目录中的清单。',
+    ],
+  }, open, baseline, cancelFirst)
+}
+
 function expectDenied(preflight: SubjectPreflightReading): void {
   expect(preflight.status).toBe(403)
   expect(preflight.code).toBe('FORBIDDEN')
@@ -136,7 +276,7 @@ describe('permission browser real database', () => {
     await expectUi(fx.subjectPage.getByTestId('permission-browser-harness-label')).toHaveText('隔离的真实 Vue 权限页骨架，不是完整登录或工作台。')
 
     await openSubject(fx)
-    await page.getByTestId('assign-role-button').click()
+    await confirmRoleMembership(page, fx, 'assign', fx.subjectId, fx.roleId, ['stock-prep:read'], true)
     await expectRoleFeedback(page, fx.roleId, true)
     let writes = fx.mutations().length
     await refreshAdmission(page)
@@ -152,7 +292,7 @@ describe('permission browser real database', () => {
     await expectCardAgrees(page, read)
     await expectUi(page.getByTestId('member-authorization-outline')).toContainText('不是最终业务访问结论')
 
-    await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
+    await confirmAdmissionEnable(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'], true)
     await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
     writes = fx.mutations().length
     await refreshAdmission(page)
@@ -166,20 +306,17 @@ describe('permission browser real database', () => {
     read = await fx.reread()
     expect(read.admission).toMatchObject({ hasRole: true, enabled: true, effective: true })
     expect(read.permissions).toContain('stock-prep:read')
-    await expectCardAgrees(page, read, false)
-    // Admission PATCH refreshes the admission card only. The permission-source
-    // chips stay on the last role-write snapshot, which is not the business result.
-    await expectUi(page.getByText('当前快照没有列出权限代码。这不是最终业务访问结论。')).toBeVisible()
+    await expectCardAgrees(page, read)
     await expectUi(page.locator('article.user-admin__role-card').filter({ hasText: fx.roleId })).toContainText('stock-prep:read')
 
-    await page.getByTestId('unassign-role-button').click()
+    await confirmRoleMembership(page, fx, 'unassign', fx.subjectId, fx.roleId, ['stock-prep:read'], true)
     await expectRoleFeedback(page, fx.roleId, false)
     preflight = await fx.readSubjectPreflight()
     expectDenied(preflight)
     statuses.push(preflight.status)
 
     await page.getByTestId('user-role-select').selectOption(fx.roleId)
-    await page.getByTestId('assign-role-button').click()
+    await confirmRoleMembership(page, fx, 'assign', fx.subjectId, fx.roleId, ['stock-prep:read'])
     await expectRoleFeedback(page, fx.roleId, true)
     preflight = await fx.readSubjectPreflight()
     expectDenied(preflight)
@@ -190,7 +327,7 @@ describe('permission browser real database', () => {
     expect(read.permissions).not.toContain('stock-prep:read')
     await expectCardAgrees(page, read)
 
-    await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
+    await confirmAdmissionEnable(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'])
     await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
     preflight = await fx.readSubjectPreflight()
     expectBaselineReady(preflight)
@@ -268,12 +405,12 @@ describe('permission browser real database', () => {
       await expectUi(scopeFx.subjectPage.getByTestId('subject-delegation')).toBeVisible()
 
       await openPinnedMember(page, scopeFx.subjectEmail, adminRoleId)
-      await page.getByTestId('assign-role-button').click()
+      await confirmRoleMembership(page, scopeFx, 'assign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'], true)
       await expectRoleFeedback(page, adminRoleId, true)
       let writes = scopeFx.mutations().length
       await refreshAdmission(page)
       expect(scopeFx.mutations().length).toBe(writes)
-      await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
+      await confirmAdmissionEnable(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
       await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
 
       await scopeFx.openDelegation(scopeFx.targetId)
@@ -308,15 +445,15 @@ describe('permission browser real database', () => {
 
       await scopeFx.openUserAdmin()
       await openPinnedMember(page, scopeFx.subjectEmail, adminRoleId)
-      await page.getByTestId('unassign-role-button').click()
+      await confirmRoleMembership(page, scopeFx, 'unassign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
       await expectRoleFeedback(page, adminRoleId, false)
       await page.getByTestId('user-role-select').selectOption(adminRoleId)
-      await page.getByTestId('assign-role-button').click()
+      await confirmRoleMembership(page, scopeFx, 'assign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
       await expectRoleFeedback(page, adminRoleId, true)
       writes = scopeFx.mutations().length
       await refreshAdmission(page)
       expect(scopeFx.mutations().length).toBe(writes)
-      await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
+      await confirmAdmissionEnable(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
       await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
 
       const denied = await scopeFx.readSubjectDelegation()
