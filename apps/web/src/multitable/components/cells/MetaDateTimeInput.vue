@@ -45,6 +45,9 @@ const props = defineProps<{
   modelValue: unknown
   /** IANA zone the wall clock is shown and typed in (resolveDateTimeTimezone(field.property)). */
   timezone: string
+  /** What the value belongs to (the record drawer passes the record id): the box is reused across records, and
+   *  drops its draft when this changes, also when the value itself is the same. */
+  syncKey?: string | number | null
 }>()
 
 const emit = defineEmits<{
@@ -106,7 +109,7 @@ function refreshInvalid() {
   emit('update:invalid', next)
 }
 
-watch([() => props.modelValue, () => props.timezone], () => {
+watch([() => props.modelValue, () => props.timezone, () => props.syncKey], () => {
   const parsed = parseDateTimeInput(draft.value, props.timezone)
   if (parsed.ok && sameInstant(parsed.value, props.modelValue)) return
   draft.value = formatForInput(props.modelValue)

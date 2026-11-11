@@ -157,8 +157,12 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //   * `pull_batch_install` (批次标识 BI-2, register R-65): the owner-gated per-sheet install holds the lease (purpose) for
 //     its whole run — band, views, landing, the persisted plan, the cell writes and the resolve — and BUMPS after its
 //     release (reason), so every token / approved job planned before the install is superseded.
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install'])
+//   * `recovery_verify` / `recovery_closed` (batch-refresh step 6a-2, register R-91): the recovery of an unfinished execution
+//     holds the lease (purpose `recovery_verify`) while it re-reads the source and the sheet and closes the execution in one
+//     plugin-db transaction (no host write); a CLOSE bumps after the release (reason `recovery_closed`). Appended after
+//     批次标识's entries (rebaseline item (g)).
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
