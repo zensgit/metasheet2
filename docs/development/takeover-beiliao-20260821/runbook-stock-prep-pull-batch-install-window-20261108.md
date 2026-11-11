@@ -13,7 +13,7 @@
 >   - I3 之前已在跑的拉取会新建行，由 I5 接住（`rows_after_plan`，见上条）；在 I5 之后、收尾之前落下的行，收尾时算作一行补缺行（状态 `history_gap`，之后用补缺把它标成「推定」，§7）。
 >   - 拉取的更新 / 停用补丁会按它读到的旧数据整行改写，**可能把装机已写上的批次格子改回空**。I5 会把它算成 `rows_unlabelled`，原样再 install 即可补上。多维表的写入栅栏开关 `MULTITABLE_ENABLE_WRITER_FENCE`（默认关）打开时会把这种竞争串行化；是否改它是另一项 owner 决定，本手册不改它。
 > - **中止（abort）只在确认没有拉取在跑、也没有安装请求还在执行时才做；客户端超时后用同一个摘要（digest）重跑 install，绝不 abort**（§6 最后一条，P2-9）。原因：没有租约，与还在写的 install 同时发生的 abort 会先放开 C7 设置锁，install 随后照样写上计划的标签，表停在 `pending`、带标签、锁已放开。批次号不会错，数据也不丢，但这张表的格式锁没了，之后改格式会造成新旧格式混用。
-> - **包里没有两个运维脚本。** R83 安装包不带 `scripts/ops/stock-preparation-pull-batch-install.mjs` 和 `scripts/ops/stock-preparation-scheduled-pull.mjs`（文首「核对包里有该脚本」在 R83 上的结果就是没有）。从包里操作用 §4 的 `Invoke-RestMethod` 写法；要用 `node` 脚本，只能从打了标签的源码（`onprem-r83`）复制，**绝不从 main 复制**。主机上如果还有 R83 之前复制的定时拉取脚本，它会把 409 `INSTALL_IN_PROGRESS` 当成错误：没有危害（服务端已拒绝写入），但窗口内会显示一次失败的定时运行。
+> - **两个运维脚本从 R84 起随包。** R83 安装包不带 `scripts/ops/stock-preparation-pull-batch-install.mjs` 和 `scripts/ops/stock-preparation-scheduled-pull.mjs`（文首「核对包里有该脚本」在 R83 上的结果就是没有）。R84 安装包带上这两个脚本，是 R 线自己的版本（与打包那个提交的源码相同；main 的定时拉取脚本与 R 线不同）：装 R84 后直接用包里的 `node scripts/ops/…`，文首的核对在 R84 上应当是有。仍是 R83 时：从包里操作用 §4 的 `Invoke-RestMethod` 写法；要用 `node` 脚本，只能从打了标签的源码（`onprem-r83`）复制，**绝不从 main 复制**。主机上如果还有 R83 之前复制的定时拉取脚本，它会把 409 `INSTALL_IN_PROGRESS` 当成错误：没有危害（服务端已拒绝写入），但窗口内会显示一次失败的定时运行。
 
 ## 0. 一页看懂
 
@@ -45,7 +45,7 @@
 ## 2. 现场只读 dry_run 的授权口径（C14.1）
 
 - owner 批准现场探查（O-BI-9）时，同一份授权**也覆盖**装机路由的 `dry_run`。它只读，应答只有计数、封闭词、ISO 时间和标签（序号 + 服务器日期），按序号标识项目，不带项目号（P2-6）。
-- 前提是 R83 已装好：路由和运维脚本都是随 R83 才有的。所以「翻开关之前的 dry_run」是指**装好 R83 之后、翻开关之前**。
+- 前提是 R83 已装好：路由和运维脚本（源码）都是随 R83 才有的；两个运维脚本从 R84 起才随安装包（见文首 R 线说明）。所以「翻开关之前的 dry_run」是指**装好 R83 之后、翻开关之前**。
 - 开关关着时，dry_run 只读宿主数据，**不碰账本**：用内置默认值（`settings.source: 'built_in'`），`provisional: true`，`refusals` 里有 `disabled`。这时的计数、布局、PLM 锁状态都可以拿来读，**但它给的 `planDigest` 不能拿去装机**：计划摘要随捕获的设置（规则、格式）和行的覆盖时刻变化，翻开关、设租户默认值、表上多一行都会让它变。装机用的摘要必须在窗口里、翻开关并设好默认值之后，**重新** dry_run 得到。
 - `install` / `abort` 不在这份授权内，每张表每一次都要 O-BI-1。
 
