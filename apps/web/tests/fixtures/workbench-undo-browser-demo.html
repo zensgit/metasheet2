@@ -22,7 +22,7 @@
 // goes away on Enter;
 // #outside for a popover teleported out of the workbench; #stopper for a control that stops
 // propagation of every key (the comment affordance buttons).
-import { createApp, h, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import { createApp, h, nextTick, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
 import '/node_modules/element-plus/dist/index.css'
 import '/src/styles/tokens.css'
 import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
@@ -88,6 +88,10 @@ const request = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms))
 watch(() => record.value.id, () => undo.reset())
 window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
 window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
+window.undoDemo.setField = (id, fieldId, value) => {
+  RECORDS[id] = { ...RECORDS[id], data: { ...RECORDS[id].data, [fieldId]: value } }
+  if (record.value.id === id) record.value = RECORDS[id]
+}
 window.undoDemo.draft = () => draft.value
 window.undoDemo.openComments = () => { openComments.value = true }
 window.undoDemo.comment = () => ({ ...comments.value[0] })
@@ -121,7 +125,30 @@ createApp({
         if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
         window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
-      onNavigate: (id) => { record.value = RECORDS[id] },
+      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the drawer's focused control
+      // first, then gives the focus back to it (the caret at the end of a rich text editor), or to the open tab.
+      onNavigate: async (id) => {
+        if (id === record.value.id) return
+        const active = document.activeElement
+        const drawer = active instanceof HTMLElement ? active.closest('.meta-record-drawer') : null
+        const focused = drawer ? active : null
+        focused?.blur()
+        record.value = RECORDS[id]
+        if (!focused) return
+        await nextTick()
+        const now = document.activeElement
+        if (now && now !== document.body) return
+        if (focused.isConnected) {
+          focused.focus({ preventScroll: true })
+          if (focused.isContentEditable) {
+            const selection = document.getSelection()
+            selection?.selectAllChildren(focused)
+            selection?.collapseToEnd()
+          }
+        } else if (drawer.isConnected) {
+          drawer.querySelector('[role="tabpanel"]')?.focus({ preventScroll: true })
+        }
+      },
     }),
   ]),
 }).mount('#app')

@@ -515,6 +515,8 @@ export type WeComIncompleteLocation =
   | 'department_graph'
   | 'user_list'
   | 'user'
+  | 'login'
+  | 'member'
 
 export class WeComIncompleteResponseError extends Error {
   readonly location: WeComIncompleteLocation
@@ -534,7 +536,7 @@ export class WeComTransportError extends Error {
   }
 }
 
-export type WeComInvalidInputField = 'corpId' | 'corpSecret' | 'wecomAgentId' | 'departmentId' | 'userid'
+export type WeComInvalidInputField = 'corpId' | 'corpSecret' | 'wecomAgentId' | 'departmentId' | 'userid' | 'code'
 
 /** An input rejected before any request was issued. */
 export class WeComInvalidInputError extends Error {
@@ -552,6 +554,7 @@ const WECOM_CORP_ID_PATTERN = /^[\x21-\x7e]{1,64}$/
 const WECOM_AGENT_ID_PATTERN = /^[1-9]\d{0,14}$/
 const WECOM_USER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_@.-]{0,63}$/
 const WECOM_DEPARTMENT_ID_PATTERN = /^\d{1,10}$/
+const WECOM_LOGIN_CODE_PATTERN = /^[\x21-\x7e]{1,512}$/
 
 export function isValidWeComCorpId(value: unknown): boolean {
   return typeof value === 'string' && WECOM_CORP_ID_PATTERN.test(value)
@@ -568,6 +571,11 @@ export function isValidWeComUserId(value: unknown): boolean {
 
 export function isValidWeComDepartmentId(value: unknown): boolean {
   return typeof value === 'string' && WECOM_DEPARTMENT_ID_PATTERN.test(value)
+}
+
+/** A login code: 1-512 bytes of visible ASCII, no whitespace. */
+export function isValidWeComLoginCode(value: unknown): boolean {
+  return typeof value === 'string' && WECOM_LOGIN_CODE_PATTERN.test(value)
 }
 
 /** Deployment-level base URL (the only place a base URL comes from); read at call time. */
@@ -982,5 +990,119 @@ export async function listWeComDepartmentMembers(
       ctx,
     )
     return parseUserListResponse(payload)
+  })
+}
+
+// ── Login calls ──────────────────────────────────────────────────────────────────────────────────
+
+const wecomTokenStageErrors = new WeakSet<object>()
+
+/** True when `error` was raised while the app token was being obtained, before or between request attempts. */
+export function isWeComTokenStageError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && wecomTokenStageErrors.has(error)
+}
+
+/** A read call whose failures are marked as token-stage or request-stage (see {@link isWeComTokenStageError}). */
+async function runStageTaggedWeComReadCall<T>(
+  config: WeComTokenConfig,
+  options: WeComRequestOptions | undefined,
+  operation: (accessToken: string, ctx: WeComReadContext) => Promise<T>,
+): Promise<T> {
+  let attempts = 0
+  let tokenInHand = false
+  try {
+    return await runWeComReadCall(config, options, async (accessToken, ctx) => {
+      attempts += 1
+      tokenInHand = true
+      try {
+        return await operation(accessToken, ctx)
+      } catch (error) {
+        if (attempts === 1 && error instanceof WeComBusinessError && classifyWeComErrcode(error.errcode) === 'token_stale') {
+          tokenInHand = false
+        }
+        throw error
+      }
+    })
+  } catch (error) {
+    if (!tokenInHand && typeof error === 'object' && error !== null) wecomTokenStageErrors.add(error)
+    throw error
+  }
+}
+
+export type WeComLoginCodeResult =
+  | { kind: 'member'; userid: string }
+  | { kind: 'non_member' }
+
+function parseLoginCodeResponse(payload: Record<string, unknown>): WeComLoginCodeResult {
+  if (readErrcode(payload) !== 0) throw new WeComIncompleteResponseError('login')
+  const userid = payload.userid
+  const otherIdentifiers = [payload.openid, payload.external_userid].filter((value) => !isAbsent(value))
+  if (!otherIdentifiers.every((value) => typeof value === 'string' && value.length > 0)) {
+    throw new WeComIncompleteResponseError('login')
+  }
+  if (!isAbsent(userid)) {
+    if (typeof userid !== 'string' || userid.length === 0 || otherIdentifiers.length > 0) {
+      throw new WeComIncompleteResponseError('login')
+    }
+    return { kind: 'member', userid }
+  }
+  if (otherIdentifiers.length === 0) throw new WeComIncompleteResponseError('login')
+  return { kind: 'non_member' }
+}
+
+/**
+ * `GET /cgi-bin/auth/getuserinfo` — exchanges a login code for the scanning member's `userid` as the
+ * app behind `config`. The code is single-use, so the exchange is one attempt: the only repeat is the
+ * one made after a stale token was refetched. A response naming no member is `non_member`; no
+ * identifier of a non-member is returned.
+ */
+export async function exchangeWeComLoginCode(
+  config: WeComTokenConfig,
+  code: string,
+  options?: WeComRequestOptions,
+): Promise<WeComLoginCodeResult> {
+  assertWeComReadCredentials(config)
+  if (!isValidWeComLoginCode(code)) throw new WeComInvalidInputError('code')
+  return runStageTaggedWeComReadCall(config, options, async (accessToken, ctx) => {
+    const remainingMs = ctx.deadlineAt - ctx.now()
+    if (remainingMs <= 0) throw new WeComTimeoutError(WECOM_READ_CALL_DEADLINE_MS)
+    const payload = await readWeComReadAttempt(
+      `/cgi-bin/auth/getuserinfo?access_token=${encodeURIComponent(accessToken)}&code=${encodeURIComponent(code)}`,
+      config.baseUrl,
+      ctx,
+      remainingMs,
+    )
+    return parseLoginCodeResponse(payload)
+  })
+}
+
+export interface WeComMemberStatus {
+  /** As echoed by the provider. */
+  userid: string
+  status: number
+}
+
+function parseMemberResponse(payload: Record<string, unknown>): WeComMemberStatus {
+  if (readErrcode(payload) !== 0) throw new WeComIncompleteResponseError('member')
+  if (typeof payload.userid !== 'string' || payload.userid.length === 0) throw new WeComIncompleteResponseError('member')
+  if (!isSafeInt(payload.status)) throw new WeComIncompleteResponseError('member')
+  return { userid: payload.userid, status: payload.status }
+}
+
+/** `GET /cgi-bin/user/get?userid=` — the id and status of one member; every other field is dropped. */
+export async function getWeComMember(
+  config: WeComTokenConfig,
+  userid: string,
+  options?: WeComRequestOptions,
+): Promise<WeComMemberStatus> {
+  assertWeComReadCredentials(config)
+  if (!isValidWeComUserId(userid)) throw new WeComInvalidInputError('userid')
+  return runStageTaggedWeComReadCall(config, options, async (accessToken, ctx) => {
+    const payload = await readWeComJson(
+      `/cgi-bin/user/get?access_token=${encodeURIComponent(accessToken)}&userid=${encodeURIComponent(userid)}`,
+      config.baseUrl,
+      ctx,
+    )
+    return parseMemberResponse(payload)
   })
 }

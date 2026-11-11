@@ -35,6 +35,8 @@ export const FEISHU_ENDPOINTS = Object.freeze({
   tenantAccessToken: Object.freeze({ role: 'accounts', path: '/oauth/v3/token' } as FeishuEndpoint),
   /** Enterprise information; carries the tenant key. */
   tenantQuery: Object.freeze({ role: 'openApi', path: '/open-apis/tenant/v2/tenant/query' } as FeishuEndpoint),
+  /** Sends a message to one recipient; the recipient id type is a query value. */
+  sendMessage: Object.freeze({ role: 'openApi', path: '/open-apis/im/v1/messages' } as FeishuEndpoint),
 })
 
 export function isFeishuBrand(value: unknown): value is FeishuBrand {

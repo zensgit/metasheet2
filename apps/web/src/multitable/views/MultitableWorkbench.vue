@@ -5780,8 +5780,37 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
-function onDrawerNavigate(recordId: string) {
+async function onDrawerNavigate(recordId: string) {
+  if (recordId === selectedRecordId.value) {
+    void selectRecord(recordId)
+    return
+  }
+  // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
+  // text editor keeps its draft while focused): blur the drawer's focused control first (as closing the drawer
+  // does, see flushActiveFieldEdit), so it commits to the record it was typed on. Then, once the drawer shows the
+  // next record, the focus goes back to that control (the drawer reuses it), or to the drawer's open tab when the
+  // control is gone (a field hidden there), so the chord, Esc and typing go on working, unless something else has
+  // the focus by then.
+  const active = document.activeElement
+  const drawer = active instanceof HTMLElement ? active.closest<HTMLElement>('.meta-record-drawer') : null
+  const focused = drawer ? (active as HTMLElement) : null
+  focused?.blur()
   void selectRecord(recordId)
+  if (!focused || !drawer) return
+  await nextTick()
+  const now = document.activeElement
+  if (now && now !== document.body) return
+  if (focused.isConnected) {
+    focused.focus({ preventScroll: true })
+    // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
+    if (focused.isContentEditable) {
+      const selection = document.getSelection()
+      selection?.selectAllChildren(focused)
+      selection?.collapseToEnd()
+    }
+  } else if (drawer.isConnected) {
+    drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
+  }
 }
 
 // --- Beforeunload: warn on unsaved changes ---

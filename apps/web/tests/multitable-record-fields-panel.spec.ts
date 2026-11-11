@@ -746,3 +746,46 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
     })
   })
 })
+
+describe('MetaRecordFieldsPanel — a control reused for the next record shows that record\'s value', () => {
+  // The drawer blurs the focused control and moves on in the same tick; both records hold the same value here, so
+  // the value the control is given does not change, only the record.
+  const F_RICH = { id: 'fld_rich', name: 'Notes', type: 'longText', property: { rich: true } } as unknown as MetaField
+  const F_AT = { id: 'fld_at', name: 'When', type: 'dateTime' } as unknown as MetaField
+  const sameRecord = (id: string) => ({ id, version: 1, data: { fld_rich: 'same', fld_at: null } }) as unknown as MetaRecord
+
+  afterEach(() => {
+    while (boundApps.length) boundApps.pop()!.unmount()
+    document.body.innerHTML = ''
+  })
+
+  it('the rich text editor: typed on A, then B (same value) shows its own value, and passing through it again commits nothing', async () => {
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_RICH], record: sameRecord('rec_A'), onPatch })
+    await flushUi()
+    const editable = container.querySelector<HTMLElement>('[data-test="rich-longtext-editor"]')!
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'same typed on A'
+    editable.dispatchEvent(new Event('blur'))
+    set({ record: sameRecord('rec_B') })
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_rich', 'same typed on A']])
+    expect(editable.innerHTML).toBe('same')
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur'))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('the date-time box: a draft typed on A is dropped when B (same, empty value) is shown', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_AT], record: sameRecord('rec_A'), onPatch: vi.fn() })
+    await flushUi()
+    const input = container.querySelector<HTMLInputElement>('#drawer_field_fld_at')!
+    input.value = '2031-05-06 07:08'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    set({ record: sameRecord('rec_B') })
+    await flushUi()
+    expect(input.value).toBe('')
+  })
+})

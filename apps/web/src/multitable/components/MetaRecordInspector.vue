@@ -1193,6 +1193,8 @@ function onInspectorKeydown(event: KeyboardEvent) {
   // is what an input method composes with, and no letter shortcut here checks for that).
   const mod = event.metaKey || event.ctrlKey
   if (mod && event.shiftKey && (event.code === 'Comma' || event.code === 'Period')) {
+    // Not while an input method composes: moving on would commit the unconverted text.
+    if (isImeKeyEvent(event)) return
     event.preventDefault()
     if (event.code === 'Comma') navigatePrev()
     else navigateNext()
