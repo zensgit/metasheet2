@@ -5781,6 +5781,10 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
 function onDrawerNavigate(recordId: string) {
+  // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
+  // text editor keeps its draft while focused): blur it first, as closing the drawer does, so it commits to the
+  // record it was typed on. The buttons and a row click take the focus away themselves.
+  if (recordId !== selectedRecordId.value) flushActiveFieldEdit()
   void selectRecord(recordId)
 }
 

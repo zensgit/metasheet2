@@ -719,6 +719,20 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'navigate-record',
         ),
+        // The inspector re-selects the record shown (after a permission change) through the same emit.
+        h(
+          'button',
+          {
+            'data-navigate-record': 'rec_1',
+            onClick: () => this.$emit('navigate', 'rec_1'),
+          },
+          'navigate-record-1',
+        ),
+        // A field that commits on blur, as the drawer's text fields and its rich text editor do.
+        h('input', {
+          'data-blur-commit': 'fld_title',
+          onBlur: (event: FocusEvent) => this.$emit('patch', 'fld_title', (event.target as HTMLInputElement).value),
+        }),
         h(
           'button',
           {
@@ -5539,6 +5553,32 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fieldErrorEl('fld_title')?.textContent).toBe('Old context rejected')
         expect(showErrorSpy).not.toHaveBeenCalled()
       }
+    })
+
+    // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
+    // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on.
+    it('navigating with the caret still in a field commits that field to the record it was typed on, then moves on', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(document.activeElement).not.toBe(field)
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
+    it('re-selecting the record shown leaves the focused field alone', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'still typing'
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(field)
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
     })
 
     it('record change clears inline errors (navigate to another record from the inspector)', async () => {

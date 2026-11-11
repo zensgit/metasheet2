@@ -121,7 +121,8 @@ createApp({
         if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
         window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
-      onNavigate: (id) => { record.value = RECORDS[id] },
+      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the focused field first.
+      onNavigate: (id) => { if (id !== record.value.id) document.activeElement?.blur?.(); record.value = RECORDS[id] },
     }),
   ]),
 }).mount('#app')

@@ -177,6 +177,16 @@ const SCENARIOS = {
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
     check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
   },
+  async 'rich text: type, then the next-record chord with the caret still in it: the text is saved to the record it was typed on, never the next one'(page) {
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' for A')
+    // (What the click itself saved is not this scenario's: only what the chord and after it save is checked.)
+    const before = (await saved(page)).length
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    await page.waitForFunction(() => document.querySelector('#drawer_field_fld_name')?.value === 'gamma')
+    await leave(page)
+    check('saved', (await saved(page)).slice(before).filter((p) => p.includes('fld_rich')), ['rec_1:fld_rich=rich for A'])
+    check('rec_2 shows its own text', (await state(page)).rich, 'other')
+  },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)
     check('restored', (await state(page)).outside, 'filter')
