@@ -74,11 +74,12 @@ purpose=`approval_routing` 的解析顺序：
 - 行为：resolver 不选来源，抛 `ApprovalRoutingPolicyError`（`reason='policy_required'`，固定句，
   不含 org 标识与个数）；消费 org 数据的审批创建得到 422 `APPROVAL_ROUTING_POLICY_REQUIRED`，
   零实例、零 assignment。结果与 account 的更新时间、创建时间、行序无关。
-- 不变：开关 OFF；活跃拉取源 ≤1（含「本地 + 1 个拉取源」）；有策略（策略权威，本检查不运行）；
-  预览覆盖（`overrideCanonicalIntegrationId` 非 undefined）；申请人在该 org 无关联 account
-  （`{}`，不抛）。这些情形的结果与本限定之前相同。开关 OFF、有策略、预览覆盖时，resolver 发出的
-  语句也与本限定之前相同；开关 ON、无策略且不是预览覆盖时（活跃拉取源 ≤1，或申请人在该 org 无
-  关联 account），resolver 只多发一条结果为空的只读探测，其余语句不变。
+- 不变：开关 OFF；活跃拉取源 ≤1（含「本地 + 1 个拉取源」）；受治理（申请人有 linked account 的
+  org 有策略，给定 `orgId` 时只看该 org：策略权威，本检查不运行）；预览覆盖
+  （`overrideCanonicalIntegrationId` 非 undefined）；申请人在该 org 无关联 account（`{}`，不抛）。
+  这些情形的结果与本限定之前相同。开关 OFF、受治理、预览覆盖时，resolver 发出的语句也与本限定
+  之前相同；其余情形（开关 ON、不是预览覆盖、未受治理：活跃拉取源 ≤1，或申请人在该 org 无关联
+  account）resolver 只多发一条结果为空的只读探测，其余语句不变。
 - 只计活跃来源：非活跃（`status <> 'active'`）的拉取型 integration 不计入拉取源，即使它之下仍有
   `link_status='linked'` 且 `is_active=true` 的 account。「一个活跃拉取源 + 这样的非活跃来源 +
   无策略」属于活跃拉取源 ≤1，按上面第 2 条的 legacy 路径选取，该路径选取 account 时不看
