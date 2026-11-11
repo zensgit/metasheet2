@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, shallowRef, type App } from 'vue'
 import MetaRecordAttachmentsPanel from '../src/multitable/components/MetaRecordAttachmentsPanel.vue'
 import type { MetaAttachment, MetaField, MetaFieldPermission, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
@@ -39,12 +39,18 @@ function readSrc(rel: string): string {
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 
 function mount(props: Record<string, unknown>): HTMLDivElement {
+  return mountReactive(props).container
+}
+
+// The props can change after mount (the drawer moving to another record): `set` replaces some of them.
+function mountReactive(props: Record<string, unknown>): { container: HTMLDivElement; set: (patch: Record<string, unknown>) => void } {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp({ render: () => h(MetaRecordAttachmentsPanel, props) })
+  const state = shallowRef<Record<string, unknown>>(props)
+  const app = createApp({ render: () => h(MetaRecordAttachmentsPanel, { ...state.value }) })
   app.mount(container)
   mounts.push({ app, container })
-  return container
+  return { container, set: (patch) => { state.value = { ...state.value, ...patch } } }
 }
 
 afterEach(() => {
@@ -283,7 +289,8 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       await flushUi()
 
       expect(deleteAttachmentFn).toHaveBeenCalledWith('att_1', { recordId: 'rec_1', fieldId: 'fld_a' })
-      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_2'])
+      // An attachment write names its record (the drawer can move to another one before it ends).
+      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_2'], 'rec_1')
     })
 
     it('selecting a file calls uploadFn (the SAME fn the fields panel uses) then emits patch with the new id appended', async () => {
@@ -315,7 +322,297 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       await flushUi()
 
       expect(uploadFn).toHaveBeenCalledWith(file, { recordId: 'rec_1', fieldId: 'fld_a' })
-      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_1', 'att_new'])
+      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_1', 'att_new'], 'rec_1')
+    })
+  })
+
+  // The drawer can move to another record while an upload or a delete still runs. The write, its patch
+  // and every later file belong to the record it started on (rec_A). The panel's own activity, error and
+  // local summaries are the shown record's (rec_B), so A's late result leaves them alone.
+  describe('record switch while an upload or a delete runs', () => {
+    const FIELDS = [{ id: 'fld_a', name: 'Contracts', type: 'attachment' }] as MetaField[]
+    const REC_A: MetaRecord = { id: 'rec_A', version: 1, data: { fld_a: ['att_a1'] } }
+    const REC_B: MetaRecord = { id: 'rec_B', version: 1, data: { fld_a: ['att_b1'] } }
+    const SUMMARIES = { fld_a: [attachment('att_a1', 'a1.pdf'), attachment('att_b1', 'b1.pdf')] }
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void
+      let reject!: (error: unknown) => void
+      const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+      return { promise, resolve, reject }
+    }
+
+    function fileInput(container: HTMLElement): HTMLInputElement {
+      return container.querySelector('.meta-record-attachments-panel__file-input') as HTMLInputElement
+    }
+
+    function pickFiles(input: HTMLInputElement, names: string[]): File[] {
+      const files = names.map((name) => new File(['x'], name, { type: 'application/pdf' }))
+      Object.defineProperty(input, 'files', {
+        value: {
+          ...files,
+          length: files.length,
+          item: (index: number) => files[index] ?? null,
+          [Symbol.iterator]: function* iterator() { yield* files },
+        },
+        configurable: true,
+      })
+      input.dispatchEvent(new Event('change'))
+      return files
+    }
+
+    function mountA(extra: Record<string, unknown> = {}) {
+      const onPatch = vi.fn()
+      const harness = mountReactive({
+        record: REC_A,
+        fields: FIELDS,
+        canEdit: true,
+        attachmentSummariesByField: SUMMARIES,
+        onPatch,
+        ...extra,
+      })
+      return { ...harness, onPatch }
+    }
+
+    it('an upload that ends after the switch to rec_B patches rec_A: A\'s list plus the new id, with rec_A', async () => {
+      const upload = deferred<MetaAttachment>()
+      const uploadFn = vi.fn(() => upload.promise)
+      const { container, set, onPatch } = mountA({ uploadFn })
+      await flushUi()
+      pickFiles(fileInput(container), ['new.pdf'])
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      upload.resolve(attachment('att_new', 'new.pdf'))
+      await flushUi()
+
+      expect(uploadFn).toHaveBeenCalledWith(expect.any(File), { recordId: 'rec_A', fieldId: 'fld_a' })
+      expect(onPatch).toHaveBeenCalledTimes(1)
+      expect(onPatch.mock.calls[0]).toEqual(['fld_a', ['att_a1', 'att_new'], 'rec_A'])
+    })
+
+    it('two files with a switch after the first: the second upload is still made on rec_A', async () => {
+      const first = deferred<MetaAttachment>()
+      const second = deferred<MetaAttachment>()
+      const uploadFn = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+      const { container, set, onPatch } = mountA({ uploadFn })
+      await flushUi()
+      pickFiles(fileInput(container), ['one.pdf', 'two.pdf'])
+      await flushUi()
+      expect(uploadFn).toHaveBeenCalledTimes(1)
+      set({ record: REC_B })
+      await flushUi()
+      first.resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+
+      expect(uploadFn).toHaveBeenCalledTimes(2)
+      expect(uploadFn.mock.calls[1][1]).toEqual({ recordId: 'rec_A', fieldId: 'fld_a' })
+      second.resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_n1', 'att_n2'], 'rec_A']])
+    })
+
+    it('a remove that ends after the switch patches rec_A with the list it started from, minus the id (not rec_B\'s list)', async () => {
+      const removal = deferred<void>()
+      const deleteAttachmentFn = vi.fn(() => removal.promise)
+      const { container, set, onPatch } = mountA({
+        record: { id: 'rec_A', version: 1, data: { fld_a: ['att_a1', 'att_a2'] } },
+        attachmentSummariesByField: { fld_a: [attachment('att_a1', 'a1.pdf'), attachment('att_a2', 'a2.pdf')] },
+        deleteAttachmentFn,
+      })
+      await flushUi()
+      container.querySelectorAll<HTMLButtonElement>('.meta-attachment-list__remove')[0].click()
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      removal.resolve()
+      await flushUi()
+
+      expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_a' })
+      // The removed id goes with it: the workbench takes it out of rec_A's list as it is now.
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a2'], 'rec_A', ['att_a1']]])
+    })
+
+    it('remove, same record: the current list wins over the one it started from', async () => {
+      const removal = deferred<void>()
+      const { container, set, onPatch } = mountA({
+        record: { id: 'rec_A', version: 1, data: { fld_a: ['att_a1', 'att_a2'] } },
+        attachmentSummariesByField: { fld_a: [attachment('att_a1', 'a1.pdf'), attachment('att_a2', 'a2.pdf')] },
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+      })
+      await flushUi()
+      container.querySelectorAll<HTMLButtonElement>('.meta-attachment-list__remove')[0].click()
+      await flushUi()
+      // A reload during the delete brings a third file onto the same record.
+      set({ record: { id: 'rec_A', version: 2, data: { fld_a: ['att_a1', 'att_a2', 'att_a3'] } } })
+      await flushUi()
+      removal.resolve()
+      await flushUi()
+
+      // Still shown: three arguments, no removed ids.
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a2', 'att_a3'], 'rec_A']])
+    })
+
+    it('A\'s late upload does not end rec_B\'s own upload activity (B\'s input stays disabled until B\'s upload ends)', async () => {
+      const uploadA = deferred<MetaAttachment>()
+      const uploadB = deferred<MetaAttachment>()
+      const uploadFn = vi.fn().mockReturnValueOnce(uploadA.promise).mockReturnValueOnce(uploadB.promise)
+      const { container, set, onPatch } = mountA({ uploadFn })
+      await flushUi()
+      pickFiles(fileInput(container), ['a.pdf'])
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      // the switch cleared the activity, so B can start its own upload on the same input
+      expect(fileInput(container).disabled).toBe(false)
+      pickFiles(fileInput(container), ['b.pdf'])
+      await flushUi()
+      expect(uploadFn.mock.calls[1][1]).toEqual({ recordId: 'rec_B', fieldId: 'fld_a' })
+
+      uploadA.resolve(attachment('att_na', 'a.pdf'))
+      await flushUi()
+      expect(fileInput(container).disabled).toBe(true)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_na'], 'rec_A']])
+
+      // control: B's own result does end it
+      uploadB.resolve(attachment('att_nb', 'b.pdf'))
+      await flushUi()
+      expect(fileInput(container).disabled).toBe(false)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).toBeNull()
+      expect(onPatch.mock.calls[1]).toEqual(['fld_a', ['att_b1', 'att_nb'], 'rec_B'])
+    })
+
+    it('A\'s late upload failure writes no error on rec_B and patches nothing', async () => {
+      const upload = deferred<MetaAttachment>()
+      const { container, set, onPatch } = mountA({ uploadFn: vi.fn(() => upload.promise) })
+      await flushUi()
+      pickFiles(fileInput(container), ['a.pdf'])
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      upload.reject(new Error('storage quota exceeded'))
+      await flushUi()
+
+      expect(container.querySelector('.meta-record-attachments-panel__error')).toBeNull()
+      expect(onPatch).not.toHaveBeenCalled()
+    })
+
+    it('A\'s late upload does not add its summary to rec_B (B shows its own fallback for the same id)', async () => {
+      const upload = deferred<MetaAttachment>()
+      const { container, set } = mountA({ uploadFn: vi.fn(() => upload.promise) })
+      await flushUi()
+      pickFiles(fileInput(container), ['new.pdf'])
+      await flushUi()
+      // rec_B holds an attachment with the same id that has no summary in this panel
+      set({ record: { id: 'rec_B', version: 1, data: { fld_a: ['att_new'] } } })
+      await flushUi()
+      upload.resolve(attachment('att_new', 'new.pdf'))
+      await flushUi()
+
+      const group = container.querySelector('[data-test="attachments-panel-group"]')!
+      expect(group.textContent).toContain('att_new')
+      expect(group.textContent).not.toContain('new.pdf')
+    })
+
+    it('A\'s late delete failure writes no error on rec_B and does not end B\'s upload activity', async () => {
+      const removal = deferred<void>()
+      const uploadB = deferred<MetaAttachment>()
+      const { container, set, onPatch } = mountA({
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+        uploadFn: vi.fn(() => uploadB.promise),
+      })
+      await flushUi()
+      container.querySelector<HTMLButtonElement>('.meta-attachment-list__remove')!.click()
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      pickFiles(fileInput(container), ['b.pdf'])
+      await flushUi()
+      removal.reject(new Error('delete refused'))
+      await flushUi()
+
+      expect(container.querySelector('.meta-record-attachments-panel__error')).toBeNull()
+      expect(fileInput(container).disabled).toBe(true)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
+      expect(onPatch).not.toHaveBeenCalled()
+    })
+
+    it('A\'s remove that ends after the switch does not end B\'s upload activity', async () => {
+      const removal = deferred<void>()
+      const uploadB = deferred<MetaAttachment>()
+      const { container, set, onPatch } = mountA({
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+        uploadFn: vi.fn(() => uploadB.promise),
+      })
+      await flushUi()
+      container.querySelector<HTMLButtonElement>('.meta-attachment-list__remove')!.click()
+      await flushUi()
+      set({ record: REC_B })
+      await flushUi()
+      pickFiles(fileInput(container), ['b.pdf'])
+      await flushUi()
+      removal.resolve()
+      await flushUi()
+
+      // B's upload is still running: its input stays disabled and its uploading text stays.
+      expect(fileInput(container).disabled).toBe(true)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
+      expect(container.querySelector('.meta-record-attachments-panel__error')).toBeNull()
+      expect(onPatch.mock.calls).toEqual([['fld_a', [], 'rec_A', ['att_a1']]])
+    })
+
+    it('control, same record: a successful upload ends the activity and patches rec_A', async () => {
+      const upload = deferred<MetaAttachment>()
+      const { container, onPatch } = mountA({ uploadFn: vi.fn(() => upload.promise) })
+      await flushUi()
+      pickFiles(fileInput(container), ['new.pdf'])
+      await flushUi()
+      expect(fileInput(container).disabled).toBe(true)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
+      upload.resolve(attachment('att_new', 'new.pdf'))
+      await flushUi()
+
+      expect(fileInput(container).disabled).toBe(false)
+      expect(container.querySelector('.meta-record-attachments-panel__uploading')).toBeNull()
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A']])
+    })
+
+    it('control, same record: a failed upload or delete shows its error', async () => {
+      const upload = deferred<MetaAttachment>()
+      const removal = deferred<void>()
+      const { container, onPatch } = mountA({
+        uploadFn: vi.fn(() => upload.promise),
+        deleteAttachmentFn: vi.fn(() => removal.promise),
+      })
+      await flushUi()
+      pickFiles(fileInput(container), ['a.pdf'])
+      await flushUi()
+      upload.reject(new Error('storage quota exceeded'))
+      await flushUi()
+      expect(container.querySelector('.meta-record-attachments-panel__error')?.textContent).toContain('storage quota exceeded')
+      expect(fileInput(container).disabled).toBe(false)
+
+      container.querySelector<HTMLButtonElement>('.meta-attachment-list__remove')!.click()
+      await flushUi()
+      removal.reject(new Error('delete refused'))
+      await flushUi()
+      expect(container.querySelector('.meta-record-attachments-panel__error')?.textContent).toContain('delete refused')
+      expect(onPatch).not.toHaveBeenCalled()
+    })
+
+    it('control, same record id in a new object (a re-read during the upload): the patch still goes to rec_A', async () => {
+      const upload = deferred<MetaAttachment>()
+      const { container, set, onPatch } = mountA({ uploadFn: vi.fn(() => upload.promise) })
+      await flushUi()
+      pickFiles(fileInput(container), ['new.pdf'])
+      await flushUi()
+      set({ record: { id: 'rec_A', version: 2, data: { fld_a: ['att_a1'] } } })
+      await flushUi()
+      upload.resolve(attachment('att_new', 'new.pdf'))
+      await flushUi()
+
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A']])
     })
   })
 

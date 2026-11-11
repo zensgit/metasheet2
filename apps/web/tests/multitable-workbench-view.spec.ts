@@ -744,6 +744,51 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'patch-record-status',
         ),
+        // An attachment write names the record it was made on (the third argument): it can end after the
+        // drawer moved to another record. One button per named record.
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_title', 'Stale title', 'rec_1'),
+          },
+          'patch-stale',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_2',
+            onClick: () => this.$emit('patch', 'fld_title', 'Named title', 'rec_2'),
+          },
+          'patch-named',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_remote',
+            onClick: () => this.$emit('patch', 'fld_files', ['att_2'], 'rec_remote'),
+          },
+          'patch-remote-files',
+        ),
+        // A remove that ended after the drawer moved on also names the ids it took out (the fourth argument);
+        // the value is the list it started from. One button per named record.
+        ...['rec_1', 'rec_2', 'rec_remote'].map((recordId) => h(
+          'button',
+          {
+            'data-patch-removed-for': recordId,
+            onClick: () => this.$emit('patch', 'fld_files', ['att_stale'], recordId, ['att_1']),
+          },
+          'patch-removed',
+        )),
+        // A clear-all that ended after the drawer moved on: every id it took out goes with it.
+        h(
+          'button',
+          {
+            'data-patch-cleared-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_files', [], 'rec_1', ['att_1', 'att_2']),
+          },
+          'patch-cleared',
+        ),
         h(
           'button',
           {
@@ -5507,6 +5552,240 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
     })
 
+    // --- a patch that names its record (an attachment write that ended after the drawer moved on) ---
+
+    async function openRec1ThenRec2() {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+    async function patchFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-record-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a patch naming rec_1 while rec_2 is shown goes to rec_1, with rec_1\'s own version, and never to rec_2', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].version = 7 // rec_1 moved on; rec_2 stays at 1
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7)
+      expect(gridMock.patchCell.mock.calls.some((call: unknown[]) => call[0] === 'rec_2')).toBe(false)
+    })
+
+    it('the edit gate is asked about the named record: rec_1 refused while rec_2 is editable → no patch, the edit-blocked toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rowActionOverrides.value = { rec_1: { canEdit: false, canDelete: false, canComment: false } }
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.') // wb('toast.recordEditBlocked', en)
+      expect(gridMock.resolveRowActions).toHaveBeenCalledWith('rec_1')
+    })
+
+    it('a patch naming the record shown (rec_2) is a plain drawer patch: rec_2 at its version, success toast, and it clears the field\'s inline error', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      gridMock.patchCell.mockClear()
+      acceptNextPatch()
+      await patchFor('rec_2')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1)
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a patch naming a record that is neither in the page nor deep-linked is dropped: no patch, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value = gridMock.rows.value.filter((row: { id: string }) => row.id !== 'rec_1')
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('a named rec_1 patch that succeeds after the switch leaves rec_2\'s inline error on the same field alone', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+    })
+
+    // Two answers from the inspector: the real one (it can anchor only on the record it shows), and one that
+    // would anchor anything, so the toast cannot come only from the inspector's answer.
+    it.each([
+      ['answers per record', (recordId: string) => recordId === 'rec_2'],
+      ['would anchor anything', () => true],
+    ])('a named rec_1 patch rejected after the switch (inspector %s) toasts and is never written inline on rec_2', async (_label, answer) => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation(answer)
+      rejectNextPatch('Stale title rejected', { status: 400, code: 'VALIDATION_ERROR' }) // the failure is rec_1's
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Stale title rejected')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      gridMock.error.value = null
+    })
+
+    it('an attachment delete on a deep-linked record ends after the drawer moved on: the linked copy still takes the new version, and its later patch carries it', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: ['att_1', 'att_2'] } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'a.txt' }, { id: 'att_2', filename: 'b.txt' }] },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_1')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      // version 4, plus one for the delete that ended while rec_2 was shown
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
+    // Deep link to rec_remote (not in the page, version 4), then move the drawer to the page record rec_2.
+    async function openRemoteThenRec2(files: string[] = ['att_1', 'att_2']) {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: files } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: files.map((id) => ({ id, filename: `${id}.txt` })) },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+
+    it('two named patches for the deep-linked rec_remote after the move: each carries the version the one before left (4, then 5)', async () => {
+      await openRemoteThenRec2()
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([
+        ['rec_remote', 'fld_files', ['att_2'], 4],
+        ['rec_remote', 'fld_files', ['att_2'], 5],
+      ])
+    })
+
+    it('an attachment delete on the page record rec_2 leaves the deep-linked rec_remote copy alone: its later patch carries its own version 4', async () => {
+      await openRemoteThenRec2()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_9' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_9', { recordId: 'rec_2', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4]])
+    })
+
+    // --- a remove that ended after the drawer moved on also names the ids it took out ---
+
+    async function patchRemovedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-removed-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a remove naming rec_1 (no longer shown): rec_1\'s list as it is now minus the removed ids, at rec_1\'s version; the list it started from is not written', async () => {
+      await openRec1ThenRec2()
+      // the delete's reload: att_1 still listed, and att_x added meanwhile; rec_1 moved on, rec_2 stays at 1
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_x'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7]])
+    })
+
+    it('a remove naming rec_1 whose list no longer holds the removed id (the server took it out): nothing written, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_x'] }
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    // While the record is shown the removed ids are ignored: the panel already sent its current list. Both
+    // lists of rec_2 would give another value (or no write) if they were used.
+    it.each([
+      ['still holds att_1', ['att_1', 'att_y']],
+      ['no longer holds att_1', ['att_y']],
+    ])('a remove naming the record shown (rec_2, which %s): the value as given, at rec_2\'s version', async (_label, files) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: files }
+      acceptNextPatch()
+      await patchRemovedFor('rec_2')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1]])
+    })
+
+    it('a remove naming the deep-linked rec_remote (no longer shown): rebuilt from the deep-linked copy minus the removed ids, at its version 4', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2', 'att_3'])
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4]])
+    })
+
+    // In the app the delete comes first, and it takes the id out of the deep-linked copy: the rebuild then has
+    // nothing left to take out, and nothing is written.
+    it('a remove naming the deep-linked rec_remote after its delete went through the workbench: nothing written', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2'])
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+    })
+
+    async function patchClearedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-cleared-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    // A late clear-all names every id it took out: all of them come out of the list as it is now, and an
+    // attachment added meanwhile stays.
+    it.each([
+      ['both still listed', ['att_1', 'att_2', 'att_x'], ['att_x']],
+      ['one already taken out', ['att_1', 'att_x'], ['att_x']],
+      ['both still listed, nothing else', ['att_1', 'att_2'], []],
+    ])('a clear-all naming rec_1 (no longer shown), %s: rec_1\'s list as it is now minus every cleared id', async (_label, files, expected) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: files }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchClearedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7]])
+    })
+
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
 
     it('field-routed rejection the inspector CANNOT anchor (attachments tab / hidden field) → toast with the server message, NO entry written', async () => {
@@ -6828,6 +7107,32 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('')
         gridMock.error.value = null
+      })
+
+      // A patch that names a record the drawer no longer shows (an attachment write that ended after a switch)
+      // is not a commit of the controls now on screen: the typing on the record shown stays undoable. The
+      // patch of the record shown (no record named, or the shown one named) still ends it.
+      it.each([
+        ['names rec_1, no longer shown', '[data-patch-record-for="rec_1"]', ['rec_1', 'fld_title', 'Stale title', 1], ''],
+        ['names no record (the one shown)', '[data-patch-record="fld_title"]', ['rec_2', 'fld_title', 'Patched title', 1], 'typed on B'],
+        ['names rec_2, the one shown', '[data-patch-record-for="rec_2"]', ['rec_2', 'fld_title', 'Named title', 1], 'typed on B'],
+      ])('wiring: after a switch to rec_2, an accepted title patch that %s', async (_label, button, call, afterUndo) => {
+        const { title } = await openDrawerWithTitle()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        const drawer = container!.querySelector('[data-record-drawer="rec_2"]') as HTMLElement
+        expect(drawer).toBeTruthy()
+        // the stand-in control is kept across the switch, as the real reused title input is (inside the drawer)
+        if (!title.isConnected) drawer.appendChild(title)
+        title.focus()
+        typeInto(title, 'typed on B') // after the switch, which drops every history
+        container!.querySelector<HTMLButtonElement>(button)!.click()
+        await flushUi()
+        expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith(...call)
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(title.value).toBe(afterUndo)
       })
     })
   })

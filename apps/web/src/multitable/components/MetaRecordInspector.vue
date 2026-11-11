@@ -438,7 +438,7 @@
           :mention-suggestions="mentionSuggestions"
           :mention-search="mentionSearch"
           :field-errors="fieldErrors"
-          @patch="(fieldId, value) => emit('patch', fieldId, value)"
+          @patch="relayPatch"
           @ai-preview="(field) => emit('ai-preview', field)"
           @ai-run="(field) => emit('ai-run', field)"
           @comment-field="(field) => emit('comment-field', field)"
@@ -558,7 +558,7 @@
           :attachment-summaries-by-field="attachmentSummariesByField"
           :upload-fn="uploadFn"
           :delete-attachment-fn="deleteAttachmentFn"
-          @patch="(fieldId, value) => emit('patch', fieldId, value)"
+          @patch="relayPatch"
         />
       </div>
     </div>
@@ -639,6 +639,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaDrawerPatchArgs,
   MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableComment,
@@ -872,7 +873,10 @@ const emit = defineEmits<{
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
   (e: 'copy-link'): void
-  (e: 'patch', fieldId: string, value: unknown): void
+  /** `recordId` (and `removed`): the record an attachment write was made on, from the panels (it can end after the
+   *  drawer moved to another record; see MetaRecordFieldsPanel.vue). Absent for every other edit: those are the
+   *  shown record's. */
+  (e: 'patch', ...args: MetaDrawerPatchArgs): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
@@ -1673,6 +1677,11 @@ const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
     .filter((field) => isNativePersonField(field))
     .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
 })
+
+/** A panel's patch, passed on with exactly the arguments it came with. */
+function relayPatch(...args: MetaDrawerPatchArgs) {
+  emit('patch', ...args)
+}
 
 function onTitleChange(event: Event) {
   const field = primaryField.value
