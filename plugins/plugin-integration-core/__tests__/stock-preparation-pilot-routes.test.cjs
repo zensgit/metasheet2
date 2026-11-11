@@ -200,6 +200,9 @@ function resolvedPullBatchLedger() {
     },
     async allocate() { throw new Error('readiness never allocates') },
     async finish() { throw new Error('readiness never finishes') },
+    // Readiness version 4 (batch-refresh step 6a-2): the recovery's link read and close hook are wired (never called).
+    async readBatchLink() { throw new Error('readiness never reads a link') },
+    async batchWithin() { throw new Error('readiness never closes a batch') },
   }
 }
 

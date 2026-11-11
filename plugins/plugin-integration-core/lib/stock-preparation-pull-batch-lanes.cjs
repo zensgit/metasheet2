@@ -386,6 +386,10 @@ async function prepareSmallApplyPullBatch({ lane, dryRun, action, parameters, ru
   const fieldIds = lane.band.fieldIds
   return Object.freeze({
     evaluation,
+    // Batch-refresh step 6a-1 (R-91; rebaseline C-3): the digest this stamping run allocates / joins with — persisted,
+    // unprefixed, on the governed execution row (pull_batch_source_digest) for step 6a-2's recovery close. Only on a
+    // ready run: an unready one (and the switch off: no run at all) stores NULL.
+    sourceDigest,
     stampFor(execution) {
       return {
         fieldIds,

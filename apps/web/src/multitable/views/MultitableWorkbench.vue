@@ -1204,6 +1204,18 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 // resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
 // the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
 const gridPageSizeUserId = ref<string | null>(null)
+// An attachment upload or delete is a write the grid's history does not hold yet: the drawer, and a grid upload,
+// patch the field once it is done (the grid's cell editor patches a remove or clear when it closes; the form view
+// keeps it in its draft). The grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
+let attachmentWrites = 0
+async function holdingHistory<T>(write: () => Promise<T>): Promise<T> {
+  attachmentWrites += 1
+  try {
+    return await write()
+  } finally {
+    attachmentWrites -= 1
+  }
+}
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
@@ -1216,6 +1228,7 @@ const grid = useMultitableGrid({
   // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
   // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
   resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
+  holdsHistory: () => attachmentWrites > 0,
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -2977,31 +2990,36 @@ const hierarchyParentFieldIds = computed(() =>
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
-  workbench.client.uploadAttachment(file, {
+  holdingHistory(() => workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
     recordId: context?.recordId,
     fieldId: context?.fieldId,
-  })
+  }))
 
-const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) => {
+const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  holdingHistory(() => deleteAttachment(attachmentId, context))
+
+async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
-  if (context?.recordId && selectedRecordId.value === context.recordId) {
-    const updatedIds = (selectedRecordResolved.value?.data[context.fieldId ?? ''] as unknown[] | undefined)
+  // The deep-linked copy (the reload below refreshes the page's rows only) takes the delete as the server does for
+  // an attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on:
+  // a later patch of that record starts from it.
+  const linked = deepLinkedRecord.value
+  if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
+    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
       ?.map(String)
       .filter((id) => id !== attachmentId) ?? []
-    if (deepLinkedRecord.value?.id === context.recordId && context.fieldId) {
-      deepLinkedRecord.value = {
-        ...deepLinkedRecord.value,
-        version: deepLinkedRecord.value.version + 1,
-        data: {
-          ...deepLinkedRecord.value.data,
-          [context.fieldId]: updatedIds,
-        },
-      }
-      deepLinkedRecordAttachmentSummaries.value = {
-        ...deepLinkedRecordAttachmentSummaries.value,
-        [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
-      }
+    deepLinkedRecord.value = {
+      ...linked,
+      version: linked.version + 1,
+      data: {
+        ...linked.data,
+        [context.fieldId]: updatedIds,
+      },
+    }
+    deepLinkedRecordAttachmentSummaries.value = {
+      ...deepLinkedRecordAttachmentSummaries.value,
+      [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
     }
   }
   await grid.loadViewData(grid.page.value.offset)
@@ -3678,19 +3696,38 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown) {
-  if (!selectedRecordResolved.value) return
-  const record = selectedRecordResolved.value
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[]) {
+  // An attachment write names the record it was made on: it can end after the drawer moved to another record,
+  // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
+  // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
+  // closes while it runs). Every other edit is the shown record's.
+  const record = recordId ? drawerRecordById(recordId) : selectedRecordResolved.value
+  if (!record) return
+  const shown = record.id === selectedRecordResolved.value?.id
+  // A remove or clear-all that ended after the drawer moved on names the ids it took out: they come out of the
+  // record's list as it is now (the delete's reload, or its update of a deep-linked copy, refreshed it, and it may
+  // hold an attachment added meanwhile), not the list it started from. With none of them left in it, there is
+  // nothing to write.
+  let patchValue = value
+  if (removed && !shown) {
+    const raw = record.data[fieldId]
+    const current = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const next = current.filter((id) => !removed.includes(id))
+    if (next.length === current.length) return
+    patchValue = next
+  }
   if (!ensureCanEditRecord(record.id)) return
   // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
   // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
-  // patch keeps the typing undoable.
-  const settleUndo = workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+  // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
+  const settleUndo = shown
+    ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+    : undefined
   if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, value, settleUndo)
+    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
     return
   }
-  await commitDrawerPatch(record, fieldId, value, false, settleUndo)
+  await commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
@@ -3723,7 +3760,9 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
 
 async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
-  inspectorPatchOwners.set(fieldId, patchOwner)
+  // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
+  // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
+  if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
   // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
   const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
@@ -5741,8 +5780,37 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
-function onDrawerNavigate(recordId: string) {
+async function onDrawerNavigate(recordId: string) {
+  if (recordId === selectedRecordId.value) {
+    void selectRecord(recordId)
+    return
+  }
+  // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
+  // text editor keeps its draft while focused): blur the drawer's focused control first (as closing the drawer
+  // does, see flushActiveFieldEdit), so it commits to the record it was typed on. Then, once the drawer shows the
+  // next record, the focus goes back to that control (the drawer reuses it), or to the drawer's open tab when the
+  // control is gone (a field hidden there), so the chord, Esc and typing go on working, unless something else has
+  // the focus by then.
+  const active = document.activeElement
+  const drawer = active instanceof HTMLElement ? active.closest<HTMLElement>('.meta-record-drawer') : null
+  const focused = drawer ? (active as HTMLElement) : null
+  focused?.blur()
   void selectRecord(recordId)
+  if (!focused || !drawer) return
+  await nextTick()
+  const now = document.activeElement
+  if (now && now !== document.body) return
+  if (focused.isConnected) {
+    focused.focus({ preventScroll: true })
+    // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
+    if (focused.isContentEditable) {
+      const selection = document.getSelection()
+      selection?.selectAllChildren(focused)
+      selection?.collapseToEnd()
+    }
+  } else if (drawer.isConnected) {
+    drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
+  }
 }
 
 // --- Beforeunload: warn on unsaved changes ---
