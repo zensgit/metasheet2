@@ -28,12 +28,20 @@
  *            split (the capability manifest is the route list; the tier oracle is written out here, independently of the
  *            manifest's own decision function), for the read, operate, pull and stock-prep admin tiers, a TENANTLESS
  *            platform admin and a cross-tenant puller / admin: below the tier 403; the foreign callers are sent THIS
- *            tenant's REAL hold / continuation / execution / change-plan ids with minimally valid bodies and answer exactly
- *            as for ids that exist nowhere (no existence oracle); tenantId carriers (body, query, params) naming this
- *            tenant are refused at the tenant gate; no answer of any status echoes this tenant's sheet / row / hold /
- *            continuation / execution / plan / batch ids; nothing is written and no refusal audits. The large-lane pull
- *            steps get inert foreign requests only (the matrix's u03InertForeignSteps says why); the one documented
- *            platform-admin trial steer (pull.dry-run, values-free) is pinned, not hidden.
+ *            tenant's REAL hold / continuation / execution / change-plan ids with VALID bodies (every field the parsers
+ *            require, so the id reaches the scoped read; no non-inert foreign call may stop at body validation unless the
+ *            matrix's u03BodyValidationStops lists it) and answer exactly as for ids that exist nowhere (no existence
+ *            oracle); tenantId carriers (body, query, params) naming this tenant are refused at the tenant gate; no answer
+ *            of any status echoes this tenant's sheet / row / hold / continuation / execution / plan / batch ids; those
+ *            refusals write nothing and audit nothing. The large-lane pull steps get inert foreign requests only (the
+ *            matrix's u03InertForeignSteps says why).
+ *            THE OWNER-GATED EXCEPTION G9-U03-LEGACY-TENANTLESS-ADMIN (matrix manual item, printed by every runner
+ *            verdict): PRE-EXISTING product behaviour — requireTableActionAccess's legacy integration:* branch
+ *            (http-routes.cjs:1526-1553) lets a tenantless integration:admin naming a tenant (query / params carrier)
+ *            PREVIEW AND APPLY into its governed sheet while MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED is off (the
+ *            default). G9-U03 PINS the measured writes of that path (never certifies it) and, with the flag exactly
+ *            'true' (test env only), that assertVerifiedTenantClaim (:1754) refuses the same caller 403 on every carrier
+ *            with nothing written while this tenant's own puller with a verified claim still previews (ready, a token).
  *   G9-S9X-01 (C-8, RD G2) the MVP archive identity — the default snapshotBatchId and syncRunId, both derived from
  *            buildArchiveRevision — is unchanged across the 批次标识 install + history backfill of an unchanged GOVERNED
  *            sheet, with the switch ON and OFF: the archive after the install keeps the batch already archived.
@@ -100,11 +108,21 @@ const { PROJECT_WRITE_LOCK_TABLE, sheetWriteScopeKey } = lockLib
 
 export const G9_MATRIX = JSON.parse(fs.readFileSync(MATRIX_PATH, 'utf8')) as {
   version: number
+  describe: string
+  hostFile: string
   realDb: string[]
   pending: Array<{ id: string; owner: string; what: string }>
-  manual: Array<{ id: string; what: string }>
+  manual: Array<{ id: string; what: string; ownerGated?: boolean; where?: string }>
   u03InertForeignSteps: { steps: string[]; reason: string }
+  u03BodyValidationStops: { codePattern: string; reason: string; entries: Array<{ route: string; leg: string; callers: string[]; why: string }> }
 }
+// The owner-gated item G9-U03 pins (never certifies); the runner prints its sentence in every verdict.
+const LEGACY_TENANTLESS_ADMIN_ID = 'G9-U03-LEGACY-TENANTLESS-ADMIN'
+const LEGACY_TENANTLESS_ADMIN_WHAT = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — owner ruling pending'
+// The staged tenant-claim door (http-routes.cjs stockPreparationTenantClaimRequired: exactly 'true' after trim / lower).
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+// The pull-batch pure module: the settings vocabulary's own default (a schema-valid settings patch, never a literal).
+const pullBatchPureLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch.cjs')) as any
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
@@ -374,13 +392,21 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(0)
   })
 
-  describe('G9 frozen-candidate acceptance (S6-9a, R-91 / R-65): the step-6 §9.5 matrix on real Postgres, the real routes, lock, stores and host', () => {
+  describe(`${G9_MATRIX.describe} (S6-9a, R-91 / R-65): the step-6 §9.5 matrix on real Postgres, the real routes, lock, stores and host`, () => {
     test('G9 census: every real-DB id of the matrix has exactly one case; the marker ships at 0 (S6-9 flips the literal, this harness never does)', () => {
       // Runs after the describe body registered every case (collection is synchronous).
       expect([...registered].sort()).toEqual([...G9_MATRIX.realDb].sort())
       expect(new Set(registered).size).toBe(registered.length)
       expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(0)
       for (const entry of G9_MATRIX.pending) expect(G9_MATRIX.realDb.includes(entry.id)).toBe(false)
+      // The owner-gated exception G9-U03 pins is a MANUAL item with its exact sentence (the runner prints it in every
+      // verdict), never a real-DB id: no `[G9] ... ok` line certifies it.
+      const ownerGated = G9_MATRIX.manual.filter((entry) => entry.ownerGated === true)
+      expect(ownerGated.map((entry) => [entry.id, entry.what])).toEqual([[LEGACY_TENANTLESS_ADMIN_ID, LEGACY_TENANTLESS_ADMIN_WHAT]])
+      expect(G9_MATRIX.realDb.includes(LEGACY_TENANTLESS_ADMIN_ID)).toBe(false)
+      // The runner's R-3 reading of the log (a FAIL under this describe, a failed host file) uses these two names.
+      expect(G9_MATRIX.describe).toBe('G9 frozen-candidate acceptance')
+      expect(G9_MATRIX.hostFile).toBe('stock-preparation-p4-repair-once-realdb.test.ts')
     })
 
     // ── the fourteen hermetic-only S3A cases, on real PostgreSQL ───────────────────────────────────────────────────────
@@ -1053,7 +1079,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }, 600000)
 
     // ── G9-U03: the authorization drill ─────────────────────────────────────────────────────────────────────────────
-    g9Case(['G9-U03', 'G9-S65-U03'], '(U03; S6-5\'s census and remnant routes join it) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus every pull step of the operator split: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin, sent THIS tenant\'s REAL hold / continuation / execution / change-plan ids with minimally valid bodies and steering tenantId carriers, answer exactly what they answer for ids that exist nowhere, are refused 403 at the tenant gate when a carrier names this tenant, never 2xx for the tenantless admin (save the pinned platform-admin values-free trial steer), never echo this tenant\'s ids and never write', async () => {
+    g9Case(['G9-U03', 'G9-S65-U03'], '(U03; S6-5\'s census and remnant routes join it) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus every pull step of the operator split: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin, sent THIS tenant\'s REAL hold / continuation / execution / change-plan ids with VALID bodies (no unlisted stop at body validation) and steering tenantId carriers, answer exactly what they answer for ids that exist nowhere, are refused 403 at the tenant gate when a carrier names this tenant, never echo this tenant\'s ids, and those refusals write nothing; the OWNER-GATED legacy path (G9-U03-LEGACY-TENANTLESS-ADMIN, pre-existing) is PINNED, not certified: with the tenant-claim flag off the tenantless admin naming this tenant previews (200, a token) and APPLIES (200, written 1) into it, with the flag \'true\' it is refused 403 on every carrier and nothing is written while this tenant\'s own claimed puller still previews (ready, a token)', async () => {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
       const st = await s3aStack('g9_u03', { pilot: true, serviceExtras: { stockPreparationPullBatchStore: ledgerStore, stockPreparationComponentRulingStore: rulingStore() } })
       tenants.push(st.tenantId)
@@ -1189,18 +1215,27 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         crossAdmin: { id: `u_g9_xa_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_ADMIN] },
       }
       const paramsFor = (ids: Record<string, string>) => ({ projectNo: st.projectNo, actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, holdId: ids.holdId, id: ids.continuationId, executionId: ids.executionId, acknowledgementId: ids.acknowledgementId, jobId: 'job_g9_u03_none', applyJobId: 'ajob_g9_u03_none' })
-      // The minimally valid request of each route, so a foreign caller reaches the tenant gate instead of stopping at body
-      // validation: the typed project (+ the mode, the body-carried id) on every decision route; the pull lanes' parameters.
+      // The VALID request of each route — every field its parser requires (any non-empty fingerprint / digest / receipt
+      // passes the parse; the scoped read then decides) — so a foreign caller's real id REACHES the tenant gate and the
+      // scoped read instead of stopping at body validation (the guard below refuses any such stop the matrix does not
+      // list). The settings patches are the vocabulary's own default with a version that matches no row anywhere, so a
+      // cross-tenant admin's call answers its OWN tenant's version conflict and writes nothing in any tenant.
+      const staleVersion = 987654
       const validRequest = (entry: any, ids: Record<string, string>) => {
         const confirmProjectNo = st.projectNo
+        const fp = 'g9_u03_fingerprint'
+        const receipt = 'g9_u03_read_receipt'
+        const digest = 'g9_u03_content_digest'
         const bodies: Record<string, any> = {
-          'refresh.confirm': { confirmProjectNo, holdId: ids.holdId },
-          'refresh.reviewComplete': { confirmProjectNo, changePlanId: ids.changePlanId },
+          'refresh.confirm': { confirmProjectNo, holdId: ids.holdId, holdFingerprint: fp, comparisonFingerprint: fp, evidenceFingerprint: fp, readReceipt: receipt },
+          'refresh.end': { confirmProjectNo, revision: 1, outcome: 'escalate_special_repair' },
+          'refresh.changePlanConfirm': { confirmProjectNo, holdIds: [ids.holdId], holdSetFingerprint: fp, planFingerprint: fp, sourceContentDigest: digest, readReceipt: receipt },
+          'refresh.reviewComplete': { confirmProjectNo, changePlanId: ids.changePlanId, contentDigest: digest, conclusion: 'handled', readReceipt: receipt },
           'refresh.recover': { confirmProjectNo, mode: 'verify' },
           'refresh.closeUnverified': { confirmProjectNo, mode: 'inspect' },
           'projectTarget.pullBatchInstall': { confirmProjectNo, mode: 'dry_run' },
-          'projectTarget.pullBatchSettingsSet': { confirmProjectNo, expectedVersion: 0 },
-          'pullBatch.settingsSet': { expectedVersion: 0 },
+          'projectTarget.pullBatchSettingsSet': { confirmProjectNo, expectedVersion: staleVersion, firstPullBatchRule: pullBatchPureLib.DEFAULT_PULL_BATCH_CONFIG.firstPullBatchRule },
+          'pullBatch.settingsSet': { expectedVersion: staleVersion, firstPullBatchRule: pullBatchPureLib.DEFAULT_PULL_BATCH_CONFIG.firstPullBatchRule },
           'pull.dry-run': { parameters: { projectNo: st.projectNo } },
           'pull.apply': { parameters: { projectNo: st.projectNo }, confirm: { dryRunToken: 'tok_g9_u03_none' } },
           'pull.reconcile': { parameters: { projectNo: st.projectNo } },
@@ -1225,8 +1260,25 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         const rulings = (await q(`SELECT id, kind, status, component_digest FROM ${RULING_TABLE} WHERE tenant_id = $1 ORDER BY id`, [st.tenantId])).rows
         const sheetLedger = (await q('SELECT history_status, version, first_pull_batch_rule, label_format FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [st.tenantId])).rows
         const ledger = await ledgerOf(st.tenantId)
-        return { audits, fingerprint: JSON.stringify([await stepFour(st.tenantId), await st.main(), await continuations(st), plans, lock, registry, settings, sheetLedger, rulings, ledger, await stTokens()]) }
+        const parts: Record<string, unknown> = { stepFour: await stepFour(st.tenantId), main: await st.main(), continuations: await continuations(st), plans, lock, registry, settings, sheetLedger, rulings, ledger, stTokens: await stTokens() }
+        return { audits, parts, fingerprint: JSON.stringify(Object.values(parts)) }
       }
+      // The named parts that moved between two snapshots (the owner-gated leg pins them exactly).
+      const changedParts = (from: any, to: any) => Object.keys(to.parts).filter((name) => JSON.stringify(to.parts[name]) !== JSON.stringify(from.parts[name]))
+      // A route call that carries a VERIFIED tenant claim (req.authenticatedTenantId, which the host's middleware sets only
+      // from the verified token; the kit's callRoute carries none): the tenant-claim leg's own-puller control.
+      const claimedSend = (entry: any, user: any, request: { params: any; body: any; query: any }, authenticatedTenantId: string) => both(true, async () => {
+        const handler = st.routes.get(`${entry.method} ${entry.path}`)
+        if (!handler) throw new Error(`route ${entry.method} ${entry.path} is not registered`)
+        const res: any = { statusCode: 200, headers: {}, body: undefined }
+        res.status = (code: number) => { res.statusCode = code; return res }
+        res.json = (payload: unknown) => { res.body = payload; return res }
+        res.setHeader = (name: string, value: unknown) => { res.headers[name] = value; return res }
+        res.send = (payload: unknown) => { res.body = payload; return res }
+        res.end = () => res
+        await handler({ user, body: request.body || {}, query: request.query || {}, params: request.params || {}, authenticatedTenantId }, res)
+        return res
+      })
       // THIS tenant's ids — none may appear in a foreign answer of ANY status, except an id the caller itself sent.
       const tenantIds = [st.sheetId, st.objectId, ...(await st.rows()).map((row: any) => row.id), ...holdRows.map((row: any) => row.id), ...executionRows.map((row: any) => row.id), REAL.continuationId, REAL.changePlanId, REAL.componentHandle, REAL.acknowledgementId, ...ledgerIds]
       const leaks: string[] = []
@@ -1241,6 +1293,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         const entry = drilled.find((route: any) => route.id === id)
         ownControl[id] = answerOf(await send(entry, st.users.puller, validRequest(entry, REAL)))
       }
+      // The decision body is VALID: this tenant's own puller, on the real plan id, passes the parse and the scoped read and
+      // stops at the stale digest — never the 400 / 404 a foreign caller's real id would otherwise be told apart by.
+      ownControl['refresh.reviewComplete'] = answerOf(await send(drilled.find((route: any) => route.id === 'refresh.reviewComplete'), st.users.puller, validRequest(drilled.find((route: any) => route.id === 'refresh.reviewComplete'), REAL)))
       ownControl['projectTarget.censusRead'] = answerOf(await censusRead(st, callers.spAdmin))
       ownControl['refresh.closeUnverified'] = answerOf(await send(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), callers.spAdmin, validRequest(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), REAL)))
       // Phase 1 — every caller that must be refused, then the no-write / no-audit proof.
@@ -1256,12 +1311,17 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const foreignAnswers: Record<string, Record<string, string>> = {}
       const realVsBogus: string[] = []
       const steering: Record<string, Record<string, string>> = {}
-      // THE ONE DOCUMENTED EXCEPTION, run after the no-write proof: the values-free trial (pull.dry-run without
-      // includeMissingComponents) is requireTableActionAccess's legacy platform-admin branch, where a tenantless platform
-      // admin may steer `?tenantId=` across tenants outright (http-routes.cjs tableActionDryRun, the W3a comment) — so a
-      // query / params carrier naming THIS tenant previews it (and its governed preview runs). Pinned here, never hidden.
-      const platformAdminTrial: Array<() => Promise<void>> = []
-      const platformAdminTrialAnswers: Record<string, string> = {}
+      // THE BODY-VALIDATION GUARD (R-1): every non-inert foreign answer (real, bogus, each steering carrier) that stopped at
+      // body validation, as `<caller>:<route>:<leg>`; compared EXACTLY with the matrix's listed stops below.
+      const bodyStopPattern = new RegExp(G9_MATRIX.u03BodyValidationStops.codePattern)
+      const bodyStops: string[] = []
+      const noteBodyStop = (name: string, id: string, leg: string, res: any) => {
+        if (bodyStopPattern.test(answerOf(res))) bodyStops.push(`${name}:${id}:${leg}`)
+      }
+      // The legacy path is NOT run in this phase: the tenantless admin's pull.dry-run on the query / params carrier is
+      // requireTableActionAccess's legacy integration:* branch (http-routes.cjs:1526-1553) and WRITES into this tenant; it
+      // is the owner-gated leg after the no-write proof, inside its own write accounting.
+      const legacyCarriers = ['query', 'params']
       for (const [name, user] of Object.entries(foreign)) {
         for (const entry of drilled) {
           if (inertForeign.has(entry.id)) {
@@ -1273,6 +1333,8 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           const real = await send(entry, user, validRequest(entry, REAL))
           const bogus = await send(entry, user, validRequest(entry, BOGUS))
           ;(foreignAnswers[name] ||= {})[entry.id] = answerOf(real)
+          noteBodyStop(name, entry.id, 'real', real)
+          noteBodyStop(name, entry.id, 'bogus', bogus)
           // NO EXISTENCE ORACLE: this tenant's real id is answered exactly like an id that exists nowhere.
           if (answerOf(real) !== answerOf(bogus)) realVsBogus.push(`${name}:${entry.id}:${answerOf(real)}!=${answerOf(bogus)}`)
           leakCheck(`${name}:${entry.id}`, real, realSent)
@@ -1285,22 +1347,92 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           }
           if (entry.method !== 'GET') carriers.body = { ...request, body: { ...request.body, tenantId: st.tenantId } }
           for (const [carrier, steered] of Object.entries(carriers)) {
-            if (name === 'tenantless' && entry.id === 'pull.dry-run' && carrier !== 'body') {
-              platformAdminTrial.push(async () => {
-                const res = await send(entry, user, steered)
-                platformAdminTrialAnswers[carrier] = answerOf(res)
-                leakCheck(`${name}:${entry.id}:platform-admin-trial-${carrier}`, res, realSent)
-              })
-              continue
-            }
+            if (name === 'tenantless' && entry.id === 'pull.dry-run' && legacyCarriers.includes(carrier)) continue
             const res = await send(entry, user, steered)
             ;(steering[`${name}:${carrier}`] ||= {})[entry.id] = answerOf(res)
+            noteBodyStop(name, entry.id, `steer-${carrier}`, res)
             leakCheck(`${name}:${entry.id}:steer-${carrier}`, res, realSent)
           }
         }
       }
       const afterRefusals = await tenantRows()
-      for (const run of platformAdminTrial) await run()
+      // ── THE OWNER-GATED LEG G9-U03-LEGACY-TENANTLESS-ADMIN (PRE-EXISTING product behaviour, escalated to the owner) ──
+      const dryRunEntry = drilled.find((route: any) => route.id === 'pull.dry-run')
+      const applyEntry = drilled.find((route: any) => route.id === 'pull.apply')
+      const pullBody = { parameters: { projectNo: st.projectNo } }
+      const carried = (carrier: string, body: any) => (carrier === 'query'
+        ? { params: paramsFor(REAL), query: { tenantId: st.tenantId }, body }
+        : carrier === 'params'
+          ? { params: { ...paramsFor(REAL), tenantId: st.tenantId }, query: {}, body }
+          : carrier === 'body'
+            ? { params: paramsFor(REAL), query: {}, body: { ...body, tenantId: st.tenantId } }
+            : { params: paramsFor(REAL), query: {}, body })
+      // (b) FIRST, on the state (a) then writes into: the SAME tenantless caller with the tenant-claim flag exactly 'true'
+      //     (this process's env, for this leg only, restored in finally). assertVerifiedTenantClaim (http-routes.cjs:1754)
+      //     refuses it 403 on pull.dry-run and pull.apply on every carrier (none / query / params / body) — the apply sent
+      //     a LIVE token this tenant's own claimed puller just minted — with nothing written and no audit (the live token
+      //     not consumed); this tenant's puller WITHOUT a claim is refused the same way; WITH its verified claim it still
+      //     previews (ready, a token). Its token is never applied: the apply would consume the confirmed change plan (a)
+      //     then measures.
+      const claimFlagBefore = process.env[TENANT_CLAIM_FLAG]
+      let claimLeg: Record<string, unknown>
+      try {
+        process.env[TENANT_CLAIM_FLAG] = 'true'
+        const ownDry = await claimedSend(dryRunEntry, st.users.puller, carried('none', pullBody), st.tenantId)
+        const liveToken = tokenOf(ownDry)
+        const beforeClaimRefusals = await tenantRows()
+        const refused: Record<string, string> = {}
+        for (const carrier of ['none', 'query', 'params', 'body']) {
+          refused[`pull.dry-run:${carrier}`] = answerOf(await send(dryRunEntry, foreign.tenantless, carried(carrier, pullBody)))
+          refused[`pull.apply:${carrier}`] = answerOf(await send(applyEntry, foreign.tenantless, carried(carrier, { ...pullBody, confirm: { dryRunToken: typeof liveToken === 'string' ? liveToken : 'tok_g9_u03_none' } })))
+        }
+        const unclaimedPuller = answerOf(await send(dryRunEntry, st.users.puller, carried('none', pullBody)))
+        const afterClaimRefusals = await tenantRows()
+        claimLeg = {
+          ownDryRun: [answerOf(ownDry), status(ownDry), typeof liveToken],
+          refusedNot403Required: Object.entries(refused).filter(([, answer]) => answer !== '403:OPERATOR_SCOPE_TENANT_REQUIRED').map(([key, answer]) => `${key}:${answer}`),
+          refusedCalls: Object.keys(refused).length,
+          unclaimedPuller,
+          refusalsWrote: changedParts(beforeClaimRefusals, afterClaimRefusals),
+          refusalsAudited: afterClaimRefusals.audits - beforeClaimRefusals.audits,
+        }
+      } finally {
+        if (claimFlagBefore === undefined) delete process.env[TENANT_CLAIM_FLAG]
+        else process.env[TENANT_CLAIM_FLAG] = claimFlagBefore
+      }
+      // (a) THEN flag OFF (the default): the tenantless integration:admin names THIS tenant on the query / params carrier of
+      //     pull.dry-run — the legacy branch admits it, the governed preview runs and mints a token; the token of the
+      //     later preview (params) APPLIES; the earlier one is superseded. Every write is accounted and pinned here.
+      const afterClaimLeg = await tenantRows()
+      const legacyTokens: Record<string, unknown> = {}
+      const legacyDryRun: Record<string, unknown[]> = {}
+      for (const carrier of legacyCarriers) {
+        const res = await send(dryRunEntry, foreign.tenantless, carried(carrier, pullBody))
+        legacyTokens[carrier] = tokenOf(res)
+        legacyDryRun[carrier] = [answerOf(res), status(res), typeof tokenOf(res)]
+        leakCheck(`tenantless:pull.dry-run:legacy-${carrier}`, res, realSent)
+      }
+      const afterLegacyDryRun = await tenantRows()
+      const legacyApply: Record<string, unknown[]> = {}
+      const mainBeforeApply = (await st.main()).count
+      for (const carrier of ['params', 'query']) {
+        const token = legacyTokens[carrier]
+        const res = await send(applyEntry, foreign.tenantless, carried(carrier, { ...pullBody, confirm: { dryRunToken: typeof token === 'string' ? token : 'tok_g9_u03_none' } }))
+        legacyApply[carrier] = [answerOf(res), status(res) ?? null, res.body && res.body.data && res.body.data.apply ? res.body.data.apply.written : null]
+        leakCheck(`tenantless:pull.apply:legacy-${carrier}`, res, realSent)
+      }
+      const afterLegacyApply = await tenantRows()
+      const legacy = {
+        dryRun: legacyDryRun,
+        dryRunWrote: changedParts(afterClaimLeg, afterLegacyDryRun),
+        dryRunTokens: [afterClaimLeg.parts.stTokens, afterLegacyDryRun.parts.stTokens],
+        dryRunAudits: afterLegacyDryRun.audits - afterClaimLeg.audits,
+        apply: legacyApply,
+        applyWrote: changedParts(afterLegacyDryRun, afterLegacyApply),
+        applyRowsAdded: (await st.main()).count - mainBeforeApply,
+        applyAudits: afterLegacyApply.audits - afterLegacyDryRun.audits,
+      }
+      console.log(`[G9-OWNER] ${LEGACY_TENANTLESS_ADMIN_ID} measured (pinned, NOT certified; owner ruling pending) ${JSON.stringify({ legacy, claimLeg })}`)
       // Phase 2 — the callers at or above the tier are admitted (an inert request may still be a 4xx; never a 401 / 403).
       const admitted: Record<string, string[]> = {}
       for (const [name, user] of Object.entries(callers)) {
@@ -1318,6 +1450,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       console.log(`[G9-U03] own control ${JSON.stringify(ownControl)}`)
       console.log(`[G9-U03] foreign answers ${JSON.stringify(foreignAnswers)}`)
       console.log(`[G9-U03] steering answers ${JSON.stringify(steering)}`)
+      // The listed body-validation stops, expanded per caller (the matrix list is exact both ways).
+      const listedBodyStops = G9_MATRIX.u03BodyValidationStops.entries.flatMap((entry) => entry.callers.map((caller) => `${caller}:${entry.route}:${entry.leg}`))
+      const decisionIds = ['refresh.confirm', 'refresh.end', 'refresh.changePlanConfirm', 'refresh.reviewComplete']
       const observed = {
         drilled: drilled.length,
         ownControl,
@@ -1326,21 +1461,28 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         realVsBogus,
         steered2xx,
         steeredRefreshNot403,
-        platformAdminTrialAnswers,
+        unlistedBodyStops: bodyStops.filter((stop) => !listedBodyStops.includes(stop)).sort(),
+        listedBodyStopsNotSeen: listedBodyStops.filter((stop) => !bodyStops.includes(stop)).sort(),
+        // The four decision routes that carry a real id: a cross-tenant caller's VALID body reaches the scoped read.
+        decisionForeign: Object.fromEntries(['crossPuller', 'crossAdmin'].map((name) => [name, decisionIds.map((id) => foreignAnswers[name][id])])),
         leaks,
         refusalsWroteNothing: afterRefusals.fingerprint === before.fingerprint,
         refusalsAudited: afterRefusals.audits - before.audits,
+        legacy,
+        claimLeg,
         admittedRefused: admitted,
       }
       expect(observed).toEqual({
         drilled: Object.keys(EXPECTED_TIERS).length,
         // The ids are REAL: the owner reads the hold's evidence and the continuation; the recovery FINDS the (succeeded)
-        // execution and refuses it as not unfinished — never the 404 a foreign caller must get.
+        // execution and refuses it as not unfinished; the review finds the plan and stops at the stale digest — never the
+        // 404 a foreign caller must get.
         ownControl: {
           'refresh.evidence': '200:-',
           'refresh.continuation': '200:-',
           'refresh.recover': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
           'refresh.closeUnverified': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
+          'refresh.reviewComplete': '409:STOCK_PREP_CHANGE_REVIEW_STALE',
           'projectTarget.censusRead': '200:-',
         },
         belowTierNot403: [],
@@ -1348,14 +1490,43 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         realVsBogus: [],
         steered2xx: [],
         steeredRefreshNot403: [],
-        platformAdminTrialAnswers: { query: '200:-', params: '200:-' },
+        unlistedBodyStops: [],
+        listedBodyStopsNotSeen: [],
+        decisionForeign: {
+          crossPuller: ['404:STOCK_PREP_REFRESH_HOLD_NOT_FOUND', '404:STOCK_PREP_CONTINUATION_NOT_FOUND', '409:STOCK_PREP_CHANGE_PLAN_STALE', '404:STOCK_PREP_CHANGE_PLAN_NOT_FOUND'],
+          crossAdmin: ['404:STOCK_PREP_REFRESH_HOLD_NOT_FOUND', '404:STOCK_PREP_CONTINUATION_NOT_FOUND', '409:STOCK_PREP_CHANGE_PLAN_STALE', '404:STOCK_PREP_CHANGE_PLAN_NOT_FOUND'],
+        },
         leaks: [],
         refusalsWroteNothing: true,
         refusalsAudited: 0,
+        // G9-U03-LEGACY-TENANTLESS-ADMIN — THE MEASURED LEGACY OUTCOME, PINNED (pre-existing; owner ruling pending): with
+        // the flag off the tenantless admin's preview of THIS tenant mints tokens and moves the step-4 / lock rows; its
+        // apply WRITES (written 1); the superseded token is refused. Any change to this outcome turns G9-U03 red.
+        legacy: {
+          dryRun: { query: ['200:-', 'ready', 'string'], params: ['200:-', 'ready', 'string'] },
+          dryRunWrote: ['stepFour', 'lock', 'stTokens'],
+          dryRunTokens: [1, 3],
+          dryRunAudits: 0,
+          apply: { params: ['200:-', 'succeeded', 1], query: ['409:STOCK_PREP_PROJECT_PLAN_SUPERSEDED', null, null] },
+          applyWrote: ['stepFour', 'main', 'continuations', 'plans', 'stTokens'],
+          applyRowsAdded: 0,
+          applyAudits: 0,
+        },
+        // ... and with the flag exactly 'true' the same caller is refused on every carrier, nothing written.
+        claimLeg: {
+          ownDryRun: ['200:-', 'ready', 'string'],
+          refusedNot403Required: [],
+          refusedCalls: 8,
+          unclaimedPuller: '403:OPERATOR_SCOPE_TENANT_REQUIRED',
+          refusalsWrote: [],
+          refusalsAudited: 0,
+        },
         admittedRefused: {},
       })
       expect(drilled.length).toBeGreaterThanOrEqual(37)
-      g9Pass('G9-U03', { ...observed, foreign2xx: foreign2xx.length, steeringCalls: Object.values(steering).reduce((n, answers) => n + Object.keys(answers).length, 0) })
+      // The ok line certifies the drill, NOT the owner-gated legacy path (the [G9-OWNER] line above and the matrix item).
+      const { legacy: _legacy, claimLeg: _claimLeg, ...certified } = observed
+      g9Pass('G9-U03', { ...certified, ownerGatedPinned: LEGACY_TENANTLESS_ADMIN_ID, foreign2xx: foreign2xx.length, steeringCalls: Object.values(steering).reduce((n, answers) => n + Object.keys(answers).length, 0) })
       // G9-S65-U03 rides this drill: S6-5's four routes are in the tier oracle, the manifest equality and every leg above.
       const s65 = ['projectTarget.census', 'projectTarget.censusRead', 'projectTarget.remnantAcknowledge', 'projectTarget.remnantRevoke']
       expect(s65.every((id) => drilled.some((route: any) => route.id === id))).toBe(true)

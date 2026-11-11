@@ -17,7 +17,10 @@
 //                                           complete, save its whole log and evaluate it as --parse-log does, expecting
 //                                           the TAG'S OWN COMMIT (`git rev-parse <tag>^{commit}`, never a run's headSha)
 //   --parse-log <file> --expect-sha <sha>   evaluate a saved log: every realDb id needs one `[G9] <id> ok` line, no vitest
-//                                           FAIL line may name a G9 case, and THE TESTED COMMIT must be <sha> (40-hex,
+//                                           FAIL line may name a G9 case or ANY test under the matrix's `describe` (the
+//                                           census test, a hook), the matrix's `hostFile` (the p4 host) must not report a
+//                                           failed test, no vitest summary may count a failure (R-3), and THE TESTED
+//                                           COMMIT must be <sha> (40-hex,
 //                                           mandatory for a PASS): every job checkout's `git log -1 --format=%H` answer
 //                                           (actions/checkout prints it) — at least one, all equal to <sha>. A sha merely
 //                                           MENTIONED in the log (a merge subject, a branch name) never counts: a
@@ -25,6 +28,10 @@
 //   --old-build-drill --sha <sha>           print the U07 old-build half (design §7.5): a pre-step-6 build against a
 //                                           database migrated by the candidate and carrying the G9-U07 artifacts
 //   --self-test                             the parser against synthetic logs (green, missing id, red case, caret ANSI)
+//
+// OWNER-GATED ITEMS: every verdict (PASS or not) prints the matrix's `manual` entries marked `ownerGated` with their
+// sentence - today G9-U03-LEGACY-TENANTLESS-ADMIN, a PRE-EXISTING product path G9-U03 pins and never certifies - so no
+// G9 PASS hides them.
 //
 // WHY BOTH WORKFLOWS: since #6187 the required `stock-prep PowerShell 5.1 acceptance` context comes from
 // stock-prep-powershell51.yml, not plugin-tests.yml. Both carry workflow_dispatch, so no workflow file is edited here.
@@ -83,9 +90,41 @@ export function testedCommitsOf(log) {
 }
 
 /**
+ * The vitest failure signals of one log (R-3): a FAIL line under the matrix's describe (any test of the G9 block - the
+ * census, a hook - not only the id-named cases), a FAIL line or a per-file result line of the host file counting a
+ * failure, and any `Tests` / `Test Files` summary counting one. Both reporters' forms (default `> file (N tests | k
+ * failed)`, the summary's `FAIL  file > ...`), either log prefix, ESC or caret ANSI.
+ */
+export function failureSignalsOf(log, matrix) {
+  const describe = typeof matrix.describe === 'string' && matrix.describe ? matrix.describe : null
+  const hostFile = typeof matrix.hostFile === 'string' && matrix.hostFile ? matrix.hostFile : null
+  const g9Fails = []
+  const hostFails = []
+  const summaries = []
+  for (const raw of stripAnsi(log).split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    const isFail = /\bFAIL\s+\S/.test(line)
+    if (isFail && describe && line.includes(`> ${describe}`)) g9Fails.push(line.trim().slice(0, 200))
+    if (hostFile && line.includes(hostFile)) {
+      const counted = /\((\d+) tests?[^)]*?\|\s*(\d+) failed/.exec(line)
+      if (isFail || (counted && Number(counted[2]) > 0)) hostFails.push(line.trim().slice(0, 200))
+    }
+    const summary = /\b(Test Files|Tests)\s+(\d+) failed\b/.exec(line)
+    if (summary && Number(summary[2]) > 0) summaries.push(`${summary[1]} ${summary[2]} failed`)
+  }
+  return { g9Fails: [...new Set(g9Fails)], hostFails: [...new Set(hostFails)], summaries: [...new Set(summaries)] }
+}
+
+/** The matrix's owner-gated manual items, as printed in every verdict. */
+export function ownerGatedOf(matrix) {
+  return (matrix.manual || []).filter((entry) => entry && entry.ownerGated === true).map((entry) => `${entry.id}: ${entry.what}`)
+}
+
+/**
  * Evaluate one CI log against the matrix. `ok` only when every realDb id printed exactly one ok line, no vitest FAIL
- * line names a G9 case, `expectSha` is a 40-hex sha, and the log's tested commits (testedCommitsOf) are at least one
- * and ALL equal to it. Pure; values-free answer.
+ * line names a G9 case, no test under the G9 describe failed, the host file reports no failed test and no vitest
+ * summary counts a failure (failureSignalsOf), `expectSha` is a 40-hex sha, and the log's tested commits
+ * (testedCommitsOf) are at least one and ALL equal to it. Pure; values-free answer.
  */
 export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
   const log = stripAnsi(rawLog)
@@ -100,13 +139,15 @@ export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
     // A case names its id as `> <id> ` — or `+ <id> ` for an extension id riding another case (`G9-U03 + G9-S65-U03`).
     for (const id of matrix.realDb) if (line.includes(`> ${id} `) || line.includes(`+ ${id} `)) failedCases.push(id)
   }
+  const signals = failureSignalsOf(log, matrix)
   const tested = testedCommitsOf(log)
   let shaVerdict
   if (typeof expectSha !== 'string' || !SHA_PATTERN.test(expectSha)) shaVerdict = 'expect_sha_missing_or_not_40_hex'
   else if (tested.length === 0) shaVerdict = 'no_tested_commit_in_log'
   else if (tested.some((commit) => commit !== expectSha)) shaVerdict = 'tested_commit_differs'
   else shaVerdict = 'tested_commit_matches'
-  const ok = missing.length === 0 && duplicated.length === 0 && failedCases.length === 0 && shaVerdict === 'tested_commit_matches'
+  const testsFailed = signals.g9Fails.length > 0 || signals.hostFails.length > 0 || signals.summaries.length > 0
+  const ok = missing.length === 0 && duplicated.length === 0 && failedCases.length === 0 && !testsFailed && shaVerdict === 'tested_commit_matches'
   return {
     ok,
     expectSha: typeof expectSha === 'string' ? expectSha : null,
@@ -118,8 +159,12 @@ export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
     duplicated,
     unknown,
     failedCases: [...new Set(failedCases)],
+    g9DescribeFailures: signals.g9Fails,
+    hostFileFailures: signals.hostFails,
+    failedSummaries: signals.summaries,
     pending: matrix.pending.map((entry) => `${entry.id} (${entry.owner})`),
     manual: matrix.manual.map((entry) => entry.id),
+    ownerGated: ownerGatedOf(matrix),
   }
 }
 
@@ -140,13 +185,25 @@ function planCommands(sha, tag) {
 function printVerdict(verdict) {
   console.log(JSON.stringify(verdict, null, 2))
   console.log(`tested commit(s): ${verdict.testedCommits.join(', ') || 'none found'} (expected ${verdict.expectSha || 'none given'}: ${verdict.shaVerdict})`)
+  if (verdict.g9DescribeFailures.length || verdict.hostFileFailures.length || verdict.failedSummaries.length) {
+    console.log(`failed tests in the log: ${verdict.g9DescribeFailures.length} under the G9 describe, ${verdict.hostFileFailures.length} host-file line(s), summaries: ${verdict.failedSummaries.join('; ') || 'none'}`)
+  }
   console.log(verdict.ok
-    ? 'G9 real-DB half: PASS on this log. Still required: the PR-only contexts from the S6-9 PR at the same sha, the pending ids above and the manual items.'
+    ? 'G9 real-DB half: PASS on this log. Still required: the PR-only contexts from the S6-9 PR at the same sha, the pending ids above, the manual items and the OWNER-GATED items below.'
     : 'G9 real-DB half: NOT PASSED on this log.')
+  // Every verdict, PASS or not: the owner-gated items no G9 PASS covers.
+  for (const item of verdict.ownerGated) console.log(`OWNER-GATED (not covered by this verdict): ${item}`)
 }
 
 function selfTest() {
-  const matrix = { realDb: ['S3A-02', 'G9-U08'], pending: [{ id: 'G9-S65-V5', owner: 'S6-5' }], manual: [{ id: 'U09' }] }
+  const owner = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — owner ruling pending'
+  const matrix = {
+    realDb: ['S3A-02', 'G9-U08'],
+    pending: [{ id: 'G9-S65-V5', owner: 'S6-5' }],
+    manual: [{ id: 'U09' }, { id: 'G9-U03-LEGACY-TENANTLESS-ADMIN', ownerGated: true, what: owner }],
+    describe: 'G9 frozen-candidate acceptance',
+    hostFile: 'stock-preparation-p4-repair-once-realdb.test.ts',
+  }
   const sha = 'a'.repeat(40)
   const base = 'b'.repeat(40)
   const merge = 'c'.repeat(40)
@@ -163,6 +220,15 @@ function selfTest() {
   const mixedJobs = `${ghCheckout('db (20.x)', sha)}${ghCheckout('unit (20.x)', merge)}${cases}`
   const unreadable = `${stamp} [command]/usr/bin/git log -1 --format=%H\n${stamp} not-a-sha\n${cases}`
   const verdictOf = (log, expectSha) => evaluateLog(log, matrix, { expectSha })
+  // R-3: every ok line printed, yet a test under the G9 describe (the census, a hook) failed, or the host file / a vitest
+  // summary counts a failure outside G9.
+  const host = 'tests/integration/stock-preparation-p4-repair-once-realdb.test.ts'
+  const g9Path = `${host} > stock-prep project write lock > S3A step-4 lanes > G9 frozen-candidate acceptance (S6-9a, R-91 / R-65): the matrix`
+  const censusRed = `${green}\n FAIL  ${g9Path} > G9 census: every real-DB id of the matrix has exactly one case`
+  const hookRed = `${green}\n^[[31m FAIL ^[[39m ${g9Path} > (afterAll hook)`
+  const hostRed = `${green}\n ❯ ${host}  (210 tests | 1 failed | 3 skipped) 109220ms\n FAIL  ${host} > stock-prep project write lock > S8-08 the gate on the real stack`
+  const hostSummaryRed = `${green}\n Test Files  1 failed (1)\n      Tests  1 failed | 206 passed | 3 todo (210)`
+  const dotGreen = `${green}\n ✓ ${host}  (210 tests | 3 skipped) 109220ms\n Test Files  269 passed (269)\n      Tests  3541 passed | 2 skipped | 3 todo (3546)`
   const checks = [
     ['green (the tested commit is the expected one)', verdictOf(green, sha).ok === true && verdictOf(green, sha).testedCommits.join() === sha],
     ['missing id', verdictOf(`${checkout(sha)}[G9] S3A-02 ok {}`, sha).missing.join() === 'G9-U08'],
@@ -178,6 +244,12 @@ function selfTest() {
     ['gh run view form, every job tested it', verdictOf(twoJobs, sha).ok === true && verdictOf(twoJobs, sha).checkouts === 2],
     ['one job tested another commit', verdictOf(mixedJobs, sha).ok === false],
     ['checkout answer unreadable', verdictOf(unreadable, sha).ok === false && verdictOf(unreadable, sha).testedCommits.join() === 'unreadable'],
+    ['R-3: a failed test under the G9 describe (the census) refuses, every ok line notwithstanding', verdictOf(censusRed, sha).ok === false && verdictOf(censusRed, sha).g9DescribeFailures.length === 1 && verdictOf(censusRed, sha).missing.length === 0],
+    ['R-3: a failed G9 hook through caret ANSI refuses', verdictOf(hookRed, sha).ok === false && verdictOf(hookRed, sha).g9DescribeFailures.length === 1],
+    ['R-3: the host file counting a failed test outside G9 refuses', verdictOf(hostRed, sha).ok === false && verdictOf(hostRed, sha).hostFileFailures.length === 2 && verdictOf(hostRed, sha).failedCases.length === 0],
+    ['R-3: a "Tests N failed" summary refuses', verdictOf(hostSummaryRed, sha).ok === false && verdictOf(hostSummaryRed, sha).failedSummaries.join() === 'Test Files 1 failed,Tests 1 failed'],
+    ['R-3: a green host line and a green summary still pass', verdictOf(dotGreen, sha).ok === true && verdictOf(dotGreen, sha).hostFileFailures.length === 0 && verdictOf(dotGreen, sha).failedSummaries.length === 0],
+    ['owner-gated item listed on a PASS and on a refusal', verdictOf(green, sha).ownerGated.join() === `G9-U03-LEGACY-TENANTLESS-ADMIN: ${owner}` && verdictOf(censusRed, sha).ownerGated.length === 1],
     ['a red case carrying a riding id flags both', evaluateLog(`${checkout(sha)}[G9] S3A-02 ok {}\n FAIL  tests/integration/x.test.ts > a > S3A-02 + G9-U08 (U08) the run`, matrix, { expectSha: sha }).failedCases.join() === 'S3A-02,G9-U08'],
   ]
   for (const [name, passed] of checks) console.log(`${passed ? 'ok' : 'NOT OK'} ${name}`)
