@@ -3,6 +3,7 @@
  * 支持多渠道通知发送，模板管理，订阅管理
  */
 
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'eventemitter3'
 import nodemailer from 'nodemailer'
 import type {
@@ -37,10 +38,18 @@ import {
 } from './email-transport-readiness'
 import {
   NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+  NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON,
+  NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON,
   NOTIFICATION_TRANSPORT_DISABLED_REASON,
   NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
   NOTIFICATION_TRANSPORT_SIMULATED_REASON,
 } from './notification-delivery-outcome'
+import type {
+  FeishuCapabilityDecision,
+  FeishuSendEndpoint,
+  FeishuSendInput,
+  FeishuSendOutcome,
+} from './feishu-message-sender'
 
 /**
  * Email notification payload
@@ -517,25 +526,85 @@ export class DingTalkNotificationChannel implements NotificationChannel {
   }
 }
 
+/** What the channel needs to know about a notification topic: only topics in the closed set are known. */
+export interface FeishuChannelTopic {
+  /** True once the topic's business path is wired to routing and carries its own business authorisation. */
+  integrated: boolean
+}
+
+export type FeishuChannelEndpointResult =
+  | {
+      kind: 'found'
+      connectionId: string
+      endpoint: FeishuSendEndpoint
+      /** A stored second endpoint of the same user. This channel never sends to it: no result redirects a send. */
+      backup?: { connectionId: string; endpoint: FeishuSendEndpoint }
+    }
+  | { kind: 'none' }
+
+/**
+ * The collaborators of the real path of {@link FeishuNotificationChannel}. The names are provisional
+ * until the routing allow-set and endpoint resolver exist; the semantics are fixed:
+ *  - the allow-set decides, for an organisation, a topic and local user ids, which users may be sent to;
+ *  - the endpoint resolver returns the stored endpoint of a LOCAL user id, never a Feishu identifier that
+ *    the notification carried.
+ */
+export interface FeishuChannelDeps {
+  /** The raw value of the delivery switch. */
+  deliveryFlag(): string | undefined
+  /** The topic from the closed topic set, or null when the topic is not in it. */
+  resolveTopic(topic: string): FeishuChannelTopic | null | Promise<FeishuChannelTopic | null>
+  resolveAllowSet(input: { orgId: string; topic: string; userIds: readonly string[] }): Promise<ReadonlySet<string>>
+  resolveEndpoint(input: { orgId: string; userId: string }): Promise<FeishuChannelEndpointResult>
+  resolveCapability(connectionId: string): Promise<FeishuCapabilityDecision>
+  sender: { sendFeishuText(input: FeishuSendInput): Promise<FeishuSendOutcome> }
+  sleep?(ms: number): Promise<void>
+  newDedupeKey?(): string
+}
+
+/** Minimum gap between two sends on one connection. */
+export const FEISHU_CHANNEL_MIN_SEND_INTERVAL_MS = 200
+
+/** What became of one addressed user: not allowed, without an endpoint, or the outcome of the send core. */
+type FeishuRecipientState =
+  | { kind: 'not_allowed' }
+  | { kind: 'not_bound' }
+  | { kind: 'outcome'; outcome: FeishuSendOutcome }
+
+function errorLabel(error: unknown): string {
+  return error instanceof Error ? error.name : 'non-error'
+}
+
 /**
  * 飞书通知渠道
+ *
+ * Constructed with `{}` and no collaborators it has no sender: it reports `failed` with a stable reason,
+ * makes no call and no wait. Constructed with collaborators it sends text to LOCAL users:
+ *  - a recipient of type `user` carries a local user id; no Feishu identifier supplied by a caller (in the
+ *    notification metadata or anywhere else) is read;
+ *  - a recipient is sent to only when the topic is in the closed set and integrated, the organisation is
+ *    known, the allow-set names the user and the user has a stored endpoint;
+ *  - `sent` means the provider accepted EVERY addressed recipient; a recipient that was not allowed, had
+ *    no endpoint, was refused, or whose result is unknown is not accepted, so the result is `failed`;
+ *  - an unknown outcome is never repeated and never redirected;
+ *  - there is no ledger here: a caller that retries after `failed` must treat it as an unknown outcome.
  */
 export class FeishuNotificationChannel implements NotificationChannel {
   name = 'feishu'
   type = 'feishu' as const
   config: NotificationChannelConfig
   private logger: Logger
+  private deps: FeishuChannelDeps | undefined
 
-  constructor(config: NotificationChannelConfig) {
+  constructor(config: NotificationChannelConfig, deps?: FeishuChannelDeps) {
     this.config = config
+    this.deps = deps ?? undefined
     this.logger = new Logger('FeishuChannel')
   }
 
-  /**
-   * No Feishu sender is configured on this channel. It reports `failed` with a stable reason and makes
-   * no call and no wait, so a caller cannot read the result as delivery.
-   */
-  async sender(_notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
+  async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
+    if (this.deps !== undefined) return this.sendWithDeps(this.deps, notification, recipients)
+
     const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
     const userRecipients = recipients.filter(r => r.type === 'user')
 
@@ -552,6 +621,158 @@ export class FeishuNotificationChannel implements NotificationChannel {
         channel: 'feishu',
         reason: NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
         recipientCount: userRecipients.length,
+      },
+    }
+  }
+
+  private cancelled(id: string, reason: string, recipientCount: number): NotificationResult {
+    this.logger.info('Feishu notification cancelled', { channel: 'feishu', reason, recipientCount })
+    return { id, status: 'cancelled', metadata: { channel: 'feishu', reason, recipientCount } }
+  }
+
+  private async sendWithDeps(
+    deps: FeishuChannelDeps,
+    notification: Notification,
+    recipients: NotificationRecipient[],
+  ): Promise<NotificationResult> {
+    const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const userIds = [...new Set(recipients.filter(r => r.type === 'user').map(r => r.id))]
+    const recipientCount = userIds.length
+    if (recipientCount === 0) return this.cancelled(id, NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON, 0)
+
+    let flag: string | undefined
+    try {
+      flag = deps.deliveryFlag()
+    } catch {
+      flag = undefined
+    }
+    if (flag !== 'true') return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
+
+    const metadata = notification.metadata ?? {}
+    const topic = typeof metadata.topic === 'string' && metadata.topic.length > 0 ? metadata.topic : null
+    let topicInfo: FeishuChannelTopic | null = null
+    if (topic !== null) {
+      try {
+        topicInfo = await deps.resolveTopic(topic)
+      } catch (error) {
+        this.logger.warn(`Feishu topic lookup failed (${errorLabel(error)})`)
+      }
+    }
+    if (topic === null || topicInfo === null || topicInfo.integrated !== true) {
+      return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON, recipientCount)
+    }
+
+    const orgId = typeof metadata.orgId === 'string' && metadata.orgId.length > 0 ? metadata.orgId : null
+    if (orgId === null) return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON, recipientCount)
+
+    let allowed: ReadonlySet<string> = new Set()
+    try {
+      allowed = await deps.resolveAllowSet({ orgId, topic, userIds })
+    } catch (error) {
+      this.logger.warn(`Feishu allow-set lookup failed (${errorLabel(error)})`)
+    }
+    const allowedUserIds = userIds.filter(userId => allowed.has(userId))
+    if (allowedUserIds.length === 0) return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON, recipientCount)
+
+    const dedupeKey =
+      typeof notification.id === 'string' && notification.id.length > 0
+        ? notification.id
+        : (deps.newDedupeKey?.() ?? randomUUID())
+    const text = [notification.subject, notification.content]
+      .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+      .join('\n')
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+    const capabilities = new Map<string, FeishuCapabilityDecision>()
+    const sentOn = new Set<string>()
+    const states: FeishuRecipientState[] = userIds.filter(userId => !allowed.has(userId)).map(() => ({ kind: 'not_allowed' }))
+
+    for (const userId of allowedUserIds) {
+      let found: FeishuChannelEndpointResult = { kind: 'none' }
+      try {
+        found = await deps.resolveEndpoint({ orgId, userId })
+      } catch (error) {
+        this.logger.warn(`Feishu endpoint lookup failed (${errorLabel(error)})`)
+      }
+      if (found.kind !== 'found') {
+        states.push({ kind: 'not_bound' })
+        continue
+      }
+
+      let decision = capabilities.get(found.connectionId)
+      if (decision === undefined) {
+        try {
+          decision = await deps.resolveCapability(found.connectionId)
+        } catch (error) {
+          this.logger.warn(`Feishu capability lookup failed (${errorLabel(error)})`)
+          decision = { effective: false, reason: 'read_failed' }
+        }
+        capabilities.set(found.connectionId, decision)
+      }
+
+      // The endpoint term of the request key: local user, then the evidence the resolver names, then the open id.
+      const endpoint: FeishuSendEndpoint = { ...found.endpoint, evidence: [userId, ...(found.endpoint.evidence ?? [])] }
+      if (sentOn.has(found.connectionId)) await sleep(FEISHU_CHANNEL_MIN_SEND_INTERVAL_MS)
+      let outcome: FeishuSendOutcome
+      try {
+        outcome = await deps.sender.sendFeishuText({
+          connectionId: found.connectionId,
+          endpoint,
+          text,
+          dedupeKey,
+          capabilityDecision: decision,
+        })
+      } catch (error) {
+        // The sender does not throw; if one does, the message may have been written.
+        this.logger.warn(`Feishu sender failed unexpectedly (${errorLabel(error)})`)
+        outcome = { kind: 'unknown', reason: 'network_error' }
+      }
+      if (outcome.kind !== 'not_attempted') sentOn.add(found.connectionId)
+      states.push({ kind: 'outcome', outcome })
+    }
+
+    return this.aggregate(id, recipientCount, states)
+  }
+
+  private aggregate(id: string, recipientCount: number, states: FeishuRecipientState[]): NotificationResult {
+    const outcomes = states.flatMap(state => (state.kind === 'outcome' ? [state.outcome] : []))
+    const acceptedCount = outcomes.filter(outcome => outcome.kind === 'accepted').length
+    const unknownCount = outcomes.filter(outcome => outcome.kind === 'unknown').length
+    const requestedCount = outcomes.filter(outcome => outcome.kind !== 'not_attempted').length
+    this.logger.info('Feishu notification finished', { channel: 'feishu', recipientCount, acceptedCount, unknownCount })
+
+    if (requestedCount === 0) {
+      const notAttemptedReasons = new Set<string>(
+        outcomes.flatMap(outcome => (outcome.kind === 'not_attempted' ? [outcome.reason] : [])),
+      )
+      const hasAny = (...reasons: string[]): boolean => reasons.some(reason => notAttemptedReasons.has(reason))
+      if (hasAny('not_configured', 'empty_message', 'aborted')) {
+        return {
+          id,
+          status: 'failed',
+          failedReason: 'feishu send was not attempted for every recipient',
+          metadata: { channel: 'feishu', recipientCount, acceptedCount, unknownCount, sendOutcome: 'rejected' },
+        }
+      }
+      if (hasAny('flag_off', 'capability_off')) return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
+      return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON, recipientCount)
+    }
+
+    if (acceptedCount === recipientCount) {
+      return { id, status: 'sent', sentAt: new Date(), metadata: { channel: 'feishu', recipientCount, acceptedCount } }
+    }
+    return {
+      id,
+      status: 'failed',
+      failedReason:
+        unknownCount > 0
+          ? 'feishu did not confirm the send for at least one recipient'
+          : 'feishu send was not accepted for every recipient',
+      metadata: {
+        channel: 'feishu',
+        recipientCount,
+        acceptedCount,
+        unknownCount,
+        sendOutcome: unknownCount > 0 ? 'unknown' : 'rejected',
       },
     }
   }

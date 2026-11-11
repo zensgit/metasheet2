@@ -20,6 +20,10 @@ export const NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON = 'no_channel_recipients'
 export const NOTIFICATION_TRANSPORT_DISABLED_REASON = 'transport_disabled' as const
 export const NOTIFICATION_TRANSPORT_SIMULATED_REASON = 'transport_simulated' as const
 export const NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON = 'transport_not_configured' as const
+/** A channel that addresses recipients through a bound endpoint: no addressed recipient had a usable endpoint. */
+export const NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON = 'recipients_not_bound' as const
+/** The same channel: the allow-set for the event and its recipients was empty. */
+export const NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON = 'recipients_not_allowed' as const
 
 /** The closed set of send_email outcome reasons (step output `reason` and ledger `last_error`). */
 export const SEND_EMAIL_OUTCOME_REASONS = Object.freeze({
