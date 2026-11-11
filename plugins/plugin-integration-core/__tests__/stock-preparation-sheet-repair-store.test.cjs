@@ -136,8 +136,15 @@ test('ST-01 migration 108: the closed lists are the library\'s; the kit\'s CHECK
   assert.equal(sql.includes('closed by the next repair request on that sheet'), false, 'the header no longer says a request (a preview) closes an open run')
   // What `backup` can hold (write-safety review of round 1): the header states it as the library's gate decides it —
   // the stamp cells AS READ, where they are stored and who reads them — and no longer carries the absolutes.
-  for (const phrase of ['AS READ from the sheet', 'WHAT CAN BE STORED', 'WHERE, AND WHO READS IT', 'No route answers it']) {
+  for (const phrase of ['AS READ from the sheet', 'WHAT CAN BE STORED', 'WHERE, AND WHO READS IT', 'No route answers it', 'own writers produces', 'not a proof of who wrote it']) {
     assert.ok(sql.includes(phrase), `the header states: ${phrase}`)
+  }
+  // The writers the header names are the library's gate: its small-lane run id, the two other run-id forms, its four
+  // summary types and the change-plan id form.
+  assert.equal(kit.PULL_RUN_ID, R.__internals.STAMP_RUN_ID_SMALL_LANE)
+  assert.deepEqual(Object.keys(R.__internals.STAMP_SUMMARY_KEYS_BY_TYPE), ['plm_system_refresh', 'change_plan_update', 'missing_from_plm', 'sheet_repair_retire'])
+  for (const named of [R.__internals.STAMP_RUN_ID_SMALL_LANE, 'large-bom:large-bom-expansion-<uuid>', `${R.SHEET_REPAIR_RUN_ID_PREFIX}<uuid>`, '`chp_` + 32 hex', '`ext_` extension namespace'].concat(Object.keys(R.__internals.STAMP_SUMMARY_KEYS_BY_TYPE).map((type) => `\`${type}\``))) {
+    assert.ok(sql.includes(named), `the header names the writer's form: ${named}`)
   }
   for (const overclaim of ['Both tables are values-free', 'no material value is ever stored here', 'Owner gate Q-B is not widened']) {
     assert.equal(sql.includes(overclaim), false, `the header no longer claims: ${overclaim}`)

@@ -308,7 +308,10 @@ const TENANT_ID = 'tenant-syn-rp'
 const SHEET_ID = 'sheet_syn_rp_01'
 const OLD_ROOT = 'S-100'
 const PARENT = 'P-200'
-const PULL_RUN_ID = 'table-action:syn-pull-1'
+// The run id the SMALL LANE stamps on every row it writes — its only one (`table-action:` + the one action id the
+// table-action config accepts). A fixture row must carry a real writer's stamp: the repair backs a row up only when its
+// stamp cells are byte for byte a known writer's (the library suite's MS-02 pins this literal to the lane itself).
+const PULL_RUN_ID = 'table-action:plm.stock-preparation.pull-bom.v1'
 
 /** One row as the project-scoped reader answers it: logical ids, the record ref on the planner's Symbol. */
 function sheetRow({ projectNo = PROJECT_NO, tokens, id, version = 1, active = true, runId = PULL_RUN_ID, decision = 'add', summary = '', cells = {} }) {

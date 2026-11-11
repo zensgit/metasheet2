@@ -12,8 +12,11 @@
 //   CA-01  F-11 on both sides: every row of the nested copy a retire leaves live must hold `active` as the BOOLEAN
 //          true — a copy row whose cell is 'false', 0, null, absent, 'true' or 1 refuses the retire, counted, in the
 //          preview and (409) by the recompute inside the lease
-//   MS-01  what a backup may hold: the machine-shape gate of the three RUN stamp cells — the summary is checked AS
-//          TEXT (a duplicated key, padding or an escape refuses), its list items and its keys are checked
+//   MS-01  what a backup may hold of the three RUN stamp cells: only a cell that is byte for byte one of the plugin's
+//          own writers' (the three run-id grammars, the closed decisions, the four summary texts with field ids);
+//          anything else refuses the retire, is counted and stores nothing
+//   MS-02  those grammars are the writers' own: the real planner's ADD / UPDATE / INACTIVE stamps are stored as
+//          written, and each spelled grammar is pinned to the module that produces it
 //   RP-02  the write: `active` is the BOOLEAN false (F-11) with the three RUN stamps; deepest row first, the root last
 //   RP-03  the backup (run row + claim, one transaction) is committed BEFORE the first patch
 //   RP-04  restore against CURRENT versions: a row whose version moved under an intact stamp IS restored at its current
@@ -62,6 +65,7 @@
 
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -71,7 +75,9 @@ const lockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs
 const { HUMAN_PRESERVED_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { __internals: auditInternals } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const { assertHostFencedWriteSupported } = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
+const { CHANGE_PLAN_UPDATE_TYPE, EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
 const kit = require('./support/stock-preparation-sheet-repair-kit.cjs')
+const F = require('./support/stock-preparation-continuation-fixtures.cjs')
 const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
 
 const tests = []
@@ -420,7 +426,7 @@ test('RP-01 retire preconditions: each one refuses with its closed token and pla
   assert.equal(nullStamp.eligible, true, JSON.stringify(nullStamp.refusals))
   assert.deepEqual(nullStamp.backup.find((entry) => entry[0] === 'rec_old_2').slice(2), [true, null, null, null])
   // The planner's own summaries are machine-shaped.
-  for (const summary of ['', '{"type":"missing_from_plm"}', '{"type":"plm_system_refresh","changedFields":["componentName","ext_componentSortNo"]}', '{"type":"change_plan_update","changePlanId":"chp_1a2b","changedFields":["material"]}']) {
+  for (const summary of ['', '{"type":"missing_from_plm"}', '{"type":"plm_system_refresh","changedFields":["componentName","ext_componentSortNo"]}', `{"type":"change_plan_update","changePlanId":"chp_${'0123456789abcdef'.repeat(2)}","changedFields":["material"]}`]) {
     assert.equal(R.__internals.isMachineSummary(summary), true, summary)
   }
   // Two active roots of the component; a root whose path cannot be read.
@@ -516,9 +522,12 @@ test('CA-01 every row of the nested copy a retire leaves LIVE must hold `active`
   }
 })
 
-// ── MS-01 (what a backup may hold; write-safety review of round 1) ───────────────────────────────────────
+// ── MS-01 / MS-02 (what a backup may hold; write-safety review of round 1) ───────────────────────────────
 
-test('MS-01 the machine-shape gate of the three RUN stamp cells — what a BACKUP may hold: a summary is checked AS TEXT (a duplicated key, padding or an escape refuses), its list items and its keys are checked; a row that fails refuses the retire, is counted and stores nothing', () => {
+const SMALL_LANE_RUN_ID = 'table-action:plm.stock-preparation.pull-bom.v1'
+const CHANGE_PLAN_ID = `chp_${'0123456789abcdef'.repeat(2)}`
+
+test('MS-01 what a BACKUP may hold of the three RUN stamp cells: only a cell that is byte for byte one of the plugin\'s own writers\' — the three run-id grammars, the closed decisions, the four summary texts with field ids; anything else (free text, a part id or a drawing number in a stamp cell, an unknown type or key, a text that is not the writer\'s serialization) refuses the retire, is counted and stores nothing', () => {
   const analyzed = (patch) => refusalsOf(kit.doubledSheet({ mutate: (spec) => (spec.id === 'rec_old_2' ? { ...spec, ...patch } : spec) }))
   const refused = (label, patch) => {
     const component = analyzed(patch)
@@ -531,33 +540,157 @@ test('MS-01 the machine-shape gate of the three RUN stamp cells — what a BACKU
     assert.equal(component.eligible, true, `${label}: ${JSON.stringify(component.refusals)}`)
     assert.deepEqual(component.backup.find((entry) => entry[0] === 'rec_old_2').slice(2), expected, label)
   }
-  // The summary's LIST ITEMS and its KEYS are checked one by one (the reviewer's mutants Y27b and Y28 survived round 1).
+
+  // ── THE RUN-ID CELL: blank, or one of the three writers' run ids. ──
+  assert.equal(kit.PULL_RUN_ID, SMALL_LANE_RUN_ID, 'the fixture rows carry the small lane\'s own run id')
+  const largeLaneRunId = `large-bom:large-bom-expansion-${crypto.randomUUID()}`
+  const repairRunId = `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`
+  for (const runId of [SMALL_LANE_RUN_ID, largeLaneRunId, repairRunId, '', null]) stored(`run id ${JSON.stringify(runId)}`, { runId }, [true, runId, 'add', ''])
+  for (const [label, runId] of [
+    ['a part id', 'S-001'],
+    ['a drawing number', 'D100-01-03'],
+    ['an account', 'zhang.san'],
+    ['a run id of no known writer', 'run_scc_fixture'],
+    ['the small lane\'s prefix with another action id', 'table-action:SENTINEL-D100-01-03'],
+    ['the small lane\'s run id with a suffix', `${SMALL_LANE_RUN_ID}.SENTINEL`],
+    ['the small lane\'s run id in another case', SMALL_LANE_RUN_ID.toUpperCase()],
+    ['the large lane\'s prefix with a tail that is not its job id', 'large-bom:SENTINEL-D100-01-03'],
+    ['the large lane\'s APPLY job id (never a planner run id)', `large-bom:large-bom-apply-${crypto.randomUUID()}`],
+    ['a bare job id', `large-bom-expansion-${crypto.randomUUID()}`],
+    ['a repair run id that is not a uuid', 'sheet-repair:SENTINEL'],
+    ['a repair run id with a trailing newline', `${repairRunId}\n`],
+    ['free text', 'SENTINEL a person typed'],
+    ['a blank that is not empty', ' '],
+  ]) refused(`run id: ${label}`, { runId })
+
+  // ── THE DECISION CELL: blank, or the planner's closed vocabulary. ──
+  for (const decision of ['add', 'update', 'inactive', 'skip', 'manual_confirm', '', null]) stored(`decision ${JSON.stringify(decision)}`, { decision }, [true, SMALL_LANE_RUN_ID, decision, ''])
+  for (const decision of ['SENTINEL', 'Add', 'add ', 'S-001']) refused(`decision ${JSON.stringify(decision)}`, { decision })
+
+  // ── THE SUMMARY CELL: blank, or one of the writers' four texts, byte for byte. ──
+  const writers = [
+    '',
+    '{"type":"missing_from_plm"}',
+    '{"type":"plm_system_refresh","changedFields":["totalQuantity"]}',
+    '{"type":"plm_system_refresh","changedFields":["componentName","material","ext_componentSortNo","ext_nameAndSpec"]}',
+    '{"type":"plm_system_refresh","changedFields":[]}',
+    `{"type":"change_plan_update","changePlanId":"${CHANGE_PLAN_ID}","changedFields":["material"]}`,
+    kit.RETIRE_SUMMARY,
+  ]
+  for (const summary of writers) {
+    assert.equal(R.__internals.isMachineSummary(summary), true, summary)
+    stored(`the writer's own text ${summary}`, { summary }, [true, SMALL_LANE_RUN_ID, 'add', summary])
+  }
+  stored('an explicit null in all three cells', { runId: null, decision: null, summary: null }, [true, null, null, null])
+  // Its list items and its keys are checked one by one (the reviewer's mutants Y27b and Y28 survived round 1).
   refused('a list item with a space', { summary: '{"type":"plm_system_refresh","changedFields":["SENTINEL has space"]}' })
   refused('a list item in CJK', { summary: '{"type":"plm_system_refresh","changedFields":["material","SENTINEL图号"]}' })
+  refused('a list item that is a part id', { summary: '{"type":"plm_system_refresh","changedFields":["S-001"]}' })
+  refused('a list item that is a drawing number', { summary: '{"type":"plm_system_refresh","changedFields":["material","D100-01-03"]}' })
+  refused('a list item that is identifier-shaped but no field of the template', { summary: '{"type":"plm_system_refresh","changedFields":["SENTINELzhangsan"]}' })
+  refused('a list item that is the bare extension prefix', { summary: '{"type":"plm_system_refresh","changedFields":["ext_"]}' })
+  refused('a list item in the extension namespace with a separator', { summary: '{"type":"plm_system_refresh","changedFields":["ext_SENTINEL-01"]}' })
+  refused('a list item in the extension namespace that starts upper-case', { summary: '{"type":"plm_system_refresh","changedFields":["ext_SENTINEL"]}' })
   refused('a list item that is an object', { summary: '{"type":"plm_system_refresh","changedFields":[{"a":"SENTINEL"}]}' })
-  refused('a list item that is a list', { summary: '{"type":"plm_system_refresh","changedFields":[["SENTINEL"]]}' })
-  refused('a list item that is a boolean', { summary: '{"type":"plm_system_refresh","changedFields":[true]}' })
-  refused('a key with a space', { summary: '{"type":"x","SENTINEL key":1}' })
-  refused('a key in CJK', { summary: '{"type":"x","SENTINEL备注":1}' })
-  refused('a key that starts with a digit', { summary: '{"type":"x","1SENTINEL":1}' })
-  refused('a key with a hyphen', { summary: '{"type":"x","SENTINEL-key":1}' })
+  refused('a list item that is a list', { summary: '{"type":"plm_system_refresh","changedFields":[["material"]]}' })
+  refused('a list item that is a number', { summary: '{"type":"plm_system_refresh","changedFields":[7]}' })
+  refused('changedFields that is not a list', { summary: '{"type":"plm_system_refresh","changedFields":"material"}' })
+  refused('a key no writer writes beside a known type', { summary: '{"type":"missing_from_plm","drawing":"D100-01-03"}' })
+  refused('a key with a space', { summary: '{"type":"missing_from_plm","SENTINEL key":1}' })
+  refused('a key in CJK', { summary: '{"type":"missing_from_plm","SENTINEL备注":1}' })
+  refused('a key of the type missing', { summary: '{"type":"plm_system_refresh"}' })
+  refused('the keys in another order than the writer\'s', { summary: '{"changedFields":["material"],"type":"plm_system_refresh"}' })
+  refused('a type no writer writes', { summary: '{"type":"note","drawing":"D100-01-03","by":"zhang.san"}' })
+  refused('a type that is not a string', { summary: '{"type":["missing_from_plm"]}' })
+  refused('a type that is an object key of every object', { summary: '{"type":"constructor"}' })
+  refused('no type', { summary: '{"changedFields":["material"]}' })
+  refused('a change-plan id that is not the store\'s', { summary: '{"type":"change_plan_update","changePlanId":"SENTINEL-D100-01-03","changedFields":["material"]}' })
+  refused('a short change-plan id', { summary: '{"type":"change_plan_update","changePlanId":"chp_1a2b","changedFields":["material"]}' })
+  refused('free text', { summary: 'SENTINEL free text a person typed' })
+  refused('a JSON list', { summary: '["missing_from_plm"]' })
+  refused('a JSON string', { summary: '"missing_from_plm"' })
   // The TEXT is what the backup stores, so the text itself must be exactly the serialization of the object that was
   // checked. A duplicated key (JSON.parse keeps the LAST one), padding or an escape would ride in unchecked.
-  refused('a duplicated key whose FIRST value is free text', { summary: '{"note":"SENTINEL free text a person typed","note":"ok","type":"x"}' })
+  refused('a duplicated key whose FIRST value is free text', { summary: '{"type":"SENTINEL free text a person typed","type":"missing_from_plm"}' })
   refused('duplicated changedFields, the first one free text', { summary: '{"type":"plm_system_refresh","changedFields":["SENTINEL free text"],"changedFields":["material"]}' })
-  refused('a duplicated type', { summary: '{"type":"SENTINEL free text","type":"missing_from_plm"}' })
-  refused('padding inside the planner\'s own shape', { summary: '{ "type" : "missing_from_plm" }' })
+  refused('padding inside the writer\'s own shape', { summary: '{ "type" : "missing_from_plm" }' })
   refused('a trailing newline', { summary: '{"type":"missing_from_plm"}\n' })
-  refused('an escaped value', { summary: '{"type":"x","a":"\\u0053ENTINEL"}' })
-  refused('a number that is not in its canonical form', { summary: '{"type":"x","count":1.0}' })
-  // The writers' own texts are canonical and are stored byte for byte.
-  for (const summary of ['', '{"type":"missing_from_plm"}', '{"type":"plm_system_refresh","changedFields":["componentName","ext_componentSortNo"]}', '{"type":"change_plan_update","changePlanId":"chp_1a2b","changedFields":["material"]}', kit.RETIRE_SUMMARY]) {
-    stored(`the writer's own text ${summary}`, { summary }, [true, kit.PULL_RUN_ID, 'add', summary])
+  refused('an escaped character in a field id', { summary: '{"type":"plm_system_refresh","changedFields":["\\u006daterial"]}' })
+  refused('an escaped character in the type', { summary: '{"type":"missing_from_pl\\u006d"}' })
+  // The gate's parts, each on its own.
+  assert.deepEqual([SMALL_LANE_RUN_ID, largeLaneRunId, repairRunId, ''].map(R.__internals.isMachineRunId), [true, true, true, true])
+  assert.deepEqual(['S-001', 'table-action:other', 'run_scc_fixture', ' '].map(R.__internals.isMachineRunId), [false, false, false, false])
+  assert.deepEqual(['material', 'notes', 'lastPlmRefreshAt', 'ext_spec', 'ext_componentSortNo'].map(R.__internals.isStampFieldId), [true, true, true, true, true])
+  assert.deepEqual(['S-001', 'Material', 'ext_', 'ext_Spec', 'ext_has_underscore', '', 7, null].map(R.__internals.isStampFieldId), [false, false, false, false, false, false, false, false])
+  // THE STATED LIMIT: a test of FORM, not a proof of who wrote the cell. A value typed to imitate a writer's form — an
+  // identifier under the reserved `ext_` prefix in a `changedFields` list — cannot be told from a writer's and IS
+  // stored (the library's header and migration 108's header say so).
+  stored('a value typed to imitate the extension namespace', { summary: '{"type":"plm_system_refresh","changedFields":["ext_zhangsan"]}' }, [true, SMALL_LANE_RUN_ID, 'add', '{"type":"plm_system_refresh","changedFields":["ext_zhangsan"]}'])
+})
+
+test('MS-02 the gate\'s grammars are the WRITERS\' own: every stamp the real planner writes (ADD, UPDATE, INACTIVE) under the small lane\'s run id is stored byte for byte; the two lanes\' run ids, the job id, the action id, the change-plan stamp and its id, and the template\'s field ids are pinned to the modules that produce them', async () => {
+  // (a) The REAL planner, the way the small lane calls it: the stamps of its ADD, UPDATE and INACTIVE decisions.
+  const first = F.applyToSheet(F.plan(await F.expand(F.firstPullSource()), [], { runId: SMALL_LANE_RUN_ID }), [])
+  const tampered = first.map((row, index) => {
+    if (index !== 1) return row
+    const out = { ...row, totalQuantity: row.totalQuantity + 7 }
+    out[EXISTING_ROW_RECORD_REF] = row[EXISTING_ROW_RECORD_REF]
+    return out
+  })
+  const refreshed = F.plan(await F.expand(F.firstPullSource()), tampered, { runId: SMALL_LANE_RUN_ID })
+  const swept = F.plan(await F.expand(F.secondPullSource({ sLine: false })), first, { runId: SMALL_LANE_RUN_ID })
+  const stamps = []
+  for (const decision of first.map((row) => ({ decision: 'add', record: row })).concat(refreshed.decisions, swept.decisions)) {
+    const cells = decision.record || decision.patch
+    if (!cells) continue
+    stamps.push([decision.decision, cells.lastPlmRefreshRunId, cells.lastPlmRefreshDecision, cells.lastPlmConflictSummary])
   }
-  // THE STATED LIMIT: this is a test of SHAPE, not of origin. A handle-shaped value sitting in a stamp cell passes it
-  // and IS stored with the backup (the library's header and migration 108's header say so).
-  stored('a part-id-shaped value in the run-id cell', { runId: 'S-001' }, [true, 'S-001', 'add', ''])
-  stored('a summary of an unknown type with handle-shaped values', { summary: '{"type":"note","drawing":"D100-01-03"}' }, [true, kit.PULL_RUN_ID, 'add', '{"type":"note","drawing":"D100-01-03"}'])
+  assert.deepEqual(Array.from(new Set(stamps.map((stamp) => stamp[0]))).sort(), ['add', 'inactive', 'update'], 'the fixture drives all three stamp writers of the planner')
+  assert.deepEqual(Array.from(new Set(stamps.map((stamp) => JSON.stringify(stamp.slice(1))))).sort(), [
+    JSON.stringify([SMALL_LANE_RUN_ID, 'add', '']),
+    JSON.stringify([SMALL_LANE_RUN_ID, 'inactive', '{"type":"missing_from_plm"}']),
+    JSON.stringify([SMALL_LANE_RUN_ID, 'update', '{"type":"plm_system_refresh","changedFields":["totalQuantity"]}']),
+  ].sort())
+  for (const [decision, runId, decisionCell, summary] of stamps) {
+    assert.deepEqual(R.__internals.stampCellsOf({ lastPlmRefreshRunId: runId, lastPlmRefreshDecision: decisionCell, lastPlmConflictSummary: summary }), { runId, decision: decisionCell, summary }, `the planner's ${decision} stamp is admitted as written`)
+  }
+  // (b) The grammars this file SPELLS, pinned to the source of each writer (a writer that changes its grammar turns
+  // this red before a sheet refuses).
+  const sourceOf = (name) => fs.readFileSync(path.join(LIB, name), 'utf8').replace(/\r\n/g, '\n')
+  const tableActions = sourceOf('stock-preparation-table-actions.cjs')
+  const actionId = /\nconst PLM_STOCK_PREPARATION_ACTION_ID = '([^'\n]+)'\n/.exec(tableActions)
+  assert.ok(actionId, 'the action id constant')
+  assert.equal(`table-action:${actionId[1]}`, SMALL_LANE_RUN_ID, 'the small lane\'s run id is `table-action:` + the action id')
+  assert.equal(tableActions.split('runId: runId || `table-action:${action.actionId}`,').length, 2, 'the small lane hands the planner exactly this run id')
+  assert.ok(tableActions.includes('  if (actionId !== PLM_STOCK_PREPARATION_ACTION_ID) {\n    throw new StockPreparationTableActionError(422, \'TABLE_ACTION_CONFIG_INVALID\''), 'the table-action config refuses every other action id')
+  const largeJobs = sourceOf('stock-preparation-large-bom-jobs.cjs')
+  assert.equal(largeJobs.split('runId: input.runId || `large-bom:${job.jobId}`,').length, 2, 'the large lane hands the planner `large-bom:` + the expansion job\'s id')
+  assert.ok(largeJobs.includes('function defaultJobId() {\n  return `large-bom-expansion-${crypto.randomUUID()}`\n}'), 'the expansion job id is `large-bom-expansion-<uuid>`')
+  const planner = sourceOf('stock-preparation-conflict-planner.cjs')
+  // Every producer of a stamp cell is one of these four `runPatch` calls (and `runPatch` writes the cells as handed).
+  assert.deepEqual(
+    Array.from(planner.matchAll(/runPatch\(runId, plannedAt, DECISIONS\.([A-Z_]+)(?:, JSON\.stringify\(\{ ([^}]*) \}\))?\)/g)).map((match) => [match[1], match[2] || '']).sort(),
+    [['ADD', ''], ['INACTIVE', 'type: \'missing_from_plm\''], ['UPDATE', 'type: \'plm_system_refresh\', changedFields: changed'], ['UPDATE', 'type: CHANGE_PLAN_UPDATE_TYPE, changePlanId, changedFields: changed']].sort(),
+  )
+  assert.equal(planner.split('runPatch(').length - 1, 5, 'four calls and the definition: no other producer')
+  assert.equal(CHANGE_PLAN_UPDATE_TYPE, 'change_plan_update')
+  // The change-plan id is the continuation store's `chp_` + 32 hex.
+  const continuationStore = sourceOf('stock-preparation-continuation-store.cjs')
+  assert.ok(continuationStore.includes('`${kind}_${crypto.randomBytes(16).toString(\'hex\')}`'), 'the store\'s id generator')
+  assert.ok(continuationStore.includes('const changePlanId = newId(\'chp\')'), 'a change plan\'s id kind')
+  assert.match(CHANGE_PLAN_ID, /^chp_[0-9a-f]{32}$/)
+  // (c) `changedFields` names plm-band field ids: every id of the frozen main template is admitted, and the reserved
+  // extension namespace by its own grammar (the namespace module's prefix and suffix shape).
+  const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+  const extension = require(path.join(LIB, 'stock-preparation-extension-namespace.cjs'))
+  for (const field of STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields) assert.equal(R.__internals.isStampFieldId(field.id), true, field.id)
+  // Every id the main template has EVER declared (the same 33 at every tag that carries the planner; none was ever
+  // removed) stays admitted: a removed or renamed id would refuse rows an older build stamped.
+  for (const fieldId of ['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'parentComponentCode', 'parentComponentName', 'path', 'depth', 'componentCode', 'componentName', 'componentSpec', 'material', 'sourceVersion', 'rawQuantity', 'totalQuantity', 'active', 'lastPlmRefreshRunId', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmConflictSummary', 'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes', 'procurementReply', 'warehouseConfirmation', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate']) {
+    assert.equal(R.__internals.isStampFieldId(fieldId), true, `${fieldId} is still a field id a stamp may name`)
+  }
+  assert.deepEqual([extension.TENANT_EXTENSION_FIELD_ID_PREFIX, String(extension.__internals.SUFFIX_SHAPE_PATTERN)], ['ext_', '/^[a-z][a-zA-Z0-9]{0,63}$/'])
+  assert.equal(R.__internals.isMachineSummary(JSON.stringify({ type: 'plm_system_refresh', changedFields: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id).concat(['ext_componentSortNo']) })), true, 'an UPDATE that changed every column')
 })
 
 // ── RP-02 / RP-03 ────────────────────────────────────────────────────────────────────────────────────────

@@ -76,6 +76,12 @@
  *            retire before any write (`copy_row_active_not_boolean`, counted in the preview; 409 NOT_APPLICABLE by the
  *            recompute inside the lease; no run, no claim, no patch); with the cell put right the same approved digest
  *            runs, and every copy row is the JSON boolean true while every old row is the JSON boolean false.
+ *   S9D-24   what a backup may hold (write-safety review of round 1): an old row whose STORED stamp cell is no known
+ *            writer's — a part id or an unknown writer's run id in the run-id cell, a summary of an unknown type, a
+ *            summary whose text carries a duplicated key — refuses the retire before any write (`row_not_machine_shaped`,
+ *            counted; 409 inside the lease), so no run row and no backup exist; another WRITER's stamp (the large lane's
+ *            run id, an UPDATE's decision and summary) is stored as read, nothing planted is anywhere in the ledger, the
+ *            audit details or the answers, and the restore puts every stamp back byte for byte.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -122,6 +128,10 @@ const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS, PROJEC
 const { readExistingStockPreparationRows } = tableActionsLib.__internals
 const [RETIRE, RESTORE] = SHEET_REPAIR_RECIPES as [string, string]
 const CLOSE: string = repairLib.SHEET_REPAIR_CONTINUATIONS[0]
+// The run id the SMALL LANE stamps on every row it writes — its only one (`table-action:` + the one action id). Every
+// world plans its fixture rows under it: the repair backs a row up only when its stamp cells are a known writer's
+// (the fixtures' own default run id is no writer's, and S9D-24 plants it to see it refused).
+const SMALL_LANE_RUN_ID = `table-action:${tableActionsLib.PLM_STOCK_PREPARATION_ACTION_ID}`
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -381,8 +391,8 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
 
       // D1, row by row: created through the host records API (the project number), then the stored cells shaped
       // directly — exactly what two pulls of the fixture wrote, both subtrees active.
-      const first = CF.applyToSheet(CF.plan(await CF.expand(CF.firstPullSource()), []), [], { idPrefix: 'syn_s', human: { 'S-001': { notes: 'synthetic note' } } })
-      const second = CF.applyToSheet(CF.plan(await CF.expand(CF.secondPullSource({ sLine: false })), []), [], { idPrefix: 'syn_p' })
+      const first = CF.applyToSheet(CF.plan(await CF.expand(CF.firstPullSource()), [], { runId: SMALL_LANE_RUN_ID }), [], { idPrefix: 'syn_s', human: { 'S-001': { notes: 'synthetic note' } } })
+      const second = CF.applyToSheet(CF.plan(await CF.expand(CF.secondPullSource({ sLine: false })), [], { runId: SMALL_LANE_RUN_ID }), [], { idPrefix: 'syn_p' })
       const oldIds: string[] = []
       const copyIds: string[] = []
       for (const [index, row] of first.concat(second).entries()) {
@@ -629,7 +639,7 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const run = (await st.runs())[0]
       expect([run.id, run.status, run.stop_reason, run.recipe, run.sequence_no, run.planned_count, run.written_count, run.plan_digest, run.component_handle, run.write_scope_key, run.started_by, run.project_no])
         .toEqual([done.runId, 'completed', null, RETIRE, 0, 4, 4, plan.planDigest, st.handle, st.scopeKey, st.admin.id, PROJECT])
-      expect(run.backup.map((entry: any[]) => [st.oldIds.includes(entry[0]), entry[1], entry[2], entry[3], entry[4], entry[5]])).toEqual(Array(4).fill([true, 1, true, CF.RUN_ID, 'add', '']))
+      expect(run.backup.map((entry: any[]) => [st.oldIds.includes(entry[0]), entry[1], entry[2], entry[3], entry[4], entry[5]])).toEqual(Array(4).fill([true, 1, true, SMALL_LANE_RUN_ID, 'add', '']))
       expect((await st.claims()).map((claim: any) => [claim.run_id, claim.plan_digest, claim.recipe, claim.approval_ref])).toEqual([[done.runId, plan.planDigest, RETIRE, 'R-91:s66-d11']])
       const audits = await st.audits()
       expect(audits.map((row: any) => [row.action, row.mode, row.subject_id, row.project_id, row.actor])).toEqual([
@@ -1300,6 +1310,67 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const activeOf = async (ids: string[]) => (await q(`SELECT jsonb_typeof(data -> $2) AS t, data -> $2 AS v FROM meta_records WHERE id = ANY($1) ORDER BY id`, [ids, F.active])).rows.map((row: any) => [row.t, row.v])
       expect(await activeOf(copyRoots.concat(copyChildren)), 'the copy the retire left live: the boolean true on every row').toEqual(copyRoots.concat(copyChildren).map(() => ['boolean', true]))
       expect(await activeOf(st.oldIds), 'the retired old subtree: the boolean false on every row').toEqual(st.oldIds.map(() => ['boolean', false]))
+    }, 180_000)
+
+    test('S9D-24 what a backup may hold, on real rows: an old row whose STORED stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose text carries a duplicated key — refuses the retire before any write, so nothing of it is stored; another WRITER\'s stamp (the large lane\'s run id, an UPDATE\'s summary) is stored as read and put back byte for byte by the restore', async () => {
+      const st = await world('d24')
+      const F = st.fields
+      const cellOf = async (id: string, field: string) => (await q('SELECT data ->> $2 AS v FROM meta_records WHERE id = $1', [id, field])).rows[0].v as string | null
+      const setCells = (id: string, cells: Record<string, unknown>) => q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [id, JSON.stringify(cells)])
+      const ok = dataOf(await st.preview())
+      expect([ok.eligible, ok.refusals, ok.counts.notMachineShaped]).toEqual([true, [], 0])
+
+      // (a) A cell that is no known writer's — sitting in a stamp column of a row the retire would WRITE (and so back up).
+      const victim = st.oldIds[1]
+      for (const [label, field, value] of [
+        ['a part id in the run-id cell', F.lastPlmRefreshRunId, 'S-001'],
+        ['the run id of no known writer in the run-id cell', F.lastPlmRefreshRunId, CF.RUN_ID],
+        ['a summary of an unknown type', F.lastPlmConflictSummary, '{"type":"note","drawing":"D100-01-03","by":"zhang.san"}'],
+        ['a summary whose text carries a duplicated key', F.lastPlmConflictSummary, '{"type":"synthetic free text","type":"missing_from_plm"}'],
+      ] as Array<[string, string, string]>) {
+        const original = await cellOf(victim, field)
+        await setCells(victim, { [field]: value })
+        expect(await cellOf(victim, field), `${label}: stored as planted`).toBe(value)
+        const before = await st.stored()
+        const refused = dataOf(await st.preview())
+        expect([refused.eligible, refused.refusals, refused.planDigest, refused.counts.notMachineShaped, refused.counts.toRetire], label).toEqual([false, ['row_not_machine_shaped'], null, 1, 4])
+        // The digest approved while the sheet was clean runs nothing now: the recompute inside the lease refuses.
+        const error = errorOf(await st.execute(ok.planDigest), 409, CODES.NOT_APPLICABLE)
+        expect([error.details.reasons, error.details.counts.notMachineShaped, error.details.partial], label).toEqual([['row_not_machine_shaped'], 1, false])
+        expect([await st.runs(), await st.claims(), st.patchInputs.length], `${label}: no run row — so no backup — no claim, no patch`).toEqual([[], [], 0])
+        expect(await st.stored(), label).toEqual(before)
+        for (const answer of [refused, error]) expect([value, 'D100-01-03', 'zhang.san'].some((planted) => JSON.stringify(answer).includes(planted)), `${label}: the refusal is values-free`).toBe(false)
+        await setCells(victim, { [field]: original })
+      }
+
+      // (b) ANOTHER WRITER'S stamp on one old row — the large lane's run id, an UPDATE's decision and its summary: a
+      // cell the plugin itself produces, so the row is planned and the cells are stored AS READ.
+      const stamped = st.oldIds[2]
+      const largeLane = { [F.lastPlmRefreshRunId]: 'large-bom:large-bom-expansion-0f8fad5b-d9cb-469f-a165-70867728950e', [F.lastPlmRefreshDecision]: 'update', [F.lastPlmConflictSummary]: '{"type":"plm_system_refresh","changedFields":["totalQuantity","ext_componentSortNo"]}' }
+      await setCells(stamped, largeLane)
+      const before = await st.stored()
+      const again = dataOf(await st.preview())
+      expect([again.eligible, again.counts.notMachineShaped, again.planDigest], 'no version moved: the same digest').toEqual([true, 0, ok.planDigest])
+      const done = dataOf(await st.execute(ok.planDigest))
+      expect([done.status, done.planned, done.written]).toEqual(['completed', 4, 4])
+      const run = (await st.runs())[0]
+      expect(new Map(run.backup.map((entry: any[]) => [entry[0], entry.slice(2)]))).toEqual(new Map(st.oldIds.map((id) => [id, id === stamped
+        ? [true, largeLane[F.lastPlmRefreshRunId], 'update', largeLane[F.lastPlmConflictSummary]]
+        : [true, SMALL_LANE_RUN_ID, 'add', '']])))
+      // Nothing that was planted in (a) is anywhere: not in the ledger, not in an audit detail, not in an answer.
+      const runsAnswer = dataOf(await st.call('GET', PATHS.runs))
+      const everything = JSON.stringify([await st.runs(), await st.claims(), (await st.audits()).map((row: any) => row.detail), again, done, runsAnswer])
+      for (const planted of ['S-001', CF.RUN_ID, 'D100-01-03', 'zhang.san', 'synthetic free text']) expect(everything.includes(planted), `${planted} is nowhere in the ledger, the audit details or the answers`).toBe(false)
+      expect(JSON.stringify(runsAnswer).includes('large-bom-expansion'), 'the run list never answers a backup cell').toBe(false)
+      // And the restore puts every stamp back byte for byte — the large lane's included.
+      const plan = dataOf(await st.repair({ mode: 'preview', recipe: RESTORE, runId: done.runId }))
+      const restored = dataOf(await st.repair({ mode: 'execute', recipe: RESTORE, runId: done.runId, planDigest: plan.planDigest, approvalRef: 'R-91:s66-d24-restore' }))
+      expect([restored.status, restored.written]).toEqual(['completed', 4])
+      const after = await st.stored()
+      for (const [id, row] of before.entries()) {
+        expect(after.get(id)!.data, `${st.oldIds.includes(id) ? 'old' : 'copy'} row: byte-identical`).toBe(row.data)
+        expect(after.get(id)!.version).toBe(row.version + (st.oldIds.includes(id) ? 2 : 0))
+      }
     }, 180_000)
   })
 }

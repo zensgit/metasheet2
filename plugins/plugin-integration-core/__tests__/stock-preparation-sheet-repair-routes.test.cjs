@@ -42,6 +42,8 @@
 //   RR-13  (write-safety review of round 1) F-11 on both sides through the route, over the sheet's PHYSICAL field ids: a
 //          row of the nested copy whose `active` cell is not the boolean true refuses the preview with its count and
 //          the execute with 409 — no run, no claim, no patch; put right, the same approved digest runs
+//   RR-14  (write-safety review of round 1) what a backup may hold, through the route: an old row whose stamp cell is no
+//          known writer's refuses the same way; put right, the run row's backup holds exactly the writers' cells
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -217,9 +219,10 @@ async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source
   const physical = seeded ? (fieldId) => h.provisioning.getFieldId(h.staging, seeded.objectId, fieldId) : null
   if (seeded) {
     // D1: the first pull's S-001 rows (a person's note on the root) AND the second pull's P-001 subtree with its nested
-    // S-001 copies — every row active, each stored under the sheet's PHYSICAL field ids.
-    const first = F.applyToSheet(F.plan(await F.expand(F.firstPullSource()), []), [], { idPrefix: 'rec_s', human: { 'S-001': { notes: 'synthetic note' } } })
-    const second = F.applyToSheet(F.plan(await F.expand(F.secondPullSource({ sLine: false })), []), [], { idPrefix: 'rec_p' })
+    // S-001 copies — every row active, each stored under the sheet's PHYSICAL field ids. Planned under the run id the
+    // SMALL LANE stamps (its only one): the repair backs a row up only when its stamp cells are a known writer's.
+    const first = F.applyToSheet(F.plan(await F.expand(F.firstPullSource()), [], { runId: kit.PULL_RUN_ID }), [], { idPrefix: 'rec_s', human: { 'S-001': { notes: 'synthetic note' } } })
+    const second = F.applyToSheet(F.plan(await F.expand(F.secondPullSource({ sLine: false })), [], { runId: kit.PULL_RUN_ID }), [], { idPrefix: 'rec_p' })
     for (const row of first.concat(second)) {
       const ref = row[EXISTING_ROW_RECORD_REF]
       const data = {}
@@ -1038,7 +1041,7 @@ test('RR-12 the continuation through the route: a run left `running` after every
   } finally { off.h.restore() }
 })
 
-// ── RR-13 (write-safety review of round 1) ───────────────────────────────────────────────────────────────
+// ── RR-13 / RR-14 (write-safety review of round 1) ───────────────────────────────────────────────────────
 
 /**
  * A sheet that refuses a retire for ONE reason: the preview names the token and its count, the execute of a digest
@@ -1076,6 +1079,32 @@ test('RR-13 F-11 on both sides through the route, over the sheet\'s PHYSICAL fie
     assert.deepEqual([done.status, done.planned, done.written], ['completed', 4, 4])
     assert.deepEqual(st.copyRows().map((row) => st.cell(row, 'active')), Array(st.copyRows().length).fill(true), 'every copy row: the boolean true')
     assert.deepEqual(st.oldRows().map((row) => st.cell(row, 'active')), Array(4).fill(false), 'every old row: the boolean false')
+  } finally { st.h.restore() }
+})
+
+test('RR-14 what a backup may hold, through the route: an old row whose stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose TEXT differs from what the parser sees — refuses the preview with its count and the execute with 409; put right, the same approved digest runs and the run row\'s backup holds exactly the writers\' cells', async () => {
+  const st = await mount()
+  try {
+    const clean = dataOf(await withEnv(ON, () => preview(st)))
+    assert.deepEqual([clean.eligible, clean.refusals, clean.counts.notMachineShaped], [true, [], 0])
+    const old = st.oldRows()[1]
+    for (const [fieldId, value] of [
+      ['lastPlmRefreshRunId', 'S-001'],
+      ['lastPlmRefreshRunId', F.RUN_ID],
+      ['lastPlmConflictSummary', '{"type":"note","drawing":"D100-01-03","by":"zhang.san"}'],
+      ['lastPlmConflictSummary', '{"type":"synthetic note a person typed","type":"missing_from_plm"}'],
+    ]) {
+      const original = old.data[st.physical(fieldId)]
+      old.data[st.physical(fieldId)] = value
+      await refusedBoth(st, clean, `${fieldId} holds ${value}`, 'row_not_machine_shaped', 'notMachineShaped')
+      old.data[st.physical(fieldId)] = original
+    }
+    // Put right, and no version moved: the SAME approved digest runs, and the run row's backup holds the writers' cells
+    // and nothing else.
+    const done = dataOf(await withEnv(ON, () => execute(st, clean.planDigest)))
+    assert.deepEqual([done.status, done.planned, done.written], ['completed', 4, 4])
+    assert.deepEqual(st.runs()[0].backup.map((entry) => entry.slice(2)), Array(4).fill([true, kit.PULL_RUN_ID, 'add', '']))
+    for (const planted of ['S-001', F.RUN_ID, 'D100-01-03', 'zhang.san', 'synthetic note']) assert.equal(JSON.stringify(st.runs()[0].backup).includes(planted), false, `${planted} is not in the backup`)
   } finally { st.h.restore() }
 })
 

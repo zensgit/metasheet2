@@ -54,9 +54,10 @@
 // handle), closed tokens, digests, integers and booleans — never a project number, a key, a part id, a path or a cell
 // a person typed. The fills report says WHETHER a human cell is filled and whether two cells are equal, never what
 // they hold. THE LEDGER'S BACKUP is the one place where cells are stored AS READ from the sheet: the three RUN stamp
-// cells of every planned row (a restore puts them back byte-identically), in a table no route answers. What it can
-// hold is decided by `stampCellsOf` below and is said there — it is a test of the cell's SHAPE, never a claim that no
-// person typed it.
+// cells of every planned row (a restore puts them back byte-identically), in a table no route answers. A row is
+// planned — and so backed up — only when each of those cells is byte-for-byte a cell one of this plugin's OWN WRITERS
+// produces (`stampCellsOf` below spells the writers out); any other cell refuses the retire and nothing of it is
+// stored. That is a test of the cell's FORM, never a proof of who wrote it.
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
@@ -68,8 +69,9 @@ const {
   relativePath,
   __internals: { canonicalJson, isActiveRow, isRootRow },
 } = require('./stock-preparation-continuation-pairing.cjs')
-const { DECISIONS, derivePackAwarePlmWritableFields } = require('./stock-preparation-conflict-planner.cjs')
-const { HUMAN_PRESERVED_FIELD_IDS } = require('./stock-preparation-templates.cjs')
+const { CHANGE_PLAN_UPDATE_TYPE, DECISIONS, derivePackAwarePlmWritableFields } = require('./stock-preparation-conflict-planner.cjs')
+const { HUMAN_PRESERVED_FIELD_IDS, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+const { TENANT_EXTENSION_FIELD_ID_PREFIX, __internals: { SUFFIX_SHAPE_PATTERN: EXTENSION_SUFFIX_SHAPE_PATTERN } } = require('./stock-preparation-extension-namespace.cjs')
 const { __internals: { componentHandle: censusComponentHandle, isBlankCell } } = require('./stock-preparation-sheet-census.cjs')
 
 // ── the switch (design §6.6; the members-page / pull-batch reader shape) ─────────────────────────────────────
@@ -159,7 +161,8 @@ const SHEET_REPAIR_COMPONENT_SHAPES = Object.freeze(['two_copy', 'inactive_root_
 // The four cells a recipe writes — the WHOLE write surface (ruling C7: a batch band cell or a human cell is never here).
 const SHEET_REPAIR_WRITE_FIELD_IDS = Object.freeze(['active', 'lastPlmRefreshRunId', 'lastPlmRefreshDecision', 'lastPlmConflictSummary'])
 const SHEET_REPAIR_STAMP_FIELD_IDS = Object.freeze(['lastPlmRefreshRunId', 'lastPlmRefreshDecision', 'lastPlmConflictSummary'])
-const SHEET_REPAIR_RETIRE_SUMMARY = JSON.stringify({ type: 'sheet_repair_retire' })
+const SHEET_REPAIR_RETIRE_SUMMARY_TYPE = 'sheet_repair_retire'
+const SHEET_REPAIR_RETIRE_SUMMARY = JSON.stringify({ type: SHEET_REPAIR_RETIRE_SUMMARY_TYPE })
 const SHEET_REPAIR_RETIRE_DECISION = DECISIONS.INACTIVE
 const SHEET_REPAIR_LEASE_PURPOSE = 'sheet_repair'
 const SHEET_REPAIR_GENERATION_REASON = 'sheet_repair'
@@ -211,10 +214,33 @@ const PLAN_DIGEST_PATTERN = /^[0-9a-f]{64}$/
 const COMPONENT_HANDLE_PATTERN = /^[0-9a-f]{24}$/
 const RUN_ID_PATTERN = /^sheet-repair:[0-9a-f-]{36}$/
 const RECORD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
-// The machine shape of a RUN stamp cell (what the planner and this file write): handle-like strings only.
-const STAMP_HANDLE_PATTERN = /^[A-Za-z0-9._:|@-]{0,200}$/
-const STAMP_TOKEN_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
-const STAMP_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+// THE WRITERS OF THE THREE RUN STAMP CELLS, and what each produces — the only cells a backup may hold (`stampCellsOf`).
+// The conflict planner's `runPatch` is the one producer of these cells; it is called by the small lane
+// (lib/stock-preparation-table-actions.cjs) and the large lane (lib/stock-preparation-large-bom-jobs.cjs), and no route
+// hands either lane a run id of its own. Read over every tag of the repository that carries the planner:
+//   run id    `table-action:` + the ONE action id the table-action config accepts (the small lane's only run id);
+//             `large-bom:` + the expansion job's id, `large-bom-expansion-<uuid>` (the large lane);
+//             `sheet-repair:<uuid>` (a retire of this file — RUN_ID_PATTERN above);
+//   decision  a token of the planner's closed vocabulary;
+//   summary   '' (an ADD), or `JSON.stringify` of exactly one of
+//               { type: 'plm_system_refresh', changedFields }                    an UPDATE
+//               { type: 'change_plan_update', changePlanId, changedFields }      a confirmed change plan's UPDATE
+//               { type: 'missing_from_plm' }                                     an INACTIVE
+//               { type: 'sheet_repair_retire' }                                  a retire of this file
+//             where `changedFields` lists field ids of the frozen main template or of the reserved `ext_` extension
+//             namespace, and `changePlanId` is the continuation store's `chp_` + 32 hex.
+// The two lanes' grammars and the two planner literals are SPELLED here (this file requires neither lane); the suite
+// pins every one of them to its writer (MS-02).
+const STAMP_RUN_ID_SMALL_LANE = 'table-action:plm.stock-preparation.pull-bom.v1'
+const STAMP_RUN_ID_LARGE_LANE_PATTERN = /^large-bom:large-bom-expansion-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const STAMP_CHANGE_PLAN_ID_PATTERN = /^chp_[0-9a-f]{32}$/
+const STAMP_SUMMARY_KEYS_BY_TYPE = Object.freeze({
+  plm_system_refresh: Object.freeze(['type', 'changedFields']),
+  [CHANGE_PLAN_UPDATE_TYPE]: Object.freeze(['type', 'changePlanId', 'changedFields']),
+  missing_from_plm: Object.freeze(['type']),
+  [SHEET_REPAIR_RETIRE_SUMMARY_TYPE]: Object.freeze(['type']),
+})
+const STAMP_TEMPLATE_FIELD_IDS = new Set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
 const STAMP_SUMMARY_MAX_LENGTH = 4000
 const STAMP_SUMMARY_MAX_ITEMS = 500
 const DECISION_VALUES = Object.freeze(Object.values(DECISIONS))
@@ -436,24 +462,26 @@ function normalizeRunsQuery(query) {
   return Object.freeze({})
 }
 
-// ── the machine shape of the cells a recipe writes (what a backup may hold) ───────────────────────────────────
+// ── what a backup may hold: the three RUN stamp cells, only as one of this plugin's own writers produces them ────
 
-function isMachineSummaryValue(value) {
-  if (value === null || typeof value === 'boolean') return true
-  if (typeof value === 'number') return Number.isFinite(value)
-  if (typeof value === 'string') return STAMP_HANDLE_PATTERN.test(value)
-  if (Array.isArray(value)) {
-    return value.length <= STAMP_SUMMARY_MAX_ITEMS
-      && value.every((item) => (typeof item === 'string' && STAMP_HANDLE_PATTERN.test(item)) || (typeof item === 'number' && Number.isFinite(item)))
-  }
-  return false
+/** A field id a writer's `changedFields` can name: an id of the frozen main template, or one of the reserved `ext_` extension namespace. */
+function isStampFieldId(value) {
+  if (typeof value !== 'string') return false
+  if (STAMP_TEMPLATE_FIELD_IDS.has(value)) return true
+  return value.startsWith(TENANT_EXTENSION_FIELD_ID_PREFIX) && EXTENSION_SUFFIX_SHAPE_PATTERN.test(value.slice(TENANT_EXTENSION_FIELD_ID_PREFIX.length))
+}
+
+/** The run-id cell of a known writer: blank, the small lane's one run id, the large lane's, or a repair run's. */
+function isMachineRunId(value) {
+  return value === '' || value === STAMP_RUN_ID_SMALL_LANE || STAMP_RUN_ID_LARGE_LANE_PATTERN.test(value) || RUN_ID_PATTERN.test(value)
 }
 
 /**
- * `''`, or the planner's conflict-summary JSON: an object with a token `type` whose other values are handles, numbers,
- * booleans or flat lists of them — AS CANONICAL TEXT. The backup stores the TEXT, not what `JSON.parse` made of it, so
- * the text must be exactly the serialization of the object that was checked (the writers' own `JSON.stringify`): a
- * duplicated key (the parser keeps the last one), padding or an escape would otherwise ride into the backup unchecked.
+ * `''`, or the TEXT of one of the writers' four summaries, byte for byte: a known `type`, exactly that type's keys in the
+ * writer's order, `changedFields` a list of field ids, `changePlanId` the continuation store's id — and the text itself
+ * equal to the serialization of the object that was checked (the writers' own `JSON.stringify`). The backup stores the
+ * TEXT, not what `JSON.parse` made of it: a duplicated key (the parser keeps the last one), padding or an escape would
+ * otherwise ride into the backup unchecked.
  */
 function isMachineSummary(text) {
   if (text === '') return true
@@ -464,18 +492,25 @@ function isMachineSummary(text) {
   } catch {
     return false
   }
-  if (!isPlainObject(parsed) || typeof parsed.type !== 'string' || !STAMP_TOKEN_PATTERN.test(parsed.type)) return false
-  if (!Object.entries(parsed).every(([key, value]) => STAMP_KEY_PATTERN.test(key) && isMachineSummaryValue(value))) return false
+  if (!isPlainObject(parsed) || typeof parsed.type !== 'string' || !Object.prototype.hasOwnProperty.call(STAMP_SUMMARY_KEYS_BY_TYPE, parsed.type)) return false
+  const expected = STAMP_SUMMARY_KEYS_BY_TYPE[parsed.type]
+  const keys = Object.keys(parsed)
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return false
+  if (expected.includes('changedFields') && !(Array.isArray(parsed.changedFields) && parsed.changedFields.length <= STAMP_SUMMARY_MAX_ITEMS && parsed.changedFields.every(isStampFieldId))) return false
+  if (expected.includes('changePlanId') && !(typeof parsed.changePlanId === 'string' && STAMP_CHANGE_PLAN_ID_PATTERN.test(parsed.changePlanId))) return false
   return JSON.stringify(parsed) === text
 }
 
 /**
- * The three RUN stamp cells of a row as a backup may hold them, or null when the row is not machine-shaped: each cell
- * must be PRESENT (a patch cannot put an absent cell back) and a string of the plugin's own shape, or an explicit null.
- * A SHAPE test — a handle-like run id, a decision of the closed vocabulary, a canonical summary of tokens, handles,
- * numbers and flat lists of them. It refuses free text; it does NOT prove that a writer of this plugin produced the
- * cell: a handle-shaped value sitting in a stamp cell (a part id or a drawing number in the run-id column) passes it
- * and is stored with the backup.
+ * The three RUN stamp cells of a row as a backup may hold them, or null when the row is not machine-shaped. Each cell
+ * must be PRESENT (a patch cannot put an absent cell back) and be an explicit null or, BYTE FOR BYTE, a cell one of this
+ * plugin's own writers produces (the list above the STAMP_ constants): a run id of the small lane, the large lane or a
+ * repair run; a decision of the planner's closed vocabulary; one of the four summary texts. Anything else — free text,
+ * a part id or a drawing number sitting in a stamp column, an unknown summary type or key, a list item that is not a
+ * field id, a JSON text that is not exactly the writer's serialization — is null here: the retire refuses
+ * (`row_not_machine_shaped`), the preview counts the row, and nothing of the cell is stored.
+ * This is a test of the cell's FORM, not a proof of who wrote it: a value typed to imitate one of these forms cannot be
+ * told from a writer's and would be stored.
  */
 function stampCellsOf(row) {
   for (const fieldId of SHEET_REPAIR_STAMP_FIELD_IDS) {
@@ -485,7 +520,7 @@ function stampCellsOf(row) {
   const runId = row.lastPlmRefreshRunId
   const decision = row.lastPlmRefreshDecision
   const summary = row.lastPlmConflictSummary
-  if (runId !== null && !STAMP_HANDLE_PATTERN.test(runId)) return null
+  if (runId !== null && !isMachineRunId(runId)) return null
   if (decision !== null && decision !== '' && !DECISION_VALUES.includes(decision)) return null
   if (summary !== null && !isMachineSummary(summary)) return null
   return { runId, decision, summary }
@@ -1553,6 +1588,8 @@ module.exports = {
     RECORD_ID_PATTERN,
     RUN_ID_PATTERN,
     SHEET_REPAIR_MAX_PLAN_ROWS,
+    STAMP_RUN_ID_SMALL_LANE,
+    STAMP_SUMMARY_KEYS_BY_TYPE,
     alreadyConsumed,
     analyzeRetireComponent,
     backupEntriesOf,
@@ -1561,7 +1598,9 @@ module.exports = {
     doubledComponentsOf,
     fillClassOf,
     inHostWrite,
+    isMachineRunId,
     isMachineSummary,
+    isStampFieldId,
     planChanged,
     planDigestOf,
     repairError,
