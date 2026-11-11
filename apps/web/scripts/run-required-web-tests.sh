@@ -967,6 +967,18 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # `StockPreparationRail` right after `StockPreparationR`), it is a substring of no token, and it matches exactly one
 # file on disk. Case-insensitive order: …Rail < …RefreshChangePlan < …RefreshQueue.
 #
+# 备料分批拉取第一期 step 6a-3 (batch-refresh S6-3, register R-91, 2026-11-10): ONE token added,
+# `StockPreparationRefreshRecovery` — the NEW spec (apps/web/tests/StockPreparationRefreshRecovery.spec.ts) for
+# 「拉取待确认」's recovery card (dormancy outside 失败待恢复, verify / paged pending list / close echoing the last digest,
+# UNPROVABLE and the admin's runbook close, allow-listed bodies parsed out of the plugin source and fed to its real
+# normalizers, N-SWITCH by key presence, values staying in the page, the live-vocabulary words) and RC-ALIGN through the
+# real shell for the three recovery controls the permission matrix defers to. Substring collision checked in BOTH
+# directions: no existing token is a substring of it (`StockPreparationRefreshChangePlan` / `StockPreparationRefreshQueue`
+# / `StockPreparationRefreshState` diverge right after `StockPreparationRefresh`, `StockPreparationRail` right after
+# `StockPreparationR`), it is a substring of no token, and it matches exactly one test file on disk (the component
+# StockPreparationRefreshRecoveryCard.vue is not a test file). Case-insensitive order: …RefreshQueue <
+# …RefreshRecovery < …RefreshState.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -2017,6 +2029,7 @@ exec npx vitest run \
   StockPreparationRail \
   StockPreparationRefreshChangePlan \
   StockPreparationRefreshQueue \
+  StockPreparationRefreshRecovery \
   StockPreparationRefreshState \
   StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \

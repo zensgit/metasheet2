@@ -71,6 +71,12 @@ const pgMocks = vi.hoisted(() => {
         && (!namespaces || namespaces.includes(scope.namespace)))
 
     if (/WITH RECURSIVE/i.test(s)) return { rows: [{ allowed: true }], rowCount: 1 }
+    if (/SELECT EXISTS \(/i.test(s) && /AS configured/i.test(s)) {
+      const adminUserId = String(params[0] ?? '')
+      const namespaces = Array.isArray(params[1]) ? (params[1] as unknown[]).map((namespace) => String(namespace)) : []
+      const configured = db.scopes.some((scope) => scope.adminUserId === adminUserId && namespaces.includes(scope.namespace))
+      return { rows: [{ configured }], rowCount: 1 }
+    }
     if (/^SELECT id FROM roles WHERE id = \$1 FOR SHARE$/i.test(s)) {
       const roleId = String(params[0])
       return db.roles.has(roleId) ? { rows: [{ id: roleId }], rowCount: 1 } : { rows: [], rowCount: 0 }
@@ -187,10 +193,11 @@ const PLATFORM_ASSIGN_ROUTE = '/api/admin/users/:userId/roles/assign'
 const PLATFORM_ADMIN = 'platform-admin-1'
 const TARGET = 'target-user-1'
 
-function profile(id: string) {
+function profile(id: string, role = 'user') {
   return {
     id, email: `${id}@example.test`, username: null, name: id, mobile: null, employeeNo: null, department: null,
-    position: null, hireDate: null, role: 'user', is_active: true, is_admin: false, last_login_at: null,
+    position: null, hireDate: null, role, is_active: true, is_admin: false, last_login_at: null,
+    activation_status: 'activated', deleted_at: null, purged_at: null,
     created_at: 'now', updated_at: 'now',
   }
 }
@@ -244,7 +251,7 @@ const userRoleWrites = () => db.seen.filter((entry) => /(INSERT INTO|DELETE FROM
 const auditCalls = () => auditMocks.auditLog.mock.calls.map(([entry]) => entry as Record<string, any>)
 
 beforeEach(() => {
-  db.users = new Map([[TARGET, profile(TARGET)], [PLATFORM_ADMIN, profile(PLATFORM_ADMIN)]])
+  db.users = new Map([[TARGET, profile(TARGET)], [PLATFORM_ADMIN, profile(PLATFORM_ADMIN, 'admin')]])
   db.userRoles = new Map()
   db.roles = new Map([
     ['attendance_admin', ['attendance:admin', 'attendance:read']],

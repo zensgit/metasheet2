@@ -64,6 +64,7 @@ import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from './di
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
+import { noProspectiveDeactivation, orgVouchExists } from './departure-vouching'
 import {
   DIRECTORY_DEPROVISION_POLICIES,
   resolveDirectoryDeprovisionPolicy,
@@ -1660,17 +1661,8 @@ export async function applyDirectoryDeprovisionPolicies(
         AND l.local_user_id IS NOT NULL
       WHERE a.id = ANY($1::uuid[])
         AND a.is_active = FALSE
-        AND NOT EXISTS (
-          SELECT 1
-            FROM directory_account_links sibling_link
-            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
-            JOIN directory_integrations sibling_integration ON sibling_integration.id = sibling.integration_id
-           WHERE sibling_link.local_user_id = l.local_user_id
-             AND sibling_link.link_status = 'linked'
-             AND sibling.is_active = true
-             AND sibling_integration.org_id = $2::text
-        )`,
-    [options.deactivatedAccountIds, orgId],
+        AND NOT ${orgVouchExists({ user: 'l.local_user_id', prospectiveParam: 3, orgParam: 2 })}`,
+    [options.deactivatedAccountIds, orgId, noProspectiveDeactivation()],
   )
 
   // One decision per PERSON, not per account: a user reached through two departed accounts
@@ -6073,17 +6065,8 @@ export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
      WHERE user_id = $1::text
        AND org_id = $2::text
        AND is_active = TRUE
-       AND NOT EXISTS (
-         SELECT 1
-         FROM directory_account_links l
-         JOIN directory_accounts a ON a.id = l.directory_account_id
-         JOIN directory_integrations i ON i.id = a.integration_id
-         WHERE l.local_user_id = $1::text
-           AND l.link_status = 'linked'
-           AND a.is_active = TRUE
-           AND i.org_id = $2::text
-       )`,
-    [options.userId, options.orgId],
+       AND NOT ${orgVouchExists({ user: '$1::text', prospectiveParam: 3, orgParam: 2 })}`,
+    [options.userId, options.orgId, noProspectiveDeactivation()],
   )
 }
 

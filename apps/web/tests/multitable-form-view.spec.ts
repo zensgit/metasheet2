@@ -448,6 +448,444 @@ describe('MetaFormView attachment flow', () => {
   })
 })
 
+// --- attachment writes stay with the record they started on ---
+describe('MetaFormView attachment record binding', () => {
+  const FIELDS = [
+    { id: 'fld_title', name: 'Title', type: 'string' },
+    { id: 'fld_files', name: 'Files', type: 'attachment' },
+  ]
+  const REC_A = () => ({ id: 'rec_A', version: 1, data: { fld_title: 'Alpha', fld_files: ['att_a1', 'att_a2'] } })
+  const REC_B = () => ({ id: 'rec_B', version: 1, data: { fld_title: 'Beta', fld_files: ['att_b1'] } })
+
+  function attachment(id: string, filename: string) {
+    return {
+      id,
+      filename,
+      mimeType: 'application/pdf',
+      size: 1024,
+      url: `https://files.example.com/${filename}`,
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-25T01:00:00.000Z',
+    }
+  }
+
+  function deferred<T = void>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
+  // Each call to the returned fn waits on its own deferred, kept in `pending` in call order.
+  function deferredFn<T = void>() {
+    const pending: Array<ReturnType<typeof deferred<T>>> = []
+    const fn = vi.fn(() => {
+      const next = deferred<T>()
+      pending.push(next)
+      return next.promise
+    })
+    return { fn, pending }
+  }
+
+  function mountForm(options: {
+    record: Record<string, unknown> | null
+    uploadFn?: unknown
+    deleteAttachmentFn?: unknown
+  }) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const record = ref(options.record)
+    const initialValues = ref<Record<string, unknown> | null>(null)
+    const submitSpy = vi.fn()
+    const Harness = defineComponent({
+      render() {
+        return h(MetaFormView, {
+          fields: FIELDS,
+          record: record.value,
+          initialValues: initialValues.value,
+          loading: false,
+          readOnly: false,
+          uploadFn: options.uploadFn,
+          deleteAttachmentFn: options.deleteAttachmentFn,
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+    const app = createApp(Harness)
+    app.mount(container)
+    return {
+      container,
+      record,
+      initialValues,
+      submitSpy,
+      fileInput: () => container.querySelector('.meta-form-view__file-input') as HTMLInputElement,
+      unmount() {
+        app.unmount()
+        container.remove()
+      },
+    }
+  }
+
+  function pickFiles(input: HTMLInputElement, files: File[]) {
+    Object.defineProperty(input, 'files', {
+      value: {
+        ...files,
+        length: files.length,
+        item: (index: number) => files[index] ?? null,
+        [Symbol.iterator]: function* iterator() {
+          yield* files
+        },
+      },
+      configurable: true,
+    })
+    input.dispatchEvent(new Event('change'))
+  }
+
+  // What the form would submit right now.
+  async function submitted(view: ReturnType<typeof mountForm>) {
+    view.submitSpy.mockClear()
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(view.submitSpy).toHaveBeenCalledTimes(1)
+    return view.submitSpy.mock.calls[0][0]
+  }
+
+  const fieldError = (view: ReturnType<typeof mountForm>) =>
+    view.container.querySelector('.meta-form-view__attachment-field .meta-form-view__field-error')
+
+  it('keeps an upload that ends after the form moved to another record out of that record\'s form', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn })
+    const file = new File(['new'], 'new.pdf', { type: 'application/pdf' })
+
+    pickFiles(view.fileInput(), [file])
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    upload.pending[0].resolve(attachment('att_new', 'new.pdf'))
+    await flushUi()
+
+    // The upload was A's; B's form keeps B's own list and does not show A's file.
+    expect(upload.fn).toHaveBeenCalledWith(file, { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(view.container.textContent).not.toContain('new.pdf')
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1'] })
+
+    view.unmount()
+  })
+
+  it('sends every file of a multi-file upload to the record it started on', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn })
+    const one = new File(['one'], 'one.pdf', { type: 'application/pdf' })
+    const two = new File(['two'], 'two.pdf', { type: 'application/pdf' })
+
+    pickFiles(view.fileInput(), [one, two])
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    upload.pending[0].resolve(attachment('att_one', 'one.pdf'))
+    await flushUi()
+
+    // The second file is still uploaded to A, not to the record now shown.
+    expect(upload.fn).toHaveBeenCalledTimes(2)
+    expect(upload.fn.mock.calls[1]).toEqual([two, { recordId: 'rec_A', fieldId: 'fld_files' }])
+
+    upload.pending[1].resolve(attachment('att_two', 'two.pdf'))
+    await flushUi()
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1'] })
+
+    view.unmount()
+  })
+
+  it('deletes every attachment of a clear-all from the record it started on and leaves the next record\'s list alone', async () => {
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), deleteAttachmentFn: remove.fn })
+
+    ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    remove.pending[0].resolve()
+    await flushUi()
+
+    // The second delete still names A.
+    expect(remove.fn).toHaveBeenCalledTimes(2)
+    expect(remove.fn.mock.calls[1]).toEqual(['att_a2', { recordId: 'rec_A', fieldId: 'fld_files' }])
+
+    remove.pending[1].resolve()
+    await flushUi()
+    // B's list is not emptied by A's clear.
+    expect(view.container.querySelector('.meta-form-view__attachment-clear')).not.toBeNull()
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1'] })
+
+    view.unmount()
+  })
+
+  it('leaves the next record\'s form data alone when a remove ends after the switch', async () => {
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), deleteAttachmentFn: remove.fn })
+
+    ;(view.container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click()
+    await flushUi()
+    // B has never had a value for the field, so any write to it shows up in the payload.
+    view.record.value = { id: 'rec_B', version: 1, data: { fld_title: 'Beta' } }
+    await flushUi()
+    remove.pending[0].resolve()
+    await flushUi()
+
+    expect(remove.fn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta' })
+    expect(view.submitSpy.mock.calls[0][0]).not.toHaveProperty('fld_files')
+
+    view.unmount()
+  })
+
+  it('keeps the next record\'s own upload shown as uploading when the earlier record\'s upload ends', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn })
+
+    pickFiles(view.fileInput(), [new File(['late'], 'late.pdf', { type: 'application/pdf' })])
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    expect(view.fileInput().disabled).toBe(false)
+    pickFiles(view.fileInput(), [new File(['own'], 'own.pdf', { type: 'application/pdf' })])
+    await flushUi()
+    expect(upload.fn.mock.calls[1][1]).toEqual({ recordId: 'rec_B', fieldId: 'fld_files' })
+
+    upload.pending[0].resolve(attachment('att_late', 'late.pdf'))
+    await flushUi()
+
+    // A's late result neither ends B's activity nor puts A's file into B's list.
+    expect(view.fileInput().disabled).toBe(true)
+    expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+    expect(view.container.textContent).not.toContain('late.pdf')
+
+    upload.pending[1].resolve(attachment('att_b2', 'own.pdf'))
+    await flushUi()
+    expect(view.fileInput().disabled).toBe(false)
+    expect(view.container.querySelector('.meta-form-view__uploading')).toBeNull()
+    expect(view.container.textContent).toContain('own.pdf')
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1', 'att_b2'] })
+
+    view.unmount()
+  })
+
+  it('keeps the next record\'s own upload shown as uploading when the earlier record\'s remove ends', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+
+    ;(view.container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click()
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    pickFiles(view.fileInput(), [new File(['own'], 'own.pdf', { type: 'application/pdf' })])
+    await flushUi()
+
+    remove.pending[0].resolve()
+    await flushUi()
+
+    // A's finished remove does not end B's upload activity.
+    expect(view.fileInput().disabled).toBe(true)
+    expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+
+    upload.pending[0].resolve(attachment('att_b2', 'own.pdf'))
+    await flushUi()
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1', 'att_b2'] })
+
+    view.unmount()
+  })
+
+  it.each(['remove fails', 'clear-all fails', 'clear-all ends'])(
+    'keeps the next record\'s own upload shown as uploading when the earlier record\'s %s after the switch',
+    async (settle) => {
+      const upload = deferredFn<ReturnType<typeof attachment>>()
+      const remove = deferredFn()
+      const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+      const button = settle === 'remove fails' ? '.meta-attachment-list__remove' : '.meta-form-view__attachment-clear'
+      const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+      ;(view.container.querySelector(button) as HTMLButtonElement).click()
+      await flushUi()
+      view.record.value = REC_B()
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['own'], 'own.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      expect(saveButton().disabled).toBe(true)
+
+      if (settle === 'clear-all ends') {
+        // Both of A's deletes finish: the clear's success path runs after the switch.
+        remove.pending[0].resolve()
+        await flushUi()
+        remove.pending[1].resolve()
+      } else {
+        remove.pending[0].reject(new Error('Delete refused'))
+      }
+      await flushUi()
+
+      // A's settled write neither ends B's upload activity nor shows its error under B.
+      expect(view.fileInput().disabled).toBe(true)
+      expect(saveButton().disabled).toBe(true)
+      expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+      expect(fieldError(view)).toBeNull()
+      expect(view.container.textContent).not.toContain('Delete refused')
+
+      upload.pending[0].resolve(attachment('att_b2', 'own.pdf'))
+      await flushUi()
+      expect(view.fileInput().disabled).toBe(false)
+      expect(saveButton().disabled).toBe(false)
+      expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1', 'att_b2'] })
+
+      view.unmount()
+    },
+  )
+
+  it.each([
+    {
+      name: 'upload',
+      start: (view: ReturnType<typeof mountForm>) =>
+        pickFiles(view.fileInput(), [new File(['big'], 'big.pdf', { type: 'application/pdf' })]),
+    },
+    {
+      name: 'remove',
+      start: (view: ReturnType<typeof mountForm>) =>
+        (view.container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click(),
+    },
+    {
+      name: 'clear-all',
+      start: (view: ReturnType<typeof mountForm>) =>
+        (view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click(),
+    },
+  ])('shows no error under the next record when the earlier record\'s $name fails after the switch', async ({ start }) => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+
+    start(view)
+    await flushUi()
+    view.record.value = REC_B()
+    await flushUi()
+    ;[...upload.pending, ...remove.pending].forEach((call) => call.reject(new Error('Storage quota exceeded')))
+    await flushUi()
+
+    expect(fieldError(view)).toBeNull()
+    expect(view.container.textContent).not.toContain('Storage quota exceeded')
+    expect(view.fileInput().disabled).toBe(false)
+    expect(await submitted(view)).toEqual({ fld_title: 'Beta', fld_files: ['att_b1'] })
+
+    view.unmount()
+  })
+
+  it('appends an upload to the same record\'s form when no switch happens', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn })
+    const file = new File(['new'], 'new.pdf', { type: 'application/pdf' })
+
+    pickFiles(view.fileInput(), [file])
+    await flushUi()
+    expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+    upload.pending[0].resolve(attachment('att_new', 'new.pdf'))
+    await flushUi()
+
+    expect(upload.fn).toHaveBeenCalledWith(file, { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(view.container.textContent).toContain('new.pdf')
+    expect(view.container.querySelector('.meta-form-view__uploading')).toBeNull()
+    expect(view.fileInput().disabled).toBe(false)
+    expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: ['att_a1', 'att_a2', 'att_new'] })
+
+    view.unmount()
+  })
+
+  it('updates the same record\'s form after a remove and then a clear-all', async () => {
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const view = mountForm({ record: REC_A(), deleteAttachmentFn: remove })
+
+    ;(view.container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click()
+    await flushUi()
+    expect(remove).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: ['att_a2'] })
+
+    ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+    await flushUi()
+    expect(remove).toHaveBeenLastCalledWith('att_a2', { recordId: 'rec_A', fieldId: 'fld_files' })
+    expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: [] })
+    expect(view.container.querySelector('.meta-form-view__attachment-clear')).toBeNull()
+
+    view.unmount()
+  })
+
+  it('shows the error on the same record when its upload or remove fails', async () => {
+    const upload = vi.fn().mockRejectedValue(new Error('Storage quota exceeded'))
+    const remove = vi.fn().mockRejectedValue(new Error('Delete refused'))
+    const view = mountForm({ record: REC_A(), uploadFn: upload, deleteAttachmentFn: remove })
+
+    pickFiles(view.fileInput(), [new File(['big'], 'big.pdf', { type: 'application/pdf' })])
+    await flushUi()
+    expect(fieldError(view)?.textContent).toBe('Storage quota exceeded')
+    expect(view.fileInput().disabled).toBe(false)
+
+    ;(view.container.querySelector('.meta-attachment-list__remove') as HTMLButtonElement).click()
+    await flushUi()
+    expect(fieldError(view)?.textContent).toBe('Delete refused')
+    expect(view.fileInput().disabled).toBe(false)
+    // The failed remove keeps the list as it was.
+    expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: ['att_a1', 'att_a2'] })
+
+    view.unmount()
+  })
+
+  // A form that moves between create mode and a record (a deep link with its discard prompt accepted, or the record
+  // removed under it) is another form too: the late upload stays out of it.
+  it.each([
+    ['create mode, then rec_B', null, REC_B],
+    ['rec_A, then create mode', REC_A, null],
+  ] as const)('keeps an upload that ends after the form moved from %s out of the form now shown', async (_label, first, second) => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: first && first(), uploadFn: upload.fn })
+    await flushUi()
+
+    pickFiles(view.fileInput(), [new File(['late'], 'late.pdf', { type: 'application/pdf' })])
+    await flushUi()
+    view.record.value = second && second()
+    await flushUi()
+    upload.pending[0].resolve(attachment('att_late', 'late.pdf'))
+    await flushUi()
+
+    expect(view.container.textContent).not.toContain('late.pdf')
+    expect((await submitted(view)).fld_files ?? []).not.toContain('att_late')
+
+    view.unmount()
+  })
+
+  it('lands an upload in a create-mode form (no record) even when the prefill arrives during the upload', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const view = mountForm({ record: null, uploadFn: upload.fn })
+    const file = new File(['new'], 'new.pdf', { type: 'application/pdf' })
+
+    pickFiles(view.fileInput(), [file])
+    await flushUi()
+    // The public form loads its prefill late; the form re-syncs but is still the same (record-less) form.
+    view.initialValues.value = { fld_title: 'Seeded' }
+    await flushUi()
+    upload.pending[0].resolve(attachment('att_new', 'new.pdf'))
+    await flushUi()
+
+    expect(upload.fn).toHaveBeenCalledTimes(1)
+    expect(upload.fn.mock.calls[0][1]).toEqual({ recordId: undefined, fieldId: 'fld_files' })
+    expect(upload.fn.mock.calls[0][1].recordId).toBeUndefined()
+    expect(view.container.textContent).toContain('new.pdf')
+    expect(view.container.querySelector('.meta-form-view__uploading')).toBeNull()
+    expect(await submitted(view)).toEqual({ fld_title: 'Seeded', fld_files: ['att_new'] })
+
+    view.unmount()
+  })
+})
+
 // --- A4: multi-page / prefill / cross-page validation ---
 describe('MetaFormView A4 form logic', () => {
   it('renders exactly the flat single-page form when no layout is provided (backward compat)', async () => {
