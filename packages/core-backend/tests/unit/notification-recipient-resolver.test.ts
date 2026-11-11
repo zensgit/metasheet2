@@ -244,7 +244,12 @@ describe('source of the statements', () => {
     expect(candidate).toContain('i.id = q.connection_id')
     expect(candidate).toContain('a.corp_id = i.corp_id')
     expect(candidate).not.toMatch(/corp_id IS NULL OR/)
-    expect(candidate.indexOf('a.is_active')).toBeLessThan(candidate.indexOf('rn <= 2'))
+    // Every validity filter sits inside the window's source rows; the final select only cuts the window.
+    const window = candidate.slice(candidate.indexOf('row_number() OVER'))
+    const source = window.slice(window.indexOf('FROM q'), window.indexOf('SELECT * FROM c'))
+    expect(source).toContain('a.is_active')
+    expect(source).toContain("l.link_status = 'linked'")
+    expect(candidate.endsWith('SELECT * FROM c WHERE rn <= 2')).toBe(true)
     expect(candidate).toMatch(/WITH q AS[\s\S]*row_number\(\) OVER[\s\S]*SELECT \* FROM c WHERE rn <= 2/)
     for (const { name, sql } of statements) expect(sql, name).not.toMatch(/ORDER BY[^)]*updated_at/)
   })
