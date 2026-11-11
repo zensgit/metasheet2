@@ -24,11 +24,16 @@
  *   G9-U08   the synthetic end-to-end demonstration A01 -> A02 -> A03 -> A05 -> C08 with E06 and E07 injected, on ONE
  *            BI-installed governed sheet with the 批次标识 switch ON: recovery through the puller routes, A03 「无新增物料
  *            批次」 (no new ledger batch), the E10 labels kept across the retry, the export refused / allowed / refused.
- *   G9-U03   the authorization drill over every step-4/5/6 route and 批次标识's routes (the capability manifest is the
- *            route list; the tier oracle is written out here, independently of the manifest's own decision function),
- *            for the read, operate, pull and stock-prep admin tiers, a TENANTLESS platform admin and a cross-tenant
- *            puller / admin: below the tier 403; the tenantless admin and the foreign tenant never 2xx-with-data and never
- *            write; every refusal audits nothing.
+ *   G9-U03   the authorization drill over every step-4/5/6 route, 批次标识's routes and every pull step of the operator
+ *            split (the capability manifest is the route list; the tier oracle is written out here, independently of the
+ *            manifest's own decision function), for the read, operate, pull and stock-prep admin tiers, a TENANTLESS
+ *            platform admin and a cross-tenant puller / admin: below the tier 403; the foreign callers are sent THIS
+ *            tenant's REAL hold / continuation / execution / change-plan ids with minimally valid bodies and answer exactly
+ *            as for ids that exist nowhere (no existence oracle); tenantId carriers (body, query, params) naming this
+ *            tenant are refused at the tenant gate; no answer of any status echoes this tenant's sheet / row / hold /
+ *            continuation / execution / plan / batch ids; nothing is written and no refusal audits. The large-lane pull
+ *            steps get inert foreign requests only (the matrix's u03InertForeignSteps says why); the one documented
+ *            platform-admin trial steer (pull.dry-run, values-free) is pinned, not hidden.
  *   G9-S9X-01 (C-8, RD G2) the MVP archive identity — the default snapshotBatchId and syncRunId, both derived from
  *            buildArchiveRevision — is unchanged across the 批次标识 install + history backfill of an unchanged GOVERNED
  *            sheet, with the switch ON and OFF: the archive after the install keeps the batch already archived.
@@ -88,6 +93,7 @@ export const G9_MATRIX = JSON.parse(fs.readFileSync(MATRIX_PATH, 'utf8')) as {
   realDb: string[]
   pending: Array<{ id: string; owner: string; what: string }>
   manual: Array<{ id: string; what: string }>
+  u03InertForeignSteps: { steps: string[]; reason: string }
 }
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -872,9 +878,20 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         return res.statusCode === 200 ? 'exported' : `${res.statusCode}:${codeOf(res)}`
       }
       const labels = async () => (await st.rows()).map((row: any) => ({ id: row.id, part: row.data[p('componentSourceId')], first: row.data[p('firstPullBatch')] ?? null, current: row.data[p('pullBatch')] ?? null }))
+      // 批次标识's own ledger, per step: every batch (number, status, closed reason, label) and every execution link
+      // (its batch, writer status, created-row count, verified outcome). Labels are compared, never printed.
+      const ledgerTrace = async () => {
+        const batches = (await q('SELECT id, batch_no, status, closed_reason, label FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no, id', [st.tenantId])).rows
+        const links = (await q('SELECT b.batch_no, l.writer_status, l.created_row_count, l.verified_outcome FROM integration_stock_prep_pull_batch_execution l JOIN integration_stock_prep_pull_batch b ON b.id = l.batch_id WHERE l.tenant_id = $1 ORDER BY l.joined_at, l.id', [st.tenantId])).rows
+        return {
+          batches: batches.map((row: any) => `${row.batch_no}:${row.status}:${row.closed_reason ?? '-'}`),
+          links: links.map((row: any) => `${row.batch_no}:${row.writer_status ?? '-'}:${row.created_row_count ?? '-'}:${row.verified_outcome ?? '-'}`),
+          labelOf: Object.fromEntries(batches.map((row: any) => [row.batch_no, row.label])) as Record<number, string>,
+        }
+      }
       const record = async (step: string, extra: Record<string, unknown> = {}) => {
-        const ledger = await ledgerOf(st.tenantId)
-        const entry = { step, derived: await derivedStatus(st), executions: await executionStatuses(st), rows: (await st.main()).count, batches: ledger.batches.map((row: any) => `${row.batch_no}:${row.status}`), ...extra }
+        const ledger = await ledgerTrace()
+        const entry: Record<string, any> = { step, derived: await derivedStatus(st), executions: await executionStatuses(st), rows: (await st.main()).count, batches: ledger.batches, links: ledger.links, ...extra }
         steps.push(entry)
         console.log(`[G9-U08] ${JSON.stringify(entry)}`)
         return entry
@@ -893,6 +910,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       st.state.data = CF.secondPullSource()
       const a01 = await pull()
       await record('A01', { preview: status(a01.dry), token: tokenOf(a01.dry), export: await exportCode() })
+      const labelsA01 = await labels()
       // A02 — the puller confirms the same demand through the route; the apply hits E06 (the host refuses one of the two
       // creates: partial); the recovery verifies and closes it; the retry lands the missing row in the SAME batch.
       await routeConfirmCandidate(st)
@@ -902,19 +920,41 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const e06 = await record('A02-E06', { preview: status(a02.dry), applyStatus: a02.applied && a02.applied.statusCode, export: await exportCode() })
       const labelsAfterFailure = await labels()
       const e06Closed = await verifyAndClose(st, partial[0].id)
-      await record('A02-recovered', { verify: e06Closed.report.result, close: e06Closed.closed.status || 'closed' })
+      const e06Recovered = await record('A02-recovered', { verify: e06Closed.report.result, close: e06Closed.closed.status || 'closed' })
       const retry = await pull()
       const labelsAfterRetry = await labels()
-      const keptLabels = labelsAfterFailure.filter((row: any) => row.current !== null).every((row: any) => {
+      // E10: EVERY row the failure left carries both labels, and keeps them byte-equal across the retry (a stamping lane
+      // gone dead leaves every label null — that must fail here, not pass vacuously).
+      const keptLabels = labelsAfterFailure.length > 0 && labelsAfterFailure.every((row: any) => {
         const now = labelsAfterRetry.find((entry: any) => entry.id === row.id)
-        return now && now.first === row.first && now.current === row.current
+        return row.first !== null && row.current !== null && now && now.first === row.first && now.current === row.current
       })
       const settleA02 = await both(true, () => st.dryRun())
       const a02done = await record('A02-retried', { retry: retry.applied && retry.applied.body.data.status, keptLabels, settle: status(settleA02), export: await exportCode() })
-      // A03 — a third identical pull: no hold, no write, no new batch.
-      const batchesBeforeA03 = (await ledgerOf(st.tenantId)).batches.length
+      // The SAME batch: the row E06 created and the row the retry created both carry batch 2's label (first and current:
+      // both are new materials), and every A01 row still carries batch 1's.
+      const ledgerA02 = await ledgerTrace()
+      const createdByE06 = labelsAfterFailure.filter((row: any) => !labelsA01.some((entry: any) => entry.id === row.id))
+      const createdByRetry = labelsAfterRetry.filter((row: any) => !labelsAfterFailure.some((entry: any) => entry.id === row.id))
+      const labelState = (rows: any[], batchNo: number) => rows.map((row: any) => (row.first === ledgerA02.labelOf[batchNo] && row.current === ledgerA02.labelOf[batchNo] ? `batch${batchNo}` : `other:${row.first === null ? 'null' : 'set'}/${row.current === null ? 'null' : 'set'}`))
+      const sameBatch = {
+        labelsDistinct: typeof ledgerA02.labelOf[1] === 'string' && typeof ledgerA02.labelOf[2] === 'string' && ledgerA02.labelOf[1] !== ledgerA02.labelOf[2],
+        a01Rows: labelState(labelsAfterRetry.filter((row: any) => labelsA01.some((entry: any) => entry.id === row.id)), 1),
+        e06Rows: labelState(labelsAfterRetry.filter((row: any) => createdByE06.some((entry: any) => entry.id === row.id)), 2),
+        retryRows: labelState(createdByRetry, 2),
+        everyRowLabelled: labelsAfterRetry.every((row: any) => row.first !== null && row.current !== null),
+      }
+      // A03 — a third identical pull: no hold, no write, no new batch and no new link row.
+      const ledgerBeforeA03 = await ledgerTrace()
       const a03 = await pull()
-      const a03done = await record('A03', { preview: status(a03.dry), written: a03.applied && a03.applied.body.data.apply ? Number(a03.applied.body.data.apply.written || 0) : null, newBatches: (await ledgerOf(st.tenantId)).batches.length - batchesBeforeA03 })
+      const ledgerAfterA03 = await ledgerTrace()
+      const a03done = await record('A03', {
+        preview: status(a03.dry),
+        written: a03.applied && a03.applied.body.data.apply ? Number(a03.applied.body.data.apply.written || 0) : null,
+        newBatches: ledgerAfterA03.batches.length - ledgerBeforeA03.batches.length,
+        newLinks: ledgerAfterA03.links.length - ledgerBeforeA03.links.length,
+        ledgerUnchanged: sameJson(ledgerAfterA03, ledgerBeforeA03),
+      })
       // A05 + C08 — PART-C's usage changes inside the continued subtree: suspended; the change plan is confirmed through the
       // route; the write lands but the process dies before its finish (E07): recovered (landed); the review; the export.
       st.state.data = CF.secondPullSource({ boms: { 'PART-A': [{ part: 'PART-C', usage: 5 }] } })
@@ -941,19 +981,30 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const c08again = await record('C08-changed-again', { preview: status(again), export: await exportCode() })
 
       const observed = {
-        A01: { preview: steps[0].preview, token: steps[0].token, rows: steps[0].rows, exportRefused: String(steps[0].export).startsWith('409') },
-        E06: { applyStatus: e06.applyStatus, executions: e06.executions, derived: e06.derived, exportRefused: String(e06.export).startsWith('409'), verify: e06Closed.report.result },
-        A02: { retry: a02done.retry, keptLabels: a02done.keptLabels, settle: a02done.settle, derived: a02done.derived, export: a02done.export, rows: a02done.rows },
-        A03: { preview: a03done.preview, written: a03done.written, newBatches: a03done.newBatches },
+        A01: { preview: steps[0].preview, token: steps[0].token, rows: steps[0].rows, exportRefused: String(steps[0].export).startsWith('409'), batches: steps[0].batches, links: steps[0].links },
+        E06: { applyStatus: e06.applyStatus, executions: e06.executions, derived: e06.derived, exportRefused: String(e06.export).startsWith('409'), verify: e06Closed.report.result, batches: e06.batches, links: e06.links },
+        E06recovered: { batches: e06Recovered.batches, links: e06Recovered.links },
+        A02: { retry: a02done.retry, keptLabels: a02done.keptLabels, settle: a02done.settle, derived: a02done.derived, export: a02done.export, rows: a02done.rows, batches: a02done.batches, links: a02done.links, sameBatch },
+        A03: { preview: a03done.preview, written: a03done.written, newBatches: a03done.newBatches, newLinks: a03done.newLinks, ledgerUnchanged: a03done.ledgerUnchanged },
         A05: { preview: a05done.preview, token: a05done.token, exportRefused: String(a05done.export).startsWith('409') },
         E07: { crashFired: e07.crashFired, executionsHaveRunning: (e07.executions as string[]).includes('running'), exportRefused: String(e07.export).startsWith('409'), verify: e07Closed.report.result, planAfterClose: afterE07.plan, exportAfterClose: String(afterE07.export).startsWith('409') ? 'refused' : 'exported' },
         C08: { plan: c08done.plan, export: c08done.export, again: c08again.preview, exportAgain: String(c08again.export).startsWith('409') ? 'refused' : 'exported' },
       }
       expect(observed).toEqual({
-        A01: { preview: 'suspended', token: null, rows: 4, exportRefused: true },
-        E06: { applyStatus: e06.applyStatus, executions: ['succeeded', 'partial'], derived: 'failed_pending_recovery', exportRefused: true, verify: 'mixed' },
-        A02: { retry: 'succeeded', keptLabels: true, settle: 'ready', derived: 'complete', export: 'exported', rows: 6 },
-        A03: { preview: 'ready', written: 0, newBatches: 0 },
+        // The ledger, per step (`<batch_no>:<status>:<closed_reason>`, links `<batch_no>:<writer>:<created>:<verified>`):
+        // A01's pull is batch 1, closed by its own success; E06 opens batch 2 with a PARTIAL link that created 1 row;
+        // the mixed close verifies that link verified_mixed and KEEPS batch 2 open (C-3); the retry joins batch 2 (its
+        // own succeeded link) and its success closes it; A03 adds no batch and no link.
+        A01: { preview: 'suspended', token: null, rows: 4, exportRefused: true, batches: ['1:closed:execution_succeeded'], links: ['1:succeeded:4:-'] },
+        E06: { applyStatus: e06.applyStatus, executions: ['succeeded', 'partial'], derived: 'failed_pending_recovery', exportRefused: true, verify: 'mixed', batches: ['1:closed:execution_succeeded', '2:open:-'], links: ['1:succeeded:4:-', '2:partial:1:-'] },
+        E06recovered: { batches: ['1:closed:execution_succeeded', '2:open:-'], links: ['1:succeeded:4:-', '2:partial:1:verified_mixed'] },
+        A02: {
+          retry: 'succeeded', keptLabels: true, settle: 'ready', derived: 'complete', export: 'exported', rows: 6,
+          batches: ['1:closed:execution_succeeded', '2:closed:execution_succeeded'],
+          links: ['1:succeeded:4:-', '2:partial:1:verified_mixed', '2:succeeded:1:-'],
+          sameBatch: { labelsDistinct: true, a01Rows: ['batch1', 'batch1', 'batch1', 'batch1'], e06Rows: ['batch2'], retryRows: ['batch2'], everyRowLabelled: true },
+        },
+        A03: { preview: 'ready', written: 0, newBatches: 0, newLinks: 0, ledgerUnchanged: true },
         A05: { preview: 'suspended', token: null, exportRefused: true },
         E07: { crashFired: true, executionsHaveRunning: true, exportRefused: true, verify: 'landed', planAfterClose: 'written', exportAfterClose: 'refused' },
         C08: { plan: 'reviewed', export: 'exported', again: 'suspended', exportAgain: 'refused' },
@@ -962,13 +1013,42 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }, 600000)
 
     // ── G9-U03: the authorization drill ─────────────────────────────────────────────────────────────────────────────
-    g9Case('G9-U03', '(U03) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus the pull lanes: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin never answered 2xx with this tenant\'s data and never wrote', async () => {
+    g9Case('G9-U03', '(U03) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus every pull step of the operator split: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin, sent THIS tenant\'s REAL hold / continuation / execution / change-plan ids with minimally valid bodies and steering tenantId carriers, answer exactly what they answer for ids that exist nowhere, are refused 403 at the tenant gate when a carrier names this tenant, never 2xx for the tenantless admin (save the pinned platform-admin values-free trial steer), never echo this tenant\'s ids and never write', async () => {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
       const st = await s3aStack('g9_u03', { pilot: true, serviceExtras: { stockPreparationPullBatchStore: ledgerStore } })
       tenants.push(st.tenantId)
-      await firstPullApplied(st)
+      // THE FIXTURE: this tenant owns one of every id kind the routes address — ledger batches (the band born empty, two
+      // landed pulls), a continuation (the route confirm), executions, a change plan (the route confirm) and holds.
+      await bornEmptyBand(st, ledgerStore)
+      const pull = async () => {
+        const dry = await both(true, () => st.dryRun())
+        const applied = status(dry) === 'ready' ? await both(true, () => st.apply(st.users.puller, dry.body.data.dryRunToken)) : null
+        return { dry, applied }
+      }
+      st.state.data = CF.firstPullSource()
+      expect((await pull()).applied?.statusCode).toBe(200)
       st.state.data = CF.secondPullSource()
-      expect(status(await st.dryRun())).toBe('suspended')
+      expect(status((await pull()).dry)).toBe('suspended')
+      const confirmed = await routeConfirmCandidate(st)
+      expect((await pull()).applied?.statusCode).toBe(200)
+      st.state.data = CF.secondPullSource({ boms: { 'PART-A': [{ part: 'PART-C', usage: 5 }] } })
+      expect(status(await both(true, () => st.dryRun()))).toBe('suspended')
+      const { body: cpBody } = await boundBody(st)
+      const cp = await both(true, () => cpCall(st, 'POST', CPR.confirm, { body: cpBody }))
+      expect(cp.statusCode, JSON.stringify(cp.body)).toBe(201)
+      const holdRows = await st.holds()
+      const executionRows = await st.executions()
+      const REAL = {
+        holdId: (holdRows.find((row: any) => row.status === 'open') || holdRows[holdRows.length - 1]).id as string,
+        continuationId: confirmed.continuationId as string,
+        executionId: executionRows[executionRows.length - 1].id as string,
+        changePlanId: cp.body.data.changePlanId as string,
+      }
+      const BOGUS = { holdId: 'hold_g9_u03_none', continuationId: 'cont_g9_u03_none', executionId: 'exe_g9_u03_none', changePlanId: 'cp_g9_u03_none' }
+      const ledgerIds = [
+        ...(await q('SELECT id FROM integration_stock_prep_pull_batch WHERE tenant_id = $1', [st.tenantId])).rows.map((row: any) => row.id),
+        ...(await q('SELECT id FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1', [st.tenantId])).rows.map((row: any) => row.id),
+      ]
       const other = await s3aStack('g9_u03x', { pilot: true })
       // THE INDEPENDENT TIER ORACLE: every drilled capability's tier written out HERE (the ladder read < operate < pull <
       // stock-prep admin), never read from the manifest. The handlers gate with their own literal requireAccess(...) calls,
@@ -995,13 +1075,24 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         'refresh.executions': 'pull',
         'refresh.recover': 'pull',
         'refresh.closeUnverified': 'admin',
-        // The two pull lanes of the operator split (STOCK_PREP_OPERATOR_PULL_STEPS): the pull tier for stock-prep callers.
+        // EVERY pull step of the operator split (STOCK_PREP_OPERATOR_PULL_STEPS): the pull tier for stock-prep callers.
         'pull.dry-run': 'pull',
+        'pull.dry-run-job-start': 'pull',
+        'pull.dry-run-job-get': 'pull',
         'pull.apply': 'pull',
+        'pull.large-bom-expansion-start': 'pull',
+        'pull.large-bom-expansion-get': 'pull',
+        'pull.large-bom-expansion-run': 'pull',
+        'pull.large-bom-expansion-plan': 'pull',
+        'pull.large-bom-apply-start': 'pull',
+        'pull.large-bom-apply-get': 'pull',
+        'pull.large-bom-apply-run': 'pull',
+        'pull.large-bom-expansion-cancel': 'pull',
+        'pull.reconcile': 'pull',
       }
       const inScope = (entry: any) => /\/refresh\/|\/target\/pilot$|\/target\/pull-batch|\/pull-batch\/settings$|\/prep-lines\/export$/.test(entry.path)
       const manifestTiers = Object.fromEntries(access.STOCK_PREP_WORKBENCH_CAPABILITIES.filter(inScope).map((entry: any) => [entry.capability, String(entry.code).replace(/^stock-prep:/, '')]))
-      for (const step of access.STOCK_PREP_OPERATOR_PULL_STEPS.filter((entry: any) => ['dry-run', 'apply'].includes(entry.step))) manifestTiers[`pull.${step.step}`] = 'pull'
+      for (const step of access.STOCK_PREP_OPERATOR_PULL_STEPS) manifestTiers[`pull.${step.step}`] = 'pull'
       // S6-5 / S6-6 (pending G9-S65-U03 / G9-S66-U03): their new capabilities fail THIS equality until they are added above.
       expect(manifestTiers).toEqual(EXPECTED_TIERS)
       const routeOf = (id: string) => {
@@ -1011,6 +1102,11 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const drilled = Object.entries(EXPECTED_TIERS).map(([id, tier]) => ({ id, method: routeOf(id).method, path: routeOf(id).path, rank: RANK[tier] }))
       const missing = drilled.filter((entry: any) => !st.routes.has(`${entry.method} ${entry.path}`)).map((entry: any) => entry.id)
       expect(missing).toEqual([])
+      // The pull steps a foreign caller is sent only INERT requests for (the matrix records which and why): the S3A stack
+      // configures no large lane, so no real job id exists to address, and a valid start from a foreign caller would leave
+      // background work running past the case. Their tier legs (below 403, at/above admitted) run like every route's.
+      const inertForeign = new Set<string>(G9_MATRIX.u03InertForeignSteps.steps)
+      expect([...inertForeign].every((id) => id in EXPECTED_TIERS)).toBe(true)
       const callers: Record<string, any> = {
         reader: { id: `u_g9_r_${TOKEN}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_READ], rank: 1 },
         operator: { id: `u_g9_o_${TOKEN}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE], rank: 2 },
@@ -1022,61 +1118,170 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         crossPuller: { id: `u_g9_xp_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] },
         crossAdmin: { id: `u_g9_xa_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_ADMIN] },
       }
-      const paramsFor = (entry: any) => ({ projectNo: st.projectNo, actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, holdId: 'hold_g9_u03_none', id: 'cont_g9_u03_none', executionId: 'exe_g9_u03_none' })
-      const call = (entry: any, user: any) => both(true, () => callRoute(st.routes, entry.method, entry.path, { user, params: paramsFor(entry), query: {}, body: {} }))
+      const paramsFor = (ids: typeof REAL) => ({ projectNo: st.projectNo, actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, holdId: ids.holdId, id: ids.continuationId, executionId: ids.executionId, jobId: 'job_g9_u03_none', applyJobId: 'ajob_g9_u03_none' })
+      // The minimally valid request of each route, so a foreign caller reaches the tenant gate instead of stopping at body
+      // validation: the typed project (+ the mode, the body-carried id) on every decision route; the pull lanes' parameters.
+      const validRequest = (entry: any, ids: typeof REAL) => {
+        const confirmProjectNo = st.projectNo
+        const bodies: Record<string, any> = {
+          'refresh.confirm': { confirmProjectNo, holdId: ids.holdId },
+          'refresh.reviewComplete': { confirmProjectNo, changePlanId: ids.changePlanId },
+          'refresh.recover': { confirmProjectNo, mode: 'verify' },
+          'refresh.closeUnverified': { confirmProjectNo, mode: 'inspect' },
+          'projectTarget.pullBatchInstall': { confirmProjectNo, mode: 'dry_run' },
+          'projectTarget.pullBatchSettingsSet': { confirmProjectNo, expectedVersion: 0 },
+          'pullBatch.settingsSet': { expectedVersion: 0 },
+          'pull.dry-run': { parameters: { projectNo: st.projectNo } },
+          'pull.apply': { parameters: { projectNo: st.projectNo }, confirm: { dryRunToken: 'tok_g9_u03_none' } },
+          'pull.reconcile': { parameters: { projectNo: st.projectNo } },
+        }
+        const body = entry.method === 'GET' ? {} : (bodies[entry.id] || (entry.id.startsWith('refresh.') || entry.id === 'projectTarget.pilotEnable' ? { confirmProjectNo } : {}))
+        const query = entry.id === 'confirmationQueue.export' ? { projectNo: st.projectNo } : {}
+        return { params: paramsFor(ids), body, query }
+      }
+      const answerOf = (res: any) => `${res.statusCode}:${codeOf(res) || '-'}`
+      const send = (entry: any, user: any, request: { params: any; body: any; query: any }) => both(true, () => callRoute(st.routes, entry.method, entry.path, { user, ...request }))
+      // The inert request (the admitted phase): made-up ids and an empty body — no admitted call changes anything.
+      const inert = () => ({ params: paramsFor(BOGUS), query: {}, body: {} })
+      const stTokens = async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'integration:table-action:dry-run-token:%' AND value->>'writeScope' = $1`, [st.key])).rows[0].n)
       const tenantRows = async () => {
         const audits = Number((await q('SELECT count(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1', [st.tenantId])).rows[0].n)
         const plans = (await q(`SELECT id, status FROM ${RT.changePlan} WHERE tenant_id = $1 ORDER BY id`, [st.tenantId])).rows
         const lock = (await q(`SELECT generation, generation_token, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows
-        const registry = (await q('SELECT status, pilot_enabled_at, sheet_id FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows
+        const registry = (await q('SELECT status, pilot_enabled_at, pilot_readiness_version, sheet_id FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows
+        const settings = (await q('SELECT * FROM integration_stock_prep_pull_batch_settings WHERE tenant_id = $1', [st.tenantId])).rows
+        const sheetLedger = (await q('SELECT history_status, version, first_pull_batch_rule, label_format FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [st.tenantId])).rows
         const ledger = await ledgerOf(st.tenantId)
-        return { audits, fingerprint: JSON.stringify([await stepFour(st.tenantId), await st.main(), plans, lock, registry, ledger, await kvTokens()]) }
+        return { audits, fingerprint: JSON.stringify([await stepFour(st.tenantId), await st.main(), await continuations(st), plans, lock, registry, settings, sheetLedger, ledger, await stTokens()]) }
       }
+      // THIS tenant's ids — none may appear in a foreign answer of ANY status, except an id the caller itself sent.
+      const tenantIds = [st.sheetId, st.objectId, ...(await st.rows()).map((row: any) => row.id), ...holdRows.map((row: any) => row.id), ...executionRows.map((row: any) => row.id), REAL.continuationId, REAL.changePlanId, ...ledgerIds]
+      const leaks: string[] = []
+      const leakCheck = (label: string, res: any, sent: string[]) => {
+        const text = JSON.stringify(res.body || {})
+        const found = tenantIds.filter((id) => !sent.includes(id) && text.includes(id))
+        if (found.length) leaks.push(`${label}:${found.length}`)
+      }
+      // The control: THIS tenant's own puller / admin, on the same real ids, is answered with the data (the ids are real).
+      const ownControl: Record<string, string> = {}
+      for (const id of ['refresh.evidence', 'refresh.continuation', 'refresh.recover']) {
+        const entry = drilled.find((route: any) => route.id === id)
+        ownControl[id] = answerOf(await send(entry, st.users.puller, validRequest(entry, REAL)))
+      }
+      ownControl['refresh.closeUnverified'] = answerOf(await send(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), callers.spAdmin, validRequest(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), REAL)))
       // Phase 1 — every caller that must be refused, then the no-write / no-audit proof.
       const before = await tenantRows()
       const refusedAnswers: Record<string, Record<string, string>> = {}
-      const leaks: string[] = []
-      const tenantIds = [st.sheetId, st.objectId, ...(await st.rows()).map((row: any) => row.id)]
       for (const [name, user] of Object.entries(callers)) {
         for (const entry of drilled.filter((route: any) => user.rank < route.rank)) {
-          const res = await call(entry, user)
+          const res = await send(entry, user, validRequest(entry, REAL))
           ;(refusedAnswers[name] ||= {})[entry.id] = `${res.statusCode}`
         }
       }
+      const realSent = Object.values(REAL)
       const foreignAnswers: Record<string, Record<string, string>> = {}
+      const realVsBogus: string[] = []
+      const steering: Record<string, Record<string, string>> = {}
+      // THE ONE DOCUMENTED EXCEPTION, run after the no-write proof: the values-free trial (pull.dry-run without
+      // includeMissingComponents) is requireTableActionAccess's legacy platform-admin branch, where a tenantless platform
+      // admin may steer `?tenantId=` across tenants outright (http-routes.cjs tableActionDryRun, the W3a comment) — so a
+      // query / params carrier naming THIS tenant previews it (and its governed preview runs). Pinned here, never hidden.
+      const platformAdminTrial: Array<() => Promise<void>> = []
+      const platformAdminTrialAnswers: Record<string, string> = {}
       for (const [name, user] of Object.entries(foreign)) {
         for (const entry of drilled) {
-          const res = await call(entry, user)
-          ;(foreignAnswers[name] ||= {})[entry.id] = `${res.statusCode}`
-          const text = JSON.stringify(res.body || {})
-          if (res.statusCode < 300 && tenantIds.some((id) => text.includes(id))) leaks.push(`${name}:${entry.id}`)
+          if (inertForeign.has(entry.id)) {
+            const res = await send(entry, user, inert())
+            ;(foreignAnswers[name] ||= {})[entry.id] = answerOf(res)
+            leakCheck(`${name}:${entry.id}`, res, [])
+            continue
+          }
+          const real = await send(entry, user, validRequest(entry, REAL))
+          const bogus = await send(entry, user, validRequest(entry, BOGUS))
+          ;(foreignAnswers[name] ||= {})[entry.id] = answerOf(real)
+          // NO EXISTENCE ORACLE: this tenant's real id is answered exactly like an id that exists nowhere.
+          if (answerOf(real) !== answerOf(bogus)) realVsBogus.push(`${name}:${entry.id}:${answerOf(real)}!=${answerOf(bogus)}`)
+          leakCheck(`${name}:${entry.id}`, real, realSent)
+          leakCheck(`${name}:${entry.id}:bogus`, bogus, [])
+          // STEERING: the same valid request naming THIS tenant in the body, the query and the params.
+          const request = validRequest(entry, REAL)
+          const carriers: Record<string, any> = {
+            query: { ...request, query: { ...request.query, tenantId: st.tenantId } },
+            params: { ...request, params: { ...request.params, tenantId: st.tenantId } },
+          }
+          if (entry.method !== 'GET') carriers.body = { ...request, body: { ...request.body, tenantId: st.tenantId } }
+          for (const [carrier, steered] of Object.entries(carriers)) {
+            if (name === 'tenantless' && entry.id === 'pull.dry-run' && carrier !== 'body') {
+              platformAdminTrial.push(async () => {
+                const res = await send(entry, user, steered)
+                platformAdminTrialAnswers[carrier] = answerOf(res)
+                leakCheck(`${name}:${entry.id}:platform-admin-trial-${carrier}`, res, realSent)
+              })
+              continue
+            }
+            const res = await send(entry, user, steered)
+            ;(steering[`${name}:${carrier}`] ||= {})[entry.id] = answerOf(res)
+            leakCheck(`${name}:${entry.id}:steer-${carrier}`, res, realSent)
+          }
         }
       }
       const afterRefusals = await tenantRows()
-      // Phase 2 — the callers at or above the tier are admitted (an empty body may still be a 4xx; never a 401 / 403).
+      for (const run of platformAdminTrial) await run()
+      // Phase 2 — the callers at or above the tier are admitted (an inert request may still be a 4xx; never a 401 / 403).
       const admitted: Record<string, string[]> = {}
       for (const [name, user] of Object.entries(callers)) {
         for (const entry of drilled.filter((route: any) => user.rank >= route.rank)) {
-          const res = await call(entry, user)
-          if (res.statusCode === 401 || res.statusCode === 403) (admitted[name] ||= []).push(`${entry.id}:${res.statusCode}:${codeOf(res)}`)
+          const res = await send(entry, user, inert())
+          if (res.statusCode === 401 || res.statusCode === 403) (admitted[name] ||= []).push(`${entry.id}:${answerOf(res)}`)
         }
       }
       const belowTierNot403 = Object.entries(refusedAnswers).flatMap(([name, answers]) => Object.entries(answers).filter(([, code]) => code !== '403').map(([id, code]) => `${name}:${id}:${code}`))
-      const foreign2xx = Object.entries(foreignAnswers).flatMap(([name, answers]) => Object.entries(answers).filter(([, code]) => Number(code) < 300).map(([id]) => `${name}:${id}`))
+      const foreign2xx = Object.entries(foreignAnswers).flatMap(([name, answers]) => Object.entries(answers).filter(([, code]) => Number(code.split(':')[0]) < 300).map(([id]) => `${name}:${id}`))
+      const steered2xx = Object.entries(steering).flatMap(([name, answers]) => Object.entries(answers).filter(([, code]) => Number(code.split(':')[0]) < 300).map(([id]) => `${name}:${id}`))
+      // The decision routes read the carriers (collectExplicitTenantIds): a carrier naming another tenant is refused AT
+      // THE GATE (403) for every caller that holds a tenant, whatever the route.
+      const steeredRefreshNot403 = Object.entries(steering).filter(([name]) => !name.startsWith('tenantless:')).flatMap(([name, answers]) => Object.entries(answers).filter(([id, code]) => id.startsWith('refresh.') && !code.startsWith('403:')).map(([id, code]) => `${name}:${id}:${code}`))
+      console.log(`[G9-U03] own control ${JSON.stringify(ownControl)}`)
+      console.log(`[G9-U03] foreign answers ${JSON.stringify(foreignAnswers)}`)
+      console.log(`[G9-U03] steering answers ${JSON.stringify(steering)}`)
       const observed = {
         drilled: drilled.length,
+        ownControl,
         belowTierNot403,
         tenantless2xx: foreign2xx.filter((entry) => entry.startsWith('tenantless:')),
+        realVsBogus,
+        steered2xx,
+        steeredRefreshNot403,
+        platformAdminTrialAnswers,
         leaks,
         refusalsWroteNothing: afterRefusals.fingerprint === before.fingerprint,
         refusalsAudited: afterRefusals.audits - before.audits,
         admittedRefused: admitted,
       }
-      console.log(`[G9-U03] foreign answers ${JSON.stringify(foreignAnswers)}`)
-      expect(observed).toEqual({ drilled: drilled.length, belowTierNot403: [], tenantless2xx: [], leaks: [], refusalsWroteNothing: true, refusalsAudited: 0, admittedRefused: {} })
-      expect(drilled.length).toBeGreaterThanOrEqual(20)
-      g9Pass('G9-U03', { ...observed, foreign2xx: foreign2xx.length })
-    }, 600000)
+      expect(observed).toEqual({
+        drilled: Object.keys(EXPECTED_TIERS).length,
+        // The ids are REAL: the owner reads the hold's evidence and the continuation; the recovery FINDS the (succeeded)
+        // execution and refuses it as not unfinished — never the 404 a foreign caller must get.
+        ownControl: {
+          'refresh.evidence': '200:-',
+          'refresh.continuation': '200:-',
+          'refresh.recover': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
+          'refresh.closeUnverified': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
+        },
+        belowTierNot403: [],
+        tenantless2xx: [],
+        realVsBogus: [],
+        steered2xx: [],
+        steeredRefreshNot403: [],
+        platformAdminTrialAnswers: { query: '200:-', params: '200:-' },
+        leaks: [],
+        refusalsWroteNothing: true,
+        refusalsAudited: 0,
+        admittedRefused: {},
+      })
+      expect(drilled.length).toBeGreaterThanOrEqual(33)
+      g9Pass('G9-U03', { ...observed, foreign2xx: foreign2xx.length, steeringCalls: Object.values(steering).reduce((n, answers) => n + Object.keys(answers).length, 0) })
+    }, 900000)
 
     // ── G9-S9X-01: the MVP archive identity across the 批次标识 install + backfill ──────────────────────────────────────
     g9Case('G9-S9X-01', '(C-8, RD G2, E10 clause 3) on an unchanged GOVERNED pilot sheet: the archive before the 批次标识 install, then the REAL install with its history backfill, then the archive again with the switch ON and OFF — the same default snapshotBatchId and syncRunId (both from buildArchiveRevision): the archive replays the kept batch, never a second one', async () => {

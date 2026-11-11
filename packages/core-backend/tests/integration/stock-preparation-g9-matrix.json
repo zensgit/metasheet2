@@ -30,6 +30,21 @@
     { "id": "G9-S66-U07", "owner": "S6-6", "what": "U07: a repair run left running makes its stop-condition query non-zero; the drill refuses the rollback while it is" },
     { "id": "G9-S66-INSTALLING", "owner": "S6-6", "what": "B-9: a repair is refused while the sheet's pull-batch row is installing" }
   ],
+  "u03InertForeignSteps": {
+    "steps": [
+      "pull.dry-run-job-start",
+      "pull.dry-run-job-get",
+      "pull.large-bom-expansion-start",
+      "pull.large-bom-expansion-get",
+      "pull.large-bom-expansion-run",
+      "pull.large-bom-expansion-plan",
+      "pull.large-bom-apply-start",
+      "pull.large-bom-apply-get",
+      "pull.large-bom-apply-run",
+      "pull.large-bom-expansion-cancel"
+    ],
+    "reason": "G9-U03 drills these pull steps' tiers like every route (below the pull tier 403 with nothing written and no audit row; at or above it admitted), but sends the tenantless and cross-tenant callers only INERT requests (an empty body, made-up job ids): the S3A real stack configures no large lane, so no real expansion / apply job id of this tenant exists to address, and a valid start from a foreign caller would leave background work running past the case. Their tenant derivation is the dry-run's own (resolveOperatorValueScope), which the drill does reach on pull.dry-run, pull.apply and pull.reconcile with valid bodies."
+  },
   "manual": [
     { "id": "U07-OLD-BUILD", "what": "the section 7.5 drill proper: a pre-step-6 build (the parent of migration 106's first commit) against a database migrated by the candidate and carrying the G9-U07 artifacts; preview / apply / export refused where the stop queries say so; no ADD or INACTIVE written (runner: --old-build-drill prints the commands)" },
     { "id": "U09", "what": "the pilot pages in a real browser on a deployment built from the frozen sha" },
