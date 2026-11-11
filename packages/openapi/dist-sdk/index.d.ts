@@ -12264,6 +12264,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/me/notification-endpoints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the caller's notification endpoints and the connections that could become one
+         * @description Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the session token carries no organization). The caller and the organization come from the session only. The response carries no recipient identifier, digest or proof id. `capability` is a display state and is not authoritative.
+         */
+        get: operations["listMyNotificationEndpoints"];
+        put?: never;
+        /**
+         * Make or refresh an endpoint from a proof the caller already holds
+         * @description The request names a connection and a proof kind and nothing else; any other field, including every recipient-identifier name, is a 422. The address is derived from the proof and never stored or returned. Repeating the request changes nothing; a revoked endpoint is re-enabled as the same row.
+         */
+        post: operations["createMyNotificationEndpoint"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/notification-endpoints/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke one of the caller's endpoints
+         * @description Idempotent. The preferences that refer to the endpoint are cleared in the same transaction: a revoked primary is replaced by the backup when there is one. The preference's `enabled` is never changed. An endpoint of another user, of another organization and an unknown id are the same 404.
+         */
+        delete: operations["revokeMyNotificationEndpoint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/notification-preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Show the caller's preference for each topic and whether it takes effect now
+         * @description One entry per topic. `applies` says whether the preference is in force at this moment and why not; a topic that is not connected to sending shows topic_not_integrated. Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true.
+         */
+        get: operations["listMyNotificationPreferences"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change the caller's preference for one topic
+         * @description Applied only if the stored revision equals expectedRevision. The endpoints must be the caller's own, active, of a provider the topic routes; an endpoint of another user, of another organization and an unknown id are the same 409 ENDPOINT_NOT_USABLE. A backup of the primary's provider is refused (FALLBACK_PROVIDER_NOT_ALLOWED). Quiet hours suppress a reminder that falls due inside the window; they do not delay it. Nothing is sent.
+         */
+        patch: operations["patchMyNotificationPreference"];
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -19154,6 +19222,151 @@ export interface components {
                 login: components["schemas"]["DirectoryIntegrationCapability"];
                 notification: components["schemas"]["DirectoryIntegrationCapability"];
             };
+        };
+        /** @description Values-free error body of the user notification routes. Details are field names, a fixed reason code or a revision number; never an identifier, a digest or provider text. */
+        NotificationError: {
+            error: {
+                code: string;
+                /** @description Names of the request fields that failed validation (422 INVALID_REQUEST) */
+                fields?: string[];
+                /** @description Fixed reason code (409 ENDPOINT_NOT_USABLE) */
+                reason?: string;
+                /** @description Stored revision of the preference (409 PREFERENCE_STALE); 0 when there is no row */
+                currentRevision?: number;
+            };
+        };
+        NotificationConnectionRef: {
+            /** Format: uuid */
+            id: string;
+            /** @example dingtalk */
+            provider: string;
+            /** @description Provider name and integration name; never an identifier */
+            label: string;
+        };
+        /** @enum {string} */
+        NotificationResolveFailureCode: "connection_not_found" | "connection_inactive" | "provider_not_registered" | "proof_kind_unavailable" | "proof_missing" | "proof_not_linked" | "proof_wrong_user" | "proof_ambiguous" | "proof_account_inactive" | "proof_changed" | "proof_assurance_insufficient" | "address_missing" | "address_unusable" | "address_kind_not_derivable" | "address_bound_on_other_connection" | "scope_unproven" | "scope_changed" | "user_not_active_member" | "endpoint_not_found";
+        NotificationEndpoint: {
+            /** Format: uuid */
+            id: string;
+            connection: components["schemas"]["NotificationConnectionRef"];
+            /** @example dingtalk_userid */
+            addressKind: string;
+            /** @enum {string} */
+            proofKind: "directory_link" | "external_identity";
+            /** @enum {string} */
+            status: "active" | "stale";
+            revision: number;
+            /** @description The proof was derived again now and the endpoint is active */
+            usable: boolean;
+            /** @description Why the endpoint is not usable; endpoint_stale when it is stale although its proof holds again */
+            unusableReason: (components["schemas"]["NotificationResolveFailureCode"] | "endpoint_stale") | null;
+            /** @description Display state of the connection notification capability; not an authorization input */
+            capability: {
+                effective: boolean;
+                reason: string | null;
+            };
+            /** @description Connection verification evidence; always false until evidence is stored */
+            verified: boolean;
+            /** Format: date-time */
+            lastVerifiedAt: string;
+        };
+        NotificationEndpointCandidate: {
+            connection: components["schemas"]["NotificationConnectionRef"];
+            /** @enum {string} */
+            proofKind: "directory_link" | "external_identity";
+            addressable: boolean;
+            reasonCode: components["schemas"]["NotificationResolveFailureCode"] | null;
+            /**
+             * Format: uuid
+             * @description The caller own endpoint that is not revoked
+             */
+            endpointId: string | null;
+        };
+        NotificationEndpointListing: {
+            /** @description Nothing is sent in this version; delivery is always reported disabled */
+            delivery: {
+                /** @enum {boolean} */
+                enabled: false;
+                /** @enum {boolean} */
+                testSendAvailable: false;
+                /** @enum {string} */
+                reason: "delivery_disabled";
+            };
+            endpoints: components["schemas"]["NotificationEndpoint"][];
+            candidates: components["schemas"]["NotificationEndpointCandidate"][];
+        };
+        NotificationEndpointResult: {
+            endpoint: components["schemas"]["NotificationEndpoint"];
+        };
+        NotificationEndpointRevoked: {
+            endpoint: {
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                status: "revoked";
+                revision: number;
+            };
+        };
+        NotificationEndpointCreate: {
+            /** Format: uuid */
+            connectionId: string;
+            /** @enum {string} */
+            proofKind: "directory_link" | "external_identity";
+        };
+        /** @description A daily window; a reminder that falls due inside it is skipped, not delayed */
+        NotificationQuietHours: {
+            /** @description Local time */
+            start: string;
+            /** @description Local time */
+            end: string;
+            /** @description IANA zone name */
+            timeZone: string;
+        };
+        NotificationPreference: {
+            enabled: boolean;
+            /** Format: uuid */
+            primaryEndpointId: string | null;
+            /** Format: uuid */
+            fallbackEndpointId: string | null;
+            quietHours: components["schemas"]["NotificationQuietHours"] | null;
+            revision: number;
+        };
+        NotificationTopicView: {
+            /** @enum {string} */
+            topic: "task_reminder";
+            integrated: boolean;
+            applies: {
+                now: boolean;
+                /** @enum {string|null} */
+                reason: "topic_not_integrated" | "org_not_taken_over" | "org_paused" | "delivery_disabled" | "capability_off" | null;
+            };
+            preference: components["schemas"]["NotificationPreference"] | null;
+            effective: {
+                /** @enum {string} */
+                source: "user_primary" | "org_default" | "none";
+                connection: components["schemas"]["NotificationConnectionRef"] | null;
+                usable: boolean;
+                /** @description The stored backup; never usable when it is of the primary's provider */
+                fallback: {
+                    connection: components["schemas"]["NotificationConnectionRef"];
+                    usable: boolean;
+                } | null;
+            };
+        };
+        NotificationPreferenceList: {
+            topics: components["schemas"]["NotificationTopicView"][];
+        };
+        /** @description Keys that are present are set, null clears a nullable key, absent keys are unchanged. expectedRevision 0 means no row is expected yet. A body that changes nothing answers 200 and changes no revision. */
+        NotificationPreferencePatch: {
+            /** @enum {string} */
+            topic: "task_reminder";
+            expectedRevision: number;
+            enabled?: boolean;
+            /** Format: uuid */
+            primaryEndpointId?: string | null;
+            /** Format: uuid */
+            fallbackEndpointId?: string | null;
+            quietHours?: components["schemas"]["NotificationQuietHours"] | null;
         };
         DirectErrorResponse: {
             error?: {
@@ -26900,6 +27113,292 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             410: components["responses"]["ElearningError"];
             503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyNotificationEndpoints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's endpoints and candidates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationEndpointListing"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off, or the session has no organization (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+        };
+    };
+    createMyNotificationEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationEndpointCreate"];
+            };
+        };
+        responses: {
+            /** @description The endpoint already existed (or was refreshed) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationEndpointResult"];
+                };
+            };
+            /** @description The endpoint was created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationEndpointResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description PROOF_KIND_UNAVAILABLE, ADDRESS_KIND_NOT_DERIVABLE, PROOF_NOT_FOUND, PROOF_AMBIGUOUS, SCOPE_UNPROVEN, ADDRESS_UNUSABLE, NOT_ACTIVE_MEMBER, ADDRESS_ALREADY_BOUND (an endpoint of another organization and user holds this address in this tenant) or ADDRESS_BOUND_ON_OTHER_CONNECTION (the caller's own endpoint on another connection of the tenant holds it) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description INVALID_REQUEST with the names of the offending fields, or ORG_MISSING */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement); retry */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+        };
+    };
+    revokeMyNotificationEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The endpoint is revoked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationEndpointRevoked"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off, or no such endpoint of the caller (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description ORG_MISSING */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY; retry */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+        };
+    };
+    listMyNotificationPreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The preference of each topic */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationPreferenceList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off, or the session has no organization (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+        };
+    };
+    patchMyNotificationPreference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationPreferencePatch"];
+            };
+        };
+        responses: {
+            /** @description The topic view after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTopicView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description PREFERENCE_STALE (with currentRevision), ENDPOINT_NOT_USABLE (with reason), ENDPOINT_NOT_ALLOWED_FOR_TOPIC or FALLBACK_PROVIDER_NOT_ALLOWED */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description INVALID_REQUEST with the names of the offending fields (a topic outside the closed set is one), or ORG_MISSING */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY; retry */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
         };
     };
     listAdminRoleMembers: {
