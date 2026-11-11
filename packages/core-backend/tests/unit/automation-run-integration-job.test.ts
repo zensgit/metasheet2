@@ -145,7 +145,12 @@ describe('run_integration_job — save-time vocabulary (pure)', () => {
     const nested = { type: 'run_integration_job', config: {} } as never
     const branch = { type: 'parallel_branch', config: { joinMode: 'all', branches: [{ key: 'a', actions: [nested] }] } } as never
     expect(collectRunIntegrationJobOccurrences('run_integration_job', { job: 1 }, null, [])).toEqual({ occurrences: [{ path: 'actionConfig', config: { job: 1 } }], error: null })
-    expect(collectRunIntegrationJobOccurrences('record_click', {}, [nested], [nested]).occurrences.map((o) => o.path)).toEqual(['actions[0].config'])
+    // an actions[] entry is collected as a top-level occurrence; I6d fix round 2 (F2): under a pair that is another
+    // action the rule is refused all the same — the job is its rule's only action (pair and list both)
+    const underOtherPair = collectRunIntegrationJobOccurrences('record_click', {}, [nested], [nested])
+    expect(underOtherPair.occurrences.map((o) => o.path)).toEqual(['actions[0].config'])
+    expect(underOtherPair.error).toMatch(/must be the only action of its rule/)
+    expect(collectRunIntegrationJobOccurrences('run_integration_job', {}, [nested], [nested])).toMatchObject({ error: null })
     expect(collectRunIntegrationJobOccurrences('record_click', {}, [branch], [branch, nested]).error).toMatch(/top-level action/)
     expect(collectRunIntegrationJobOccurrences('record_click', {}, null, [])).toEqual({ occurrences: [], error: null })
   })

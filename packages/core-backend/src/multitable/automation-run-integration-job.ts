@@ -196,6 +196,40 @@ export interface RunIntegrationJobOccurrence {
 
 const RUN_INTEGRATION_JOB_NESTED_ERROR = 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)'
 
+/** The 400 message (code VALIDATION_ERROR, as the nested refusal) for a rule that carries the job AND anything else. Fixed text, values-free. */
+export const RUN_INTEGRATION_JOB_NOT_SOLE_ERROR = 'run_integration_job must be the only action of its rule (no other action before it, after it or beside it)'
+
+/**
+ * R-69 I6d fix round 2 (F2; T-layer default) — THE JOB IS ITS RULE'S ONLY ACTION. A rule that carries
+ * run_integration_job at the top level is stored in one of exactly two shapes:
+ *   (A) the legacy pair is the job, and `actions` is absent, null or empty;
+ *   (B) the legacy pair is the job, and `actions` is exactly `[the job]` — the rule editor's shape (it posts the
+ *       action list and mirrors `actions[0]` into the pair).
+ * Everything else that carries the job is refused: the job after or before another action, two jobs, the job in
+ * `actions` under a pair that is another action, the job in the pair beside an `actions` list that holds anything
+ * else. Judged on the RAW list length — an entry that is not an action is still an entry beside the job.
+ *
+ * Why (round-1 judge, F2): the executor stops a rule at its first failed step and marks the rest skipped at the
+ * EXECUTION level — a job behind a failed step never reaches the step that emits its summary, so nothing alerts; and
+ * a job behind a step that suspends (wait_for_callback, start_approval) would run when the execution is resumed,
+ * at a time that is not the cron's. With the job alone, neither of those rules can be saved. The pair is required to
+ * be the job too, so `action_type = 'run_integration_job'` names every job rule this gate lets a save store, and a
+ * PATCH that re-types only the pair is refused instead of leaving a rule that still runs the job from `actions`.
+ *
+ * Pure; mirrored by the web editor (apps/web/src/multitable/runIntegrationJobAuthoring.ts
+ * validateRunIntegrationJobSoleAction, byte parity pinned by tests/unit/automation-run-integration-job-web-parity.test.ts).
+ * Returns the refusal, or null (also for a rule that does not carry the job at the top level at all).
+ */
+export function validateRunIntegrationJobSoleAction(actionType: string, actions: readonly unknown[] | null | undefined): string | null {
+  const list = Array.isArray(actions) ? actions : []
+  const pairIsJob = actionType === RUN_INTEGRATION_JOB_ACTION_TYPE
+  const jobsInList = list.filter((action) => isRecord(action) && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE).length
+  if (!pairIsJob && jobsInList === 0) return null
+  if (pairIsJob && list.length === 0) return null
+  if (pairIsJob && list.length === 1 && jobsInList === 1) return null
+  return RUN_INTEGRATION_JOB_NOT_SOLE_ERROR
+}
+
 /**
  * R-69 I6d — is the action carried inside a BRANCH LIST of this action config, at any depth? The branch lists are
  * `branches[*].actions[*]` and `defaultBranch.actions[*]`: the two lists the executor dispatches branch steps from
@@ -230,7 +264,9 @@ function branchListsCarryRunIntegrationJob(config: unknown): boolean {
 
 /**
  * Every TOP-LEVEL occurrence of the action — the legacy pair (`actionConfig`) and each entry of the rule's `actions`
- * list (`actions[i].config`) — and the refusal of every NESTED one.
+ * list (`actions[i].config`) — the refusal of every NESTED one and, fix round 2 (F2), the refusal of a rule in which
+ * the job is not the ONLY action (validateRunIntegrationJobSoleAction). A nested occurrence answers the nested
+ * message first.
  *
  * Top-level only, because the save gate's binding stamp and per-occurrence checks (closed config, the rule-sheet
  * guard) cover exactly those positions, and the job's lifecycle (lease, heartbeat, shutdown drain) is wired for
@@ -271,7 +307,8 @@ export function collectRunIntegrationJobOccurrences(
     const flattened = allActions.filter((action) => action && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE).length
     if (flattened > topLevelInActions) nested = true
   }
-  return { occurrences, error: nested ? RUN_INTEGRATION_JOB_NESTED_ERROR : null }
+  // F2: a nested occurrence answers first (its message names the fix); otherwise the job must be the only action.
+  return { occurrences, error: nested ? RUN_INTEGRATION_JOB_NESTED_ERROR : validateRunIntegrationJobSoleAction(actionType, actions) }
 }
 
 /** A fresh, opaque holder id for a job-lease claim (the executor uses the execution id + a suffix). */

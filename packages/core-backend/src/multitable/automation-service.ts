@@ -3068,6 +3068,8 @@ export class AutomationService {
    *     every `actions[i]`, plus the occurrence count of `allActions`, the caller's flattening of the same rule) —
    *     never by object identity, so the rule editor's shape (`actions[]` with `actions[0]` mirrored into the pair)
    *     reaches every check below, for EVERY occurrence, and both persisted columns are stamped;
+   *   - fix round 2 (F2): the job is not the rule's ONLY action — anything else in `actions`, a second job, or a
+   *     pair that is another action → 400, same code, its own fixed message (validateRunIntegrationJobSoleAction);
    *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);
    *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
    *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
@@ -3381,8 +3383,9 @@ export class AutomationService {
 
   /**
    * Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. No flattened
-   * list exists on this path (R-69 I6d): the position walk alone decides a nested occurrence — a stored row that
-   * carries one never passed the save gate, and its trigger is not edited forward.
+   * list exists on this path (R-69 I6d): the position walk alone decides a nested occurrence. A stored row that
+   * carries one — or, fix round 2 (F2), one in which the job is not the only action — is not a shape this gate
+   * lets a save store, and its trigger is not edited forward: the edit is refused with that shape's own message.
    */
   private runIntegrationJobTriggerCouplingError(
     triggerType: string,

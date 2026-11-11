@@ -15,6 +15,9 @@
  * per rule). That half is pinned here too, against the LIVE guard: for the same config the web check and the
  * server guard agree, and the web message is the server's.
  *
+ * R-69 I6d fix round 2 (F2): the job is its rule's ONLY action (server validateRunIntegrationJobSoleAction, called
+ * from collectRunIntegrationJobOccurrences). The editor's mirror gives the byte-identical answer on a shape table.
+ *
  * Runs in the default core-backend unit job (tests/unit/**, not DB-gated) — no CI wiring needed.
  */
 import { describe, expect, it } from 'vitest'
@@ -24,8 +27,11 @@ import {
   RUN_INTEGRATION_JOB_APPLY_MODES as SERVER_APPLY_MODES,
   RUN_INTEGRATION_JOB_KINDS as SERVER_KINDS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS as SERVER_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_NOT_SOLE_ERROR as SERVER_NOT_SOLE_ERROR,
   RUN_INTEGRATION_JOB_TIMEOUT_MIN_MS as SERVER_TIMEOUT_MIN_MS,
+  collectRunIntegrationJobOccurrences as occurrencesServer,
   validateRunIntegrationJobConfig as validateServer,
+  validateRunIntegrationJobSoleAction as soleActionServer,
   validateRunIntegrationJobTriggerCoupling as couplingServer,
 } from '../../src/multitable/automation-run-integration-job'
 import {
@@ -45,13 +51,16 @@ import {
   RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS as WEB_EDITOR_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_KINDS as WEB_KINDS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS as WEB_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE as WEB_NOT_SOLE_MESSAGE,
   RUN_INTEGRATION_JOB_PROJECT_MISMATCH_MESSAGE as WEB_PROJECT_MISMATCH_MESSAGE,
   RUN_INTEGRATION_JOB_TIMEOUT_DEFAULT_MS as WEB_TIMEOUT_DEFAULT_MS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS as WEB_TIMEOUT_MAX_MS,
   RUN_INTEGRATION_JOB_TIMEOUT_MIN_MS as WEB_TIMEOUT_MIN_MS,
   buildRunIntegrationJobConfig,
   checkRunIntegrationJobRuleSheetProjects as ruleSheetProjectsWeb,
+  isRunIntegrationJobSelectable as selectableWeb,
   validateRunIntegrationJobConfig as validateWeb,
+  validateRunIntegrationJobSoleAction as soleActionWeb,
   validateRunIntegrationJobTriggerCoupling as couplingWeb,
 } from '../../../../apps/web/src/multitable/runIntegrationJobAuthoring'
 
@@ -227,6 +236,58 @@ describe('run_integration_job save gate — server/web byte parity (R-69 1b-iii)
     it('anti-vacuous: the favourable registry really is favourable (one project passes), and the count is what refuses two', async () => {
       expect(await serverVerdict(['P-001'])).toEqual({ ok: true })
       expect(await serverVerdict(['P-001', 'P-002'])).toEqual({ ok: false, refusal: 'project_mismatch' })
+    })
+  })
+
+  // ── R-69 I6d fix round 2 (F2): the job is its rule's ONLY action, on both sides ─────────────────────────────────
+  describe('sole action: a rule that carries the job holds nothing else, on both sides', () => {
+    const J = { type: SERVER_ACTION_TYPE, config: {} }
+    const X = { type: 'send_notification', config: {} }
+    /** [label, the legacy pair's type, the rule's actions, accepted?] — `accepted` pins the verdict independently. */
+    const SOLE_CASES: Array<[string, string, unknown, boolean]> = [
+      ['no job anywhere (pair only)', 'send_notification', null, true],
+      ['no job anywhere (a list of other actions)', 'send_notification', [X, X], true],
+      ['(A) the legacy pair alone, actions undefined', SERVER_ACTION_TYPE, undefined, true],
+      ['(A) the legacy pair alone, actions null', SERVER_ACTION_TYPE, null, true],
+      ['(A) the legacy pair alone, actions []', SERVER_ACTION_TYPE, [], true],
+      ['(B) the editor shape: actions [job], the pair mirrored', SERVER_ACTION_TYPE, [J], true],
+      ['the job, then another action', SERVER_ACTION_TYPE, [J, X], false],
+      ['another action, then the job', 'send_notification', [X, J], false],
+      ['the job between two others', 'send_notification', [X, J, X], false],
+      ['the job twice', SERVER_ACTION_TYPE, [J, J], false],
+      ['the job only in the pair, beside a list of another action', SERVER_ACTION_TYPE, [X], false],
+      ['the job only in the list, under a pair that is another action', 'send_notification', [J], false],
+      ['an entry that is not an action, beside the job', SERVER_ACTION_TYPE, [J, null], false],
+      ['a list of one entry that is not an action, under a job pair', SERVER_ACTION_TYPE, [null], false],
+      ['a list that is not a list is no list (the executor runs the pair)', SERVER_ACTION_TYPE, 'run_integration_job', true],
+      ['a bare type string is not an action entry', 'send_notification', ['run_integration_job'], true],
+      ['a job entry without a config is still a job entry', 'send_notification', [{ type: SERVER_ACTION_TYPE }], false],
+    ]
+
+    it('the web message is the server\'s, byte for byte', () => {
+      expect(WEB_NOT_SOLE_MESSAGE).toBe(SERVER_NOT_SOLE_ERROR)
+    })
+
+    it.each(SOLE_CASES)('%s: the same answer on both sides', (_label, actionType, actions, accepted) => {
+      const server = soleActionServer(actionType, actions as never)
+      expect(soleActionWeb(actionType, actions as never)).toBe(server)
+      expect(server === null).toBe(accepted)
+      if (!accepted) expect(server).toBe(SERVER_NOT_SOLE_ERROR)
+    })
+
+    it('anti-vacuous: the table refuses and accepts, and the server\'s save gate answers with this very check', () => {
+      expect(SOLE_CASES.filter(([, , , accepted]) => accepted).length).toBeGreaterThanOrEqual(6)
+      expect(SOLE_CASES.filter(([, , , accepted]) => !accepted).length).toBeGreaterThanOrEqual(8)
+      // collectRunIntegrationJobOccurrences — what assertRunIntegrationJobAtSave throws from — carries the same answer
+      expect(occurrencesServer('send_notification', {}, [X, J] as never, [X, J] as never).error).toBe(SERVER_NOT_SOLE_ERROR)
+      expect(occurrencesServer(SERVER_ACTION_TYPE, {}, [J] as never, [J] as never).error).toBeNull()
+    })
+
+    it('the editor offers the job for a NEW selection only on a rule with one action row — the shape the server accepts', () => {
+      expect(selectableWeb(true, 'schedule.cron', 'send_notification', 1)).toBe(true)
+      for (const count of [2, 3]) expect(selectableWeb(true, 'schedule.cron', 'send_notification', count)).toBe(false)
+      // a loaded job stays listed whatever the count (never silently dropped); the save block is what stops the save
+      expect(selectableWeb(false, 'record.created', SERVER_ACTION_TYPE, 3)).toBe(true)
     })
   })
 })

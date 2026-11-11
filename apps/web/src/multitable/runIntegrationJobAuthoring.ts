@@ -15,6 +15,8 @@
  *      the mirror exists so a refusal is an inline "why can't I save" line, not an opaque 400.
  *      1b (R-69 I6d) adds the count half of the server's rule-sheet guard: EXACTLY ONE project per rule
  *      (RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS) — the editor's project limit; the mirror's 20 is not.
+ *      1c (R-69 I6d fix round 2, F2) mirrors the server's validateRunIntegrationJobSoleAction: the job is its rule's
+ *      ONLY action.
  *   2. Draft <-> config helpers for the editor (project list text, timeout in minutes).
  *   3. The VALUES-FREE step-result view: the executor's `output.outcome` / `output.reason` vocabulary
  *      (automation-executor.ts runIntegrationJobStep / runIntegrationJobUnit, plugin lib/integration-run-port.cjs)
@@ -212,6 +214,40 @@ export function checkRunIntegrationJobRuleSheetProjects(config: unknown): RunInt
   return { code: 'projects_not_single', message: RUN_INTEGRATION_JOB_PROJECT_MISMATCH_MESSAGE }
 }
 
+// ── 1c. The job is its rule's only action (server: automation-run-integration-job.ts) ──────────────────────────
+
+/** Byte-identical to the server's RUN_INTEGRATION_JOB_NOT_SOLE_ERROR. */
+export const RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE =
+  'run_integration_job must be the only action of its rule (no other action before it, after it or beside it)'
+
+export type RunIntegrationJobSoleActionErrorCode = 'not_sole_action'
+
+/**
+ * R-69 I6d fix round 2 (F2) — structured mirror of the server's validateRunIntegrationJobSoleAction: a rule that
+ * carries the job at the top level is one of exactly two shapes — (A) the legacy pair is the job and `actions` is
+ * absent / null / empty, or (B) the pair is the job and `actions` is exactly `[the job]` (what this editor sends: the
+ * action list, with `actions[0]` mirrored into the pair). Anything else that carries the job is refused; judged on
+ * the raw list length. null for an accepted shape and for a rule that does not carry the job at the top level.
+ * Same branch order as the server; byte parity pinned by the core-backend web-parity test.
+ */
+export function checkRunIntegrationJobSoleAction(
+  actionType: string,
+  actions: readonly unknown[] | null | undefined,
+): RunIntegrationJobCheck<RunIntegrationJobSoleActionErrorCode> | null {
+  const list = Array.isArray(actions) ? actions : []
+  const pairIsJob = actionType === RUN_INTEGRATION_JOB_ACTION_TYPE
+  const jobsInList = list.filter((action) => isRecord(action) && action.type === RUN_INTEGRATION_JOB_ACTION_TYPE).length
+  if (!pairIsJob && jobsInList === 0) return null
+  if (pairIsJob && list.length === 0) return null
+  if (pairIsJob && list.length === 1 && jobsInList === 1) return null
+  return { code: 'not_sole_action', message: RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE }
+}
+
+/** Same signature and answers as the server's validateRunIntegrationJobSoleAction. */
+export function validateRunIntegrationJobSoleAction(actionType: string, actions: readonly unknown[] | null | undefined): string | null {
+  return checkRunIntegrationJobSoleAction(actionType, actions)?.message ?? null
+}
+
 // ── 2. Editor draft <-> config ───────────────────────────────────────────────────────────────────────────────
 
 /** The editor's draft keys for this action (UI only; buildRunIntegrationJobConfig turns them into the config). */
@@ -287,10 +323,12 @@ export function buildRunIntegrationJobConfig(draft: Partial<RunIntegrationJobDra
  * this type always stays in the option list (never silently dropped); a new one needs the server switch ON
  * (session feature `integrationAutomationRunAction`, from INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED) and a
  * schedule.cron trigger.
+ * R-69 I6d fix round 2 (F2): the job is its rule's ONLY action, so a new selection also needs the rule to have
+ * exactly one action row — the one being changed (`actionCount`, the rule's number of top-level actions).
  */
-export function isRunIntegrationJobSelectable(switchOn: boolean, triggerType: string, currentType: string): boolean {
+export function isRunIntegrationJobSelectable(switchOn: boolean, triggerType: string, currentType: string, actionCount = 1): boolean {
   if (currentType === RUN_INTEGRATION_JOB_ACTION_TYPE) return true
-  return switchOn === true && triggerType === RUN_INTEGRATION_JOB_TRIGGER_TYPE
+  return switchOn === true && triggerType === RUN_INTEGRATION_JOB_TRIGGER_TYPE && actionCount === 1
 }
 
 // ── 3. Values-free step-result view (executor output.outcome / output.reason) ─────────────────────────────

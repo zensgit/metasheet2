@@ -1439,12 +1439,19 @@
                  not selectable yet), the apply mode is a fixed display (no other mode is authorable), the timeout
                  is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly.
                  R-69 I6d: EXACTLY ONE project per rule — the project this sheet is registered to (the server's
-                 rule-sheet guard, register R-90). A loaded rule that lists several is shown whole and blocks save. -->
+                 rule-sheet guard, register R-90). A loaded rule that lists several is shown whole and blocks save.
+                 R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — no action is added beside it, and a
+                 loaded rule that has others is shown whole and blocks save until they are removed. -->
             <div v-if="action.type === 'run_integration_job'" class="meta-rule-editor__action-config" data-action-config="run_integration_job">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="rij-dry-run-hint">
                 {{ isZh
                   ? '仅预演：按计划对本表登记的项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
                   : 'Dry run only: runs the stock-prep pull as a dry run for the project this sheet is registered to, on schedule, and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
+              </div>
+              <div class="meta-rule-editor__hint" data-field="rij-sole-action-hint">
+                {{ isZh
+                  ? '此动作必须是规则里唯一的动作：带有它的规则不能再添加其他动作。'
+                  : 'This action is the only action of its rule: a rule that has it takes no other action.' }}
               </div>
               <label class="meta-rule-editor__label">{{ isZh ? '任务种类' : 'Job kind' }}</label>
               <el-select v-model="(action.config.rijKind as string)" class="meta-rule-editor__select" data-field="rijKind">
@@ -1803,8 +1810,10 @@
               </el-collapse-item>
             </el-collapse>
           </div>
+          <!-- R-69 I6d fix round 2 (F2): no second action beside run_integration_job — it is its rule's only action
+               (the server refuses anything else; the job's own config block says so). -->
           <el-button
-            v-if="draft.actions.length < 3"
+            v-if="draft.actions.length < 3 && !draftCarriesRunIntegrationJob"
             size="small"
             class="meta-rule-editor__btn"
             data-action="add-action"
@@ -2033,6 +2042,7 @@ import {
   buildRunIntegrationJobConfig,
   checkRunIntegrationJobConfig,
   checkRunIntegrationJobRuleSheetProjects,
+  checkRunIntegrationJobSoleAction,
   checkRunIntegrationJobTriggerCoupling,
   defaultRunIntegrationJobDraft,
   isRunIntegrationJobSelectable,
@@ -2206,6 +2216,10 @@ const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbW
 // R-69 1b-iii: run_integration_job is offered for a NEW selection only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED, surfaced as the session feature integrationAutomationRunAction).
 const integrationRunActionEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunAction'))
+// R-69 I6d fix round 2 (F2): run_integration_job is its rule's ONLY action (server: validateRunIntegrationJobSoleAction).
+// While the draft carries one, no action is added beside it; a LOADED rule that already has others is shown whole
+// and blocked at save (runIntegrationJobSaveBlockReasons) until they are removed.
+const draftCarriesRunIntegrationJob = computed(() => draft.value.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE))
 // R-69 1c: integration.run_finished is offered for a NEW rule only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, surfaced as the session feature integrationAutomationRunEvent).
 const integrationRunEventEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunEvent'))
@@ -2585,7 +2599,8 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
   }
   // R-69 1b-iii: run_integration_job — new only with the switch ON and a schedule.cron trigger; a loaded one
   // always stays listed (never silently dropped). Top-level only: not in any branch-authorable list.
-  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType)) {
+  // R-69 I6d fix round 2 (F2): and only on a rule with ONE action row — the job is its rule's only action.
+  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, draft.value.actions.length)) {
     if (!types.includes(RUN_INTEGRATION_JOB_ACTION_TYPE)) types.push(RUN_INTEGRATION_JOB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
@@ -4308,13 +4323,31 @@ const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
 // server's: the action is not offered for a new selection while it is off.
 // R-69 I6d: after the pure mirror, the count half of the server's rule-sheet guard (register R-90: EXACTLY ONE
 // project per rule, the sheet's registered one) — checkRunIntegrationJobRuleSheetProjects, same server order.
+// R-69 I6d fix round 2 (F2): before all of them, as on the server, the job must be the rule's ONLY action
+// (checkRunIntegrationJobSoleAction, the mirror of validateRunIntegrationJobSoleAction).
 const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
   const indexes = draft.value.actions
     .map((action, idx) => (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE ? idx : -1))
     .filter((idx) => idx >= 0)
   if (indexes.length === 0) return []
   const reasons: SaveBlockReason[] = []
-  // Same order as the server gate: the switch first (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
+  // R-69 I6d fix round 2 (F2), first as on the server: the job is its rule's ONLY action. The mirror is given what
+  // buildPayload sends — the action list, and its first action's type as the legacy pair. Reachable from a LOADED
+  // rule only (one stored before this rule, or written by hand): this editor adds nothing beside the job.
+  const sole = checkRunIntegrationJobSoleAction(
+    draft.value.actions[0]?.type ?? '',
+    draft.value.actions.map((action) => ({ type: action.type })),
+  )
+  if (sole) {
+    reasons.push({
+      key: 'runIntegrationJobSole',
+      message: isZh.value
+        ? '「运行集成任务」必须是规则里唯一的动作：请移除其他动作（其他动作请另建一条规则）。'
+        : 'Run integration job must be the only action of its rule: remove the other actions (give them a rule of their own).',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
+  // Then the switch (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
   // while the switch is off, but the rule cannot be saved with it — say so instead of an opaque 403.
   if (!integrationRunActionEnabled.value) {
     reasons.push({
@@ -4491,6 +4524,8 @@ function removeConditionNode(path: ConditionPath) {
 
 function addAction() {
   if (draft.value.actions.length >= 3) return
+  // R-69 I6d fix round 2 (F2): run_integration_job is its rule's only action — nothing is added beside it.
+  if (draftCarriesRunIntegrationJob.value) return
   draft.value.actions.push(createDraftAction('update_record'))
 }
 

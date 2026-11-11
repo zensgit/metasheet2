@@ -40,8 +40,11 @@
  *   - R-69 I6d fix round 2 (F1): `updateRule` against a CONCURRENT PATCH on the real table — two AutomationService
  *     instances, each over its own one-connection pool (two backends), the first request's UPDATE held at the moment
  *     its statement would be sent. A write whose stored row changed since it was read updates nothing and is
- *     re-validated against the row as it now is (action type × action config; trigger × action, both orders), and
- *     two saves stamped in the same millisecond are still two row versions.
+ *     re-validated against the row as it now is (action type × action config; trigger × action, both orders; pair ×
+ *     actions[] under F2's sole-action rule, both orders), and two saves stamped in the same millisecond are still
+ *     two row versions.
+ *   - R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — the job behind or before another action is
+ *     refused on the real createRule / updateRule (no row, no change).
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
@@ -458,7 +461,7 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
   // refuse that shape as "nested" (it compared object identity against a list the service had already copied), so no
   // case before this one put an `actions[]` occurrence through a real INSERT / UPDATE. Here the wire body (JSON
   // round-tripped: no shared object) goes through the route's own parsers into the real createRule / updateRule.
-  test('R-69 I6d: the editor wire shape (actions[] + its mirrored pair) saves on the real tables with BOTH JSONB columns stamped, is re-stamped from the stored creator on edit, refuses nested and wrong-project occurrences without a row or a change, and its stored actions[0] runs once', async () => {
+  test('R-69 I6d: the editor wire shape (actions[] + its mirrored pair) saves on the real tables with BOTH JSONB columns stamped, is re-stamped from the stored creator on edit, refuses nested, later-step (fix round 2, F2) and wrong-project occurrences without a row or a change, and its stored actions[0] runs once', async () => {
     const principalId = `svc6d_${RUN}`
     const editorId = `editor6d_${RUN}`
     const project = `P6D-${RUN}`
@@ -488,6 +491,7 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     })
     const foreignBinding = { principalId, tenantId: `${TENANT}_other` }
     const NESTED = 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)'
+    const NOT_SOLE = 'run_integration_job must be the only action of its rule (no other action before it, after it or beside it)'
     const storedRow = async (ruleId: string) => (await q(`SELECT name, action_type, action_config, actions, created_by FROM automation_rules WHERE id = $1`, [ruleId])).rows[0] as
       { name: string; action_type: string; action_config: Record<string, unknown>; actions: WireAction[]; created_by: string }
     const rulesOnSheet = async () => (await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [sheet])).rows.length
@@ -497,8 +501,15 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     const nestedRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(editorBody([other, nestedIn(job(project, { binding: foreignBinding }))]), principalId)))
     expect(nestedRefusal).toBeInstanceOf(AutomationRuleValidationError)
     expect(nestedRefusal!.message).toBe(NESTED)
-    // an actions[] occurrence that names a project the sheet is not registered to: refused by the real registry
-    const projectRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(editorBody([other, job(`${project}-x`)]), principalId)))
+    // I6d fix round 2 (F2): the job behind another action is refused as not its rule's only action (round 1 took this
+    // shape as far as the registry) — whatever project it names
+    for (const laterStep of [editorBody([other, job(project)]), editorBody([other, job(`${project}-x`)]), editorBody([job(project), other])]) {
+      const laterStepRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(laterStep, principalId)))
+      expect(laterStepRefusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(laterStepRefusal!.message).toBe(NOT_SOLE)
+    }
+    // the job ALONE, naming a project the sheet is not registered to: refused by the real registry
+    const projectRefusal = await refusalOf(service.createRule(sheet, parseCreateRuleInput(editorBody([job(`${project}-x`)]), principalId)))
     expect(projectRefusal).toBeInstanceOf(AutomationRuleValidationError)
     expect(projectRefusal!.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
     expect(await rulesOnSheet()).toBe(0)
@@ -528,10 +539,14 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
       expect(afterEdit.created_by).toBe(principalId)
       expect(JSON.stringify(afterEdit)).not.toContain(editorId)
 
-      // an edit that moves the job into a branch, or names another project in actions[]: refused, the row is unchanged
+      // an edit that moves the job into a branch, puts another action before it (F2), or names another project in
+      // actions[]: refused, the row is unchanged
       const moved = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(editorBody([other, nestedIn(job(project))]))!, editorId))
       expect(moved).toBeInstanceOf(AutomationRuleValidationError)
       expect(moved!.message).toBe(NESTED)
+      const pushedBack = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(editorBody([other, job(project)]))!, editorId))
+      expect(pushedBack).toBeInstanceOf(AutomationRuleValidationError)
+      expect(pushedBack!.message).toBe(NOT_SOLE)
       const renamedProject = await refusalOf(service.updateRule(rule.id, sheet, parseUpdateRuleInput(wire({ actions: [job(`${project}-x`)] }))!, editorId))
       expect(renamedProject).toBeInstanceOf(AutomationRuleValidationError)
       expect(renamedProject!.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
@@ -915,6 +930,44 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
       expect(refusal.message).toBe(COUPLING)
     } finally {
       await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  // F2 under F1: "the job is its rule's ONLY action" is a rule about TWO columns (the pair and actions[]), so two
+  // PATCHes that each send one of them are exactly the pair a missing version predicate lets through. Either order.
+  test('pair × actions[] (the sole-action rule, F2): a PATCH that puts ANOTHER action in actions[] and the job PATCH — whichever lost is re-validated against the winner\'s row and refused; the job is never left beside another action', async () => {
+    const NOT_SOLE = 'run_integration_job must be the only action of its rule (no other action before it, after it or beside it)'
+    const otherAction = { type: 'record_click', config: {} }
+    const otherList = { actions: [otherAction] }
+    const refusedAsNotSole = (settled: Settled) => {
+      expect(settled.ok).toBe(false)
+      const refusal = (settled as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal.message).toBe(NOT_SOLE)
+    }
+    // held: the actions[] PATCH (read while the pair is record_click — no job in sight); other: the job PATCH
+    const first = await seedPlainCronRule(`f1_sole_list_${RUN}`)
+    try {
+      const { held, other } = await interleave(first.id, otherList, jobPatch)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(first.id)
+      expect([row.action_type, row.actions]).toEqual(['run_integration_job', null])
+      expect(row.action_config).toEqual({ ...jobConfig(), binding: serverBinding })
+      refusedAsNotSole(held)
+    } finally {
+      await dropRule(first.id)
+    }
+    // held: the job PATCH (read while actions[] is null); other: the actions[] PATCH
+    const second = await seedPlainCronRule(`f1_sole_job_${RUN}`)
+    try {
+      const { held, other } = await interleave(second.id, jobPatch, otherList)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(second.id)
+      expect([row.action_type, row.actions]).toEqual(['record_click', [otherAction]])
+      expect(row.action_config).toEqual({})
+      refusedAsNotSole(held)
+    } finally {
+      await dropRule(second.id)
     }
   }, 30_000)
 
