@@ -167,11 +167,19 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 
 开关打开后，令牌里没有租户声明的请求一律 403 `OPERATOR_SCOPE_TENANT_REQUIRED`（`http-routes.cjs:1754-1766`），而且覆盖整个集成插件，不只备料（交付说明 `customer-delivery-guide-20260904.md` §5-5）。**如果定时拉取用的令牌没有租户声明，开关一开它就停。** 所以顺序是：
 
-1. **确认定时拉取的令牌绑定了租户（只记「是 / 否」，不记令牌、账号、租户）。** 两条都要「是」：
-   - 定时任务的命令行里**没有** `--allow-tenantless`（只数次数，应为 0）。没有这个参数时，脚本每次运行都先解开令牌、只看有没有非空的 `tenantId` 声明，没有就拒绝运行、退出码 1（`scripts/ops/stock-preparation-scheduled-pull.mjs:43-48`、`:187`、`:787-797`）；
-   - 第 3 步换上新版脚本后手动触发的那一次，输出里没有 `MS_TOKEN does not carry a tenantId claim` 这句（只数次数，应为 0）。只看这一句，不看退出码：退出码还会因别的原因不为 0（例如某个项目在等恢复，§1.5）。
+1. **确认定时拉取的令牌绑定了租户（只记「是 / 否」和计数，不记令牌、账号、租户、路径）。** 决定「是」的是 (a) 和 (b) 两条，(c) 是第二道核对；三条都满足才记「是」：
+   - **(a) 真正启动 node 的那一行没有 `--allow-tenantless`（只数次数，应为 0）。** 定时任务的「操作」指向的是 `.cmd` 包装脚本（交付说明 §3.2），参数写在包装脚本里，**不在任务自己的命令行上**——只看任务的命令行会漏掉它。所以先看任务的「操作」指向哪个文件，一路跟到运行 `node … stock-preparation-scheduled-pull.mjs` 的那一行（包装脚本再调别的脚本，就接着跟），任务自己的参数和那一行都要数：
 
-   任一条是「否」：先按交付说明 §5-5 第 2 步用 `--tenant-id` 重新换发令牌（`scripts/ops/attendance-window-runner-mint-token.mjs`），换好再从第 1 步查起。**不要**为了让脚本跑通而加 `--allow-tenantless`。
+     ```powershell
+     @((Get-ScheduledTask -TaskName '<定时任务名>').Actions | Where-Object { ('' + $_.Execute + ' ' + $_.Arguments).Contains('--allow-tenantless') }).Count
+     @(Select-String -LiteralPath '<包装脚本路径>' -SimpleMatch -Pattern '--allow-tenantless').Count
+     ```
+
+     两个计数都应为 0。没有这个参数时，脚本每次运行都先解开令牌、只看有没有非空的 `tenantId` 声明，没有就拒绝运行、退出码 1、**标准输出一行都不写**（`scripts/ops/stock-preparation-scheduled-pull.mjs:43-48`、`:187`、`:787-797`）。
+   - **(b) 手动触发的这一次确实跑到了项目（结果行至少 1 行）。** §1.5 换上新版脚本后，用 `Start-ScheduledTask` 手动触发一次（跑的就是任务本身那条链）。只看**这一次新增**的输出：触发前先记下日志的行数，或让包装脚本这一次写到一个新文件。标准输出里每个项目写一行含 `"projectNo"` 的结果（`:811`、`:821-838`），这一次新增的行里这样的行至少 1 行。被拒的那次运行没有任何结果行，所以它不可能在这一条上读成「是」；日志里昨天留下的结果行不算。
+   - **(c) 同一次运行里两句提示都是 0（第二道核对）。** 这两句只写到**标准错误**，标准输出里永远是 0：`MS_TOKEN does not carry a tenantId claim`（拒绝运行，`:791`）和 `MS_TOKEN does not declare a tenantId claim`（带着 `--allow-tenantless` 放行时的警告，`:800`；真正让无租户令牌跑起来的就是这条路，它打的是这句，不是前一句）。所以先确认 node 那一行把标准错误也接进了日志（例如 `2>&1` 或 `2>` 到文件）；**没有接标准错误时，这两个 0 什么也证明不了**，只能靠 (a)(b)。接了的话，两句都数，都应为 0。
+
+   只看这些计数，不看退出码：退出码还会因别的原因不为 0（例如某个项目在等恢复，§1.5）。任一条不满足：先按交付说明 §5-5 第 2 步用 `--tenant-id` 重新换发令牌（`scripts/ops/attendance-window-runner-mint-token.mjs`），把 `--allow-tenantless` 从启动行删掉，换好再从 (a) 查起。**不要**为了让脚本跑通而加 `--allow-tenantless`。
 2. 按交付说明 §5-5 的前置顺序做完其余几步（`user_orgs` 每个账号恰好一条活跃行、全员重新登录）。
 3. 在 `app.env` 里加一行 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`，重启后端；按 §5-5 第 4 步核两条（进程环境里能看到这一行；一个没有租户声明的旧令牌被拒 403 `OPERATOR_SCOPE_TENANT_REQUIRED`）。
 4. 再手动触发一次定时拉取：每个项目的结果应与打开前相同。
@@ -392,7 +400,7 @@ SELECT kind, count(*) FROM integration_stock_prep_component_ruling WHERE status 
 [S6-8] 2026-11-xx 装机窗口：Pending 17 → 0；--confirm 100/101/102/103/104/106/107 全为 0；授权 14 表全真；装后计数全 0
 [S6-8] 普查 第 1 页：序号 1 complete D1=0 D2=0；序号 2 incomplete reason=pack_unreadable；序号 3 complete D1=0 D2=1 governed=none
 [S6-8] 序号 3 就绪 v6：failing=[continuation_support_version]
-[S6-8] 租户声明开关（§1.6）：定时拉取令牌绑定租户 = 是；--allow-tenantless 计数 0；开关已加、旧令牌 403
+[S6-8] 租户声明开关（§1.6）：定时拉取令牌绑定租户 = 是；(a) --allow-tenantless 计数 任务 0 / 包装脚本启动行 0；(b) 本次手动触发结果行 2；(c) 标准错误已接入，does not carry 0 / does not declare 0；开关已加、旧令牌 403
 ```
 
 **只能进私有记录**：项目号、序号与项目 / objectId 的对照、`componentHandle`（它是业务值的摘要，可被反推）、执行 id、完整的普查 / 核对应答文件、待处理页里的部件编码和名称、主机、地址、令牌、数据源 id、批复原文里的任何业务值。
