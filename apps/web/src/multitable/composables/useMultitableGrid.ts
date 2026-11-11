@@ -585,6 +585,11 @@ export function useMultitableGrid(opts: {
   // (which would answer 403). Absent ⇒ every cell writes through /patch, exactly as before. Range fill / paste
   // (patchRange) never consult it: those keep treating the cells as read-only.
   resolveManualCellWrite?: (recordId: string, fieldId: string) => ManualCellWrite | null
+  // A write that starts outside patchCell and that the history does not hold yet (an attachment upload or delete;
+  // in the drawer, and on a grid upload, the field is patched once it is done). While this returns true, undo and
+  // redo do nothing, as during a cell patch (a step would replay an earlier, unrelated edit to the server), also
+  // for an edit made since it began.
+  holdsHistory?: () => boolean
 }) {
   const client = opts.client ?? multitableClient
   const initialPageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
@@ -1587,7 +1592,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function undo() {
-    if (rangePending || pendingCellPatches > 0 || !canUndo.value) return
+    if (rangePending || pendingCellPatches > 0 || opts.holdsHistory?.() || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
     const route = manualReplayRoute(edit)
@@ -1608,7 +1613,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function redo() {
-    if (rangePending || pendingCellPatches > 0 || !canRedo.value) return
+    if (rangePending || pendingCellPatches > 0 || opts.holdsHistory?.() || !canRedo.value) return
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()

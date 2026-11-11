@@ -208,8 +208,9 @@ describe('attendance legacy fallback load', () => {
 })
 
 describe('ATTENDANCE_PROVISION_ROLE_PERMISSIONS (AttendanceView legacy fallback)', () => {
-  // Server admin template keys: packages/core-backend/src/routes/attendance-admin.ts
-  // ATTENDANCE_ROLE_TEMPLATES.admin.permissions (lines 240-244 on main 5920de5b2).
+  // Explicit literals. They match ATTENDANCE_ROLE_TEMPLATES.admin.permissions
+  // at packages/core-backend/src/routes/attendance-admin.ts:240-244.
+  // This spec does not import or compare the server template module.
   const serverAdminTemplatePermissions = [
     'attendance:read',
     'attendance:write',
