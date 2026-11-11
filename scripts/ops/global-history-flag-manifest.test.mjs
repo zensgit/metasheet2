@@ -1051,6 +1051,7 @@ test('stock-prep sheet-repair switch (batch-refresh step 6d-2a, R-91): boolean, 
   // Round 2 (coordinator rulings C-2 / C-3): the install gate does not depend on the pull-batch switch, and the
   // continuation writes no row.
   assert.match(spec.purpose, /whatever the pull-batch switch says/)
+  assert.match(spec.purpose, /whose aborted install still holds its persisted plan or its settings lock, is refused/)
   assert.doesNotMatch(spec.purpose, /While the pull-batch switch is on/)
   assert.match(spec.purpose, /verify_and_close_run, which verifies every planned row against the run's own backup and writes NO row/)
   assert.match(spec.purpose, /owner gate ② per sheet/)

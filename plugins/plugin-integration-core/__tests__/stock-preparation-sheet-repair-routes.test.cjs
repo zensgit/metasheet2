@@ -19,9 +19,11 @@
 //   RR-04  (RP-01) a governed project: a preview refusal and 409 for an execute, nothing written — for a retire and
 //          for the restore of a run whose project was governed afterwards
 //   RR-05  the install gate through the route (coordinator ruling C-2): read from the batch ledger on every preview and
-//          execute of a recipe WHATEVER the batch switch says — `installing` and an aborted install whose lock is held
-//          are 409, with the switch off too; its one read is the repair's only batch-ledger statement; an unwired or
-//          unreadable ledger is 503 by name before anything is read; the fills report and the run list never read it
+//          execute of a recipe WHATEVER the batch switch says — `installing` and a pending sheet that still carries an
+//          aborted install's persisted plan (or its settings lock) are 409, with the switch off too; a pending sheet
+//          with neither is repairable; its one read is the repair's only batch-ledger statement; an unwired or
+//          unreadable ledger, or a row without its install facts, is 503 by name; the fills report and the run list
+//          never read it
 //   RR-06  mutual exclusion with a pull, a recovery and an install: whoever holds the sheet, the repair is 409
 //          WRITE_LOCKED; while the repair holds it, a pull preview is 409 WRITE_LOCKED naming `sheet_repair`
 //   RR-07  a host that cannot honour the write fence refuses the execute (501) BEFORE the claim is spent; the old root
@@ -572,7 +574,7 @@ test('RR-04 (RP-01) a governed project is never repaired: the preview names proj
 
 // ── RR-05 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): read from the batch ledger on every preview and execute WHATEVER the batch switch says; `installing` and an aborted install whose lock is held are 409; an unwired or unreadable ledger is 503 by name; the fills report and the run list never read it', async () => {
+test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): read from the batch ledger on every preview and execute WHATEVER the batch switch says; `installing` and a pending sheet that still carries an aborted install\'s persisted plan (or its settings lock) are 409; an unwired or unreadable ledger is 503 by name; the fills report and the run list never read it', async () => {
   const BOTH = { [REPAIR_ENV]: 'true', [PULL_BATCH_ENV]: 'true' }
   const GATE_READ = [['selectOne', pbKit.T.sheet], ['select', pbKit.T.batch]]
   // The SAME behaviour with the batch switch off (`ON` leaves it unset) and on: the gate does not look at the switch.
@@ -596,8 +598,9 @@ test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): rea
       if (env === ON) assert.deepEqual(st.batchStatements(), GATE_READ, 'off: the execute read the sheet state once, inside the lease, and nothing else of that ledger')
       const refused = dataOf(await withEnv(env, () => preview(st)))
       assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest], [false, ['install_in_progress'], null], label)
-      // That install is ABORTED and its settings lock stays held (a label of its plan may be on the sheet, so its next
-      // run would RESUME the persisted plan): refused under the same code, naming the state.
+      // That install is ABORTED: the row is `pending` again and still carries its persisted plan (here with its settings
+      // lock held as well — a label of the plan was on the sheet). Its next run RESUMES that plan whenever one of its
+      // labels is on the sheet: refused under the same code, naming the state.
       await st.db.updateRow(pbKit.T.sheet, { history_status: 'pending', history_plan: { aborted: true }, resolved_at: null, resolved_by: null, history_mode: null, history_batch_count: null }, { id: sheetRow.id })
       const held = dataOf(await withEnv(env, () => preview(st)))
       assert.deepEqual([held.eligible, held.refusals, held.planDigest], [false, ['install_aborted_unresolved'], null], label)
@@ -606,9 +609,26 @@ test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): rea
       assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims()], [false, [], []], label)
       // The batch ledger untouched by the repair: the row is exactly what the install left.
       assert.deepEqual(st.db.rows(pbKit.T.sheet).map((row) => [row.history_status, row.version, row.settings_locked_at]), [['pending', 0, '2026-11-10T00:00:00.000Z']])
-      // The abort RELEASED the lock (no label of the plan on the sheet): the next install plans afresh, so the SAME
-      // approved digest runs.
+      // The abort RELEASED the lock (no label of the plan was on the sheet THEN) and the plan is still on the row:
+      // refused all the same (ruling C-2 — the ledger shows the plan; it cannot show whether a labelled row has come
+      // back to the sheet since, and the install's next run would then resume that plan).
       await st.db.updateRow(pbKit.T.sheet, { settings_locked_at: null }, { id: sheetRow.id })
+      const kept = dataOf(await withEnv(env, () => preview(st)))
+      assert.deepEqual([kept.eligible, kept.refusals, kept.planDigest], [false, ['install_aborted_unresolved'], null], `${label}: the plan alone`)
+      const keptError = expectRefusal(await withEnv(env, () => execute(st, plan.planDigest)), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_aborted_unresolved' })
+      assert.equal(keptError.details.partial, false)
+      // The plan's DIGEST alone (a plan cell that no longer reads) is a persisted plan too …
+      await st.db.updateRow(pbKit.T.sheet, { history_plan: null, history_plan_digest: 'd'.repeat(64) }, { id: sheetRow.id })
+      assert.deepEqual(dataOf(await withEnv(env, () => preview(st))).refusals, ['install_aborted_unresolved'], `${label}: the digest alone`)
+      // … and so is the settings lock alone (a plan the abort could not read keeps it).
+      await st.db.updateRow(pbKit.T.sheet, { history_plan_digest: null, settings_locked_at: '2026-11-10T00:00:00.000Z' }, { id: sheetRow.id })
+      assert.deepEqual(dataOf(await withEnv(env, () => preview(st))).refusals, ['install_aborted_unresolved'], `${label}: the lock alone`)
+      expectRefusal(await withEnv(env, () => execute(st, plan.planDigest)), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_aborted_unresolved' })
+      assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims(), st.lockRow().lease_id], [false, [], [], null], label)
+      // A pending sheet with NEITHER a plan nor a lock (never installed: its first install plans from the rows as they
+      // are then) is repairable — the SAME approved digest runs.
+      await st.db.updateRow(pbKit.T.sheet, { settings_locked_at: null }, { id: sheetRow.id })
+      assert.deepEqual(st.db.rows(pbKit.T.sheet).map((row) => [row.history_status, row.history_plan, row.history_plan_digest, row.settings_locked_at]), [['pending', null, null, null]])
       assert.equal(dataOf(await withEnv(env, () => execute(st, plan.planDigest))).status, 'completed', label)
     } finally { st.h.restore() }
   }
@@ -645,6 +665,24 @@ test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): rea
     const error = expectRefusal(await withEnv(ON, () => preview(odd)), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
     assert.equal(error.details.operation, 'read_sheet_shape')
   } finally { odd.h.restore() }
+  // A sheet row WITHOUT one of its install facts (the status, the plan, the plan's digest, the settings lock) is not
+  // the ledger's shape either: 503 naming the facts — never "no plan" or "not locked". Each fact in turn, on a row
+  // that would otherwise read as repairable; the whole row is the control.
+  const whole = { historyStatus: 'pending', historyPlan: null, historyPlanDigest: null, settingsLockedAt: null }
+  for (const missing of [null, 'historyStatus', 'historyPlan', 'historyPlanDigest', 'settingsLockedAt']) {
+    const sheet = { ...whole }
+    if (missing) delete sheet[missing]
+    const partial = await mount({ serviceOverrides: { stockPreparationPullBatchStore: { readSheetState: async () => ({ sheet, batches: [] }) } } })
+    try {
+      const answer = await withEnv(ON, () => preview(partial))
+      if (!missing) {
+        assert.equal(dataOf(answer).eligible, true, 'the control: the whole row of a never-installed pending sheet is repairable')
+        continue
+      }
+      const error = expectRefusal(answer, { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+      assert.deepEqual([error.details.operation, error.details.partial, partial.sourceState.reads, partial.runs(), partial.claims()], ['read_sheet_facts', false, 0, [], []], missing)
+    } finally { partial.h.restore() }
+  }
 })
 
 // ── RR-06 ────────────────────────────────────────────────────────────────────────────────────────────────

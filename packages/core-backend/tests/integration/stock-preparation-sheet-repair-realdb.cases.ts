@@ -40,9 +40,11 @@
  *   S9D-15   one sheet, one writer: a pull, a recovery or an install holding the sheet lease refuses the repair 409
  *            WRITE_LOCKED (nothing of it runs); while the repair holds the lease a pull cannot take it (WRITE_LOCKED
  *            naming `sheet_repair`); the install gate (coordinator ruling C-2) is read from the batch ledger WHATEVER
- *            the batch switch says: with the switch OFF a sheet whose batch columns are being installed, and one whose
- *            aborted first install still holds its settings lock, are refused 409 INSTALL_IN_PROGRESS inside the
- *            lease; once the lock is released, or the install resolved, the same approved digest runs.
+ *            the batch switch says: with the switch OFF a sheet whose batch columns are being installed, and a pending
+ *            one that still carries an aborted first install's persisted plan (the plan, or its digest alone — the
+ *            settings lock held or released) or its settings lock, are refused 409 INSTALL_IN_PROGRESS inside the
+ *            lease; a pending sheet with neither is repairable; once the install resolved, the same approved digest
+ *            runs.
  *   S9D-16   takeover / zombie: the repair's lease lapses mid-run and a pull takes the sheet over — the HOST fence
  *            refuses the zombie's next patch (nothing lands), its answer carries the partial count, its run row stays
  *            open (the 108 stop-condition query answers 1); the next repair run closes it `abandoned` in its own begin
@@ -798,8 +800,9 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const error = errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS)
       expect([error.details.reason, error.details.partial]).toEqual(['install_in_progress', false])
       expect([await inst.runs(), await inst.claims(), inst.patchInputs.length, (await inst.lockRow()).lease_id]).toEqual([[], [], 0, null])
-      // That first install is ABORTED and its settings lock stays held (a label of its persisted plan may be on the
-      // sheet, so its next run would RESUME that plan): refused under the same code, naming the state.
+      // That first install is ABORTED: the row is `pending` again and still carries its persisted plan (here with its
+      // settings lock held as well). Its next run RESUMES that plan whenever one of its labels is on the sheet: refused
+      // under the same code, naming the state.
       await q(`UPDATE ${BI_SHEET_TABLE} SET history_status = 'pending', history_plan = '{"aborted": true}'::jsonb WHERE id = $1`, [sheetRowId])
       const heldPreview = dataOf(await inst.preview())
       expect([heldPreview.eligible, heldPreview.refusals]).toEqual([false, ['install_aborted_unresolved']])
@@ -808,8 +811,25 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect([await inst.runs(), await inst.claims(), inst.patchInputs.length]).toEqual([[], [], 0])
       const untouched = (await q(`SELECT history_status, version, settings_locked_at IS NOT NULL AS locked FROM ${BI_SHEET_TABLE} WHERE id = $1`, [sheetRowId])).rows[0]
       expect([untouched.history_status, Number(untouched.version), untouched.locked], 'the repair never writes the batch ledger').toEqual(['pending', 0, true])
-      // An abort that RELEASED the lock (no label of the plan on the sheet): the next install plans afresh — repairable.
+      // An abort that RELEASED the lock (no label of the plan was on the sheet THEN), the plan still on the row: refused
+      // all the same (ruling C-2 — the ledger shows the plan; it cannot show whether a labelled row has come back since).
       await q(`UPDATE ${BI_SHEET_TABLE} SET settings_locked_at = NULL WHERE id = $1`, [sheetRowId])
+      const keptPreview = dataOf(await inst.preview())
+      expect([keptPreview.eligible, keptPreview.refusals], 'the persisted plan alone').toEqual([false, ['install_aborted_unresolved']])
+      const kept = errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS)
+      expect([kept.details.reason, kept.details.partial]).toEqual(['install_aborted_unresolved', false])
+      // The plan's DIGEST alone is a persisted plan too, and so is the settings lock alone.
+      await q(`UPDATE ${BI_SHEET_TABLE} SET history_plan = NULL, history_plan_digest = $2 WHERE id = $1`, [sheetRowId, 'd'.repeat(64)])
+      expect(dataOf(await inst.preview()).refusals, 'the digest alone').toEqual(['install_aborted_unresolved'])
+      await q(`UPDATE ${BI_SHEET_TABLE} SET history_plan_digest = NULL, settings_locked_at = now() WHERE id = $1`, [sheetRowId])
+      expect(dataOf(await inst.preview()).refusals, 'the lock alone').toEqual(['install_aborted_unresolved'])
+      expect(errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS).details.reason).toBe('install_aborted_unresolved')
+      expect([await inst.runs(), await inst.claims(), inst.patchInputs.length, (await inst.lockRow()).lease_id]).toEqual([[], [], 0, null])
+      // A pending sheet with NEITHER a plan nor a lock (never installed: its first install plans from the rows as they
+      // are then) is repairable.
+      await q(`UPDATE ${BI_SHEET_TABLE} SET settings_locked_at = NULL WHERE id = $1`, [sheetRowId])
+      const bare = (await q(`SELECT history_status, history_plan IS NULL AS no_plan, history_plan_digest IS NULL AS no_digest, settings_locked_at IS NULL AS no_lock FROM ${BI_SHEET_TABLE} WHERE id = $1`, [sheetRowId])).rows[0]
+      expect([bare.history_status, bare.no_plan, bare.no_digest, bare.no_lock]).toEqual(['pending', true, true, true])
       expect(dataOf(await inst.preview()).eligible).toBe(true)
       // With the batch identifier ON the gate answers the same; resolved, the SAME approved digest runs.
       process.env[PULL_BATCH_SWITCH] = 'true'

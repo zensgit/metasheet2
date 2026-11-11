@@ -28,8 +28,9 @@
 //          that raised may have landed); a refusal before the first patch moves nothing; a failed bump never fails the run
 //   RP-13  the preview: refused while a writer holds the sheet; audited before the answer; values-free
 //   NI-01  the install gate (coordinator ruling C-2): the install state is read on EVERY analysis and is REQUIRED (no
-//          reader => refused by name, never "not installing"); `installing` and an aborted install whose settings lock is
-//          held refuse the preview and the execute (409 in the lease) for a retire and a restore; a reader that fails or
+//          reader => refused by name, never "not installing"); `installing` and a pending sheet that still carries an
+//          aborted install's persisted plan (or its settings lock) refuse the preview and the execute (409 in the
+//          lease) for a retire and a restore; a pending sheet with neither is repairable; a reader that fails or
 //          answers what the library does not understand refuses
 //   N6-01  (ruling C-1) the heartbeat N6 rule: the begin's and the finish's holder assert and every patch run at
 //          host-write depth 1; no heartbeat CAS is attempted while a ledger transaction is open; a guard without the
@@ -913,21 +914,37 @@ test('RP-13 the preview: refused while a writer holds the sheet; audited BEFORE 
 
 // ── NI-01 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is read on EVERY analysis and is required; `installing` and an aborted install whose lock is held refuse a retire and a restore — in the preview and, 409, in the lease; an unreadable or unintelligible answer refuses', async () => {
+test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is read on EVERY analysis and is required; `installing` and a pending sheet that still carries an aborted install\'s persisted plan (or its settings lock) refuse a retire and a restore — in the preview and, 409, in the lease; an unreadable or unintelligible answer refuses', async () => {
   // The decision, pure — from the values-free facts of the batch ledger's sheet row.
   for (const [facts, expected] of [
     [{ present: false }, 'none'],
-    [{ present: true, historyStatus: 'installing', settingsLocked: true }, 'installing'],
-    [{ present: true, historyStatus: 'installing', settingsLocked: false }, 'installing'],
-    // An aborted FIRST install: the lock still held => its next run may RESUME the persisted plan.
-    [{ present: true, historyStatus: 'pending', settingsLocked: true }, 'aborted_unresolved'],
-    // Never installed, or aborted with the lock released (the abort proved no label of the plan is on the sheet).
-    [{ present: true, historyStatus: 'pending', settingsLocked: false }, 'none'],
-    [{ present: true, historyStatus: 'born_empty', settingsLocked: false }, 'none'],
-    [{ present: true, historyStatus: 'born_empty', settingsLocked: true }, 'none'],
-    [{ present: true, historyStatus: 'backfilled', settingsLocked: true }, 'none'],
+    [{ present: true, historyStatus: 'installing', planPersisted: true, settingsLocked: true }, 'installing'],
+    [{ present: true, historyStatus: 'installing', planPersisted: false, settingsLocked: false }, 'installing'],
+    // An aborted FIRST install leaves its plan on the pending row, and its next run RESUMES that plan whenever one of
+    // its labels is on the sheet: refused whether the abort KEPT the settings lock or RELEASED it (ruling C-2 — the
+    // ledger shows the plan; it cannot show whether a label is on the sheet now).
+    [{ present: true, historyStatus: 'pending', planPersisted: true, settingsLocked: true }, 'aborted_unresolved'],
+    [{ present: true, historyStatus: 'pending', planPersisted: true, settingsLocked: false }, 'aborted_unresolved'],
+    // The lock alone (a plan the abort could not read) is refused too.
+    [{ present: true, historyStatus: 'pending', planPersisted: false, settingsLocked: true }, 'aborted_unresolved'],
+    // Never installed: neither a plan nor a lock.
+    [{ present: true, historyStatus: 'pending', planPersisted: false, settingsLocked: false }, 'none'],
+    // A resolved sheet is not an install in progress, whatever its row still carries.
+    [{ present: true, historyStatus: 'born_empty', planPersisted: false, settingsLocked: false }, 'none'],
+    [{ present: true, historyStatus: 'born_empty', planPersisted: false, settingsLocked: true }, 'none'],
+    [{ present: true, historyStatus: 'backfilled', planPersisted: true, settingsLocked: true }, 'none'],
   ]) assert.equal(R.installStateOfFacts(facts), expected, JSON.stringify(facts))
-  for (const facts of [undefined, null, [], {}, { present: 'no' }, { installing: false }, { present: true, historyStatus: 'installing' }, { present: true, historyStatus: 'pending', settingsLocked: 'yes' }, { present: true, historyStatus: 'archived', settingsLocked: false }, { present: true, settingsLocked: false }]) {
+  for (const facts of [
+    undefined, null, [], {}, { present: 'no' }, { installing: false },
+    { present: true, historyStatus: 'installing' },
+    // Each fact is REQUIRED and a boolean: a missing one never reads as "no plan" / "not locked".
+    { present: true, historyStatus: 'pending', settingsLocked: false },
+    { present: true, historyStatus: 'pending', planPersisted: false },
+    { present: true, historyStatus: 'pending', planPersisted: 'no', settingsLocked: false },
+    { present: true, historyStatus: 'pending', planPersisted: false, settingsLocked: 'yes' },
+    { present: true, historyStatus: 'archived', planPersisted: false, settingsLocked: false },
+    { present: true, planPersisted: false, settingsLocked: false },
+  ]) {
     throwsSync(() => R.installStateOfFacts(facts), { code: CODES.UNAVAILABLE, field: 'installStateOf' })
   }
   // A state outside the closed list never reaches a plan.
@@ -947,8 +964,12 @@ test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is 
   await rejects(unbound.execute('a'.repeat(64)), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
   assert.deepEqual([unbound.state.reads, unbound.host.calls.length, unbound.db.rows(kit.T.run).length, unbound.db.rows(kit.T.claim).length, unbound.db.rows(kit.T.lock).length], [[], 0, 0, 0, 0], 'refused before the sheet, the ledger or the lease')
   for (const [facts, token] of [
-    [{ present: true, historyStatus: 'installing', settingsLocked: true }, 'install_in_progress'],
-    [{ present: true, historyStatus: 'pending', settingsLocked: true }, 'install_aborted_unresolved'],
+    [{ present: true, historyStatus: 'installing', planPersisted: true, settingsLocked: true }, 'install_in_progress'],
+    [{ present: true, historyStatus: 'pending', planPersisted: true, settingsLocked: true }, 'install_aborted_unresolved'],
+    // The abort RELEASED the lock and the plan is still on the row: refused all the same.
+    [{ present: true, historyStatus: 'pending', planPersisted: true, settingsLocked: false }, 'install_aborted_unresolved'],
+    // The lock without a readable plan.
+    [{ present: true, historyStatus: 'pending', planPersisted: false, settingsLocked: true }, 'install_aborted_unresolved'],
   ]) {
     const on = mount()
     on.state.installFacts = facts
@@ -957,7 +978,7 @@ test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is 
     // An unknown component names the install state first.
     assert.deepEqual((await on.preview({ componentHandle: 'f'.repeat(24) })).refusals, [token, 'component_not_found'])
     // Not installing at the preview, in that state by the time the lease is held: the in-lease read decides.
-    on.state.installFacts = { present: true, historyStatus: 'backfilled', settingsLocked: true }
+    on.state.installFacts = { present: true, historyStatus: 'backfilled', planPersisted: true, settingsLocked: true }
     const preview = await on.preview()
     assert.equal(preview.eligible, true)
     on.state.installFacts = facts
@@ -975,10 +996,11 @@ test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is 
     await rejects(on.restoreExecute(retired.runId, restorePlan.planDigest), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: token })
     assert.equal(on.db.rows(kit.T.run).length, 1, 'no restore run began')
   }
-  // An aborted install whose lock the abort RELEASED does not refuse: its next run plans afresh.
-  const released = mount()
-  released.state.installFacts = { present: true, historyStatus: 'pending', settingsLocked: false }
-  assert.equal((await released.execute((await released.preview()).planDigest)).status, 'completed')
+  // A pending sheet that was NEVER installed (neither a plan nor a lock) does not refuse: its first install plans
+  // from the rows as they are then.
+  const never = mount()
+  never.state.installFacts = { present: true, historyStatus: 'pending', planPersisted: false, settingsLocked: false }
+  assert.equal((await never.execute((await never.preview()).planDigest)).status, 'completed')
   // A reader that FAILS (the ledger unreadable — the route's 503) refuses the preview and the execute; nothing begins.
   const down = mount()
   const good = await down.preview()
@@ -987,7 +1009,7 @@ test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is 
   await rejects(down.execute(good.planDigest), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
   assert.deepEqual([down.host.calls.length, down.db.rows(kit.T.run).length, down.db.rows(kit.T.claim).length, down.db.rows(kit.T.lock)[0].lease_id], [0, 0, 0, null])
   // A reader that answers what the library does not understand is a wiring defect, never "not installing".
-  for (const answer of [{}, { installing: false }, { present: true, historyStatus: 'archived', settingsLocked: false }]) {
+  for (const answer of [{}, { installing: false }, { present: true, historyStatus: 'archived', planPersisted: false, settingsLocked: false }, { present: true, historyStatus: 'pending', settingsLocked: false }, { present: true, historyStatus: 'pending', planPersisted: false }]) {
     down.deps.installStateOf = async () => answer
     await rejects(down.preview(), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
     await rejects(down.execute(good.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })

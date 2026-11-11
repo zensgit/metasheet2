@@ -70,7 +70,7 @@
     "pluginPackageJson": "4cd227957910381d06701bdbd95a33b2276c4c735f364ab415efdf8d4d113dc9",
     "pnpmLock": "171239d1837edfe39eacb31b006dde700d45e4378b9b84b2068135ea43645859",
     "pluginIndex": "9de6c48f5c8af19f6c89cb5100c48cf5e0f37b3db712f11fd18a6ec0e85f7d03",
-    "pluginHttpRoutes": "1ec31fc9ae4416693081c210df1aa10bc5228ec805d6692e869ca12ac1426b35",
+    "pluginHttpRoutes": "27baa529ced7ace314597a86372c0d495aaafd802dcf3b571a3afff1a0c50daa",
     "testChainRunner": "c6ce4f00b412038b7f4473802f9d0b0df408d693c0b117f5b9dd23e0a7b1b82d",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",

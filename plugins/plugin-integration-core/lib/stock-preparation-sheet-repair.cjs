@@ -33,9 +33,10 @@
 //   lease     the sheet write lease, purpose `sheet_repair` — a pull, a recovery, an install and a pilot enable all
 //             take the same lease, so none of them interleaves with a repair
 //   gates     the batch-identifier INSTALL STATE of the sheet, read from its ledger row on EVERY analysis whatever the
-//             batch switch says (rebaseline B-9; coordinator ruling C-2): `installing`, or an aborted first install
-//             whose settings lock is still held, => 409 -> the IN-LEASE recompute of the preview (a fresh source read
-//             for a retire) -> preconditions -> the plan digest must equal the echoed one
+//             batch switch says (rebaseline B-9; coordinator ruling C-2): `installing`, or a `pending` sheet that still
+//             carries an aborted first install's persisted plan (or its settings lock), => 409 -> the IN-LEASE
+//             recompute of the preview (a fresh source read for a retire) -> preconditions -> the plan digest must
+//             equal the echoed one
 //   holder    ONE holder CAS of the guard BEFORE the begin (ruling C-4): a guard already lost (a failed heartbeat, a
 //             lapsed lease) refuses here, so the one-shot claim is never spent by a run that cannot write
 //   begin     ONE ledger transaction, holder assert first: an abandoned open run of this sheet is closed, the one-shot
@@ -118,13 +119,17 @@ const SHEET_REPAIR_REFUSALS = Object.freeze([
 ])
 // The batch identifier's INSTALL STATE of the sheet as a repair reads it (ruling C-2), from the sheet's ledger row alone:
 //   installing          an install (a first install or a gap pass) is between its runs;
-//   aborted_unresolved  a FIRST install was aborted and its settings lock is still held — the abort could not prove that
-//                       no label of its persisted plan is on the sheet, so its next run may RESUME that plan;
-//   none                no ledger row, a resolved sheet, or a pending sheet whose lock is not held (never installed, or an
-//                       aborted install whose abort released the lock: its next run plans afresh from the rows as they
-//                       are then).
+//   aborted_unresolved  a `pending` sheet that still carries a PERSISTED install plan, or whose settings lock is still
+//                       held. Only an aborted FIRST install leaves either on a pending row (the row is born with
+//                       neither, and no label is handed out to a pending sheet). That plan is RESUMED — never
+//                       recomputed — whenever one of its labels is on the sheet at the install's next run; the ledger
+//                       cannot say whether one is (the abort's own proof is of the moment of the abort: a labelled row
+//                       restored from trash afterwards returns it), so the repair refuses the plan itself;
+//   none                no ledger row, a resolved sheet, or a pending sheet with neither a plan nor a held lock (never
+//                       installed: its first install plans from the rows as they are then).
 // The two that are not `none` refuse a retire and a restore: the persisted plan of a continued / resumed install is
-// never recomputed, so a write to 有效 between its runs changes that plan's inputs behind it.
+// never recomputed, so a write to 有效 between its runs changes that plan's inputs behind it. The way out of both is the
+// install itself (finish it; an aborted one with no label on the sheet is planned afresh by its next run).
 const SHEET_REPAIR_INSTALL_STATES = Object.freeze(['none', 'installing', 'aborted_unresolved'])
 const INSTALL_REFUSAL_BY_STATE = Object.freeze({ installing: 'install_in_progress', aborted_unresolved: 'install_aborted_unresolved' })
 // The history statuses of the batch ledger's sheet row (migration 105's CHECK), SPELLED here: this file never requires
@@ -268,7 +273,7 @@ function notApplicable(reasons, counts) {
 function installInProgress(installState) {
   const reason = INSTALL_REFUSAL_BY_STATE[installState] || INSTALL_REFUSAL_BY_STATE.installing
   const message = reason === INSTALL_REFUSAL_BY_STATE.aborted_unresolved
-    ? 'an aborted install of the batch columns of this sheet still holds its plan and its settings lock; repair and install windows never interleave — finish that install first'
+    ? 'an aborted install of the batch columns of this sheet still holds its persisted plan (or its settings lock); repair and install windows never interleave — finish that install first'
     : 'the batch columns of this sheet are being installed; repair and install windows never interleave — finish or abort the install first'
   return repairError(409, SHEET_REPAIR_ERROR_CODES.INSTALL_IN_PROGRESS, message, { reason, partial: false })
 }
@@ -282,15 +287,18 @@ function installRefusalOf(installState) {
 /**
  * The install state from the VALUES-FREE facts the route reads off the batch ledger's sheet row:
  * `{ present: false }` (no row: the batch identifier never touched this sheet) or
- * `{ present: true, historyStatus, settingsLocked }`. Anything else — a missing fact, a status this build does not
- * know — refuses (500 naming the reader), never "not installing".
+ * `{ present: true, historyStatus, planPersisted, settingsLocked }` — the row's history status, whether it still
+ * carries a persisted install plan, whether its settings lock is held. Anything else — a missing fact, a status this
+ * build does not know — refuses (500 naming the reader), never "not installing".
  */
 function installStateOfFacts(facts) {
   if (!isPlainObject(facts) || typeof facts.present !== 'boolean') throw unavailable('installStateOf')
   if (facts.present === false) return 'none'
-  if (typeof facts.settingsLocked !== 'boolean') throw unavailable('installStateOf')
+  if (typeof facts.planPersisted !== 'boolean' || typeof facts.settingsLocked !== 'boolean') throw unavailable('installStateOf')
   if (facts.historyStatus === INSTALL_HISTORY_STATUS_INSTALLING) return 'installing'
-  if (facts.historyStatus === INSTALL_HISTORY_STATUS_PENDING) return facts.settingsLocked ? 'aborted_unresolved' : 'none'
+  // Ruling C-2: a persisted plan on a pending sheet is refused whether or not the abort kept the lock; the lock alone
+  // (a plan the abort could not read) is refused too.
+  if (facts.historyStatus === INSTALL_HISTORY_STATUS_PENDING) return facts.planPersisted || facts.settingsLocked ? 'aborted_unresolved' : 'none'
   if (INSTALL_HISTORY_STATUSES_RESOLVED.includes(facts.historyStatus)) return 'none'
   throw unavailable('installStateOf')
 }

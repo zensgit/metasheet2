@@ -6964,8 +6964,10 @@ function requireStockPreparationAudit() {
   }
   // 批次标识 (rebaseline B-9; coordinator ruling C-2) — THE INSTALL STATE of the sheet as the repair's gate reads it: the
   // VALUES-FREE facts of the sheet's batch-ledger row (the library decides from them; this only reads). No row =>
-  // `{ present: false }`; else the row's history status and whether its settings lock is held. A read that fails, or
-  // answers something that is not the ledger's shape, is 503 by name — never "no row".
+  // `{ present: false }`; else the row's history status, whether it still carries a persisted install plan (the plan or
+  // its digest — an aborted first install keeps both; the plan itself is never handed on) and whether its settings lock
+  // is held. A read that fails, or answers something that is not the ledger's shape — a row object WITHOUT one of those
+  // facts included — is 503 by name: never "no row", "no plan" or "not locked".
   async function sheetRepairInstallFactsOf(scope) {
     let state
     try {
@@ -6978,7 +6980,12 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger answered no sheet state; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'read_sheet_shape', partial: false })
     }
     if (state.sheet === null) return { present: false }
-    return { present: true, historyStatus: state.sheet.historyStatus, settingsLocked: state.sheet.settingsLockedAt !== null && state.sheet.settingsLockedAt !== undefined }
+    const row = state.sheet
+    if (['historyStatus', 'historyPlan', 'historyPlanDigest', 'settingsLockedAt'].some((key) => !Object.prototype.hasOwnProperty.call(row, key))) {
+      throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger answered a sheet row without its install facts; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'read_sheet_facts', partial: false })
+    }
+    const held = (value) => value !== null && value !== undefined
+    return { present: true, historyStatus: row.historyStatus, planPersisted: held(row.historyPlan) || held(row.historyPlanDigest), settingsLocked: held(row.settingsLockedAt) }
   }
   /**
    * The repair's server-held deps, built per request. Nothing guard-bound is built eagerly: the fenced patch, the holder
