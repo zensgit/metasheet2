@@ -5780,12 +5780,25 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
-function onDrawerNavigate(recordId: string) {
+async function onDrawerNavigate(recordId: string) {
+  if (recordId === selectedRecordId.value) {
+    void selectRecord(recordId)
+    return
+  }
   // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
-  // text editor keeps its draft while focused): blur it first, as closing the drawer does, so it commits to the
-  // record it was typed on. The buttons and a row click take the focus away themselves.
-  if (recordId !== selectedRecordId.value) flushActiveFieldEdit()
+  // text editor keeps its draft while focused): blur the drawer's focused control first (as closing the drawer
+  // does, see flushActiveFieldEdit), so it commits to the record it was typed on. Then the focus goes back to that
+  // control (the drawer reuses it for the next record), so the chord, Esc and typing go on working, unless
+  // something else has the focus by then.
+  const focused = document.activeElement instanceof HTMLElement && document.activeElement.closest('.meta-record-drawer')
+    ? document.activeElement
+    : null
+  focused?.blur()
   void selectRecord(recordId)
+  if (!focused) return
+  await nextTick()
+  const now = document.activeElement
+  if (focused.isConnected && (!now || now === document.body)) focused.focus({ preventScroll: true })
 }
 
 // --- Beforeunload: warn on unsaved changes ---

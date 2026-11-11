@@ -473,7 +473,9 @@ function onEscape(event: KeyboardEvent): void {
   emit('cancel')
 }
 
-/** Blur = commit. Emit BOTH the final live value and the `change` commit event. */
+/** Blur = commit. Emit BOTH the final live value and, when it differs from the model, the `change` commit event
+ *  (as an input's `change`): focus that only passes through (the drawer focusing its title on open, or giving
+ *  the focus back after a record switch) commits nothing. */
 function onBlur(): void {
   focused.value = false
   // Dismiss the mention popover on blur. The suggestion buttons use
@@ -482,7 +484,7 @@ function onBlur(): void {
   dismissMention()
   const value = currentValue()
   emit('update:modelValue', value)
-  emit('change', value)
+  if (value !== sanitizeRichLongTextHtml(props.modelValue)) emit('change', value)
 }
 
 /**

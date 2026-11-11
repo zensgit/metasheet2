@@ -22,7 +22,7 @@
 // goes away on Enter;
 // #outside for a popover teleported out of the workbench; #stopper for a control that stops
 // propagation of every key (the comment affordance buttons).
-import { createApp, h, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import { createApp, h, nextTick, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
 import '/node_modules/element-plus/dist/index.css'
 import '/src/styles/tokens.css'
 import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
@@ -121,8 +121,19 @@ createApp({
         if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
         window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
-      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the focused field first.
-      onNavigate: (id) => { if (id !== record.value.id) document.activeElement?.blur?.(); record.value = RECORDS[id] },
+      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the drawer's focused control
+      // first, then gives the focus back to it.
+      onNavigate: async (id) => {
+        if (id === record.value.id) return
+        const active = document.activeElement
+        const focused = active instanceof HTMLElement && active.closest('.meta-record-drawer') ? active : null
+        focused?.blur()
+        record.value = RECORDS[id]
+        if (!focused) return
+        await nextTick()
+        const now = document.activeElement
+        if (focused.isConnected && (!now || now === document.body)) focused.focus({ preventScroll: true })
+      },
     }),
   ]),
 }).mount('#app')

@@ -617,6 +617,19 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(onNavigate).toHaveBeenCalledWith('rec_2')
     })
 
+    it('the chord does nothing while an input method composes (moving on would commit the unconverted text)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement
+      const chord = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, isComposing: true, bubbles: true, cancelable: true,
+      })
+      textarea.dispatchEvent(chord)
+      expect(onNavigate).not.toHaveBeenCalled()
+      expect(chord.defaultPrevented).toBe(false)
+    })
+
     it('bounds: chord at the first/last record emits nothing', async () => {
       const onNavigate = vi.fn()
       const { container } = mountInspector({ recordIds: ['rec_1'], onNavigate })

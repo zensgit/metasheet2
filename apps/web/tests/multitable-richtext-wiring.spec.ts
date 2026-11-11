@@ -243,6 +243,27 @@ describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no 
     container.remove()
   })
 
+  it('a blur that changed nothing commits nothing (focus only passing through), and still updates the model', async () => {
+    const changeSpy = vi.fn()
+    const updateSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: '<b>saved</b>', 'onUpdate:modelValue': updateSpy, onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(updateSpy).toHaveBeenLastCalledWith('<b>saved</b>')
+    // An edit, then a blur: committed as before.
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = '<b>saved</b> more'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['<b>saved</b> more']])
+    app.unmount()
+    container.remove()
+  })
+
   it('the `change` value is sanitized (commit cannot carry unsafe markup)', async () => {
     const changeSpy = vi.fn()
     const { container, app } = mountEditor({ onChange: changeSpy })
