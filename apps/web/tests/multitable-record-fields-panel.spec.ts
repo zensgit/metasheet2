@@ -905,6 +905,28 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     expect(onPatch.mock.calls).toEqual([['fld_day', ''], ['fld_day', '2031-01-09']])
   })
 
+  it('a box left holding a draft it cannot read is written on the next redraw, also when the stored value is empty (the draft goes, the stored value shows)', async () => {
+    const F_NUM_EMPTY = { id: 'fld_num', name: 'Amount', type: 'number' } as unknown as MetaField
+    const numRecord = (version: number) => ({ id: 'rec_A', version, data: { fld_num: null } }) as unknown as MetaRecord
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_NUM_EMPTY], record: numRecord(1), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_num')!
+    const validity = { badInput: false }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.focus()
+    validity.badInput = true
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    box.blur()
+    await flushUi()
+    expect(onPatch).not.toHaveBeenCalled()
+    const writes = countWrites(box)
+    set({ record: numRecord(2) })
+    await flushUi()
+    expect(writes()).toBe(1)
+  })
+
   it('a date box cleared in full (not half-typed) commits the empty date', async () => {
     const onPatch = vi.fn()
     const F_DAY = { id: 'fld_day', name: 'Day', type: 'date' } as unknown as MetaField
