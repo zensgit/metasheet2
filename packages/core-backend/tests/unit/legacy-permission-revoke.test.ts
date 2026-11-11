@@ -49,6 +49,25 @@ vi.mock('../../src/audit/audit', () => ({
 
 import { permissionsRouter } from '../../src/routes/permissions'
 import { removeMatchingLegacyPermission } from '../../src/admin/legacy-permission-revoke'
+import {
+  RECOVERY_CONFLICT_HTTP_CODE,
+  RECOVERY_CONFLICT_HTTP_MESSAGE,
+} from '../../src/db/recovery-conflict'
+import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// The legacy-revoke leg records only after its assertions pass. The file afterAll
+// then requires that executed set to equal this file's registered census sites.
+const census = censusFile('legacy-permission-revoke.test.ts')
+
+const UNIFORM_409_BODY = {
+  ok: false,
+  error: {
+    code: RECOVERY_CONFLICT_HTTP_CODE,
+    message: RECOVERY_CONFLICT_HTTP_MESSAGE,
+    details: { retryable: true },
+  },
+}
 
 function createMockResponse() {
   return {
@@ -150,7 +169,7 @@ function installScript(script: Script) {
             }],
           }
         }
-        if (text.includes('SET permissions')) {
+        if (text.includes('UPDATE users') && text.includes('SET permissions')) {
           if (script.failWrite) throw script.failWrite
           permissionWrite = params
           if (script.suppressWrite) return { rows: [], rowCount: 0 }
@@ -347,8 +366,8 @@ describe('legacy permission revoke', () => {
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
   })
 
-  it('rolls the response back when the permission write hits a recovery lease', async () => {
-    const busy = Object.assign(new Error('METASHEET_RECOVERY_AUTHORITY_BUSY'), { code: '40001' })
+  it('[recovery-census:permissions:legacy-revoke] rolls the response back when the permission write hits a recovery lease', async () => {
+    const busy = Object.assign(new Error(RECOVERY_AUTHORITY_BUSY_MARKER), { code: '40001' })
     const script = installScript({
       columnType: 'jsonb',
       permissions: ['attendance:read'],
@@ -357,9 +376,51 @@ describe('legacy permission revoke', () => {
 
     const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
 
+    const updateAt = script.sqlLog.findIndex((sql) => sql.includes('UPDATE users') && sql.includes('SET permissions'))
+    expect(updateAt).toBeGreaterThan(0)
+    expect(script.sqlLog.slice(0, updateAt).some((sql) => sql.includes('pg_typeof'))).toBe(true)
+    expect(script.sqlLog.slice(updateAt + 1)).toEqual([])
+    expect(script.sqlLog.some((sql) => sql.includes('directory_deprovision'))).toBe(false)
     expect(response.statusCode).toBe(409)
-    expect((response.body as { ok?: boolean; error?: { code?: string } }).ok).toBe(false)
-    expect((response.body as { error?: { code?: string } }).error?.code).toBe('RECOVERY_AUTHORITY_BUSY')
+    expect(response.body).toEqual(UNIFORM_409_BODY)
+    expect(script.order).toEqual(['rollback'])
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('permissions:legacy-revoke')
+  })
+
+  it('keeps the original 500 when the permission write raises a bare 40P01', async () => {
+    const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+    const script = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      failWrite: deadlock,
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expect(script.sqlLog.some((sql) => sql.includes('UPDATE users') && sql.includes('SET permissions'))).toBe(true)
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({ error: 'Failed to revoke legacy permission' })
+    expect(script.order).toEqual(['rollback'])
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('keeps the original 500 when the permission write raises a 40001 without the recovery marker', async () => {
+    const serialization = Object.assign(new Error('could not serialize access'), { code: '40001' })
+    const script = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      failWrite: serialization,
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expect(serialization.message).not.toBe(RECOVERY_AUTHORITY_BUSY_MARKER)
+    expect(script.sqlLog.some((sql) => sql.includes('UPDATE users') && sql.includes('SET permissions'))).toBe(true)
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({ error: 'Failed to revoke legacy permission' })
     expect(script.order).toEqual(['rollback'])
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     expect(auditMocks.auditLog).not.toHaveBeenCalled()

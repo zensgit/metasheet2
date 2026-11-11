@@ -49,7 +49,7 @@
  * scope is true.
  *
  * Ordering: no zzzz20261111 migration existed when this file was added. It sorts
- * after zzzz20261106120000_create_security_action_challenges and after the
+ * after the 2026-11-06 security-action proof migration and after the
  * delegated-scope tables it alters.
  */
 import { sql, type Kysely } from 'kysely'
