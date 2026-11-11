@@ -88,6 +88,10 @@ const request = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms))
 watch(() => record.value.id, () => undo.reset())
 window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
 window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
+window.undoDemo.setField = (id, fieldId, value) => {
+  RECORDS[id] = { ...RECORDS[id], data: { ...RECORDS[id].data, [fieldId]: value } }
+  if (record.value.id === id) record.value = RECORDS[id]
+}
 window.undoDemo.draft = () => draft.value
 window.undoDemo.openComments = () => { openComments.value = true }
 window.undoDemo.comment = () => ({ ...comments.value[0] })
@@ -122,17 +126,28 @@ createApp({
         window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
       // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the drawer's focused control
-      // first, then gives the focus back to it.
+      // first, then gives the focus back to it (the caret at the end of a rich text editor), or to the open tab.
       onNavigate: async (id) => {
         if (id === record.value.id) return
         const active = document.activeElement
-        const focused = active instanceof HTMLElement && active.closest('.meta-record-drawer') ? active : null
+        const drawer = active instanceof HTMLElement ? active.closest('.meta-record-drawer') : null
+        const focused = drawer ? active : null
         focused?.blur()
         record.value = RECORDS[id]
         if (!focused) return
         await nextTick()
         const now = document.activeElement
-        if (focused.isConnected && (!now || now === document.body)) focused.focus({ preventScroll: true })
+        if (now && now !== document.body) return
+        if (focused.isConnected) {
+          focused.focus({ preventScroll: true })
+          if (focused.isContentEditable) {
+            const selection = document.getSelection()
+            selection?.selectAllChildren(focused)
+            selection?.collapseToEnd()
+          }
+        } else if (drawer.isConnected) {
+          drawer.querySelector('[role="tabpanel"]')?.focus({ preventScroll: true })
+        }
       },
     }),
   ]),

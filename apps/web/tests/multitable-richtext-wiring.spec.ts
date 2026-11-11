@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, ref } from 'vue'
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
 import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vue'
 import MetaRichLongTextEditor from '../src/multitable/components/cells/MetaRichLongTextEditor.vue'
@@ -260,6 +260,70 @@ describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no 
     editable.dispatchEvent(new Event('blur', { bubbles: true }))
     await nextTick()
     expect(changeSpy.mock.calls).toEqual([['<b>saved</b> more']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('a value the editor reads back in another form (a non-breaking space) is no change: passing through commits nothing', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: 'a\u00a0b', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    app.unmount()
+    container.remove()
+  })
+
+  it('an edit undone before the model caught up is committed too (the blur compares with the content at focus, not the model)', async () => {
+    const changeSpy = vi.fn()
+    // The host has not applied the first commit yet: the model stays at 'rich'.
+    const { container, app } = mountEditor({ modelValue: 'rich', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X'], ['rich']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('Cmd/Ctrl+Enter, then a blur with no further edit, commits once', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: 'rich', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows the value again when its sync key changes, also when the value is the same (the drawer moving to another record)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const syncKey = ref('rec_A')
+    const app = createApp({ render: () => h(MetaRichLongTextEditor, { modelValue: 'same', syncKey: syncKey.value }) })
+    app.mount(container)
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'same typed on A'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    syncKey.value = 'rec_B'
+    await nextTick()
+    expect(editable.innerHTML).toBe('same')
     app.unmount()
     container.remove()
   })

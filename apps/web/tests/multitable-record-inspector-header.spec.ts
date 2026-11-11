@@ -628,6 +628,13 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       textarea.dispatchEvent(chord)
       expect(onNavigate).not.toHaveBeenCalled()
       expect(chord.defaultPrevented).toBe(false)
+      // A key the input method took (keyCode 229), as some engines report it without isComposing.
+      const taken = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      })
+      Object.defineProperty(taken, 'keyCode', { value: 229 })
+      textarea.dispatchEvent(taken)
+      expect(onNavigate).not.toHaveBeenCalled()
     })
 
     it('bounds: chord at the first/last record emits nothing', async () => {

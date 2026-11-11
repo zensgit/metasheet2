@@ -743,6 +743,9 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             'data-blur-commit': 'fld_title',
             onBlur: (event: FocusEvent) => this.$emit('patch', 'fld_title', (event.target as HTMLInputElement).value),
           }),
+          // A control only rec_1 shows (a field hidden on another record), and the drawer's open tab.
+          this.record?.id === 'rec_1' ? h('input', { 'data-rec1-only': 'true' }) : null,
+          h('div', { role: 'tabpanel', tabindex: 0, 'data-stub-tabpanel': 'true' }),
         ]),
         h(
           'button',
@@ -5599,14 +5602,26 @@ describe('MultitableWorkbench view wiring', () => {
       expect(document.activeElement).toBe(other)
     })
 
+    it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
+      await openRec1()
+      container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-rec1-only]')).toBeNull()
+      expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+    })
+
     it('a move leaves a focused control outside the drawer alone', async () => {
       await openRec1()
       const outside = document.body.appendChild(document.createElement('input'))
       try {
         outside.focus()
+        const blurred = vi.fn()
+        outside.addEventListener('blur', blurred)
         container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
         await flushUi()
         expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+        expect(blurred).not.toHaveBeenCalled()
         expect(document.activeElement).toBe(outside)
       } finally {
         outside.remove()
