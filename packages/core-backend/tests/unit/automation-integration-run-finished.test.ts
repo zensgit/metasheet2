@@ -378,47 +378,127 @@ describe('integration.run_finished — the action layer emits EXACTLY ONE summar
     ])
   })
 
-  // R-69 I6a fix (re-review L3): the rule-sheet re-check (executor step 0.5) stops the step BEFORE any unit. That stop
-  // is still summarized — once per configured project — and the step's closed `cause` never rides in the event.
-  it.each<[label: string, arrange: (db: ReturnType<typeof createFakeJobDb>) => void, status: string, reason: string, cause: string | undefined]>([
-    ['the rule sheet was ARCHIVED', (db) => { db.projectTargets.get('sheet_1')!.status = 'archived' }, 'skipped', 'principal_unauthorized', 'rule_sheet_unregistered'],
-    ['the rule sheet is registered to ANOTHER tenant', (db) => { db.projectTargets.set('sheet_1', { tenantId: 'tenant_2', projectNo: 'P-1', status: 'active' }) }, 'skipped', 'principal_unauthorized', 'rule_sheet_tenant_mismatch'],
-    ['the registry is UNREADABLE', (db) => { db.setRegistryUnreadable('57P01') }, 'not_started', 'authority_unavailable', undefined],
-  ])('a step 0.5 stop — %s ⇒ ONE summary per project carrying the step\'s status and reason, never its cause; the port is never called', async (_label, arrange, status, reason, cause) => {
+  // ── R-69 I6d fix round 2 (F1b): the ROUTE is a tenant THIS trigger verified, or there is no summary ──────────
+  //
+  // The route tenant decides whose integration.run_finished rules fire, and the publish port checks only its shape.
+  // The executor's two binding checks (the binding principal is the rule's stored creator; the rule's sheet is the
+  // active registered project sheet of the binding tenant) are what verifies it. A step they STOP used to be
+  // summarized all the same — once per project, routed to whatever tenant the stored binding named (the I6a L3 pin
+  // these cases replace). It publishes nothing now; the step result is unchanged, so the execution log still names
+  // the stop and its closed cause.
+  const VICTIM = 'tenant_victim'
+  /** Captures every delivery, whatever its route — the assertions below are about ALL of them, not one tenant's. */
+  const expectNothingPublished = (events: ReturnType<typeof captureSink>) => {
+    expect(events.map((e) => [e.route.tenantId, e.event.job.projectNo, e.event.status, e.event.reason])).toEqual([])
+  }
+
+  it.each<[label: string, arrange: (db: ReturnType<typeof createFakeJobDb>) => void, status: string, reason: string, cause: string | undefined, registryReads: unknown[]]>([
+    ['the rule sheet was ARCHIVED', (db) => { db.projectTargets.get('sheet_1')!.status = 'archived' }, 'skipped', 'principal_unauthorized', 'rule_sheet_unregistered', ['sheet_1']],
+    ['the rule sheet is registered to ANOTHER tenant', (db) => { db.projectTargets.set('sheet_1', { tenantId: 'tenant_2', projectNo: 'P-1', status: 'active' }) }, 'skipped', 'principal_unauthorized', 'rule_sheet_tenant_mismatch', ['sheet_1']],
+    ['the rule sheet was NEVER registered', (db) => { db.projectTargets.delete('sheet_1') }, 'skipped', 'principal_unauthorized', 'rule_sheet_unregistered', ['sheet_1']],
+    // exact literal only: with the switch off the registry is not the authority and is not read at all
+    ['the project-sheets switch is OFF', () => { vi.stubEnv(PROJECT_SHEETS_FLAG, 'TRUE') }, 'skipped', 'principal_unauthorized', 'rule_sheet_unregistered', []],
+    ['the registry is UNREADABLE', (db) => { db.setRegistryUnreadable('57P01') }, 'not_started', 'authority_unavailable', undefined, ['sheet_1']],
+  ])('a rule-sheet stop — %s ⇒ the step keeps its status, reason and cause, and NOTHING is published; the port is never called', async (_label, arrange, status, reason, cause, registryReads) => {
     const events = captureSink()
     const db = createFakeJobDb()
     arrange(db)
     const port = fakePort('immediate')
     const { run } = harness(db, port.port)
     const step = await run('exec_step05', CONFIG3)
-    // the STEP names the cause (or none, for an unreadable registry) …
+    // the STEP is what it was: it names the cause (or none, for an unreadable registry) …
     expect(step.output).toEqual({ outcome: status, reason, ...(cause ? { cause } : {}) })
     expect(port.run).not.toHaveBeenCalled()
     expect(db.intentRows()).toHaveLength(0)
-    // … and every configured project gets exactly one summary of that stop
-    expect(events.map((e) => [e.event.job.projectNo, e.event.status, e.event.reason])).toEqual([
-      ['P-1', status, reason], ['P-2', status, reason], ['P-3', status, reason],
-    ])
-    const actionKey = deriveActionKey({ structuralPath: '0', actionType: 'run_integration_job', canonicalConfig: CONFIG3 })
-    for (const { event, route } of events) {
-      expect(route).toEqual({ tenantId: TENANT })
-      expect(event).toMatchObject({
-        canApply: false,
-        counts: { read: 0, cleaned: 0, written: 0, failed: 0, ...ZERO_DECISIONS },
-        durationMs: 0,
-        attempts: 1,
-        triggeredBy: 'automation',
-        _automationDepth: 1,
-      })
-      expect(event.eventId).toBe(deriveAutomationRunFinishedEventId({ rootExecutionId: 'exec_step05', executionId: 'exec_step05', actionKey, projectNo: event.job.projectNo as string }))
-      // closed key set, values-free: no cause, no errorClass, no sheet / tenant / principal
-      expect(event).not.toHaveProperty('cause')
-      expect(event).not.toHaveProperty('errorClass')
-      expect(Object.keys(event).every((key) => (INTEGRATION_RUN_FINISHED_EVENT_KEYS as readonly string[]).includes(key))).toBe(true)
-      const text = JSON.stringify(event)
-      for (const needle of ['rule_sheet', 'cause', TENANT, 'tenant_2', 'sheet_1', 'svc_user', 'binding']) expect(text).not.toContain(needle)
+    // … and no summary of it leaves the process, to any tenant
+    expectNothingPublished(events)
+    // the step's own read only: the emitter used the step's verdict, it did not ask the registry again
+    expect(db.registryReads).toEqual(registryReads)
+  })
+
+  it('a FORGED binding tenant — the creator\'s own principal over another tenant — is the tenant-mismatch stop: nothing reaches that tenant (or any other)', async () => {
+    const events = captureSink()
+    const db = createFakeJobDb() // sheet_1 is registered to tenant_1, active
+    const port = fakePort('immediate')
+    const { run } = harness(db, port.port)
+    const forged = { ...CONFIG3, binding: { principalId: 'svc_user', tenantId: VICTIM } }
+    const step = await run('exec_forged', forged)
+    expect(step.output).toEqual({ outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_tenant_mismatch' })
+    expect(port.run).not.toHaveBeenCalled()
+    expectNothingPublished(events)
+  })
+
+  it('a binding whose principal is NOT the rule\'s creator stops before the registry is read, and publishes nothing — also when its tenant is the sheet\'s own', async () => {
+    for (const tenantId of [TENANT, VICTIM]) {
+      const events = captureSink()
+      const db = createFakeJobDb()
+      const port = fakePort('immediate')
+      const { run } = harness(db, port.port)
+      const step = await run(`exec_principal_${tenantId}`, { ...CONFIG3, binding: { principalId: 'someone_else', tenantId } })
+      expect(step.output).toEqual({ outcome: 'skipped', reason: 'principal_unauthorized', cause: 'binding_principal_mismatch' })
+      expect(port.run).not.toHaveBeenCalled()
+      expect(db.registryReads).toHaveLength(0)
+      expectNothingPublished(events)
+      clearIntegrationRunFinishedSinkForTest()
     }
-    expect(new Set(events.map((e) => e.event.eventId)).size).toBe(3)
+  })
+
+  it('the action switch OFF is summarized ONLY for a binding that verifies: the same two checks run before the publish, and a forged tenant, a foreign principal or an archived sheet publishes nothing', async () => {
+    vi.stubEnv(ACTION_FLAG, 'false')
+    for (const [label, config, arrange] of [
+      ['forged tenant', { ...CONFIG3, binding: { principalId: 'svc_user', tenantId: VICTIM } }, undefined],
+      ['foreign principal', { ...CONFIG3, binding: { principalId: 'someone_else', tenantId: TENANT } }, undefined],
+      ['archived sheet', CONFIG3, (db: ReturnType<typeof createFakeJobDb>) => { db.projectTargets.get('sheet_1')!.status = 'archived' }],
+      ['unreadable registry', CONFIG3, (db: ReturnType<typeof createFakeJobDb>) => { db.setRegistryUnreadable('57P01') }],
+    ] as const) {
+      const events = captureSink()
+      const db = createFakeJobDb()
+      arrange?.(db)
+      const port = fakePort('immediate')
+      const { run } = harness(db, port.port)
+      const step = await run(`exec_off_${label.replace(/ /g, '_')}`, config)
+      // the step never looked at the binding: the switch answers first
+      expect(step.output, label).toEqual({ outcome: 'skipped', reason: 'action_disabled' })
+      expect(port.run).not.toHaveBeenCalled()
+      expectNothingPublished(events)
+      clearIntegrationRunFinishedSinkForTest()
+    }
+    // the control of the same run: a binding that verifies IS summarized (the case above), after ONE registry read
+    const events = captureSink()
+    const db = createFakeJobDb()
+    const { run } = harness(db, fakePort('immediate').port)
+    await run('exec_off_verified', CONFIG3)
+    expect(events.map((e) => [e.route.tenantId, e.event.job.projectNo, e.event.status, e.event.reason])).toEqual([
+      [TENANT, 'P-1', 'skipped', 'action_disabled'], [TENANT, 'P-2', 'skipped', 'action_disabled'], [TENANT, 'P-3', 'skipped', 'action_disabled'],
+    ])
+    expect(db.registryReads).toEqual(['sheet_1'])
+  })
+
+  it('a stop AFTER the binding verified is still summarized, to the verified tenant: live authority refused, authority unreadable, no port', async () => {
+    for (const [label, extra, port, status, reason] of [
+      ['live authority refused', { resolveIntegrationRunPrincipal: async () => ({ ok: false as const, reason: 'principal_unauthorized' as const }) }, fakePort('immediate').port, 'skipped', 'principal_unauthorized'],
+      ['live authority unreadable', { resolveIntegrationRunPrincipal: async () => ({ ok: false as const, reason: 'authority_unavailable' as const }) }, fakePort('immediate').port, 'not_started', 'authority_unavailable'],
+      ['no port', {}, null, 'not_started', 'port_inactive'],
+    ] as const) {
+      const events = captureSink()
+      const db = createFakeJobDb()
+      const { run } = harness(db, port, extra as Partial<AutomationDeps>)
+      const step = await run(`exec_after_${label.replace(/ /g, '_')}`, CONFIG3)
+      expect(step.output, label).toEqual({ outcome: status, reason })
+      expect(events.map((e) => [e.route.tenantId, e.event.job.projectNo, e.event.status, e.event.reason]), label).toEqual([
+        [TENANT, 'P-1', status, reason], [TENANT, 'P-2', status, reason], [TENANT, 'P-3', status, reason],
+      ])
+      // values-free, closed key set: the step's cause and the tenant never ride in the event
+      for (const { event } of events) {
+        expect(event).not.toHaveProperty('cause')
+        expect(Object.keys(event).every((key) => (INTEGRATION_RUN_FINISHED_EVENT_KEYS as readonly string[]).includes(key))).toBe(true)
+        const text = JSON.stringify(event)
+        for (const needle of ['rule_sheet', 'cause', TENANT, 'sheet_1', 'svc_user', 'binding']) expect(text).not.toContain(needle)
+      }
+      // one registry read per trigger: the step's; the emitter used that verdict
+      expect(db.registryReads).toEqual(['sheet_1'])
+      clearIntegrationRunFinishedSinkForTest()
+    }
   })
 
   it('a timeout_unsettled unit: ONE outcome_unknown summary at the step; the late settlement (Tx B) emits nothing; unreached projects are not_started(timeout)', async () => {
