@@ -72,6 +72,8 @@ Harold 同意将 #6849 对齐最新 `origin/main`。分支原基于 `5920de5b2`�
 
 `331b87960..0232a25f2` 共 10 个提交。其中触及敏感路径的是：`a77016971`（#6809）改 `.github/workflows/plugin-tests.yml` 与 `packages/core-backend/vitest.config.ts`；`b10632007`（#6850）同上两处；`e2823e93b`（#6851）改 `plugin-tests.yml`；`58e1af6ea`（#6853）改 `plugin-tests.yml`；`0232a25f2`（#6842）新增迁移 `packages/core-backend/migrations/107_create_integration_stock_prep_component_ruling.sql`。#6847 本身也改过 `plugin-tests.yml`、`approval-realdb-departure-transfer.yml` 和 `packages/core-backend/vitest.config.ts`。这些都不改 `attendance-web-guard.yml`、`web-tests.yml`、apps/web 的 vitest/vite 配置，或 `run-required-web-tests` 脚本，因此帮助规格与 `attendanceLegacyPermissionPayload` 的跑法不变。本修复文件的行号在对齐后仍指向同一处（回退清单模块与 `AttendanceView.vue:12829`、grant 调用点）。
 
+2026-11-11 再对齐：已审并推送的 `438842a9aeb9a8e7b097226fbbd5bf4c024c827c` 在 CI 结束（31 成功、1 条有条件跳过）时，main 又前进到 `48aaac6b4a3e16ac785ae1aee1bf32e85ef441a7`（#6857，2026-11-11 18:09:17 +0800）。本工作树用 `git merge --no-commit --no-ff` 合入该提交，上文历史记录和四文件修复都保留。此后的核验必须使用含该 main 的新合并结果，不能沿用 `438842a9a` 上已经结束的 CI。
+
 ## 2026-10-16 第五轮
 
 三份排查按「现象 → 原因 → 怎么改」写进现有文章，并新增 `troubleshoot`（排查）。
