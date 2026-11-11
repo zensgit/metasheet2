@@ -2,13 +2,14 @@
   <section class="user-admin">
     <header class="user-admin__header">
       <div>
-        <h1>用户管理</h1>
-        <p>查看成员、邀请新用户，并在侧栏里维护资料与权限。</p>
+        <h1>成员与授权</h1>
+        <p>查看成员、邀请新用户，并维护角色分配、插件准入、权限来源和管理范围。</p>
       </div>
 
       <div class="user-admin__actions">
-        <router-link class="user-admin__link" to="/admin/roles">角色管理</router-link>
-        <router-link class="user-admin__link" to="/admin/permissions">权限管理</router-link>
+        <router-link class="user-admin__link" to="/admin/roles">角色</router-link>
+        <router-link class="user-admin__link" :to="managementScopeLocation">管理范围</router-link>
+        <router-link class="user-admin__link" data-testid="permission-source-link" :to="permissionSourceLocation">权限来源与例外</router-link>
         <router-link class="user-admin__link" to="/admin/directory">目录同步</router-link>
         <router-link class="user-admin__link" to="/admin/audit">管理审计</router-link>
         <button class="user-admin__button" type="button" data-testid="open-invite-user" @click="openInvite()">
@@ -757,6 +758,9 @@
             </div>
             <button class="user-admin__button user-admin__button--secondary user-admin__detail-close" type="button" @click="closeUserDetail()">关闭</button>
           </div>
+          <p class="user-admin__hint" data-testid="member-authorization-outline">
+            成员授权分四层：角色分配决定身份；插件准入和角色一起决定能否使用插件；权限来源记录角色继承和直接授予，不是最终业务访问结论；管理范围只说明委派管理员能分配哪些成员和角色。
+          </p>
 
           <div class="user-admin__section">
             <div class="user-admin__section-head">
@@ -812,21 +816,71 @@
 
           <div class="user-admin__section">
             <h3>角色</h3>
+            <p class="user-admin__hint">已分配的角色显示在这里。</p>
             <div class="user-admin__chips">
               <span v-for="role in access.roles" :key="role" class="user-admin__chip">
-                {{ role }}
+                {{ roleIdTitle(role) }}
               </span>
               <span v-if="access.roles.length === 0" class="user-admin__empty">未分配角色</span>
             </div>
           </div>
 
           <div class="user-admin__section">
-            <h3>权限</h3>
+            <h3>角色分配</h3>
+            <div class="user-admin__role-actions">
+              <select v-model="selectedRoleId" class="user-admin__select" data-testid="user-role-select" aria-label="选择要分配或撤销的角色">
+                <option value="">请选择角色</option>
+                <option v-for="role in roleCatalog" :key="role.id" :value="role.id">
+                  {{ roleTitleFromCatalog(role) }} ({{ role.id }})
+                </option>
+              </select>
+              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
+                分配角色
+              </button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
+                撤销角色
+              </button>
+            </div>
+            <p data-testid="selected-role-membership" class="user-admin__hint">{{ selectedRoleMembership.text }}</p>
+            <p
+              v-if="roleActionFeedback"
+              data-testid="role-action-feedback"
+              class="user-admin__status"
+              :class="{ 'user-admin__status--error': roleActionFeedback.tone === 'error' }"
+              aria-live="polite"
+            >
+              {{ roleActionFeedback.message }}
+            </p>
+          </div>
+
+          <div class="user-admin__section">
+            <h3>角色目录</h3>
+            <div class="user-admin__role-list">
+              <article v-for="role in roleCatalog" :key="role.id" class="user-admin__role-card">
+                <strong>{{ roleTitleFromCatalog(role) }}</strong>
+                <span class="user-admin__code">{{ role.id }}</span>
+                <small>成员数：{{ role.memberCount }}</small>
+                <p class="user-admin__code">{{ role.permissions.join(', ') || '无权限映射' }}</p>
+              </article>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>权限来源</h3>
+                <p class="user-admin__hint">下列代码来自当前访问快照，通常由角色继承，也可能包含直接授予。它不是该成员最终的业务访问结论；来源和例外以权限页为准。</p>
+              </div>
+              <router-link class="user-admin__link" data-testid="member-permission-source-link" :to="permissionSourceLocation">
+                查看权限来源与例外
+              </router-link>
+            </div>
             <div class="user-admin__chips">
               <span v-for="permission in access.permissions" :key="permission" class="user-admin__chip user-admin__chip--permission">
-                {{ permission }}
+                <template v-if="permissionCodeTitle(permission) !== permission">{{ permissionCodeTitle(permission) }} </template>
+                <span class="user-admin__code">{{ permission }}</span>
               </span>
-              <span v-if="access.permissions.length === 0" class="user-admin__empty">未授予额外权限</span>
+              <span v-if="access.permissions.length === 0" class="user-admin__empty">当前快照没有列出权限代码。这不是最终业务访问结论。</span>
             </div>
           </div>
 
@@ -942,7 +996,7 @@
             <div class="user-admin__section-head">
               <div>
                 <h3>插件使用</h3>
-                <p class="user-admin__hint">这里控制成员是否可进入具体插件命名空间。钉钉登录只决定能否扫码进入平台，不等于插件权限。</p>
+                <p class="user-admin__hint">角色分配和这里的插件准入一起决定能否使用该插件：两者同时满足才可用。委派管理身份与插件准入分开，管理委派不要求先开通插件使用。钉钉登录只决定能否扫码进入平台。</p>
               </div>
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loadingAdmission || !access" @click="void loadMemberAdmission(access.user.id)">
                 {{ loadingAdmission ? '刷新中...' : '刷新插件准入' }}
@@ -982,11 +1036,23 @@
             </div>
           </div>
 
+          <div class="user-admin__section" data-testid="management-scope-section">
+            <div class="user-admin__section-head">
+              <div>
+                <h3>管理范围</h3>
+                <p class="user-admin__hint">部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
+              </div>
+              <router-link class="user-admin__link" data-testid="management-scope-link" :to="managementScopeLocation">
+                查看该成员的管理范围
+              </router-link>
+            </div>
+          </div>
+
           <div class="user-admin__section">
             <div class="user-admin__section-head">
               <div>
                 <h3>管理员能力</h3>
-                <p class="user-admin__hint">考勤管理员和平台管理员分开控制，互不隐含。平台管理员变更后建议重新登录一次。</p>
+                <p class="user-admin__hint">考勤管理员和平台管理员分开控制，互不隐含。平台管理员变更后建议重新登录一次。开通插件使用不是成为委派管理员的条件。</p>
               </div>
             </div>
             <div class="user-admin__chips">
@@ -1218,45 +1284,6 @@
             </div>
           </div>
 
-          <div class="user-admin__section">
-            <h3>角色操作</h3>
-            <div class="user-admin__role-actions">
-              <select v-model="selectedRoleId" class="user-admin__select" data-testid="user-role-select" aria-label="选择要分配或撤销的角色">
-                <option value="">请选择角色</option>
-                <option v-for="role in roleCatalog" :key="role.id" :value="role.id">
-                  {{ role.name }} ({{ role.id }})
-                </option>
-              </select>
-              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
-                分配角色
-              </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
-                撤销角色
-              </button>
-            </div>
-            <p data-testid="selected-role-membership" class="user-admin__hint">{{ selectedRoleMembership.text }}</p>
-            <p
-              v-if="roleActionFeedback"
-              data-testid="role-action-feedback"
-              class="user-admin__status"
-              :class="{ 'user-admin__status--error': roleActionFeedback.tone === 'error' }"
-              aria-live="polite"
-            >
-              {{ roleActionFeedback.message }}
-            </p>
-          </div>
-
-          <div class="user-admin__section">
-            <h3>角色目录</h3>
-            <div class="user-admin__role-list">
-              <article v-for="role in roleCatalog" :key="role.id" class="user-admin__role-card">
-                <strong>{{ role.name }}</strong>
-                <span>{{ role.id }}</span>
-                <small>成员数：{{ role.memberCount }}</small>
-                <p>{{ role.permissions.join(', ') || '无权限映射' }}</p>
-              </article>
-            </div>
-          </div>
         </template>
 
         <div v-else-if="selectedUserId" class="user-admin__empty" data-testid="user-access-unread">
@@ -1302,6 +1329,7 @@ import {
   type RoleMembershipSnapshot,
   type RoleMembershipWriteOutcome,
 } from './adminUserRoleAction'
+import { presentPermission, presentRoleTitle } from './builtinCatalogPresentation'
 import {
   ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
   ADMIN_TEMPORARY_PASSWORD_TOO_SHORT,
@@ -1714,6 +1742,29 @@ const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const selectedRoleMembership = computed(() => selectedRoleMembershipHint(selectedRoleId.value, access.value?.roles || []))
+const permissionSourceLocation = computed(() => {
+  const userId = (access.value?.user.id || selectedUserId.value).trim()
+  if (!userId) return '/admin/permissions'
+  return `/admin/permissions?userId=${encodeURIComponent(userId)}`
+})
+const managementScopeLocation = computed(() => {
+  const userId = (access.value?.user.id || selectedUserId.value).trim()
+  if (!userId) return '/admin/role-delegation'
+  return `/admin/role-delegation?userId=${encodeURIComponent(userId)}`
+})
+
+function roleTitleFromCatalog(role: { id: string; name: string }): string {
+  return presentRoleTitle(role)
+}
+
+function roleIdTitle(roleId: string): string {
+  const catalogRole = roleCatalog.value.find((role) => role.id === roleId)
+  return presentRoleTitle({ id: roleId, name: catalogRole?.name ?? roleId })
+}
+
+function permissionCodeTitle(code: string): string {
+  return presentPermission({ code }).name || code
+}
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
 // Hidden for a disabled account: the server reads memberships with the login predicate
@@ -2420,13 +2471,19 @@ function buildUserNavigationKey(navigation: InitialUserNavigation): string {
 function buildUserLocation(navigation: InitialUserNavigation): string {
   if (typeof window === 'undefined') return '/admin/users'
   const url = new URL(window.location.href)
-  const params = new URLSearchParams()
-  if (navigation.userId.trim().length > 0) params.set('userId', navigation.userId.trim())
-  if (navigation.source.trim().length > 0) params.set('source', navigation.source.trim())
-  if (navigation.directoryFailure.trim().length > 0) params.set('directoryFailure', navigation.directoryFailure.trim())
-  if (navigation.integrationId.trim().length > 0) params.set('integrationId', navigation.integrationId.trim())
-  if (navigation.accountId.trim().length > 0) params.set('accountId', navigation.accountId.trim())
+  const params = url.searchParams
+  const setOrDelete = (key: string, value: string): void => {
+    const trimmed = value.trim()
+    if (trimmed.length > 0) params.set(key, trimmed)
+    else params.delete(key)
+  }
+  setOrDelete('userId', navigation.userId)
+  setOrDelete('source', navigation.source)
+  setOrDelete('directoryFailure', navigation.directoryFailure)
+  setOrDelete('integrationId', navigation.integrationId)
+  setOrDelete('accountId', navigation.accountId)
   if (navigation.filter !== 'all') params.set('filter', navigation.filter)
+  else params.delete('filter')
   const search = params.toString()
   return `${url.pathname}${search ? `?${search}` : ''}${url.hash}`
 }
@@ -4972,11 +5029,14 @@ onUnmounted(() => {
 .user-admin__chip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   border-radius: 999px;
   background: #f3f4f6;
   color: #111827;
   padding: 4px 10px;
   font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .user-admin__toggle {
@@ -5030,6 +5090,13 @@ onUnmounted(() => {
 
 .user-admin__role-card p {
   margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.user-admin__code {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .user-admin__panel--detail-open {
@@ -5348,6 +5415,29 @@ onUnmounted(() => {
 
   .user-admin__actions {
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .user-admin__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .user-admin__actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .user-admin__actions > .user-admin__link,
+  .user-admin__actions > .user-admin__button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
 }
 </style>

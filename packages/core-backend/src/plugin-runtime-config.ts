@@ -7,6 +7,8 @@ const INTEGRATION_CORE_CUSTOMER_PACKS_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARA
 const INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
 const INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
 const INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
+// Pre-pilot fix batch 8(f) (batch-refresh pre-flip, register R-91): the 备料分批拉取 pilot's server-held declarations.
+const INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH'
 
 function parsePluginJsonEnv(env: NodeJS.ProcessEnv, key: string): unknown {
   const raw = env[key]
@@ -178,6 +180,29 @@ export function resolvePluginRuntimeConfig(
     INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV,
     'a JSON object with an ordered steps array'
   )
+  // 备料分批拉取 PILOT DECLARATIONS (pre-pilot fix batch 8(f), register R-91) — the fifth artifact on this reader. Before
+  // it the two server-held pilot declarations had no deploy path at all (only a test mount could set them): the plugin reads
+  // `config.stockPreparationPilot` (lib/http-routes.cjs stockPreparationPilotSpecSlotDeclaration /
+  // stockPreparationPilotCustomerPackDeclaration), and each of its two keys counts only as the EXACT literal
+  // 'not_applicable':
+  //   specReadPlanSlot: 'not_applicable'  — this deployment's source has no 规格 column to read (readiness
+  //                                         `spec_read_plan_slot` then passes without `part.specField`);
+  //   customerPack:     'not_applicable'  — this deployment runs without a customer pack (readiness
+  //                                         `pack_columns_installed` then passes only while no `ext_` column is
+  //                                         declared or installed).
+  // Anything else in the file declares nothing (the plugin owns the literal check, as it does for every sibling).
+  //
+  // UNSET -> the key is omitted -> `config.stockPreparationPilot` is absent -> both declarations are null -> the two
+  // readiness checks answer exactly what they answer on today's build. Nothing here enables a pilot: the enable is
+  // still the admin POST, behind every readiness check and CONTINUATION_SUPPORT_VERSION. SET-but-malformed -> THROW,
+  // naming the ENV KEY and never the path, the same as its siblings: a typo'd path must not read like "nothing
+  // declared". A declaration is a SITE FACT the owner states (O-8 / B-M8: never guessed) — declaring the 规格 slot not
+  // applicable on a site whose source does have the column means that column is never read for a pilot project.
+  const stockPreparationPilot = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH_ENV,
+    'a JSON object with the pilot declarations (specReadPlanSlot, customerPack)'
+  )
 
   return {
     ...(tableActions !== undefined ? { tableActions } : {}),
@@ -186,6 +211,7 @@ export function resolvePluginRuntimeConfig(
     ...(stockPreparationExtFieldMapping !== undefined ? { stockPreparationExtFieldMapping } : {}),
     ...(b2aTrialRegistry !== undefined ? { b2aTrialRegistry } : {}),
     ...(stockPreparationHandoff !== undefined ? { stockPreparationHandoff } : {}),
+    ...(stockPreparationPilot !== undefined ? { stockPreparationPilot } : {}),
     ...(c6TestFailureInjection !== undefined || c6TestFailureInjectionDeployEnabled
       ? {
           c6TestFailureInjection: {

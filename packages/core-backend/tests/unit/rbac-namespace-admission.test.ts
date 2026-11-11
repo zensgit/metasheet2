@@ -21,7 +21,7 @@ vi.mock('../../src/metrics/metrics', () => ({
   },
 }))
 
-import { inspectUserPermissionGrants, invalidateUserPerms, listUserPermissions, userHasPermission } from '../../src/rbac/service'
+import { getPermCacheStatus, inspectUserPermissionGrants, invalidateUserPerms, listUserPermissions, userHasPermission } from '../../src/rbac/service'
 import { rbacGuard } from '../../src/rbac/rbac'
 import { userHasEffectiveNamespaceAccess } from '../../src/rbac/namespace-admission'
 
@@ -167,21 +167,26 @@ describe('rbac namespace admission', () => {
     expect(state.poolQuery).toHaveBeenCalledTimes(2)
   })
 
-  // Final review (M26): the in-lock read of the grantor's codes "bypasses the 60 s cache" — the test above
-  // starts from a COLD memo, so a transaction branch that returned a cache hit first survived it. Warm
-  // the memo through the pool path, then read on a transaction query that answers a DIFFERENT set.
-  it('on a caller transaction query: a WARM memo is bypassed — the transaction\'s codes come back, no cache hit is counted, the memo is not overwritten', async () => {
+  // The in-lock read must use the caller's executor, not a previous pool answer and not a
+  // memo written back for the next pool read. Pool reads re-query; each one is a miss.
+  it('on a caller transaction query: pool reads re-query, and the transaction result is not written back', async () => {
     const userId = 'user-warm-m26'
     state.query.mockResolvedValue({ rows: [] })
-    state.poolQuery
-      .mockResolvedValueOnce({ rows: [{ code: 'workflow:read' }, { code: 'spreadsheets:read' }] })
-      .mockResolvedValueOnce({ rows: [{ permissions: [] }] })
+    state.poolQuery.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('permission_code AS code')) {
+        return { rows: [{ code: 'workflow:read' }, { code: 'spreadsheets:read' }] }
+      }
+      if (text.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      return { rows: [] }
+    })
     expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
     expect(state.cacheMiss).toHaveBeenCalledTimes(1)
-    // The memo is warm: a second pool-path read is a hit and issues no statement.
     expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
-    expect(state.cacheHits).toHaveBeenCalledTimes(1)
+    expect(state.cacheHits).not.toHaveBeenCalled()
+    expect(state.cacheMiss).toHaveBeenCalledTimes(2)
     const poolCalls = state.poolQuery.mock.calls.length
+    expect(poolCalls).toBeGreaterThanOrEqual(4)
 
     const txQuery = vi.fn(async (sql: string) => {
       const text = sql.replace(/\s+/g, ' ').trim()
@@ -192,12 +197,15 @@ describe('rbac namespace admission', () => {
     const fromTx = await listUserPermissions(userId, txQuery)
     expect(fromTx).toEqual(['workflow:read'])
     expect(txQuery).toHaveBeenCalled()
-    expect(state.cacheHits).toHaveBeenCalledTimes(1)
-    expect(state.cacheMiss).toHaveBeenCalledTimes(1)
+    expect(state.cacheHits).not.toHaveBeenCalled()
+    expect(state.cacheMiss).toHaveBeenCalledTimes(2)
     expect(state.poolQuery).toHaveBeenCalledTimes(poolCalls)
-    // Nor written back: the pool path still serves the memo's two codes.
+    expect(getPermCacheStatus().cacheSize).toBe(0)
+
     expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
-    expect(state.cacheHits).toHaveBeenCalledTimes(2)
+    expect(state.cacheMiss).toHaveBeenCalledTimes(3)
+    expect(state.cacheHits).not.toHaveBeenCalled()
+    expect(state.poolQuery.mock.calls.length).toBeGreaterThan(poolCalls)
   })
 
   it('userHasEffectiveNamespaceAccess on a caller transaction query reads both admission inputs there, one after the other', async () => {
@@ -552,21 +560,22 @@ describe('rbac namespace admission', () => {
     expect(firstRead).not.toEqual(revokedCodes)
     expect(unionReads).toBeGreaterThanOrEqual(2)
     const unionReadsAfterRetry = unionReads
+    // The pre-revoke snapshot is not stored. The next call reads the committed
+    // post-revoke rows (empty here) instead of replaying workflow:read.
+    expect(getPermCacheStatus()).toMatchObject({ cacheSize: 0, keys: [] })
 
-    // If the deferred pre-revoke result had been cache.set, the next list would
-    // return workflow:read even after this poisoned miss source.
     state.poolQuery.mockImplementation(async (sql: string) => {
       const text = String(sql)
       if (text.includes('permission_code AS code')) {
         unionReads += 1
-        return { rows: revokedCodes.map((code) => ({ code })) }
+        return { rows: [] }
       }
       if (text.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
       return { rows: [] }
     })
     await expect(listUserPermissions(userId)).resolves.toEqual([])
-    expect(unionReads).toBe(unionReadsAfterRetry)
-    expect(state.cacheHits).toHaveBeenCalled()
+    expect(unionReads).toBe(unionReadsAfterRetry + 1)
+    expect(state.cacheHits).not.toHaveBeenCalled()
 
     state.poolQuery.mockImplementation(async (sql: string) => {
       const text = String(sql)
@@ -650,23 +659,31 @@ describe('rbac namespace admission', () => {
     expect(state.cacheHits.mock.calls.length).toBe(hitsBeforeFreshRead)
   })
 
-  it('drops a warm authorization memo on invalidate so the next list is a fresh miss', async () => {
+  it('does not keep a prior grant when the next committed read no longer has it', async () => {
     const userId = 'user-warm-invalidate'
     state.query.mockResolvedValue({ rows: [] })
-    state.poolQuery
-      .mockResolvedValueOnce({ rows: [{ code: 'workflow:read' }] })
-      .mockResolvedValueOnce({ rows: [{ permissions: [] }] })
+    state.poolQuery.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('permission_code AS code')) return { rows: [{ code: 'workflow:read' }] }
+      if (text.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      return { rows: [] }
+    })
     expect(await listUserPermissions(userId)).toEqual(['workflow:read'])
     expect(state.cacheMiss).toHaveBeenCalledTimes(1)
     expect(await listUserPermissions(userId)).toEqual(['workflow:read'])
-    expect(state.cacheHits).toHaveBeenCalledTimes(1)
-
-    invalidateUserPerms(userId)
-    state.poolQuery
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ permissions: [] }] })
-    expect(await listUserPermissions(userId)).toEqual([])
+    expect(state.cacheHits).not.toHaveBeenCalled()
     expect(state.cacheMiss).toHaveBeenCalledTimes(2)
+
+    state.poolQuery.mockImplementation(async (sql: string) => {
+      const text = String(sql)
+      if (text.includes('permission_code AS code')) return { rows: [] }
+      if (text.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      return { rows: [] }
+    })
+    expect(await listUserPermissions(userId)).toEqual([])
+    expect(state.cacheMiss).toHaveBeenCalledTimes(3)
+    expect(state.cacheHits).not.toHaveBeenCalled()
+    expect(getPermCacheStatus().cacheSize).toBe(0)
     state.poolQuery.mockResolvedValue({ rows: [] })
     await expect(userHasPermission(userId, 'workflow:read')).resolves.toBe(false)
   })

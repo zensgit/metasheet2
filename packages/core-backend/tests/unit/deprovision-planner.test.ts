@@ -15,7 +15,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: false,
       orgId: 'org-1',
       orgMembershipActive: false,
-      dingtalkGrantEnabled: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: true,
       globallyClear: true,
     })
     expect(plan.effects).toEqual([])
@@ -32,7 +33,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
         isActive: true,
         orgId: 'org-1',
         orgMembershipActive: true,
-        dingtalkGrantEnabled: true,
+        loginGrantProvider: 'dingtalk',
+        loginGrantEnabled: true,
         globallyClear: true,
       })
       expect(plan).toEqual({
@@ -51,7 +53,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: true,
       orgId: 'org-a',
       orgMembershipActive: true,
-      dingtalkGrantEnabled: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: true,
       globallyClear: true,
     })
     expect(plan.skipReason).toBeNull()
@@ -70,7 +73,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: true,
       orgId: 'org-a',
       orgMembershipActive: true,
-      dingtalkGrantEnabled: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: true,
       globallyClear: false,
     })
     expect(plan.effects).toEqual([
@@ -94,8 +98,9 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: false,
       orgId: 'org-a',
       orgMembershipActive: false,
-      dingtalkGrantEnabled: false,
-      dingtalkGrantRowExists: false,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: false,
+      loginGrantRowExists: false,
       globallyClear: true,
     })
     expect(plan.effects).toEqual([
@@ -105,9 +110,58 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
         beforeActive: false,
         afterActive: false,
         grantRowCreated: true,
+        provider: 'dingtalk',
       },
     ])
     expect(plan.skipReason).toBeNull()
+  })
+
+  // The grant leg acts on the `(loginGrantProvider, user)` row, and every grant_changed effect
+  // carries that provider so the ledger row is self-describing; the other effect types carry none.
+  it('carries loginGrantProvider on both grant_changed shapes and on no other effect', () => {
+    const flip = planDirectoryDeprovision({
+      localUserId: 'u-provider',
+      policy: 'mark_inactive',
+      activationStatus: 'activated',
+      isActive: true,
+      orgId: 'org-a',
+      orgMembershipActive: true,
+      loginGrantProvider: 'wecom',
+      loginGrantEnabled: true,
+      loginGrantRowExists: true,
+      globallyClear: true,
+    })
+    expect(flip.effects.find((e) => e.type === 'grant_changed')).toMatchObject({
+      provider: 'wecom',
+      beforeActive: true,
+      afterActive: false,
+    })
+    for (const effect of flip.effects.filter((e) => e.type !== 'grant_changed')) {
+      expect(effect).not.toHaveProperty('provider')
+    }
+
+    const creation = planDirectoryDeprovision({
+      localUserId: 'u-provider',
+      policy: 'disable_grant_only',
+      activationStatus: 'activated',
+      isActive: true,
+      orgId: 'org-a',
+      orgMembershipActive: false,
+      loginGrantProvider: 'wecom',
+      loginGrantEnabled: false,
+      loginGrantRowExists: false,
+      globallyClear: true,
+    })
+    expect(creation.effects).toEqual([
+      {
+        type: 'grant_changed',
+        orgId: null,
+        beforeActive: false,
+        afterActive: false,
+        grantRowCreated: true,
+        provider: 'wecom',
+      },
+    ])
   })
 
   it('zero-effect when already inactive with no orgs and the deny row already present', () => {
@@ -118,8 +172,9 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: false,
       orgId: 'org-a',
       orgMembershipActive: false,
-      dingtalkGrantEnabled: false,
-      dingtalkGrantRowExists: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: false,
+      loginGrantRowExists: true,
       globallyClear: true,
     })
     expect(plan.effects).toEqual([])
@@ -134,8 +189,9 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: false,
       orgId: 'org-a',
       orgMembershipActive: false,
-      dingtalkGrantEnabled: false,
-      dingtalkGrantRowExists: false,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: false,
+      loginGrantRowExists: false,
       globallyClear: false,
     })
     expect(plan.effects).toEqual([])
@@ -150,7 +206,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: true,
       orgId: 'org-a',
       orgMembershipActive: true,
-      dingtalkGrantEnabled: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: true,
       globallyClear: true,
     })
     expect(plan.effects.map((effect) => effect.type).sort()).toEqual(
@@ -166,7 +223,8 @@ describe('planDirectoryDeprovision (D2 prospective)', () => {
       isActive: true,
       orgId: 'org-a',
       orgMembershipActive: true,
-      dingtalkGrantEnabled: true,
+      loginGrantProvider: 'dingtalk',
+      loginGrantEnabled: true,
       globallyClear: true,
     })
     expect(plan).toEqual({

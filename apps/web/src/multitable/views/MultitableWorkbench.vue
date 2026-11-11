@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-workbench" @keydown="onGlobalKeydown">
+  <div ref="workbenchRootRef" class="mt-workbench" @keydown="onGlobalKeydown">
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
@@ -317,6 +317,20 @@
         <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
+        <!-- 备料 「查看子件」 / 「查看所有使用位置」: the viewer filter the drawer set (utils/bom-relations.ts). Per-viewer and
+             never stored; 清除 drops it and reloads the page the grid was on, with the view exactly as stored. -->
+        <div
+          v-if="viewerFilterState && !showDashboardView"
+          class="mt-workbench__viewer-filter"
+          role="status"
+          data-testid="workbench-viewer-filter-banner"
+        >
+          <div class="mt-workbench__viewer-filter-copy">
+            <strong data-testid="workbench-viewer-filter-label">{{ viewerFilterState.label }}</strong>
+            <span class="mt-workbench__viewer-filter-note">{{ bomRelationsLabel('banner.note', isZh) }}</span>
+          </div>
+          <MtButton size="sm" data-testid="workbench-viewer-filter-clear" @click="onClearViewerFilter">{{ bomRelationsLabel('banner.clear', isZh) }}</MtButton>
+        </div>
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
@@ -504,6 +518,7 @@
         :can-create="canCreateRecordByHand"
         :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :manual-copy-available="manualRowsCreateAvailable"
+        :bom-relations="inspectorBomRelations"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="inspectorFieldPermissions"
@@ -541,6 +556,7 @@
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @manual-copy="onManualCopyRecord(selectedRecordId)"
+        @bom-relations="onBomRelations"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -862,6 +878,7 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '../utils/workbench-undo'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
@@ -913,6 +930,13 @@ import {
   resolveManualRowEditableFieldIds,
 } from '../utils/manual-rows'
 import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
+import {
+  bomRelationsLabel,
+  bomRelationsSourceValue,
+  buildBomRelationsViewerFilter,
+  readBomRelationsBlock,
+  type BomRelationKind,
+} from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
@@ -1180,6 +1204,18 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 // resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
 // the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
 const gridPageSizeUserId = ref<string | null>(null)
+// An attachment upload or delete is a write the grid's history does not hold yet: the drawer, and a grid upload,
+// patch the field once it is done (the grid's cell editor patches a remove or clear when it closes; the form view
+// keeps it in its draft). The grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
+let attachmentWrites = 0
+async function holdingHistory<T>(write: () => Promise<T>): Promise<T> {
+  attachmentWrites += 1
+  try {
+    return await write()
+  } finally {
+    attachmentWrites -= 1
+  }
+}
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
@@ -1192,6 +1228,7 @@ const grid = useMultitableGrid({
   // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
   // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
   resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
+  holdsHistory: () => attachmentWrites > 0,
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -2953,31 +2990,36 @@ const hierarchyParentFieldIds = computed(() =>
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
-  workbench.client.uploadAttachment(file, {
+  holdingHistory(() => workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
     recordId: context?.recordId,
     fieldId: context?.fieldId,
-  })
+  }))
 
-const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) => {
+const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  holdingHistory(() => deleteAttachment(attachmentId, context))
+
+async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
-  if (context?.recordId && selectedRecordId.value === context.recordId) {
-    const updatedIds = (selectedRecordResolved.value?.data[context.fieldId ?? ''] as unknown[] | undefined)
+  // The deep-linked copy (the reload below refreshes the page's rows only) takes the delete as the server does for
+  // an attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on:
+  // a later patch of that record starts from it.
+  const linked = deepLinkedRecord.value
+  if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
+    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
       ?.map(String)
       .filter((id) => id !== attachmentId) ?? []
-    if (deepLinkedRecord.value?.id === context.recordId && context.fieldId) {
-      deepLinkedRecord.value = {
-        ...deepLinkedRecord.value,
-        version: deepLinkedRecord.value.version + 1,
-        data: {
-          ...deepLinkedRecord.value.data,
-          [context.fieldId]: updatedIds,
-        },
-      }
-      deepLinkedRecordAttachmentSummaries.value = {
-        ...deepLinkedRecordAttachmentSummaries.value,
-        [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
-      }
+    deepLinkedRecord.value = {
+      ...linked,
+      version: linked.version + 1,
+      data: {
+        ...linked.data,
+        [context.fieldId]: updatedIds,
+      },
+    }
+    deepLinkedRecordAttachmentSummaries.value = {
+      ...deepLinkedRecordAttachmentSummaries.value,
+      [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
     }
   }
   await grid.loadViewData(grid.page.value.offset)
@@ -3654,15 +3696,38 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown) {
-  if (!selectedRecordResolved.value) return
-  const record = selectedRecordResolved.value
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[]) {
+  // An attachment write names the record it was made on: it can end after the drawer moved to another record,
+  // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
+  // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
+  // closes while it runs). Every other edit is the shown record's.
+  const record = recordId ? drawerRecordById(recordId) : selectedRecordResolved.value
+  if (!record) return
+  const shown = record.id === selectedRecordResolved.value?.id
+  // A remove or clear-all that ended after the drawer moved on names the ids it took out: they come out of the
+  // record's list as it is now (the delete's reload, or its update of a deep-linked copy, refreshed it, and it may
+  // hold an attachment added meanwhile), not the list it started from. With none of them left in it, there is
+  // nothing to write.
+  let patchValue = value
+  if (removed && !shown) {
+    const raw = record.data[fieldId]
+    const current = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const next = current.filter((id) => !removed.includes(id))
+    if (next.length === current.length) return
+    patchValue = next
+  }
   if (!ensureCanEditRecord(record.id)) return
+  // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
+  // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
+  // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
+  const settleUndo = shown
+    ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+    : undefined
   if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, value)
+    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
     return
   }
-  await commitDrawerPatch(record, fieldId, value)
+  await commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
@@ -3677,12 +3742,12 @@ function drawerRecordById(recordId: string): MetaRecord | null {
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown): Promise<void> {
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
   const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
   const step = previous.then(async () => {
     // Re-read AFTER the previous step: its returned version is on the row by now.
     const current = drawerRecordById(recordId)
-    if (current) await commitDrawerPatch(current, fieldId, value, true)
+    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
   })
   const tail = step.then(() => undefined, () => undefined)
   manualDrawerWriteTails.set(recordId, tail)
@@ -3693,9 +3758,11 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
   }
 }
 
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false) {
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
-  inspectorPatchOwners.set(fieldId, patchOwner)
+  // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
+  // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
+  if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
   // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
   const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
@@ -3750,6 +3817,7 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
     showError(grid.error.value)
     return
   }
+  onCommitted?.()
   // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
   // panel's watch, its draft). Other fields' errors are untouched.
   if (latestRequest) clearInspectorFieldError(fieldId)
@@ -4252,7 +4320,7 @@ async function loadAggregates() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value })
     if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
     aggregateGroups.value = r.groups ?? []
@@ -4265,7 +4333,7 @@ async function loadAggregates() {
   }
 }
 watch(
-  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value],
+  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value, () => grid.viewerFilterParam?.value],
   () => { void loadAggregates() },
   { immediate: true },
 )
@@ -4285,7 +4353,7 @@ async function loadScaleStats() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, statsFields })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value, statsFields })
     if (seq !== scaleStatsReqSeq) return // a newer request superseded this one
     scaleServerStats.value = r.stats ?? {}
   } catch {
@@ -4313,6 +4381,7 @@ const scaleStatsKey = () => JSON.stringify([
   grid.filterRules.value,
   grid.filterGroups.value,
   searchText.value,
+  grid.viewerFilterParam?.value ?? null,
   autoScaleStatsFieldIds.value,
 ])
 let lastScaleStatsKey = ''
@@ -5711,8 +5780,37 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
-function onDrawerNavigate(recordId: string) {
+async function onDrawerNavigate(recordId: string) {
+  if (recordId === selectedRecordId.value) {
+    void selectRecord(recordId)
+    return
+  }
+  // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
+  // text editor keeps its draft while focused): blur the drawer's focused control first (as closing the drawer
+  // does, see flushActiveFieldEdit), so it commits to the record it was typed on. Then, once the drawer shows the
+  // next record, the focus goes back to that control (the drawer reuses it), or to the drawer's open tab when the
+  // control is gone (a field hidden there), so the chord, Esc and typing go on working, unless something else has
+  // the focus by then.
+  const active = document.activeElement
+  const drawer = active instanceof HTMLElement ? active.closest<HTMLElement>('.meta-record-drawer') : null
+  const focused = drawer ? (active as HTMLElement) : null
+  focused?.blur()
   void selectRecord(recordId)
+  if (!focused || !drawer) return
+  await nextTick()
+  const now = document.activeElement
+  if (now && now !== document.body) return
+  if (focused.isConnected) {
+    focused.focus({ preventScroll: true })
+    // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
+    if (focused.isContentEditable) {
+      const selection = document.getSelection()
+      selection?.selectAllChildren(focused)
+      selection?.collapseToEnd()
+    }
+  } else if (drawer.isConnected) {
+    drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
+  }
 }
 
 // --- Beforeunload: warn on unsaved changes ---
@@ -5726,13 +5824,28 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   e.returnValue = ''
 }
 
+// mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts,
+// installed on the document in onMounted): the browser's own undo never runs on the page, since it is
+// page-wide and can revert another field. A text control's chord is its own step or nothing; the grid's
+// undo/redo runs from a non-text target in the workbench, or from the page itself after a press on the
+// grid's cells or the drawer's title or fields (their edits are cell patches; a button or file input
+// there, the grid's footer, the drawer's comments, or a rail or manager rename is not:
+// `isWorkbenchGridSurface`).
+const workbenchRootRef = ref<HTMLElement | null>(null)
+const workbenchUndo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),
+  isGridSurface: isWorkbenchGridSurface,
+})
+let removeWorkbenchUndo: (() => void) | null = null
+// The drawer's controls are reused when it shows another record (and the sheet's and view's controls
+// when those change), so a control's history must not outlive what it was typed for: with equal content
+// in both (commonly empty), an undo would bring record A's typing into record B and save it there.
+watch([selectedRecordId, () => workbench.activeSheetId.value, () => workbench.activeViewId.value], () => workbenchUndo.reset())
+
 function onGlobalKeydown(e: KeyboardEvent) {
-  const mod = e.metaKey || e.ctrlKey
-  if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
-  else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
   // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
   // (the rich-text editor is a contenteditable div, not an input).
-  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
+  if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
   // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
   // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
   // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
@@ -6156,6 +6269,37 @@ const selectedRecordResolved = computed<MetaRecord | null>(() => {
   return null
 })
 
+// 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07; utils/bom-relations.ts). The buttons exist only when
+// /context sends the stockPreparationBomRelations block for the ACTIVE sheet (never from stale capabilities of the
+// previous sheet). Pressing one sets the grid's VIEWER filter (useMultitableGrid setViewerFilter): GET /view narrows
+// this viewer's rows; nothing is written to the shared view or the personal overlay. 查看子件 closes the drawer first
+// (the open row is the parent and is not among its own children); 查看所有使用位置 keeps it open (the row is one of
+// the positions).
+const bomRelationsBlock = computed(() => (capabilitiesStale.value ? null : readBomRelationsBlock(capabilitySource.value)))
+const inspectorBomRelations = computed<{ disabledReason: string | null } | null>(() => {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return null
+  return { disabledReason: bomRelationsSourceValue(block, record) === null ? bomRelationsLabel('action.noSource', isZh.value) : null }
+})
+const viewerFilterState = computed(() => grid.viewerFilter?.value ?? null)
+async function onBomRelations(kind: BomRelationKind) {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return
+  const state = buildBomRelationsViewerFilter(kind, block, record, isZh.value)
+  if (!state) return
+  if (kind === 'children') {
+    onCloseDrawer()
+    // A pending edit the user chose to keep (confirmDiscardRecordChanges declined) keeps the drawer — and the grid as it is.
+    if (inspectorOpen.value) return
+  }
+  await grid.setViewerFilter(state)
+}
+async function onClearViewerFilter() {
+  await grid.clearViewerFilter()
+}
+
 watch(
   [() => workbench.activeSheetId.value, visibleCommentPresenceRecordIds, () => effectiveRowActions.value.canComment],
   ([sheetId, recordIds, canComment]) => {
@@ -6422,6 +6566,7 @@ watch(
 )
 
 onMounted(async () => {
+  removeWorkbenchUndo = installWorkbenchUndo(workbenchUndo, { undo: () => grid.undo(), redo: () => grid.redo() })
   window.addEventListener('beforeunload', onBeforeUnload)
   syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
   // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
@@ -6508,6 +6653,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  removeWorkbenchUndo?.()
+  removeWorkbenchUndo = null
   workbenchAlive = false
   closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
@@ -6560,6 +6707,20 @@ defineExpose({
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.mt-workbench__viewer-filter {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #b3d8ff;
+  border-radius: 10px;
+  background: #ecf5ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mt-workbench__viewer-filter-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mt-workbench__viewer-filter-note { font-size: 12px; line-height: 1.4; color: #606266; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
   padding: 10px 12px;

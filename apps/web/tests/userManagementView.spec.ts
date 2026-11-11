@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -85,7 +86,7 @@ async function setSelectValue(select: HTMLSelectElement, value: string): Promise
 
 function registerRouterLink(app: App<Element>, withHref = false): void {
   app.component('RouterLink', {
-    props: ['to'],
+    props: { to: { type: [String, Object], default: '' } },
     computed: {
       resolvedHref(): string {
         return typeof this.to === 'string' ? this.to : String(this.to || '')
@@ -862,7 +863,7 @@ describe('UserManagementView', () => {
   it('distinguishes DingTalk login from plugin usage and can open namespace admission', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -901,7 +902,7 @@ describe('UserManagementView', () => {
   it('can select filtered users and batch update DingTalk grants', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -1426,6 +1427,61 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Bravo')
   })
 
+  it('keeps unrelated query fields and the hash when a member filter changes', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&integrationId=ding-1&accountId=user-2-directory&directoryFailure=missing_account&handoff=keep#member-detail')
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+
+    const url = new URL(window.location.href)
+    expect(url.searchParams.get('userId')).toBe('user-2')
+    expect(url.searchParams.get('source')).toBe('directory-sync')
+    expect(url.searchParams.get('integrationId')).toBe('ding-1')
+    expect(url.searchParams.get('accountId')).toBe('user-2-directory')
+    expect(url.searchParams.get('directoryFailure')).toBe('missing_account')
+    expect(url.searchParams.get('filter')).toBe('dingtalk-openid-missing')
+    expect(url.searchParams.get('handoff')).toBe('keep')
+    expect(url.hash).toBe('#member-detail')
+    expect(container?.textContent).toContain('目录定位未完成')
+  })
+
+  it('links the selected member to permission sources and management scope', async () => {
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    const permissionLink = container!.querySelector('[data-testid="member-permission-source-link"]')
+    const scopeLink = container!.querySelector('[data-testid="management-scope-link"]')
+    expect(permissionLink?.getAttribute('href')).toBe('/admin/permissions?userId=user-1')
+    expect(scopeLink?.getAttribute('href')).toBe('/admin/role-delegation?userId=user-1')
+    expect(container?.textContent).toContain('不是最终业务访问结论')
+    expect(container?.textContent).toContain('部门范围包含该部门及其下级')
+    expect(container?.textContent).toContain('共享成员组')
+    expect(container?.textContent).toContain('取并集')
+    expect(container?.textContent).toContain('委派管理员只能给允许的成员分配允许的角色')
+    expect(container?.textContent).toContain('平台管理员配置管理范围')
+    expect(container?.textContent).not.toContain('必须开通插件')
+    expect(container?.textContent).toContain('管理委派不要求先开通插件使用')
+    expect(container?.textContent).not.toContain('私有圈定')
+    expect(container?.textContent).not.toContain('不新增范围类型')
+    expect(container?.textContent).not.toContain('中文名只用于阅读')
+    expect(container?.textContent).not.toContain('保存仍使用角色 ID')
+
+    const bravo = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
+    bravo?.click()
+    await waitForCondition(() => container!.querySelector('[data-testid="member-permission-source-link"]')?.getAttribute('href') === '/admin/permissions?userId=user-2')
+    expect(container!.querySelector('[data-testid="member-permission-source-link"]')?.getAttribute('href')).toBe('/admin/permissions?userId=user-2')
+    expect(container!.querySelector('[data-testid="management-scope-link"]')?.getAttribute('href')).toBe('/admin/role-delegation?userId=user-2')
+  })
+
   it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {
     const state = createApiState()
     state[1].hasOpenId = false
@@ -1466,7 +1522,7 @@ describe('UserManagementView', () => {
   it('can batch update plugin usage with namespace selection and refresh the current detail user', async () => {
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -3355,7 +3411,7 @@ describe('UserManagementView', () => {
     apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
     app = createApp(UserManagementView)
     app.component('RouterLink', {
-      props: ['to'],
+      props: { to: { type: [String, Object], default: '' } },
       template: '<a><slot /></a>',
     })
     app.mount(container!)
@@ -3401,9 +3457,9 @@ describe('UserManagementView', () => {
     expect(rule('.user-admin__user > .user-admin__hint')).toContain('flex-basis: 100%;')
     expect(rule('.user-admin__user > .user-admin__hint')).toContain('min-width: 0;')
     expect(rule('.user-admin__user > .user-admin__hint')).toContain('overflow-wrap: anywhere;')
-    expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n  overflow-wrap: anywhere;/)
+    expect(style).toMatch(/\.user-admin__user-body > span,\n\.user-admin__detail-head h2,\n\.user-admin__detail-head p \{\n {2}overflow-wrap: anywhere;/)
     // The shared flex-wrap rule for every action row is still in place.
-    expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n  display: flex;\n  flex-wrap: wrap;/)
+    expect(style).toMatch(/\.user-admin__role-actions,\n\.user-admin__role-list \{\n {2}display: flex;\n {2}flex-wrap: wrap;/)
   })
 
   it('keeps invite and editing off the member table until the admin opens them', async () => {

@@ -175,7 +175,9 @@
 //           (its repair leg, `repairProjectSheetContractOptions`) — G1 field defect (R67): a WRITE of
 //           field metadata (the server-held contract option sets) onto the sheet the proven tenant's
 //           registry row names, in the staging project derived from this scope with no request
-//           projectId. A header-fillable tenant here would patch another tenant's project sheet. The
+//           projectId. R-71 ⑦.4 PR-3: with `addMissingColumns: true` the same leg also ADDS the frozen
+//           template's missing columns there (field metadata again, never a row; `dryRun: true` writes
+//           nothing). A header-fillable tenant here would patch another tenant's project sheet. The
 //           route's projectNo-less leg is unchanged and is NOT on this list: it keeps its
 //           `resolveAuthUserTenantId` normalizer (the GHSA step-1 write face).
 //       21. GET  …/projects/:projectNo/target/pilot    `stockPreparationProjectPilotGet`
@@ -216,6 +218,36 @@
 //           record handles); the POST is a WRITE — one field property of that sheet's key column, through the host's
 //           provisioning port in the staging project derived from this scope with no request projectId. A
 //           header-fillable tenant here would read or flip another tenant's project switch.
+//       34. GET  …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchGet`
+//           批次标识 BI-1b (design §8.7; register R-65), ADMIN. A values-free READ of the proven tenant's project
+//           sheet: whether its two batch columns are present / locked / visible, its pull-batch ledger state and its
+//           row classes (counts). The staging project it reads through is derived (in the shared status-deps helper)
+//           from this scope with no request projectId. A header-fillable tenant here would read another tenant's
+//           sheet state.
+//       35. GET  …/pull-batch/settings                                  `stockPreparationPullBatchSettingsGet`
+//       36. POST …/pull-batch/settings                                  `stockPreparationPullBatchSettingsSet`
+//       37. POST …/projects/:projectNo/target/pull-batch/settings       `stockPreparationProjectPullBatchSettingsSet`
+//           批次标识 BI-7 (design §5.5 / §11; register R-65), ADMIN. The GET reads the proven tenant's pull-batch
+//           settings: its tenant default and its registered sheets' captured values (with their project numbers,
+//           admin-visible); the two POSTs are WRITES to that tenant's settings row and to one of its sheets' ledger
+//           rows. Plugin ledger only — no staging project, no host call. A header-fillable tenant here would read or
+//           change another tenant's settings.
+//       38. POST …/projects/:projectNo/target/pull-batch  `stockPreparationProjectPullBatchInstall`
+//           批次标识 BI-2 (design §8.1-§8.6; register R-65), ADMIN. The per-sheet install (dry_run / install / abort): a
+//           WRITE of the proven tenant's project sheet — the band columns, the plugin views, the landing, the persisted
+//           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope
+//           with no request projectId. Every real run is owner gate ② per sheet. A header-fillable tenant here would
+//           install onto another tenant's sheet.
+//       39. GET  …/project-targets/census                                   `stockPreparationSheetCensusList`
+//       40. GET  …/projects/:projectNo/target/census                        `stockPreparationProjectSheetCensusGet`
+//       41. POST …/projects/:projectNo/target/remnant-acknowledgements      `stockPreparationProjectRemnantAcknowledge`
+//       42. POST …/target/remnant-acknowledgements/:acknowledgementId/revoke `stockPreparationProjectRemnantAcknowledgementRevoke`
+//           Batch-refresh step 6d-1b (S6-5; step-6 design §6.5; register R-91), ADMIN. The two census READS answer the
+//           proven tenant's registry rows and project sheets (the doubled-sheet counts; the project form also the
+//           PRIVATE component handles), through the walled project-scoped read and the staging project derived (in the
+//           shared census helpers) from this scope with no request projectId; the acknowledgement and the revoke are
+//           WRITES to that tenant's component ruling ledger (migration 107), each with its audit row on one transaction.
+//           A header-fillable tenant here would read another tenant's sheets or acknowledge a remnant on its project.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

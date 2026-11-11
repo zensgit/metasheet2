@@ -1,0 +1,163 @@
+<!doctype html>
+<!-- Synthetic browser verification only; this is not an application route or a backend persistence test. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>MetaSheet workbench undo verification</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}.row{display:flex;height:100vh}.main{flex:1;padding:16px;display:flex;flex-direction:column;gap:12px;align-items:flex-start}</style>
+<div id="app"></div>
+<script type="module">
+// The REAL MetaRecordInspector (record drawer, with its comments tab) inside a root wired the way
+// MultitableWorkbench wires the REAL utils/workbench-undo.ts: installed on the document with the same
+// `isWorkbenchGridSurface`; a drawer patch is the record's it names (an attachment write) or the shown
+// one's, and settles its commit at once (an accepted server patch) when that record is shown; a
+// record switch (also the drawer's next / previous buttons) resets every history; a comment is sent, resolved or deleted the way the workbench does
+// it (its control is disabled while the request is out, then the change lands). The grid's undo/redo
+// are counted; they run the REAL useMultitableGrid on a stand-in server whose history holds one earlier
+// cell edit, so a replay of it reaches the server (`replays`), and an attachment upload holds them the
+// way the workbench holds them (`holdsHistory`). The drawer's patches do not enter that history (they
+// do not go through patchCell), so a replay here is always that earlier edit; in the workbench the
+// grid's undo after a drawer commit or an upload would undo that write itself. The browser's own undo/redo (`input` with inputType
+// historyUndo / historyRedo) are counted anywhere on the page. #grid-area stands for the grid (.meta-grid), #bulk-delete for its bulk bar's
+// Delete selected (disabled once pressed), #foot-select for its footer's aggregation select (gone once
+// its last aggregation is removed); the attachment field uploads the way the drawer does (its file input
+// is disabled until the upload ends, then the field is patched); #rename for a rail rename whose input
+// goes away on Enter;
+// #outside for a popover teleported out of the workbench; #stopper for a control that stops
+// propagation of every key (the comment affordance buttons).
+import { createApp, h, nextTick, ref, watch } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import '/node_modules/element-plus/dist/index.css'
+import '/src/styles/tokens.css'
+import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '/src/multitable/utils/workbench-undo.ts'
+import { useLocale } from '/src/composables/useLocale.ts'
+import { MultitableApiClient } from '/src/multitable/api/client.ts'
+import { useMultitableGrid } from '/src/multitable/composables/useMultitableGrid.ts'
+useLocale().setLocale('zh-CN')
+window.undoDemo = { grid: { undo: 0, redo: 0 }, native: 0, patches: [], replays: 0 }
+// The stand-in server: the grid's load, and its replays (an undo or redo of a recorded cell edit).
+const answer = (data) => new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'content-type': 'application/json' } })
+const client = new MultitableApiClient({
+  fetchFn: async (input) => {
+    if (String(input).includes('/api/multitable/patch')) {
+      window.undoDemo.replays += 1
+      return answer({ updated: [{ recordId: 'rec_9', version: 3 }], records: [{ recordId: 'rec_9', data: { fld_name: 'older' } }] })
+    }
+    return answer({
+      fields: [{ id: 'fld_name', name: '名称', type: 'string' }],
+      rows: [{ id: 'rec_9', version: 2, data: { fld_name: 'newer' } }],
+      meta: { permissions: { rowActions: { canEdit: true, canDelete: false, canComment: true } } },
+    })
+  },
+})
+// As in MultitableWorkbench: an attachment upload holds the grid's undo and redo until it settles.
+let attachmentWrites = 0
+async function holdingHistory(write) {
+  attachmentWrites += 1
+  try { return await write() } finally { attachmentWrites -= 1 }
+}
+const grid = useMultitableGrid({ sheetId: ref('sht_demo'), viewId: ref('view_demo'), client, holdsHistory: () => attachmentWrites > 0 })
+document.addEventListener('input', (e) => { if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') window.undoDemo.native += 1 }, true)
+const rootRef = ref(null)
+const undo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!rootRef.value?.contains(node),
+  isGridSurface: isWorkbenchGridSurface,
+})
+installWorkbenchUndo(undo, { undo: () => { window.undoDemo.grid.undo += 1; grid.undo() }, redo: () => { window.undoDemo.grid.redo += 1; grid.redo() } })
+const FIELDS = [
+  { id: 'fld_title', name: '标题', type: 'string' },
+  { id: 'fld_name', name: '名称', type: 'string' },
+  { id: 'fld_note', name: '备注', type: 'string' },
+  { id: 'fld_due', name: '截止日期', type: 'date' },
+  { id: 'fld_rich', name: '说明', type: 'longText', property: { rich: true } },
+  { id: 'fld_extra', name: '补充', type: 'string' },
+  { id: 'fld_files', name: '附件', type: 'attachment' },
+]
+const RECORDS = {
+  rec_1: { id: 'rec_1', version: 1, data: { fld_title: '巡检记录 A', fld_name: 'alpha', fld_note: 'beta', fld_due: '2031-01-02', fld_rich: 'rich', fld_extra: '' } },
+  rec_2: { id: 'rec_2', version: 1, data: { fld_title: '巡检记录 B', fld_name: 'gamma', fld_note: 'delta', fld_due: '2031-02-03', fld_rich: 'other', fld_extra: '' } },
+}
+const record = ref(RECORDS.rec_1)
+const draft = ref('')
+const submitting = ref(false)
+const openComments = ref(false)
+const comments = ref([{ id: 'c_1', containerId: 'sht_demo', targetId: 'rec_1', mentions: [], authorId: 'u_me', authorName: '我', content: '第一条', resolved: false, createdAt: '2031-01-01T00:00:00.000Z' }])
+const resolvingIds = ref([])
+const deletingIds = ref([])
+const bulkDeleting = ref(false)
+const footAggregation = ref(true)
+const renaming = ref(true)
+const request = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms))
+watch(() => record.value.id, () => undo.reset())
+window.undoDemo.rewrite = (fieldId, value) => { record.value = { ...record.value, version: record.value.version + 1, data: { ...record.value.data, [fieldId]: value } } }
+window.undoDemo.switchTo = (id) => { record.value = RECORDS[id] }
+window.undoDemo.setField = (id, fieldId, value) => {
+  RECORDS[id] = { ...RECORDS[id], data: { ...RECORDS[id].data, [fieldId]: value } }
+  if (record.value.id === id) record.value = RECORDS[id]
+}
+window.undoDemo.draft = () => draft.value
+window.undoDemo.openComments = () => { openComments.value = true }
+window.undoDemo.comment = () => ({ ...comments.value[0] })
+createApp({
+  render: () => h('div', { class: 'row', ref: rootRef }, [
+    h('div', { class: 'rail', style: 'width: 160px; padding: 16px' }, [
+      renaming.value
+        ? h('input', { id: 'rename', value: 'Sheet 1', onKeydown: (e) => { if (e.key === 'Enter') renaming.value = false } })
+        : h('span', { id: 'renamed' }, 'renamed'),
+    ]),
+    h('div', { class: 'main meta-grid', tabindex: 0, id: 'grid-area' }, [
+      h('p', '表格区域（合成）'),
+      h('button', { id: 'bulk-delete', type: 'button', disabled: bulkDeleting.value, onClick: () => { bulkDeleting.value = true } }, 'Delete selected'),
+      footAggregation.value
+        ? h('div', { class: 'meta-grid__foot' }, [h('select', { id: 'foot-select', onChange: () => { footAggregation.value = false } }, [h('option', { value: 'sum' }, 'Sum'), h('option', { value: '' }, '—')])])
+        : null,
+      h('button', { id: 'stopper', type: 'button', onKeydown: (e) => e.stopPropagation() }, 'stopper'),
+    ]),
+    h(MetaRecordInspector, {
+      visible: true, record: record.value, fields: FIELDS, canEdit: true, canDelete: false, recordIds: ['rec_1', 'rec_2'], sheetId: 'sht_demo',
+      canComment: true, canResolveComments: true, currentUserId: 'u_me', comments: comments.value, openComments: openComments.value,
+      commentDraft: draft.value, 'onUpdate:commentDraft': (v) => { draft.value = v }, commentSubmitting: submitting.value,
+      commentResolvingIds: resolvingIds.value, commentDeletingIds: deletingIds.value,
+      uploadFn: (file) => holdingHistory(async () => { await request(1000); return { id: 'att_1', filename: file.name, mimeType: 'text/plain', size: file.size, url: '', uploadedAt: '2031-01-01T00:00:00.000Z' } }),
+      // The workbench's order (useMultitableComments, then onSubmitComment): disabled while it sends, then cleared.
+      onCommentSubmit: async () => { submitting.value = true; try { await request() } finally { submitting.value = false }; draft.value = '' },
+      onCommentResolve: async (id) => { resolvingIds.value = [id]; await request(); comments.value = comments.value.map((c) => (c.id === id ? { ...c, resolved: true } : c)); resolvingIds.value = [] },
+      onCommentDelete: async (id) => { deletingIds.value = [id]; await request(); comments.value = comments.value.filter((c) => c.id !== id); deletingIds.value = [] },
+      onPatch: (fieldId, value, recordId) => {
+        const target = recordId ?? record.value.id
+        if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
+        window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
+      },
+      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the drawer's focused control
+      // first, then gives the focus back to it (the caret at the end of a rich text editor), or to the open tab.
+      onNavigate: async (id) => {
+        if (id === record.value.id) return
+        const active = document.activeElement
+        const drawer = active instanceof HTMLElement ? active.closest('.meta-record-drawer') : null
+        const focused = drawer ? active : null
+        focused?.blur()
+        record.value = RECORDS[id]
+        if (!focused) return
+        await nextTick()
+        const now = document.activeElement
+        if (now && now !== document.body) return
+        if (focused.isConnected) {
+          focused.focus({ preventScroll: true })
+          if (focused.isContentEditable) {
+            const selection = document.getSelection()
+            selection?.selectAllChildren(focused)
+            selection?.collapseToEnd()
+          }
+        } else if (drawer.isConnected) {
+          drawer.querySelector('[role="tabpanel"]')?.focus({ preventScroll: true })
+        }
+      },
+    }),
+  ]),
+}).mount('#app')
+const outside = Object.assign(document.createElement('input'), { id: 'outside', type: 'text', value: 'filter' })
+document.body.appendChild(outside)
+// The grid's history holds one earlier cell edit (rec_9 名称 older → newer) once it has loaded.
+await new Promise((resolve) => { const wait = () => (grid.loading.value ? setTimeout(wait, 20) : resolve()); wait() })
+grid.editHistory.value = [{ recordId: 'rec_9', fieldId: 'fld_name', oldValue: 'older', newValue: 'newer', version: 2 }]
+grid.historyIndex.value = 0
+window.undoDemo.ready = true
+</script>
+</html>
