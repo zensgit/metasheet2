@@ -222,6 +222,10 @@ function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () =
 // because the writer now refuses a fenced write without a consulted verdict (E-1 layer (b)).
 const refreshLanes = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-lanes.cjs')) as any
 const continuationStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-continuation-store.cjs')) as any
+// Batch-refresh step 6a-1 (S6-1, R-91): every begin carries its intent journal; a seeded begin that is not about the
+// journal carries the journal of an EMPTY plan bound to its own plan digest (the real builder, the store's admission).
+const executionIntentLib = require(path.join(PLUGIN_LIB, 'stock-preparation-execution-intent.cjs')) as any
+const emptyIntentFor = (planDigest: string) => executionIntentLib.buildExecutionIntent({ plan: { decisions: [] }, planDigest })
 const refreshGovernanceLib = require(path.join(PLUGIN_LIB, 'stock-preparation-refresh-governance.cjs')) as any
 const projectTargetStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-project-target-store.cjs')) as any
 const packInstallStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
@@ -1736,6 +1740,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
           // Readiness v3 (批次标识 BI-1b): the real pull-batch ledger store (migration 105).
           stockPreparationPullBatchStore: pullBatchStore,
+          // Readiness v4 (batch-refresh step 6a-2, R-91): the real refresh store (execution_recovery_ready reads its methods).
+          stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
@@ -3028,7 +3034,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
 
         // PR-5 (S5): `routeLock` replaces the lock the ROUTES are handed (a hookable view over the same table); `serviceExtras`
         // are merged last (the S5 xlsx builder with its hook). Both additive; every earlier case passes neither.
-        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any; routeLock?: any; serviceExtras?: Record<string, any> } = {}) {
+        // S6-2 (R-91): `routeMultitable` wraps the multitable the ROUTES are handed (a create / patch hook over the real host);
+        // additive, every earlier case passes none.
+        async function s3aStack(label: string, options: { pilot?: boolean; register?: boolean; switchOn?: boolean; data?: any; refresh?: any; routeLock?: any; serviceExtras?: Record<string, any>; routeMultitable?: (multitable: any) => any } = {}) {
           const { pilot = true, register = true, switchOn = true } = options
           const tenantId = tenantFor(`s3a_${label}`)
           const projectNo: string = CF.PROJECT_NO
@@ -3077,7 +3085,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           const routeContext = {
             api: {
               http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
-              multitable,
+              multitable: options.routeMultitable ? options.routeMultitable(multitable) : multitable,
               database: pluginContext.api.database,
             },
             storage: pluginContext.storage,
@@ -3413,6 +3421,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               plannedCounts: { add: 1, update: 0, inactive: 0 },
               refreshBinding: { continuations: [], holdSetFingerprint: null },
               startedBy: 'u_s3a_dead',
+              intent: emptyIntentFor('a'.repeat(64)),
             })
             if (variant === 'failed') await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S3A'] })
             // Review round 1 item 4: the preview says so — the same rows the apply refuses on.
@@ -3617,6 +3626,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               plannedCounts: { add: 0, update: 0, inactive: 0 },
               refreshBinding: { continuations: [{ id: C, revision: confirmed.revision || 1 }], holdSetFingerprint: null },
               startedBy: 'u_s3a_17',
+              intent: emptyIntentFor('b'.repeat(64)),
             })
             const settlement = { executionId: execution.id, generationToken: lockRow.generation_token, sourceContentDigest: 'src_s3a_17', sheetMachineDigest: 'machine_s3a_17' }
             return {
@@ -3931,6 +3941,382 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               expect([auto.first, auto.current]).toEqual([null, null])
             })
           }, 180000)
+
+          // Batch-refresh step 6a-2 (S6-2, register R-91; 批次标识 R-65) — the RECOVERY through the REAL routes on THIS stack:
+          // real PostgreSQL, the real multitable host (meta_records + its write fence), the real route table, the real write
+          // lock, the real refresh store, the real audit store and the real 批次标识 ledger (a counting proxy over it). The
+          // store-level close cases are tests/integration/stock-preparation-execution-recovery-realdb.cases.ts. Synthetic ids.
+          //   S9R-BI-02 E06 + retry on a BI sheet: the recovery closes the partial run (link SET by value, batch kept open); the
+          //             retry (same digest) joins batch 1 — every row labelled 1, ONE close, the counts exact (RR G3)
+          //   S9R-BI-03 the source gains a part between the failed attempt and the retry: batch 1 closes
+          //             superseded_by_new_source, the landed rows keep 1, the retry's rows get 2 (RR G5)
+          //   S9R-25    §3.9 rows 3 / 11 (rebaseline (e)): a zombie's BI finish and its `aborted` finish commit between the
+          //             recovery's verify and its close — the BI finish is holder_refused, the close reads pre_close_status
+          //             aborted under the lock and finishes the link by value
+          //   S9R-25b   the other order: the zombie resumes AFTER the close — holder_refused, the ledger unchanged; the retry
+          //             joins batch 1
+          //   S9R-29d   §3.9 row 15 (rebaseline (d), N6): both closes run inside guard.withHostWrite, so the recovery lease's own
+          //             heartbeat never queues behind the close's lock-row hold
+          describe('S6-2 recovery through the real routes on the real stack (S9R-BI-02, S9R-BI-03, S9R-25, S9R-29d)', () => {
+            const REC_BASE = '/api/integration/stock-preparation/projects/:projectNo/refresh/executions'
+            const REC = { list: REC_BASE, recover: `${REC_BASE}/:executionId/recover`, cu: `${REC_BASE}/:executionId/close-unverified` }
+            // Both switches held for a whole case (a frozen zombie apply outlives any one call).
+            async function holdSwitches<T>(pull: boolean, fn: () => Promise<T>): Promise<T> {
+              const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
+              process.env[SWITCH] = 'true'
+              if (pull) process.env[PULL_SWITCH] = 'true'
+              else delete process.env[PULL_SWITCH]
+              try {
+                return await fn()
+              } finally {
+                if (before.pull === undefined) delete process.env[PULL_SWITCH]; else process.env[PULL_SWITCH] = before.pull
+                if (before.sheets === undefined) delete process.env[SWITCH]; else process.env[SWITCH] = before.sheets
+              }
+            }
+            // A counting proxy over the real ledger: every call, batchWithin's arguments, each answer's outcome.
+            function countingLedger(real: any, calls: any[]) {
+              const out: any = {}
+              for (const [name, fn] of Object.entries(real)) {
+                out[name] = typeof fn === 'function'
+                  ? async (...args: any[]) => {
+                    const entry: any = { method: name }
+                    calls.push(entry)
+                    if (name === 'batchWithin') {
+                      const a = args[1] || {}
+                      entry.args = { result: a.result, sourceDigest: a.sourceDigest, verifiedCreatedRows: a.verifiedCreatedRows }
+                    }
+                    try {
+                      const value = await (fn as any)(...args)
+                      entry.outcome = value && typeof value === 'object' ? (value.outcome !== undefined ? value.outcome : (value.linked !== undefined ? `linked:${value.linked}` : 'object')) : value
+                      return value
+                    } catch (error: any) {
+                      entry.error = error && error.code
+                      throw error
+                    }
+                  }
+                  : fn
+              }
+              return out
+            }
+            // Autocommit statements of THIS db run with a short statement_timeout (standing in for the host pool's 30 s);
+            // every autocommit UPDATE of the lock table is recorded (ok / failed, when).
+            function shortTimeoutDb(ms: number, events: any[]) {
+              return createDb({
+                database: {
+                  query: async (sql: string, params?: unknown[]) => {
+                    const client = await poolManager.get().getInternalPool().connect()
+                    const isLockUpdate = /^\s*UPDATE\s+"?integration_stock_prep_project_write_lock/i.test(sql)
+                    const at = Date.now()
+                    try {
+                      await client.query('BEGIN')
+                      await client.query(`SET LOCAL statement_timeout = ${ms}`)
+                      const result = await client.query(sql, params)
+                      await client.query('COMMIT')
+                      if (isLockUpdate) events.push({ ok: true, at, ms: Date.now() - at, heartbeatLike: /lease_heartbeat_at/.test(sql) && /lease_seq/.test(sql) })
+                      return result.rows
+                    } catch (error: any) {
+                      await client.query('ROLLBACK').catch(() => {})
+                      if (isLockUpdate) events.push({ ok: false, at, ms: Date.now() - at, code: error && error.code, heartbeatLike: /lease_heartbeat_at/.test(sql) && /lease_seq/.test(sql) })
+                      throw error
+                    } finally {
+                      client.release()
+                    }
+                  },
+                  transaction: async <T>(callback: any): Promise<T> => {
+                    const client = await poolManager.get().getInternalPool().connect()
+                    try {
+                      await client.query('BEGIN')
+                      const result = await callback({ query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows, commit: async () => {}, rollback: async () => {} })
+                      await client.query('COMMIT')
+                      return result
+                    } catch (error) {
+                      await client.query('ROLLBACK').catch(() => {})
+                      throw error
+                    } finally {
+                      client.release()
+                    }
+                  },
+                },
+              })
+            }
+            async function recStack(label: string, opts: any = {}) {
+              const { band = false, failCreates = 0, routeLock, refresh, auditStore } = opts
+              const calls: any[] = []
+              const ledgerDb = createDb({ database: createProductionPluginContext().api.database })
+              const realLedger = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: ledgerDb })
+              const ledger = countingLedger(realLedger, calls)
+              // The route context's multitable with a create hook: refuse the first `failCreates` creates (E06), or freeze
+              // INSIDE the `holdAt`-th create until `gate` resolves (a writer frozen in its host-write bracket).
+              const hook: any = { failCreates, holdAt: 0, creates: 0, gate: null, reached: null }
+              const routeMultitable = (multitable: any) => ({
+                ...multitable,
+                records: {
+                  ...multitable.records,
+                  async createRecord(input: any) {
+                    hook.creates += 1
+                    if (hook.failCreates > 0) {
+                      hook.failCreates -= 1
+                      throw Object.assign(new Error('synthetic create failure'), { code: 'SYN_CREATE_FAILED' })
+                    }
+                    if (hook.holdAt > 0 && hook.creates === hook.holdAt && hook.gate) {
+                      if (hook.reached) hook.reached()
+                      await hook.gate
+                    }
+                    return multitable.records.createRecord(input)
+                  },
+                },
+              })
+              const serviceExtras: any = { stockPreparationPullBatchStore: ledger }
+              if (auditStore) serviceExtras.stockPreparationAuditStore = auditStore
+              const st: any = await s3aStack(label, { pilot: true, routeMultitable, routeLock, refresh, serviceExtras })
+              tenants.push(st.tenantId)
+              const physical = (fieldId: string) => st.multitable.provisioning.getFieldId(st.projectId, st.objectId, fieldId)
+              if (band) {
+                const added = await st.multitable.provisioning.ensureMissingObjectFields({
+                  projectId: st.projectId,
+                  objectId: st.objectId,
+                  fields: templatesLib.pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' }).map((descriptor: any) => ({ ...descriptor, property: { ...descriptor.property } })),
+                })
+                expect(added.addedFieldIds).toEqual([physical('firstPullBatch'), physical('pullBatch')])
+                await ledgerDb.transaction((trx: any) => realLedger.createSheetRowWithin(trx, { tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', settings: { firstPullBatchRule: 'material', labelFormat: 'ordinal_date' } }))
+              }
+              const spAdmin = { id: `u_s9r_spadmin_${label}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_ADMIN] }
+              const rec = {
+                list: (user: any) => callRoute(st.routes, 'GET', REC.list, { user, params: { projectNo: st.projectNo }, query: {} }),
+                recover: (user: any, executionId: string, body: any) => callRoute(st.routes, 'POST', REC.recover, { user, params: { projectNo: st.projectNo, executionId }, body: { confirmProjectNo: st.projectNo, ...body } }),
+                cu: (user: any, executionId: string, body: any) => callRoute(st.routes, 'POST', REC.cu, { user, params: { projectNo: st.projectNo, executionId }, body: { confirmProjectNo: st.projectNo, ...body } }),
+              }
+              const execRow = async (id: string) => (await q(`SELECT id, status, verified_result, closed_mode, pre_close_status, pull_batch_source_digest FROM ${RT.execution} WHERE id = $1`, [id])).rows[0]
+              const executionsInOrder = async () => (await q(`SELECT id, status, pull_batch_source_digest FROM ${RT.execution} WHERE sheet_id = $1 ORDER BY started_at, id`, [st.sheetId])).rows
+              const lockRow = async () => (await q(`SELECT lease_id, fencing_epoch, generation FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows[0]
+              const ledgerRows = async () => ({
+                batches: (await q('SELECT batch_no, status, closed_reason, source_digest FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [st.tenantId])).rows.map((row: any) => [row.batch_no, row.status, row.closed_reason, row.source_digest]),
+                links: (await q('SELECT refresh_execution_id, writer_status, created_row_count, verified_outcome, finished_at IS NOT NULL AS finished FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1 ORDER BY joined_at, id', [st.tenantId])).rows,
+              })
+              return { st, calls, hook, physical, rec, spAdmin, execRow, executionsInOrder, lockRow, ledgerRows }
+            }
+            const errCode = (res: any) => (res && res.body && res.body.error ? res.body.error.code : null)
+            async function pullOnce(k: any) {
+              const dry = await k.st.dryRun()
+              expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+              const applied = await k.st.apply(k.st.users.puller, dry.body.data.dryRunToken)
+              return { dry, applied }
+            }
+            async function verifyAndClose(k: any, executionId: string) {
+              const verified = await k.rec.recover(k.st.users.puller, executionId, { mode: 'verify' })
+              expect(verified.statusCode, JSON.stringify(verified.body)).toBe(200)
+              const report = verified.body.data.report
+              const closed = await k.rec.recover(k.st.users.puller, executionId, { mode: 'close', verifyDigest: report.verifyDigest })
+              expect(closed.statusCode, JSON.stringify(closed.body)).toBe(200)
+              return { report, closed: closed.body.data }
+            }
+            const linkCounts = (links: any[]) => links.map((l: any) => [l.refresh_execution_id, Number(l.created_row_count), l.verified_outcome, l.finished])
+
+            test('S9R-BI-02 (E06 + retry, RR G3) switch ON on a BI-installed governed sheet: the host refuses 2 of 4 creates (partial) -> verify mixed (linked, verifiedCreatedRows 2) -> close kept_open, the link SET by value to 2 -> the retry (same source digest) joins batch 1: every row labelled batch 1, ONE close, the link counts sum to the sheet count exactly', async () => {
+              const k = await recStack('s9rbi02', { band: true, failCreates: 2 })
+              await holdSwitches(true, async () => {
+                const { applied } = await pullOnce(k)
+                const ex = await k.executionsInOrder()
+                expect(ex.map((row: any) => row.status), JSON.stringify(applied.body)).toEqual(['partial'])
+                expect(ex[0].pull_batch_source_digest).toMatch(/^[0-9a-f]{32}$/)
+                expect((await k.ledgerRows()).batches.map((b: any) => [b[0], b[1]])).toEqual([[1, 'open']])
+                const { report, closed } = await verifyAndClose(k, ex[0].id)
+                expect([report.result, report.counts.landed, report.counts.notLanded]).toEqual(['mixed', 2, 2])
+                expect(report.batch).toEqual({ linked: true, batchNo: 1, statusSeen: 'open', verifiedCreatedRows: 2 })
+                expect([closed.result, closed.batchOutcome]).toEqual(['mixed', 'kept_open'])
+                const bw = k.calls.filter((c: any) => c.method === 'batchWithin')
+                expect(bw.map((c: any) => c.args)).toEqual([{ result: 'mixed', sourceDigest: ex[0].pull_batch_source_digest, verifiedCreatedRows: 2 }])
+                const led1 = await k.ledgerRows()
+                expect(linkCounts(led1.links)).toEqual([[ex[0].id, 2, 'verified_mixed', true]])
+                expect(led1.batches.map((b: any) => [b[0], b[1]])).toEqual([[1, 'open']])
+                // The retry: the same source digest joins batch 1.
+                const retry = await pullOnce(k)
+                expect(retry.applied.statusCode, JSON.stringify(retry.applied.body)).toBe(200)
+                expect(retry.applied.body.data.status).toBe('succeeded')
+                expect(retry.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 1, createdRowCount: 2 })
+                const led2 = await k.ledgerRows()
+                expect(led2.batches.map((b: any) => [b[0], b[1], b[2]])).toEqual([[1, 'closed', 'execution_succeeded']])
+                const rowsNow = await k.st.rows()
+                expect(rowsNow).toHaveLength(4)
+                expect(led2.links.reduce((sum: number, l: any) => sum + Number(l.created_row_count || 0), 0), 'count = n exactly (the v1 double count is 2n-k)').toBe(rowsNow.length)
+                for (const row of rowsNow) {
+                  expect(row.data[k.physical('pullBatch')], JSON.stringify(row.data)).toMatch(LABEL1)
+                  expect(row.data[k.physical('firstPullBatch')], JSON.stringify(row.data)).toMatch(LABEL1)
+                }
+              })
+            }, 240000)
+
+            test('S9R-BI-03 (RR G5) the source gains a part between the failed attempt and the retry: the recovery closes the partial run mixed (batch 1 kept open); the retry (another source digest) closes batch 1 superseded_by_new_source and stamps batch 2 — the landed rows keep batch 1, the retry\'s rows carry batch 2', async () => {
+              const k = await recStack('s9rbi03', { band: true, failCreates: 1 })
+              await holdSwitches(true, async () => {
+                await pullOnce(k)
+                const ex = await k.executionsInOrder()
+                expect(ex.map((row: any) => row.status)).toEqual(['partial'])
+                const digest1 = ex[0].pull_batch_source_digest
+                const { report, closed } = await verifyAndClose(k, ex[0].id)
+                expect([report.result, report.counts.landed, report.counts.notLanded]).toEqual(['mixed', 3, 1])
+                expect([closed.result, closed.batchOutcome]).toEqual(['mixed', 'kept_open'])
+                const landedIds = (await k.st.rows()).map((row: any) => row.id).sort()
+                expect(landedIds).toHaveLength(3)
+                // The source gains PART-D under PART-A.
+                k.st.state.data = CF.project({ orders: [{ part: 'S-001', qty: 10 }], parts: [...CF.PARTS, CF.part('PART-D', 'C200-4', 'Washer')], boms: { ...CF.S_BOMS, 'PART-A': [...CF.S_BOMS['PART-A'], { part: 'PART-D', usage: 1 }] } })
+                const retry = await pullOnce(k)
+                expect(retry.dry.body.data.status, JSON.stringify(retry.dry.body)).toBe('ready')
+                expect(retry.applied.statusCode, JSON.stringify(retry.applied.body)).toBe(200)
+                expect(retry.applied.body.data.status).toBe('succeeded')
+                expect(retry.applied.body.data.pullBatch).toMatchObject({ stamped: true, batchNo: 2, createdRowCount: 2 })
+                const all = await k.executionsInOrder()
+                expect(all.map((row: any) => row.status)).toEqual(['verified_closed', 'succeeded'])
+                expect(all[1].pull_batch_source_digest).toMatch(/^[0-9a-f]{32}$/)
+                expect(all[1].pull_batch_source_digest, 'calibration: the retry read another source').not.toBe(digest1)
+                const led = await k.ledgerRows()
+                expect(led.batches.map((b: any) => [b[0], b[1], b[2]])).toEqual([[1, 'closed', 'superseded_by_new_source'], [2, 'closed', 'execution_succeeded']])
+                // The retry's own link: its exec_ id (C-11), the writer's own count, no recovery outcome (it succeeded by itself).
+                expect(linkCounts(led.links)).toEqual([[ex[0].id, 3, 'verified_mixed', true], [all[1].id, 2, null, true]])
+                const rowsNow = await k.st.rows()
+                expect(rowsNow).toHaveLength(5)
+                for (const row of rowsNow) {
+                  const label = row.data[k.physical('pullBatch')]
+                  if (landedIds.includes(row.id)) expect(label, `landed ${row.id} keeps batch 1`).toMatch(LABEL1)
+                  else expect(label, `retry row ${row.id} carries batch 2`).toMatch(LABEL2)
+                }
+              })
+            }, 240000)
+
+            test('S9R-25 (§3.9 rows 3 / 11, rebaseline (e)) switch ON + band: a writer frozen INSIDE its 3rd create (lease lapsed); the recovery VERIFIES (takeover), THEN the zombie resumes (host fence refuses; its BI finish is holder_refused; its finish records ABORTED), THEN the close: pre_close_status aborted decided under the lock; the unfinished link is finished by the recovery by value', async () => {
+              const k = await recStack('s9r25', { band: true })
+              await holdSwitches(true, async () => {
+                k.hook.holdAt = 3
+                k.hook.gate = new Promise<void>((resolve) => { k.hook.release = resolve })
+                const reached = new Promise<void>((resolve) => { k.hook.reached = resolve })
+                const dry = await k.st.dryRun()
+                const zombie = settle(k.st.apply(k.st.users.puller, dry.body.data.dryRunToken))
+                await reached
+                expect((await k.st.rows()).length, 'calibration: two rows landed before the freeze').toBe(2)
+                const ex = (await k.st.executions())[0]
+                expect(ex.status).toBe('running')
+                // The process is gone: no heartbeat while frozen in its host-write bracket; its lease lapses.
+                await q(`UPDATE ${PROJECT_WRITE_LOCK_TABLE} SET lease_expires_at = now() - interval '1 hour' WHERE scope_key = $1`, [k.st.key])
+                const verified = await k.rec.recover(k.st.users.puller, ex.id, { mode: 'verify' })
+                expect(verified.statusCode, JSON.stringify(verified.body)).toBe(200)
+                expect([verified.body.data.report.preStatus, verified.body.data.report.result]).toEqual(['running', 'mixed'])
+                const callsZ = k.calls.length
+                k.hook.release()
+                await zombie
+                expect(k.calls.slice(callsZ).filter((c: any) => c.method === 'finish').map((c: any) => c.outcome)).toEqual(['holder_refused'])
+                expect((await k.st.rows()).length, 'the host wrote nothing for the zombie').toBe(2)
+                expect((await k.execRow(ex.id)).status).toBe('aborted')
+                expect((await k.ledgerRows()).links.map((l: any) => l.finished)).toEqual([false])
+                const closed = await k.rec.recover(k.st.users.puller, ex.id, { mode: 'close', verifyDigest: verified.body.data.report.verifyDigest })
+                expect(closed.statusCode, JSON.stringify(closed.body)).toBe(200)
+                expect([closed.body.data.result, closed.body.data.preStatus, closed.body.data.batchOutcome]).toEqual(['mixed', 'aborted', 'kept_open'])
+                const row = await k.execRow(ex.id)
+                expect([row.status, row.verified_result, row.pre_close_status]).toEqual(['verified_closed', 'mixed', 'aborted'])
+                const led = await k.ledgerRows()
+                expect(led.links.map((l: any) => [Number(l.created_row_count), l.verified_outcome, l.finished])).toEqual([[2, 'verified_mixed', true]])
+                expect(led.batches.map((b: any) => [b[0], b[1]])).toEqual([[1, 'open']])
+              })
+            }, 300000)
+
+            test('S9R-25b (§3.9 row 11, the other order) switch ON + band: the recovery takes over a frozen writer, verifies mixed and closes (batchWithin gets the UNPREFIXED digest, kept_open); the zombie resumes AFTER the close: host fence refuses, its BI finish is holder_refused, the ledger unchanged; the retry joins batch 1 with exact counts', async () => {
+              const k = await recStack('s9r25b', { band: true })
+              await holdSwitches(true, async () => {
+                k.hook.holdAt = 3
+                k.hook.gate = new Promise<void>((resolve) => { k.hook.release = resolve })
+                const reached = new Promise<void>((resolve) => { k.hook.reached = resolve })
+                const dry = await k.st.dryRun()
+                expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+                const zombie = settle(k.st.apply(k.st.users.puller, dry.body.data.dryRunToken))
+                await reached
+                const ex = (await k.st.executions())[0]
+                const exFull = await k.execRow(ex.id)
+                expect(exFull.pull_batch_source_digest).toMatch(/^[0-9a-f]{32}$/)
+                const listLive = await k.rec.list(k.st.users.puller)
+                expect(listLive.body.data.items[0]).toMatchObject({ id: ex.id, status: 'running', recoverable: false, batch: { batchNo: 1, status: 'open' } })
+                const busy = await k.rec.recover(k.st.users.puller, ex.id, { mode: 'verify' })
+                expect([busy.statusCode, errCode(busy)]).toEqual([409, 'STOCK_PREP_PROJECT_WRITE_LOCKED'])
+                await q(`UPDATE ${PROJECT_WRITE_LOCK_TABLE} SET lease_expires_at = now() - interval '1 hour' WHERE scope_key = $1`, [k.st.key])
+                const lockW = await k.lockRow()
+                expect((await k.rec.list(k.st.users.puller)).body.data.items[0].recoverable).toBe(true)
+                const callsBefore = k.calls.length
+                const { report, closed } = await verifyAndClose(k, ex.id)
+                expect([report.result, report.preStatus, report.counts.landed]).toEqual(['mixed', 'running', 2])
+                expect(report.batch).toEqual({ linked: true, batchNo: 1, statusSeen: 'open', verifiedCreatedRows: 2 })
+                expect(Number((await k.lockRow()).fencing_epoch)).toBeGreaterThan(Number(lockW.fencing_epoch))
+                expect([closed.result, closed.preStatus, closed.batchOutcome]).toEqual(['mixed', 'running', 'kept_open'])
+                const bw = k.calls.slice(callsBefore).filter((c: any) => c.method === 'batchWithin')
+                expect(bw.map((c: any) => c.args)).toEqual([{ result: 'mixed', sourceDigest: exFull.pull_batch_source_digest, verifiedCreatedRows: 2 }])
+                const led1 = await k.ledgerRows()
+                expect(linkCounts(led1.links)).toEqual([[ex.id, 2, 'verified_mixed', true]])
+                // The zombie resumes.
+                const callsZ = k.calls.length
+                k.hook.release()
+                await zombie
+                expect(k.calls.slice(callsZ).filter((c: any) => c.method === 'finish').map((c: any) => c.outcome)).toEqual(['holder_refused'])
+                expect(await k.ledgerRows(), 'the zombie changed nothing in the ledger').toEqual(led1)
+                expect((await k.st.rows()).length, 'the host wrote nothing for the zombie').toBe(2)
+                const row2 = await k.execRow(ex.id)
+                expect([row2.status, row2.verified_result, row2.pre_close_status]).toEqual(['verified_closed', 'mixed', 'running'])
+                // The retry joins batch 1 (same source digest): every row labelled batch 1, one close, counts exact.
+                const retry = await pullOnce(k)
+                expect(retry.applied.body.data.status).toBe('succeeded')
+                const led2 = await k.ledgerRows()
+                expect(led2.batches.map((b: any) => [b[0], b[1], b[2]])).toEqual([[1, 'closed', 'execution_succeeded']])
+                const rowsNow = await k.st.rows()
+                expect(led2.links.reduce((sum: number, l: any) => sum + Number(l.created_row_count || 0), 0)).toBe(rowsNow.length)
+                for (const r of rowsNow) expect(r.data[k.physical('pullBatch')]).toMatch(LABEL1)
+              })
+            }, 300000)
+
+            test('S9R-29d (§3.9 row 15, rebaseline (d), N6) both closes run inside guard.withHostWrite: a 3 s close (a slow audit append inside the close transaction), the recovery lease heartbeating every 100 ms over autocommit statements with a 1.5 s statement_timeout (standing for the pool\'s 30 s) — no heartbeat is attempted while either close holds the lock row and none fails, for the puller close and for close-unverified', async () => {
+              const events: any[] = []
+              const warnings: any[] = []
+              const hbLock = createStockPreparationProjectWriteLock({ db: shortTimeoutDb(1500, events), heartbeatMs: 100, logger: { warn: (msg: string, meta: unknown) => warnings.push({ msg, meta }), info() {}, error() {} } })
+              const realAudit = auditStoreLib.createStockPreparationAuditStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
+              const windows: any[] = []
+              const slowAudit = {
+                ...realAudit,
+                appendWithin: async (trx: any, entry: any) => {
+                  if (entry && (entry.mode === 'execution_verified_closed' || entry.mode === 'execution_closed_unverified')) {
+                    const w: any = { mode: entry.mode, start: Date.now() }
+                    windows.push(w)
+                    await new Promise((resolve) => setTimeout(resolve, 3000))
+                    w.end = Date.now()
+                  }
+                  return realAudit.appendWithin(trx, entry)
+                },
+              }
+              for (const [label, mode] of [['s9r29d', 'puller'], ['s9r29d2', 'runbook']] as Array<[string, string]>) {
+                const k = await recStack(label, { failCreates: 1, routeLock: hbLock, auditStore: slowAudit })
+                await holdSwitches(false, async () => {
+                  await pullOnce(k)
+                  const ex = await k.st.executions()
+                  expect(ex.map((row: any) => row.status)).toEqual(['partial'])
+                  if (mode === 'puller') {
+                    await verifyAndClose(k, ex[0].id)
+                  } else {
+                    const inspected = await k.rec.cu(k.spAdmin, ex[0].id, { mode: 'inspect' })
+                    expect(inspected.statusCode, JSON.stringify(inspected.body)).toBe(200)
+                    const closed = await k.rec.cu(k.spAdmin, ex[0].id, { mode: 'close', inspectDigest: inspected.body.data.report.inspectDigest, runbookRef: 'TICKET-S9R29D', acknowledge: { resultUnknown: true } })
+                    expect(closed.statusCode, JSON.stringify(closed.body)).toBe(200)
+                  }
+                })
+              }
+              expect(windows.map((w: any) => w.mode)).toEqual(['execution_verified_closed', 'execution_closed_unverified'])
+              const [puller, runbook] = windows
+              // Calibration: the heartbeat ran before the first close and again between the two (the runbook leg is not vacuous).
+              expect(events.filter((e: any) => e.heartbeatLike && e.ok && e.at < puller.start).length, 'calibration: heartbeats before the puller close').toBeGreaterThan(0)
+              expect(events.filter((e: any) => e.heartbeatLike && e.ok && e.at > puller.end && e.at < runbook.start).length, 'calibration: heartbeats between the two closes').toBeGreaterThan(0)
+              // Per close window: no heartbeat attempted while it held the lock row, none failed.
+              for (const w of windows) {
+                const within = (e: any) => e.at >= w.start && e.at <= w.end
+                expect(events.filter((e: any) => e.heartbeatLike && within(e)).length, `${w.mode}: no heartbeat attempted while the close held the lock row`).toBe(0)
+                expect(events.filter((e: any) => !e.ok && within(e)).map((e: any) => [e.code, e.ms]), `${w.mode}: no lock statement failed inside the close`).toEqual([])
+              }
+              expect(events.filter((e: any) => !e.ok).map((e: any) => [e.code, e.ms]), 'no heartbeat queued behind a close and timed out').toEqual([])
+              expect(warnings.filter((w: any) => /heartbeat failed/.test(w.msg)).length).toBe(0)
+            }, 300000)
+          })
         })
 
         // 批次标识 BI-2 (register R-65; design §8.2-§8.6, §9, §13) — the per-sheet INSTALL on the REAL stack: the real host (its
@@ -4671,6 +5057,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: 'run_s3a_22_dead', leaseId: 'lease_s3a_22_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_22' },
               tokenRevision: 'rev_s3a_22', planDigest: 'c'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_22',
+              intent: emptyIntentFor('c'.repeat(64)),
             })
             await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_22'] })
             const pair = await seedCarryPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
@@ -4826,6 +5213,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: 'run_s3a_28_dead', leaseId: 'lease_s3a_28_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_28' },
               tokenRevision: 'rev_s3a_28', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_28',
+              intent: emptyIntentFor('d'.repeat(64)),
             })
             await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_28'] })
             const pair = await seedSuffixedPair({ multitable: st.multitable, sheetId: st.sheetId, target: st.target }, st.projectNo)
@@ -4849,6 +5237,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             ...envScope, lane: 'small_apply',
             guard: { leaseRunId: 'run_s3a_29_dead', leaseId: 'lease_s3a_29_dead', fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken || 'tok_s3a_29' },
             tokenRevision: 'rev_s3a_29', planDigest: 'd'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_29',
+            intent: emptyIntentFor('d'.repeat(64)),
           })
           await st.refresh.store.finishExecution({ ...envScope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['E_S3A_29'] })
           const physical = (logical: string) => (env.fieldIdMap && env.fieldIdMap[logical]) || logical
@@ -4931,6 +5320,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             ...st.scope, lane: 'small_apply',
             guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
             tokenRevision: 'rev_s3a_30', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s3a_30',
+            intent: emptyIntentFor('e'.repeat(64)),
           })
           // 3. The snapshot is taken now (it holds the running row); the preview stops at its lock read.
           lockGate.armed = true
@@ -6004,6 +6394,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 ...st.scope, lane: 'small_apply',
                 guard: { leaseRunId: 's4-01b-dead', leaseId: 'lease_s4_01b_dead', fencingEpoch: 1, generation: Number(lock0.generation), generationToken: lock0.generation_token },
                 tokenRevision: 'rev_s4_01b', planDigest: 'plan_s4_01b', plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: st.users.puller.id,
+                intent: emptyIntentFor('plan_s4_01b'),
               })
               const res = await confirmViaRoute(st, row)
               observed.b = {
@@ -6527,7 +6918,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               const recoveryAtConsult = refreshLanes.previewRecoveryOf(consultT0)
               const grant = await w.st.lock.acquire(w.st.key, { purpose: 'small_apply', runId: 's4-08c-apply', tenantId: w.st.tenantId })
               const guard = w.st.lock.createGuard(grant)
-              const execution = await w.store.beginExecution({ ...w.st.scope, lane: 'small_apply', guard: { leaseRunId: 's4-08c-apply', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: grant.generation, generationToken: grant.generationToken }, tokenRevision: 'rev_s408c', planDigest: 'plan_s408c', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: w.st.users.puller.id })
+              const execution = await w.store.beginExecution({ ...w.st.scope, lane: 'small_apply', guard: { leaseRunId: 's4-08c-apply', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: grant.generation, generationToken: grant.generationToken }, tokenRevision: 'rev_s408c', planDigest: 'plan_s408c', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: w.st.users.puller.id, intent: emptyIntentFor('plan_s408c') })
               await w.store.finishExecution({ ...w.st.scope, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: ['SYNTHETIC'] })
               await guard.release()
               const lock0 = await lockRowOf(w.st.key)
@@ -6719,7 +7110,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             return { confirmed }
           }
 
-          /** A WHOLE zero-write execution on the real lock and store: acquire (epoch + 1), begin, finish, release. */
+          /** A WHOLE zero-write execution on the real lock and store: acquire (epoch + 1), begin, finish, release. Step 6a-1
+           *  (S6-1, R-91): a failed run is seeded as having ATTEMPTED one host call (unprovable: it stays failed) — a 0/0
+           *  failed run now self-verifies transparent (XS-02 / S9R-01). */
           async function zeroWriteRun(st: any, status: 'failed' | 'succeeded', { settle = false }: { settle?: boolean } = {}) {
             const runId = `s5_${status}_${TOKEN}_${Date.now().toString(36)}`
             const grant = await st.rawLock.acquire(st.key, { purpose: 'small_apply', runId, tenantId: st.tenantId })
@@ -6728,9 +7121,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               ...st.scope, lane: 'small_apply',
               guard: { leaseRunId: runId, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
               tokenRevision: 'rev_s5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5',
+              intent: emptyIntentFor('e'.repeat(64)),
             })
             await st.refresh.store.finishExecution({
-              ...st.scope, executionId: begun.id, status, written: 0, attemptedWrites: 0,
+              ...st.scope, executionId: begun.id, status, written: 0, attemptedWrites: status === 'failed' ? 1 : 0,
               ...(settle ? { settlement: { generationToken: gen.generationToken, sourceContentDigest: 'c'.repeat(64), sheetMachineDigest: await st.settledDigest() } } : {}),
             })
             await st.rawLock.createGuard(grant).release()
@@ -6769,6 +7163,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
                 ...st.scope, lane: 'small_apply',
                 guard: { leaseRunId: `run_s5_dead_${TOKEN}`, leaseId: `lease_s5_dead_${TOKEN}`, fencingEpoch: 1, generation: gen.generation, generationToken: gen.generationToken },
                 tokenRevision: 'rev_s5_dead', planDigest: 'a'.repeat(64), plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [], holdSetFingerprint: null }, startedBy: 'u_s5_dead',
+                intent: emptyIntentFor('a'.repeat(64)),
               })
               await st.refresh.store.finishExecution({ ...st.scope, executionId: begun.id, status: 'failed', written: 1, attemptedWrites: 1, errorCodes: ['E_S5'] })
               const res2 = await st.exportLines()
@@ -7094,9 +7489,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //         fields; the plan written by a bound execution.
         //   S8-04b (A12 / F15, human) a person's cell committed by another session INSIDE the host's patch (SHARE lock on
         //         meta_records, pg_blocking_pids): one conflict, one retry, the person's value kept.
-        //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution
-        //         aborted, the plan invalidated(execution_failed), failed_pending_recovery: the page blocked, a confirm 409
-        //         RECOVERY_PENDING, the export 409.
+        //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved. RE-PINNED by
+        //         step 6a-1 (S6-1, R-91; T6-4) — the stop wrote and attempted nothing (0 / 0), so the execution SELF-VERIFIES
+        //         (verified_closed / nothing_landed / self_verified, a settlement subject) and the plan STAYS confirmed: the
+        //         project derives confirmed_pending_execution, never failed_pending_recovery; the export 409. Also S9R-01b:
+        //         the next preview finds the moved cell — the plan invalidated(source_changed) with a new content hold in ONE
+        //         reconcile.
         //   S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token's apply 409
         //         REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt;
         //         the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new
@@ -7545,7 +7943,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(observed).toEqual({ hostWaitedOnTheLock: true, applied: '200:succeeded', personKept: true, materialWritten: true, versionStep: 2, plan: 'written' })
           }, 300000)
 
-          test('S8-04c (A12, machine) a plugin-owned cell committed INSIDE the host\'s patch: 409 CHANGE_PLAN_STALE machine_columns_moved, the execution aborted, the plan invalidated(execution_failed), failed_pending_recovery — the page blocked, a confirm 409 RECOVERY_PENDING, the export 409', async () => {
+          test('S8-04c / S9R-01b (A12, machine; re-pinned by step 6a-1, R-91) a plugin-owned cell committed INSIDE the host\'s patch: 409 CHANGE_PLAN_STALE machine_columns_moved; the 0/0 stop SELF-VERIFIES (verified_closed / nothing_landed / self_verified, a settlement subject) and the plan STAYS confirmed — confirmed_pending_execution, never failed_pending_recovery; the export 409; the next preview invalidates the plan source_changed with a new content hold in one reconcile', async () => {
             const { st, confirmed } = await s8Confirmed('s8_04c')
             const replan = await st.dryRun()
             const partA0 = await rowOf(st, 'PART-A')
@@ -7555,7 +7953,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             )
             const applied = (result as any).ok ? (result as any).value : null
             const plan = await planById(confirmed.changePlanId)
-            const execution = (await q(`SELECT status FROM ${RT.execution} WHERE id = $1`, [plan.execution_id])).rows[0]
+            // The plan stays confirmed (no execution id on it): the bound execution is found by its refresh binding.
+            const execution = (await q(`SELECT status, verified_result, closed_mode, pre_close_status, settlement_subject, written, attempted_writes, intent_version, intent_entry_count FROM ${RT.execution} WHERE tenant_id = $1 AND refresh_binding ->> 'changePlanId' = $2`, [st.tenantId, confirmed.changePlanId])).rows
+            const intentChunks = Number((await q('SELECT count(*)::int AS n FROM integration_stock_prep_refresh_execution_intent WHERE tenant_id = $1', [st.tenantId])).rows[0].n)
             const page = okData(await cpCall(st, 'GET', CPR.current))
             const confirm = await cpCall(st, 'POST', CPR.confirm, { body: { confirmProjectNo: st.projectNo, holdIds: ['hold_s8_04c'], holdSetFingerprint: 'a', planFingerprint: 'b', sourceContentDigest: 'c', readReceipt: 'e'.repeat(32) } })
             const exported = await st.exportLines()
@@ -7563,8 +7963,9 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               hostWaitedOnTheLock: blocked,
               applied: applied ? answer(applied) : 'threw',
               partial: applied && errorOf(applied).details ? typeof errorOf(applied).details.written : 'none',
-              execution: execution && execution.status,
-              plan: `${plan.status}:${plan.invalidated_reason}`,
+              execution: execution.map((row: any) => `${row.status}:${row.verified_result}:${row.closed_mode}:${row.pre_close_status}:${row.settlement_subject}:${row.written}/${row.attempted_writes}`),
+              journaled: execution.length === 1 && Number(execution[0].intent_version) === 1 && Number(execution[0].intent_entry_count) >= 1 && intentChunks >= 1,
+              plan: `${plan.status}:${plan.invalidated_reason}:${plan.execution_id}`,
               derived: (await derivedOf(st)).status,
               pageBlocked: page.proposal.blocked,
               confirm: answer(confirm),
@@ -7575,13 +7976,22 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               hostWaitedOnTheLock: true,
               applied: `409:${DC.CHANGE_PLAN_STALE}:machine_columns_moved`,
               partial: 'number',
-              execution: 'aborted',
-              plan: 'invalidated:execution_failed',
-              derived: 'failed_pending_recovery',
-              pageBlocked: 'recovery_pending',
-              confirm: `409:${DC.RECOVERY_PENDING}:`,
-              exported: `409:${EXPORT_BLOCKED}:state:failed_pending_recovery`,
+              execution: ['verified_closed:nothing_landed:self_verified:aborted:true:0/0'],
+              journaled: true,
+              plan: 'confirmed:null:null',
+              derived: 'confirmed_pending_execution',
+              pageBlocked: 'no_content_hold',
+              confirm: `409:${DC.CHANGE_PLAN_STALE}:no_content_hold`,
+              exported: `409:${EXPORT_BLOCKED}:state:confirmed_pending_execution`,
             })
+            // S9R-01b: the next preview reads the moved cell — the plan's change set no longer matches, so ONE reconcile
+            // invalidates it source_changed (no running bound execution defers it) and opens the new content hold.
+            const next = await st.dryRun()
+            const after = await planById(confirmed.changePlanId)
+            const openHolds = (await q(`SELECT kind FROM ${RT.hold} WHERE tenant_id = $1 AND status = 'open'`, [st.tenantId])).rows.map((row: any) => row.kind).sort()
+            const nextObserved = { preview: `${next.statusCode}:${next.body.data && next.body.data.status}`, plan: `${after.status}:${after.invalidated_reason}`, openHolds, derived: (await derivedOf(st)).status }
+            console.log(`[S9R-01b] ${JSON.stringify(nextObserved)}`)
+            expect(nextObserved).toEqual({ preview: '200:suspended', plan: 'invalidated:source_changed', openHolds: ['content_change'], derived: 'pending_confirmation' })
           }, 300000)
 
           test('S8-05 (C04 / C11 / C12 / C08) written => change_pending_review: export 409, an unbound token 409 REVIEW_PENDING, the preview review_pending (no token, no bump) yet settled; the written page + receipt; the review (200, decision_version + 1, no bump, two audit rows, sameActorAsConfirm); export 200; a new change => export 409 again', async () => {
@@ -8423,6 +8833,75 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
           }, 300000)
 
+          // Pre-pilot fix batch 8(a) (register R-91): the S8-19 interleaving on the RE-CONFIRM (a relationship_reconfirm hold).
+          test('S8-21 (pre-pilot fix batch 8a, the V8PG-09 interleaving on PR-4\'s RE-CONFIRM) a relationship_reconfirm confirm with the pilot marker cleared AFTER the route\'s consult, just before the store takes the state row: 409 NOT_PILOT decided under the lock — the relationship stays needs_reconfirmation at revision 1, no bump, no decision audit, the hold open; the marker back => the same body 201 revision 2', async () => {
+            let fire: null | (() => Promise<void>) = null
+            const hook = async (event: StatementEvent) => {
+              if (fire && event.inTransaction && /integration_stock_prep_refresh_state[\s\S]*FOR UPDATE/i.test(String(event.sql))) {
+                const run = fire
+                fire = null
+                await run()
+              }
+            }
+            const st = await s3aStack('s8_21', { pilot: true, refresh: realRefreshServices(hostLikeDb(hook)) })
+            await firstPullApplied(st)
+            st.state.data = CF.secondPullSource()
+            const suspended = await st.dryRun()
+            const confirmed = await confirmOpenCandidate(st)
+            const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId, { confirmable: true, verdict: 'source_scope_changed' })
+            await seedOpenHolds(st.refresh.store, st.scope, [reconfirm], await decisionVersionOf(st.scope), { [confirmed.continuationId]: 'source_scope_changed' })
+            const row = (await openHoldRows(st)).find((entry: any) => entry.kind === 'relationship_reconfirm')
+            expect(row, 'an open re-confirm hold').toBeTruthy()
+            const page = okData(await cpCall(st, 'GET', CPR.holds, { query: { holdId: row.id } }))
+            const body = {
+              confirmProjectNo: st.projectNo,
+              holdId: row.id,
+              holdFingerprint: row.fingerprint,
+              comparisonFingerprint: row.comparison_fingerprint,
+              evidenceFingerprint: row.evidence_fingerprint,
+              readReceipt: page.readReceipt.id,
+              acknowledge: { historyUnknown: true },
+              continuation: { id: confirmed.continuationId, revision: 1 },
+            }
+            const lock0 = await lockRowFor(st.key)
+            const audits0 = (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length
+            const relationship = async () => (await q(`SELECT status, revision FROM ${RT.continuation} WHERE id = $1`, [confirmed.continuationId])).rows[0]
+            const before = await relationship().then((r: any) => r && `${r.status}:${r.revision}`)
+            fire = async () => { await st.pilotExit() }
+            const refused = await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body })
+            const lock1 = await lockRowFor(st.key)
+            const observed = {
+              suspended: suspended.body.data.status,
+              before,
+              fired: fire === null,
+              confirm: answer(refused),
+              decidedUnderLock: Boolean(errorOf(refused).details && errorOf(refused).details.decidedUnderLock === true),
+              relationshipAfter: await relationship().then((r: any) => `${r.status}:${r.revision}`),
+              bump: Number(lock1.generation) - Number(lock0.generation),
+              decisionAuditsAdded: (await auditsOf(st.tenantId)).filter((item: any) => item.action === 'exception_resolve').length - audits0,
+              holdStillOpen: (await openHoldRows(st)).some((item: any) => item.id === row.id),
+              reEnabled: '',
+              relationshipFinal: '',
+            }
+            await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_s8_21_admin'])
+            observed.reEnabled = answer(await cpCall(st, 'POST', `${CP_BASE}/continuations/confirm`, { body }))
+            observed.relationshipFinal = await relationship().then((r: any) => `${r.status}:${r.revision}`)
+            console.log(`[S8-21] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({
+              suspended: 'suspended',
+              before: 'needs_reconfirmation:1',
+              fired: true,
+              confirm: `409:${DC.NOT_PILOT}:`,
+              decidedUnderLock: true,
+              relationshipAfter: 'needs_reconfirmation:1',
+              bump: 0,
+              decisionAuditsAdded: 0,
+              holdStillOpen: true,
+              reEnabled: '201',
+              relationshipFinal: 'active:2',
+            })
+          }, 300000)
+
           // The store-level interleavings: the canonical changed read planned against the first-pull sheet (the REAL planner),
           // its content holds persisted on a synthetic sheet, the confirm's inputs derived from the persisted rows.
           async function storeScenario(label: string) {
@@ -8534,7 +9013,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             const guardFor = (label: string) => ({ leaseRunId: `run_${label}`, leaseId: `lease_${label}`, fencingEpoch: 1, generation: 1, generationToken: `tok_${label}` })
             const beginInput = (scenario: any, label: string, changePlanId: string) => ({
               ...scenario.scope, lane: 'small_apply', guard: guardFor(label), tokenRevision: `rev_${label}`, planDigest: `plan_${label}`,
-              plannedCounts: { add: 0, update: 2, inactive: 0 }, refreshBinding: { continuations: [], changePlanId, holdSetFingerprint: null }, startedBy: `u_${label}`,
+              plannedCounts: { add: 0, update: 2, inactive: 0 }, refreshBinding: { continuations: [], changePlanId, holdSetFingerprint: null }, startedBy: `u_${label}`, intent: emptyIntentFor(`plan_${label}`),
             })
             const staleReconcile = (store: any, scenario: any, changePlanId: string, dv: number, label: string) => store.reconcileHolds({
               ...scenario.scope, decisionVersionObserved: dv, holds: [], computation: computation({ suspended: false, sourceContentDigest: `src_${label}_next` }),
@@ -8614,6 +9093,111 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               commitGate.open()
             }
           }, 300000)
+          // Batch-refresh step 6a-2 (S6-2, register R-91) — the RECOVERY of a change-plan-BOUND execution through the REAL
+          // routes (design §3.5 step 4e, §3.7): the plan-bound mapping decides which write records of the confirmed plan
+          // landed, and the close writes the cell's plan rows on PostgreSQL (104's shape CHECKs, its one-`written` index).
+          //   S9R-16 (recovery leg, P7) a plan-bound run whose first UPDATE the host refuses: partial, CP invalidated by the
+          //          finish; verify mixed (changePlan landed 1 / not landed 1); the close writes RW carrying ONLY the landed record
+          //   S9R-18 (P1 leg) a plan-bound run that wrote every UPDATE but whose finish failed (RUNNING, CP still confirmed):
+          //          verify landed (changePlan landed 2); the close makes CP written, no RW
+          describe('S6-2 recovery of a change-plan-bound execution through the real routes (S9R-16 recovery leg, S9R-18 P1 leg)', () => {
+            const REC_PATH = '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover'
+            function hookedMultitable(hook: any) {
+              return (multitable: any) => ({
+                ...multitable,
+                records: {
+                  ...multitable.records,
+                  async patchRecord(input: any) {
+                    hook.patches += 1
+                    if (hook.failPatches > 0) {
+                      hook.failPatches -= 1
+                      hook.failedRecordIds.push(input.recordId)
+                      throw Object.assign(new Error('synthetic patch failure'), { code: 'SYN_PATCH_FAILED' })
+                    }
+                    return multitable.records.patchRecord(input)
+                  },
+                },
+              })
+            }
+            const recoverCall = (st: any, executionId: string, body: any) => withSwitch(() => callRoute(st.routes, 'POST', REC_PATH, { user: st.users.puller, params: { projectNo: st.projectNo, executionId }, body: { confirmProjectNo: st.projectNo, ...body } }))
+            const recordIdsOf = (plan: any) => (typeof plan.record_set === 'string' ? JSON.parse(plan.record_set) : plan.record_set).map((record: any) => record.recordId).sort()
+            async function confirmedWithHook(label: string, hook: any, extra: any = {}) {
+              const st = await s3aStack(label, { pilot: true, routeMultitable: hookedMultitable(hook), ...extra })
+              await firstPullApplied(st)
+              st.state.data = sourceWith({ partCUsage: 5 })
+              const preview = await st.dryRun()
+              expect(preview.body.data && preview.body.data.status, JSON.stringify(preview.body)).toBe('suspended')
+              const { body } = await boundBody(st)
+              const res = await cpCall(st, 'POST', CPR.confirm, { body })
+              expect(res.statusCode, JSON.stringify(res.body)).toBe(201)
+              return { st, cpId: res.body.data.changePlanId }
+            }
+
+            test('S9R-16 (recovery leg, §3.7 P7) through the real routes: a plan-bound run whose first UPDATE the host refuses (partial; its finish invalidates CP execution_failed) -> verify mixed (changePlan landed 1 / not landed 1) -> close P7: a recovery-written plan carrying ONLY the landed record', async () => {
+              const hook: any = { patches: 0, failPatches: 0, failedRecordIds: [] }
+              const { st, cpId } = await confirmedWithHook('s9r16', hook)
+              const cpRecords = recordIdsOf(await planById(cpId))
+              const replan = await st.dryRun()
+              expect(replan.body.data.status, JSON.stringify(replan.body)).toBe('ready')
+              hook.failPatches = 1
+              const applied = await st.apply(st.users.puller, replan.body.data.dryRunToken)
+              const ex = (await st.executions()).filter((row: any) => ['running', 'partial', 'failed', 'aborted'].includes(row.status))
+              expect(ex.map((row: any) => row.status), JSON.stringify(applied.body)).toEqual(['partial'])
+              const cp1 = await planById(cpId)
+              expect([cp1.status, cp1.invalidated_reason]).toEqual(['invalidated', 'execution_failed'])
+              const verified = await recoverCall(st, ex[0].id, { mode: 'verify' })
+              expect(verified.statusCode, JSON.stringify(verified.body)).toBe(200)
+              const report = verified.body.data.report
+              expect(report.result).toBe('mixed')
+              expect(report.changePlan).toMatchObject({ bound: true, landedRecords: 1, notLandedRecords: 1, possiblyLandedRecords: 0 })
+              const closed = await recoverCall(st, ex[0].id, { mode: 'close', verifyDigest: report.verifyDigest })
+              expect(closed.statusCode, JSON.stringify(closed.body)).toBe(200)
+              expect([closed.body.data.changePlan.cell, closed.body.data.changePlan.recoveredRecordCount]).toEqual(['P7', 1])
+              const rw = (await plansOf(st)).filter((plan: any) => plan.recovered_from_change_plan_id === cpId)
+              expect(rw).toHaveLength(1)
+              const landed = cpRecords.filter((id: string) => !hook.failedRecordIds.includes(id))
+              expect(landed).toHaveLength(1)
+              expect([rw[0].status, Number(rw[0].write_record_count), recordIdsOf(rw[0])]).toEqual(['written', 1, landed])
+              const cp2 = await planById(cpId)
+              expect([cp2.status, cp2.invalidated_reason]).toEqual(['invalidated', 'execution_failed'])
+            }, 240000)
+
+            test('S9R-18 (P1 leg) through the real routes: a plan-bound run that wrote every UPDATE but whose finish failed (RUNNING, CP still confirmed) -> verify landed (changePlan landed 2) -> close P1: CP written (as a succeeded finish), no recovery-written plan', async () => {
+              const real = realRefreshServices()
+              const armed = { on: false }
+              const store = {
+                ...real.store,
+                finishExecution: async (input: any, ...rest: any[]) => {
+                  if (armed.on && input && input.status === 'succeeded') {
+                    armed.on = false
+                    throw Object.assign(new Error('synthetic finish failure'), { code: '57P01' })
+                  }
+                  return real.store.finishExecution(input, ...rest)
+                },
+              }
+              const hook: any = { patches: 0, failPatches: 0, failedRecordIds: [] }
+              const { st, cpId } = await confirmedWithHook('s9r18', hook, { refresh: { governance: real.governance, store } })
+              const replan = await st.dryRun()
+              expect(replan.body.data.status, JSON.stringify(replan.body)).toBe('ready')
+              armed.on = true
+              const applied = await st.apply(st.users.puller, replan.body.data.dryRunToken)
+              expect(armed.on, 'calibration: the succeeded finish was refused').toBe(false)
+              const ex = (await st.executions()).filter((row: any) => row.status === 'running')
+              expect(ex, JSON.stringify(applied.body)).toHaveLength(1)
+              expect((await planById(cpId)).status).toBe('confirmed')
+              const verified = await recoverCall(st, ex[0].id, { mode: 'verify' })
+              expect(verified.statusCode, JSON.stringify(verified.body)).toBe(200)
+              const report = verified.body.data.report
+              expect(report.result).toBe('landed')
+              expect(report.changePlan).toMatchObject({ bound: true, planStatusSeen: 'confirmed', landedRecords: 2, notLandedRecords: 0, possiblyLandedRecords: 0 })
+              const closed = await recoverCall(st, ex[0].id, { mode: 'close', verifyDigest: report.verifyDigest })
+              expect(closed.statusCode, JSON.stringify(closed.body)).toBe(200)
+              expect([closed.body.data.changePlan.cell, closed.body.data.changePlan.outcome]).toEqual(['P1', 'written'])
+              const cp = await planById(cpId)
+              expect([cp.status, cp.execution_id]).toEqual(['written', ex[0].id])
+              expect((await plansOf(st)).filter((plan: any) => plan.recovered_from_change_plan_id === cpId)).toHaveLength(0)
+            }, 240000)
+          })
         })
       })
     })

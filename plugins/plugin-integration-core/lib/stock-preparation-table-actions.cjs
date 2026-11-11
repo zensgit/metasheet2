@@ -100,8 +100,14 @@ const {
   previewRecoveryRechecked,
   previewReviewOf,
   reconcileComputation,
+  recoverySettlementFor,
   selfSettlementFor,
 } = require('./stock-preparation-refresh-lanes.cjs')
+// Batch-refresh step 6a-1 (S6-1; R-91): the execution intent journal, built from the in-lease recompute.
+const { buildExecutionIntent } = require('./stock-preparation-execution-intent.cjs')
+// Batch-refresh step 6a-2 (S6-2; R-91): the recovery assessment (pure) and the refresh store's recovery vocabulary.
+const executionRecovery = require('./stock-preparation-execution-recovery.cjs')
+const { REFRESH_STORE_ERROR_CODES, StockPreparationRefreshStoreError, UNFINISHED_EXECUTION_STATUSES } = require('./stock-preparation-continuation-store.cjs')
 const {
   applyStockPreparationPlan,
   countAttemptedHostWrites,
@@ -2111,6 +2117,10 @@ function projectWriteAbortError(applyResult) {
 // (`withExistingRowRecordRef`). Built from THIS request's read (O-10), never from the token, a preview or a stored
 // artifact. A key whose existing group is not exactly one row with an integer version gets no entry, and the writer
 // patches it exactly as before. Every small apply passes it, governed or not (register R-63 ①).
+// Pre-pilot fix batch 8(e) (R-91): for a DUPLICATED key "exactly as before" means NOT AT ALL — the writer's lookup
+// (per key and the batched prefetch alike) refuses a key matching more than one row `duplicate_target_key` before any
+// patch (stock-preparation-apply-writer.cjs findExistingRecord), so no unfenced UPDATE / INACTIVE of a duplicated key is
+// ever sent (EV-12). The remaining unfenced case is a single row whose record carries no integer version.
 function expectedRecordsOf(dryRun) {
   const groups = new Map()
   for (const row of Array.isArray(dryRun.existingRows) ? dryRun.existingRows : []) {
@@ -2137,11 +2147,15 @@ function expectedRecordsOf(dryRun) {
 // token, or `apply_threw`), best effort. A finish that fails here leaves the row `running` — after the
 // release it derives 失败待恢复 and blocks the next apply (RECOVERY_PENDING) until step 6 — and is logged
 // values-free (codes only). The caller rethrows the ORIGINAL error either way.
+// Step 6a-1 (design §3.3, RR G8): ONLY a throw the writer itself marked `writerPhase === 'pre_io'` (its closed
+// WRITER_PRE_IO_REASONS list) reports `written: 0, attemptedWrites: 0` — then the store self-verifies the run. Any other
+// throw (a `details.partial === false` included) reports no counts and stays recoverable.
 const EXECUTION_ERROR_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/
 async function finishExecutionFailedBestEffort(handle, input, error, logger) {
   const code = error && typeof error.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(error.code) ? error.code : 'apply_threw'
+  const preIo = Boolean(error) && error.writerPhase === 'pre_io'
   try {
-    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code] })
+    await handle.store.finishExecution({ ...input, status: 'failed', errorCodes: [code], ...(preIo ? { written: 0, attemptedWrites: 0 } : {}) })
   } catch (finishError) {
     const finishCode = finishError && typeof finishError.code === 'string' && EXECUTION_ERROR_CODE_PATTERN.test(finishError.code) ? finishError.code : 'finish_threw'
     if (logger && typeof logger.warn === 'function') {
@@ -3377,9 +3391,27 @@ async function applyStockPreparationAction(input = {}) {
   const governedApply = Boolean(dryRun.refresh && dryRun.refresh.governed)
   const refreshScope = governedApply ? dryRun.refresh.consult.scope : null
   const storeScope = refreshScope ? { tenantId: refreshScope.tenantId, sheetId: refreshScope.sheetId, projectNo: refreshScope.projectNo } : null
+  // Batch-refresh step 6a-1 (S6-1, design §3.2; R-91): the values-free INTENT JOURNAL of this execution, from THIS
+  // in-lease recompute (O-10: the plan the writer receives, the versions it fences on, the writer's own pack-aware band)
+  // — never the token or a preview. Governed only: a not-governed apply begins no execution and journals nothing (C09).
+  const executionPlanDigest = governedApply ? planDigestOf(dryRun.plan) : null
+  const intentExpectedRecords = governedApply ? expectedRecordsOf(dryRun) : null
+  const executionIntent = governedApply
+    ? buildExecutionIntent({
+      plan: dryRun.plan,
+      planDigest: executionPlanDigest,
+      // The SAME versions the writer fences on (expectedRecordsOf is a pure function of this dryRun; the writer call below
+      // computes its own copy, so EV-10's one-writer-call pin stays exact).
+      expectedRecords: intentExpectedRecords,
+      template: action.template,
+      installedFieldProperties: dryRun.refresh.installedFieldProperties,
+    })
+    : null
   // PR-3a (O-13; design §4.2 / §9.3): THE EXECUTION LEDGER — governed only (TD-4), begun BEFORE the first
   // write, bound to the lease grant (its lease id only through the host fence), the token, the plan digest and
   // the refresh binding the apply just verified. A begin failure refuses before any write (partial: false).
+  // Step 6a-1: ONE transaction with the journal; 批次标识's unprefixed source digest rides along only when this run
+  // stamps (R-65; the switch off => no pull-batch run => no key at all).
   const execution = governedApply
     ? await dryRun.refresh.handle.store.beginExecution({
       ...storeScope,
@@ -3392,10 +3424,12 @@ async function applyStockPreparationAction(input = {}) {
         generationToken: projectWriteGuard.generationToken,
       },
       tokenRevision: tokenRecord.revision,
-      planDigest: planDigestOf(dryRun.plan),
+      planDigest: executionPlanDigest,
       plannedCounts: dryRun.plan.counts,
       refreshBinding: refreshOutcome.binding,
       startedBy: input.startedBy,
+      intent: executionIntent,
+      ...(pullBatchRun && pullBatchRun.evaluation.ready && typeof pullBatchRun.sourceDigest === 'string' ? { pullBatchSourceDigest: pullBatchRun.sourceDigest } : {}),
     })
     : null
   // From the moment the execution exists, every way out finishes it (P3-X3): a throw — the writer's or anything
@@ -3502,6 +3536,196 @@ async function applyStockPreparationAction(input = {}) {
   }
 }
 
+// ── batch-refresh step 6a-2 (S6-2; register R-91): the recovery verify-and-close ─────────────────────────────────────
+
+const RECOVERY_OPERATIONS = Object.freeze(['verify', 'close', 'inspect', 'close_unverified'])
+
+function recoveryError(status, code, message, details = {}) {
+  return new StockPreparationRefreshStoreError(status, code, message, { ...details, partial: false })
+}
+
+/**
+ * THE RECOVERY of one unfinished governed execution (design §3.5-§3.8; G4 「恢复入口」). Called by the route INSIDE the
+ * `recovery_verify` lease it holds (`projectWriteGuard`), never with a token, and it performs NO record write.
+ *   verify            read -> in-lease recompute -> classify -> the values-free report + ONE audited page of the pending list
+ *   close             the same, then (refusals: UNPROVABLE / STALE) the store's close transaction inside guard.withHostWrite
+ *                     (the heartbeat skips while it holds the lock row — rebaseline (d), N6)
+ *   inspect           close-unverified's read: the SHEET only (no source read — the escape works when the source cannot be
+ *                     read), a best-effort classification and its `inspectDigest`
+ *   close_unverified  the runbook close: `verified_result = unknown`, no settlement, every write record of a bound plan to
+ *                     review (P5 / P9), 批次标识's link finished with the sheet-only count, the batch kept open
+ * 批次标识 (rebaseline (a), (b)): readBatchLink / batchWithin only when the lane is ON and has a ledger; the close hands the
+ * execution's UNPREFIXED source digest. The guard's holder assert (`holderWithin`, reason recovery_close) and the audit
+ * hooks are the route's. Allowed while 批次标识's sheet install is in progress (N-INSTALLING): the recovery never touches
+ * the `_sheet` row and classifies band-blind.
+ */
+async function recoverStockPreparationExecution(input = {}) {
+  const operation = input.operation
+  if (!RECOVERY_OPERATIONS.includes(operation)) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the recovery operation is not one of verify / close / inspect / close_unverified', { field: 'operation' })
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
+  const guard = requireProjectWriteGuard(input.projectWriteGuard)
+  assertProjectWriteGuardScope(guard, action)
+  if (typeof guard.withHostWrite !== 'function' || typeof guard.hostWriteFence !== 'function') {
+    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the recovery needs the sheet write guard\'s host-write bracket; nothing is closed without it')
+  }
+  const handle = input.refreshGovernance
+  const store = handle && handle.store
+  if (!store || typeof store.readExecutionForRecovery !== 'function' || typeof store.closeExecution !== 'function') {
+    throw recoveryError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the refresh store on this deployment cannot recover an execution', { reason: 'recovery_store' })
+  }
+  const executionId = optionalString(input.executionId)
+  if (!executionId) throw recoveryError(404, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_FOUND, 'this project has no such execution')
+  const tenantId = optionalString(input.tenantId)
+  if (!tenantId) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the recovery needs the proven tenant', { field: 'tenantId' })
+  const scope = { tenantId, sheetId: action.target.sheetId, projectNo: parameters.projectNo }
+  const runbook = operation === 'inspect' || operation === 'close_unverified'
+
+  // a. THE READ (one snapshot), in scope and unfinished — decided again under the close's locks.
+  const read = await store.readExecutionForRecovery({ ...scope, executionId })
+  if (!read) throw recoveryError(404, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_FOUND, 'this project has no such execution')
+  if (!UNFINISHED_EXECUTION_STATUSES.includes(read.execution.status)) {
+    throw recoveryError(409, REFRESH_STORE_ERROR_CODES.EXECUTION_NOT_UNFINISHED, 'this execution is not unfinished; there is nothing to recover', { reason: read.execution.status === 'verified_closed' ? 'verified_closed' : 'execution_finished' })
+  }
+  const bandOn = Boolean(pullBatchLane && pullBatchLane.enabled === true && pullBatchLane.store && typeof pullBatchLane.store.readBatchLink === 'function')
+  const link = bandOn ? await pullBatchLane.store.readBatchLink({ ...scope, refreshExecutionId: executionId }) : null
+
+  // b. THE RECOMPUTE under the lease (verify / close): the same read the apply makes, its consult and the band strip —
+  // never reconciled (no computation lane is recorded). close-unverified reads the SHEET only.
+  let dryRun = null
+  let rows
+  if (!runbook) {
+    const b2aSourceObjects = stockPreparationB2aSourceObjects({ registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects })
+    const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+      registry: input.b2aTrialRegistry,
+      store: input.b2aClaimStore,
+      operationClaim: input.b2aOperationClaim,
+      tenantId,
+      action,
+      parameters,
+      runId: input.b2aRunId,
+      purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+      now: input.now,
+      sourceObjects: b2aSourceObjects,
+    })
+    const tableScopeReview = input.policyStore ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore }) : null
+    dryRun = await computeDryRun({
+      action,
+      parameters,
+      sourceAdapter: input.sourceAdapter,
+      recordsApi: input.recordsApi,
+      plannedAt: input.plannedAt,
+      runId: input.runId,
+      runOnlyReview: normalizeRunOnlyConflictPolicyReview(undefined),
+      tableScopeReview,
+      installedFieldProperties: input.installedFieldProperties,
+      targetFieldExistence: input.targetFieldExistence,
+      extFieldMapping: input.extFieldMapping,
+      confirmationDecisionResolver: input.confirmationDecisionResolver,
+      b2aTrialRegistration,
+      b2aClaimStore: input.b2aClaimStore,
+      b2aSourceObjects,
+      b2aNow: input.now,
+      refreshGovernance: input.refreshGovernance,
+      // 批次标识 (BI §3.4, RS-2): the reader strip (always) and, while the switch is on, the band probe fold.
+      pullBatchLane,
+    })
+    if (!dryRun.refresh || dryRun.refresh.governed !== true) {
+      throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'an execution exists, so the project must be governed; the recompute says otherwise', { reason: 'recovery_recompute_not_governed' })
+    }
+    if (dryRun.refresh.complete !== true) {
+      throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_RECOMPUTE_INCOMPLETE, 'the source could not be read completely under the recovery lease; nothing was closed — retry once the source reads cleanly')
+    }
+    rows = dryRun.existingRows
+  } else {
+    if (typeof input.readSheetRows !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'close-unverified needs the route\'s sheet read', { field: 'readSheetRows' })
+    rows = await input.readSheetRows()
+  }
+
+  // c-e. CLASSIFY over the lease's own read, the consistency rule, the plan-bound mapping, 批次标识's sheet count.
+  const assessment = executionRecovery.assessExecutionRecovery({ read, rows, plan: dryRun ? dryRun.plan : null, link, template: action.template })
+  const intentDigest = read.execution.intentDigest
+  const transparentShape = read.changePlanBound !== true
+
+  if (runbook) {
+    const inspectDigest = executionRecovery.inspectDigestOf({ executionId, intentDigest, assessment })
+    if (operation === 'inspect') {
+      const report = executionRecovery.recoveryReportOf({ read, assessment, plan: null, bandOn, link, settlesIfClosedNow: false, digestKey: 'inspectDigest', digest: inspectDigest })
+      if (typeof input.auditVerifyRead !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the inspect read is audited', { field: 'auditVerifyRead' })
+      await input.auditVerifyRead({ operation: 'execution_inspect_read', pageIndex: 0, entryCount: 0, pendingTotal: assessment.pendingTotal, intended: assessment.counts.intended })
+      return Object.freeze({ operation, report })
+    }
+    if (input.inspectDigest !== inspectDigest) throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_STALE, 'the sheet changed since it was inspected; inspect again')
+    if (!input.acknowledge || input.acknowledge.resultUnknown !== true) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'close-unverified acknowledges resultUnknown', { field: 'acknowledge' })
+    // P5 / P9: EVERY write record of the bound plan goes to review (fail-safe); the store takes them all for `unknown`.
+    const closed = await guard.withHostWrite(() => store.closeExecution({
+      ...scope,
+      executionId,
+      mode: 'runbook',
+      classification: {
+        result: 'unknown',
+        intentDigest,
+        counts: assessment.counts,
+        landedRecordIds: [],
+        landedAddCount: assessment.landedAddCount,
+        verifiedCreatedRows: assessment.verifiedCreatedRows,
+      },
+      lease: { leaseId: guard.hostWriteFence().leaseId, leaseRunId: input.projectWriteRunId, fencingEpoch: guard.fencingEpoch },
+      closedBy: input.closedBy,
+      runbookRef: input.runbookRef,
+    }, {
+      auditWithin: input.auditCloseWithin,
+      holderWithin: input.holderWithin,
+      batchWithin: bandOn && typeof pullBatchLane.store.batchWithin === 'function' ? (trx, args) => pullBatchLane.store.batchWithin(trx, args) : null,
+    }))
+    return Object.freeze({ operation, closed })
+  }
+
+  // f. The report and its digest; the settlement a close would carry (re-decided by the store under its lock).
+  const verifyDigest = executionRecovery.verifyDigestOf({ executionId, intentDigest, assessment })
+  const settlement = assessment.result === 'landed' || assessment.result === 'mixed' || (assessment.result === 'nothing_landed' && !transparentShape)
+    ? recoverySettlementFor({ dryRun, guard, template: action.template })
+    : null
+  const report = executionRecovery.recoveryReportOf({ read, assessment, plan: dryRun.plan, bandOn, link, settlesIfClosedNow: assessment.refusalReasons.length === 0 && settlement !== null, digestKey: 'verifyDigest', digest: verifyDigest })
+
+  // g. verify: the report + ONE page of the private pending list, audited FIRST (a refusing audit => no values).
+  if (operation === 'verify') {
+    const page = executionRecovery.pendingPageOf({ assessment, expansionRows: dryRun.expansion && dryRun.expansion.rows, existingRows: rows, cursor: input.pageCursor === undefined ? null : input.pageCursor })
+    if (typeof input.auditVerifyRead !== 'function') throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the verify page is audited', { field: 'auditVerifyRead' })
+    await input.auditVerifyRead({ operation: 'execution_verify_read', pageIndex: page.pageIndex, entryCount: page.entries.length, pendingTotal: assessment.pendingTotal, intended: assessment.counts.intended })
+    return Object.freeze({ operation, report, pending: page })
+  }
+  if (assessment.refusalReasons.length > 0) {
+    throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_UNPROVABLE, 'what landed cannot be proven from the sheet; the execution stays unfinished — follow the runbook', {
+      reasons: assessment.refusalReasons.slice(),
+      counts: { ...assessment.counts },
+    })
+  }
+  if (input.verifyDigest !== verifyDigest) throw recoveryError(409, REFRESH_STORE_ERROR_CODES.RECOVERY_STALE, 'the sheet or the source changed since it was verified; verify again')
+  const closed = await guard.withHostWrite(() => store.closeExecution({
+    ...scope,
+    executionId,
+    mode: 'puller_verified',
+    classification: {
+      result: assessment.result,
+      intentDigest,
+      counts: assessment.counts,
+      landedRecordIds: assessment.landedRecordIds,
+      landedAddCount: assessment.landedAddCount,
+      verifiedCreatedRows: assessment.verifiedCreatedRows,
+    },
+    lease: { leaseId: guard.hostWriteFence().leaseId, leaseRunId: input.projectWriteRunId, fencingEpoch: guard.fencingEpoch },
+    closedBy: input.closedBy,
+    ...(settlement ? { settlement } : {}),
+  }, {
+    auditWithin: input.auditCloseWithin,
+    holderWithin: input.holderWithin,
+    batchWithin: bandOn && typeof pullBatchLane.store.batchWithin === 'function' ? (trx, args) => pullBatchLane.store.batchWithin(trx, args) : null,
+  }))
+  return Object.freeze({ operation, closed })
+}
+
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
@@ -3531,7 +3755,12 @@ module.exports = {
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
+  // Batch-refresh step 6a-2 (S6-2).
+  RECOVERY_OPERATIONS,
+  recoverStockPreparationExecution,
   __internals: {
+    // Step 6a-1 (XS-03): the best-effort failed finish and its pre-IO rule.
+    finishExecutionFailedBestEffort,
     assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,

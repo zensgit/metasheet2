@@ -119,6 +119,7 @@ export async function previewDeprovisionForUser(localUserId: string, integration
           localUserId,
           skipReason: 'no_active_linked_accounts',
           effects: [],
+          suppressedByLocal: { membership: false, global: false },
         },
       }
     }

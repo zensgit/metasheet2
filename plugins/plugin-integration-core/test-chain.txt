@@ -101,6 +101,9 @@ node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
 node __tests__/stock-preparation-continuation-store.test.cjs
 node __tests__/stock-preparation-change-plan-store.test.cjs
+node __tests__/stock-preparation-execution-intent.test.cjs
+node __tests__/stock-preparation-execution-recovery.test.cjs
+node __tests__/stock-preparation-execution-recovery-routes.test.cjs
 node __tests__/stock-preparation-change-plan-planner.test.cjs
 node __tests__/stock-preparation-change-plan-lanes.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs

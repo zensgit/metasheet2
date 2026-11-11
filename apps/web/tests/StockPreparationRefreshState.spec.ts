@@ -88,7 +88,8 @@ import {
   recordStockPrepProjectVisit,
 } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import { buildOperatorHomeCards } from '../src/services/integration/stockPreparation/operatorHomeCards'
-import type { StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import type { StockPreparationOperatorDirectory, StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import { buildStockPrepProjectQueryRows, filterStockPrepProjectQueryRows } from '../src/services/integration/stockPreparation/projectQuery'
 
 const nodeRequire = createRequire(import.meta.url)
 const PLUGIN_LIB = '../../../plugins/plugin-integration-core/lib/'
@@ -229,7 +230,13 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     expect(stockPrepRefreshBanner(stanza('executed_pending_settlement'), { canOpenQueue: true })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('complete'))?.key).toBe('unsettled')
     expect(stockPrepRefreshBanner(stanza('complete'))?.zh).toContain('待核对')
-    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toContain('执行失败待恢复')
+    // S6-3 (step-6 design §5.4, R-91): 「上次写入未完成,等待拉取人员核对;正式导出已暂停」 — re-pinned from 执行失败待恢复;
+    // the second line names the card (拉取待确认) and keeps the runbook for an unprovable check (平台管理员).
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toBe('本项目上次写入未完成,等待拉取人员核对;正式导出已暂停。')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('拉取待确认')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('平台管理员按手册')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: true })?.link).toBe(true)
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: false })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('change_pending_review'))?.zh).toContain('变更待复核')
     expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: false, status: 'unreadable' }))?.zh).toContain('读取失败')
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
@@ -258,11 +265,12 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
       expect(entry?.enNext, name).toContain('awaiting check')
       expect(entry?.enNext, name).not.toMatch(/still opens|presses “Check” again|is still needed/)
     }
-    // Every other unfinished status keeps no link (only pending_confirmation and change_pending_review have one).
+    // Every other unfinished status keeps no link (only pending_confirmation, change_pending_review and — S6-3, R-91:
+    // the recovery card — failed_pending_recovery have one). The link set 2 → 3 statuses is that decision.
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
       const banner = stockPrepRefreshBanner(status === 'unreadable' ? parseStockPrepRefreshStanza({ readable: false, status }) : parseStockPrepRefreshStanza({ readable: true, status, governed: 'pilot', settled: false, counts: { pendingConfirm: 1, pendingReviews: 1 } }), { canOpenQueue: true })
       if (!banner) continue
-      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review')
+      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review' || status === 'failed_pending_recovery')
     }
     // A confirmed change plan reads confirmed_pending_execution too: its words name both.
     expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: true, status: 'confirmed_pending_execution', governed: 'pilot', settled: false, counts: null }))?.zh).toContain('变更计划')
@@ -787,7 +795,8 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
       ['executed_pending_settlement', 'check'],
       ['confirmed_pending_execution', 'resync'],
       ['executing', null],
-      ['failed_pending_recovery', null],
+      // S6-3 (R-91): null → 'go-refresh-queue' — the recovery card is a section of 「拉取待确认」 (NS-6).
+      ['failed_pending_recovery', 'go-refresh-queue'],
       // PR-9 (R-77 ⑥): null → 'go-refresh-queue' — the review is a section of 「拉取待确认」 (NS-5).
       ['change_pending_review', 'go-refresh-queue'],
       ['unreadable', null],
@@ -817,6 +826,19 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
     expect(confirmed.en).toContain('change plan')
     const confirmedFloor = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
     expect(confirmedFloor.zh).toContain('变更计划')
+  })
+
+  it('NS-6 (S6-3): failed_pending_recovery — a puller is sent to the recovery card; the floor gets the sentence and no action', () => {
+    const puller = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, refreshPendingConfirmCount: 0, canOpenRefreshQueue: true }))
+    expect(puller).toMatchObject({ key: 'refresh', action: 'go-refresh-queue', actionZh: '去核对' })
+    expect(puller.zh).toContain('拉取待确认')
+    expect(puller.zh).toContain('结束这次执行')
+    expect(puller.zh).not.toContain('平台管理员')
+    const floor = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(floor.action).toBeNull()
+    expect(floor.actionZh).toBe('')
+    expect(floor.zh).toContain('等待拉取人员核对')
+    expect(floor.zh).toContain('请联系拉取人员')
   })
 
   it('NS-2: absent / not_governed / complete ∧ settled never fire rule 3b (dormancy)', () => {
@@ -886,5 +908,58 @@ describe('OH — 今天要处理 keeps 刷新未完成', () => {
     // A live pending count still decides on its own.
     const live = buildOperatorHomeCards([registryRow({ pendingDecisionCount: 2 })], [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
     expect(live[0].posture.key).toBe('pending_decision')
+  })
+
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): the registry row carries the server's blocked token.
+  it('OH-DIR (8c): a registry row\'s server token decides before 「可以导出」 — 变更待复核 / 待核对 / 状态读取失败 / 刷新未完成; null is the live 「可以导出」 even over a remembered block; the count badges still rank first; a row without the key keeps the fold', () => {
+    const card = (overrides: Partial<StockPreparationOperatorProject>, memory: Array<{ projectNo: string; updatedAt: string; postureKey: 'blocked_pull_state' | 'ready' }> = []) => buildOperatorHomeCards([registryRow(overrides)], memory)[0]
+    const review = card({ refreshBlocked: 'change_pending_review', pendingReviewCount: 1, openRefreshHoldCount: 0 })
+    expect([review.posture.key, review.posture.zh, review.postureFromMemory]).toEqual(['blocked_pull_state', '变更待复核', false])
+    expect(card({ refreshBlocked: 'unsettled', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('待核对')
+    expect(card({ refreshBlocked: 'failed_pending_recovery', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('上次写入未完成')
+    // 「状态读取失败」 even on a row the overview never stamped (no counts): never 「看不到」, never 「可以导出」.
+    const unreadable = card({ refreshBlocked: 'unreadable', pendingReviewCount: null, openRefreshHoldCount: null, pulledRowCount: null })
+    expect([unreadable.posture.key, unreadable.posture.zh]).toEqual(['blocked_pull_state', '状态读取失败'])
+    expect(card({ refreshBlocked: 'made_up_token', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('刷新未完成')
+    // The open holds already fold into the live pending count, which still ranks first.
+    expect(card({ refreshBlocked: 'pending_confirmation', openRefreshHoldCount: 2, pendingReviewCount: 0, pendingDecisionCount: 2 }).posture.key).toBe('pending_decision')
+    // null = the server says the export would not refuse on the state: the LIVE answer beats a remembered block.
+    const ready = card({ refreshBlocked: null, pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
+    expect([ready.posture.key, ready.postureFromMemory]).toEqual(['ready', false])
+    // And a live block beats a remembered 「可以导出」.
+    expect(card({ refreshBlocked: 'executing', pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'ready' }]).posture.zh).toBe('正在写入')
+    // An older server (no key): the PR-7 fold, unchanged.
+    expect(card({}, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }]).posture.key).toBe('blocked_pull_state')
+  })
+
+  it('OH-DIR-MIRROR (8c): for EVERY status × settled the server derives, the token the directory row carries renders on the home card exactly what the server overview posture says — 「可以导出」 only where the formal-surface verdict allows', () => {
+    const overview = nodeRequire(`${PLUGIN_LIB}stock-preparation-project-overview.cjs`) as {
+      refreshBlockedToken: (input: Record<string, unknown>) => string | null
+      projectOverviewPosture: (input: Record<string, unknown>) => { key: string; zh: string; en: string; tone: string }
+      REFRESH_BLOCKED_TOKENS: readonly string[]
+    }
+    for (const status of [...STOCK_PREP_REFRESH_STATUS_TOKENS, 'made_up']) {
+      for (const settled of [true, false]) {
+        const token = overview.refreshBlockedToken({ refreshStatus: status, refreshSettled: settled })
+        if (token !== null) expect(overview.REFRESH_BLOCKED_TOKENS).toContain(token)
+        const server = overview.projectOverviewPosture({ pulledRowCount: 12, refreshStatus: status, refreshSettled: settled, refreshPendingConfirmCount: 0 })
+        const web = buildOperatorHomeCards([registryRow({ refreshBlocked: token, openRefreshHoldCount: 0, pendingReviewCount: 0 })], [])[0].posture
+        expect({ status, settled, posture: web }).toEqual({ status, settled, posture: server })
+        expect(web.key === 'ready').toBe(status !== 'made_up' && backendState.formalSurfaceVerdict({ readable: status !== 'unreadable', status, settled }).allowed === true)
+      }
+    }
+  })
+
+  it('OH-DIR-QUERY (8c): 项目查询 inherits it — the 「可以导出」 chip never lists a row the server says is blocked', () => {
+    const directory = {
+      tenantId: 'tenant-syn', directoryReady: true, ledgerReady: true,
+      projects: [
+        registryRow({ projectNo: 'SYN-Q-READY', refreshBlocked: null, openRefreshHoldCount: 0, pendingReviewCount: 0 }),
+        registryRow({ projectNo: 'SYN-Q-REVIEW', refreshBlocked: 'change_pending_review', openRefreshHoldCount: 0, pendingReviewCount: 1 }),
+      ],
+    } as unknown as StockPreparationOperatorDirectory
+    const rows = buildStockPrepProjectQueryRows(directory, [])
+    const ready = filterStockPrepProjectQueryRows(rows, { status: 'ready', source: 'all', search: '' } as never).map((row) => row.projectNo)
+    expect(ready).toEqual(['SYN-Q-READY'])
   })
 })
