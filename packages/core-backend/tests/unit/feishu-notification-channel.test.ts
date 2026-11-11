@@ -24,7 +24,12 @@ import {
   NOTIFICATION_TRANSPORT_DISABLED_REASON,
   NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
 } from '../../src/services/notification-delivery-outcome'
-import type { FeishuCapabilityDecision, FeishuSendInput, FeishuSendOutcome } from '../../src/services/feishu-message-sender'
+import {
+  createFeishuMessageSender,
+  type FeishuCapabilityDecision,
+  type FeishuSendInput,
+  type FeishuSendOutcome,
+} from '../../src/services/feishu-message-sender'
 import type { Notification, NotificationRecipient } from '../../src/types/plugin'
 import { listSourceFiles } from '../helpers/import-edge-allowlist'
 import {
@@ -118,8 +123,10 @@ function buildDeps(world: World, h: SendHarness, overrides: Partial<FeishuChanne
         connectionId,
         endpoint: endpointFor(user.openId, { connectionId, anchor, evidence: [`evidence-${input.userId}`, '1'] }),
       }
+      // A resolver may return more than the interface names; the channel never reads a second endpoint.
       if (user.backupOpenId !== undefined) {
-        found.backup = { connectionId, endpoint: endpointFor(user.backupOpenId, { connectionId, anchor, evidence: ['backup', '1'] }) }
+        const backup = { connectionId, endpoint: endpointFor(user.backupOpenId, { connectionId, anchor, evidence: ['backup', '1'] }) }
+        return { ...found, backup } as FeishuChannelEndpointResult
       }
       return found
     },
@@ -254,8 +261,8 @@ describe('FX-M12 aggregation over several recipients', () => {
     const recipients: NotificationRecipient[] = [
       { id: 'u1', type: 'user' },
       { id: 'u1', type: 'user' },
-      { id: 'someone@example.com', type: 'email' },
-      { id: 'https://example.invalid/hook', type: 'webhook' },
+      { id: 'fx-mail-0001@example.test', type: 'email' },
+      { id: 'https://hook.example.test/fx-0001', type: 'webhook' },
     ]
     const result = await run(notification({ recipients }))
     expect(result.status).toBe('sent')
@@ -287,7 +294,7 @@ describe('FX-M12 aggregation over several recipients', () => {
 
 describe('FX-M13 results that are cancelled', () => {
   it('no recipient of type user: cancelled, no_channel_recipients, nothing is looked up', async () => {
-    const result = await run(notification({ recipients: [{ id: 'a@example.com', type: 'email' }] }))
+    const result = await run(notification({ recipients: [{ id: 'fx-mail-0002@example.test', type: 'email' }] }))
     expect(result.status).toBe('cancelled')
     expect(result.metadata).toEqual({ channel: 'feishu', reason: NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON, recipientCount: 0 })
     const none = await run(notification({ recipients: [] }))
@@ -335,6 +342,25 @@ describe('FX-M13 results that are cancelled', () => {
     expect(h.server.count()).toBe(0)
     // asked once per connection
     expect(world.calls.capability).toEqual([CONNECTION_ID])
+  })
+
+  it('a connection that cannot be read leaves the recipients unsent in the same class as an unreadable capability', async () => {
+    const sender = createFeishuMessageSender({
+      loadConnection: async () => {
+        throw new Error('database unavailable')
+      },
+      decodeSecret: (stored) => stored,
+      tokens: h.tokens,
+      deliveryFlag: () => 'true',
+    })
+    const result = await run(notification({ recipients: userRecipients('u1', 'u2') }), { sender })
+    expect(result.status).toBe('cancelled')
+    expect(result.metadata).toEqual({ channel: 'feishu', reason: NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount: 2 })
+    world.failures.capability = true
+    const capability = await run(notification({ recipients: userRecipients('u1', 'u2') }))
+    expect(capability.status).toBe(result.status)
+    expect(capability.metadata).toEqual(result.metadata)
+    expect(h.server.count()).toBe(0)
   })
 
   it('an unreadable capability is not effective', async () => {
@@ -547,6 +573,22 @@ describe('FX-M23 a notification without an id', () => {
     expect(sent[1].uuid).toBe(sent[2].uuid)
   })
 
+  it('never hands the send core an empty key, whether the id or the injected generator gives one', async () => {
+    const seen: string[] = []
+    const sender = {
+      sendFeishuText: async (input: FeishuSendInput): Promise<FeishuSendOutcome> => {
+        seen.push(input.dedupeKey)
+        return { kind: 'accepted', messageRef: 'ref' }
+      },
+    }
+    await run(notification({ id: '' }), { sender, newDedupeKey: () => '' })
+    await run(notification({ id: undefined }), { sender, newDedupeKey: () => '' })
+    await run(notification({ id: undefined }), { sender })
+    expect(seen).toHaveLength(3)
+    expect(seen.every((key) => key.length > 0)).toBe(true)
+    expect(new Set(seen).size).toBe(3)
+  })
+
   it('treats an empty id as missing and takes an injected key generator when there is one', async () => {
     h.server.script(SEND_ROUTE, [acceptedStep(), acceptedStep()])
     await run(notification({ id: '' }), { newDedupeKey: () => 'generated-key-1' })
@@ -557,9 +599,9 @@ describe('FX-M23 a notification without an id', () => {
 
 describe('FX-M06 an unknown or refused outcome is never redirected', () => {
   it.each([
-    ['unknown', { kind: 'reset' }],
-    ['refused', refusedStep(230013)],
-  ] as const)('a %s send to the primary endpoint makes no send to a stored backup endpoint', async (_name, step) => {
+    ['an unknown', { kind: 'reset' }],
+    ['a refused', refusedStep(230013)],
+  ] as const)('%s send to the primary endpoint makes no send to a stored backup endpoint', async (_name, step) => {
     world.users.get('u1')!.backupOpenId = 'ou_fx_backup_0009'
     h.server.script(SEND_ROUTE, [step, acceptedStep()])
     const result = await run(notification())

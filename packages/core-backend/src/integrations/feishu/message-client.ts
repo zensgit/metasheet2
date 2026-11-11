@@ -1,7 +1,3 @@
-import { FEISHU_ENDPOINTS, feishuEndpointUrl } from './endpoints'
-import type { FeishuTenantTokenCredentials, FeishuTenantTokenService } from './token'
-import { requestFeishuJson } from './transport'
-
 /**
  * The Feishu message client: one text message to one recipient, sent on the `send` tier.
  *
@@ -16,6 +12,11 @@ import { requestFeishuJson } from './transport'
  *
  * The wait for a token mint is not abortable by the caller's signal; only the send request is.
  */
+import { FEISHU_ENDPOINTS, feishuEndpointUrl } from './endpoints'
+import type { FeishuTenantTokenCredentials, FeishuTenantTokenService } from './token'
+import { requestFeishuJson } from './transport'
+
+/** The only recipient identifier type this client addresses. */
 export const FEISHU_MESSAGE_RECEIVE_ID_TYPE = 'open_id' as const
 
 export interface FeishuTextMessageRequest {

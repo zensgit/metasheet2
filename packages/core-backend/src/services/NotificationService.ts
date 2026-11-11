@@ -537,8 +537,6 @@ export type FeishuChannelEndpointResult =
       kind: 'found'
       connectionId: string
       endpoint: FeishuSendEndpoint
-      /** A stored second endpoint of the same user. This channel never sends to it: no result redirects a send. */
-      backup?: { connectionId: string; endpoint: FeishuSendEndpoint }
     }
   | { kind: 'none' }
 
@@ -586,8 +584,16 @@ function errorLabel(error: unknown): string {
  *    known, the allow-set names the user and the user has a stored endpoint;
  *  - `sent` means the provider accepted EVERY addressed recipient; a recipient that was not allowed, had
  *    no endpoint, was refused, or whose result is unknown is not accepted, so the result is `failed`;
- *  - an unknown outcome is never repeated and never redirected;
- *  - there is no ledger here: a caller that retries after `failed` must treat it as an unknown outcome.
+ *  - an unknown outcome is never repeated and never redirected: no stored second endpoint is ever used;
+ *  - a lookup that fails (topic, allow-set, endpoint, capability, connection) sends nothing and is
+ *    reported as `cancelled`, the same retryable class for every one of them;
+ *  - `metadata.topic` and `metadata.orgId` are ASSERTIONS of the caller: the channel cannot authenticate
+ *    them. Whoever registers the channel, or calls it, must supply both from trusted context (never from
+ *    a request, a payload or any value a user controls); the allow-set checks the policy and the user's
+ *    selection, not the caller's authority to name a topic or an organisation;
+ *  - there is no ledger here: a caller that retries after `failed` must treat it as an unknown outcome
+ *    and must never resend automatically; event-level idempotence belongs to the caller's intent ledger
+ *    (a two-phase record written before the send), and the request key de-duplicates only within a call.
  */
 export class FeishuNotificationChannel implements NotificationChannel {
   name = 'feishu'
@@ -677,7 +683,7 @@ export class FeishuNotificationChannel implements NotificationChannel {
     const dedupeKey =
       typeof notification.id === 'string' && notification.id.length > 0
         ? notification.id
-        : (deps.newDedupeKey?.() ?? randomUUID())
+        : (deps.newDedupeKey?.() || randomUUID())
     const text = [notification.subject, notification.content]
       .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
       .join('\n')
@@ -753,7 +759,7 @@ export class FeishuNotificationChannel implements NotificationChannel {
           metadata: { channel: 'feishu', recipientCount, acceptedCount, unknownCount, sendOutcome: 'rejected' },
         }
       }
-      if (hasAny('flag_off', 'capability_off')) return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
+      if (hasAny('flag_off', 'capability_off', 'connection_unavailable')) return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
       return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON, recipientCount)
     }
 

@@ -17,9 +17,12 @@
  *    recipients of one event never share one.
  *  - The core reads no database and no environment variable: the connection row, the secret decoder, the
  *    token service and the delivery flag value are injected. The flag is on only for the exact text 'true'.
- *  - No identifier, text, token, `uuid` or message id is logged or placed in an outcome.
+ *  - No identifier, text, token or `uuid` is logged or placed in an outcome; the message id appears only in
+ *    an `accepted` outcome, for the caller.
+ *  - A connection row that cannot be read is a transient infrastructure failure: it is `not_attempted` with
+ *    its own reason, the same family as an unreadable capability, never a configuration failure.
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { feishuScopeOf, parseFeishuConfig, resolveFeishuAppSecret, type FeishuIdRef } from '../integrations/feishu/config'
 import {
   FEISHU_FLOW_CONTROL_CODE,
@@ -66,6 +69,7 @@ export const FEISHU_NOT_ATTEMPTED_REASONS = Object.freeze([
   'endpoint_scope_mismatch',
   'id_type_not_enabled',
   'endpoint_anchor_stale',
+  'connection_unavailable',
   'not_configured',
   'empty_message',
   'aborted',
@@ -121,7 +125,11 @@ export interface FeishuSendInput {
   endpoint: FeishuSendEndpoint
   /** The rendered text; it is cut to FEISHU_TEXT_MAX_UTF16_UNITS before it is sent. */
   text: string
-  /** The caller's identifier of this one send; the same value gives the same `uuid` for the same endpoint. */
+  /**
+   * The caller's identifier of this one send; the same value gives the same `uuid` for the same endpoint.
+   * An empty or missing value is treated as no key: the core then uses a random key for this one call, so
+   * the attempts of the call share one `uuid` and no two calls or endpoints do.
+   */
   dedupeKey: string
   capabilityDecision: FeishuCapabilityDecision
   signal?: AbortSignal
@@ -263,7 +271,7 @@ export function createFeishuMessageSender(deps: FeishuMessageSenderDeps): Feishu
       row = await deps.loadConnection(input.connectionId)
     } catch (error) {
       logger.warn(`Feishu connection could not be read (${feishuLogLabel(error)})`)
-      return notAttempted('not_configured')
+      return notAttempted('connection_unavailable')
     }
     if (row === null || (row.provider !== undefined && row.provider !== 'feishu')) return notAttempted('not_configured')
     const scope = feishuScopeOf(row)
@@ -277,17 +285,20 @@ export function createFeishuMessageSender(deps: FeishuMessageSenderDeps): Feishu
     if (!parsed.ok) return notAttempted('not_configured')
     const appSecret = resolveFeishuAppSecret(parsed.settings, deps.decodeSecret)
     if (appSecret === null) return notAttempted('not_configured')
-    // N7: there is something to send.
-    if (input.text.trim().length === 0) return notAttempted('empty_message')
+    // N7: there is something to send once the text is cut to the size that is sent.
+    const text = truncateFeishuText(input.text)
+    if (text.trim().length === 0) return notAttempted('empty_message')
     if (input.signal?.aborted) return notAttempted('aborted')
 
-    const uuid = buildFeishuMessageUuid(input.connectionId, input.dedupeKey, feishuEndpointRefOf(input.endpoint))
+    // One key for every attempt of this call; an empty or missing key is replaced by a random one.
+    const dedupeKey = typeof input.dedupeKey === 'string' && input.dedupeKey.length > 0 ? input.dedupeKey : randomUUID()
+    const uuid = buildFeishuMessageUuid(input.connectionId, dedupeKey, feishuEndpointRefOf(input.endpoint))
     const result = await sendFeishuTextMessage(
       { tokens: deps.tokens, fetchFn: deps.fetchFn, signal: input.signal, transport: deps.transport },
       {
         credentials: { connectionId: input.connectionId, appId: parsed.settings.appId, appSecret, brand: parsed.settings.brand },
         receiveId: input.endpoint.ref.value,
-        text: truncateFeishuText(input.text),
+        text,
         uuid,
       },
     )

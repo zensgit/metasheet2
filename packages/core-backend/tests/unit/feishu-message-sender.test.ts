@@ -5,6 +5,7 @@
  */
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { FeishuHostNotAllowedError } from '../../src/integrations/feishu/errors'
 import {
   FEISHU_NOT_ATTEMPTED_REASONS,
   FEISHU_REJECT_REASONS,
@@ -75,6 +76,7 @@ describe('outcome vocabulary', () => {
       'endpoint_scope_mismatch',
       'id_type_not_enabled',
       'endpoint_anchor_stale',
+      'connection_unavailable',
       'not_configured',
       'empty_message',
       'aborted',
@@ -95,6 +97,13 @@ describe('outcome vocabulary', () => {
     expect(classifyFeishuSend({ ok: false, phase: 'send', error: 'not an error object' })).toEqual({
       kind: 'unknown',
       reason: 'network_error',
+    })
+  })
+
+  it('a request target outside the allowed hosts is decided locally: not attempted, not configured', () => {
+    expect(classifyFeishuSend({ ok: false, phase: 'send', error: new FeishuHostNotAllowedError() })).toEqual({
+      kind: 'not_attempted',
+      reason: 'not_configured',
     })
   })
 })
@@ -399,7 +408,7 @@ describe('FX-M09 and the local gates N1-N7: each refusal is local and makes no r
     none()
   })
 
-  it('N6 a connection that cannot be read is not configured', async () => {
+  it('a connection that cannot be read is unavailable, a transient failure that is not a configuration failure', async () => {
     const { createFeishuMessageSender } = await import('../../src/services/feishu-message-sender')
     const sender = createFeishuMessageSender({
       loadConnection: async () => {
@@ -409,7 +418,7 @@ describe('FX-M09 and the local gates N1-N7: each refusal is local and makes no r
       tokens: h.tokens,
       deliveryFlag: () => 'true',
     })
-    expect(await sender.sendFeishuText(h.input())).toEqual({ kind: 'not_attempted', reason: 'not_configured' })
+    expect(await sender.sendFeishuText(h.input())).toEqual({ kind: 'not_attempted', reason: 'connection_unavailable' })
     none()
   })
 
@@ -420,6 +429,12 @@ describe('FX-M09 and the local gates N1-N7: each refusal is local and makes no r
     const controller = new AbortController()
     controller.abort()
     expect(await h.sender.sendFeishuText(h.input({ signal: controller.signal }))).toEqual({ kind: 'not_attempted', reason: 'aborted' })
+    none()
+  })
+
+  it('N7 the text is judged as it is sent: blanks that fill the whole cut leave nothing to send', async () => {
+    const text = `${' '.repeat(FEISHU_TEXT_MAX_UTF16_UNITS)}content after the cut`
+    expect(await h.sender.sendFeishuText(h.input({ text }))).toEqual({ kind: 'not_attempted', reason: 'empty_message' })
     none()
   })
 
@@ -550,7 +565,42 @@ describe('FX-M15 nothing identifying is logged or placed in an outcome', () => {
   })
 })
 
+describe('a missing or empty dedupe key', () => {
+  it.each([['an empty text', ''], ['a value that is not text', undefined]])(
+    '%s is treated as no key: a random key per call, one key for the replay inside a call, never shared between calls',
+    async (_name, dedupeKey) => {
+      h.server.script(SEND_ROUTE, [acceptedStep(), refusedStep(99991663), acceptedStep(), acceptedStep()])
+      const input = h.input({ dedupeKey: dedupeKey as never })
+      expect(await h.sender.sendFeishuText(input)).toMatchObject({ kind: 'accepted' })
+      expect(await h.sender.sendFeishuText(input)).toMatchObject({ kind: 'accepted' })
+      expect(await h.sender.sendFeishuText({ ...input, endpoint: endpointFor(OPEN_ID_2) })).toMatchObject({ kind: 'accepted' })
+      const uuids = h.sendRequests().map((request) => JSON.parse(request.body).uuid as string)
+      expect(uuids).toHaveLength(4)
+      expect(uuids.every((uuid) => /^ms2-[A-Za-z0-9_-]{43}$/.test(uuid))).toBe(true)
+      expect(uuids[1]).toBe(uuids[2])
+      expect(new Set([uuids[0], uuids[1], uuids[3]]).size).toBe(3)
+    },
+  )
+})
+
 describe('abort', () => {
+  it('a caller abort while the send request is in flight is unknown after exactly one request, never not attempted', async () => {
+    await h.close()
+    h = await createSendHarness({ transportTimeoutMs: 10_000 })
+    h.server.script(SEND_ROUTE, [{ kind: 'hang' }, acceptedStep()])
+    const controller = new AbortController()
+    const started = Date.now()
+    const pending = h.sender.sendFeishuText(h.input({ signal: controller.signal }))
+    while (h.sendRequests().length === 0 && Date.now() - started < 5000) await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(h.sendRequests()).toHaveLength(1)
+    controller.abort()
+    const outcome = await pending
+    expect(outcome).toMatchObject({ kind: 'unknown' })
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(h.sendRequests()).toHaveLength(1)
+    expect(h.server.count(MINT_ROUTE)).toBe(1)
+  })
+
   it('a signal that aborted before the send makes no request and no mint', async () => {
     const controller = new AbortController()
     controller.abort()

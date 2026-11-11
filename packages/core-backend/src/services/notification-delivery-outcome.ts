@@ -8,7 +8,8 @@
  *   - `sent` is the ONLY status that proves a transport / provider accepted the message. It is matched
  *     positively; "not failed" is never treated as success.
  *   - `simulated` (development mock) and `cancelled` (nothing attempted: no recipient of the channel's
- *     type, transport disabled, or preference-filtered) are DEFINITE non-delivery: nothing left the
+ *     type, transport disabled, preference-filtered, no usable endpoint for any addressed recipient, or an
+ *     empty allow-set) are DEFINITE non-delivery: nothing left the
  *     client, so the ledger may record `failed` (retryable) under its existing status set.
  *   - `failed`, `pending`, `scheduled` and any unrecognised literal are NOT provable as pre-dispatch
  *     non-delivery and fail closed to `outcome_unknown` (never auto-resent).
