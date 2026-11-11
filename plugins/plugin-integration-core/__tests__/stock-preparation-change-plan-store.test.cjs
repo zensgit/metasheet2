@@ -50,6 +50,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const kit = require(path.join(__dirname, 'support', 'stock-preparation-refresh-store-kit.cjs'))
+const { emptyIntentFor } = kit
 const F = require(path.join(__dirname, 'support', 'stock-preparation-continuation-fixtures.cjs'))
 const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
@@ -215,6 +216,7 @@ async function beginBound(w, changePlanId, continuations = []) {
     plannedCounts: { update: 1 },
     refreshBinding: { continuations, changePlanId, holdSetFingerprint: null },
     startedBy: PULLER,
+    intent: emptyIntentFor('pd_cps'),
   })
 }
 
@@ -474,7 +476,7 @@ test('CP-S04 every fact is decided from the rows under the lock: a stale echo / 
   // (f) a failed execution recorded after the page was read: refused AFTER the bump, the bump rolled back with it.
   {
     const { w, proposal } = await base()
-    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
     await finish(w, execution.id, 'failed')
     const snapshot = tablesSnapshot(w.db)
     await expectError(confirmPlan(w, { proposal }), { status: 409, code: CODES.RECOVERY_PENDING })
@@ -780,11 +782,31 @@ test('CP-S09 the bound begin asserts the plan under the state lock; the finish m
     assert.equal(rowsOf(w, 'execution').length, 0)
   }
   {
-    // An unbound begin is the pre-PR-8 autocommit insert (no state lock, no plan read).
+    // RE-PINNED by step 6a-1 (S6-1, R-91): an unbound begin is no longer PR-8's autocommit insert — it is ONE transaction
+    // with its intent journal (no state lock, no plan read; an empty plan journals zero chunks).
     const { w } = await setup()
     w.db.log.length = 0
-    await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
-    assert.deepEqual(w.db.log.map(([method]) => method), ['insertOne'])
+    await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
+    assert.deepEqual(w.db.log.map(([method]) => method), ['transaction', 'trx.insertOne', 'commit'])
+  }
+  {
+    // Step 6a-1 (T6-4, design §3.7 P4 / P12; XS-02b / XS-02c): a bound run that wrote AND attempted nothing (an aborted
+    // decision-0 stop, a pre-IO writer refusal) self-verifies — the plan STAYS `confirmed` (asserted under its row lock,
+    // never written), the close stays a settlement subject; `partial` never qualifies (the loop above).
+    for (const status of ['failed', 'aborted']) {
+      const { w, id } = await setup()
+      const execution = await beginBound(w, id)
+      w.db.log.length = 0
+      const done = await finish(w, execution.id, status, { written: 0, attemptedWrites: 0 })
+      assert.deepEqual(done.changePlan, { id, status: 'confirmed', kept: true }, status)
+      const plan = rowsOf(w, 'changePlan')[0]
+      assert.equal(plan.status, 'confirmed', `${status}: the 0/0 path never invalidates (P12)`)
+      assert.equal(plan.execution_id, null)
+      assert.ok(statementsOf(w.db).includes('selectOneForUpdate:change_plan'), 'asserted under its row lock')
+      assert.ok(!statementsOf(w.db).includes('updateRow:change_plan'), 'never updated')
+      const row = rowsOf(w, 'execution')[0]
+      assert.deepEqual([row.status, row.verified_result, row.closed_mode, row.pre_close_status, row.settlement_subject], ['verified_closed', 'nothing_landed', 'self_verified', status, true])
+    }
   }
 })
 
@@ -851,7 +873,7 @@ test('CP-S10 the review: digest-bound, no bump, decision_version + 1, the state\
   {
     // A failed execution recorded since: RECOVERY_PENDING (nothing reviewed).
     const { w, plan } = await writtenWorld()
-    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
     await finish(w, execution.id, 'failed')
     await expectError(review(w, plan), { status: 409, code: CODES.RECOVERY_PENDING })
     assert.equal(rowsOf(w, 'changePlan')[0].status, 'written')

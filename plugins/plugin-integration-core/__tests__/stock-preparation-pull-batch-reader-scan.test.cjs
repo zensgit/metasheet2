@@ -161,7 +161,8 @@ test('RS-2 every computeDryRun( call in table-actions passes the lane (the strip
     if (/function\s*$/.test(code.slice(Math.max(0, at - 16), at))) continue
     calls.push(callArgsAt(code, at))
   }
-  assert.equal(calls.length, 4, 'dry-run, reconcile, mvp-persist, apply')
+  // Batch-refresh step 6a-2 (S6-2, rebaseline (f)): the recovery's in-lease recompute is the fifth.
+  assert.equal(calls.length, 5, 'dry-run, reconcile, mvp-persist, apply, recovery')
   for (const args of calls) assert.match(args, /pullBatchLane/)
 })
 
@@ -178,7 +179,8 @@ test('RS-3 every route call of the small-lane entries passes pullBatch:, the lar
     }
     return out
   }
-  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction']) {
+  // Batch-refresh step 6a-2 (S6-2, rebaseline (f)): the recovery entry is the fifth small-lane route call.
+  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction', 'recoverStockPreparationExecution']) {
     const calls = callsOf(name)
     assert.equal(calls.length, 1, `${name}: one route call`)
     assert.match(calls[0], /pullBatch:/, `${name} passes the lane input`)

@@ -21,7 +21,8 @@
 //     holds:         [{ id, status: 'open'|'resolved'|'superseded', kind, confirmable: boolean }],
 //     state:         null | { settledAt: ISO|null, settledExecutionId: string|null, ... },
 //     executions:    [{ id, status: 'running'|'succeeded'|'partial'|'failed'|'aborted'|'verified_closed',
-//                       leaseId: string|null, startedAt: ISO }],
+//                       leaseId: string|null, startedAt: ISO,
+//                       settlementSubject?: boolean, verifiedResult?, changePlanBound?: boolean }],   (step 6a-1)
 //     changePlans:   [{ id, status: 'confirmed'|'written'|'reviewed'|'invalidated'|'superseded' }],
 //     lock: {
 //       state:      the #6501 lock `readState(scope)` answer   { present, leaseHeld, leaseLive, ... }
@@ -133,7 +134,10 @@ function normalizeConsult(consult) {
     && typeof entry.confirmable === 'boolean')
   const executions = requireArray(consult, 'executions', (entry) => nonBlankString(entry.id)
     && EXECUTION_STATUSES.includes(entry.status)
-    && (entry.leaseId === null || entry.leaseId === undefined || nonBlankString(entry.leaseId)))
+    && (entry.leaseId === null || entry.leaseId === undefined || nonBlankString(entry.leaseId))
+    // Step 6a-1 (design §3.4): `settlementSubject === false` is the TRANSPARENT close and nothing else — on any other
+    // shape it is malformed (unreadable, fail closed), never a reason to skip a row.
+    && (entry.settlementSubject !== false || isTransparentShape(entry)))
   const changePlans = requireArray(consult, 'changePlans', (entry) => nonBlankString(entry.id) && CHANGE_PLAN_STATUSES.includes(entry.status))
   if (consult.pilot !== null && !(isPlainObject(consult.pilot) && typeof consult.pilot.enabled === 'boolean')) {
     throw new MalformedConsultError('pilot')
@@ -147,6 +151,25 @@ function normalizeConsult(consult) {
     throw new MalformedConsultError('lock')
   }
   return { continuations, holds, executions, changePlans, pilot: consult.pilot, state: consult.state, lock }
+}
+
+// Step 6a-1 (design §3.4; migration 106's settlement_subject CHECK, mirrored): the one shape a close may be transparent in.
+function isTransparentShape(entry) {
+  return entry.status === 'verified_closed' && entry.verifiedResult === 'nothing_landed' && entry.changePlanBound !== true
+}
+
+/** A TRANSPARENT close (design §3.4): stored `settlement_subject = false`. The ONE definition (lanes import it). */
+function isTransparentExecution(entry) {
+  return isPlainObject(entry) && entry.settlementSubject === false
+}
+
+/**
+ * The newest SETTLEMENT SUBJECT (design §3.4, RR G4): the newest execution that is not a transparent close. The
+ * derivation and the settling computation name THIS one, never the raw newest — a transparent close leaves the
+ * project exactly as it was before the attempt.
+ */
+function newestSettlementSubject(executions) {
+  return newestExecution((Array.isArray(executions) ? executions : []).filter((entry) => !isTransparentExecution(entry)))
 }
 
 function newestExecution(executions) {
@@ -242,8 +265,11 @@ function readProjectRefreshState(consult) {
   })
   if (unconsumed || changePlans.some((entry) => entry.status === 'confirmed')) return answerWith('confirmed_pending_execution')
 
-  const newest = newestExecution(executions)
-  if (newest && newest.status === 'succeeded' && !(state && state.settledExecutionId === newest.id)) {
+  // Step 6a-1 (design §3.4): the newest SETTLEMENT SUBJECT — `succeeded` or `verified_closed` — not named by the
+  // settlement is 已执行待核对. A transparent close is skipped (it changed nothing); a non-transparent close (landed,
+  // mixed, unknown, or a plan-bound nothing_landed) needs a settling computation like a success does.
+  const newest = newestSettlementSubject(executions)
+  if (newest && (newest.status === 'succeeded' || newest.status === 'verified_closed') && !(state && state.settledExecutionId === newest.id)) {
     return answerWith('executed_pending_settlement')
   }
 
@@ -284,6 +310,9 @@ module.exports = {
   // PR-3a (O-14): the ONE newest-execution ordering (startedAt desc, then id desc) a settling computation
   // names its execution by — exported so the lanes never reproduce it.
   newestExecution,
+  // Step 6a-1: the transparent close and the newest settlement subject — one definition, imported by the lanes.
+  isTransparentExecution,
+  newestSettlementSubject,
   readProjectRefreshState,
   formalSurfaceVerdict,
 }
