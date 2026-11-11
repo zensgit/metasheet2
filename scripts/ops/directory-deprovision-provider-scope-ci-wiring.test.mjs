@@ -24,6 +24,7 @@ const STEP_ID = REAL_DB_STEP_IDS.approval
 const SUITES = [
   'tests/integration/directory-deprovision-effect-provider-schema.db.test.ts',
   'tests/integration/directory-deprovision-provider-evidence.db.test.ts',
+  'tests/integration/directory-departure-vouching.db.test.ts',
 ]
 
 const vitestConfig = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')

@@ -321,6 +321,11 @@ function readyDeps(overrides = {}) {
     customerPackDeclaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE,
     // Version 3 (批次标识 BI-1b): one READY pull-batch status.
     readPullBatchStatus: async () => READY_PULL_BATCH_STATUS,
+    // Version 4 (batch-refresh step 6a-2, R-91): the recovery entry — the refresh store's recovery methods, and (the switch
+    // on) 批次标识's link read and close hook.
+    recoveryStore: { async readExecutionForRecovery() {}, async closeExecution() {}, async listExecutions() {} },
+    pullBatchEnabled: true,
+    pullBatchStore: { async readBatchLink() {}, async batchWithin() {} },
     ...overrides,
   }
 }
@@ -357,13 +362,17 @@ async function withContinuationSupport(version, fn) {
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
   // Version 3 (批次标识 BI-1b, R-65 P-8): the six pull_batch_* checks, immediately before the D-22 marker (still last).
-  assert.equal(readiness.PILOT_READINESS_VERSION, 3)
+  // Version 4 (batch-refresh step 6a-2, R-91, rebaseline B-8): change_plan_store_readable + execution_recovery_ready, inserted
+  // before the D-22 marker as BI did.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 4)
+  assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS.slice(-3), ['change_plan_store_readable', 'execution_recovery_ready', 'continuation_support_version'])
   assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
     'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet',
     'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved',
+    'change_plan_store_readable', 'execution_recovery_ready',
     'continuation_support_version',
   ])
   // The web clamps a failing id to /^[a-z][a-z0-9_]{0,63}$/ (projectTarget.ts): every id survives it.
@@ -372,7 +381,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 3)
+  assert.equal(answer.version, 4)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
@@ -404,7 +413,7 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['export_closure_port (sheet not present on the host)', (d) => ({ provisioning: { ...d.provisioning, async getSheetGridExportClosure({ sheetId }) { return { sheetId, present: false, closure: null, closedAt: null, closedBy: null } } } }), ['export_closure_port']],
     ['continuation_store_readable', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP4_STORE_TABLES.continuation, ...(table === readiness.STEP4_STORE_TABLES.continuation ? { reason: 'undefined_table' } : {}) }) }), ['continuation_store_readable']],
     ['refresh_state_store_readable', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP4_STORE_TABLES.refreshState }) }), ['refresh_state_store_readable']],
-    ['both step-4 stores (no probe)', () => ({ probeTableReadable: undefined }), ['continuation_store_readable', 'refresh_state_store_readable']],
+    ['both step-4 stores (no probe)', () => ({ probeTableReadable: undefined }), ['continuation_store_readable', 'refresh_state_store_readable', 'change_plan_store_readable', 'execution_recovery_ready']],
     ['spec_read_plan_slot (undeclared, nothing said)', () => ({ action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } } }), ['spec_read_plan_slot']],
     ['spec_read_plan_slot (undeclared, a non-literal declaration)', () => ({ action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } }, specReadPlanSlotDeclaration: 'maybe' }), ['spec_read_plan_slot']],
     ['no_generic_writer_names_sheet (an object config names the sheet)', () => ({ collectGenericWriterTargets: async () => ({ complete: true, sheetIds: new Set([SHEET]), objectIds: new Set() }) }), ['no_generic_writer_names_sheet']],
@@ -445,6 +454,14 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['pull_batch_history_resolved (a gap row)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: { ...READY_PULL_BATCH_STATUS.rows, gap: 1 } }) }), ['pull_batch_history_resolved']],
     ['pull_batch_history_resolved (rows unreadable)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: null }) }), ['pull_batch_history_resolved']],
     ['every pull_batch_* check (no status read wired)', () => ({ readPullBatchStatus: undefined }), ['pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved']],
+    // ── version 4 (batch-refresh step 6a-2): the change-plan store and the recovery entry ──
+    ['change_plan_store_readable (migration 104 absent)', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP6_RECOVERY_TABLES.changePlan }) }), ['change_plan_store_readable']],
+    ['execution_recovery_ready (migration 106 absent)', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP6_RECOVERY_TABLES.intent }) }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (no refresh store wired)', () => ({ recoveryStore: null }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (the store cannot close)', () => ({ recoveryStore: { async readExecutionForRecovery() {}, async listExecutions() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (the store cannot list)', () => ({ recoveryStore: { async readExecutionForRecovery() {}, async closeExecution() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (switch on, the ledger has no close hook)', () => ({ pullBatchStore: { async readBatchLink() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (switch on, no ledger)', () => ({ pullBatchStore: null }), ['execution_recovery_ready']],
   ]
   for (const [label, mutate, expected] of table) {
     const deps = readyDeps()
@@ -455,6 +472,10 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
   // The explicit NOT-APPLICABLE declaration (server config literal) satisfies the slot without a column.
   const declared = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness({ ...readyDeps(), action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } }, specReadPlanSlotDeclaration: readiness.SPEC_READ_PLAN_SLOT_NOT_APPLICABLE }))
   assert.deepEqual([...declared.failing], [])
+  // Version 4: with the switch OFF the recovery clause asks nothing of the ledger (rebaseline B-6) — only pull_batch_enabled
+  // refuses, never execution_recovery_ready.
+  const switchOff = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness({ ...readyDeps(), pullBatchEnabled: false, pullBatchStore: null, readPullBatchStatus: pullBatchStatusWith({ switchOn: false }) }))
+  assert.deepEqual([...switchOff.failing], ['pull_batch_enabled'])
   // The build marker: 0 ⇒ failing; 1 ⇒ ok; a non-integer ⇒ failing.
   for (const [version, failing] of [[0, ['continuation_support_version']], [1, []], ['1', ['continuation_support_version']]]) {
     const answer = await withContinuationSupport(version, () => readiness.evaluatePilotReadiness(readyDeps()))
@@ -528,7 +549,7 @@ test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator
   })
   let pullBatchStatusCalls = 0
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(deps))
-  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved'])
+  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'change_plan_store_readable', 'execution_recovery_ready'])
   assert.equal(pullBatchStatusCalls, 1, 'the six v3 checks share ONE status read per evaluation')
   assert.ok(!JSON.stringify(answer).includes(SHEET), 'a thrown message never travels into the answer')
   const empty = await readiness.evaluatePilotReadiness({})

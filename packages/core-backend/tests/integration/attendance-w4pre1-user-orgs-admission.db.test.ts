@@ -151,8 +151,30 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     })
     baseUrl = `http://127.0.0.1:${port}`
 
+    const adminUserId = `${NS}-admin`
+    // PATCH /api/admin/users/:id/status re-reads authority from the locked user row.
+    // The dev token's admin claim is not enough; this suite's actor has to be one in the database.
+    await query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, is_active, is_admin, activation_status
+       ) VALUES ($1, $2, $1, 'W4PRE1 Admin', 'x', 'admin', true, true, 'activated')
+       ON CONFLICT (id) DO UPDATE SET
+         role = 'admin',
+         is_active = true,
+         is_admin = true,
+         activation_status = 'activated',
+         deleted_at = NULL,
+         purged_at = NULL`,
+      [adminUserId, emailFor('suite-admin')],
+    )
+    await query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')
+       ON CONFLICT DO NOTHING`,
+      [adminUserId],
+    )
+
     const tokenRes = await fetch(
-      `${baseUrl}/api/auth/dev-token?userId=${NS}-admin&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
     )
     const tokenJson = await tokenRes.json()
     adminToken = tokenJson.token as string
@@ -162,12 +184,15 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
     if (httpServer) {
       await new Promise<void>((resolve) => httpServer.close(() => resolve()))
     }
+    const adminUserId = `${NS}-admin`
+    await query(`DELETE FROM user_roles WHERE user_id = $1`, [adminUserId])
     if (createdUserIds.length) {
       await query(`DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [createdUserIds])
       await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
     }
+    await query(`DELETE FROM users WHERE id = $1`, [adminUserId])
     if (createdGroupIds.length) {
       await query(`DELETE FROM attendance_groups WHERE id = ANY($1::uuid[])`, [createdGroupIds])
     }
@@ -570,9 +595,9 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
   beforeAll(async () => {
     for (const userId of allUserIds) {
       await query(
-        `INSERT INTO users (id, email, name, password_hash, role, is_active, is_admin)
-         VALUES ($1, $2, $1, 'x', 'user', true, false)`,
-        [userId, `${userId}@example.test`],
+        `INSERT INTO users (id, email, name, password_hash, role, is_active, is_admin, activation_status)
+         VALUES ($1, $2, $1, 'x', $3, true, $4, 'activated')`,
+        [userId, `${userId}@example.test`, userId === ids.platformAdmin ? 'admin' : 'user', userId === ids.platformAdmin],
       )
     }
     await ensureRole(roles.stockPrepAdmin, ['stock-prep:admin'])
@@ -714,6 +739,18 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     expect(status).toBe(200)
     expect(await holds(ids.target, roles.stockPrepAdmin)).toBe(true)
     await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, roles.stockPrepAdmin])
+  })
+
+  it('refuses a token claiming platform administration after the database authority is removed', async () => {
+    await query("UPDATE users SET role = 'user', is_admin = false WHERE id = $1", [ids.platformAdmin])
+    try {
+      const result = await delegationRole(tokens.platformAdmin, ids.target, 'assign', { roleId: roles.stockPrepAdmin })
+      expect(result.status).toBe(403)
+      expect(result.json?.error?.code).toBe('FORBIDDEN')
+      expect(await holds(ids.target, roles.stockPrepAdmin)).toBe(false)
+    } finally {
+      await query("UPDATE users SET role = 'admin', is_admin = true WHERE id = $1", [ids.platformAdmin])
+    }
   })
 
   it('a delegate cannot assign a role carrying a platform code; in-namespace-only roles still assign', async () => {

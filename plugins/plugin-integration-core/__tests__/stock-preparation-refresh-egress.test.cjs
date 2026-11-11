@@ -37,6 +37,7 @@ const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.c
 const { writeBindingFromGeneration, sheetWriteScopeKey } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const lockKit = require('./support/stock-preparation-project-write-lock-kit.cjs')
+const { emptyIntentFor } = require('./support/stock-preparation-refresh-store-kit.cjs')
 const harness = require('./support/stock-preparation-project-sheet-harness.cjs')
 const F = require('./support/stock-preparation-continuation-fixtures.cjs')
 
@@ -269,6 +270,7 @@ test('EG-14 (review round 1) a `recovery_pending` preview of a project whose exe
     plannedCounts: { add: 0, update: 0, inactive: 0 },
     refreshBinding: { continuations: [] },
     startedBy: `${SENTINEL}-principal`,
+    intent: emptyIntentFor('plan_eg_dead'),
   })
   await w.env.store.finishExecution({ ...scope, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1, errorCodes: [`E_${SENTINEL.replace(/-/g, '_')}`] })
   const preview = await w.dryRun()
