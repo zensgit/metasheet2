@@ -5721,7 +5721,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
   else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
-  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
+  // (the rich-text editor is a contenteditable div, not an input).
+  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
   // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
   // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
   // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
