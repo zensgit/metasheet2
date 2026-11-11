@@ -1254,7 +1254,7 @@ describe('bindDirectoryAccount', () => {
     // W4-PRE-1b item B: same-transaction org-scoped deactivation of the just-unbound user.
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE user_orgs'),
-      ['user-1', 'default'],
+      ['user-1', 'default', []],
     )
     expect(result).toMatchObject({
       account: {

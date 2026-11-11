@@ -617,6 +617,26 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(onNavigate).toHaveBeenCalledWith('rec_2')
     })
 
+    it('the chord does nothing while an input method composes (moving on would commit the unconverted text)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement
+      const chord = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, isComposing: true, bubbles: true, cancelable: true,
+      })
+      textarea.dispatchEvent(chord)
+      expect(onNavigate).not.toHaveBeenCalled()
+      expect(chord.defaultPrevented).toBe(false)
+      // A key the input method took (keyCode 229), as some engines report it without isComposing.
+      const taken = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      })
+      Object.defineProperty(taken, 'keyCode', { value: 229 })
+      textarea.dispatchEvent(taken)
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
     it('bounds: chord at the first/last record emits nothing', async () => {
       const onNavigate = vi.fn()
       const { container } = mountInspector({ recordIds: ['rec_1'], onNavigate })
@@ -1217,5 +1237,36 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(pressThenChord(container.querySelector('.meta-comment-composer textarea'))).toBe(0)
     expect(pressThenChord(title())).toBe(1)
     expect(pressThenChord(container.querySelector('.meta-comment-composer__submit'))).toBe(0)
+  })
+
+  it('isWorkbenchGridSurface on the REAL drawer\'s attachments: a press on a file input (the fields panel\'s or the attachments tab\'s; disabled for the whole upload) never leaves Cmd+Z on the page to the grid', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const fields: MetaField[] = [...FIELDS, { id: 'fld_files', name: 'Files', type: 'attachment' } as MetaField]
+    const record = { ...RECORD, data: { ...RECORD.data, fld_files: [] } } as MetaRecord
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record, fields, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+        uploadFn: vi.fn(() => new Promise(() => {})),
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]'))).toBe(0)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel input[type="file"]'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel'))).toBe(0)
   })
 })

@@ -862,6 +862,10 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     input.value = ''
     return
   }
+  // The form can move to another record while the upload runs (its draft discarded): every file goes to the
+  // record it started on, and the result lands in the form only while that record is still the form's.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
@@ -869,35 +873,41 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
-      rememberLocalAttachment(fieldId, attachment)
+      if (same()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
+    if (same()) formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
   } catch (error: any) {
-    setAttachmentOperationError(fieldId, error?.message ?? lc('cell.uploadFailed'))
+    if (same()) setAttachmentOperationError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
-    setAttachmentActivity(fieldId)
+    if (same()) setAttachmentActivity(fieldId)
     input.value = ''
   }
 }
 
 async function onRemoveAttachment(fieldId: string, attachmentId: string) {
   clearAttachmentOperationError(fieldId)
+  // As for an upload: the delete is the record's it started on, and its result the form's only while it is.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'removing')
     try {
       await props.deleteAttachmentFn(attachmentId, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.removeFailed'))
-      setAttachmentActivity(fieldId)
+      if (same()) {
+        setAttachmentOperationError(fieldId, error?.message ?? lc('cell.removeFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
+    if (!same()) return
     setAttachmentActivity(fieldId)
   }
   formData[fieldId] = attachmentList(fieldId).filter((id) => id !== attachmentId)
@@ -908,21 +918,27 @@ async function onClearAttachments(fieldId: string) {
   const existingIds = attachmentList(fieldId)
   if (!existingIds.length) return
   clearAttachmentOperationError(fieldId)
+  // As for an upload: the deletes are the record's it started on, and the result the form's only while it is.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'clearing')
     try {
       for (const attachmentId of existingIds) {
         await props.deleteAttachmentFn(attachmentId, {
-          recordId: props.record?.id,
+          recordId,
           fieldId,
         })
-        forgetLocalAttachment(fieldId, attachmentId)
+        if (same()) forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
-      setAttachmentActivity(fieldId)
+      if (same()) {
+        setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
+    if (!same()) return
     setAttachmentActivity(fieldId)
   }
   formData[fieldId] = []

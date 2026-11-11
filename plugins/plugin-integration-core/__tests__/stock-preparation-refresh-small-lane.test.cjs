@@ -572,6 +572,14 @@ test('SL-X1/X2/H1/G3 the governed apply\'s ORDER: consult -> reconcileHolds -> b
   assert.equal(begin.startedBy, 'u_sl_starter')
   assert.equal(begin.lane, 'small_apply')
   assert.ok(/^[0-9a-f]{64}$/.test(begin.planDigest))
+  // Step 6a-1 (XA-01, R-91): the begin carries the journal of THIS in-lease recompute — one entry per planned ADD /
+  // UPDATE / INACTIVE, admitted against the begin's own plan digest — and, with 批次标识 off, no pull-batch digest key.
+  const planned = begin.plannedCounts
+  assert.equal(begin.intent.entryCount, Number(planned.add || 0) + Number(planned.update || 0) + Number(planned.inactive || 0))
+  assert.ok(begin.intent.entryCount > 0, 'calibration: the first pull plans writes')
+  assert.doesNotThrow(() => require(path.join(__dirname, '..', 'lib', 'stock-preparation-execution-intent.cjs')).assertExecutionIntent(begin.intent, { planDigest: begin.planDigest }))
+  assert.equal(Object.prototype.hasOwnProperty.call(begin, 'pullBatchSourceDigest'), false, 'N-SWITCH: no 批次标识 key while the switch is off')
+  assert.equal(w.env.db.rows('integration_stock_prep_refresh_execution_intent').length, begin.intent.chunks.length)
   for (const [op, input] of log.filter(([op]) => ['reconcileHolds', 'beginExecution', 'finishExecution'].includes(op))) {
     assert.deepEqual({ tenantId: input.tenantId, sheetId: input.sheetId, projectNo: input.projectNo }, SCOPE, `${op}: the consult's scope`)
   }
@@ -666,8 +674,13 @@ test('SL-X3 every outcome finishes the execution (TD-9): held-only / partial-wit
   await expectCode(stale.apply(stalePreview.dryRunToken, { refreshGovernance: forgedVerdict }), { status: 501, code: 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED', reason: 'governance_stale' })
   assert.equal(stale.sheet.writes(), 0)
   const staleRow = stale.rows('execution')[0]
-  assert.equal(staleRow.status, 'failed', 'the try region starts right after begin')
+  // RE-PINNED by step 6a-1 (S6-1, design §3.3; R-91): the governance tripwire is a writer PRE-IO refusal
+  // (`writerPhase === 'pre_io'`), so the best-effort failed finish reports 0 / 0 and the store SELF-VERIFIES the run —
+  // `verified_closed / nothing_landed / self_verified` from `failed`, transparent (no change plan) — instead of the
+  // `failed` row that wedged the project 失败待恢复. The try region still starts right after begin (the row exists).
+  assert.deepEqual([staleRow.status, staleRow.verified_result, staleRow.closed_mode, staleRow.pre_close_status, staleRow.settlement_subject, staleRow.written, staleRow.attempted_writes], ['verified_closed', 'nothing_landed', 'self_verified', 'failed', false, 0, 0], 'the try region starts right after begin')
   assert.deepEqual(staleRow.error_codes, ['STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED'])
+  assert.notEqual((await stale.derived()).status, 'failed_pending_recovery')
   // (g) the scoped records API cannot be built: no execution row at all (TD-30: built before begin).
   const unbuildable = await world()
   const unbuildablePreview = await unbuildable.dryRun()

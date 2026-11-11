@@ -521,6 +521,31 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
     control: 'stock-prep-refresh-change-review-complete',
   }),
+  // 备料分批拉取第一期 step 6a-2 (S6-2; step-6 design §3.5, §3.8, §5.1; register R-91) — THE RECOVERY of an unfinished
+  // execution: the values-free executions list and the verify-and-close (PULL tier: the puller recovers with their own
+  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). Step 6a-3 (S6-3) assigned the
+  // control ids: they live on 「拉取待确认」's recovery card (StockPreparationRefreshRecoveryCard.vue).
+  Object.freeze({
+    capability: 'refresh.executions',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions',
+    control: 'stock-prep-refresh-executions',
+  }),
+  Object.freeze({
+    capability: 'refresh.recover',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover',
+    control: 'stock-prep-refresh-recover',
+  }),
+  Object.freeze({
+    capability: 'refresh.closeUnverified',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
+    control: 'stock-prep-refresh-close-unverified',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
