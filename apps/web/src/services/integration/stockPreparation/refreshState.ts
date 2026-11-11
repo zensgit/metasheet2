@@ -254,7 +254,8 @@ export function stockPrepRefreshBanner(
     zhNext: entry.zhNext ?? '',
     enNext: entry.enNext ?? '',
     count,
-    link: options.canOpenQueue === true && (key === 'pending_confirmation' || key === 'change_pending_review'),
+    // S6-3 (R-91): a puller is linked to the recovery card too (failed_pending_recovery); the floor never (R-11).
+    link: options.canOpenQueue === true && (key === 'pending_confirmation' || key === 'change_pending_review' || key === 'failed_pending_recovery'),
   }
 }
 
