@@ -156,6 +156,8 @@ jobs:
           tests/PlmBomWriteBindingsPanel.spec.ts
           tests/plm-bom-write-bindings-service.spec.ts
           tests/plm-bom-write-pending.spec.ts
+          tests/PlmBomReviewWorkspaceView.spec.ts
+          tests/plm-bom-customer-route.spec.ts
           --reporter=verbose
       - name: Run the whole personal approval PostgreSQL suite
         env:

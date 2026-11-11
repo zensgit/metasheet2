@@ -2,22 +2,32 @@ import { createRequire } from 'node:module'
 import assert from 'node:assert/strict'
 
 /** Real Chromium + actual Vue components + owned Meta HTTP; no network response fixtures. */
-export async function verifyBrowser(input: { metaCheckout: string; metaBase: string; jwt: string; grant: string; disableWrites: () => Promise<void> }) {
+export async function verifyBrowser(input: { metaCheckout: string; metaBase: string; jwt: string; grant: string; customerEntry?: boolean; disableWrites: () => Promise<void> }) {
   const web = input.metaCheckout + '/apps/web'
   const require = createRequire(web + '/package.json')
   const { createServer } = await import(require.resolve('vite'))
   const { default: vue } = await import(require.resolve('@vitejs/plugin-vue'))
   const { chromium } = require('@playwright/test')
+  if (input.customerEntry) {
+    const claims = JSON.parse(Buffer.from(input.jwt.split('.')[1], 'base64url').toString())
+    assert.equal(claims.role, 'user')
+    assert(Array.isArray(claims.perms) && !claims.perms.includes('integration:write'))
+  }
   let browser: any
   const requests: { path: string; method: string; key: string | undefined; ifMatch: string | undefined; body: unknown }[] = []
+  const entryPath = input.customerEntry ? '/plm/bom-review' : '/__paired_browser'
+  const entryHtml = input.customerEntry
+    ? '<div id="app"></div><script type="module">import {createApp,h} from "vue";import {createRouter,createWebHistory,RouterView} from "vue-router";import {appRoutes} from "/src/router/appRoutes.ts";const route=appRoutes.find(r=>r.path==="/plm/bom-review");if(!route)throw new Error("customer BOM route missing");const router=createRouter({history:createWebHistory(),routes:[route]});const app=createApp({render:()=>h(RouterView)});app.use(router);await router.isReady();app.mount("#app")</script>'
+    : '<div id="app"></div><script type="module">import {createApp,h} from "vue";import Panel from "/src/components/plm/PlmBomReviewPanel.vue";createApp({render:()=>h(Panel,{dataSourceId:"source-1",ecoIntentEnabled:true})}).mount("#app")</script>'
   const vite = await createServer({
     configFile: false, root: web, envDir: process.cwd(), cacheDir: process.cwd() + '/vite-cache', logLevel: 'error',
+    resolve: { alias: { '@': web + '/src' } },
     plugins: [vue(), {
       name: 'owned-personal-bom-browser-harness',
       configureServer(server: any) {
-        server.middlewares.use('/__paired_browser', async (_req: unknown, res: any) => {
+        server.middlewares.use(entryPath, async (_req: unknown, res: any) => {
           res.setHeader('Content-Type', 'text/html')
-          res.end(await server.transformIndexHtml('/__paired_browser', '<div id="app"></div><script type="module">import {createApp,h} from "vue";import Panel from "/src/components/plm/PlmBomReviewPanel.vue";createApp({render:()=>h(Panel,{dataSourceId:"source-1",ecoIntentEnabled:true})}).mount("#app")</script>'))
+          res.end(await server.transformIndexHtml(entryPath, entryHtml))
         })
       },
     }],
@@ -37,9 +47,14 @@ export async function verifyBrowser(input: { metaCheckout: string; metaBase: str
       const path = new URL(request.url()).pathname
       if (path.startsWith('/api/')) requests.push({ path, method: request.method(), key: request.headers()['idempotency-key'], ifMatch: request.headers()['if-match'], body: request.postDataJSON() })
     })
-    await page.goto(`http://127.0.0.1:${address.port}/__paired_browser`)
+    await page.goto(`http://127.0.0.1:${address.port}${entryPath}${input.customerEntry ? '?dataSourceId=source-1&partId=part' : ''}`)
     await page.getByTestId('plm-bom-review-panel').waitFor()
-    assert.equal(requests.length, 0, 'mount must not fetch/write PLM')
+    if (input.customerEntry) {
+      await page.locator('[data-testid="plm-bom-review-state"][data-state="table"]').waitFor()
+      assert.equal(await page.getByTestId('plm-bom-review-part-input').inputValue(), 'part')
+      assert(requests.some(r => r.method === 'GET' && r.path.endsWith('/part/context')))
+      assert(requests.every(r => r.method === 'GET'), 'customer deep link may read, never mutate')
+    } else assert.equal(requests.length, 0, 'manual panel mount must not fetch/write PLM')
     await page.getByTestId('plm-bom-write-bindings-open').click()
     await page.getByTestId('plm-bom-write-grant').fill(input.grant)
     await page.getByTestId('plm-bom-write-connection-id').fill('personal-fixture')
@@ -118,7 +133,7 @@ export async function verifyBrowser(input: { metaCheckout: string; metaBase: str
     assert.equal((await unbound).status(), 200)
     assert.equal(errors.length, 0, errors.join('\n'))
     await context.close()
-    return { actual_chromium: true, actual_vue_components: true, network_fixtures: false, line_requests: 3, eco_requests: 2, consecutive_distinct_edits_with_fresh_etag: true, both_refreshes_no_automatic_write: true, same_frozen_body_and_key: true, grant_input_cleared: true, no_grant_in_pending_storage: true, no_login_jwt_in_pending_storage: true, pending_removed_only_after_receipt: true, unbind_status: 200, disabled_feature_cleanup: true }
+    return { actual_chromium: true, actual_vue_components: true, actual_customer_route: input.customerEntry === true, ordinary_meta_without_integration_write: input.customerEntry === true, whole_main_bootstrap: false, network_fixtures: false, line_requests: 3, eco_requests: 2, consecutive_distinct_edits_with_fresh_etag: true, both_refreshes_no_automatic_write: true, same_frozen_body_and_key: true, grant_input_cleared: true, no_grant_in_pending_storage: true, no_login_jwt_in_pending_storage: true, pending_removed_only_after_receipt: true, unbind_status: 200, disabled_feature_cleanup: true }
   } finally {
     if (browser) await browser.close()
     await vite.close()

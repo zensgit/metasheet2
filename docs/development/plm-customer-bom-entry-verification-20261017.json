@@ -1,0 +1,227 @@
+{
+  "scope": "C1 customer BOM route, not managed SSO/package completion",
+  "parent_meta_sha": "00de3a19342d8eea6603fa18859de8a472439722",
+  "native_candidate_sha": "dd1dd6d53c86e72521672d392090d53d65225ea8",
+  "implementation_model": "Grok 4.7 (xhigh), gbt-d5a9-1a149d58478-60; main independently reviewed and executed checks",
+  "web": {
+    "files": 12,
+    "passed": 156,
+    "failed": 0,
+    "seconds": 2.65,
+    "types_exit": 0
+  },
+  "browser": {
+    "seconds": 5.71,
+    "proof": {
+      "actual_chromium": true,
+      "actual_vue_components": true,
+      "actual_customer_route": true,
+      "ordinary_meta_without_integration_write": true,
+      "whole_main_bootstrap": false,
+      "network_fixtures": false,
+      "line_requests": 3,
+      "eco_requests": 2,
+      "consecutive_distinct_edits_with_fresh_etag": true,
+      "both_refreshes_no_automatic_write": true,
+      "same_frozen_body_and_key": true,
+      "grant_input_cleared": true,
+      "no_grant_in_pending_storage": true,
+      "no_login_jwt_in_pending_storage": true,
+      "pending_removed_only_after_receipt": true,
+      "unbind_status": 200,
+      "disabled_feature_cleanup": true
+    },
+    "meta": {
+      "meta_owner": "meta-owner",
+      "meta_tenant": "meta-a",
+      "native_subject": "42",
+      "native_tenant": "default",
+      "native_org": "fixture-org",
+      "audit_rows": 12
+    },
+    "native": {
+      "quantity": 10,
+      "ecos": 1,
+      "eco_receipts": 1,
+      "domain_audits": 1,
+      "exact_audit_authority": true,
+      "no_tenant_authority_copies": true,
+      "dependency_overrides": 0,
+      "grants": 1,
+      "revoked_grants": 1
+    },
+    "source_stable": true,
+    "untrusted_certificate_rejected": true,
+    "native_child_exit": 0,
+    "postgres_stopped": true,
+    "owned_runtime_removed": true
+  },
+  "manual_browser_regression": {
+    "seconds": 4.23,
+    "passed": true,
+    "source_stable": true,
+    "cleanup": true
+  },
+  "source_sha256": {
+    "meta": {
+      "packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts": "55c5296b48a0f5d06e9faccd43b78f14f34da66a0679cb72159f28fe83e72f6c",
+      "packages/core-backend/src/services/plm-personal-bom-write-http.ts": "08c5a4bdd3f7867b0c9745f5e8aeccf211a7aa4d5d94d6ea0616207a6ae57a0e",
+      "packages/core-backend/src/services/plm-personal-bom-write-wire.ts": "8261516182f59c48b51f879eec089fa2096cc1690f450a5bee180ade66bf92df",
+      "packages/core-backend/src/routes/plm-personal-bom-write-bindings.ts": "1de12ce2c9972b43287a9f0b805e8870d5d2870c028f51514d1cddda7db9dbe3",
+      "packages/core-backend/src/routes/plm-workbench.ts": "287faddc10729164b1f82e2019cd56c6973293b146c6f4a76e67ee05a3184883",
+      "packages/core-backend/src/auth/AuthService.ts": "9b3ed4c284fdeeb4b98360ba89df9bae2e9b8975c20a93123d5e5cccb488acda",
+      "packages/core-backend/src/auth/jwt-middleware.ts": "9fe10b08bae4357804f64cb33c582f8033762d73db2eb9fbfdb1b3e1576d7f22",
+      "packages/core-backend/src/auth/verified-tenant-claim.ts": "b27b593584a73a3bc3d9cbd97a0fd9b8647485e3a5293e617f6ab1a6618367a5",
+      "packages/core-backend/src/data-adapters/PLMAdapter.ts": "675f2606b7be49c2a91736ba1a560d65e18d97d127ea32c9ad7ad110418ccd1a",
+      "apps/web/src/components/plm/PlmBomReviewPanel.vue": "f3e289ebbf101ced31d3a7bcbe0482817d2a531f38ae95d43fe749914fbccf31",
+      "apps/web/src/components/plm/PlmBomWriteBindingsPanel.vue": "ff1eb6afd28408feeb07a0bc746ba55446e395e8bf4cea71d909af6b1253e33e",
+      "apps/web/src/services/plm/plmBomWriteBindings.ts": "1d76637f4b065dff34df21537ef15334daf1bfb089038433d139ce87f3799657",
+      "apps/web/src/services/plm/plmBomWritePending.ts": "83112f519e7638053adddd60ab95df1faee5783244c7e92e2a8f0f34bbd8c835",
+      "apps/web/src/services/integration/workbench.ts": "cd1427f8f582baaf4936848bcd3eab1599c57c3583f44200631596701da75871",
+      "apps/web/src/views/PlmBomReviewWorkspaceView.vue": "8e5f19bfda0461d992e235c6684f72217b92a57ac95932276fae4bfedfd4e8c4",
+      "apps/web/src/router/appRoutes.ts": "36e23dcf78079f830a8f0ae77f885e0b1c8c3f3c80350ef0e2a7a4753b93ae37",
+      "apps/web/src/router/guardPolicy.ts": "031171dc876a699987eb7ff2df6d26b3457fbc5a555758ca356c49caf3410ec0",
+      "apps/web/src/router/routeAccess.ts": "950caf8807e1ca07f0545e7c0054da4f604db26e5e4ef5c199a126114e2bc5db",
+      "apps/web/src/composables/authPrincipal.ts": "c87dc1103844b7d1f599ef51d6618ac418a9f02925958cda203262c45810cd37"
+    },
+    "native": {
+      "src/yuantus/meta_engine/web/bom_router.py": "363922f426388c30e16f2b767bb238cf1917f30290c8efddec62a9859e4b66cf",
+      "src/yuantus/meta_engine/models/meta_bom_eco_intent_audit.py": "43fa6b51817351911edb77a3a7aef3be881472f5de165c9fab3d0fc6d452f525",
+      "src/yuantus/meta_engine/web/bom_multitable_router.py": "f9fe0a6c4247eeb5346e1095ace4d71a10990ab6782e03d3b611431fc6803c72",
+      "src/yuantus/api/dependencies/plm_bom_write.py": "c37f45310979c891d908953690a4ad2b5e33876589476a9793ddd01afb85f5d3",
+      "src/yuantus/meta_engine/models/meta_bom_writeback_audit.py": "3026581d6b1a4a80098e4c9f9f56bc45ec42d64815ead7d907d9f26c8956aed3",
+      "src/yuantus/meta_engine/services/bom_multitable_writeback_service.py": "d340fb2cb49e248415cb8b84cee51c4c030e80952a5f039b374df54802810bca",
+      "src/yuantus/security/auth/plm_approval_grant_service.py": "16ff93344eec114ded36ae7380cf9ca04b586938573c14265de3d20b69785899"
+    }
+  },
+  "harness_sha256": {
+    "verify.py": "0464f9df283e27c95cda0cfef2a15109ed46dc4640e0e8ff6effa8e106c7433d",
+    "native_server.py": "1c70c5d22f1da118c74719cc1911185c2650315ee182867e11d60d1c94efdc9f",
+    "meta_server.mts": "113af5cc2a24dc5f4588205c6c028171a2f8e7a59ec64293d7bc6e9f178a7939",
+    "browser_check.mts": "e4baee79d32b15513e5d859a323415d5d7ac1cc69789aad857dd2f76c9bf6508"
+  },
+  "limits": [
+    "Native official tenant provisioning metadata builder, not full native Alembic acceptance. Meta personal migrations actual, ancillary tables minimal fixture. HTTP application assembled from actual routes/global JWT middleware and actual DataSourceManager; no full index lifecycle acceptance.",
+    "Actual appRoutes record/VueRouter/view and signed ordinary Meta JWT, not full main.ts bootstrap; route policy tests do not clone the login guard.",
+    "Existing owned-source read uses configured native read principal. No native-person SSO/read-revocation or managed companion install/backup/restore claim.",
+    "Native domain candidate dd1 is unpublished; fresh remote 26-step migration/CI still pending.",
+    "Local runtime tested the recorded source blobs on parent00de; exact source687 CI now has16successful checks with actual156web cases. Documentation closeout commit checks remain independently pending."
+  ],
+  "source_ci": {
+    "source_sha": "687e23031083efb32891fc5e144dccf849646de9",
+    "merge_sha": "4821129e29b35c02f5c82efe89af370975af6f80",
+    "base_sha": "00de3a19342d8eea6603fa18859de8a472439722",
+    "observed_utc": "2026-10-17T13:11:02.543110+00:00",
+    "checks_success": 16,
+    "workflow_runs": 16,
+    "personal_run": 39034213448,
+    "personal_job": 117400667895,
+    "backend": {
+      "files": 22,
+      "passed": 394,
+      "seconds": 17.16
+    },
+    "web": {
+      "files": 12,
+      "passed": 156,
+      "seconds": 7.82
+    },
+    "approval_pg16": {
+      "passed": 16,
+      "skipped": 0,
+      "seconds": 12.01
+    },
+    "bom_pg16": {
+      "files": 2,
+      "passed": 22,
+      "skipped": 0,
+      "seconds": 5.18
+    },
+    "backend_and_web_types": "SUCCESS",
+    "executed_junit_guards": "SUCCESS",
+    "stock_browser": "conditional green job117400667887 did not run stock business suite for this source; do not repeat parent00de29 count as current execution",
+    "checks": [
+      {
+        "name": "Approval browser verify (chromium)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213369/job/117400667449"
+      },
+      {
+        "name": "s1-evidence replay gate contract (static census — no DB, no secrets)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213530/job/117400668124"
+      },
+      {
+        "name": "approval-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213386/job/117400667689"
+      },
+      {
+        "name": "attendance-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213327/job/117400667430"
+      },
+      {
+        "name": "guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213567/job/117400668196"
+      },
+      {
+        "name": "elearning-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213400/job/117400667813"
+      },
+      {
+        "name": "integration-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213350/job/117400667450"
+      },
+      {
+        "name": "observation-kit contract (read-only SQL census + runbook gating)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213401/job/117400667747"
+      },
+      {
+        "name": "recovery-schema-drift",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213431/job/117400667840"
+      },
+      {
+        "name": "visual-consumer",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213531/job/117400667925"
+      },
+      {
+        "name": "postgres",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213448/job/117400667895"
+      },
+      {
+        "name": "pr-validate",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213360/job/117400667690"
+      },
+      {
+        "name": "ssh host-key pin contract (fail-closed known_hosts)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213357/job/117400667518"
+      },
+      {
+        "name": "Stock-prep browser verify (chromium)",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213447/job/117400667887"
+      },
+      {
+        "name": "tasks-web-guard",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213393/job/117400667657"
+      },
+      {
+        "name": "tasks-realdb",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/zensgit/metasheet2/actions/runs/39034213379/job/117400667824"
+      }
+    ],
+    "doc_policy": "One3pathdocumentationcloseout follows; its exactCIwillbe reported inPRbody/state,noadditionalselfSHAloop"
+  }
+}

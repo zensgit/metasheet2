@@ -5,12 +5,15 @@ for name in ('meta-checkout','native-checkout','python','node','tsx','pg-bin','o
  parser.add_argument('--'+name,required=True)
 parser.add_argument('--browser',action='store_true',help='Real Chromium/components to owned HTTP; separate fresh runtime')
 parser.add_argument('--browser-cache',help='Existing Playwright browser cache; read only, never installs')
+parser.add_argument('--customer-entry',action='store_true',help='Use the actual authenticated customer BOM route/component in the browser lane; not whole main.ts bootstrap')
 args=parser.parse_args()
+if args.customer_entry:assert args.browser,'--customer-entry requires --browser'
 if args.browser:assert args.browser_cache and Path(args.browser_cache).is_dir(),'--browser requires existing --browser-cache'
 meta_checkout=Path(args.meta_checkout).resolve();native_checkout=Path(args.native_checkout).resolve()
 pg=Path(args.pg_bin).resolve();python=str(Path(args.python).absolute());node=str(Path(args.node).absolute());tsx=str(Path(args.tsx).absolute())
 scripts=Path(__file__).resolve().parent
 assert (meta_checkout/'packages/core-backend/src/services/PlmPersonalBomWriteBindingService.ts').is_file()
+if args.customer_entry:assert (meta_checkout/'apps/web/src/views/PlmBomReviewWorkspaceView.vue').is_file()
 assert (native_checkout/'src/yuantus/meta_engine/models/meta_bom_eco_intent_audit.py').is_file()
 assert all(Path(path).is_file() for path in (python,node,tsx,pg/'initdb',pg/'pg_ctl'))
 heads={name:subprocess.check_output(['git','rev-parse','HEAD'],cwd=path,text=True).strip() for name,path in [('meta',meta_checkout),('native',native_checkout)]}
@@ -35,6 +38,8 @@ source_files={
 }
 if args.browser:
  source_files['meta'] += ['apps/web/src/components/plm/PlmBomReviewPanel.vue','apps/web/src/components/plm/PlmBomWriteBindingsPanel.vue','apps/web/src/services/plm/plmBomWriteBindings.ts','apps/web/src/services/plm/plmBomWritePending.ts','apps/web/src/services/integration/workbench.ts']
+if args.customer_entry:
+ source_files['meta'] += ['apps/web/src/views/PlmBomReviewWorkspaceView.vue','apps/web/src/router/appRoutes.ts','apps/web/src/router/guardPolicy.ts','apps/web/src/router/routeAccess.ts','apps/web/src/composables/authPrincipal.ts']
 def fingerprints():
  return {name:{f:hashlib.sha256((checkout/f).read_bytes()).hexdigest() for f in files} for name,checkout,files in [('meta',meta_checkout,source_files['meta']),('native',native_checkout,source_files['native'])]}
 source_before=fingerprints()
@@ -54,7 +59,7 @@ try:
  ready=read_message()
  assert 'origin' in ready and 'jwt' in ready,'native fixture ready protocol'
  begin=time.monotonic()
- node_input={'metaCheckout':str(meta_checkout),'origin':ready['origin'],'nativeJwt':ready['jwt'],'pgUrl':f'postgresql://plm_test@localhost/postgres?host={sock}&port=5432'}
+ node_input={'metaCheckout':str(meta_checkout),'origin':ready['origin'],'nativeJwt':ready['jwt'],'pgUrl':f'postgresql://plm_test@localhost/postgres?host={sock}&port=5432','customerEntry':args.customer_entry}
  runtime_env={**clean_env,'NODE_EXTRA_CA_CERTS':str(owned/'cert.pem')}
  runtime_env.pop('NODE_TLS_REJECT_UNAUTHORIZED',None)
  if args.browser:runtime_env['PLAYWRIGHT_BROWSERS_PATH']=str(Path(args.browser_cache).resolve())

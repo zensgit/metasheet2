@@ -180,7 +180,12 @@ import PlmBomReviewTable from './PlmBomReviewTable.vue'
 import PlmBomWriteBindingsPanel from './PlmBomWriteBindingsPanel.vue'
 import { randomUuid } from '../../utils/uuid'
 
-const props = defineProps<{ dataSourceId: string; ecoIntentEnabled?: boolean }>()
+const props = defineProps<{
+  dataSourceId: string
+  ecoIntentEnabled?: boolean
+  /** Mount-only part seed. A nonblank value may start the existing read. It never writes. */
+  initialPartId?: string
+}>()
 
 const partId = ref('')
 const loading = ref(false)
@@ -872,7 +877,13 @@ watch(() => props.dataSourceId, () => {
   storageMessage.value = ''
 })
 
-onMounted(() => window.addEventListener('storage', resetForSession))
+onMounted(() => {
+  window.addEventListener('storage', resetForSession)
+  const seeded = typeof props.initialPartId === 'string' ? props.initialPartId.trim() : ''
+  if (!seeded) return
+  partId.value = seeded
+  void load()
+})
 onBeforeUnmount(() => {
   generation += 1
   controller?.abort()

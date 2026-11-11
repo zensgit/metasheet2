@@ -64,7 +64,7 @@ try {
   assert(metaContext.body?.context,JSON.stringify({native_status:nativeContext.status,native_entitled:nativeContext.body?.entitled,native_part:nativeContext.body?.context?.part,native_path_labels:nativeContext.body?.context?.lines?.map((r:any)=>r.path_labels),meta_response:metaContext}))
   const {verifyBrowser}=await import('./browser_check.mts')
   const grant=await issue()
-  const browserProof=await verifyBrowser({metaCheckout:input.metaCheckout,metaBase:base,jwt:loginJwt,grant:grant.token,disableWrites:async()=>{
+  const browserProof=await verifyBrowser({metaCheckout:input.metaCheckout,metaBase:base,jwt:loginJwt,grant:grant.token,customerEntry:input.customerEntry===true,disableWrites:async()=>{
    process.env.PLM_PERSONAL_BOM_WRITE_ENABLED='false'
    assert.equal((await meta(line,'PATCH',{quantity:11},'disabled-negative')).status,404)
    assert.equal((await meta('/api/me/plm-bom-write-bindings')).status,200)
