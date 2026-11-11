@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { authenticate } from '../../src/middleware/auth'
 import { NotificationHttpError } from '../../src/notifications/notification-errors'
 import { createPreferencesService, type PreferencesService } from '../../src/notifications/preferences-service'
-import type { NotificationDbDeps } from '../../src/notifications/notification-tx'
+import type { AuditEvent, NotificationDbDeps } from '../../src/notifications/notification-tx'
 import type { Db, RecipientResolver } from '../../src/notifications/recipient-resolver'
 import { createMeNotificationPreferencesRouter } from '../../src/routes/me-notification-preferences'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -29,6 +29,7 @@ vi.mock('../../src/middleware/auth', () => {
 const AS = { 'x-test-user': 'user-1', 'x-test-tenant': 'org-1' }
 const ENDPOINT_A = '33333333-3333-4333-8333-333333333333'
 const ENDPOINT_B = '44444444-4444-4444-8444-444444444444'
+const CONNECTION_ID = '11111111-1111-4111-8111-111111111111'
 const PATH = '/api/me/notification-preferences'
 
 const view = { topic: 'task_reminder', integrated: false, applies: { now: false, reason: 'topic_not_integrated' }, preference: null, effective: { source: 'none', connection: null, usable: false, fallback: null } }
@@ -182,5 +183,89 @@ describe('endpoint references in a preference write', () => {
     const read = statements.find((sql) => sql.includes('FROM user_notification_endpoints'))!
     expect(read).toMatch(/org_id = \$2 AND user_id = \$3/)
     expect(statements.some((sql) => /^\s*(INSERT|UPDATE)/.test(sql))).toBe(false)
+  })
+})
+
+describe('a preference write over a scripted database', () => {
+  const pinned = usePinnedServer()
+  const audits: AuditEvent[] = []
+  const calls: Array<{ sql: string; params: unknown[] | undefined }> = []
+  // Letters in the id, so that its upper-case spelling differs from the stored one.
+  const OWN = 'abcdef12-3456-4789-8abc-def012345678'
+
+  function scripted(): Db {
+    return {
+      query: async (sql, params) => {
+        calls.push({ sql, params })
+        if (/FOR SHARE/.test(sql)) return { rows: [{ id: OWN, provider: 'dingtalk', status: 'active' }] }
+        if (/^\s*INSERT INTO user_notification_preferences/.test(sql)) {
+          return {
+            rows: [{ topic: 'task_reminder', enabled: true, primary_endpoint_id: OWN, fallback_endpoint_id: null, quiet_start: null, quiet_end: null, quiet_timezone: null, revision: '1' }],
+          }
+        }
+        if (/LEFT JOIN directory_integrations/.test(sql)) return { rows: [{ id: OWN, connection_id: CONNECTION_ID, provider: 'dingtalk', status: 'active', connection_name: 'HQ' }] }
+        return { rows: [] }
+      },
+    }
+  }
+
+  beforeEach(() => {
+    audits.length = 0
+    calls.length = 0
+    const db = scripted()
+    const resolver = { verifyEndpoints: async () => [{ ok: true }] } as unknown as RecipientResolver
+    const service = createPreferencesService({
+      db,
+      transaction: async (fn) => fn(db),
+      resolver,
+      audit: async (event) => {
+        audits.push(event)
+      },
+    })
+    const app = express()
+    app.use(express.json())
+    app.use(createMeNotificationPreferencesRouter({ isEnabled: () => true, service }))
+    pinned.setApp(app)
+  })
+
+  it('accepts the upper-case spelling of an endpoint id of the caller and reads it in canonical form', async () => {
+    const response = await request(pinned.url()).patch(PATH).set(AS).send({ topic: 'task_reminder', expectedRevision: 0, primaryEndpointId: OWN.toUpperCase() })
+    expect(response.status).toBe(200)
+    const shared = calls.find((call) => /FOR SHARE/.test(call.sql))!
+    expect(shared.params?.[0]).toEqual([OWN])
+    const insert = calls.find((call) => /^\s*INSERT INTO user_notification_preferences/.test(call.sql))!
+    expect(insert.params?.[4]).toBe(OWN)
+  })
+
+  it('records the organization and the user in the audit of an update, with a closed key set and no endpoint id', async () => {
+    await request(pinned.url()).patch(PATH).set(AS).send({ topic: 'task_reminder', expectedRevision: 0, primaryEndpointId: OWN })
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ actorType: 'user', actorId: 'user-1', action: 'notification.preference.update', resourceType: 'user_notification_preference', resourceId: 'task_reminder' })
+    expect(Object.keys(audits[0].meta ?? {}).sort()).toEqual(['organizationId', 'revision', 'topic', 'userId'])
+    expect(audits[0].meta).toEqual({ topic: 'task_reminder', revision: 1, organizationId: 'org-1', userId: 'user-1' })
+  })
+})
+
+describe('a failed read or write on the preference routes', () => {
+  const pinned = usePinnedServer()
+  const failure = (code: string) => Object.assign(new Error('relation "user_notification_preferences" does not exist for dt-secret'), { code })
+  const service = { list: vi.fn(), patch: vi.fn() }
+
+  beforeEach(() => {
+    const app = express()
+    app.use(express.json())
+    app.use(createMeNotificationPreferencesRouter({ isEnabled: () => true, service: service as unknown as PreferencesService }))
+    pinned.setApp(app)
+  })
+
+  it.each(['42P01', '42703'])('answers a missing table or column (%s) as 503 NOTIFICATION_SCHEMA_UNAVAILABLE on both routes', async (code) => {
+    service.list.mockReset().mockRejectedValue(failure(code))
+    service.patch.mockReset().mockRejectedValue(failure(code))
+    const read = await request(pinned.url()).get(PATH).set(AS)
+    const write = await request(pinned.url()).patch(PATH).set(AS).send({ topic: 'task_reminder', expectedRevision: 0 })
+    for (const answer of [read, write]) {
+      expect([answer.status, answer.body]).toEqual([503, { error: { code: 'NOTIFICATION_SCHEMA_UNAVAILABLE' } }])
+      expect(JSON.stringify(answer.body)).not.toMatch(/dt-secret|relation/)
+    }
   })
 })

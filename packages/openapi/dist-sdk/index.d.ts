@@ -12279,7 +12279,7 @@ export interface paths {
         put?: never;
         /**
          * Make or refresh an endpoint from a proof the caller already holds
-         * @description The request names a connection and a proof kind and nothing else; any other field, including every recipient-identifier name, is a 422. The address is derived from the proof and never stored or returned. Repeating the request changes nothing; a revoked endpoint is re-enabled as the same row.
+         * @description The request names a connection and a proof kind and nothing else; any other field, including every recipient-identifier name, is a 422. The address is derived from the proof and never stored or returned. Repeating the request changes nothing; a revoked endpoint is re-enabled as the same row. A request that finds the proof of the caller's own endpoint on that connection gone answers 409 and marks that endpoint stale.
          */
         post: operations["createMyNotificationEndpoint"];
         delete?: never;
@@ -27152,6 +27152,15 @@ export interface operations {
                     "application/json": components["schemas"]["NotificationError"];
                 };
             };
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
         };
     };
     createMyNotificationEndpoint: {
@@ -27222,7 +27231,7 @@ export interface operations {
                     "application/json": components["schemas"]["NotificationError"];
                 };
             };
-            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement); retry */
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -27281,7 +27290,7 @@ export interface operations {
                     "application/json": components["schemas"]["NotificationError"];
                 };
             };
-            /** @description NOTIFICATION_BUSY; retry */
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -27322,6 +27331,15 @@ export interface operations {
             };
             /** @description Fixed-sentence failure (INTERNAL) */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27390,7 +27408,7 @@ export interface operations {
                     "application/json": components["schemas"]["NotificationError"];
                 };
             };
-            /** @description NOTIFICATION_BUSY; retry */
+            /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
             503: {
                 headers: {
                     [name: string]: unknown;

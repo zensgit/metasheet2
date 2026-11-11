@@ -280,49 +280,49 @@ describe('source of the statements', () => {
   })
 })
 
+/** The stored endpoint is whatever the first resolution derived. */
+async function stored(over: Row = {}) {
+  const resolver = resolverWith()
+  const first = await resolver.resolveForConnection(scripted({ candidate: () => [candidateRow('u1')] }).db, { orgId: ORG, ...one() })
+  if (first.ok !== true) throw new Error('setup')
+  const t = first.target
+  const row = (extra: Row): Row => ({
+    endpoint_id: ENDPOINT,
+    endpoint_user_id: 'u1',
+    endpoint_connection_id: CONN,
+    endpoint_provider: 'dingtalk',
+    endpoint_address_kind: 'dingtalk_userid',
+    endpoint_proof_kind: 'directory_link',
+    endpoint_proof_id: 'proof-u1',
+    endpoint_proof_witness: t.proofWitness,
+    endpoint_address_witness: t.addressWitness,
+    endpoint_tenant_address_witness: t.tenantAddressWitness,
+    endpoint_bound_tenant: 'CorpOne',
+    endpoint_bound_app_scope: 'AppOne',
+    link_id: 'proof-u1',
+    link_user_id: 'u1',
+    link_status: 'linked',
+    account_id: 'account-u1',
+    account_integration_id: CONN,
+    account_active: true,
+    account_provider: 'dingtalk',
+    account_corp_id: 'CorpOne',
+    external_user_id: 'dt-u1',
+    union_id: null,
+    open_id: null,
+    connection_id: CONN,
+    connection_org_id: ORG,
+    connection_provider: 'dingtalk',
+    connection_status: 'active',
+    connection_corp_id: 'CorpOne',
+    scope_config: { appKey: 'AppOne' },
+    ...extra,
+  })
+  return { resolver, row: row(over) }
+}
+
 describe('re-checking an endpoint', () => {
   const link = (over: Row = {}): Row => ({ ...candidateRow('u1'), ...over })
-
-  /** The stored endpoint is whatever the first resolution derived. */
-  async function stored(over: Row = {}) {
-    const resolver = resolverWith()
-    const first = await resolver.resolveForConnection(scripted({ candidate: () => [candidateRow('u1')] }).db, { orgId: ORG, ...one() })
-    if (first.ok !== true) throw new Error('setup')
-    const t = first.target
-    const row = (extra: Row): Row => ({
-      endpoint_id: ENDPOINT,
-      endpoint_user_id: 'u1',
-      endpoint_connection_id: CONN,
-      endpoint_provider: 'dingtalk',
-      endpoint_address_kind: 'dingtalk_userid',
-      endpoint_proof_kind: 'directory_link',
-      endpoint_proof_id: 'proof-u1',
-      endpoint_proof_witness: t.proofWitness,
-      endpoint_address_witness: t.addressWitness,
-      endpoint_tenant_address_witness: t.tenantAddressWitness,
-      endpoint_bound_tenant: 'CorpOne',
-      endpoint_bound_app_scope: 'AppOne',
-      link_id: 'proof-u1',
-      link_user_id: 'u1',
-      link_status: 'linked',
-      account_id: 'account-u1',
-      account_integration_id: CONN,
-      account_active: true,
-      account_provider: 'dingtalk',
-      account_corp_id: 'CorpOne',
-      external_user_id: 'dt-u1',
-      union_id: null,
-      open_id: null,
-      connection_id: CONN,
-      connection_org_id: ORG,
-      connection_provider: 'dingtalk',
-      connection_status: 'active',
-      connection_corp_id: 'CorpOne',
-      scope_config: { appKey: 'AppOne' },
-      ...extra,
-    })
-    return { resolver, row: row(over) }
-  }
 
   const verifyWith = async (over: Row, resolverOver?: Partial<RecipientResolverDeps>) => {
     const { row } = await stored()
@@ -492,8 +492,21 @@ describe('candidates', () => {
     if (first.ok !== true) throw new Error('setup')
     const tenantWitness = first.target.tenantAddressWitness
     const own = (rows: Row[]) => scripted({ linked: () => linked([{ connection_id: CONN2, provider: 'dingtalk', name: 'Branch' }]), candidate: () => [candidateRow('u1', { connection_id: CONN2 })], own: () => rows })
-    const held = await resolverWith().listCandidates(own([{ id: ENDPOINT, connection_id: CONN, proof_kind: 'directory_link', status: 'active', provider: 'dingtalk', tenant_address_witness: tenantWitness }]).db, { orgId: ORG, userId: 'u1' })
+    const { row: holding } = await stored()
+    const ownWith = (rows: Row[], verifyRows: Row[]) =>
+      scripted({
+        linked: () => linked([{ connection_id: CONN2, provider: 'dingtalk', name: 'Branch' }]),
+        candidate: () => [candidateRow('u1', { connection_id: CONN2 })],
+        own: () => rows,
+        verify: () => verifyRows,
+      }).db
+    const activeOwn = [{ id: ENDPOINT, connection_id: CONN, proof_kind: 'directory_link', status: 'active', provider: 'dingtalk', tenant_address_witness: tenantWitness }]
+    // The other endpoint still re-checks: it holds the address.
+    const held = await resolverWith().listCandidates(ownWith(activeOwn, [holding]), { orgId: ORG, userId: 'u1' })
     expect(held[0]).toMatchObject({ connectionId: CONN2, addressable: false, reasonCode: 'address_bound_on_other_connection', endpointId: null })
+    // The other endpoint's proof is gone: it holds nothing, and the candidate is open.
+    const moved = await resolverWith().listCandidates(ownWith(activeOwn, [{ ...holding, account_integration_id: CONN2 }]), { orgId: ORG, userId: 'u1' })
+    expect(moved[0]).toMatchObject({ connectionId: CONN2, addressable: true, reasonCode: null, endpointId: null })
     const stale = await resolverWith().listCandidates(own([{ id: ENDPOINT, connection_id: CONN, proof_kind: 'directory_link', status: 'stale', provider: 'dingtalk', tenant_address_witness: tenantWitness }]).db, { orgId: ORG, userId: 'u1' })
     expect(stale[0]).toMatchObject({ addressable: true, reasonCode: null })
     const same = await resolverWith().listCandidates(own([{ id: ENDPOINT, connection_id: CONN2, proof_kind: 'directory_link', status: 'active', provider: 'dingtalk', tenant_address_witness: tenantWitness }]).db, { orgId: ORG, userId: 'u1' })

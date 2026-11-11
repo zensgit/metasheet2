@@ -215,10 +215,32 @@ describe('/api/me/notification-endpoints', () => {
     })
 
     it('answers any other failure as 500 INTERNAL without its message or its code', async () => {
-      service.list.mockRejectedValue(Object.assign(new Error('relation "user_notification_endpoints" does not exist for dt-secret'), { code: '42P01' }))
+      service.list.mockRejectedValue(Object.assign(new Error('failure text for dt-secret'), { code: '23505' }))
       const response = await request(pinned.url()).get('/api/me/notification-endpoints').set(AS)
       expect([response.status, response.body]).toEqual([500, { error: { code: 'INTERNAL' } }])
-      expect(JSON.stringify(response.body)).not.toMatch(/42P01|dt-secret|relation/)
+      expect(JSON.stringify(response.body)).not.toMatch(/23505|dt-secret|failure text/)
+    })
+
+    it.each(['42P01', '42703'])('answers a missing table or column (%s) on every route as 503 NOTIFICATION_SCHEMA_UNAVAILABLE', async (code) => {
+      const failure = Object.assign(new Error('relation "user_notification_endpoints" does not exist for dt-secret'), { code })
+      service.list.mockRejectedValue(failure)
+      service.establish.mockRejectedValue(failure)
+      service.revoke.mockRejectedValue(failure)
+      const answers = [
+        await request(pinned.url()).get('/api/me/notification-endpoints').set(AS),
+        await request(pinned.url()).post('/api/me/notification-endpoints').set(AS).send({ connectionId: CONNECTION, proofKind: 'directory_link' }),
+        await request(pinned.url()).delete(`/api/me/notification-endpoints/${ENDPOINT}`).set(AS),
+      ]
+      for (const answer of answers) {
+        expect([answer.status, answer.body]).toEqual([503, { error: { code: 'NOTIFICATION_SCHEMA_UNAVAILABLE' } }])
+        expect(JSON.stringify(answer.body)).not.toMatch(/dt-secret|relation/)
+      }
+    })
+
+    it('answers a cancelled statement on a read as 503 NOTIFICATION_BUSY', async () => {
+      service.list.mockRejectedValue(Object.assign(new Error('x'), { code: '57014' }))
+      const response = await request(pinned.url()).get('/api/me/notification-endpoints').set(AS)
+      expect([response.status, response.body]).toEqual([503, { error: { code: 'NOTIFICATION_BUSY' } }])
     })
   })
 })

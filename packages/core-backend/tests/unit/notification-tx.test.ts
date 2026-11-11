@@ -61,6 +61,13 @@ describe('a failure that is worth retrying', () => {
     }
   })
 
+  it('maps a missing table or column to a 503 of its own', () => {
+    for (const code of ['42P01', '42703']) {
+      const mapped = mapBusy(Object.assign(new Error('x'), { code })) as NotificationHttpError
+      expect([mapped.status, mapped.code, mapped.details]).toEqual([503, 'NOTIFICATION_SCHEMA_UNAVAILABLE', undefined])
+    }
+  })
+
   it('passes everything else through, including a service error', () => {
     const own = new NotificationHttpError(409, 'ADDRESS_ALREADY_BOUND')
     expect(mapBusy(own)).toBe(own)

@@ -8,6 +8,7 @@
 import type { Request, Response } from 'express'
 import { Logger } from '../core/logger'
 import { isNotificationHttpError, NotificationHttpError } from '../notifications/notification-errors'
+import { mapBusy } from '../notifications/notification-tx'
 
 const logger = new Logger('MeNotificationRoutes')
 
@@ -49,14 +50,25 @@ export function plainObjectKeys(body: unknown): string[] | null {
   return Object.keys(body as Record<string, unknown>)
 }
 
-export function respondError(res: Response, error: unknown): void {
-  if (isNotificationHttpError(error)) {
-    res.status(error.status).json({ error: { code: error.code, ...(error.details ?? {}) } })
-    return
-  }
+function failureToken(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code
   const name = error instanceof Error ? error.name : 'non-error'
-  logger.error(`notification route failed: ${name}${typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? ` ${code}` : ''}`)
+  return `${name}${typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? ` ${code}` : ''}`
+}
+
+/**
+ * Every route ends here. A lock wait, deadlock or cancelled statement is 503 NOTIFICATION_BUSY and a missing
+ * table or column is 503 NOTIFICATION_SCHEMA_UNAVAILABLE, whether the failure came from a read or a write;
+ * any other unexpected failure is the fixed-sentence 500.
+ */
+export function respondError(res: Response, error: unknown): void {
+  const mapped = mapBusy(error)
+  if (isNotificationHttpError(mapped)) {
+    if (mapped !== error) logger.error(`notification route unavailable: ${failureToken(error)}`)
+    res.status(mapped.status).json({ error: { code: mapped.code, ...(mapped.details ?? {}) } })
+    return
+  }
+  logger.error(`notification route failed: ${failureToken(error)}`)
   res.status(500).json({ error: { code: 'INTERNAL' } })
 }
 

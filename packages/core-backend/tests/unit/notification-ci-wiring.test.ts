@@ -8,60 +8,61 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
-import yaml from 'js-yaml'
-import config from '../../vitest.config'
+import {
+  REAL_DB_STEP_IDS,
+  extractStepById,
+  isQuotedInTestExclude,
+  isSuiteWiredInRealDbStep,
+  parseYamlDocument,
+  realDbStepWholeFileArgs,
+  requireExecutableRealDbStep,
+} from '../../../../scripts/ops/ci-realdb-step-contract.mjs'
 
 const BACKEND = path.resolve(__dirname, '..', '..')
 const ROOT = path.resolve(BACKEND, '..', '..')
 const DB_SPEC = 'tests/integration/notification-endpoints-preferences.db.test.ts'
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'plugin-tests.yml')
+const VITEST_CONFIG = path.join(BACKEND, 'vitest.config.ts')
 const PREDECESSOR = 'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts'
+const STEP = REAL_DB_STEP_IDS.approval
 
-type Step = { id?: string; run?: string; env?: Record<string, string>; if?: string }
-
-function step(job: string, id: string): Step & { run: string } {
-  const doc = yaml.load(readFileSync(WORKFLOW, 'utf8')) as { jobs: Record<string, { steps: Step[] }> }
-  const found = doc.jobs[job].steps.find((candidate) => candidate.id === id)
-  if (!found?.run) throw new Error(`${job}/${id} not found`)
-  return found as Step & { run: string }
-}
-
-const approvalStep = () => step('approval-db', 'approval-real-db-integration')
+const workflow = () => readFileSync(WORKFLOW, 'utf8')
 
 describe('user notification endpoints and preferences real-DB suite wiring', () => {
   it('exists', () => {
     expect(existsSync(path.join(BACKEND, DB_SPEC))).toBe(true)
   })
 
-  it('is excluded from the no-DB vitest run, exactly once', () => {
-    const exclude = (config as { test?: { exclude?: string[] } }).test?.exclude ?? []
-    expect(exclude.filter((entry) => entry === DB_SPEC)).toHaveLength(1)
+  it('is excluded from the no-DB vitest run, as one quoted entry of test.exclude', () => {
+    const config = readFileSync(VITEST_CONFIG, 'utf8')
+    expect(isQuotedInTestExclude(config, DB_SPEC)).toBe(true)
+    expect(config.split(`'${DB_SPEC}'`).length - 1).toBe(1)
   })
 
-  it('is named whole, exactly once, in the approval real-DB step, after the lifecycle history suite', () => {
-    const { run } = approvalStep()
-    expect(run.split(`  ${DB_SPEC} \\\n`).length - 1).toBe(1)
-    expect(run.split(DB_SPEC).length - 1).toBe(1)
-    expect(run).toContain(`  ${PREDECESSOR} \\\n  ${DB_SPEC} \\\n`)
+  it('is run by the approval real-DB step under the shared step contract', () => {
+    expect(() => requireExecutableRealDbStep(workflow(), STEP)).not.toThrow()
   })
 
-  it('is not also named in another job of the workflow', () => {
-    const text = readFileSync(WORKFLOW, 'utf8')
-    expect(text.split(DB_SPEC).length - 1).toBe(1)
-    const doc = yaml.load(text) as { jobs: Record<string, { steps: Step[] }> }
-    for (const [job, { steps }] of Object.entries(doc.jobs)) {
-      if (job === 'approval-db') continue
-      for (const candidate of steps) expect(candidate.run ?? '', `${job}/${candidate.id ?? ''}`).not.toContain(DB_SPEC)
-    }
+  it('is a whole-file argument of that step, exactly once, right after the lifecycle history suite', () => {
+    expect(isSuiteWiredInRealDbStep(workflow(), STEP, DB_SPEC)).toBe(true)
+    const args = realDbStepWholeFileArgs(workflow(), STEP)
+    expect(args.filter((arg) => arg === DB_SPEC)).toHaveLength(1)
+    expect(args.indexOf(DB_SPEC)).toBe(args.indexOf(PREDECESSOR) + 1)
+    expect(args.indexOf(PREDECESSOR)).toBeGreaterThanOrEqual(0)
   })
 
-  it('runs in a step that arms the database-expected sentinel on the Node 20 matrix entry, with a literal DATABASE_URL and a real vitest call', () => {
-    const current = approvalStep()
-    expect(current.env?.EXPECT_DB).toBe('1')
-    expect(current.if).toBe("matrix.node-version == '20.x'")
-    expect(current.env?.DATABASE_URL).toMatch(/^postgresql:\/\//)
-    expect(current.run).toContain('vitest --config vitest.integration.config.ts run')
-    expect(current.run).toContain(': "${DATABASE_URL:?DATABASE_URL is required')
+  it('is not an argument of the other real-DB step, and no other step of the workflow names it', () => {
+    expect(realDbStepWholeFileArgs(workflow(), REAL_DB_STEP_IDS.multitable)).not.toContain(DB_SPEC)
+    const doc = parseYamlDocument(workflow()) as { jobs: Record<string, { steps?: Array<{ id?: string; run?: string }> }> }
+    const naming = Object.entries(doc.jobs).flatMap(([job, { steps = [] }]) =>
+      steps.filter((candidate) => (candidate.run ?? '').includes(DB_SPEC)).map((candidate) => `${job}/${candidate.id ?? ''}`),
+    )
+    expect(naming).toEqual([`approval-db/${STEP}`])
+  })
+
+  it('runs in a step that arms the database-expected sentinel', () => {
+    const step = extractStepById(workflow(), STEP) as { env?: Record<string, string> } | null
+    expect(step?.env?.EXPECT_DB).toBe('1')
   })
 
   it('carries the sentinel that fails a database-expected run without a database, at module top level', () => {

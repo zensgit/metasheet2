@@ -110,6 +110,15 @@ function appliesOf(descriptor: NotificationTopicDescriptor): TopicView['applies'
 
 const NONE_EFFECTIVE: TopicView['effective'] = { source: 'none', connection: null, usable: false, fallback: null }
 
+/** Endpoint ids are compared as stored: the lower-case canonical form of a UUID. */
+function canonicalIds(patch: PreferencePatch): PreferencePatch {
+  const lower = (id: string | null | undefined) => (typeof id === 'string' ? id.toLowerCase() : id)
+  const copy: PreferencePatch = { ...patch }
+  if ('primaryEndpointId' in copy) copy.primaryEndpointId = lower(copy.primaryEndpointId)
+  if ('fallbackEndpointId' in copy) copy.fallbackEndpointId = lower(copy.fallbackEndpointId)
+  return copy
+}
+
 export function createPreferencesService(deps: PreferencesServiceDeps): PreferencesService {
   const { resolver } = deps
 
@@ -169,7 +178,7 @@ export function createPreferencesService(deps: PreferencesServiceDeps): Preferen
 
   async function patch(input: { orgId: string; userId: string; patch: PreferencePatch }): Promise<TopicView> {
     const { orgId, userId } = input
-    const request = input.patch
+    const request = canonicalIds(input.patch)
     const descriptor = resolveNotificationTopic(request.topic)
     if (descriptor === null) throw new NotificationHttpError(422, 'INVALID_REQUEST', { fields: ['topic'] })
     let auditRevision = 0
@@ -254,7 +263,7 @@ export function createPreferencesService(deps: PreferencesServiceDeps): Preferen
           action: 'notification.preference.update',
           resourceType: 'user_notification_preference',
           resourceId: descriptor.topic,
-          meta: { topic: descriptor.topic, revision: auditRevision },
+          meta: { topic: descriptor.topic, revision: auditRevision, organizationId: orgId, userId },
         })
       }
       const rows = written === null ? [] : [written]

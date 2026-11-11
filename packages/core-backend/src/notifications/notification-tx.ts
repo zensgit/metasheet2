@@ -27,6 +27,8 @@ export const LOCK_WAIT = '5s'
 export const USER_LOCK_SQL = `SELECT pg_advisory_xact_lock(hashtext('notif-user:' || $1::text), hashtext($2::text))`
 
 const BUSY_CODES = new Set(['55P03', '40P01', '40001', '57014'])
+/** A relation (42P01) or column (42703) that the schema does not have yet. */
+const SCHEMA_CODES = new Set(['42P01', '42703'])
 
 export function sortedUserLocks(keys: readonly UserLockKey[]): UserLockKey[] {
   const unique = new Map<string, UserLockKey>()
@@ -54,11 +56,15 @@ export async function withUserLocks<T>(
   })
 }
 
-/** A lock wait, deadlock, serialization failure or statement cancel is answered 503, retryable; anything else passes through. */
+/**
+ * A lock wait, deadlock, serialization failure or statement cancel is answered 503 NOTIFICATION_BUSY, retryable.
+ * A missing table or column is answered 503 NOTIFICATION_SCHEMA_UNAVAILABLE. Anything else passes through.
+ */
 export function mapBusy(error: unknown): unknown {
   if (isNotificationHttpError(error)) return error
   const code = (error as { code?: unknown } | null)?.code
   if (typeof code === 'string' && BUSY_CODES.has(code)) return new NotificationHttpError(503, 'NOTIFICATION_BUSY')
+  if (typeof code === 'string' && SCHEMA_CODES.has(code)) return new NotificationHttpError(503, 'NOTIFICATION_SCHEMA_UNAVAILABLE')
   return error
 }
 

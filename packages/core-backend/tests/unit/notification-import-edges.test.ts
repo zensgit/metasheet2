@@ -47,6 +47,7 @@ const OUTSIDE_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['routes/me-notification-endpoints.ts', 'notifications/notification-flags'],
   ['routes/me-notification-endpoints.ts', 'notifications/provider-notification-registry'],
   ['routes/me-notification-http.ts', 'notifications/notification-errors'],
+  ['routes/me-notification-http.ts', 'notifications/notification-tx'],
   ['routes/me-notification-preferences.ts', 'notifications/notification-flags'],
   ['routes/me-notification-preferences.ts', 'notifications/preferences-service'],
   ['routes/me-notification-preferences.ts', 'notifications/quiet-hours'],

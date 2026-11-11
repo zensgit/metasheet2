@@ -58,6 +58,15 @@ describe('time zones', () => {
     expect(isWithinQuietHours(at('2026-03-08T08:00:00Z'), quiet)).toBe(false) // 04:00
   })
 
+  it('sees the repeated hour of the New York fall-back day twice (2026-11-01)', () => {
+    const quiet = window('01:00', '02:00', 'America/New_York')
+    // 05:30Z is 01:30 EDT; 06:30Z is 01:30 EST: both are inside.
+    expect(isWithinQuietHours(at('2026-11-01T05:30:00Z'), quiet)).toBe(true)
+    expect(isWithinQuietHours(at('2026-11-01T06:30:00Z'), quiet)).toBe(true)
+    expect(isWithinQuietHours(at('2026-11-01T07:00:00Z'), quiet)).toBe(false) // 02:00 EST
+    expect(isWithinQuietHours(at('2026-11-01T04:59:00Z'), quiet)).toBe(false) // 00:59 EDT
+  })
+
   it('sees the repeated hour of the fall-back day twice (Berlin, 2026-10-25)', () => {
     const quiet = window('02:00', '03:00', 'Europe/Berlin')
     // 00:30Z is 02:30 CEST; 01:30Z is 02:30 CET: both are inside.

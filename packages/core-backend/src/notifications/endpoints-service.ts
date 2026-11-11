@@ -108,6 +108,10 @@ const SELECT_ADDRESS_HOLDER_SQL = `SELECT ${ENDPOINT_COLUMNS}
   FROM user_notification_endpoints
  WHERE provider = $1 AND bound_tenant = $2 AND address_kind = $3 AND tenant_address_witness = $4 AND status = 'active'`
 
+const SELECT_OWN_ACTIVE_BY_PROOF_SQL = `SELECT id::text AS id, provider
+  FROM user_notification_endpoints
+ WHERE org_id = $1 AND user_id = $2 AND connection_id = $3::uuid AND proof_kind = $4 AND status = 'active'`
+
 const SELECT_ADDRESS_HOLDER_LOCKED_SQL = `${SELECT_ADDRESS_HOLDER_SQL} FOR UPDATE`
 
 const CONNECTION_NAMES_SQL = `SELECT id::text AS id, name FROM directory_integrations WHERE id = ANY($1::uuid[]) AND org_id = $2`
@@ -161,6 +165,43 @@ function resolutionError(code: ResolveFailureCode): NotificationHttpError {
       return new NotificationHttpError(409, 'ADDRESS_UNUSABLE')
     default:
       return new NotificationHttpError(409, 'PROOF_NOT_FOUND')
+  }
+}
+
+/**
+ * Whether a failed re-check means the endpoint's proof is itself gone or no longer matches what was stored:
+ * the link is missing, cancelled or belongs to someone else, the account moved to another connection or
+ * tenant, or the derived address or witness differs. The other failures describe a state that can pass
+ * (a disabled connection, a user who is not an active member for now, an inactive account, an unregistered
+ * provider or reader, an unknown anchor) and never change another user's endpoint.
+ */
+export function isProofGone(code: ResolveFailureCode): boolean {
+  switch (code) {
+    case 'proof_missing':
+    case 'proof_not_linked':
+    case 'proof_wrong_user':
+    case 'proof_changed':
+    case 'proof_assurance_insufficient':
+    case 'address_missing':
+    case 'address_unusable':
+    case 'scope_changed':
+      return true
+    case 'connection_not_found':
+    case 'connection_inactive':
+    case 'provider_not_registered':
+    case 'proof_kind_unavailable':
+    case 'proof_ambiguous':
+    case 'proof_account_inactive':
+    case 'address_kind_not_derivable':
+    case 'address_bound_on_other_connection':
+    case 'scope_unproven':
+    case 'user_not_active_member':
+    case 'endpoint_not_found':
+      return false
+    default: {
+      const unreachable: never = code
+      return unreachable
+    }
   }
 }
 
@@ -281,23 +322,48 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
 
   const MAX_LOCK_ATTEMPTS = 3
 
+  /**
+   * The user's own refresh found no usable proof for a connection where the user already holds an active
+   * endpoint: that endpoint is written back as stale when its own re-check says the proof is gone. A failure
+   * that can pass (a disabled connection, an inactive membership) leaves the row alone.
+   */
+  async function writeBackLostProof(orgId: string, userId: string, connectionId: string, proofKind: ProofKind): Promise<void> {
+    const present = await deps.db.query(SELECT_OWN_ACTIVE_BY_PROOF_SQL, [orgId, userId, connectionId, proofKind])
+    if (present.rows.length === 0) return
+    const audits: AuditEvent[] = []
+    await withUserLocks(deps, [lockKey(orgId, userId)], async (tx) => {
+      const rows = await tx.query(`${SELECT_OWN_ACTIVE_BY_PROOF_SQL} FOR UPDATE`, [orgId, userId, connectionId, proofKind])
+      for (const row of rows.rows) {
+        const checked = await resolver.verifyEndpoint(tx, { orgId, userId, endpointId: text(row.id) })
+        if (checked.ok === true || !isProofGone(checked.code)) continue
+        const demoted = await tx.query(DEMOTE_SQL, [text(row.id)])
+        if (demoted.rows.length === 0) continue
+        audits.push(demoteAudit(orgId, userId, 'self', text(row.id), text(row.provider), Number(demoted.rows[0].revision), 'proof_gone'))
+      }
+    })
+    for (const event of audits) await deps.audit(event)
+  }
+
   async function establish(input: { orgId: string; userId: string; connectionId: string; proofKind: ProofKind }): Promise<EndpointWriteResult> {
     const { orgId, userId, connectionId, proofKind } = input
     for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt += 1) {
-      // Outside any lock: derive the target and find who holds the address, to know whose lock is also needed.
-      const first = await resolver.resolveForConnection(deps.db, { orgId, userId, connectionId, proofKind })
-      if (first.ok === false) throw resolutionError(first.code)
-      const holder = await deps.db.query(SELECT_ADDRESS_HOLDER_SQL, [
-        first.target.provider,
-        first.target.boundTenant,
-        first.target.addressKind,
-        first.target.tenantAddressWitness,
-      ])
-      const locks: UserLockKey[] = [lockKey(orgId, userId)]
-      for (const row of holder.rows) locks.push(lockKey(text(row.org_id), text(row.user_id)))
-      const held = new Set(locks.map((key) => JSON.stringify([key.orgId, key.userId])))
       const audits: AuditEvent[] = []
       try {
+        // Outside any lock: derive the target and find who holds the address, to know whose lock is also needed.
+        const first = await resolver.resolveForConnection(deps.db, { orgId, userId, connectionId, proofKind })
+        if (first.ok === false) {
+          await writeBackLostProof(orgId, userId, connectionId, proofKind)
+          throw resolutionError(first.code)
+        }
+        const holder = await deps.db.query(SELECT_ADDRESS_HOLDER_SQL, [
+          first.target.provider,
+          first.target.boundTenant,
+          first.target.addressKind,
+          first.target.tenantAddressWitness,
+        ])
+        const locks: UserLockKey[] = [lockKey(orgId, userId)]
+        for (const row of holder.rows) locks.push(lockKey(text(row.org_id), text(row.user_id)))
+        const held = new Set(locks.map((key) => JSON.stringify([key.orgId, key.userId])))
         const outcome = await withUserLocks(deps, locks, async (tx) => {
           const target = await resolver.resolveForConnection(tx, { orgId, userId, connectionId, proofKind })
           if (target.ok === false) throw resolutionError(target.code)
@@ -312,19 +378,16 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
           for (const row of others) {
             const mine = sameOwner(row, orgId, userId)
             const checked = await resolver.verifyEndpoint(tx, { orgId: text(row.org_id), userId: text(row.user_id), endpointId: text(row.id) })
-            if (checked.ok === true) {
+            // The caller's own endpoint yields to any failed re-check. Another user's endpoint yields only
+            // when its proof is gone; a state that can pass keeps the address held.
+            if (checked.ok === true || (!mine && !isProofGone(checked.code))) {
               throw new NotificationHttpError(409, mine ? 'ADDRESS_BOUND_ON_OTHER_CONNECTION' : 'ADDRESS_ALREADY_BOUND')
             }
             const demoted = await tx.query(DEMOTE_SQL, [text(row.id)])
             if (demoted.rows.length > 0) {
-              audits.push({
-                actorType: mine ? 'user' : 'system',
-                ...(mine ? { actorId: userId } : {}),
-                action: 'notification.endpoint.demote',
-                resourceType: 'user_notification_endpoint',
-                resourceId: text(row.id),
-                meta: { provider: text(row.provider), revision: Number(demoted.rows[0].revision), reason: 'address_rebound', organizationId: text(row.org_id) },
-              })
+              audits.push(
+                demoteAudit(text(row.org_id), text(row.user_id), mine ? 'self' : 'system', text(row.id), text(row.provider), Number(demoted.rows[0].revision), 'address_rebound'),
+              )
             }
           }
 
@@ -335,7 +398,7 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
             const inserted = await tx.query(INSERT_SQL, [
               orgId, userId, now.connectionId, now.provider, now.addressKind, now.proofKind, ...params,
             ])
-            audits.push(createAudit(userId, text(inserted.rows[0].id), now.provider, Number(inserted.rows[0].revision), 'created'))
+            audits.push(createAudit(orgId, userId, text(inserted.rows[0].id), now.provider, Number(inserted.rows[0].revision), 'created'))
             return { created: true, id: text(inserted.rows[0].id) }
           }
           const unchanged =
@@ -349,7 +412,7 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
           if (unchanged) return { created: false, id: text(row.id) }
           const refreshed = await tx.query(REFRESH_SQL, [text(row.id), ...params])
           audits.push(
-            createAudit(userId, text(row.id), now.provider, Number(refreshed.rows[0].revision), text(row.status) === 'revoked' ? 'reactivated' : 'refreshed'),
+            createAudit(orgId, userId, text(row.id), now.provider, Number(refreshed.rows[0].revision), text(row.status) === 'revoked' ? 'reactivated' : 'refreshed'),
           )
           return { created: false, id: text(row.id) }
         })
@@ -369,14 +432,38 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
     throw new NotificationHttpError(503, 'NOTIFICATION_BUSY')
   }
 
-  function createAudit(userId: string, id: string, provider: string, revision: number, change: string): AuditEvent {
+  /**
+   * The audit meta names the owner of the row acted on: `organizationId` and `userId`. For a change the
+   * owner makes on their own row the owner is also the actor.
+   */
+  function createAudit(orgId: string, userId: string, id: string, provider: string, revision: number, change: string): AuditEvent {
     return {
       actorType: 'user',
       actorId: userId,
       action: 'notification.endpoint.create',
       resourceType: 'user_notification_endpoint',
       resourceId: id,
-      meta: { provider, revision, change },
+      meta: { provider, revision, change, organizationId: orgId, userId },
+    }
+  }
+
+  /** `initiator` says whether the owner's own request caused the demotion or another user's request did. */
+  function demoteAudit(
+    ownerOrgId: string,
+    ownerUserId: string,
+    initiator: 'self' | 'system',
+    id: string,
+    provider: string,
+    revision: number,
+    reason: 'address_rebound' | 'proof_gone',
+  ): AuditEvent {
+    return {
+      actorType: initiator === 'self' ? 'user' : 'system',
+      ...(initiator === 'self' ? { actorId: ownerUserId } : {}),
+      action: 'notification.endpoint.demote',
+      resourceType: 'user_notification_endpoint',
+      resourceId: id,
+      meta: { provider, revision, reason, initiator, organizationId: ownerOrgId, userId: ownerUserId },
     }
   }
 
@@ -398,7 +485,7 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
           action: 'notification.endpoint.revoke',
           resourceType: 'user_notification_endpoint',
           resourceId: text(row.id),
-          meta: { provider: text(row.provider), revision },
+          meta: { provider: text(row.provider), revision, organizationId: orgId, userId },
         })
         return { id: text(row.id), status: 'revoked' as const, revision }
       })

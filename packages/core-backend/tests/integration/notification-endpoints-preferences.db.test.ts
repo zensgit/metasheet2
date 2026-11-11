@@ -940,7 +940,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const old = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [mine.endpoint.id]))[0]
       expect([old.status, Number(old.revision)]).toEqual(['stale', 2])
       const demote = audits.find((event) => event.action === 'notification.endpoint.demote')
-      expect(demote).toMatchObject({ actorType: 'system', resourceId: mine.endpoint.id, meta: { reason: 'address_rebound', organizationId: w.org } })
+      expect(demote).toMatchObject({ actorType: 'system', resourceId: mine.endpoint.id, meta: { reason: 'address_rebound', initiator: 'system', organizationId: w.org, userId: a } })
       expect(demote?.actorId).toBeUndefined()
     })
 
@@ -979,7 +979,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect([old.status, Number(old.revision)]).toEqual(['stale', 2])
       expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
         actorType: 'system',
-        meta: { reason: 'address_rebound', organizationId: w.org },
+        meta: { reason: 'address_rebound', initiator: 'system', organizationId: w.org, userId: w.a },
       })
     })
 
@@ -989,6 +989,99 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       await establish(svc, w.org, w.a, w.first.id)
       const error = await failureOf(establish(svc, w.org, w.b, w.second.id))
       expect([error.status, error.code, error.details]).toEqual([409, 'ADDRESS_ALREADY_BOUND', undefined])
+    })
+
+    it('every audit event of every kind carries a closed set of keys, ids and fixed codes only, and a demotion made for another user names neither the caller nor the caller organization', async () => {
+      const secrets: string[] = []
+      const noteRows = async (org: string) => {
+        for (const row of await rowsOf(ENDPOINTS, 'org_id = $1', [org])) {
+          secrets.push(String(row.address_witness), String(row.tenant_address_witness), String(row.proof_witness), String(row.proof_id))
+        }
+      }
+      const svc = services()
+
+      // create, refresh, preference update, revoke
+      const one = await scene()
+      const user = one.users[0]
+      const made = await establish(svc, one.org, user, one.id)
+      secrets.push(one.accounts[0].external)
+      await run(`UPDATE directory_accounts SET union_id = 'union-audit-secret' WHERE id = $1::uuid`, [one.accounts[0].accountId])
+      secrets.push('union-audit-secret')
+      await establish(svc, one.org, user, one.id)
+      await svc.preferences.patch({ orgId: one.org, userId: user, patch: { topic: 'task_reminder', expectedRevision: 0, primaryEndpointId: made.endpoint.id } })
+      await svc.endpoints.revoke({ orgId: one.org, userId: user, endpointId: made.endpoint.id })
+      await noteRows(one.org)
+
+      // a demotion the owner caused (the proof moved to another connection) and one the owner's own refresh found (the proof is gone)
+      const own = await scene()
+      const ownSecond = await insertIntegration({ corp: own.corp, orgId: own.org, config: { appKey: 'AppTwo' } })
+      await establish(svc, own.org, own.users[0], own.id)
+      secrets.push(own.accounts[0].external)
+      await run('UPDATE directory_accounts SET integration_id = $1::uuid WHERE id = $2::uuid', [ownSecond.id, own.accounts[0].accountId])
+      await establish(svc, own.org, own.users[0], ownSecond.id)
+      await run('DELETE FROM directory_account_links WHERE id = $1::uuid', [own.accounts[0].linkId])
+      await failureOf(establish(svc, own.org, own.users[0], ownSecond.id))
+      await noteRows(own.org)
+
+      // a demotion another user's request caused
+      const two = await twoConnections({ sameUser: false })
+      await establish(svc, two.org, two.a, two.first.id)
+      secrets.push(two.external)
+      await run('DELETE FROM directory_account_links WHERE id = $1::uuid', [two.x1.linkId])
+      const before = audits.length
+      await establish(svc, two.org, two.b, two.second.id)
+      const caused = audits.slice(before).find((event) => event.action === 'notification.endpoint.demote')
+      expect(caused).toMatchObject({ actorType: 'system', meta: { initiator: 'system', userId: two.a, organizationId: two.org } })
+      expect(caused?.actorId).toBeUndefined()
+      expect(JSON.stringify(caused)).not.toContain(two.b)
+      await noteRows(two.org)
+
+      const allowedMeta: Record<string, string[]> = {
+        'notification.endpoint.create': ['change', 'organizationId', 'provider', 'revision', 'userId'],
+        'notification.endpoint.demote': ['initiator', 'organizationId', 'provider', 'reason', 'revision', 'userId'],
+        'notification.endpoint.revoke': ['organizationId', 'provider', 'revision', 'userId'],
+        'notification.preference.update': ['organizationId', 'revision', 'topic', 'userId'],
+      }
+      expect([...new Set(audits.map((event) => event.action))].sort()).toEqual(Object.keys(allowedMeta).sort())
+      expect(audits.filter((event) => event.action === 'notification.endpoint.demote').map((event) => `${event.meta?.initiator}:${event.meta?.reason}`).sort()).toEqual([
+        'self:address_rebound',
+        'self:proof_gone',
+        'system:address_rebound',
+      ])
+      for (const event of audits) {
+        expect(Object.keys(event).filter((key) => key !== 'actorId').sort()).toEqual(['action', 'actorType', 'meta', 'resourceId', 'resourceType'])
+        expect(Object.keys(event.meta ?? {}).sort(), event.action).toEqual(allowedMeta[event.action])
+        for (const value of Object.values(event.meta ?? {})) expect(['string', 'number']).toContain(typeof value)
+        if (event.actorType === 'user') expect(event.meta?.userId).toBe(event.actorId)
+      }
+      const text = JSON.stringify(audits)
+      for (const secret of secrets) expect(text).not.toContain(secret)
+    })
+
+    it("another user's endpoint in a state that can pass (a disabled connection, an inactive member, an inactive account) keeps the address: 409, and nothing of theirs changes", async () => {
+      const w = await twoConnections({ sameUser: false })
+      const svc = services()
+      const held = await establish(svc, w.org, w.a, w.first.id)
+      const unchanged = async () => {
+        const row = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [held.endpoint.id]))[0]
+        expect([row.status, Number(row.revision)]).toEqual(['active', 1])
+      }
+      const refused = async () => {
+        const error = await failureOf(establish(svc, w.org, w.b, w.second.id))
+        expect([error.status, error.code, error.details]).toEqual([409, 'ADDRESS_ALREADY_BOUND', undefined])
+        await unchanged()
+      }
+      await run(`UPDATE directory_integrations SET status = 'inactive' WHERE id = $1::uuid`, [w.first.id])
+      await refused()
+      await run(`UPDATE directory_integrations SET status = 'active' WHERE id = $1::uuid`, [w.first.id])
+      await run('UPDATE user_orgs SET is_active = FALSE WHERE user_id = $1 AND org_id = $2', [w.a, w.org])
+      await refused()
+      await run('UPDATE user_orgs SET is_active = TRUE WHERE user_id = $1 AND org_id = $2', [w.a, w.org])
+      await run('UPDATE directory_accounts SET is_active = FALSE WHERE id = $1::uuid', [w.x1.accountId])
+      await refused()
+      await run('UPDATE directory_accounts SET is_active = TRUE WHERE id = $1::uuid', [w.x1.accountId])
+      await refused()
+      expect(audits.filter((event) => event.action === 'notification.endpoint.demote')).toEqual([])
     })
 
     it("the caller's own endpoint on another connection of the tenant is a 409 ADDRESS_BOUND_ON_OTHER_CONNECTION, and the candidate says so", async () => {
@@ -1014,7 +1107,21 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const stale = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [old.endpoint.id]))[0]
       expect([stale.status, Number(stale.revision)]).toEqual(['stale', 2])
       const demote = audits.find((event) => event.action === 'notification.endpoint.demote')
-      expect(demote).toMatchObject({ actorType: 'user', actorId: user, meta: { reason: 'address_rebound' } })
+      expect(demote).toMatchObject({ actorType: 'user', actorId: user, meta: { reason: 'address_rebound', initiator: 'self', organizationId: w.org, userId: user } })
+    })
+
+    it("an own endpoint whose proof moved to another connection no longer blocks that connection's candidate, and a read does not write", async () => {
+      const w = await scene()
+      const second = await insertIntegration({ corp: w.corp, orgId: w.org, config: { appKey: 'AppTwo' } })
+      const svc = services()
+      const user = w.users[0]
+      const old = await establish(svc, w.org, user, w.id)
+      await run('UPDATE directory_accounts SET integration_id = $1::uuid WHERE id = $2::uuid', [second.id, w.accounts[0].accountId])
+      const listing = await svc.endpoints.list({ orgId: w.org, userId: user })
+      const candidate = listing.candidates.find((entry) => entry.connection.id === second.id && entry.proofKind === 'directory_link')
+      expect([candidate?.addressable, candidate?.reasonCode]).toEqual([true, null])
+      const kept = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [old.endpoint.id]))[0]
+      expect([kept.status, Number(kept.revision)]).toEqual(['active', 1])
     })
 
     it('two users that reach the same address together: one succeeds, the other gets a 409, never a 500 (same connection and across connections)', async () => {
@@ -1174,6 +1281,27 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       }
     })
 
+    it('the upper-case spelling of the caller own endpoint id is accepted and stored in canonical form; DELETE accepts it as well', async () => {
+      const w = await scene()
+      const svc = services()
+      const user = w.users[0]
+      const made = await establish(svc, w.org, user, w.id)
+      const view = await svc.preferences.patch({
+        orgId: w.org,
+        userId: user,
+        patch: { topic: 'task_reminder', expectedRevision: 0, primaryEndpointId: made.endpoint.id.toUpperCase() },
+      })
+      expect(view.preference?.primaryEndpointId).toBe(made.endpoint.id)
+      const again = await svc.preferences.patch({
+        orgId: w.org,
+        userId: user,
+        patch: { topic: 'task_reminder', expectedRevision: 1, primaryEndpointId: made.endpoint.id.toUpperCase() },
+      })
+      expect(again.preference?.revision).toBe(1)
+      const revoked = await svc.endpoints.revoke({ orgId: w.org, userId: user, endpointId: made.endpoint.id.toUpperCase() })
+      expect([revoked.id, revoked.status]).toEqual([made.endpoint.id, 'revoked'])
+    })
+
     it("an endpoint of another user, of another organization and an unknown id answer identically, before any status or provider check", async () => {
       const w = await scene(2)
       const svc = services()
@@ -1291,7 +1419,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
   })
 
   describe('#9 unbinding keeps working while an endpoint refers to the proof', () => {
-    it('removing an identity row or cancelling a directory link succeeds, and the endpoint is then found stale', async () => {
+    it('removing an identity row or cancelling a directory link succeeds, and the endpoint is then read as not usable without any write', async () => {
       const w = await scene()
       const svc = services()
       const user = w.users[0]
@@ -1308,6 +1436,34 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const byId = new Map(listing.endpoints.map((endpoint) => [endpoint.id, endpoint]))
       expect(byId.get(mine.endpoint.id)).toMatchObject({ usable: false, unusableReason: 'proof_missing' })
       expect(byId.get(identityEndpoint)?.usable).toBe(false)
+      // A read never writes: the stored rows are as they were.
+      const stored = await rowsOf(ENDPOINTS, 'org_id = $1 ORDER BY id', [w.org])
+      expect(stored.map((row) => [row.status, Number(row.revision)])).toEqual([['active', 1], ['active', 1]])
+    })
+
+    it("the owner's own request for a proof that is gone writes the endpoint back as stale and answers 409; a state that can pass leaves it active", async () => {
+      const w = await scene()
+      const svc = services()
+      const user = w.users[0]
+      const mine = await establish(svc, w.org, user, w.id)
+      // A disabled connection is a state that can pass: the request is refused and the row is untouched.
+      await run(`UPDATE directory_integrations SET status = 'inactive' WHERE id = $1::uuid`, [w.id])
+      const disabled = await failureOf(establish(svc, w.org, user, w.id))
+      expect([disabled.status, disabled.code]).toEqual([409, 'PROOF_NOT_FOUND'])
+      expect((await rowsOf(ENDPOINTS, 'id = $1::uuid', [mine.endpoint.id]))[0]).toMatchObject({ status: 'active', revision: '1' })
+      await run(`UPDATE directory_integrations SET status = 'active' WHERE id = $1::uuid`, [w.id])
+      audits.length = 0
+      await run('DELETE FROM directory_account_links WHERE id = $1::uuid', [w.accounts[0].linkId])
+      const gone = await failureOf(establish(svc, w.org, user, w.id))
+      expect([gone.status, gone.code]).toEqual([409, 'PROOF_NOT_FOUND'])
+      expect((await rowsOf(ENDPOINTS, 'id = $1::uuid', [mine.endpoint.id]))[0]).toMatchObject({ status: 'stale', revision: '2' })
+      expect(audits.map((event) => event.action)).toEqual(['notification.endpoint.demote'])
+      expect(audits[0]).toMatchObject({
+        actorType: 'user',
+        actorId: user,
+        resourceId: mine.endpoint.id,
+        meta: { reason: 'proof_gone', initiator: 'self', organizationId: w.org, userId: user },
+      })
     })
   })
 
@@ -1450,11 +1606,14 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect(replaced.created).toBe(true)
       const old = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [held.endpoint.id]))[0]
       expect(old.status).toBe('stale')
-      expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
+      const demotion = audits.find((event) => event.action === 'notification.endpoint.demote')
+      expect(demotion).toMatchObject({
         actorType: 'system',
         resourceId: held.endpoint.id,
-        meta: { reason: 'address_rebound', organizationId: w.a.org },
+        meta: { reason: 'address_rebound', initiator: 'system', organizationId: w.a.org, userId: ua },
       })
+      expect(JSON.stringify(demotion)).not.toContain(w.b.org)
+      expect(JSON.stringify(demotion)).not.toContain(ub)
       expect(w.a.org).not.toBe(w.b.org)
       const both = await pgError(insertEndpoint({ org: w.a.org, user: ua, connection: w.a.id, tenant: w.corp, address: 'direct-write', proofKind: 'external_identity' }).then(() =>
         insertEndpoint({ org: w.b.org, user: ub, connection: w.b.id, tenant: w.corp, address: 'direct-write', proofKind: 'external_identity' }),
@@ -1501,7 +1660,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
         actorType: 'system',
         resourceId: inA.endpoint.id,
-        meta: { reason: 'address_rebound', organizationId: w.a.org },
+        meta: { reason: 'address_rebound', initiator: 'system', organizationId: w.a.org, userId: user },
       })
     })
 

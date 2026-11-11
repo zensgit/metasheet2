@@ -654,6 +654,17 @@ export function createRecipientResolver(deps: RecipientResolverDeps): RecipientR
       tenantWitness: text(row.tenant_address_witness),
     }))
 
+    // An own endpoint on another connection blocks a candidate only while its own re-check still holds; the
+    // re-check is one set-based call, made at most once and only when a candidate could be blocked.
+    let stillHolds: Map<string, boolean> | null = null
+    const holdsNow = async (): Promise<Map<string, boolean>> => {
+      if (stillHolds !== null) return stillHolds
+      const activeRows = ownRows.filter((row) => row.status === 'active')
+      const checks = activeRows.length === 0 ? [] : await verifyEndpoints(db, { orgId, refs: activeRows.map((row) => ({ endpointId: row.id, userId })) })
+      stillHolds = new Map(activeRows.map((row, index) => [row.id, checks[index].ok === true]))
+      return stillHolds
+    }
+
     const candidates: EndpointCandidate[] = []
     let cursor = 0
     for (const connection of connections) {
@@ -667,13 +678,15 @@ export function createRecipientResolver(deps: RecipientResolverDeps): RecipientR
         let addressable = result.ok === true
         let reasonCode: ResolveFailureCode | null = result.ok === true ? null : result.code
         if (result.ok === true && existing === null) {
-          const elsewhere = ownRows.some(
+          const blockers = ownRows.filter(
             (row) =>
               row.status === 'active' &&
               row.connectionId !== connection.id &&
               row.provider === connection.provider &&
               row.tenantWitness === result.target.tenantAddressWitness,
           )
+          const holds = blockers.length === 0 ? null : await holdsNow()
+          const elsewhere = blockers.some((row) => holds?.get(row.id) === true)
           if (elsewhere) {
             addressable = false
             reasonCode = 'address_bound_on_other_connection'
