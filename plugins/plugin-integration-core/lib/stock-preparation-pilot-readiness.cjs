@@ -88,9 +88,9 @@
 //                                  environment. Owner ruling 2026-11-11 (R-91, option A): while the door is off,
 //                                  requireTableActionAccess's legacy integration:* branch lets a tenantless platform
 //                                  admin name a tenant and preview AND apply into it, so the door being on is a
-//                                  PILOT-ENABLE PRECONDITION. It gates the enable only: nothing re-evaluates readiness
-//                                  after a pilot is enabled, so removing the flag afterwards reopens that path on the
-//                                  pilot sheet (the runbook's stop condition forbids it). The legacy branch itself and
+//                                  PILOT-ENABLE PRECONDITION. It gates the enable only: after an enable nothing refuses
+//                                  at run time (only the pilot GET re-lists this id), so removing the flag afterwards
+//                                  reopens that path on the pilot sheet (the runbook forbids it). The legacy branch and
 //                                  every non-pilot project are unchanged.
 //   continuation_support_version  the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
