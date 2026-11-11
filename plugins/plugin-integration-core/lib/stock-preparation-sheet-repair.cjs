@@ -1189,8 +1189,8 @@ async function runClosePreview(deps, request) {
  * THE CONTINUATION'S EXECUTE (ruling C-3): the sheet lease -> the SAME verification recomputed in the lease -> the
  * echoed digest -> ONE ledger transaction in the host-write bracket (holder assert first; the run still `running` and
  * begun under ANOTHER lease; `completed`, its close approval, its audit row) -> after the release, the generation bump
- * the run itself never got to. No sheet row is written and no claim is spent: a closed run cannot be closed again (409
- * `run_not_open`).
+ * the run itself may never have got. No sheet row is written and no claim is spent: a closed run cannot be closed again
+ * (409 `run_not_open`).
  */
 async function runCloseExecute(deps, request) {
   let closed = false
@@ -1223,7 +1223,8 @@ async function runCloseExecute(deps, request) {
       return { mode: 'execute', recipe: request.recipe, runId: plan.runId, runRecipe: plan.runRecipe, status: 'completed', planned, verified: plan.counts.inTargetState, versionMoved: plan.counts.versionMoved, governed: plan.governed === true, planDigest: plan.planDigest }
     })
   } finally {
-    // The run's own bump never ran (its lease was gone): every token planned before the repair is superseded now.
+    // The run's own bump may never have landed (it is refused while a taker holds the sheet): every token planned
+    // before the repair is superseded now.
     if (closed && typeof deps.bumpAfterRelease === 'function') {
       try {
         await deps.bumpAfterRelease()

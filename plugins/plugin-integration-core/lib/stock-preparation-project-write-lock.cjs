@@ -163,9 +163,10 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //     批次标识's entries (rebaseline item (g)).
 //   * `sheet_repair` (batch-refresh step 6d-2a, register R-91; both lists): the owner-gated doubled-sheet repair holds the
 //     lease (purpose) for its whole run — the in-lease recompute of the approved preview, the run row with its backup and
-//     one-shot claim, the fenced version-conditional patches, the run's finish — and BUMPS after its release (reason), so
-//     every token / approved job planned before a repair that wrote is superseded. Appended after the recovery's entries
-//     (rebaseline B-18).
+//     one-shot claim, the fenced version-conditional patches, the run's finish — and BUMPS after its release (reason)
+//     whenever it ATTEMPTED a host write, so every token / approved job planned before a repair that may have written is
+//     superseded. Its continuation `verify_and_close_run` (no host write: it verifies and finishes a run left open) takes
+//     the same lease and bumps after a close. Appended after the recovery's entries (rebaseline B-18).
 const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify', 'sheet_repair'])
 const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair'])
 
