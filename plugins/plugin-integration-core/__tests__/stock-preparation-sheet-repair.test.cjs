@@ -14,6 +14,12 @@
 //   RP-04  restore against CURRENT versions: a row whose version moved under an intact stamp IS restored at its current
 //          version; revived / restamped / missing / never-retired rows are counted and not written; the four cells
 //          come back byte-identical and a person's edit survives
+//   RD-01  the RESTORE's own digest, pure: it binds the scope, the source run, the run sequence and every planned row at
+//          its current version — it moves when a planned row's version moves and when a row leaves the plan
+//   RD-02  a restore execute whose sheet moved since its preview (a planned row edited by a person, a row that left the
+//          plan) is 409 PLAN_CHANGED in the lease: zero patches, no run row, no claim; the new preview runs
+//   RD-03  the sequence nonce of a restore: a restore run that began and wrote nothing makes the next preview a new
+//          digest and its execute completes (the undo of a retire is never dead-ended)
 //   RP-05  the one-shot claim: a second run of an approved digest is 409 ALREADY_CONSUMED (prelude, and in the lease);
 //          a failed claim insert is read back and fails closed
 //   RP-06  an execute's refusals (installing, not applicable, digest differs) leave zero patches and zero ledger rows
@@ -572,6 +578,127 @@ test('RP-04b restore: revived, restamped, missing and never-retired rows are tol
     const verdict = R.analyzeRestore({ scope: SCOPE, run: { ...own, ...foreign }, rows: m.host.rows(), sequence: 2, governed: false, installState: 'none' })
     assert.deepEqual([verdict.eligible, verdict.refusals, verdict.sourceRunId, verdict.planDigest], [false, ['run_not_found'], null, null], JSON.stringify(foreign))
   }
+})
+
+// ── RD-01 … RD-03 (the restore's OWN digest; write-safety review of round 1) ─────────────────────────────
+
+/** Every stored record of the fixture's host: its version and its data — what "nothing was written" compares. */
+const storedOf = (m) => JSON.stringify(Array.from(m.host.records.values()).map((record) => [record.id, record.version, record.data]))
+/** A pull revives one retired row (its key re-entered the expansion): active again under the pull's own stamp. */
+const reviveByPull = (m, recordId) => {
+  Object.assign(m.host.records.get(recordId).data, { active: true, lastPlmRefreshRunId: 'table-action:syn-pull-2', lastPlmRefreshDecision: 'update', lastPlmConflictSummary: '{"type":"plm_system_refresh","changedFields":["material"]}' })
+  m.host.records.get(recordId).version += 1
+}
+
+test('RD-01 the restore\'s OWN digest binds what its approval covers — the scope, the source run, the run sequence and every planned row at its CURRENT version: it moves when a planned row\'s version moves and when a row leaves the plan, and with no row the restore does not plan', async () => {
+  const m = mount()
+  const retired = await m.execute((await m.preview()).planDigest)
+  const run = await m.store.readRun({ ...SCOPE, runId: retired.runId })
+  const restoreOf = (extra = {}) => R.analyzeRestore({ scope: SCOPE, run, rows: m.host.rows(), sequence: 1, governed: false, installState: 'none', ...extra })
+  const rowsOf = (analysis) => analysis.writes.map((item) => [item.recordId, item.version])
+  const one = restoreOf()
+  assert.deepEqual([one.eligible, one.refusals, one.counts.toRestore], [true, [], 4])
+  assert.match(one.planDigest, /^[0-9a-f]{64}$/)
+  // The plan: the root first (the reverse of the retire), each row at the version the retire left it.
+  const planned = [['rec_old_1', 4], ['rec_old_3', 6], ['rec_old_2', 5], ['rec_old_4', 7]]
+  assert.deepEqual(rowsOf(one), planned)
+  // Stable over a re-read, and the digest the preview answers (the one an owner approves).
+  assert.equal(restoreOf().planDigest, one.planDigest)
+  assert.equal((await m.restorePreview(retired.runId)).planDigest, one.planDigest)
+  // Moved by every input the approval covers — the run sequence, each part of the scope, the source run.
+  assert.notEqual(restoreOf({ sequence: 2 }).planDigest, one.planDigest, 'the run sequence')
+  for (const part of [{ sheetId: 'sheet_syn_other' }, { projectNo: 'SYN-OTHER' }, { tenantId: 'tenant_syn_other' }]) {
+    const elsewhere = restoreOf({ scope: { ...SCOPE, ...part }, run: { ...run, ...part } })
+    assert.deepEqual([elsewhere.eligible, rowsOf(elsewhere)], [true, planned], JSON.stringify(part))
+    assert.notEqual(elsewhere.planDigest, one.planDigest, `the scope: ${Object.keys(part)[0]}`)
+  }
+  // ANOTHER retire run over the very same rows and versions is another plan.
+  const otherRunId = `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`
+  const underOtherRun = m.host.rows().map((row) => (row.lastPlmRefreshRunId === retired.runId ? Object.assign(row, { lastPlmRefreshRunId: otherRunId }) : row))
+  const other = restoreOf({ run: { ...run, id: otherRunId }, rows: underOtherRun })
+  assert.deepEqual([other.eligible, other.sourceRunId, rowsOf(other)], [true, otherRunId, planned])
+  assert.notEqual(other.planDigest, one.planDigest, 'the source run')
+  // A person edits a human cell of a PLANNED row: its version moves, its stamp stays — the row is still planned, at
+  // its CURRENT version, and the digest moves with that version.
+  m.host.humanEdit('rec_old_3', { notes: 'typed after the restore was previewed' })
+  const edited = restoreOf()
+  assert.deepEqual([edited.eligible, edited.counts.toRestore, edited.counts.versionMovedStampIntact], [true, 4, 1])
+  assert.deepEqual(rowsOf(edited), [['rec_old_1', 4], ['rec_old_3', 7], ['rec_old_2', 5], ['rec_old_4', 7]])
+  assert.notEqual(edited.planDigest, one.planDigest, 'a planned row\'s version')
+  // A row that LEAVES the plan (a pull revived it) moves it again.
+  reviveByPull(m, 'rec_old_2')
+  const fewer = restoreOf()
+  assert.deepEqual([fewer.eligible, fewer.counts.toRestore, fewer.counts.revived], [true, 3, 1])
+  assert.deepEqual(rowsOf(fewer), [['rec_old_1', 4], ['rec_old_3', 7], ['rec_old_4', 7]])
+  assert.notEqual(fewer.planDigest, edited.planDigest, 'a row that left the plan')
+  assert.notEqual(fewer.planDigest, one.planDigest)
+  // NOT moved by a row the restore does not plan: a copy row a person fills, an unrelated row.
+  m.host.humanEdit('rec_copy_2', { notes: 'people fill the copies' })
+  m.host.humanEdit('rec_other_3', { notes: 'an unrelated row' })
+  assert.equal(restoreOf().planDigest, fewer.planDigest, 'only the planned rows are in the digest')
+  // And it is EXACTLY this body under the plan scheme — its recipe tag included, so a restore's digest is never a
+  // retire's: nothing an approval covers is left out, nothing else is in.
+  assert.equal(one.planDigest, R.__internals.planDigestOf({ recipe: RESTORE, tenantId: SCOPE.tenantId, sheetId: SCOPE.sheetId, projectNo: SCOPE.projectNo, sourceRunId: retired.runId, sequence: 1, rows: planned }))
+})
+
+test('RD-02 a restore execute whose sheet moved since its preview is 409 PLAN_CHANGED in the lease — a planned row a person edited (its version moved under an intact stamp), a row that left the plan: zero patches, no run row, no claim, no bump; the NEW preview covers what moved and runs under its own approval', async () => {
+  for (const [label, move, expected] of [
+    ['a planned row edited by a person', (m) => m.host.humanEdit('rec_old_2', { notes: 'typed between the restore preview and its execute' }), { toRestore: 4, versionMovedStampIntact: 1, revived: 0 }],
+    ['a planned row revived by a pull', (m) => reviveByPull(m, 'rec_old_2'), { toRestore: 3, versionMovedStampIntact: 0, revived: 1 }],
+  ]) {
+    const m = mount()
+    const retired = await m.execute((await m.preview()).planDigest)
+    const plan = await m.restorePreview(retired.runId)
+    assert.deepEqual([plan.eligible, plan.sequence, plan.counts.toRestore], [true, 1, 4], label)
+    // The sheet moves AFTER the restore was previewed (and its digest approved).
+    move(m)
+    const stored = storedOf(m)
+    m.host.calls.length = 0
+    const bumps = m.state.bumps
+    const refused = await rejects(m.restoreExecute(retired.runId, plan.planDigest), { status: 409, code: CODES.PLAN_CHANGED, reason: 'plan_digest_differs' })
+    assert.equal(refused.details.partial, false, label)
+    assert.deepEqual(
+      [m.host.calls.length, m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length, m.state.bumps, m.db.rows(kit.T.lock)[0].lease_id],
+      [0, 1, 1, bumps, null],
+      `${label}: no patch, no restore run, no restore claim, no bump — and the lease is released`,
+    )
+    assert.equal(m.state.reads[m.state.reads.length - 1], 'restore:lease', `${label}: refused by the recompute INSIDE the lease`)
+    assert.equal(storedOf(m), stored, `${label}: no stored row moved`)
+    // The approved digest is not the sheet's any more — and it was not spent: the new preview names what moved.
+    const next = await m.restorePreview(retired.runId)
+    assert.notEqual(next.planDigest, plan.planDigest, label)
+    assert.deepEqual([next.eligible, next.sequence, next.counts.toRestore, next.counts.versionMovedStampIntact, next.counts.revived], [true, 1, expected.toRestore, expected.versionMovedStampIntact, expected.revived], label)
+    const done = await m.restoreExecute(retired.runId, next.planDigest)
+    assert.deepEqual([done.status, done.planned, done.written], ['completed', expected.toRestore, expected.toRestore], label)
+    assert.equal(m.db.rows(kit.T.claim).length, 2, `${label}: the restore spent its own claim, once`)
+  }
+})
+
+test('RD-03 the sequence nonce of a RESTORE: a restore run that began and wrote NOTHING makes the next preview a new digest, and its execute completes — the undo of a retire is never dead-ended by a spent approval', async () => {
+  const m = mount()
+  const before = Object.fromEntries(m.sheet.ids.old.map((id) => [id, JSON.stringify(m.host.dataOf(id))]))
+  const retired = await m.execute((await m.preview()).planDigest)
+  const plan = await m.restorePreview(retired.runId)
+  assert.deepEqual([plan.eligible, plan.sequence, plan.counts.toRestore], [true, 1, 4])
+  // The restore's very first patch fails inside the host: the run is stopped with zero rows written and the four rows
+  // are exactly as the retire left them — at the same versions.
+  const stored = storedOf(m)
+  m.host.beforePatch = () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
+  const stop = await rejects(m.restoreExecute(retired.runId, plan.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
+  assert.deepEqual([stop.details.planned, stop.details.written, stop.details.partial], [4, 0, false])
+  m.host.beforePatch = null
+  assert.equal(storedOf(m), stored, 'nothing was restored')
+  assert.deepEqual(m.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((row) => [row.recipe, row.status, row.stop_reason, row.written_count]), [[RETIRE, 'completed', null, 4], [RESTORE, 'stopped', 'host_write_failed', 0]])
+  // The SAME rows at the SAME versions — and a NEW digest, because the run sequence moved.
+  const next = await m.restorePreview(retired.runId)
+  assert.deepEqual([next.eligible, next.sequence, next.counts.toRestore, next.counts.versionMovedStampIntact], [true, 2, 4, 0])
+  assert.notEqual(next.planDigest, plan.planDigest, 'the same rows, a new digest: the spent approval cannot dead-end the undo')
+  // The spent digest stays spent; the new one runs under its own approval and puts every row back.
+  await rejects(m.restoreExecute(retired.runId, plan.planDigest), { status: 409, code: CODES.ALREADY_CONSUMED })
+  const done = await m.run({ mode: 'execute', recipe: RESTORE, confirmProjectNo: SCOPE.projectNo, runId: retired.runId, planDigest: next.planDigest, approvalRef: 'R-91:syn-restore-again' })
+  assert.deepEqual([done.status, done.planned, done.written, done.sourceRunId], ['completed', 4, 4, retired.runId])
+  for (const id of m.sheet.ids.old) assert.equal(JSON.stringify(m.host.dataOf(id)), before[id], `${id}: byte-identical to before the retire`)
+  assert.deepEqual(m.db.rows(kit.T.claim).map((claim) => claim.approval_ref).sort(), ['R-91:syn-1', 'R-91:syn-2', 'R-91:syn-restore-again'])
 })
 
 // ── RP-05 ────────────────────────────────────────────────────────────────────────────────────────────────

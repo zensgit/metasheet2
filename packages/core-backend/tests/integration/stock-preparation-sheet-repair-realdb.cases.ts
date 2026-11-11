@@ -67,6 +67,10 @@
  *            closes.
  *   S9D-21   (ruling C-4) a guard already lost before the begin (one heartbeat CAS failed in the store, the lease row
  *            intact): refused before the claim is spent; the same approved digest runs afterwards.
+ *   S9D-22   the RESTORE's own digest (write-safety review of round 1): a row a person edited between the restore's
+ *            preview and its execute => 409 PLAN_CHANGED in the lease — no restore run, no restore claim, no patch,
+ *            `data::text` and versions unchanged; a restore run that began and wrote nothing leaves a NEW digest
+ *            behind (the run sequence), the spent one is ALREADY_CONSUMED, and the new one puts every row back.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -1184,5 +1188,67 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect([done.status, done.written]).toEqual(['completed', 4])
       expect((await st.claims()).length).toBe(1)
     }, 120_000)
+
+    test('S9D-22 the RESTORE\'s own digest on the real stack: a row a person edited between the restore\'s preview and its execute => 409 PLAN_CHANGED in the lease, nothing begun, nothing written; a restore run that began and wrote NOTHING leaves a NEW digest behind, and its execute puts every row back', async () => {
+      const st = await world('d22')
+      const before = await st.stored()
+      const retired = dataOf(await st.execute(dataOf(await st.preview()).planDigest))
+      const restore = (body: Record<string, unknown>) => st.repair({ recipe: RESTORE, runId: retired.runId, ...body })
+      const plan = dataOf(await restore({ mode: 'preview' }))
+      expect([plan.eligible, plan.sequence, plan.counts.toRestore, plan.counts.versionMovedStampIntact]).toEqual([true, 1, 4, 0])
+
+      // (a) A person fills a human cell of one retired row AFTER the restore was previewed (and its digest approved):
+      // the row's version moves, its retire stamp stays. The approved digest no longer names the sheet.
+      const edited = st.oldIds[1]
+      await st.humanEdit(edited, 'typed between the restore preview and its execute')
+      const moved = await st.stored()
+      const generationBefore = Number((await st.lockRow()).generation)
+      st.patchInputs.length = 0
+      const refused = errorOf(await restore({ mode: 'execute', planDigest: plan.planDigest, approvalRef: 'R-91:s66-d22-a' }), 409, CODES.PLAN_CHANGED)
+      expect([refused.details.reason, refused.details.partial]).toEqual(['plan_digest_differs', false])
+      expect([(await st.runs()).length, (await st.claims()).length, st.patchInputs.length], 'no restore run, no restore claim, no patch').toEqual([1, 1, 0])
+      expect(await st.stored(), 'no stored row moved').toEqual(moved)
+      const lockRow = await st.lockRow()
+      expect([lockRow.lease_id, Number(lockRow.generation)], 'the lease was taken for the recompute and released; nothing was attempted, so nothing was bumped').toEqual([null, generationBefore])
+      // The new preview covers the moved row at its CURRENT version: another digest, to be approved on its own.
+      const next = dataOf(await restore({ mode: 'preview' }))
+      expect([next.eligible, next.sequence, next.counts.toRestore, next.counts.versionMovedStampIntact]).toEqual([true, 1, 4, 1])
+      expect(next.planDigest).not.toBe(plan.planDigest)
+
+      // (b) A restore run that BEGAN and wrote nothing (its first patch fails inside the host): the sheet is as it was
+      // and the approval is spent — but the run sequence moved, so the next preview is a NEW digest and the undo of
+      // the retire is not dead-ended.
+      st.hooks.beforePatch = async () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
+      const stop = errorOf(await restore({ mode: 'execute', planDigest: next.planDigest, approvalRef: 'R-91:s66-d22-b' }), 409, CODES.STOPPED)
+      expect([stop.details.reason, stop.details.planned, stop.details.written, stop.details.partial]).toEqual(['host_write_failed', 4, 0, false])
+      st.hooks.beforePatch = null
+      expect(await st.stored(), 'the stopped run wrote nothing').toEqual(moved)
+      expect((await st.runs()).map((run: any) => [run.recipe, run.status, run.stop_reason, run.sequence_no, run.written_count])).toEqual([[RETIRE, 'completed', null, 0, 4], [RESTORE, 'stopped', 'host_write_failed', 1, 0]])
+      errorOf(await restore({ mode: 'execute', planDigest: next.planDigest, approvalRef: 'R-91:s66-d22-b' }), 409, CODES.ALREADY_CONSUMED)
+      const again = dataOf(await restore({ mode: 'preview' }))
+      expect([again.eligible, again.sequence, again.counts.toRestore, again.counts.versionMovedStampIntact]).toEqual([true, 2, 4, 1])
+      expect(again.planDigest, 'the same rows at the same versions, a NEW digest').not.toBe(next.planDigest)
+      const done = dataOf(await restore({ mode: 'execute', planDigest: again.planDigest, approvalRef: 'R-91:s66-d22-c' }))
+      expect([done.status, done.planned, done.written, done.sourceRunId]).toEqual(['completed', 4, 4, retired.runId])
+
+      // Every stored row is what it was before the retire (version + 2); the edited row carries the person's edit
+      // (version + 3) and nothing else differs on it.
+      const after = await st.stored()
+      for (const [id, row] of before.entries()) {
+        if (id === edited) {
+          expect(after.get(id)!.version).toBe(row.version + 3)
+          const data = JSON.parse(after.get(id)!.data)
+          expect(data[st.fields.notes]).toBe('typed between the restore preview and its execute')
+          delete data[st.fields.notes]
+          const original = JSON.parse(row.data)
+          delete original[st.fields.notes]
+          expect(data, 'the four cells are back; the person\'s edit survives').toEqual(original)
+        } else {
+          expect(after.get(id)!.data, `${st.oldIds.includes(id) ? 'old' : 'copy'} row: byte-identical`).toBe(row.data)
+          expect(after.get(id)!.version).toBe(row.version + (st.oldIds.includes(id) ? 2 : 0))
+        }
+      }
+      expect((await st.claims()).map((claim: any) => claim.approval_ref).sort(), 'the refused execute spent nothing; the stopped run and the completed one each spent their own').toEqual(['R-91:s66-d22', 'R-91:s66-d22-b', 'R-91:s66-d22-c'])
+    }, 180_000)
   })
 }
