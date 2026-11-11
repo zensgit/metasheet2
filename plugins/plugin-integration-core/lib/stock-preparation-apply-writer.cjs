@@ -723,6 +723,42 @@ function isRecordVersionConflict(error) {
   return error.code === 'VERSION_CONFLICT' || error.name === 'MultitableRecordVersionConflictError'
 }
 
+// Batch-refresh step 6a-1 (S6-1, design §3.3 / RR G8; rebaseline S6-1 (2)): THE WRITER-SCOPED PRE-IO MARKER. The writer
+// sets `error.writerPhase = 'pre_io'` (and `error.writerPreIoReason`, one of the closed list below) on EXACTLY the
+// refusals it raises before ANY record IO of the run, at their call sites in applyStockPreparationPlan, and nowhere
+// else: never on a stop inside the loop (`writerStop`, a fence stop, a pull-batch allocation stop) and never on
+// `metadata_scope_incomplete`. The governed apply's best-effort failed finish self-verifies a run ONLY on this marker
+// (zero writes, zero attempts are then provable) — never on `details.partial === false`, which `writerStop` and the lock
+// also set with other meanings. The zero-IO refusals at the very top of the writer (permission, plan shape, the first
+// suspension check, the target, the expected-records map) are deliberately UNMARKED: leaving a refusal unmarked is fail
+// safe (the run stays recoverable instead of self-verified).
+const WRITER_PRE_IO_REASONS = Object.freeze([
+  // 批次标识 (R-65): the stamp admission — the writer's ONE copy (admittedPullBatchStampOf, which
+  // assertWriterAdmitsPullBatchStamp also runs), 500 STAMP_INVALID, before the fence refusal below.
+  'pull_batch_stamp_admission',
+  'write_fence_required',
+  // PR-3a: the governance tripwire (assertWriterAdmitsPlan: its suspension re-check and the four governance reasons).
+  'governance_tripwire',
+  'host_fence_unsupported',
+])
+
+function markWriterPreIo(error, reason) {
+  if (!WRITER_PRE_IO_REASONS.includes(reason)) throw new Error(`markWriterPreIo: ${reason} is not a writer pre-IO reason`)
+  if (error && typeof error === 'object') {
+    error.writerPhase = 'pre_io'
+    error.writerPreIoReason = reason
+  }
+  return error
+}
+
+function preIo(reason, fn) {
+  try {
+    return fn()
+  } catch (error) {
+    throw markWriterPreIo(error, reason)
+  }
+}
+
 function writerStop(reason, decision) {
   const error = new StockPreparationProjectWriteLockError(409, CHANGE_PLAN_STALE_CODE, 'a row this plan was computed against changed while it was being written; preview again', {
     reason,
@@ -1038,7 +1074,7 @@ async function applyStockPreparationPlan(input = {}) {
   const expectedRecords = normalizeExpectedRecords(input.expectedRecords)
   const templateFields = fieldMapForTemplate(template)
   // 批次标识 BI-1b: the optional side input, validated BEFORE any IO (500 STAMP_INVALID). Absent => byte-identical.
-  const pullBatch = pullBatchRunOf(input.pullBatchStamp, { plan, target, writeFence: input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null })
+  const pullBatch = preIo('pull_batch_stamp_admission', () => pullBatchRunOf(input.pullBatchStamp, { plan, target, writeFence: input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null }))
   const counts = {
     created: 0,
     updated: 0,
@@ -1056,13 +1092,13 @@ async function applyStockPreparationPlan(input = {}) {
   // production stock-prep write without the lease fence is refused here (501), whatever the caller did
   // before. Direct callers (writer tests, fakes) that pass neither keep the unfenced behaviour.
   if (input.writeFenceRequired === true && !writeFence) {
-    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
+    throw markWriterPreIo(new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' }), 'write_fence_required')
   }
   // PR-3a: the governance tripwire (see assertWriterAdmitsPlan). Runs AFTER the refusal above on purpose —
   // check (iii) reads `writeFence.generationToken`, and only that refusal guarantees a fence here.
-  if (input.writeFenceRequired === true) assertWriterAdmitsPlan({ plan, governance: input.governance, writeFence })
+  if (input.writeFenceRequired === true) preIo('governance_tripwire', () => assertWriterAdmitsPlan({ plan, governance: input.governance, writeFence }))
   // A fenced run is ALSO host-fenced on every record write; fail closed before any IO otherwise.
-  assertHostFencedWriteSupported(recordsApi, writeFence)
+  preIo('host_fence_unsupported', () => assertHostFencedWriteSupported(recordsApi, writeFence))
 
   // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
   // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
@@ -1348,6 +1384,8 @@ module.exports = {
   // PR-8: the version fence's stop code (the lanes / store / decisions spell the same literal).
   CHANGE_PLAN_STALE_CODE,
   WRITER_STOP_REASONS,
+  // Step 6a-1 (R-91): the closed list of the refusals the writer marks `writerPhase === 'pre_io'`.
+  WRITER_PRE_IO_REASONS,
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
@@ -1360,6 +1398,8 @@ module.exports = {
   countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
+    // Step 6a-1: the pre-IO marker (XS-04).
+    markWriterPreIo,
     pullBatchAllocationStop,
     isRecordVersionConflict,
     logicalRowOf,

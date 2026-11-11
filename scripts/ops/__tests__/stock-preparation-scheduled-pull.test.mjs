@@ -382,7 +382,18 @@ test('manual_confirm_required is recorded and NEVER applied, even with --apply',
     // PR-3a follow-up: `recovery_pending` fails by its own code with a recovery note, not as an unexpected status.
     assert.equal(heldLines[0].error, 'STOCK_PREP_REFRESH_RECOVERY_PENDING')
     assert.match(heldLines[0].note, /recovered/)
+    // Batch-refresh step 6a-3 (S6-3, R-91; F-14): the note points to WHERE it is recovered — the recovery card of the
+    // 拉取待确认 page — and says this script never recovers. Asserted inside this existing subtest on purpose: the ops
+    // TAP `# tests` count does not move for it.
+    assert.match(heldLines[0].note, /recovery card of the 拉取待确认 page/)
+    assert.match(heldLines[0].note, /核对上次写入 \/ 结束这次执行/)
+    assert.match(heldLines[0].note, /this script never recovers/)
+    assert.doesNotMatch(heldLines[0].note, /until step 6 exists/)
   }
+  // S6-3 (the integration line imports pullOneProject / summarize from this script): the exports stay stable.
+  const exported = await import(pathToFileURL(SCRIPT_PATH).href)
+  assert.equal(typeof exported.pullOneProject, 'function', 'pullOneProject stays exported')
+  assert.equal(typeof exported.summarize, 'function', 'summarize stays exported')
 })
 
 // Batch-refresh step 4 PR-7 (register R-62 ②; design §17 PR-7 row): a governed project whose pull is SUSPENDED (the
