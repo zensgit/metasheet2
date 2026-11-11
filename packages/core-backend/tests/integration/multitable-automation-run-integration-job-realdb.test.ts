@@ -37,6 +37,11 @@
  *     I6a fix (re-review M1): the sheet id is EXACT on the real registry read — the registered id plus one whitespace
  *     code point is another sheet: refused at save (no rule row) and at every trigger (0 port calls, no intent row,
  *     no lease), while the registered id itself saves and runs (the positive control of the same lookups).
+ *   - R-69 I6d fix round 2 (F1): `updateRule` against a CONCURRENT PATCH on the real table — two AutomationService
+ *     instances, each over its own one-connection pool (two backends), the first request's UPDATE held at the moment
+ *     its statement would be sent. A write whose stored row changed since it was read updates nothing and is
+ *     re-validated against the row as it now is (action type × action config; trigger × action, both orders), and
+ *     two saves stamped in the same millisecond are still two row versions.
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
@@ -44,11 +49,13 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { Client } from 'pg'
+import { Kysely, PostgresDialect } from 'kysely'
+import { Client, Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, test, vi } from 'vitest'
 
 import { authService } from '../../src/auth/AuthService'
 import { db } from '../../src/db/db'
+import type { Database } from '../../src/db/types'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { up as leasesUp } from '../../src/db/migrations/zzzz20261106111100_create_automation_job_leases'
 import { down as runFinishedTriggerDown, up as runFinishedTriggerUp } from '../../src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type'
@@ -653,6 +660,305 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
       await q(`DELETE FROM automation_rules WHERE sheet_id = ANY($1::text[])`, [[sheet, ...lookalikes]]).catch(() => undefined)
     }
   }, 20_000)
+})
+
+// ── R-69 I6d fix round 2 (F1): updateRule against a CONCURRENT PATCH, on the real table ───────────────────────
+//
+// updateRule validates the MERGED rule (request ?? stored) and writes only the columns the request sent. Without a
+// row-version predicate on that write, two PATCHes that each validated against the same stored row can leave a
+// combination NEITHER of them validated: the job type over a config no gate ever saw (a client `binding` that names
+// another tenant), or the job on a trigger that is not schedule.cron.
+//
+// HOW THE INTERLEAVING IS MADE DETERMINISTIC. Each request runs in its OWN AutomationService over its OWN
+// one-connection pool — two backends, the shape of two app processes, so nothing held in one process's memory could
+// pass these cases — and ONE statement of the first request is HELD at the moment it would be sent: a wrapper around
+// the Kysely handle the test hands to that service makes the terminal call of its next
+// `updateTable('automation_rules')` (or of a chosen `selectFrom('automation_rules')`) wait for the test. No
+// production seam is involved, so this block runs unchanged on the source as it was before the fix.
+//
+// Order in every case: the HELD request runs up to the held statement (built, not sent) → the OTHER request runs to
+// completion on the second backend → the held statement is sent.
+
+/** Which automation_rules statement of a request to hold: its UPDATE, or its n-th SELECT (1 = the next one). */
+type HeldStatement = 'update' | { read: number }
+
+/** A handle on `real` that holds ONE automation_rules statement at its terminal call once `holdNext()` armed it. */
+function heldRuleStatements<T extends object>(real: T) {
+  type Hold = { reach: () => void; released: Promise<void> }
+  let armed: { hold: Hold; verb: 'updateTable' | 'selectFrom'; skip: number } | null = null
+  // Kysely's builders are immutable and keep their state in private fields: every call goes to the real object
+  // (never with the proxy as `this`), and every builder a call returns is wrapped again, down to the terminal call.
+  const holdBuilder = (builder: object, hold: Hold): object => new Proxy(builder, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target) as unknown
+      if (typeof value !== 'function') return value
+      const method = value as (...args: unknown[]) => unknown
+      return (...args: unknown[]) => {
+        if (prop === 'execute' || prop === 'executeTakeFirst') {
+          hold.reach()
+          return hold.released.then(() => method.apply(target, args))
+        }
+        const next = method.apply(target, args)
+        return next !== null && typeof next === 'object' && typeof (next as { execute?: unknown }).execute === 'function'
+          ? holdBuilder(next as object, hold)
+          : next
+      }
+    },
+  })
+  const handle = new Proxy(real, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target) as unknown
+      if (typeof value !== 'function') return value
+      const method = value as (...args: unknown[]) => unknown
+      return (...args: unknown[]) => {
+        const out = method.apply(target, args)
+        if (!armed || prop !== armed.verb || args[0] !== 'automation_rules') return out
+        if (armed.skip > 0) {
+          armed.skip -= 1
+          return out
+        }
+        const { hold } = armed
+        armed = null // one statement only: a later statement of the same request (its re-validated write) is not held
+        return holdBuilder(out as object, hold)
+      }
+    },
+  })
+  const holdNext = (statement: HeldStatement = 'update') => {
+    let reach!: () => void
+    let release!: () => void
+    const reached = new Promise<void>((resolve) => { reach = resolve })
+    const released = new Promise<void>((resolve) => { release = resolve })
+    armed = statement === 'update'
+      ? { hold: { reach, released }, verb: 'updateTable', skip: 0 }
+      : { hold: { reach, released }, verb: 'selectFrom', skip: statement.read - 1 }
+    return { reached, release }
+  }
+  return { handle, holdNext }
+}
+
+/** One AutomationService whose every automation_rules statement runs on ONE backend of its own. */
+function ownBackendService() {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
+  const kysely = new Kysely<Database>({ dialect: new PostgresDialect({ pool }) })
+  const held = heldRuleStatements(kysely)
+  const query = (text: string, params?: unknown[]) => pool.query(text, params)
+  const service = new AutomationService(new EventBus(), held.handle as never, query as never)
+  const backendPid = async () => Number(((await pool.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+  return { service, holdNext: held.holdNext, backendPid, close: () => kysely.destroy() }
+}
+
+describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed under it is re-validated, never written as it was (two backends, the first UPDATE held)', () => {
+  const principalId = `svcf1_${RUN}`
+  const project = `PF1-${RUN}`
+  const sheet = `sheetf1_${RUN}`
+  const serverBinding = { principalId, tenantId: TENANT }
+  const forgedBinding = { principalId, tenantId: `${TENANT}_other` }
+  // 1 January only: the cron this file registers on its schedulers does not fire while the file runs.
+  const cron = { cron: '0 6 1 1 *', timezone: 'Asia/Shanghai' }
+  const jobConfig = (projectNo: string = project, extra: Record<string, unknown> = {}) => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 60_000, ...extra })
+  const jobPatch = { actionType: 'run_integration_job', actionConfig: jobConfig() }
+  const recordTriggerPatch = { triggerType: 'record.created', triggerConfig: {} }
+  const COUPLING = 'run_integration_job (stock_prep_pull) is only allowed on a schedule.cron trigger (got record.created)'
+  const savedFlag = process.env[FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+  let A: ReturnType<typeof ownBackendService>
+  let B: ReturnType<typeof ownBackendService>
+
+  beforeAll(async () => {
+    process.env[FLAG] = 'true'
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcf1'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await registerRuleSheet(sheet, TENANT, project)
+    A = ownBackendService()
+    B = ownBackendService()
+  })
+  afterAll(async () => {
+    if (savedFlag === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = savedFlag
+    if (savedProjectSheets === undefined) delete process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+    else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
+    await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    await q(`DELETE FROM integration_stock_prep_project_target WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
+    await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)
+    await A?.close().catch(() => undefined)
+    await B?.close().catch(() => undefined)
+  })
+
+  type StoredRule = { trigger_type: string; action_type: string; action_config: Record<string, unknown>; actions: unknown; version_ms: string }
+  const storedRule = async (ruleId: string) => (await q(
+    `SELECT trigger_type, action_type, action_config, actions, (extract(epoch FROM date_trunc('milliseconds', updated_at)) * 1000)::bigint::text AS version_ms
+       FROM automation_rules WHERE id = $1`,
+    [ruleId],
+  )).rows[0] as StoredRule
+  /** A stored rule that carries NO job: schedule.cron with a timezone, and an action no save gate looks at. */
+  const seedPlainCronRule = (name: string) => A.service.createRule(sheet, { name, triggerType: 'schedule.cron', triggerConfig: cron, actionType: 'record_click', actionConfig: {}, createdBy: principalId } as never)
+  const dropRule = async (ruleId: string) => {
+    A.service.unregisterSchedule(ruleId)
+    B.service.unregisterSchedule(ruleId)
+    await q(`DELETE FROM automation_rules WHERE id = $1`, [ruleId]).catch(() => undefined)
+  }
+  type Settled = { ok: true; value: unknown } | { ok: false; error: Error }
+  const settle = (work: Promise<unknown>): Promise<Settled> => work.then(
+    (value): Settled => ({ ok: true, value }),
+    (error: unknown): Settled => ({ ok: false, error: error as Error }),
+  )
+  /** HELD (backend A) runs up to its held statement and waits; OTHER (backend B) runs to completion; then it is sent. */
+  const interleave = async (ruleId: string, heldPatch: Record<string, unknown>, otherPatch: Record<string, unknown>, statement: HeldStatement = 'update') => {
+    const hold = A.holdNext(statement)
+    const held = settle(A.service.updateRule(ruleId, sheet, heldPatch as never, principalId))
+    await Promise.race([
+      hold.reached,
+      held.then(() => { throw new Error('the held PATCH settled before it reached the statement to hold') }),
+    ])
+    const other = await settle(B.service.updateRule(ruleId, sheet, otherPatch as never, principalId))
+    hold.release()
+    return { held: await held, other }
+  }
+
+  test('the two requests are two backends', async () => {
+    expect(await A.backendPid()).not.toBe(await B.backendPid())
+  })
+
+  test('action type × action config: the config PATCH that lost the race is re-validated as the JOB config it has become — stored with the SERVER binding, its own (another tenant) dropped', async () => {
+    const rule = await seedPlainCronRule(`f1_u_same_${RUN}`)
+    try {
+      const { held, other } = await interleave(
+        rule.id,
+        // read while the action is record_click: no gate looks at this config, binding included
+        { actionConfig: jobConfig(project, { timeoutMs: 120_000, binding: forgedBinding }) },
+        // read while the config is {}: the job gate validates and stamps ITS config
+        jobPatch,
+      )
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect(row.action_type).toBe('run_integration_job')
+      // what every save validated: a stored job config carries the SERVER binding
+      expect(row.action_config.binding).toEqual(serverBinding)
+      // the loser was not dropped either: validated again against the winner's row, it is the stored config
+      expect(held).toMatchObject({ ok: true })
+      expect(row.action_config).toEqual({ ...jobConfig(project, { timeoutMs: 120_000 }), binding: serverBinding })
+      expect(row.trigger_type).toBe('schedule.cron')
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('action type × action config: a loser that names ANOTHER project is refused by the rule-sheet guard when re-validated; the row is the winner\'s', async () => {
+    const rule = await seedPlainCronRule(`f1_u_other_${RUN}`)
+    try {
+      const { held, other } = await interleave(rule.id, { actionConfig: jobConfig(`${project}-x`, { binding: forgedBinding }) }, jobPatch)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect(row.action_type).toBe('run_integration_job')
+      expect(row.action_config).toEqual({ ...jobConfig(), binding: serverBinding })
+      expect(held.ok).toBe(false)
+      const refusal = (held as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal.message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.project_mismatch)
+      expect((refusal as AutomationRuleValidationError).code).toBe('VALIDATION_ERROR')
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('trigger × action, the TRIGGER PATCH held: re-validated against the job it now sits under, it is refused with the coupling message; the rule stays schedule.cron', async () => {
+    const rule = await seedPlainCronRule(`f1_d_trigger_${RUN}`)
+    try {
+      // held: read while the action is record_click (no coupling); other: read while the trigger is schedule.cron
+      const { held, other } = await interleave(rule.id, recordTriggerPatch, jobPatch)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect([row.trigger_type, row.action_type]).toEqual(['schedule.cron', 'run_integration_job'])
+      expect(row.action_config).toEqual({ ...jobConfig(), binding: serverBinding })
+      expect(held.ok).toBe(false)
+      const refusal = (held as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal.message).toBe(COUPLING)
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('trigger × action, the JOB PATCH held: re-validated against the trigger the rule now has, it is refused with the coupling message; the action stays what it was', async () => {
+    const rule = await seedPlainCronRule(`f1_d_job_${RUN}`)
+    try {
+      const { held, other } = await interleave(rule.id, jobPatch, recordTriggerPatch)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect([row.trigger_type, row.action_type]).toEqual(['record.created', 'record_click'])
+      expect(row.action_config).toEqual({})
+      expect(held.ok).toBe(false)
+      const refusal = (held as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal.message).toBe(COUPLING)
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('the row changed BETWEEN the two reads of one save (a PATCH of the action AND the trigger config): its write is bound to the FIRST version it read, so it is refused and validated again', async () => {
+    const rule = await seedPlainCronRule(`f1_between_reads_${RUN}`)
+    try {
+      // held: read 1 (the action block) sees schedule.cron, so the job gate passes; read 2 (the trigger block) is held.
+      // other: the trigger becomes record.created. Read 2 then sees the NEW row — and a write bound to that read's
+      // version would go through, leaving the job on record.created.
+      const { held, other } = await interleave(rule.id, { ...jobPatch, triggerConfig: { cron: '0 7 1 1 *', timezone: 'Asia/Shanghai' } }, recordTriggerPatch, { read: 2 })
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect([row.trigger_type, row.action_type]).toEqual(['record.created', 'record_click'])
+      expect(row.action_config).toEqual({})
+      expect(held.ok).toBe(false)
+      const refusal = (held as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal.message).toBe(COUPLING)
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('a rule DELETED under a held save answers "not found" (null), as it did before: the second validation reads no row', async () => {
+    const rule = await seedPlainCronRule(`f1_deleted_${RUN}`)
+    try {
+      const hold = A.holdNext()
+      const held = settle(A.service.updateRule(rule.id, sheet, { name: `f1_deleted_${RUN}_renamed` }, principalId))
+      await hold.reached
+      expect(await B.service.deleteRule(rule.id, sheet)).toBe(true)
+      hold.release()
+      expect(await held).toEqual({ ok: true, value: null })
+      expect((await q(`SELECT 1 FROM automation_rules WHERE id = $1`, [rule.id])).rows).toHaveLength(0)
+    } finally {
+      await dropRule(rule.id)
+    }
+  }, 30_000)
+
+  test('the row version is strictly increasing: two saves stamped in the SAME millisecond (the app clock frozen) are two versions, so a write held across the second one is not written as it was', async () => {
+    const rule = await seedPlainCronRule(`f1_same_ms_${RUN}`)
+    // Only `Date` is faked (timers stay real): every `new Date()` in this process answers the same instant, one hour
+    // ahead of the database clock, so every save below is stamped with the SAME millisecond by the application.
+    const frozen = Date.now() + 3_600_000
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(frozen)
+    try {
+      // save 1 (a rename): the row's version becomes the frozen instant
+      expect(await B.service.updateRule(rule.id, sheet, { name: `f1_same_ms_${RUN}_renamed` }, principalId)).not.toBeNull()
+      expect((await storedRule(rule.id)).version_ms).toBe(String(frozen))
+      // held: reads version = frozen. save 2 (the job) is stamped with the same millisecond — and is still a new version.
+      const { held, other } = await interleave(rule.id, { actionConfig: jobConfig(project, { timeoutMs: 120_000, binding: forgedBinding }) }, jobPatch)
+      expect(other.ok).toBe(true)
+      const row = await storedRule(rule.id)
+      expect(row.action_type).toBe('run_integration_job')
+      expect(row.action_config.binding).toEqual(serverBinding)
+      expect(held).toMatchObject({ ok: true })
+      expect(row.action_config).toEqual({ ...jobConfig(project, { timeoutMs: 120_000 }), binding: serverBinding })
+      // three saves in one application millisecond: three versions, one millisecond apart
+      expect(row.version_ms).toBe(String(frozen + 2))
+    } finally {
+      vi.useRealTimers()
+      await dropRule(rule.id)
+    }
+  }, 30_000)
 })
 
 // ── R-69 1c: integration.run_finished on the REAL tables ─────────────────────────────────────────────────────

@@ -32,8 +32,10 @@ import { EventBus } from '../../src/integration/events/event-bus'
 import { collectRunIntegrationJobOccurrences, parsePersistedRunIntegrationJobConfig } from '../../src/multitable/automation-run-integration-job'
 import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
 import {
+  AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE,
   AutomationRuleValidationError,
   AutomationService,
+  RULE_WRITE_MAX_ATTEMPTS,
   parseCreateRuleInput,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
@@ -116,12 +118,22 @@ const JSON_COLUMNS = ['trigger_config', 'action_config', 'conditions', 'actions'
  * updateRule issue) and a query function that answers the creator's memberships and the project-sheet registry. The
  * registry answers by EXACT match on each row's own `sheet_id` and returns the row as stored — never an echo of the
  * query parameter.
+ *
+ * `onRuleUpdate` (fix round 2, F1) stands for ANOTHER save landing between an updateRule attempt's read and its write:
+ * it is called when the n-th UPDATE of this service is about to run, may change the store, and by answering `'lost'`
+ * makes that UPDATE match no row — what the real statement's row-version predicate does then (the predicate itself
+ * is proven on the real table: tests/integration/multitable-automation-run-integration-job-realdb.test.ts).
  */
-function makeService(options: { orgRows?: Array<{ org_id: string }>; registry?: RegistryRow[] | Error } = {}) {
+function makeService(options: {
+  orgRows?: Array<{ org_id: string }>
+  registry?: RegistryRow[] | Error
+  onRuleUpdate?: (nth: number, rules: Map<string, Record<string, unknown>>) => 'lost' | undefined
+} = {}) {
   const orgRows = options.orgRows ?? [{ org_id: 'tenant_1' }]
   const registry = options.registry ?? [REGISTERED('sheet_1', 'tenant_1', 'P-1')]
   const rules = new Map<string, Record<string, unknown>>()
   const writes: Array<{ op: 'insert' | 'update'; values: Record<string, unknown> }> = []
+  let ruleUpdates = 0
   const asStored = (values: Record<string, unknown>) => {
     const row: Record<string, unknown> = { ...values }
     for (const column of JSON_COLUMNS) if (typeof row[column] === 'string') row[column] = JSON.parse(row[column] as string)
@@ -144,6 +156,8 @@ function makeService(options: { orgRows?: Array<{ org_id: string }>; registry?: 
         return []
       }
       if (op === 'update') {
+        ruleUpdates += 1
+        if (options.onRuleUpdate?.(ruleUpdates, rules) === 'lost') return []
         const hit = matching()
         for (const row of hit) Object.assign(row, asStored(state.values ?? {}))
         if (hit.length > 0) writes.push({ op, values: state.values ?? {} })
@@ -563,6 +577,93 @@ describe('the editor wire shape through the real updateRule (I6d)', () => {
     expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
     expect(refusal!.message).toBe(NESTED_MESSAGE)
     expect(h.writes).toHaveLength(0)
+  })
+})
+
+// ── fix round 2 (F1): a write whose stored row changed under it ─────────────────────────────────────────────────
+//
+// updateRule binds its UPDATE to the row version it validated. A write that matches no row at that version has
+// written nothing, and the whole save is validated again on the row as it now is. These cases drive that loop on the
+// in-memory store (the n-th UPDATE "loses": see makeService). That the REAL statement loses exactly when the row
+// changed — and only then — is proven on the real table, two backends, in the real-DB file's F1 block.
+describe('updateRule — a write whose stored row changed under it is validated again, never written as it was (fix round 2, F1)', () => {
+  /** A stored rule that carries no job: schedule.cron with a timezone, and an action no save gate looks at. */
+  const storedPlainRule = () => ({
+    id: 'atr_1', sheet_id: 'sheet_1', created_by: CREATOR,
+    trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    action_type: 'record_click', action_config: {}, actions: null,
+  })
+  /** The other save, landing between this one's read and its write: the rule now carries the (stamped) job. */
+  const otherSaveMakesItAJobRule = (nth: number, rules: Map<string, Record<string, unknown>>): 'lost' | undefined => {
+    if (nth !== 1) return undefined
+    Object.assign(rules.get('atr_1')!, { action_type: 'run_integration_job', action_config: stamped() })
+    return 'lost'
+  }
+
+  it('a trigger PATCH that lost to a save which made the rule a job rule is validated again and refused with the coupling message; nothing is written', async () => {
+    const h = makeService({ onRuleUpdate: otherSaveMakesItAJobRule })
+    h.seed(storedPlainRule())
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerType: 'record.created', triggerConfig: {} }), 'editor_2')))
+      .toBe('run_integration_job (stock_prep_pull) is only allowed on a schedule.cron trigger (got record.created)')
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.get('atr_1')).toMatchObject({ trigger_type: 'schedule.cron', action_type: 'run_integration_job' })
+  })
+
+  it('a config PATCH that lost to the same save is validated again as the JOB config it has become, and written with the SERVER binding', async () => {
+    const h = makeService({ onRuleUpdate: otherSaveMakesItAJobRule })
+    h.seed(storedPlainRule())
+    const updated = await h.patch('sheet_1', 'atr_1', wire({ actionConfig: editorJobConfig('P-1', { binding: CLIENT_BINDING, timeoutMs: 20 * 60_000 }) }), 'editor_2')
+    expect(updated).not.toBeNull()
+    expect(h.writes).toHaveLength(1)
+    expect(configColumn(h.writes[0].values)).toEqual({ ...stamped(), timeoutMs: 20 * 60_000 })
+    expect(JSON.stringify(h.rules.get('atr_1'))).not.toContain('tenant_foreign')
+    h.service.unregisterSchedule('atr_1')
+  })
+
+  it('a save that loses every time is refused after the last attempt — VALIDATION_ERROR, one fixed values-free message — and has written nothing', async () => {
+    let statements = 0
+    const h = makeService({ onRuleUpdate: (nth) => { statements = nth; return 'lost' } })
+    h.seed(storedPlainRule())
+    const refusal = await refusalOf(h.patch('sheet_1', 'atr_1', wire({ name: 'renamed' }), 'editor_2'))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect((refusal as AutomationRuleValidationError).code).toBe('VALIDATION_ERROR')
+    expect(refusal!.message).toBe(AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE)
+    expect(RULE_WRITE_MAX_ATTEMPTS).toBe(3)
+    expect(statements).toBe(RULE_WRITE_MAX_ATTEMPTS)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.get('atr_1')!.name).toBe('stored')
+    for (const needle of ['atr_1', 'sheet_1', CREATOR, 'tenant_', 'P-1']) expect(refusal!.message).not.toContain(needle)
+  })
+
+  it.each([
+    ['is GONE', (rules: Map<string, Record<string, unknown>>) => { rules.delete('atr_1') }],
+    ['now sits on ANOTHER sheet', (rules: Map<string, Record<string, unknown>>) => { rules.get('atr_1')!.sheet_id = 'sheet_2' }],
+  ])('a rule that %s when its write finds no row answers null (not found), from the next validation\'s first read', async (_label, change) => {
+    let statements = 0
+    const h = makeService({ onRuleUpdate: (nth, rules) => { statements = nth; change(rules); return 'lost' } })
+    h.seed(storedPlainRule())
+    expect(await h.patch('sheet_1', 'atr_1', wire({ name: 'renamed' }), 'editor_2')).toBeNull()
+    expect(statements).toBe(1)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  it('a save that does not lose reads the rule as often as it did before the fix and sends ONE statement', async () => {
+    for (const [body, reads] of [
+      [{ name: 'renamed' }, 1],
+      [{ actionConfig: {} }, 1],
+      [{ actionConfig: {}, triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } }, 2],
+    ] as const) {
+      let statements = 0
+      const h = makeService({ onRuleUpdate: (nth) => { statements = nth; return undefined } })
+      h.seed(storedPlainRule())
+      const getRule = vi.spyOn(h.service, 'getRule')
+      // the service call itself (the route's own preflight read is not part of updateRule)
+      expect(await h.service.updateRule('atr_1', 'sheet_1', wire(body) as never, 'editor_2')).not.toBeNull()
+      expect(getRule).toHaveBeenCalledTimes(reads)
+      expect(statements).toBe(1)
+      expect(h.writes).toHaveLength(1)
+      h.service.unregisterSchedule('atr_1')
+    }
   })
 })
 

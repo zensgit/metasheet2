@@ -233,6 +233,17 @@ export class AutomationRuleValidationError extends Error {
   }
 }
 
+/**
+ * R-69 I6d fix round 2 (F1) — AutomationService.updateRule. One attempt answers RULE_WRITE_LOST_RACE when the stored
+ * row changed between its read and its write (the guarded UPDATE matched no row at the version that was validated;
+ * nothing was written). updateRule validates again on the row as it now is, RULE_WRITE_MAX_ATTEMPTS attempts in all,
+ * then refuses with the existing 400 code VALIDATION_ERROR and this fixed, values-free message.
+ */
+const RULE_WRITE_LOST_RACE = Symbol('automation-rule-write-lost-race')
+export const RULE_WRITE_MAX_ATTEMPTS = 3
+export const AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE =
+  'the rule was changed by another save while this one was being checked; nothing was written — reload the rule and save again'
+
 export type AutomationTestRunMode = 'simulate' | 'real_fire'
 
 export interface AutomationTestRunSampleRecord {
@@ -1970,6 +1981,32 @@ export class AutomationService {
   /**
    * Update an existing automation rule.
    * Returns the updated rule, or null if not found.
+   *
+   * R-69 I6d fix round 2 (F1) — THE WRITE IS BOUND TO THE ROW VERSION THAT WAS VALIDATED. Every check below judges
+   * the MERGED rule (request ?? stored) and the UPDATE writes only the request's columns, so a row that another save
+   * changed between this save's read and its write would end as a combination neither save validated (the job type
+   * over a config no gate looked at; the job on a trigger that is not schedule.cron). updateRuleOnce therefore:
+   *   - takes the version of the FIRST stored snapshot it reads (`updated_at`, to the millisecond);
+   *   - sends ONE statement that matches that version only, and in the same statement moves the version strictly
+   *     forward — `GREATEST(app clock, stored version + 1 ms)` — so every write of this method is a new version
+   *     whatever the clocks say (two saves stamped in one millisecond; a clock that stepped back);
+   *   - on 0 rows has written nothing: the row was changed, moved or deleted since it was read — the save LOST A RACE.
+   * A lost race is not answered at once: the whole method runs again on the row as it now is — the same result as
+   * if this save had arrived after the other one, so a refusal is the validators' own (same codes, same messages)
+   * and a rule that is gone answers null from the first read, as it always did. RULE_WRITE_MAX_ATTEMPTS losses in
+   * a row end as a 400 VALIDATION_ERROR (AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE); nothing was written, and
+   * repeating the request is safe.
+   *
+   * Why a version predicate and not SELECT … FOR UPDATE: the validators read through the pool (queryFn, getRule), so
+   * a transaction holding the row lock across them would hold one pooled connection while asking for another — as
+   * many concurrent saves as the pool has connections (DB_POOL_MAX) would each hold one and wait for one. The single
+   * guarded statement holds nothing between the read and the write.
+   *
+   * What this covers: the rule row, for every rule and every write shape of THIS method — at this commit the one
+   * UPDATE of automation_rules a search of the repository's source finds; a writer added beside it, or SQL run by
+   * hand, is outside it. It does not cover the rows the validators read beside the rule (membership, the
+   * project-sheet registry: both re-checked on every trigger), nor the route's early checks, which read the rule
+   * before this method is called (webhook target shape, condition value types, DingTalk links — none is the job gate).
    */
   async updateRule(
     ruleId: string,
@@ -1977,11 +2014,34 @@ export class AutomationService {
     input: UpdateRuleInput,
     authoringActorId?: string | null,
   ): Promise<AutomationRule | null> {
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await this.updateRuleOnce(ruleId, sheetId, input, authoringActorId)
+      if (outcome !== RULE_WRITE_LOST_RACE) return outcome
+      if (attempt >= RULE_WRITE_MAX_ATTEMPTS) throw new AutomationRuleValidationError(AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE)
+    }
+  }
+
+  /** One read → validate → guarded write of updateRule. RULE_WRITE_LOST_RACE: the row changed since it was read; nothing written. */
+  private async updateRuleOnce(
+    ruleId: string,
+    sheetId: string,
+    input: UpdateRuleInput,
+    authoringActorId?: string | null,
+  ): Promise<AutomationRule | null | typeof RULE_WRITE_LOST_RACE> {
     if (input.triggerType !== undefined && !VALID_TRIGGER_TYPES.has(input.triggerType)) {
       throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
     }
     if (input.actionType !== undefined && !VALID_ACTION_TYPES.has(input.actionType)) {
       throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
+    }
+    // F1: the version this attempt validates against is the FIRST stored snapshot it reads. A later read of the same
+    // attempt may see a newer row; the write below still matches the first version only, so it is then refused.
+    // (Same number of getRule calls as before: the unit suites queue its answers.)
+    let validatedVersion: string | undefined
+    const readStoredRule = async (): Promise<AutomationRule | null> => {
+      const stored = await this.getRule(ruleId)
+      if (stored && validatedVersion === undefined) validatedVersion = stored.updated_at
+      return stored
     }
     const updates: Record<string, unknown> = {}
     const shouldValidateActions = input.actionType !== undefined
@@ -2006,7 +2066,7 @@ export class AutomationService {
     let existingRuleSnapshot: AutomationRule | null | undefined
 
     if (shouldValidateActions) {
-      const existing = await this.getRule(ruleId)
+      const existing = await readStoredRule()
       existingRuleSnapshot = existing
       if (!existing || existing.sheet_id !== sheetId) return null
 
@@ -2129,7 +2189,7 @@ export class AutomationService {
     // trigger type/config is being changed and the result is a date_field rule (explicit type, or a config
     // change on an existing date_field rule). Mirrors createRule's gate so the API can't bypass the UI contract.
     if (input.triggerType !== undefined || input.triggerConfig !== undefined) {
-      const existingForTrigger = await this.getRule(ruleId)
+      const existingForTrigger = await readStoredRule()
       existingRuleSnapshot = existingForTrigger
       if (!existingForTrigger || existingForTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForTrigger.trigger_type
@@ -2202,7 +2262,7 @@ export class AutomationService {
       || input.name !== undefined
       || input.enabled !== undefined
     ) {
-      const existingForWebhook = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForWebhook = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       existingRuleSnapshot = existingForWebhook
       if (!existingForWebhook || existingForWebhook.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForWebhook.trigger_type
@@ -2227,7 +2287,7 @@ export class AutomationService {
       || input.name !== undefined
       || input.enabled !== undefined
     ) {
-      const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
       const nextTriggerConfig = (
@@ -2348,7 +2408,7 @@ export class AutomationService {
     ) {
       // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
       // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
-      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       existingRuleSnapshot = existingForDeletedTrigger
       if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
@@ -2391,17 +2451,28 @@ export class AutomationService {
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
-    updates.updated_at = new Date().toISOString()
+    // F1: a write is never sent without the version it was validated against. Not reachable today — every field that
+    // puts a key into `updates` also opens the T1-2 block above, which reads the stored row — so this is the
+    // fail-closed side of a future edit that breaks that pairing, not a path with a caller.
+    if (validatedVersion === undefined) throw new Error('updateRule: no stored rule snapshot was read before the write')
+
+    // F1: the row version moves strictly forward with every write, in the statement that writes it (see updateRule).
+    const stampedAt = new Date().toISOString()
+    updates.updated_at = sql`GREATEST(${stampedAt}::timestamptz, date_trunc('milliseconds', updated_at) + interval '1 millisecond')`
 
     const result = await this.db
       .updateTable('automation_rules')
       .set(updates as never)
       .where('id', '=', ruleId)
       .where('sheet_id', '=', sheetId)
+      // F1: only the version this attempt validated against (both sides to the millisecond: the snapshot is a JS date).
+      .where(sql<boolean>`date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ${validatedVersion}::timestamptz)`)
       .returningAll()
       .execute()
 
-    if (result.length === 0) return null
+    // F1: no row at that version — it was changed, moved or deleted after this attempt read it. Nothing was written.
+    // Which of the three is the next attempt's first read to say (a rule that is gone answers null there, as before).
+    if (result.length === 0) return RULE_WRITE_LOST_RACE
 
     const rule = this.mapRow(result[0])
 
