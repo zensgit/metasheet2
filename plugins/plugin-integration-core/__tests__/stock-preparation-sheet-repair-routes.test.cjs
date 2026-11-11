@@ -39,6 +39,9 @@
 //   RR-12  (ruling C-3) the continuation through the route: a run left `running` after every row was written is
 //          verified and closed — no patch, audited, bumped, the batch ledger never read; refused with counts when a
 //          row moved; works on a project that became governed
+//   RR-13  (write-safety review of round 1) F-11 on both sides through the route, over the sheet's PHYSICAL field ids: a
+//          row of the nested copy whose `active` cell is not the boolean true refuses the preview with its count and
+//          the execute with 409 — no run, no claim, no patch; put right, the same approved digest runs
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -1033,6 +1036,47 @@ test('RR-12 the continuation through the route: a run left `running` after every
     expectRefusal(await withEnv({ [REPAIR_ENV]: undefined }, () => closePreview(off, `${R.SHEET_REPAIR_RUN_ID_PREFIX}00000000-0000-4000-8000-000000000000`)), { status: 404, code: CODES.DISABLED })
     off.zeroIo('the continuation with the switch off')
   } finally { off.h.restore() }
+})
+
+// ── RR-13 (write-safety review of round 1) ───────────────────────────────────────────────────────────────
+
+/**
+ * A sheet that refuses a retire for ONE reason: the preview names the token and its count, the execute of a digest
+ * approved while the sheet was clean is 409 inside the lease, and nothing is begun.
+ */
+async function refusedBoth(st, clean, label, token, countKey) {
+  const refused = dataOf(await withEnv(ON, () => preview(st)))
+  assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest, refused.counts[countKey]], [false, [token], null, 1], label)
+  assertValuesFree(refused, st, label)
+  const error = expectRefusal(await withEnv(ON, () => execute(st, clean.planDigest)), { status: 409, code: CODES.NOT_APPLICABLE })
+  assert.deepEqual([error.details.reasons, error.details.counts[countKey], error.details.partial], [[token], 1, false], label)
+  assertValuesFree(error, st, label)
+  assert.deepEqual([st.runs(), st.claims(), st.patchCount()], [[], [], 0], `${label}: no run, no claim, no patch`)
+  assert.equal(st.lockRow().lease_id, null, `${label}: the lease is released`)
+}
+
+test('RR-13 F-11 on both sides through the route, over the sheet\'s PHYSICAL field ids: a row of the nested copy whose `active` cell is not the boolean true refuses the preview with its count and the execute with 409 — no run, no claim, no patch; put right, the same approved digest runs', async () => {
+  const st = await mount()
+  try {
+    const clean = dataOf(await withEnv(ON, () => preview(st)))
+    assert.deepEqual([clean.eligible, clean.refusals, clean.counts.copyRowsNotBooleanActive, clean.counts.pairs], [true, [], 0, 4])
+    // The head row of the nested copy, read back through the reader's physical -> logical map.
+    const copyHead = st.copyRows().find((row) => st.cell(row, 'componentSourceId') === 'S-001')
+    assert.ok(copyHead, 'the nested copy has a head row')
+    const activeId = st.physical('active')
+    for (const value of ['false', 0, null]) {
+      copyHead.data[activeId] = value
+      await refusedBoth(st, clean, `the copy's head holds ${JSON.stringify(value)}`, 'copy_row_active_not_boolean', 'copyRowsNotBooleanActive')
+    }
+    delete copyHead.data[activeId]
+    await refusedBoth(st, clean, 'the copy\'s head holds no `active` cell at all', 'copy_row_active_not_boolean', 'copyRowsNotBooleanActive')
+    // Put right, and no version moved: the SAME approved digest runs.
+    copyHead.data[activeId] = true
+    const done = dataOf(await withEnv(ON, () => execute(st, clean.planDigest)))
+    assert.deepEqual([done.status, done.planned, done.written], ['completed', 4, 4])
+    assert.deepEqual(st.copyRows().map((row) => st.cell(row, 'active')), Array(st.copyRows().length).fill(true), 'every copy row: the boolean true')
+    assert.deepEqual(st.oldRows().map((row) => st.cell(row, 'active')), Array(4).fill(false), 'every old row: the boolean false')
+  } finally { st.h.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-repair-routes.test.cjs', tests)
