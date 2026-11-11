@@ -467,7 +467,9 @@ test('CA-01 every row of the nested copy a retire leaves LIVE must hold `active`
     return sheet
   }
   // Pure. The planner's reading — anything but the boolean false is active (design §6.1 D5) — still SELECTS such a row
-  // as a copy row, so the copy pairs; what refuses is that the views (`active is true`) would not show it.
+  // as a copy row, so the copy pairs; what refuses is that its cell is not the BOOLEAN true. The views' `active is true`
+  // filter would not show a row holding 'false', 0, null or no cell; 'true' and 1 it would show, and they refuse all the
+  // same (the strict rule of the rows a retire writes).
   for (const [label, value] of [['the string false', 'false'], ['the number 0', 0], ['null', null], ['an absent cell', ABSENT], ['the string true', 'true'], ['the number 1', 1]]) {
     for (const [where, recordId] of [['the copy\'s root', 'rec_copy_1'], ['a copy child', 'rec_copy_3'], ['the copy\'s deepest row', 'rec_copy_4']]) {
       const component = refusalsOf(withCopyCell({ [recordId]: value }))

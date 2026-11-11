@@ -217,7 +217,8 @@ const RECORD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
 // THE WRITERS OF THE THREE RUN STAMP CELLS, and what each produces — the only cells a backup may hold (`stampCellsOf`).
 // The conflict planner's `runPatch` is the one producer of these cells; it is called by the small lane
 // (lib/stock-preparation-table-actions.cjs) and the large lane (lib/stock-preparation-large-bom-jobs.cjs), and no route
-// hands either lane a run id of its own. Read over every tag of the repository that carries the planner:
+// hands either lane a run id of its own. As read over every TAG of this repository that carries the planner (the PR
+// that introduced this gate records the scan; commits between tags and writers outside the repository were not read):
 //   run id    `table-action:` + the ONE action id the table-action config accepts (the small lane's only run id);
 //             `large-bom:` + the expansion job's id, `large-bom-expansion-<uuid>` (the large lane);
 //             `sheet-repair:<uuid>` (a retire of this file — RUN_ID_PATTERN above);
@@ -657,10 +658,13 @@ function analyzeRetireComponent(context, entry) {
   const pairing = paired.length === 1 ? paired[0].pairing : null
   if (pairing) counts.pairs = pairing.pairs.length
   // F-11 ON BOTH SIDES. The rows of the paired copy are the ones a retire leaves LIVE. This file selects them the way
-  // the planner reads `active` — anything but the boolean false (design §6.1 D5) — but the fill and to-do views show a
-  // row only while its cell is the boolean true (the host's `active is true` filter reads 'false', 0, null and an
-  // absent cell as NOT active). A copy row that is merely "not the boolean false" would therefore be shown in NEITHER
-  // subtree once its old twin is retired: the retire is refused before any write and the rows are counted.
+  // the planner reads `active` — anything but the boolean false (design §6.1 D5) — but the fill and to-do views filter
+  // `active is true`, and the host reads the string 'false', the number 0, null and an absent cell as NOT true. A copy
+  // row that is merely "not the boolean false" could therefore be shown in NEITHER subtree once its old twin is
+  // retired: the retire is refused before any write and the rows are counted. The rule is the STRICT one — the boolean
+  // true, as on every row a retire writes — so a cell the host would still read as true (the string 'true', the
+  // number 1) refuses as well: a non-boolean `active` cell is the census's D5 defect, on a row that is about to become
+  // the only live copy.
   if (pairing) counts.copyRowsNotBooleanActive = paired[0].copyRows.filter((row) => row.active !== true).length
   if (counts.copyRowsNotBooleanActive > 0) refuse('copy_row_active_not_boolean')
 
