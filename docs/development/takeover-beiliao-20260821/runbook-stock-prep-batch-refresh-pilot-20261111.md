@@ -30,23 +30,41 @@
 
 在 `onprem-r83` 与 0232a25f2 之间比对迁移文件名（`packages/core-backend/migrations/` 与 `packages/core-backend/src/db/migrations/`）：R83 有、main 没有的名字是 **0 个**；main 多出 16 个：
 
-- 备料 SQL 迁移 7 个：`100`（表写锁）、`101`（试点列与审计词表）、`102`（沿用关系）、`103`（刷新状态、待定、执行台账）、`104`（变更计划）、`106`（执行 intent 日志与关闭形态）、`107`（部件裁定 / 残留确认）。`105` 两边逐字节相同，R83 已经跑过。
-- 平台 Kysely 迁移 9 个：`zzzz20261022150000`、`zzzz20261031120000`、`zzzz20261101090000`、`zzzz20261102150000`、`zzzz20261103120000`、`zzzz20261104150000`、`zzzz20261106120000`、`zzzz20261106130000`、`zzzz20261107010000`。
+迁移名 = 文件名去掉扩展名（SQL：`packages/core-backend/src/db/migration-provider.ts:243`；其余：`:169`）。
+
+- 备料 SQL 迁移 7 个：`100_create_integration_stock_prep_project_write_lock`（表写锁）、`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable`（试点列与审计词表）、`102_create_integration_stock_prep_continuation`（沿用关系）、`103_create_integration_stock_prep_refresh_state`（刷新状态、待定、执行台账）、`104_create_integration_stock_prep_change_plan`（变更计划）、`106_extend_integration_stock_prep_refresh_execution_for_recovery`（执行 intent 日志与关闭形态）、`107_create_integration_stock_prep_component_ruling`（部件裁定 / 残留确认）。`105` 两边逐字节相同，R83 已经跑过。
+- 平台 Kysely 迁移 9 个：`zzzz20261022150000_add_meta_sheets_grid_export_closure`、`zzzz20261031120000_add_users_recycle_bin`、`zzzz20261101090000_create_directory_handovers`、`zzzz20261102150000_dingtalk_login_repairs`、`zzzz20261103120000_outbound_intent_attempt_lease_target_key`、`zzzz20261104150000_create_task_source_links`、`zzzz20261106120000_create_security_action_challenges`、`zzzz20261106130000_create_directory_integration_capabilities`、`zzzz20261107010000_deprovision_effect_provider`。
 - **【待定 #6843】** 迁移 `108`（修复台账与一次性占用）。切包提交里有 #6843 时才有它，到时把它加进清单。
 
 **全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。所以这次升级**绝不用 `-RunMigrations 0`**（升级脚本默认 `'1'`，`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:269`；为 `0` 时跳过迁移，`:2864-2878`）。
 
 ### 1.2 只读预检（窗口之前，结果只记计数）
 
-**(1) 迁移清单。** 用包里的 `migrate.js`，带与升级脚本相同的环境（先导入 `docker/app.env`）：
+**(1) 迁移清单。** 新包还没装，不在现场跑它的 `migrate.js`。窗口之前分两步核：
 
-```powershell
-node packages\core-backend\dist\src\db\migrate.js --list
-```
+- 用**已安装的 R83** 的 `migrate.js`，带与升级脚本相同的环境（先导入 `docker/app.env`）：
 
-`--list` 只读（`packages/core-backend/src/db/migrate.ts:129`）。通过：没有报「missing」类错误，Pending 恰好是 §1.1 的 16 个名字（有 #6843 时 17 个），不多不少。不通过：现场库跑过 R83 之外的迁移，或名字对不上——停下，回帖只列不匹配的名字。
+  ```powershell
+  node packages\core-backend\dist\src\db\migrate.js --list
+  ```
 
-**(2) 备料计数（`psql -f`，只读角色，只记数字）。**
+  `--list` 只读（`packages/core-backend/src/db/migrate.ts:129`）。通过：Pending 为 0、Applied 等于 R83 自带的迁移数——说明现场库只跑过 R83 自带的迁移；R83 的名字全部在 main 里（§1.1），新包的迁移器不会报「missing」。
+- 再用只读 SQL 核 §1.1 的 16 个名字**一个都还没跑**（Kysely 的默认记录表 `kysely_migration`，同 `r61-release-checklist-draft-20260928.md` 的做法；本手册所写，未在库上执行过）：
+
+  ```sql
+  BEGIN READ ONLY;
+  SELECT n AS migration, EXISTS (SELECT 1 FROM kysely_migration k WHERE k.name = n) AS applied
+    FROM unnest(ARRAY[
+      '<§1.1 的第 1 个名字>',
+      '<§1.1 的第 2 个名字>'
+      -- ……16 个逐条列出（有 #6843 时 17 个）
+    ]) AS n ORDER BY n;
+  ROLLBACK;
+  ```
+
+通过：每条 `applied = f`。不通过：有 `t`，或 R83 的 `--list` 不是 Pending 0——停下，回帖只列不匹配的名字，不要重跑、不要手工补迁移。
+
+**(2) 备料计数（`psql -f`，只读角色，只记数字）**（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍）。
 
 ```sql
 SET default_transaction_read_only = on;
@@ -84,7 +102,7 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 
 **(1) 迁移。** 再跑一次 `--list`，Pending 为 0。逐个确认 7 个备料迁移：`node packages\core-backend\dist\src\db\migrate.js --confirm <名字>`，退出码 0 = 已执行、1 = 待执行、2 = 不认识（`migrate.ts:130`）。
 
-**(2) 授权。** 插件的数据库助手建在宿主给的 `context.api.database` 之上（`db.cjs:194-200`），用的就是后端自己的数据库连接，所以用 `app.env` 里 `DATABASE_URL` 的那个角色连上去查。迁移头注释写明要求的：105 四张表 SELECT / INSERT / UPDATE（`105_create_integration_stock_prep_pull_batch.sql:67`）；106 的 intent 表 SELECT / INSERT，执行台账与变更计划 SELECT / INSERT / UPDATE（`106_…:46-47`）；107 的裁定表 SELECT / INSERT / UPDATE（`107_…:41`）。100–104 的头注释没写授权，这里一并查三种权限。**只查不授**；有一格是 `f` 就停下报开发机。
+**(2) 授权。** 插件的数据库助手建在宿主给的 `context.api.database` 之上（`db.cjs:194-200`），用的就是后端自己的数据库连接，所以用 `app.env` 里 `DATABASE_URL` 的那个角色连上去查（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍）。迁移头注释写明要求的：105 四张表 SELECT / INSERT / UPDATE（`105_create_integration_stock_prep_pull_batch.sql:67`）；106 的 intent 表 SELECT / INSERT，执行台账与变更计划 SELECT / INSERT / UPDATE（`106_…:46-47`）；107 的裁定表 SELECT / INSERT / UPDATE（`107_…:41`）。100–104 的头注释没写授权，这里一并查三种权限。**只查不授**；有一格是 `f` 就停下报开发机。
 
 ```sql
 SET default_transaction_read_only = on;
@@ -112,7 +130,7 @@ SELECT t AS table_name,
 
 intent 表只要求 `s`、`i` 为真，其余各表三列都要为真。
 
-**(3) 装后计数**（期望全是 0；不为 0 说明有人在装机前已经开过试点，停下）：
+**(3) 装后计数**（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍）（期望全是 0；不为 0 说明有人在装机前已经开过试点，停下）：
 
 ```sql
 SET default_transaction_read_only = on;
@@ -193,7 +211,7 @@ UPDATE integration_stock_prep_project_target
 
 **被拒时。** `STOCK_PREP_REFRESH_RECOVERY_STALE`、`STOCK_PREP_PULL_STATE_MOVED`、`STOCK_PREP_PROJECT_WRITE_LEASE_LOST`：什么都没改，重新核对。`STOCK_PREP_REFRESH_RECOVERY_BUSY`：别的操作占着一行，稍后再点。`STOCK_PREP_PROJECT_WRITE_LOCKED`：一次拉取或另一次核对正在写，稍后再点。`STOCK_PREP_REFRESH_EXECUTION_NOT_FOUND` / `…_NOT_UNFINISHED`：重新读取（`stock-preparation-continuation-store.cjs:241`、`:261-266`）。`STOCK_PREP_REFRESH_RECOVERY_UNPROVABLE`：表格证明不了写进了哪些行（重复行、行不见了、行被替换、内容对不上等，`stock-preparation-execution-recovery.cjs:62`），**拉取人员不能结束**，交平台管理员。
 
-**平台管理员按手册结束（结果未知；`stock-prep:admin`）。** 只在 UNPROVABLE、或核对一直做不下去时用。路由 `POST …/refresh/executions/<执行 id>/close-unverified`（`http-routes.cjs:370`、`:14851-14866`）。卡片上的「按手册结束（结果未知）」区块只对管理员显示：
+**平台管理员按手册结束（结果未知；`stock-prep:admin`）。** 只在 UNPROVABLE、或核对一直做不下去时用。路由 `POST …/refresh/executions/<执行 id>/close-unverified`（`http-routes.cjs:370`、`:14851-14865`）。卡片上的「按手册结束（结果未知）」区块只对管理员显示：
 
 1. 先开一张工单，工单号只能用字母、数字和 `. _ : -`，最多 64 个字符（`stock-preparation-execution-recovery.cjs:63`）。工单里写清为什么核对证明不了；**不写业务值**。
 2. 输入项目号，点「检查表格」（`mode: inspect`）。
@@ -226,7 +244,7 @@ Invoke-RestMethod -Method Get -Uri '<后端地址>/api/integration/stock-prepara
 Remove-Variable token
 ```
 
-每次读都写一行无值审计 `project_board_read` / `sheet_census_read`（`stock-preparation-remnant-acknowledgement.cjs:38-48`）。
+每次读都写一行无值审计 `project_board_read` / `sheet_census_read`（`stock-preparation-remnant-acknowledgement.cjs:40-50`）。
 
 计数键（`stock-preparation-sheet-census.cjs:70-81`）：`rowCount`、`activeRowCount`、`twoCopyComponents`（D1）、`inactiveRootRemnantComponents`（D2）、`duplicateKeyGroups`、`keylessRowsWithoutCreator`、`keylessRowsWithCreator`、`nonBooleanActiveCells`、`inactiveRowsWithHumanCells`、`nestedCopiesWithHumanCells`。另有 `acknowledgedComponents`、`rulingComponents`、`unacknowledgedRemnantComponents`。
 
@@ -265,8 +283,8 @@ Remove-Variable token
 1. **开关。** 真实运行要求默认关闭的开关 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED`，只认精确的 `true`（R-91 ⑯）。窗口开始时打开，结束时关掉；按 #6843 当前草稿，开关关着时整组修复路由（含预览和补填报告）都是 404，所以给客户准备 Q3 的补填报告也要开开关 **【待定 #6843】**。
 2. **一个摘要一份批复。** 先预览，拿到预览摘要（planDigest）；owner 对**这个摘要**批复，批复编号就是 approvalRef；执行时回显摘要。摘要变了（表上有人改了行）就要新的批复。同一份批复只能用一次。
 3. **整个窗口暂停这个项目的拉取**（定时任务 + 通知拉取人员），从 retire 一直停到 restore 或裁定完成；同时数一下这张表上的自动化规则和 webhook，窗口内暂停。
-4. **修复窗口与批次标识装机窗口从不交错**（改正节 B-10）。注意：设计 B-10 说「装机在租约内的摘要核对随后会拒绝」，这只在装机的 dry_run 与第一次装机之间成立；对已在装机中的表**不成立**——`continue` / `resume_aborted` 直接用持久化的计划（`stock-preparation-pull-batch-install.cjs:624-629`、`:647-648`），只比对请求摘要和这份计划的摘要（`:788-792`），从不重算。在规则 `predecessor_suffix` 下，同一部件的副本会落成不同的「首次批次」，而且标签永不改写；规则 `material` 下标签不受影响。所以下一条预检是硬前提。
-5. **每个修复窗口之前，先查这张表的批次台账行**（105，已在 main 上，可以现在照做）：
+4. **修复窗口与批次标识装机窗口从不交错**（改正节 B-10）。注意：设计 B-10 说「装机在租约内的摘要核对随后会拒绝」，这只在装机的 dry_run 与第一次装机之间成立；对已在装机中的表**不成立**——`continue` / `resume_aborted` 直接用持久化的计划（`stock-preparation-pull-batch-install.cjs:624-629`、`:647-648`），只比对请求摘要和这份计划的摘要（`:788-792`），从不重算。S6-6 复核第 1 轮的探针显示：在规则 `predecessor_suffix` 下，同一部件的副本会落成不同的「首次批次」，而且标签永不改写；规则 `material` 下标签不受影响（本手册只读了代码路径，没有复跑探针）。所以下一条预检是硬前提。
+5. **每个修复窗口之前，先查这张表的批次台账行**（105，已在 main 上，可以现在照做；语句（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍））：
 
    ```sql
    SET default_transaction_read_only = on;
@@ -291,6 +309,8 @@ Remove-Variable token
 
 ### 7.2 备料停止条件（只读，全部为 0 才回退）
 
+102、104、106、107 的语句照抄迁移头注释；103 的两条是按头注释的文字写成的（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍）。
+
 ```sql
 SET default_transaction_read_only = on;
 -- 102：仍在认领的沿用关系（102_…:35）
@@ -312,11 +332,11 @@ SELECT kind, count(*) FROM integration_stock_prep_component_ruling WHERE status 
 ```
 
 - 106 那条不为 0：对每个这样的项目做一次干净的试算并结算，再查（R-91 ⑳：只计 `verified_closed` 的旧写法会漏掉排在透明关闭之后的未结算 `succeeded` 主体）。
-- 回退到 R83 时，再加一条：§1.4 (3) 那组第 4 步各表的行数**全部为 0**，带试点标记的登记行为 0。
+- 回退到 R83 时，再加一条：§1.4 (3) 那组里除 `component_ruling`（107，只供参考：R83 不读它，残留确认可以在启用之前就记下）以外的各表行数**全部为 0**，带试点标记的登记行为 0。
 - **【待定 #6843】** 108 合入后加一条：`running` 状态的修复运行为 0（设计 §7.5）。
 - **【待定 #6844 / S6-9】** S6-9 的 G9 在冻结候选上做 U07 回退演练（旧构建 + `RunMigrations 0`，库里带着未完成执行、透明关闭、已确认计划等产物）；演练没过之前，本节只是读代码得出的条件，不是演练过的。
 
-### 7.3 非备料停止条件（读代码得出，没有实际执行过）
+### 7.3 非备料停止条件（读代码得出，没有实际执行过；下面的查询（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍））
 
 1. **外发开关。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 精确为 `true` 时（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）不能回 R83：`zzzz20261103120000` 把唯一索引改成 4 列（`…/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts:55-58`），而 R83 的认领语句写的是 3 列 `ON CONFLICT`（`git show onprem-r83:packages/core-backend/src/multitable/automation-outbound-intent.ts` 第 103 行），每次外发认领都会失败。要求：开关不是 `true`（§1.2 (3) 的计数为 0）。
 2. **通讯录交接。** 要求 0 行：`SELECT count(*) FROM directory_handovers WHERE state IN ('applied', 'finalized');`（状态词见 `…/zzzz20261101090000_create_directory_handovers.ts:9`）。不为 0 时，回 R83 后向相关集成投递审批卡片会被触发器拒（55000），而 R83 代码不处理这种拒绝。
