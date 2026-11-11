@@ -108,6 +108,7 @@ const SHEET_REPAIR_REFUSALS = Object.freeze([
   'old_subtree_still_expanded',
   'row_unaddressable',
   'row_not_machine_shaped',
+  'copy_row_active_not_boolean',
   'nothing_to_retire',
   'plan_too_large',
   'run_not_found',
@@ -562,8 +563,10 @@ function normalizeScope(scope) {
  * recompute of an execute): the project is not governed; the source read is complete; the component is D1 with exactly
  * one old root; exactly ONE active nested occurrence subtree pairs with the old subtree (`pairSubtrees` ok); no key of
  * the old subtree is in the current expansion; every row to write is addressable (record id + version), active as the
- * boolean true, and carries machine-shaped stamp cells. The OLD SUBTREE is the root's keyed rows that are active OR
- * were retired by an earlier repair run of this sheet's project (so a run stopped half-way can be re-run for the rest).
+ * boolean true, and carries machine-shaped stamp cells; and EVERY ROW OF THE PAIRED COPY — the rows the retire leaves
+ * live — holds `active` as the boolean true as well (F-11 on both sides, see below). The OLD SUBTREE is the root's
+ * keyed rows that are active OR were retired by an earlier repair run of this sheet's project (so a run stopped
+ * half-way can be re-run for the rest).
  * Answers `{ componentHandle, shape, eligible, refusals, counts, planDigest, writes, backup }` — `writes` / `backup`
  * (private, server-held) only when eligible.
  */
@@ -574,7 +577,7 @@ function analyzeRetireComponent(context, entry) {
     if (!refusals.includes(token)) refusals.push(token)
   }
   const handle = censusComponentHandle(scope.tenantId, scope.projectNo, entry.component)
-  const counts = { nestedCopies: entry.occurrences.length, oldRows: 0, toRetire: 0, alreadyRetired: 0, pairedCopies: 0, pairs: 0, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0 }
+  const counts = { nestedCopies: entry.occurrences.length, oldRows: 0, toRetire: 0, alreadyRetired: 0, pairedCopies: 0, pairs: 0, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0, copyRowsNotBooleanActive: 0 }
   const installRefusal = installRefusalOf(context.installState)
   if (installRefusal) refuse(installRefusal)
   if (context.governed !== false) refuse('project_governed')
@@ -605,6 +608,13 @@ function analyzeRetireComponent(context, entry) {
   if (paired.length > 1) refuse('copy_ambiguous')
   const pairing = paired.length === 1 ? paired[0].pairing : null
   if (pairing) counts.pairs = pairing.pairs.length
+  // F-11 ON BOTH SIDES. The rows of the paired copy are the ones a retire leaves LIVE. This file selects them the way
+  // the planner reads `active` — anything but the boolean false (design §6.1 D5) — but the fill and to-do views show a
+  // row only while its cell is the boolean true (the host's `active is true` filter reads 'false', 0, null and an
+  // absent cell as NOT active). A copy row that is merely "not the boolean false" would therefore be shown in NEITHER
+  // subtree once its old twin is retired: the retire is refused before any write and the rows are counted.
+  if (pairing) counts.copyRowsNotBooleanActive = paired[0].copyRows.filter((row) => row.active !== true).length
+  if (counts.copyRowsNotBooleanActive > 0) refuse('copy_row_active_not_boolean')
 
   const subtreeKeys = new Set(oldRows.map(keyOf))
   if (pairing) for (const row of paired[0].copyRows) subtreeKeys.add(keyOf(row))

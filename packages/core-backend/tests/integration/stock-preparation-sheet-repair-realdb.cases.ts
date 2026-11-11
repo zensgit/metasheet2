@@ -71,6 +71,11 @@
  *            preview and its execute => 409 PLAN_CHANGED in the lease — no restore run, no restore claim, no patch,
  *            `data::text` and versions unchanged; a restore run that began and wrote nothing leaves a NEW digest
  *            behind (the run sequence), the spent one is ALREADY_CONSUMED, and the new one puts every row back.
+ *   S9D-23   F-11 on both sides (write-safety review of round 1): a row of the nested copy — the rows a retire leaves
+ *            live — whose STORED `active` cell is the string 'false', the number 0, JSON null or absent refuses the
+ *            retire before any write (`copy_row_active_not_boolean`, counted in the preview; 409 NOT_APPLICABLE by the
+ *            recompute inside the lease; no run, no claim, no patch); with the cell put right the same approved digest
+ *            runs, and every copy row is the JSON boolean true while every old row is the JSON boolean false.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -1249,6 +1254,52 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         }
       }
       expect((await st.claims()).map((claim: any) => claim.approval_ref).sort(), 'the refused execute spent nothing; the stopped run and the completed one each spent their own').toEqual(['R-91:s66-d22', 'R-91:s66-d22-b', 'R-91:s66-d22-c'])
+    }, 180_000)
+
+    test('S9D-23 F-11 on both sides, on real rows: a row of the nested copy whose STORED `active` cell is not the JSON boolean true (the string \'false\', the number 0, JSON null, no cell at all) refuses the retire before any write — counted in the preview, 409 inside the lease; with the cell put right the same approved digest runs and the component is shown once', async () => {
+      const st = await world('d23')
+      const F = st.fields
+      const idsWhere = async (ids: string[], field: string, value: string) =>
+        (await q(`SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2) AND data ->> $3 = $4 ORDER BY id`, [st.sheetId, ids, field, value])).rows.map((row: any) => String(row.id))
+      const copyRoots = await idsWhere(st.copyIds, F.componentSourceId, 'S-001')
+      expect(copyRoots, 'the nested copy has one head row').toHaveLength(1)
+      const copyChildren = await idsWhere(st.copyIds, F.parentSourceId, 'S-001')
+      expect(copyChildren.length, 'the nested copy has child rows').toBeGreaterThan(0)
+      const activeTypeOf = async (id: string) => (await q('SELECT jsonb_typeof(data -> $2) AS t FROM meta_records WHERE id = $1', [id, F.active])).rows[0].t
+      const setActive = (id: string, value: unknown) => q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [id, JSON.stringify({ [F.active]: value })])
+      const dropActive = (id: string) => q('UPDATE meta_records SET data = data - $2::text WHERE id = $1', [id, F.active])
+
+      const ok = dataOf(await st.preview())
+      expect([ok.eligible, ok.refusals, ok.counts.copyRowsNotBooleanActive, ok.counts.pairs]).toEqual([true, [], 0, 4])
+      for (const [label, id, arrange, storedType] of [
+        ['the string false on the copy\'s head', copyRoots[0], (target: string) => setActive(target, 'false'), 'string'],
+        ['the number 0 on the copy\'s head', copyRoots[0], (target: string) => setActive(target, 0), 'number'],
+        ['JSON null on the copy\'s head', copyRoots[0], (target: string) => setActive(target, null), 'null'],
+        ['no cell at all on the copy\'s head', copyRoots[0], (target: string) => dropActive(target), null],
+        ['the string false on a copy child', copyChildren[0], (target: string) => setActive(target, 'false'), 'string'],
+      ] as Array<[string, string, (target: string) => Promise<unknown>, string | null]>) {
+        await arrange(id)
+        expect(await activeTypeOf(id), label).toBe(storedType)
+        const before = await st.stored()
+        const refused = dataOf(await st.preview())
+        expect([refused.eligible, refused.refusals, refused.planDigest, refused.counts.copyRowsNotBooleanActive, refused.counts.pairs], label).toEqual([false, ['copy_row_active_not_boolean'], null, 1, 4])
+        // The digest approved while the sheet was clean runs nothing now: the in-lease recompute refuses by the precondition.
+        const error = errorOf(await st.execute(ok.planDigest), 409, CODES.NOT_APPLICABLE)
+        expect([error.details.reasons, error.details.counts.copyRowsNotBooleanActive, error.details.partial], label).toEqual([['copy_row_active_not_boolean'], 1, false])
+        expect([await st.runs(), await st.claims(), st.patchInputs.length], `${label}: nothing begun, nothing written`).toEqual([[], [], 0])
+        expect(await st.stored(), label).toEqual(before)
+        await setActive(id, true)
+        expect(await activeTypeOf(id)).toBe('boolean')
+      }
+      // Every copy row holds the boolean true again: the SAME approved digest (a copy cell is not in it, and no version
+      // moved) retires the old subtree.
+      const again = dataOf(await st.preview())
+      expect([again.eligible, again.counts.copyRowsNotBooleanActive, again.planDigest]).toEqual([true, 0, ok.planDigest])
+      const done = dataOf(await st.execute(ok.planDigest))
+      expect([done.status, done.planned, done.written]).toEqual(['completed', 4, 4])
+      const activeOf = async (ids: string[]) => (await q(`SELECT jsonb_typeof(data -> $2) AS t, data -> $2 AS v FROM meta_records WHERE id = ANY($1) ORDER BY id`, [ids, F.active])).rows.map((row: any) => [row.t, row.v])
+      expect(await activeOf(copyRoots.concat(copyChildren)), 'the copy the retire left live: the boolean true on every row').toEqual(copyRoots.concat(copyChildren).map(() => ['boolean', true]))
+      expect(await activeOf(st.oldIds), 'the retired old subtree: the boolean false on every row').toEqual(st.oldIds.map(() => ['boolean', false]))
     }, 180_000)
   })
 }

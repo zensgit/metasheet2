@@ -347,7 +347,7 @@ test('RP-01 the D1 fixture is eligible; the listing answers every doubled compon
   const sheet = kit.doubledSheet()
   const one = refusalsOf(sheet)
   assert.equal(one.eligible, true, JSON.stringify(one.refusals))
-  assert.deepEqual(one.counts, { nestedCopies: 1, oldRows: 4, toRetire: 4, alreadyRetired: 0, pairedCopies: 1, pairs: 4, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0 })
+  assert.deepEqual(one.counts, { nestedCopies: 1, oldRows: 4, toRetire: 4, alreadyRetired: 0, pairedCopies: 1, pairs: 4, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0, copyRowsNotBooleanActive: 0 })
   assert.match(one.planDigest, /^[0-9a-f]{64}$/)
   const listing = R.analyzeRetire(analysisBase(sheet, { componentHandle: null }))
   assert.deepEqual([listing.listing, listing.total, listing.components.map((entry) => [entry.componentHandle, entry.eligible, entry.planDigest])], [true, 1, [[HANDLE, true, one.planDigest]]])
@@ -392,6 +392,11 @@ test('RP-01 retire preconditions: each one refuses with its closed token and pla
     ['row_not_machine_shaped', mutated((spec) => (spec.id === 'rec_old_2' ? { ...spec, decision: 'SENTINEL' } : spec)), {}],
     ['row_not_machine_shaped', mutated((spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: 'run with spaces' } : spec)), {}],
     ['row_not_machine_shaped', mutated((spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: 42 } : spec)), {}],
+    // F-11 on the OTHER side: a row of the paired copy — the rows a retire leaves live — whose `active` is not the
+    // boolean true (the views would show it in neither subtree afterwards).
+    ['copy_row_active_not_boolean', mutated((spec) => (spec.id === 'rec_copy_1' ? { ...spec, active: 'false' } : spec)), {}],
+    ['copy_row_active_not_boolean', mutated((spec) => (spec.id === 'rec_copy_3' ? { ...spec, active: 0 } : spec)), {}],
+    ['copy_row_active_not_boolean', mutated((spec) => (spec.id === 'rec_copy_4' ? { ...spec, active: null } : spec)), {}],
   ]
   for (const [token, sheet, extra] of cases) {
     const component = refusalsOf(sheet, extra)
@@ -434,6 +439,76 @@ test('RP-01 retire preconditions: each one refuses with its closed token and pla
   const ambiguous = refusalsOf(twoCopies)
   assert.ok(ambiguous.refusals.includes('copy_ambiguous'))
   assert.equal(ambiguous.counts.pairedCopies, 2)
+})
+
+// ── CA-01 (F-11 on both sides; write-safety review of round 1) ───────────────────────────────────────────
+
+test('CA-01 every row of the nested copy a retire leaves LIVE must hold `active` as the BOOLEAN true: a copy row whose cell is \'false\', 0, null, absent, \'true\' or 1 refuses the retire before any write and is counted — in the preview, in the listing and, 409, by the recompute inside the lease', async () => {
+  const ABSENT = Symbol('absent')
+  const CLEAN = { nestedCopies: 1, oldRows: 4, toRetire: 4, alreadyRetired: 0, pairedCopies: 1, pairs: 4, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0, copyRowsNotBooleanActive: 0 }
+  const withCopyCell = (cells) => {
+    const sheet = kit.doubledSheet()
+    for (const [recordId, value] of Object.entries(cells)) {
+      const row = sheet.rows.find((candidate) => candidate.path === JSON.stringify(kit.COPY_PATHS[sheet.ids.copy.indexOf(recordId)]))
+      if (value === ABSENT) delete row.active
+      else row.active = value
+    }
+    return sheet
+  }
+  // Pure. The planner's reading — anything but the boolean false is active (design §6.1 D5) — still SELECTS such a row
+  // as a copy row, so the copy pairs; what refuses is that the views (`active is true`) would not show it.
+  for (const [label, value] of [['the string false', 'false'], ['the number 0', 0], ['null', null], ['an absent cell', ABSENT], ['the string true', 'true'], ['the number 1', 1]]) {
+    for (const [where, recordId] of [['the copy\'s root', 'rec_copy_1'], ['a copy child', 'rec_copy_3'], ['the copy\'s deepest row', 'rec_copy_4']]) {
+      const component = refusalsOf(withCopyCell({ [recordId]: value }))
+      assert.deepEqual([component.eligible, component.refusals, component.planDigest, component.writes, component.backup], [false, ['copy_row_active_not_boolean'], null, undefined, undefined], `${label} on ${where}`)
+      assert.deepEqual(component.counts, { ...CLEAN, copyRowsNotBooleanActive: 1 }, `${label} on ${where}: paired, counted, nothing else refused`)
+    }
+  }
+  assert.equal(refusalsOf(withCopyCell({ rec_copy_1: 'false', rec_copy_2: null, rec_copy_4: ABSENT })).counts.copyRowsNotBooleanActive, 3, 'every such row is counted')
+  assert.ok(R.SHEET_REPAIR_REFUSALS.includes('copy_row_active_not_boolean'))
+  // The boolean true on every copy row is the eligible sheet; the boolean FALSE on a copy row is another refusal (that
+  // row is not a copy row at all, so the copy no longer pairs) and is not counted here.
+  assert.deepEqual([refusalsOf(kit.doubledSheet()).eligible, refusalsOf(kit.doubledSheet()).counts], [true, CLEAN])
+  const inactiveChild = refusalsOf(withCopyCell({ rec_copy_3: false }))
+  assert.deepEqual([inactiveChild.refusals, inactiveChild.counts.copyRowsNotBooleanActive], [['copy_not_paired'], 0])
+  // The OLD rows' own check is unchanged and named apart: a row the retire would WRITE refuses as not machine-shaped.
+  const oldSide = refusalsOf(kit.doubledSheet({ mutate: (spec) => (spec.id === 'rec_old_2' ? { ...spec, active: 'true' } : spec) }))
+  assert.deepEqual([oldSide.refusals, oldSide.counts.notMachineShaped, oldSide.counts.copyRowsNotBooleanActive], [['row_not_machine_shaped'], 1, 0])
+
+  // Through the run: the preview (one component and the listing) answers the refusal and the count; the execute is
+  // refused 409 by the recompute INSIDE the lease; nothing is begun, nothing is written.
+  const zero = (m) => assert.deepEqual([m.host.calls.length, m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length, m.state.bumps, m.db.rows(kit.T.lock)[0].lease_id], [0, 0, 0, 0, null])
+  const m = mount()
+  m.host.records.get('rec_copy_1').data.active = 'false'
+  const refused = await m.preview()
+  assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest, refused.counts.copyRowsNotBooleanActive, refused.counts.pairs], [false, ['copy_row_active_not_boolean'], null, 1, 4])
+  const listing = await m.run({ mode: 'preview', recipe: RETIRE, confirmProjectNo: SCOPE.projectNo })
+  assert.deepEqual(listing.components.map((entry) => [entry.componentHandle, entry.eligible, entry.refusals, entry.counts.copyRowsNotBooleanActive]), [[HANDLE, false, ['copy_row_active_not_boolean'], 1]])
+  const stored = JSON.stringify(Array.from(m.host.records.values()).map((record) => [record.id, record.version, record.data]))
+  const error = await rejects(m.execute('a'.repeat(64)), { status: 409, code: CODES.NOT_APPLICABLE })
+  assert.deepEqual([error.details.reasons, error.details.counts.copyRowsNotBooleanActive, error.details.partial], [['copy_row_active_not_boolean'], 1, false])
+  zero(m)
+  assert.equal(JSON.stringify(Array.from(m.host.records.values()).map((record) => [record.id, record.version, record.data])), stored, 'no stored row moved')
+  // The cell put right (the boolean true): the sheet previews eligible.
+  m.host.records.get('rec_copy_1').data.active = true
+  const plan = await m.preview()
+  assert.deepEqual([plan.eligible, plan.refusals, plan.counts], [true, [], CLEAN])
+  // A copy cell that goes wrong BETWEEN the preview and the execute moves no digest (a copy row is not in it): the
+  // in-lease recompute refuses by the precondition itself, and the approved digest is not spent.
+  delete m.host.records.get('rec_copy_3').data.active
+  const late = await rejects(m.execute(plan.planDigest), { status: 409, code: CODES.NOT_APPLICABLE })
+  assert.deepEqual([late.details.reasons, late.details.counts.copyRowsNotBooleanActive], [['copy_row_active_not_boolean'], 1])
+  zero(m)
+  assert.equal(m.state.reads[m.state.reads.length - 1], 'retire:lease', 'refused by the recompute inside the lease')
+  m.host.records.get('rec_copy_3').data.active = true
+  const done = await m.execute(plan.planDigest)
+  assert.deepEqual([done.status, done.written], ['completed', 4])
+  // Afterwards the component is shown exactly once: every copy row the boolean true, every old row the boolean false.
+  for (const id of m.sheet.ids.copy) assert.strictEqual(m.host.dataOf(id).active, true, id)
+  for (const id of m.sheet.ids.old) assert.strictEqual(m.host.dataOf(id).active, false, id)
+  for (const text of [JSON.stringify(refused), JSON.stringify(listing), JSON.stringify(error.details)]) {
+    for (const planted of [kit.PROJECT_NO, kit.OLD_ROOT, kit.PARENT, 'C-1', 'rec_copy']) assert.equal(text.includes(planted), false, `${planted} leaked`)
+  }
 })
 
 // ── RP-02 / RP-03 ────────────────────────────────────────────────────────────────────────────────────────
