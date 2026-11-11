@@ -132,6 +132,9 @@ import { isImeKeyEvent } from '../../utils/ime-keys'
 const props = defineProps<{
   /** Current rich-`longText` HTML value (server-sanitized). */
   modelValue: unknown
+  /** What the value belongs to (the record drawer passes the record id): the editor is reused across records, and
+   *  shows the value again when this changes, also when the value itself is the same. */
+  syncKey?: string | number | null
   isZh?: boolean
   /**
    * People-mention candidates (B5). Fed ONLY by authenticated hosts (cell editor +
@@ -321,8 +324,13 @@ function onInput(): void {
   emitLive()
 }
 
+// The content when the editor took the focus (or last committed with Cmd/Ctrl+Enter): a blur commits only a
+// change from it, as an input's `change` does.
+let committedOnFocus: string | null = null
+
 function onFocus(): void {
   focused.value = true
+  committedOnFocus = currentValue()
 }
 
 // --- B5 mention detection + insertion ---
@@ -473,7 +481,9 @@ function onEscape(event: KeyboardEvent): void {
   emit('cancel')
 }
 
-/** Blur = commit. Emit BOTH the final live value and the `change` commit event. */
+/** Blur = commit. Emit BOTH the final live value and, when it changed since the editor took the focus, the
+ *  `change` commit event (as an input's `change`): focus that only passes through (the drawer focusing its title
+ *  on open, a click, the focus coming back after a record switch) commits nothing. */
 function onBlur(): void {
   focused.value = false
   // Dismiss the mention popover on blur. The suggestion buttons use
@@ -482,7 +492,7 @@ function onBlur(): void {
   dismissMention()
   const value = currentValue()
   emit('update:modelValue', value)
-  emit('change', value)
+  if (value !== committedOnFocus) emit('change', value)
 }
 
 /**
@@ -496,6 +506,7 @@ function onConfirm(): void {
   const value = currentValue()
   emit('update:modelValue', value)
   emit('change', value)
+  committedOnFocus = value
   emit('confirm')
 }
 
@@ -581,7 +592,7 @@ onMounted(() => {
 })
 
 watch(
-  () => props.modelValue,
+  [() => props.modelValue, () => props.syncKey],
   () => {
     // Only re-sync external changes; the focus guard in syncFromModel prevents a
     // mid-type caret jump from our own emitted value flowing back.
