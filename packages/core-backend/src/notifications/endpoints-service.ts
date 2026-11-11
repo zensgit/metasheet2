@@ -323,7 +323,7 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
                 action: 'notification.endpoint.demote',
                 resourceType: 'user_notification_endpoint',
                 resourceId: text(row.id),
-                meta: { provider: text(row.provider), revision: Number(demoted.rows[0].revision), reason: 'address_rebound' },
+                meta: { provider: text(row.provider), revision: Number(demoted.rows[0].revision), reason: 'address_rebound', organizationId: text(row.org_id) },
               })
             }
           }

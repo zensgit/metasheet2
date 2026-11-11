@@ -47,15 +47,15 @@ export function parseEndpointBody(body: unknown): { connectionId: string; proofK
 export function createMeNotificationEndpointsRouter(deps: MeNotificationEndpointsRouterDeps): ExpressRouter {
   const router = Router()
 
-  /** Authentication has run; answers 404 or 401 itself and returns null when the request must stop. */
+  /** Authentication has run; answers 401 or 404 itself, in that order, and returns null when the request must stop. */
   function caller(req: Request, res: Response, write: boolean): { orgId: string; userId: string } | null {
-    if (!deps.isEnabled()) {
-      respondNotFound(res)
-      return null
-    }
     const userId = userOf(req)
     if (userId === '') {
       respondUnauthorized(res)
+      return null
+    }
+    if (!deps.isEnabled()) {
+      respondNotFound(res)
       return null
     }
     const orgId = tenantOf(req)

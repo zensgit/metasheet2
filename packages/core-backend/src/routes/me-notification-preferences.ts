@@ -79,13 +79,13 @@ export function createMeNotificationPreferencesRouter(deps: MeNotificationPrefer
   const router = Router()
 
   function caller(req: Request, res: Response, write: boolean): { orgId: string; userId: string } | null {
-    if (!deps.isEnabled()) {
-      respondNotFound(res)
-      return null
-    }
     const userId = userOf(req)
     if (userId === '') {
       respondUnauthorized(res)
+      return null
+    }
+    if (!deps.isEnabled()) {
+      respondNotFound(res)
       return null
     }
     const orgId = tenantOf(req)

@@ -155,6 +155,13 @@ describe('resolution of a directory link', () => {
     expect(log).toEqual([])
   })
 
+  it('default targets name an ambiguous user as proof_ambiguous', async () => {
+    const rows = [candidateRow('u2', { rn: 1, n: 2 }), candidateRow('u2', { rn: 2, n: 2, account_id: 'account-2' }), candidateRow('u1')]
+    const { db } = scripted({ candidate: () => rows })
+    const results = await resolverWith().deriveDefaultTargets(db, { orgId: ORG, connectionId: CONN, userIds: ['u1', 'u2'] })
+    expect(results.map(code)).toEqual(['ok', 'proof_ambiguous'])
+  })
+
   it('derives a default target from the directory link only', async () => {
     const { db, log } = scripted({ candidate: () => [candidateRow('u1')] })
     const [result] = await resolverWith().deriveDefaultTargets(db, { orgId: ORG, connectionId: CONN, userIds: ['u1'] })

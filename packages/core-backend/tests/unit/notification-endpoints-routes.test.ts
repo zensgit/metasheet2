@@ -87,9 +87,17 @@ describe('/api/me/notification-endpoints', () => {
   })
 
   describe('handling order', () => {
-    it('answers 401 without a user', async () => {
-      const response = await request(pinned.url()).get('/api/me/notification-endpoints')
-      expect([response.status, response.body]).toEqual([401, { error: { code: 'UNAUTHORIZED' } }])
+    it('answers 401 without a user, the same with the switch on and off', async () => {
+      for (const on of [true, false]) {
+        enabled = on
+        for (const response of [
+          await request(pinned.url()).get('/api/me/notification-endpoints'),
+          await request(pinned.url()).post('/api/me/notification-endpoints').send({ connectionId: CONNECTION, proofKind: 'directory_link' }),
+          await request(pinned.url()).delete(`/api/me/notification-endpoints/${ENDPOINT}`),
+        ]) {
+          expect([on, response.status, response.body]).toEqual([on, 401, { error: { code: 'UNAUTHORIZED' } }])
+        }
+      }
       expect(calls()).toBe(0)
     })
 

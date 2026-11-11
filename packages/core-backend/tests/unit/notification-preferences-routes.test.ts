@@ -65,7 +65,12 @@ describe('/api/me/notification-preferences', () => {
   })
 
   it('answers 401 without a user, 404 with a fixed body when the switch is off (nothing else is looked at), and the organization rules', async () => {
-    expect((await request(pinned.url()).get(PATH)).status).toBe(401)
+    for (const on of [true, false]) {
+      enabled = on
+      for (const response of [await request(pinned.url()).get(PATH), await request(pinned.url()).patch(PATH).send(valid)]) {
+        expect([on, response.status, response.body]).toEqual([on, 401, { error: { code: 'UNAUTHORIZED' } }])
+      }
+    }
     enabled = false
     for (const response of [await request(pinned.url()).get(PATH).set(AS), await patch({ junk: 1 }), await patch(valid, { 'x-test-user': 'user-1' })]) {
       expect([response.status, response.body]).toEqual([404, { error: { code: 'NOT_FOUND' } }])

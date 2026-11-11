@@ -742,6 +742,17 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect(await resolveOne(a.org, user, a.id)).toBe('proof_ambiguous')
     })
 
+    it('default targets name an ambiguous user as proof_ambiguous and a clean user as ok', async () => {
+      const a = await insertIntegration()
+      const clean = await makeUser(a.org, 'clean')
+      const twice = await makeUser(a.org, 'twice')
+      await makeAccount({ integration: a.id, user: clean })
+      await makeAccount({ integration: a.id, user: twice })
+      await makeAccount({ integration: a.id, user: twice })
+      const results = await resolver.deriveDefaultTargets(poolDb(), { orgId: a.org, connectionId: a.id, userIds: [clean, twice] })
+      expect(results.map(codeOf)).toEqual(['ok', 'proof_ambiguous'])
+    })
+
     it('names the reason of a zero-candidate request from the diagnostic statement', async () => {
       const a = await insertIntegration()
       const missing = await makeUser(a.org, 'missing')
@@ -929,7 +940,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const old = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [mine.endpoint.id]))[0]
       expect([old.status, Number(old.revision)]).toEqual(['stale', 2])
       const demote = audits.find((event) => event.action === 'notification.endpoint.demote')
-      expect(demote).toMatchObject({ actorType: 'system', resourceId: mine.endpoint.id, meta: { reason: 'address_rebound' } })
+      expect(demote).toMatchObject({ actorType: 'system', resourceId: mine.endpoint.id, meta: { reason: 'address_rebound', organizationId: w.org } })
       expect(demote?.actorId).toBeUndefined()
     })
 
@@ -944,6 +955,33 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const x2 = await makeAccount({ integration: second.id, corp, user: b, externalUserId: external })
       return { org: first.org, first, second, a, b, x1, x2, corp, external }
     }
+
+    it('a changed union id fails the re-check as proof_changed, and the owner next request refreshes the same row to active with revision + 1', async () => {
+      const w = await scene()
+      const svc = services()
+      const user = w.users[0]
+      const first = await establish(svc, w.org, user, w.id)
+      await run(`UPDATE directory_accounts SET union_id = 'union-changed' WHERE id = $1::uuid`, [w.accounts[0].accountId])
+      const listing = await svc.endpoints.list({ orgId: w.org, userId: user })
+      expect(listing.endpoints[0]).toMatchObject({ id: first.endpoint.id, usable: false, unusableReason: 'proof_changed' })
+      const again = await establish(svc, w.org, user, w.id)
+      expect([again.created, again.endpoint.id, again.endpoint.status, again.endpoint.revision, again.endpoint.usable]).toEqual([false, first.endpoint.id, 'active', 2, true])
+    })
+
+    it("another user's endpoint on another connection of the tenant whose proof is gone is demoted, and the new holder is made", async () => {
+      const w = await twoConnections({ sameUser: false })
+      const svc = services()
+      const held = await establish(svc, w.org, w.a, w.first.id)
+      await run('DELETE FROM directory_account_links WHERE id = $1::uuid', [w.x1.linkId])
+      const made = await establish(svc, w.org, w.b, w.second.id)
+      expect(made.created).toBe(true)
+      const old = (await rowsOf(ENDPOINTS, 'id = $1::uuid', [held.endpoint.id]))[0]
+      expect([old.status, Number(old.revision)]).toEqual(['stale', 2])
+      expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
+        actorType: 'system',
+        meta: { reason: 'address_rebound', organizationId: w.org },
+      })
+    })
 
     it("another user's endpoint that still holds the address in this tenant is a 409 ADDRESS_ALREADY_BOUND", async () => {
       const w = await twoConnections({ sameUser: false })
@@ -1415,8 +1453,9 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
         actorType: 'system',
         resourceId: held.endpoint.id,
-        meta: { reason: 'address_rebound' },
+        meta: { reason: 'address_rebound', organizationId: w.a.org },
       })
+      expect(w.a.org).not.toBe(w.b.org)
       const both = await pgError(insertEndpoint({ org: w.a.org, user: ua, connection: w.a.id, tenant: w.corp, address: 'direct-write', proofKind: 'external_identity' }).then(() =>
         insertEndpoint({ org: w.b.org, user: ub, connection: w.b.id, tenant: w.corp, address: 'direct-write', proofKind: 'external_identity' }),
       ))
@@ -1459,7 +1498,11 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const replaced = await establish(svc, w.b.org, user, w.b.id)
       expect(replaced.created).toBe(true)
       expect((await rowsOf(ENDPOINTS, 'id = $1::uuid', [inA.endpoint.id]))[0].status).toBe('stale')
-      expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({ actorType: 'system', resourceId: inA.endpoint.id })
+      expect(audits.find((event) => event.action === 'notification.endpoint.demote')).toMatchObject({
+        actorType: 'system',
+        resourceId: inA.endpoint.id,
+        meta: { reason: 'address_rebound', organizationId: w.a.org },
+      })
     })
 
     it('the same user in two organizations posting to both at once: one wins, the other is a 409, no deadlock', async () => {
