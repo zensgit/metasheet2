@@ -238,6 +238,16 @@
 //           plan and the fill-blank backfill — through the staging project derived (in its deps helper) from this scope
 //           with no request projectId. Every real run is owner gate ② per sheet. A header-fillable tenant here would
 //           install onto another tenant's sheet.
+//       39. GET  …/project-targets/census                                   `stockPreparationSheetCensusList`
+//       40. GET  …/projects/:projectNo/target/census                        `stockPreparationProjectSheetCensusGet`
+//       41. POST …/projects/:projectNo/target/remnant-acknowledgements      `stockPreparationProjectRemnantAcknowledge`
+//       42. POST …/target/remnant-acknowledgements/:acknowledgementId/revoke `stockPreparationProjectRemnantAcknowledgementRevoke`
+//           Batch-refresh step 6d-1b (S6-5; step-6 design §6.5; register R-91), ADMIN. The two census READS answer the
+//           proven tenant's registry rows and project sheets (the doubled-sheet counts; the project form also the
+//           PRIVATE component handles), through the walled project-scoped read and the staging project derived (in the
+//           shared census helpers) from this scope with no request projectId; the acknowledgement and the revoke are
+//           WRITES to that tenant's component ruling ledger (migration 107), each with its audit row on one transaction.
+//           A header-fillable tenant here would read another tenant's sheets or acknowledge a remnant on its project.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
