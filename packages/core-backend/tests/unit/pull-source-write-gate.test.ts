@@ -45,7 +45,7 @@ import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-direct
 
 const RC = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
 const LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
-const STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '30s'"
+const STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '25s'"
 const ORG_LOCK = directoryOrgLockSql('$1')
 const PREAMBLE = [RC, LOCK_TIMEOUT, STATEMENT_TIMEOUT]
 const WRITE = 'INSERT INTO t VALUES (1)'
@@ -485,19 +485,21 @@ describe('PATCH routing policy: set with the expected current canonical', () => 
     meta: { orgId: 'default', purpose: 'approval_routing', integrationId: TARGET_ID, actorId: 'admin-7', previousCanonicalIntegrationId: previous },
   }]]
 
-  it('absent: the set is unconditional, takes no organisation lock, and audits the operator and the previous canonical', async () => {
+  it('absent: the set is unconditional, pins READ COMMITTED first, takes no organisation lock, and audits the operator and the previous canonical', async () => {
     for (const current of [null, OTHER_ID]) {
       auditMocks.auditLog.mockClear()
       const connection = scriptedConnection(setScript(current))
       const res = await patchPolicy({ canonicalIntegrationId: TARGET_ID })
       expect(res.statusCode).toBe(200)
       const texts = connection.texts()
-      expect(texts).toHaveLength(3)
-      expect(isTargetLock(texts[0])).toBe(true)
-      expect(isPolicyRead(texts[1])).toBe(true)
-      expect(texts[2]).toMatch(UPSERT)
+      expect(texts).toHaveLength(4)
+      expect(texts[0]).toBe(RC)
+      expect(isTargetLock(texts[1])).toBe(true)
+      expect(isPolicyRead(texts[2])).toBe(true)
+      expect(texts[3]).toMatch(UPSERT)
       expect(texts).not.toContain(ORG_LOCK)
-      expect(texts).not.toContain(RC)
+      expect(texts).not.toContain(LOCK_TIMEOUT)
+      expect(texts).not.toContain(STATEMENT_TIMEOUT)
       expect(auditMocks.auditLog.mock.calls).toEqual(setAudit(current))
     }
   })
@@ -506,7 +508,7 @@ describe('PATCH routing policy: set with the expected current canonical', () => 
     const connection = scriptedConnection(setScript(OTHER_ID))
     const res = await patchPolicy({ canonicalIntegrationId: TARGET_ID, expectedCurrentCanonicalIntegrationId: OTHER_ID.toUpperCase() })
     expect(res.statusCode).toBe(200)
-    // A conditional set pins READ COMMITTED first; an unconditional one (above) does not.
+    // Every set pins READ COMMITTED first.
     expect(connection.texts()[0]).toBe(RC)
     expect(isTargetLock(connection.texts()[1])).toBe(true)
     expect(isPolicyRead(connection.texts()[2])).toBe(true)
@@ -548,6 +550,76 @@ describe('PATCH routing policy: set with the expected current canonical', () => 
     expect(second.statusCode).toBe(409)
     expect((second.body as { error: { code: string } }).error.code).toBe('ROUTING_POLICY_STATE_CHANGED')
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  const SET_STAGES: Array<{ stage: string; fails: (sql: string) => boolean }> = [
+    { stage: 'target row lock', fails: isTargetLock },
+    { stage: 'policy row lock', fails: isPolicyRead },
+    { stage: 'write', fails: (sql) => UPSERT.test(sql) || INSERT_IF_ABSENT.test(sql) },
+  ]
+  for (const code of ['40P01', '55P03', '57014']) {
+    for (const { stage, fails } of SET_STAGES) {
+      it(`${code} at the ${stage} of a set is a retryable 503 with the fixed sentence, never the driver text, and no audit`, async () => {
+        const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+        try {
+          for (const body of [
+            { canonicalIntegrationId: TARGET_ID },
+            { canonicalIntegrationId: TARGET_ID, expectedCurrentCanonicalIntegrationId: OTHER_ID },
+            { canonicalIntegrationId: TARGET_ID, expectedCurrentCanonicalIntegrationId: null },
+          ]) {
+            warnSpy.mockClear()
+            const expectsNone = 'expectedCurrentCanonicalIntegrationId' in body && body.expectedCurrentCanonicalIntegrationId === null
+            const script = setScript(expectsNone ? null : OTHER_ID)
+            const connection = scriptedConnection((sql, params) => (fails(sql) ? sqlStateError(code) : script(sql, params)))
+            const res = await patchPolicy(body)
+            expect(res.statusCode, JSON.stringify(body)).toBe(503)
+            expect(res.body).toEqual(errorBody('DIRECTORY_ROUTING_GATE_BUSY', DIRECTORY_ROUTING_GATE_BUSY_MESSAGE))
+            expect(JSON.stringify(res.body)).not.toContain('driver text')
+            // The failing statement is the last one the transaction issued.
+            expect(fails(connection.texts()[connection.texts().length - 1])).toBe(true)
+            expect(auditMocks.auditLog).not.toHaveBeenCalled()
+            expect(warnSpy.mock.calls).toEqual([[
+              'Directory source check busy',
+              { code: 'DIRECTORY_ROUTING_GATE_BUSY', sqlState: code, actorId: 'admin-7' },
+            ]])
+          }
+        } finally {
+          warnSpy.mockRestore()
+        }
+      })
+    }
+  }
+
+  it('any other failure of a set transaction stays the fixed 500', async () => {
+    const errorSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+    try {
+      for (const failure of [new Error('driver text org-secret-1'), sqlStateError('40001'), sqlStateError('23503')]) {
+        scriptedConnection((sql) => (isPolicyRead(sql) ? failure : setScript(OTHER_ID)(sql, undefined)))
+        const res = await patchPolicy({ canonicalIntegrationId: TARGET_ID })
+        expect(res.statusCode).toBe(500)
+        expect(res.body).toEqual(errorBody('ROUTING_POLICY_WRITE_FAILED', 'Failed to update the routing policy'))
+        expect(auditMocks.auditLog).not.toHaveBeenCalled()
+      }
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('only the transaction is mapped: a failure after the commit, whatever its code, is not answered as "nothing was changed"', async () => {
+    const errorSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+    try {
+      for (const code of ['40P01', '55P03', '57014']) {
+        const connection = scriptedConnection(setScript(OTHER_ID))
+        auditMocks.auditLog.mockRejectedValueOnce(sqlStateError(code))
+        const res = await patchPolicy({ canonicalIntegrationId: TARGET_ID })
+        // The upsert ran and the transaction ended without an error before the audit write failed.
+        expect(connection.texts()[connection.texts().length - 1]).toMatch(UPSERT)
+        expect(res.statusCode, code).toBe(500)
+        expect(res.body).toEqual(errorBody('ROUTING_POLICY_WRITE_FAILED', 'Failed to update the routing policy'))
+      }
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   it('a value that is neither a uuid nor null is 400 before any statement; other fields stay rejected', async () => {

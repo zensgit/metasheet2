@@ -12,7 +12,7 @@ import {
   isApprovalRoutingRequirePolicyEnabled,
   type PullSourceRuleStatus,
 } from '../directory/pull-source-rule'
-import { runPullSourceGateTransaction } from '../directory/pull-source-write-gate'
+import { asPullSourceGateFailure, runPullSourceGateTransaction } from '../directory/pull-source-write-gate'
 import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -110,7 +110,10 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *                                   A set may carry `expectedCurrentCanonicalIntegrationId` (uuid, or
  *                                   null for "no policy"): the write happens only if that is still the
  *                                   current canonical, else 409 ROUTING_POLICY_STATE_CHANGED with
- *                                   nothing written. A clear runs under the organisation's pull-source
+ *                                   nothing written. A set or a clear whose transaction is ended by a
+ *                                   deadlock, a lock wait timeout or a cancelled statement answers a
+ *                                   retryable 503 DIRECTORY_ROUTING_GATE_BUSY with nothing written.
+ *                                   A clear runs under the organisation's pull-source
  *                                   lock and is refused (409 ROUTING_POLICY_CLEAR_BLOCKED) while the
  *                                   organisation has two or more active pull sources, whatever the
  *                                   approval-routing switch says.
@@ -320,12 +323,13 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         | { kind: 'ok'; provider: string; previous: string | null }
 
       const outcome = await transaction(async (client) => {
-        // A conditional set compares against what is committed when the policy row is locked, and its
-        // "insert only if absent" must see a row another transaction committed meanwhile, whatever the
-        // deployment's default isolation level: READ COMMITTED, pinned as the first statement. A set
-        // without the expected-state field keeps the deployment's isolation level; it reads the policy
-        // row under the same lock, only to name the previous canonical in its audit row.
-        if (expectedGiven) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        // READ COMMITTED, pinned as the first statement of every set, whatever the deployment's default
+        // isolation level. A conditional set compares against what is committed when the policy row is
+        // locked, and its "insert only if absent" must see a row another transaction committed
+        // meanwhile. A set without the expected-state field reads the policy row under the same lock,
+        // only to name the previous canonical in its audit row; when no row exists there is nothing to
+        // lock, so two first sets that run together both record "no previous canonical".
+        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         const locked = await client.query(
           `SELECT id::text AS id, provider, status
              FROM directory_integrations
@@ -383,6 +387,12 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
           [orgId, purpose, canonical],
         )
         return { kind: 'ok', provider: integration.provider, previous } satisfies WriteOutcome
+      }).catch((error: unknown) => {
+        // A set takes the target row, the policy row and the policy table in an order other writers
+        // can cross. When it is the one PostgreSQL ends (deadlock, lock wait timeout, cancelled
+        // statement) nothing was written, and it answers the same retryable 503 as a gate transaction.
+        // Only the transaction is mapped: the audit write below runs after the commit.
+        throw asPullSourceGateFailure(error)
       })
 
       if (outcome.kind === 'not_found') {
@@ -420,7 +430,8 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
       })
       jsonOk(res, { policy: { purpose, canonicalIntegrationId: canonical, canonicalProvider: outcome.provider } })
     } catch (error) {
-      // A clear that lost a lock race, ran out of time or could not read the source count: retryable 503.
+      // A clear or a set whose transaction lost a lock race or ran out of time, and a clear that could
+      // not read the source count: retryable 503, nothing written.
       if (sendIfPullSourceGateRefusal(res, error, { actorId: adminUserId })) return
       logger.error(`Failed to set routing policy: ${error instanceof Error ? error.message : 'unknown'}`)
       jsonError(res, 500, 'ROUTING_POLICY_WRITE_FAILED', 'Failed to update the routing policy')

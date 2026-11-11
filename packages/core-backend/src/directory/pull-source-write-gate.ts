@@ -35,8 +35,12 @@ export interface PullSourceGateClient {
 
 /** Upper bound of any single lock wait inside a gate transaction. */
 export const PULL_SOURCE_GATE_LOCK_TIMEOUT = '5s'
-/** Upper bound of any single statement inside a gate transaction. */
-export const PULL_SOURCE_GATE_STATEMENT_TIMEOUT = '30s'
+/**
+ * Upper bound of any single statement inside a gate transaction. It is below the pool's default client-side
+ * query timeout (30 s), so a statement that runs out of time is ended by the server with SQLSTATE 57014,
+ * which the gate answers as busy.
+ */
+export const PULL_SOURCE_GATE_STATEMENT_TIMEOUT = '25s'
 
 export const DIRECTORY_ROUTING_GATE_BUSY_CODE = 'DIRECTORY_ROUTING_GATE_BUSY' as const
 /** Fixed sentence: carries no organisation id, integration, count or driver text. */
@@ -80,8 +84,13 @@ function sqlStateOf(error: unknown): string | null {
   return typeof code === 'string' ? code : null
 }
 
-/** The error a failed gate transaction surfaces as. Anything that is not a gate condition passes unchanged. */
-function asGateFailure(error: unknown): unknown {
+/**
+ * The error a failed transaction of this package surfaces as: a deadlock, a lock wait that timed out and a
+ * cancelled statement become `DirectoryRoutingGateBusyError`, an unreadable source count becomes
+ * `DirectoryRoutingGateUnavailableError`, and anything else passes unchanged. It is applied to the failure
+ * of the transaction itself, where nothing was written; never to a step that runs after the commit.
+ */
+export function asPullSourceGateFailure(error: unknown): unknown {
   if (error instanceof PullSourceCountUnavailableError) return new DirectoryRoutingGateUnavailableError()
   const sqlState = sqlStateOf(error)
   if (sqlState !== null && (PULL_SOURCE_GATE_BUSY_SQLSTATES as readonly string[]).includes(sqlState)) {
@@ -122,7 +131,7 @@ export async function runPullSourceGateTransaction<T, L = undefined>(
       return body(client, locked)
     })
   } catch (error) {
-    throw asGateFailure(error)
+    throw asPullSourceGateFailure(error)
   }
 }
 

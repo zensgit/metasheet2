@@ -19,6 +19,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
  *  - A gate transaction runs under READ COMMITTED with bounded waits, holds the organisation's
  *    advisory lock while it reads and writes, and ends with nothing written when it loses a lock race
  *    (deadlock, lock wait timeout, cancelled statement) or cannot read the source count.
+ *  - A policy set takes no organisation lock; when PostgreSQL ends its transaction (deadlock, cancelled
+ *    statement) it answers the same retryable 503 with nothing written.
  *  - A successful transition writes one values-free audit row naming the operator; a refusal writes
  *    none and logs one values-free line.
  *  - With the switch off the legacy entries issue the single statement they always issued.
@@ -453,13 +455,13 @@ describeIfDatabase('pull-source write gate (real DB, pool default REPEATABLE REA
     expect(created.status).toBe(200)
     expect(witness.isolation).toBe('read committed')
     expect(witness.lockTimeout).toBe('5s')
-    expect(witness.statementTimeout).toBe('30s')
+    expect(witness.statementTimeout).toBe('25s')
     expect(witness.holders).toEqual([witness.pid])
     // The lock ends with the transaction, and the timeouts did not stay on the pooled connection.
     expect((await advisoryLocks(DEFAULT_ORG)).granted).toEqual([])
     const gate = gateTransactions()
     expect(gate).toHaveLength(1)
-    expect(gate[0].map((s) => s.sql).slice(0, 4)).toEqual([RC_PIN, "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '30s'", ORG_LOCK])
+    expect(gate[0].map((s) => s.sql).slice(0, 4)).toEqual([RC_PIN, "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'", ORG_LOCK])
     expect(gate[0].some((s) => isIntegrationInsert(s.sql))).toBe(true)
 
     const rows = await ourRows(DEFAULT_ORG)
@@ -684,7 +686,7 @@ describeIfDatabase('pull-source write gate (real DB, pool default REPEATABLE REA
     expect(await canonicalOf(DEFAULT_ORG)).toBeNull()
     // The clear ran in a gate transaction: organisation lock, the policy row, the count, the delete.
     expect(gateTransactions()).toHaveLength(1)
-    expect(gateTransactions()[0].map((s) => s.sql).slice(0, 4)).toEqual([RC_PIN, "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '30s'", ORG_LOCK])
+    expect(gateTransactions()[0].map((s) => s.sql).slice(0, 4)).toEqual([RC_PIN, "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'", ORG_LOCK])
     expect(gateTransactions()[0][5].sql).toBe(COUNT_ACTIVE_PULL_SOURCES_SQL)
     const audits = await auditRows(CLEAR_AUDIT)
     expect(audits).toHaveLength(1)
@@ -862,7 +864,7 @@ describeIfDatabase('pull-source write gate (real DB, pool default REPEATABLE REA
       const elapsed = Date.now() - startedAt
       expect(res.status).toBe(503)
       expect(errorOf(res)).toEqual(GATE_BUSY)
-      // The wait is bounded by the lock timeout (5s), far below the statement timeout (30s).
+      // The wait is bounded by the lock timeout (5s), far below the statement timeout (25s).
       expect(elapsed).toBeGreaterThanOrEqual(4500)
       expect(elapsed).toBeLessThan(15000)
       expect(refusalLogs().map((entry) => entry.meta)).toEqual([{ code: 'DIRECTORY_ROUTING_GATE_BUSY', sqlState: '55P03', actorId: ADMIN }])
@@ -944,6 +946,64 @@ describeIfDatabase('pull-source write gate (real DB, pool default REPEATABLE REA
     })
     await expectRuleHolds(DEFAULT_ORG)
     expect(await advisoryLocks(DEFAULT_ORG)).toEqual({ granted: [], waiting: [] })
+  }, 25000)
+
+  it('G11 a policy set that PostgreSQL ends is a retryable 503 with nothing written: the deadlock victim of a wait cycle with a transaction that holds the policy table and wants the target row, and a cancelled set', async () => {
+    const a = await seedIntegration(DEFAULT_ORG, corpOf('g11d-x'))
+    const b = await seedIntegration(DEFAULT_ORG, corpOf('g11d-y'))
+    await seedPolicy(DEFAULT_ORG, a)
+
+    // Deadlock. The set holds its target row FOR SHARE and is parked before its write.
+    await withRawConnection(async (third, thirdPid) => {
+      // The third transaction (the lock order of a controlled handover) holds the policy table in SHARE
+      // mode and then waits for the row the set has locked. Its own deadlock check is set late, so the
+      // waiter PostgreSQL ends is the set.
+      await third.query(`SET deadlock_timeout = '20s'`)
+      await third.query('BEGIN')
+      await third.query('LOCK TABLE org_directory_routing_policy IN SHARE MODE NOWAIT')
+      const parked = parkBefore(isPolicyInsert)
+      const set = patchPolicy({ canonicalIntegrationId: b }).then((res) => res)
+      await parked.reached
+      const rowWait = third.query('SELECT id FROM directory_integrations WHERE id = $1 FOR UPDATE', [b]).then(() => 'granted', (error: { code?: string }) => `failed:${error.code}`)
+      await waitUntilBlocked(thirdPid)
+      // The set goes on: its write waits for the table lock, which closes the cycle set → third → set.
+      parked.release()
+      const res = await set
+      expect(res.status).toBe(503)
+      expect(errorOf(res)).toEqual(GATE_BUSY)
+      expect(refusalLogs().map((entry) => entry.meta)).toEqual([{ code: 'DIRECTORY_ROUTING_GATE_BUSY', sqlState: '40P01', actorId: ADMIN }])
+      expect(await rowWait).toBe('granted')
+      await third.query('ROLLBACK')
+    })
+    expect(await canonicalOf(DEFAULT_ORG)).toBe(a)
+    expect(await auditRows(SET_AUDIT)).toHaveLength(0)
+
+    // Cancelled statement. The set waits for its target row, which another transaction holds.
+    warnSpy.mockClear()
+    await withRawConnection(async (holder, holderPid) => {
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM directory_integrations WHERE id = $1 FOR UPDATE', [b])
+      const set = patchPolicy({ canonicalIntegrationId: b, expectedCurrentCanonicalIntegrationId: a }).then((res) => res)
+      const waiter = await poll('a backend waiting for the row the holder locked', async () => {
+        const r = await query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid))`,
+          [holderPid],
+        )
+        return r.rows[0]?.pid
+      })
+      await query('SELECT pg_cancel_backend($1)', [waiter])
+      const res = await set
+      expect(res.status).toBe(503)
+      expect(errorOf(res)).toEqual(GATE_BUSY)
+      expect(refusalLogs().map((entry) => entry.meta)).toEqual([{ code: 'DIRECTORY_ROUTING_GATE_BUSY', sqlState: '57014', actorId: ADMIN }])
+    })
+    expect(await canonicalOf(DEFAULT_ORG)).toBe(a)
+    expect(await auditRows(SET_AUDIT)).toHaveLength(0)
+    // The same set goes through once nothing is in its way.
+    const retried = await patchPolicy({ canonicalIntegrationId: b, expectedCurrentCanonicalIntegrationId: a })
+    expect(retried.status).toBe(200)
+    expect(await canonicalOf(DEFAULT_ORG)).toBe(b)
+    expect(await auditRows(SET_AUDIT)).toHaveLength(1)
   }, 25000)
 
   it('G12 every successful transition writes one values-free audit row that names the operator; a refusal writes none and logs one values-free line', async () => {
