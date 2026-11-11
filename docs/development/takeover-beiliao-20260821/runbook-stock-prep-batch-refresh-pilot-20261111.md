@@ -295,6 +295,7 @@ Remove-Variable token
 
    - `history_status = 'installing'`：停。先把装机做完（或按装机手册 §6 中止），再开修复窗口。
    - `history_status = 'pending'` 且 `plan_kept = t`：停。这是一次中止后留着计划的首装，再跑会按旧计划续上（`:627-629`）。先把装机做完。
+   - `history_status = 'pending'` 且 `plan_kept = f`：这张表还没装机。按 §3 先做批次标识装机，再开修复窗口。（和上一条不同：没有留着的计划，下一次装机按首装重新出计划（`stock-preparation-pull-batch-install.cjs:624-629`）。）
    - `born_empty` / `backfilled`，或者没有行（这张表从没开始装机）：可以开。§3 的顺序是先装机，所以正常应是前者。
 6. **备份与恢复。** 每次 retire 都先存备份；restore 是另一份配方、另一次预览、另一份批复，按行**当前**的版本写。
 7. **跑完一半停住的修复。** 按 #6843 当前草稿，一次已全部写完但收尾失败的修复会停在 `running`：预览关不掉它，也没有下一次 retire 可做，只有 restore 那一次能动它（等于撤销修复）。项目一旦受治理，两种配方都开不了，工具里没有办法关掉这样的运行。合入前要给出一条 owner 批准的关闭办法 **【待定 #6843】**。
