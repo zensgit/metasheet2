@@ -38,6 +38,10 @@ const directoryWiringContractsStep = {
   name: 'Directory grant-table, deprovision-writer and access-graph-mutex CI-wiring contracts (required lane)',
   run: 'node --test \\\n  scripts/ops/directory-grant-table-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n  scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs\n',
 }
+const approvalRoutingWiringContractStep = {
+  name: 'Approval routing real-DB suites CI-wiring contract (required lane)',
+  run: 'node --test scripts/ops/approval-routing-prerequisite-ci-wiring.test.mjs',
+}
 const permissionStep = {
   name: 'Admin write-route inventory and permission preflight',
   run: 'pnpm --filter @metasheet/core-backend exec vitest run \\\n  tests/unit/admin-mounts-write-gate-guard.test.ts \\\n  tests/unit/admin-directory-routes.test.ts \\\n  tests/unit/admin-directory-5xx-values-free.test.ts\n',
@@ -133,6 +137,8 @@ function assertParallelWorkflow(doc) {
       assert.ok(sourceLockIndex >= 0, 'Keep the original directory activation source-lock step')
       assert.deepEqual(actual.splice(sourceLockIndex + 1, 1), [directoryWiringContractsStep],
         'Keep the promoted directory CI-wiring contracts immediately after the source-lock step')
+      assert.deepEqual(actual.splice(sourceLockIndex + 1, 1), [approvalRoutingWiringContractStep],
+        'Keep the approval routing CI-wiring contract immediately after the directory CI-wiring contracts')
     }
     if (suite === 'permissions') assert.deepEqual(actual.splice(-1), [permissionStep])
     if (suite === 'unit') {
@@ -211,6 +217,12 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(departureVouchingAddition + feishuSmokeAddition), 'Keep the Feishu mock harness smoke suite right after the departure vouching suite')
         const lifecycleHistoryAddition = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'
         assert.equal(step.run.split(lifecycleHistoryAddition).length - 1, 1, 'Directory integration lifecycle history DB suite must run exactly once')
+        const routingPolicyRequiredDbAddition = '  tests/integration/approval-routing-policy-required.db.test.ts \\\n'
+        assert.equal(step.run.split(routingPolicyRequiredDbAddition).length - 1, 1, 'Approval routing policy-required DB suite must run exactly once')
+        assert.ok(step.run.includes(lifecycleHistoryAddition + routingPolicyRequiredDbAddition), 'Keep the approval routing policy-required DB suite right after the directory integration lifecycle history suite')
+        const routingPolicyRequiredApiAddition = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'
+        assert.equal(step.run.split(routingPolicyRequiredApiAddition).length - 1, 1, 'Approval routing policy-required API suite must run exactly once')
+        assert.ok(step.run.includes(routingPolicyRequiredDbAddition + routingPolicyRequiredApiAddition), 'Keep the approval routing policy-required API suite right after its DB suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -225,6 +237,8 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(deferAddition, '')
         step.run = step.run.replace(departureVouchingAddition, '')
         step.run = step.run.replace(lifecycleHistoryAddition, '')
+        step.run = step.run.replace(routingPolicyRequiredDbAddition, '')
+        step.run = step.run.replace(routingPolicyRequiredApiAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
@@ -327,6 +341,12 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    ...['db', 'api'].flatMap(kind => [
+      doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
+      doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`, anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+      doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    ]),
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const db = '  tests/integration/approval-routing-policy-required.db.test.ts \\\n', api = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'; assert.ok(step.run.includes(db + api)); step.run = step.run.replace(db + api, api + db) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },
@@ -347,6 +367,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
       [canaryExclusionConsistencyStep, 'scripts/ops/dingtalk-lifecycle-canary-exclusion-consistency.test.mjs'],
       [directoryWiringContractsStep, '  scripts/ops/directory-deprovision-writer-ci-wiring.test.mjs \\\n'],
       [directoryWiringContractsStep, ' \\\n  scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs'],
+      [approvalRoutingWiringContractStep, 'scripts/ops/approval-routing-prerequisite-ci-wiring.test.mjs'],
     ].flatMap(([promoted, file]) => [
       doc => { const steps = doc.jobs.contracts.steps; steps.splice(steps.findIndex(step => step.name === promoted.name), 1) },
       doc => { doc.jobs.contracts.steps.find(step => step.name === promoted.name).run += ' || true' },

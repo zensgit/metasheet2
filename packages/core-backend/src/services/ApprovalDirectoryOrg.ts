@@ -41,6 +41,15 @@
  * downstream stays in control.
  */
 
+import {
+  ApprovalRoutingPolicyError,
+  POLICY_REQUIRED_MESSAGE,
+  PULL_SOURCE_THRESHOLD,
+  isApprovalRoutingRequirePolicyEnabled,
+  pullSourceKeySql,
+  pullSourcePredicateSql,
+} from '../directory/pull-source-rule'
+
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 export interface ApprovalRequesterOrgRelations {
@@ -273,18 +282,55 @@ interface RoutingPolicyProbeRow {
 }
 
 /**
- * B5-b fail-closed CONFIG error (design lock Lock 2): thrown when an `approval_routing` policy
- * exists but cannot be honored — its canonical integration is missing/not-active, or the requester
- * is linked in MORE THAN ONE policy-governed org. Deliberately a distinct type so the create-time
- * caller can surface "routing policy misconfigured — contact an administrator" instead of the
- * generic transient "please retry": retrying never fixes a broken policy. NOT thrown for data
- * absence (a requester simply missing from the canonical directory resolves to `{}`).
+ * Fail-closed routing CONFIG error, defined once in the pull-source rule module and re-exported
+ * here so the resolver, the service and the routes test `instanceof` against one class. `reason`
+ * says which configuration fault it is:
+ *   - `canonical_unavailable`: an `approval_routing` policy points at a missing / non-active
+ *     integration;
+ *   - `multi_org_ambiguous`: the requester is linked in more than one policy-governed org;
+ *   - `policy_required`: an org the requester is linked in has two or more active pull sources and
+ *     no policy (only while the require-policy switch is on).
+ * Retrying never fixes any of them. NOT thrown for data absence (a requester simply missing from
+ * the canonical directory resolves to `{}`).
  */
-export class ApprovalRoutingPolicyError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ApprovalRoutingPolicyError'
-  }
+export { ApprovalRoutingPolicyError }
+
+interface MultiSourceProbeRow {
+  org_id: string
+  pull_source_count: number
+}
+
+/** Stable marker carried by the multi-source probe statement. */
+export const APPROVAL_ROUTING_MULTI_SOURCE_PROBE_MARKER = '/* approval-routing:multi-source-probe */'
+
+/**
+ * The multi-source probe: every org in which the requester has a linked, active directory account
+ * and which holds at least `PULL_SOURCE_THRESHOLD` distinct active pull sources. Read-only. The
+ * source predicate, the source key and the threshold come from the pull-source rule module; this
+ * statement adds only the requester reach (same reach as the requester pick: linked + active
+ * account, integration status not considered) and, when `orgScoped`, the `$2` org boundary.
+ * Ordered by org id so the reported org is deterministic.
+ */
+export function approvalRoutingMultiSourceProbeSql(orgScoped: boolean): string {
+  const sourceKey = pullSourceKeySql('i')
+  return `${APPROVAL_ROUTING_MULTI_SOURCE_PROBE_MARKER}
+WITH requester_orgs AS (
+  SELECT DISTINCT ai.org_id
+    FROM directory_accounts a
+    JOIN directory_account_links dal ON dal.directory_account_id = a.id
+    JOIN directory_integrations ai ON ai.id = a.integration_id
+   WHERE dal.local_user_id = $1
+     AND dal.link_status = 'linked'
+     AND a.is_active = true${orgScoped ? '\n     AND ai.org_id = $2' : ''}
+)
+SELECT i.org_id AS org_id,
+       count(DISTINCT ${sourceKey})::int AS pull_source_count
+  FROM directory_integrations i
+  JOIN requester_orgs ro ON ro.org_id = i.org_id
+ WHERE ${pullSourcePredicateSql('i')}
+ GROUP BY i.org_id
+HAVING count(DISTINCT ${sourceKey}) >= ${PULL_SOURCE_THRESHOLD}
+ ORDER BY i.org_id ASC`
 }
 
 /**
@@ -357,7 +403,8 @@ export async function resolveApprovalRequesterOrgRelations(
   //    When `orgId` is OMITTED (kernel path), the probe considers every org the user
   //    is linked in (B5-b Q4, unchanged):
   //      - NO policy row  → LEGACY unscoped pick below (Q1: zero behavior change until a
-  //        policy is explicitly set — staged opt-in).
+  //        policy is explicitly set — staged opt-in), except where step 0b refuses: with the
+  //        require-policy switch on, an ungoverned org with two or more active pull sources.
   //      - ONE policy     → the policy is AUTHORITATIVE: the requester pick is restricted to the
   //        canonical integration. A policy whose canonical target is missing or not 'active' is a
   //        CONFIG error → fail-closed typed throw (operator must fix the policy; silently falling
@@ -370,7 +417,8 @@ export async function resolveApprovalRequesterOrgRelations(
   //        deterministic, never a guess.
   //
   //    When `orgId` IS set:
-  //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT.
+  //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT (after
+  //        step 0b, which looks at that org only).
   //      - ONE same-org policy → AUTHORITATIVE canonical-integration pick (within the tenant).
   //      - (multi-org ambiguity cannot fire: foreign policies are filtered out by p.org_id = $2.)
   //
@@ -427,15 +475,50 @@ export async function resolveApprovalRequesterOrgRelations(
       // Only reachable on the no-orgId (kernel) path: org-scoped probe binds p.org_id = $2.
       throw new ApprovalRoutingPolicyError(
         `approval routing is policy-managed in ${orgs.size} orgs this user is linked in; multi-org routing requires explicit resolution`,
+        'multi_org_ambiguous',
       )
     }
     const policy = policyRows.rows[0]
     if (policy.canonical_status !== 'active') {
       throw new ApprovalRoutingPolicyError(
         `the approval_routing policy for org "${policy.org_id}" points at a ${policy.canonical_status === null ? 'missing' : `'${policy.canonical_status}'`} integration; fix the routing policy`,
+        'canonical_unavailable',
       )
     }
     canonicalIntegrationId = policy.canonical_integration_id
+  }
+
+  // 0b) Multi-source rule. With the require-policy switch on, an org the requester is linked in
+  //     that holds two or more distinct active pull sources and has no `approval_routing` policy
+  //     gets NO source picked for it: the typed error below replaces the "latest updated account"
+  //     pick, so the outcome never depends on update time, creation time or row order.
+  //     The check runs only when all three hold:
+  //       - the switch is on (read per call; off ⇒ no statement is issued here);
+  //       - this is not a preview override (`overrideCanonicalIntegrationId` undefined);
+  //       - the policy probe above found no governed org (a policy stays authoritative).
+  //     With `orgId` the probe is confined to that org. Without it, any ungoverned multi-source
+  //     org the requester is linked in raises (lowest org id first). A requester with no linked
+  //     active account in such an org is not reached by the probe and resolves as before.
+  //     A failure of the probe itself is not caught here: it propagates as a transient read
+  //     failure and is never turned into `policy_required` or into an empty result.
+  if (
+    isApprovalRoutingRequirePolicyEnabled()
+    && options.overrideCanonicalIntegrationId === undefined
+    && policyRows.rows.length === 0
+  ) {
+    const multiSource = await query<MultiSourceProbeRow>(
+      approvalRoutingMultiSourceProbeSql(orgId !== null),
+      orgId ? [userId, orgId] : [userId],
+    )
+    if (multiSource.rows.length > 0) {
+      const first = multiSource.rows[0]
+      throw new ApprovalRoutingPolicyError(
+        POLICY_REQUIRED_MESSAGE,
+        'policy_required',
+        first.org_id,
+        Number(first.pull_source_count),
+      )
+    }
   }
 
   // 1) Requester's linked directory account + its primary department's raw.

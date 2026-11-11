@@ -4,7 +4,9 @@ import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import { ensurePlatformAdmin } from './admin-directory'
 import { query, transaction } from '../db/pg'
-import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import { readApprovalRoutingStatus, type ApprovalRoutingStatus } from '../directory/approval-routing-status'
+import { isApprovalRoutingPolicyRequired, isApprovalRoutingRequirePolicyEnabled } from '../directory/pull-source-rule'
+import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutingPolicyRoutes')
@@ -56,6 +58,13 @@ interface IntegrationRow {
   status: string
 }
 
+/** Error class and, when present, SQLSTATE: enough to tell failures apart without echoing any value. */
+function describeFailure(error: unknown): string {
+  const name = error instanceof Error ? error.name : 'unknown'
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? `${name} (${code})` : name
+}
+
 async function loadOrgIntegration(orgId: string, integrationId: string): Promise<IntegrationRow | null> {
   const r = await query<IntegrationRow>(
     `SELECT id::text AS id, provider, status FROM directory_integrations WHERE id = $1::uuid AND org_id = $2`,
@@ -70,6 +79,15 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *   GET   /                       — every §6 purpose with its EFFECTIVE source: the stored policy
  *                                   (canonical integration + provider/status) or 'legacy-default'
  *                                   (no policy row → the resolver's byte-identical legacy path).
+ *                                   `approval_routing` reads 'policy-required' instead when the
+ *                                   require-policy switch is on and the organisation has two or
+ *                                   more active pull sources and no policy: approvals that read
+ *                                   org data are refused there, which is not the legacy path.
+ *                                   A read-only `approvalRouting` block (switch state, source
+ *                                   count, candidates, same-enterprise groups, linked accounts
+ *                                   under non-active sources) is added whether the switch is on
+ *                                   or off; when it cannot be read it is omitted and the other
+ *                                   fields are returned unchanged.
  *   PATCH /:purpose               — the ONLY write point. `{ canonicalIntegrationId: uuid }` sets
  *                                   (upsert; target must exist in THIS org and be 'active' — a
  *                                   policy pointing at a broken target is rejected 409 at write
@@ -82,6 +100,10 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *                                   resolver both legs, so preview cannot drift from production),
  *                                   and reports per-user dept/title/manager/dept-head diffs.
  *                                   No writes, no policy row, no audit (design-lock Q5).
+ *                                   In the 'policy-required' state the report stays available:
+ *                                   a user whose current resolution is refused for the missing
+ *                                   policy is reported `blocked` with `before: null`, and the
+ *                                   candidate leg is computed as usual.
  *
  * All routes are platform-admin-only. Org identity is server-resolved (never from the request).
  */
@@ -105,22 +127,37 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
           WHERE p.org_id = $1`,
         [orgId],
       )
+      // The status block is additive and read on its own: a failed read (an unreadable source
+      // count included) omits the block and leaves every other field as it is.
+      let approvalRouting: ApprovalRoutingStatus | undefined
+      try {
+        approvalRouting = await readApprovalRoutingStatus(query, orgId)
+      } catch (error) {
+        logger.warn(`Approval routing status block omitted: ${describeFailure(error)}`)
+      }
+      // Refusing is not the legacy path, so it is not labelled as one. The label needs both the
+      // switch and the data judgement; with the switch off the legacy path really is in effect.
+      const approvalRoutingRefused = approvalRouting?.enforced === true && approvalRouting.policyRequired
       const byPurpose = new Map(rows.rows.map((r) => [r.purpose, r]))
       const purposes = PURPOSES.map((purpose) => {
         const p = byPurpose.get(purpose)
-        return p
-          ? {
-              purpose,
-              source: 'policy' as const,
-              canonicalIntegrationId: p.canonical_integration_id,
-              canonicalProvider: p.canonical_provider,
-              canonicalStatus: p.canonical_status,
-              fallbackIntegrationId: p.fallback_integration_id,
-              updatedAt: p.updated_at,
-            }
-          : { purpose, source: 'legacy-default' as const }
+        if (p) {
+          return {
+            purpose,
+            source: 'policy' as const,
+            canonicalIntegrationId: p.canonical_integration_id,
+            canonicalProvider: p.canonical_provider,
+            canonicalStatus: p.canonical_status,
+            fallbackIntegrationId: p.fallback_integration_id,
+            updatedAt: p.updated_at,
+          }
+        }
+        if (purpose === 'approval_routing' && approvalRoutingRefused) {
+          return { purpose, source: 'policy-required' as const }
+        }
+        return { purpose, source: 'legacy-default' as const }
       })
-      jsonOk(res, { orgId, purposes })
+      jsonOk(res, { orgId, purposes, ...(approvalRouting ? { approvalRouting } : {}) })
     } catch (error) {
       logger.error(`Failed to list routing policies: ${error instanceof Error ? error.message : 'unknown'}`)
       jsonError(res, 500, 'ROUTING_POLICY_LIST_FAILED', 'Failed to list routing policies')
@@ -320,22 +357,47 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         [orgId],
       )
 
+      // Whether the organisation is in the 'policy-required' state: same judgement as GET (switch
+      // on, two or more active pull sources, no policy). Read only while the switch is on and no
+      // policy exists, so every other preview issues exactly the statements it always did.
+      const policyRequiredNow =
+        !currentPolicy
+        && isApprovalRoutingRequirePolicyEnabled()
+        && (await isApprovalRoutingPolicyRequired(query, orgId)).required
+
+      type Relations = Awaited<ReturnType<typeof resolveApprovalRequesterOrgRelations>>
+      const pick = (r: Relations) => ({
+        departmentName: r.primaryDepartmentName ?? null,
+        title: r.primaryTitle ?? null,
+        managerId: r.managerId ?? null,
+        deptHeadId: r.deptHeadId ?? null,
+      })
       const rows = []
       let changedCount = 0
+      let blockedCount = 0
       for (const { local_user_id: userId } of sample.rows) {
-        // both legs run the REAL resolver — current = real probe; candidate = preview override
-        const before = await resolveApprovalRequesterOrgRelations(userId, query)
+        // both legs run the REAL resolver — current = real probe; candidate = preview override.
+        // The current leg is never forced onto the legacy path: where the real resolution is
+        // refused for the missing policy, the row says so (`blocked`, `before: null`) instead of
+        // showing a legacy pick that production would not make. Only that one reason is caught;
+        // any other failure of either leg fails the preview as before.
+        let before: Relations | null = null
+        try {
+          before = await resolveApprovalRequesterOrgRelations(userId, query)
+        } catch (error) {
+          if (!(error instanceof ApprovalRoutingPolicyError) || error.reason !== 'policy_required') throw error
+        }
         const after = await resolveApprovalRequesterOrgRelations(userId, query, {
           overrideCanonicalIntegrationId: candidate,
         })
-        const pick = (r: typeof before) => ({
-          departmentName: r.primaryDepartmentName ?? null,
-          title: r.primaryTitle ?? null,
-          managerId: r.managerId ?? null,
-          deptHeadId: r.deptHeadId ?? null,
-        })
-        const b = pick(before)
         const a = pick(after)
+        if (before === null) {
+          changedCount++
+          blockedCount++
+          rows.push({ userId, changed: true, blocked: true, before: null, after: a })
+          continue
+        }
+        const b = pick(before)
         const changed = JSON.stringify(b) !== JSON.stringify(a)
         if (changed) changedCount++
         rows.push({ userId, changed, before: b, after: a })
@@ -347,10 +409,14 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         purpose,
         current: currentPolicy
           ? { source: 'policy', canonicalIntegrationId: currentPolicy.canonical_integration_id }
-          : { source: 'legacy-default' },
+          : policyRequiredNow
+            ? { source: 'policy-required' }
+            : { source: 'legacy-default' },
         candidate: { integrationId: candidate, provider: integration.provider },
         sampleSize: rows.length,
         changedCount,
+        // present only when at least one sampled user is blocked
+        ...(blockedCount > 0 ? { blockedCount } : {}),
         rows,
       })
     } catch (error) {

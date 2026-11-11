@@ -434,6 +434,15 @@ export default defineConfig({
       // (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-lifecycle-ci-wiring.test.ts).
       'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts',
+      // Approval routing multi-source rule against real PostgreSQL: the requester resolver's
+      // policy-required refusal, its organisation boundary, its read-only probe and the leaf count
+      // statement (db file), and the same rule through the HTTP surface of a real server (api file).
+      // DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot
+      // skip-green them, and wired as WHOLE FILES into the approval real-DB step in plugin-tests.yml
+      // (pinned by plugin-tests-parallel-contract.test.mjs and
+      // approval-routing-prerequisite-ci-wiring.test.mjs).
+      'tests/integration/approval-routing-policy-required.db.test.ts',
+      'tests/integration/approval-routing-policy-required.api.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
