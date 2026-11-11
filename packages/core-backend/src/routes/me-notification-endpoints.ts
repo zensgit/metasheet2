@@ -89,7 +89,7 @@ export function createMeNotificationEndpointsRouter(deps: MeNotificationEndpoint
     }
   })
 
-  router.delete(`${ME_NOTIFICATION_ENDPOINTS_PATH}/:id`, authenticate, async (req: Request, res: Response) => {
+  router.delete('/api/me/notification-endpoints/:id', authenticate, async (req: Request, res: Response) => {
     const who = caller(req, res, true)
     if (!who) return
     try {
