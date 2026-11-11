@@ -619,6 +619,14 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       // `data-copy-link` button below is this stub's stand-in for that icon.
       'copy-link',
     ],
+    watch: {
+      // The blur-commit field below shows the record's title, but keeps what it shows while it is focused, as the
+      // rich text editor does (its DOM is not rewritten under the caret).
+      record(next: { data?: Record<string, unknown> } | null) {
+        const field = document.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')
+        if (field && document.activeElement !== field) field.value = String(next?.data?.fld_title ?? '')
+      },
+    },
     methods: {
       // PR-B2 round 2: same name/signature as the real component's `defineExpose`d query; reachable
       // through the workbench's `ref="recordInspectorRef"` because Options-API methods sit on the
@@ -719,6 +727,28 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'navigate-record',
         ),
+        // The inspector re-selects the record shown (after a permission change) through the same emit.
+        h(
+          'button',
+          {
+            'data-navigate-record': 'rec_1',
+            onClick: () => this.$emit('navigate', 'rec_1'),
+          },
+          'navigate-record-1',
+        ),
+        // A field that commits on blur, as the drawer's text fields and its rich text editor do, inside the
+        // drawer's root (as every control of the real inspector is).
+        h('div', { class: 'meta-record-drawer' }, [
+          h('input', {
+            'data-blur-commit': 'fld_title',
+            onBlur: (event: FocusEvent) => this.$emit('patch', 'fld_title', (event.target as HTMLInputElement).value),
+          }),
+          // A control only rec_1 shows (a field hidden on another record), and the drawer's open tab.
+          this.record?.id === 'rec_1' ? h('input', { 'data-rec1-only': 'true' }) : null,
+          // An editable surface, as the rich text editor's (jsdom has no isContentEditable: the cell sets it).
+          h('div', { 'data-stub-editable': 'true', contenteditable: 'true', tabindex: 0 }, 'two words'),
+          h('div', { role: 'tabpanel', tabindex: 0, 'data-stub-tabpanel': 'true' }),
+        ]),
         h(
           'button',
           {
@@ -5539,6 +5569,91 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fieldErrorEl('fld_title')?.textContent).toBe('Old context rejected')
         expect(showErrorSpy).not.toHaveBeenCalled()
       }
+    })
+
+    // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
+    // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
+    // and then gets the focus back, so the chord and Esc go on working.
+    it('navigating with the caret still in a field commits that field to the record it was typed on, moves on, and gives the focus back', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      const blurred = vi.fn()
+      field.addEventListener('blur', blurred)
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(blurred).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(document.activeElement).toBe(field)
+      // The focus comes back only once the drawer shows rec_2: the field shows rec_2's title, not rec_1's typing.
+      expect(field.value).toBe('Beta')
+    })
+
+    it('the focus is not given back when something else took it during the switch', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      const other = container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!
+      field.focus()
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      other.focus()
+      await flushUi()
+      expect(document.activeElement).toBe(other)
+    })
+
+    it('a rich text editor gets the focus back with the caret at the end of its text', async () => {
+      await openRec1()
+      const editor = container!.querySelector<HTMLElement>('[data-stub-editable]')!
+      Object.defineProperty(editor, 'isContentEditable', { value: true, configurable: true })
+      editor.focus()
+      document.getSelection()!.collapse(editor, 0)
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(editor)
+      const selection = document.getSelection()!
+      expect(selection.isCollapsed).toBe(true)
+      expect(selection.anchorNode).toBe(editor)
+      expect(selection.anchorOffset).toBe(editor.childNodes.length)
+    })
+
+    it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
+      await openRec1()
+      container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-rec1-only]')).toBeNull()
+      expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+    })
+
+    it('a move leaves a focused control outside the drawer alone', async () => {
+      await openRec1()
+      const outside = document.body.appendChild(document.createElement('input'))
+      try {
+        outside.focus()
+        const blurred = vi.fn()
+        outside.addEventListener('blur', blurred)
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+        expect(blurred).not.toHaveBeenCalled()
+        expect(document.activeElement).toBe(outside)
+      } finally {
+        outside.remove()
+      }
+    })
+
+    it('re-selecting the record shown leaves the focused field alone', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'still typing'
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(field)
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
     })
 
     it('record change clears inline errors (navigate to another record from the inspector)', async () => {
