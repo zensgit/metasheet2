@@ -157,18 +157,49 @@ const SCENARIOS = {
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
     check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
   },
-  async 'an attachment upload, then a press on the details panel and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there runs it (here it replays the grid\'s last cell edit; in the workbench, the upload)'(page) {
+  async 'an attachment upload, then a press on the grid and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there runs it (here it replays the grid\'s last cell edit; in the workbench, the upload)'(page) {
     const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
     const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
     await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
     await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
-    const panel = page.locator('[role="tabpanel"][id$="-panel-details"]')
-    await panel.dispatchEvent('mousedown'); await panel.focus()
+    const gridArea = page.locator('#grid-area')
+    await gridArea.dispatchEvent('mousedown'); await gridArea.focus()
     await page.keyboard.press(`${mod}+z`)
     let s = await state(page); check('grid while it uploads', s.grid, { undo: 1, redo: 0 }); check('replays while it uploads', s.replays, 0)
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
-    await panel.focus(); await page.keyboard.press(`${mod}+z`)
+    await gridArea.focus(); await page.keyboard.press(`${mod}+z`)
     s = await state(page); check('grid after', s.grid, { undo: 2, redo: 0 }); check('replays after', s.replays, 1)
+  },
+  async 'a press on the drawer\'s details panel itself, Cmd+Z: nothing (not the grid\'s undo), never the browser undo'(page) {
+    const panel = page.locator('[role="tabpanel"][id$="-panel-details"]')
+    await panel.dispatchEvent('mousedown'); await panel.focus()
+    await page.keyboard.press(`${mod}+z`)
+    const s = await state(page); check('grid', s.grid, { undo: 0, redo: 0 }); check('replays', s.replays, 0)
+  },
+  async 'a text box typed in again while its commit is still out: the value the server then accepts does not overwrite the typing, which the next blur saves'(page) {
+    const note = page.locator('#drawer_field_fld_note')
+    await note.click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await leave(page)
+    await note.click(); await page.keyboard.press('End'); await page.keyboard.type('Q')
+    // The first commit is accepted now: the record comes back with it.
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'betaX')); await page.waitForTimeout(100)
+    check('typing kept', await note.inputValue(), 'betaXQ')
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_note')), ['rec_1:fld_note=betaX', 'rec_1:fld_note=betaXQ'])
+  },
+  async 'a number box holding a draft it cannot read ("-"), left: nothing is saved, the stored number stays'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('-')
+    check('the box reads empty (badInput)', await qty.evaluate((el) => [el.value, el.validity.badInput]), ['', true])
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), [])
+  },
+  async 'rich text, the next record ending in an @-mention: after the chord, typing goes after the mention, not into it'(page) {
+    await page.evaluate(() => window.undoDemo.setField('rec_2', 'fld_rich', '<p>hi <span data-mention-id="u_1">@Ann</span></p>'))
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.press('End')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    await page.keyboard.type('Z')
+    check('Z after the mention, the mention unchanged', (await state(page)).rich, '<p>hi <span data-mention-id="u_1" contenteditable="false">@Ann</span>Z</p>')
   },
   async 'an attachment upload, then the drawer\'s next-record button while it uploads: the file is saved to the record it was chosen on, never the next one'(page) {
     const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')

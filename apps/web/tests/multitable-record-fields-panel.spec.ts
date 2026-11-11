@@ -789,3 +789,67 @@ describe('MetaRecordFieldsPanel — a control reused for the next record shows t
     expect(input.value).toBe('')
   })
 })
+
+describe('MetaRecordFieldsPanel — a text box keeps its typing across its own commit', () => {
+  // The box's commit (an earlier blur) is still in flight; the user is back in the box and typing; the server then
+  // accepts it, and the record comes back with the committed value.
+  const F_TEXT = { id: 'fld_text', name: 'Text', type: 'string' } as unknown as MetaField
+  const F_NOTES = { id: 'fld_notes', name: 'Notes', type: 'longText' } as unknown as MetaField
+  const F_NUM = { id: 'fld_num', name: 'Amount', type: 'number' } as unknown as MetaField
+  const textRecord = (id: string, value: string, version = 1) =>
+    ({ id, version, data: { fld_text: value, fld_notes: value, fld_num: 5 } }) as unknown as MetaRecord
+
+  afterEach(() => {
+    while (boundApps.length) boundApps.pop()!.unmount()
+    document.body.innerHTML = ''
+  })
+
+  it.each([
+    ['a text input', F_TEXT, '#drawer_field_fld_text'],
+    ['a textarea', F_NOTES, '#drawer_field_fld_notes'],
+  ] as const)('%s: a value that lands while it is focused and typed in leaves the typing, which the next blur commits', async (_label, field, selector) => {
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [field], record: textRecord('rec_A', 'n2'), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!
+    box.focus()
+    box.value = 'n2XQQ'
+    set({ record: textRecord('rec_A', 'n2X', 2) })
+    await flushUi()
+    expect(box.value).toBe('n2XQQ')
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([[field.id, 'n2XQQ']])
+  })
+
+  it.each([
+    ['focused but not typed in', true, false, 'rec_A', 'other'],
+    ['typed in but not focused', false, true, 'rec_A', 'other'],
+    ['focused and typed in, but another record', true, true, 'rec_B', 'b'],
+  ] as const)('the new value is shown when the box is %s', async (_label, focus, typed, recordId, value) => {
+    const { container, set } = mountBoundPanel({ fields: [F_NOTES], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    if (focus) box.focus()
+    if (typed) box.value = 'n2 typed'
+    set({ record: textRecord(recordId, value, 2) })
+    await flushUi()
+    expect(box.value).toBe(value)
+  })
+
+  it('a number box holding a draft it cannot read commits nothing (the stored number stays); an empty box or a number still commits', async () => {
+    const onPatch = vi.fn()
+    const { container } = mountBoundPanel({ fields: [F_NUM], record: textRecord('rec_A', 'n2'), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_num')!
+    const validity = { badInput: true }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch).not.toHaveBeenCalled()
+    validity.badInput = false
+    box.dispatchEvent(new Event('change'))
+    box.value = '7'
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_num', null], ['fld_num', 7]])
+  })
+})

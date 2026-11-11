@@ -328,6 +328,82 @@ describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no 
     container.remove()
   })
 
+  it('an @-mention chip stays atomic when the value is drawn (the caret cannot land in it), and the committed value does not carry that', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: '<p>hi <span data-mention-id="u_1">@Ann</span></p>', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    expect(editable.querySelector('span[data-mention-id="u_1"]')!.getAttribute('contenteditable')).toBe('false')
+    editable.dispatchEvent(new Event('focus'))
+    editable.querySelector('p')!.append(' there')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).toHaveBeenCalledTimes(1)
+    expect(changeSpy.mock.calls[0][0]).toContain('data-mention-id="u_1"')
+    expect(changeSpy.mock.calls[0][0]).not.toContain('contenteditable')
+    app.unmount()
+    container.remove()
+  })
+
+  function mountReactiveEditor(model: string, key = 'rec_A') {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const modelValue = ref(model)
+    const syncKey = ref(key)
+    const changeSpy = vi.fn()
+    const app = createApp({ render: () => h(MetaRichLongTextEditor, { modelValue: modelValue.value, syncKey: syncKey.value, onChange: changeSpy }) })
+    app.mount(container)
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    return { container, app, modelValue, syncKey, changeSpy, editable }
+  }
+
+  it('a blur that commits nothing shows the value that came while the editor was focused', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'newer from elsewhere'
+    await nextTick()
+    expect(editable.innerHTML).toBe('rich')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(editable.innerHTML).toBe('newer from elsewhere')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a blur that commits nothing keeps the editor\'s own commit shown while the model still lags behind it', async () => {
+    const { container, app, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    // Back in the editor before the host took the commit; out again with no edit.
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    expect(editable.innerHTML).toBe('rich X')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a move to another record while the editor is focused (no edit) shows that record\'s value on the blur, and commits nothing', async () => {
+    const { container, app, modelValue, syncKey, changeSpy, editable } = mountReactiveEditor('value of A')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'value of B'
+    syncKey.value = 'rec_B'
+    await nextTick()
+    expect(editable.innerHTML).toBe('value of A')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(editable.innerHTML).toBe('value of B')
+    app.unmount()
+    container.remove()
+  })
+
   it('the `change` value is sanitized (commit cannot carry unsafe markup)', async () => {
     const changeSpy = vi.fn()
     const { container, app } = mountEditor({ onChange: changeSpy })

@@ -26,7 +26,7 @@ import { createApp, h, nextTick, ref, watch } from '/node_modules/vue/dist/vue.e
 import '/node_modules/element-plus/dist/index.css'
 import '/src/styles/tokens.css'
 import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '/src/multitable/utils/workbench-undo.ts'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget } from '/src/multitable/utils/workbench-undo.ts'
 import { useLocale } from '/src/composables/useLocale.ts'
 import { MultitableApiClient } from '/src/multitable/api/client.ts'
 import { useMultitableGrid } from '/src/multitable/composables/useMultitableGrid.ts'
@@ -59,6 +59,7 @@ const rootRef = ref(null)
 const undo = createWorkbenchUndo({
   isInsideWorkbench: (node) => !!rootRef.value?.contains(node),
   isGridSurface: isWorkbenchGridSurface,
+  isGridTarget: isWorkbenchGridTarget,
 })
 installWorkbenchUndo(undo, { undo: () => { window.undoDemo.grid.undo += 1; grid.undo() }, redo: () => { window.undoDemo.grid.redo += 1; grid.redo() } })
 const FIELDS = [
@@ -69,10 +70,11 @@ const FIELDS = [
   { id: 'fld_rich', name: '说明', type: 'longText', property: { rich: true } },
   { id: 'fld_extra', name: '补充', type: 'string' },
   { id: 'fld_files', name: '附件', type: 'attachment' },
+  { id: 'fld_qty', name: '数量', type: 'number' },
 ]
 const RECORDS = {
-  rec_1: { id: 'rec_1', version: 1, data: { fld_title: '巡检记录 A', fld_name: 'alpha', fld_note: 'beta', fld_due: '2031-01-02', fld_rich: 'rich', fld_extra: '' } },
-  rec_2: { id: 'rec_2', version: 1, data: { fld_title: '巡检记录 B', fld_name: 'gamma', fld_note: 'delta', fld_due: '2031-02-03', fld_rich: 'other', fld_extra: '' } },
+  rec_1: { id: 'rec_1', version: 1, data: { fld_title: '巡检记录 A', fld_name: 'alpha', fld_note: 'beta', fld_due: '2031-01-02', fld_rich: 'rich', fld_extra: '', fld_qty: 5 } },
+  rec_2: { id: 'rec_2', version: 1, data: { fld_title: '巡检记录 B', fld_name: 'gamma', fld_note: 'delta', fld_due: '2031-02-03', fld_rich: 'other', fld_extra: '', fld_qty: 3 } },
 }
 const record = ref(RECORDS.rec_1)
 const draft = ref('')

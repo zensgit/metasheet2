@@ -124,6 +124,7 @@ import {
   detectMentionQuery,
   filterMentionSuggestions,
   insertMentionChipAtRange,
+  MENTION_CHIP_ATTR,
 } from '../../utils/rich-longtext-mention'
 import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../../types'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../../utils/meta-core-labels'
@@ -327,6 +328,8 @@ function onInput(): void {
 // The content when the editor took the focus (or last committed with Cmd/Ctrl+Enter): a blur commits only a
 // change from it, as an input's `change` does.
 let committedOnFocus: string | null = null
+// Whether the model (or the sync key) changed while the editor was focused, and so was not shown.
+let modelChangedWhileFocused = false
 
 function onFocus(): void {
   focused.value = true
@@ -493,6 +496,9 @@ function onBlur(): void {
   const value = currentValue()
   emit('update:modelValue', value)
   if (value !== committedOnFocus) emit('change', value)
+  // Nothing to commit: show the value that came while the editor was focused, if one did. (Not otherwise: the
+  // model can still lag behind this editor's own commit, which must stay shown until the host takes it.)
+  else if (modelChangedWhileFocused) syncFromModel()
 }
 
 /**
@@ -580,10 +586,28 @@ function syncFromModel(): void {
   // NEVER rewrite innerHTML while the user is editing: a sanitized value flowing
   // back from our own emit (or a normalization round-trip) would stomp the live
   // DOM and jump the caret. Re-sync only applies external changes received while
-  // the surface is blurred.
-  if (focused.value) return
-  const next = sanitizeRichLongTextHtml(props.modelValue)
+  // the surface is blurred (a blur that commits nothing applies one that came
+  // while it was focused, see onBlur).
+  if (focused.value) {
+    modelChangedWhileFocused = true
+    return
+  }
+  modelChangedWhileFocused = false
+  const next = withAtomicMentions(sanitizeRichLongTextHtml(props.modelValue))
   if (el.innerHTML !== next) el.innerHTML = next
+}
+
+/**
+ * The HTML with every @-mention chip non-editable, as buildMentionChip inserts it: the
+ * sanitizer drops that attribute, so a redrawn chip would otherwise take the caret (and
+ * the typing after it). The emitted value is sanitized again, so it never carries it.
+ */
+function withAtomicMentions(html: string): string {
+  if (!html.includes(MENTION_CHIP_ATTR)) return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  for (const chip of template.content.querySelectorAll(`span[${MENTION_CHIP_ATTR}]`)) chip.setAttribute('contenteditable', 'false')
+  return template.innerHTML
 }
 
 onMounted(() => {

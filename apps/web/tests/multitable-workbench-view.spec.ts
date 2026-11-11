@@ -1308,7 +1308,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, textEntryHost } from '../src/multitable/utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -5574,6 +5574,74 @@ describe('MultitableWorkbench view wiring', () => {
     // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
     // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
     // and then gets the focus back, so the chord and Esc go on working.
+    // Every move to another record commits the drawer's focused field first (releaseDrawerFocus in selectRecord), not
+    // only the drawer's own previous / next: here the record in the address (the browser's back / forward), a
+    // deep link to a record off the page while a deep-linked record is shown, and a declined discard prompt.
+    it('a move through the record in the address commits the focused field to the record it was typed on, and gives it the focus back', async () => {
+      const host = mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      host.recordId = 'rec_2'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(document.activeElement).toBe(field)
+      expect(field.value).toBe('Beta')
+    })
+
+    it('a deep link to a record off the page, while a deep-linked record is shown, commits the focused field to the record shown before it is replaced', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      const host = mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_remote'
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_far', version: 9, data: { fld_title: 'Far' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_far' },
+        linkSummaries: {},
+      })
+      acceptNextPatch()
+      host.recordId = 'rec_far'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(document.activeElement).toBe(field)
+    })
+
+    it('a declined discard prompt keeps the record: the focused field is committed to it and gets the focus back', async () => {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      try {
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      } finally {
+        confirmSpy.mockRestore()
+      }
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(document.activeElement).toBe(field)
+    })
+
     it('navigating with the caret still in a field commits that field to the record it was typed on, moves on, and gives the focus back', async () => {
       await openRec1()
       const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
@@ -6934,6 +7002,33 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
+    it('isWorkbenchGridTarget: a focused drawer tab panel itself is not the grid\'s (Cmd+Z there does nothing); a control in it, a panel elsewhere and the grid are', () => {
+      const drawer = document.body.appendChild(document.createElement('div'))
+      drawer.className = 'meta-record-drawer'
+      const panel = drawer.appendChild(document.createElement('div'))
+      panel.setAttribute('role', 'tabpanel')
+      const button = panel.appendChild(document.createElement('button'))
+      const elsewhere = document.body.appendChild(document.createElement('div'))
+      elsewhere.setAttribute('role', 'tabpanel')
+      const gridRoot = document.body.appendChild(document.createElement('div'))
+      gridRoot.className = 'meta-grid'
+      try {
+        expect(isWorkbenchGridTarget(panel)).toBe(false)
+        expect(isWorkbenchGridTarget(button)).toBe(true)
+        expect(isWorkbenchGridTarget(elsewhere)).toBe(true)
+        expect(isWorkbenchGridTarget(gridRoot)).toBe(true)
+        // Through the module: a chord on the panel does nothing, on the button in it the grid's undo runs.
+        const undo = createWorkbenchUndo({ isInsideWorkbench: () => true, isGridTarget: isWorkbenchGridTarget })
+        const chord = (target: EventTarget) => undo.decide(withProps(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }), { target }))
+        expect(chord(panel)).toBe('swallow')
+        expect(chord(button)).toBe('grid-undo')
+      } finally {
+        drawer.remove()
+        elsewhere.remove()
+        gridRoot.remove()
+      }
+    })
+
     it('classifies text-entry hosts: textarea, editable contenteditable (and a child), text-like inputs; not date/time, select, checkbox', () => {
       const { add, editable } = rig()
       const editor = editable()
@@ -7028,6 +7123,16 @@ describe('MultitableWorkbench view wiring', () => {
         return { drawer, title }
       }
       const clickPatch = () => container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+
+      it('Cmd+Z with the focus on a drawer tab panel itself does nothing; on a button in the drawer the grid\'s undo runs, as before', async () => {
+        await openDrawerWithTitle()
+        const panel = container!.querySelector<HTMLElement>('[data-stub-tabpanel]')!
+        panel.focus()
+        expect(fire(panel, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        const button = container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!
+        button.focus()
+        expect(fire(button, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      })
 
       it('wiring: a drawer commit the server accepted ends the field\'s history (the title, via the primary field); a rejected one is never settled', async () => {
         const { title } = await openDrawerWithTitle()

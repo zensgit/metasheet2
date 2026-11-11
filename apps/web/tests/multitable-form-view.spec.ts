@@ -1102,3 +1102,40 @@ describe('MetaFormView A4 form logic', () => {
     container.remove()
   })
 })
+
+describe('MetaFormView number draft', () => {
+  it('a number box holding a draft it cannot read leaves the form value as it was, so Save does not clear the stored number', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const submitSpy = vi.fn()
+    const app = createApp({
+      render: () => h(MetaFormView, {
+        fields: [{ id: 'fld_num', name: 'Amount', type: 'number' }],
+        record: { id: 'rec_A', version: 1, data: { fld_num: 5 } },
+        loading: false,
+        readOnly: false,
+        onSubmit: submitSpy,
+      }),
+    })
+    app.mount(container)
+    await flushUi()
+    const box = container.querySelector('input[type="number"]') as HTMLInputElement
+    const validity = { badInput: true }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    const submit = async () => {
+      container.querySelector('form')!.dispatchEvent(new Event('submit'))
+      await flushUi()
+      return submitSpy.mock.calls.at(-1)![0]
+    }
+    box.value = ''
+    box.dispatchEvent(new Event('input'))
+    expect(await submit()).toMatchObject({ fld_num: 5 })
+    // An empty box (a readable value) still clears it. (The submit re-rendered the box with the stored 5.)
+    validity.badInput = false
+    box.value = ''
+    box.dispatchEvent(new Event('input'))
+    expect(await submit()).toMatchObject({ fld_num: null })
+    app.unmount()
+    container.remove()
+  })
+})

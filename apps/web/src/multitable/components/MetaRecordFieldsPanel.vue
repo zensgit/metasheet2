@@ -122,7 +122,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="text"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -150,7 +150,7 @@
             v-else-if="canEditField(field.id) && field.type === 'longText'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__textarea"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             rows="6"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
@@ -163,7 +163,7 @@
             type="text"
             inputmode="text"
             :placeholder="lc('cell.barcodePlaceholder')"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -175,7 +175,7 @@
             type="text"
             inputmode="text"
             :placeholder="lc('cell.qrcodePlaceholder')"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -186,7 +186,7 @@
             class="meta-record-drawer__input"
             type="text"
             :placeholder="lc('cell.locationPlaceholder')"
-            :value="locationAddressValue(controlValue(field.id))"
+            v-field-value="[locationAddressValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
@@ -199,7 +199,7 @@
             :value="controlValue(field.id) ?? ''"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
-            @change="emitPatch(field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
+            @change="onNumberChange(field.id, $event)"
           />
           <input
             v-else-if="canEditField(field.id) && field.type === 'date'"
@@ -401,7 +401,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch, type Directive } from 'vue'
 import type {
   LinkedRecordSummary,
   PersonSummary,
@@ -560,6 +560,33 @@ watch(() => props.record, () => {
 // OTHER fields are never touched by either edge. Not a data path (HI-1): a draft only ever holds what
 // the user just entered in this panel — nothing is fetched or derived.
 const rejectedDrafts = ref<Record<string, unknown>>({})
+
+/**
+ * `v-field-value="[value, record id]"` on the drawer's text boxes, in place of `:value`. A value that arrives
+ * while the box is focused and has been typed in since it was last set (the box's own commit, still in flight
+ * then, accepted now) does not overwrite the typing: the next blur commits it. A move to another record always
+ * sets it, and so does any value while the box is not focused or not typed in.
+ */
+const vFieldValue: Directive<HTMLInputElement | HTMLTextAreaElement, readonly [string, string | undefined]> = {
+  mounted(el, { value: [text] }) {
+    el.value = text
+  },
+  updated(el, { value: [text, recordId], oldValue }) {
+    if (el.value === text) return
+    const [previous, previousRecordId] = oldValue ?? [text, recordId]
+    const typedSince = el.ownerDocument.activeElement === el && el.value !== previous
+    if (typedSince && recordId === previousRecordId) return
+    el.value = text
+  },
+}
+
+/** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") commits
+ *  nothing, where "" would clear the stored number. The draft stays in the box, as a date-time draft does. */
+function onNumberChange(fieldId: string, event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.validity.badInput) return
+  emitPatch(fieldId, input.value === '' ? null : Number(input.value))
+}
 
 function emitPatch(fieldId: string, value: unknown) {
   rejectedDrafts.value = { ...rejectedDrafts.value, [fieldId]: value }
