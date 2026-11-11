@@ -10,6 +10,12 @@
 //   restore_retired_rows             its inverse, over one earlier retire run's backup: the rows that are still
 //                                    inactive and still carry that run's stamp get their four cells back, each at its
 //                                    CURRENT version.
+// one CONTINUATION that writes no row:
+//   verify_and_close_run             closes a run left `running` after its rows were written (its finish was refused or
+//                                    failed): every planned row is VERIFIED in its target state against the run's own
+//                                    backup, then the run row is finished `completed` under its own owner approval.
+//                                    Any row not in its target state refuses with counts; restoring the run stays the
+//                                    other way out.
 // and one read: the FILLS REPORT (which old row ↔ copy pairs carry human fills, and what the K2 carry could do with
 // each), values-free.
 //
@@ -26,16 +32,22 @@
 //   prelude   the closed body; the one-shot claim of the echoed digest already taken => 409 ALREADY_CONSUMED (no lease)
 //   lease     the sheet write lease, purpose `sheet_repair` — a pull, a recovery, an install and a pilot enable all
 //             take the same lease, so none of them interleaves with a repair
-//   gates     the batch-identifier sheet row `installing` => 409 (only while that feature is on; rebaseline B-9) ->
-//             the IN-LEASE recompute of the preview (a fresh source read for a retire) -> preconditions -> the plan
-//             digest must equal the echoed one
+//   gates     the batch-identifier INSTALL STATE of the sheet, read from its ledger row on EVERY analysis whatever the
+//             batch switch says (rebaseline B-9; coordinator ruling C-2): `installing`, or an aborted first install
+//             whose settings lock is still held, => 409 -> the IN-LEASE recompute of the preview (a fresh source read
+//             for a retire) -> preconditions -> the plan digest must equal the echoed one
+//   holder    ONE holder CAS of the guard BEFORE the begin (ruling C-4): a guard already lost (a failed heartbeat, a
+//             lapsed lease) refuses here, so the one-shot claim is never spent by a run that cannot write
 //   begin     ONE ledger transaction, holder assert first: an abandoned open run of this sheet is closed, the one-shot
 //             claim is inserted, the run row with its BACKUP is inserted, the audit row is appended
 //   writes    one fenced, version-conditional patch per planned row, deepest row first and the root last; the four
 //             repair cells only (never a human cell, never a batch band cell — ruling C7); a row that moved, is locked
 //             or is gone STOPS the run (never a blind retry)
 //   finish    the run row and its audit row, holder assert first; then, after the lease is released, the generation
-//             bump (reason `sheet_repair`, best effort)
+//             bump (reason `sheet_repair`, best effort) whenever a host write was ATTEMPTED (ruling C-5: a write that
+//             raised may have landed)
+// The begin, the finish and the continuation's close each run INSIDE the guard's host-write bracket (the N6 rule: the
+// lease's own heartbeat skips while the transaction holds the lock row); a guard without that bracket is refused.
 //
 // VALUES. Answers, errors, audit details and the ledger carry handles (record ids, run ids, the census's private
 // component handle), closed tokens, digests, integers and booleans — never a project number, a key, a part id, a
@@ -67,6 +79,11 @@ function stockPrepSheetRepairWriteEnabled(env = process.env) {
 const SHEET_REPAIR_RECIPES = Object.freeze(['retire_superseded_root_subtree', 'restore_retired_rows'])
 const RECIPE_RETIRE = SHEET_REPAIR_RECIPES[0]
 const RECIPE_RESTORE = SHEET_REPAIR_RECIPES[1]
+// The continuation is a REQUEST recipe only: it begins no run and claims nothing, so it is NOT in the two lists
+// migration 108's CHECKs pin (SHEET_REPAIR_RECIPES).
+const SHEET_REPAIR_CONTINUATIONS = Object.freeze(['verify_and_close_run'])
+const RECIPE_CLOSE = SHEET_REPAIR_CONTINUATIONS[0]
+const SHEET_REPAIR_REQUEST_RECIPES = Object.freeze(SHEET_REPAIR_RECIPES.concat(SHEET_REPAIR_CONTINUATIONS))
 const SHEET_REPAIR_MODES = Object.freeze(['preview', 'execute'])
 const SHEET_REPAIR_RUN_STATUSES = Object.freeze(['running', 'completed', 'stopped'])
 const SHEET_REPAIR_STOP_REASONS = Object.freeze(['version_conflict', 'record_locked', 'record_missing', 'host_version_unexpected', 'host_write_failed', 'abandoned'])
@@ -75,6 +92,7 @@ const SHEET_REPAIR_FILLS_QUERY_KEYS = Object.freeze(['componentHandle', 'cursor'
 // Why a plan cannot run (preview answers them; execute refuses 409 NOT_APPLICABLE with the same tokens).
 const SHEET_REPAIR_REFUSALS = Object.freeze([
   'install_in_progress',
+  'install_aborted_unresolved',
   'project_governed',
   'source_incomplete',
   'component_not_found',
@@ -95,7 +113,30 @@ const SHEET_REPAIR_REFUSALS = Object.freeze([
   'run_not_retire',
   'backup_unreadable',
   'nothing_to_restore',
+  'run_not_open',
+  'rows_not_in_target_state',
 ])
+// The batch identifier's INSTALL STATE of the sheet as a repair reads it (ruling C-2), from the sheet's ledger row alone:
+//   installing          an install (a first install or a gap pass) is between its runs;
+//   aborted_unresolved  a FIRST install was aborted and its settings lock is still held — the abort could not prove that
+//                       no label of its persisted plan is on the sheet, so its next run may RESUME that plan;
+//   none                no ledger row, a resolved sheet, or a pending sheet whose lock is not held (never installed, or an
+//                       aborted install whose abort released the lock: its next run plans afresh from the rows as they
+//                       are then).
+// The two that are not `none` refuse a retire and a restore: the persisted plan of a continued / resumed install is
+// never recomputed, so a write to 有效 between its runs changes that plan's inputs behind it.
+const SHEET_REPAIR_INSTALL_STATES = Object.freeze(['none', 'installing', 'aborted_unresolved'])
+const INSTALL_REFUSAL_BY_STATE = Object.freeze({ installing: 'install_in_progress', aborted_unresolved: 'install_aborted_unresolved' })
+// The history statuses of the batch ledger's sheet row (migration 105's CHECK), SPELLED here: this file never requires
+// the batch-identifier modules. A status outside this list is not understood and refuses (never "not installing").
+const INSTALL_HISTORY_STATUS_INSTALLING = 'installing'
+const INSTALL_HISTORY_STATUS_PENDING = 'pending'
+const INSTALL_HISTORY_STATUSES_RESOLVED = Object.freeze(['born_empty', 'backfilled'])
+// What the continuation counts over the planned rows of the run it is asked to close. `inTargetState` rows carry
+// exactly the four cells the run set out to write (`versionMoved` of them at another version than the run left: a
+// person's edit of a human cell or a batch band write — still in the target state); `notWritten` rows are exactly as
+// the backup read them; `moved` rows are neither (revived, restamped); `missing` rows are gone.
+const SHEET_REPAIR_CLOSE_COUNT_KEYS = Object.freeze(['planned', 'inTargetState', 'versionMoved', 'notWritten', 'moved', 'missing'])
 // What a restore counts over a retire run's backed-up rows. Named by what is OBSERVED: `versionMovedStampIntact` is a
 // row whose version moved while the retire stamp stayed intact — a person's edit of a human cell OR a batch band write
 // look the same from here; such a row IS restored, at its current version. `notRetired` (the run never wrote it, or it
@@ -116,6 +157,7 @@ const SHEET_REPAIR_GENERATION_REASON = 'sheet_repair'
 const SHEET_REPAIR_RUN_ID_PREFIX = 'sheet-repair:'
 const SHEET_REPAIR_PLAN_SCHEME = 'stock-preparation/sheet-repair-plan/v1'
 const SHEET_REPAIR_CLAIM_SCHEME = 'stock-preparation/sheet-repair-claim/v1'
+const SHEET_REPAIR_CLOSE_SCHEME = 'stock-preparation/sheet-repair-close/v1'
 const SHEET_REPAIR_MAX_PLAN_ROWS = 5000
 const SHEET_REPAIR_MAX_LISTED_COMPONENTS = 200
 const SHEET_REPAIR_FILLS_DEFAULT_LIMIT = 100
@@ -148,6 +190,7 @@ const SHEET_REPAIR_AUDIT = Object.freeze({
     completed: 'sheet_repair_completed',
     stopped: 'sheet_repair_stopped',
     abandoned: 'sheet_repair_abandoned',
+    verifiedClosed: 'sheet_repair_verified_closed',
     previewRead: 'sheet_repair_preview_read',
     fillsReportRead: 'sheet_fills_report_read',
     runsRead: 'sheet_repair_runs_read',
@@ -222,8 +265,34 @@ function notApplicable(reasons, counts) {
   })
 }
 
-function installInProgress() {
-  return repairError(409, SHEET_REPAIR_ERROR_CODES.INSTALL_IN_PROGRESS, 'the batch columns of this sheet are being installed; repair and install windows never interleave — finish or abort the install first', { reason: 'install_in_progress', partial: false })
+function installInProgress(installState) {
+  const reason = INSTALL_REFUSAL_BY_STATE[installState] || INSTALL_REFUSAL_BY_STATE.installing
+  const message = reason === INSTALL_REFUSAL_BY_STATE.aborted_unresolved
+    ? 'an aborted install of the batch columns of this sheet still holds its plan and its settings lock; repair and install windows never interleave — finish that install first'
+    : 'the batch columns of this sheet are being installed; repair and install windows never interleave — finish or abort the install first'
+  return repairError(409, SHEET_REPAIR_ERROR_CODES.INSTALL_IN_PROGRESS, message, { reason, partial: false })
+}
+
+/** The refusal token of an install state, or null for `none`. Anything outside the closed list is a wiring defect. */
+function installRefusalOf(installState) {
+  if (!SHEET_REPAIR_INSTALL_STATES.includes(installState)) throw unavailable('installState')
+  return INSTALL_REFUSAL_BY_STATE[installState] || null
+}
+
+/**
+ * The install state from the VALUES-FREE facts the route reads off the batch ledger's sheet row:
+ * `{ present: false }` (no row: the batch identifier never touched this sheet) or
+ * `{ present: true, historyStatus, settingsLocked }`. Anything else — a missing fact, a status this build does not
+ * know — refuses (500 naming the reader), never "not installing".
+ */
+function installStateOfFacts(facts) {
+  if (!isPlainObject(facts) || typeof facts.present !== 'boolean') throw unavailable('installStateOf')
+  if (facts.present === false) return 'none'
+  if (typeof facts.settingsLocked !== 'boolean') throw unavailable('installStateOf')
+  if (facts.historyStatus === INSTALL_HISTORY_STATUS_INSTALLING) return 'installing'
+  if (facts.historyStatus === INSTALL_HISTORY_STATUS_PENDING) return facts.settingsLocked ? 'aborted_unresolved' : 'none'
+  if (INSTALL_HISTORY_STATUSES_RESOLVED.includes(facts.historyStatus)) return 'none'
+  throw unavailable('installStateOf')
 }
 
 function planChanged(reason) {
@@ -269,12 +338,13 @@ function addressOf(row) {
 // ── the request bodies (closed) ─────────────────────────────────────────────────────────────────────
 
 /**
- * The closed repair body. `mode` preview | execute; `recipe` one of SHEET_REPAIR_RECIPES; `confirmProjectNo` the typed
- * project number (compared with the path by the route). A retire names its component by `componentHandle` (24 hex, the
- * census's private handle; a preview without one LISTS the sheet's doubled components); a restore names the retire run
- * by `runId`. An execute echoes the preview's `planDigest` (64 lowercase hex) and names the `approvalRef` that approved
- * THAT digest (`^[A-Za-z0-9._:-]{1,64}$`). Any other key, a wrong type or a value outside a closed set => 400
- * STOCK_PREP_SHEET_REPAIR_REQUEST_INVALID { field } (never the value).
+ * The closed repair body. `mode` preview | execute; `recipe` one of SHEET_REPAIR_REQUEST_RECIPES; `confirmProjectNo` the
+ * typed project number (compared with the path by the route). A retire names its component by `componentHandle` (24
+ * hex, the census's private handle; a preview without one LISTS the sheet's doubled components); a restore names the
+ * retire run by `runId`; the continuation names the OPEN run it closes by `runId`. An execute echoes the preview's
+ * `planDigest` (64 lowercase hex) and names the `approvalRef` that approved THAT digest (`^[A-Za-z0-9._:-]{1,64}$`). Any
+ * other key, a wrong type or a value outside a closed set => 400 STOCK_PREP_SHEET_REPAIR_REQUEST_INVALID { field }
+ * (never the value).
  */
 function normalizeSheetRepairBody(body) {
   if (!isPlainObject(body)) throw requestInvalid('body')
@@ -282,7 +352,7 @@ function normalizeSheetRepairBody(body) {
     if (!SHEET_REPAIR_BODY_KEYS.includes(key)) throw requestInvalid(key)
   }
   if (!SHEET_REPAIR_MODES.includes(body.mode)) throw requestInvalid('mode')
-  if (!SHEET_REPAIR_RECIPES.includes(body.recipe)) throw requestInvalid('recipe')
+  if (!SHEET_REPAIR_REQUEST_RECIPES.includes(body.recipe)) throw requestInvalid('recipe')
   if (!nonBlankString(body.confirmProjectNo)) throw requestInvalid('confirmProjectNo')
   const mode = body.mode
   const recipe = body.recipe
@@ -497,7 +567,8 @@ function analyzeRetireComponent(context, entry) {
   }
   const handle = censusComponentHandle(scope.tenantId, scope.projectNo, entry.component)
   const counts = { nestedCopies: entry.occurrences.length, oldRows: 0, toRetire: 0, alreadyRetired: 0, pairedCopies: 0, pairs: 0, stillExpanded: 0, unaddressable: 0, notMachineShaped: 0 }
-  if (context.installing === true) refuse('install_in_progress')
+  const installRefusal = installRefusalOf(context.installState)
+  if (installRefusal) refuse(installRefusal)
   if (context.governed !== false) refuse('project_governed')
   if (context.complete !== true) refuse('source_incomplete')
   if (entry.shape !== 'two_copy') refuse('not_two_copy')
@@ -600,13 +671,14 @@ function analyzeRetireComponent(context, entry) {
  * The retire analysis of a read. `componentHandle` null => the list of the sheet's doubled components (each with its
  * eligibility); otherwise the ONE component named, or a `component_not_found` refusal.
  */
-function analyzeRetire({ scope, rows, expansionKeys, retireRunIds, sequence, governed, complete, installing, componentHandle = null } = {}) {
+function analyzeRetire({ scope, rows, expansionKeys, retireRunIds, sequence, governed, complete, installState, componentHandle = null } = {}) {
   const normalized = normalizeScope(scope)
   if (!Array.isArray(rows)) throw unavailable('rows')
   if (!(expansionKeys instanceof Set)) throw unavailable('expansionKeys')
   if (!(retireRunIds instanceof Set)) throw unavailable('retireRunIds')
   if (!Number.isSafeInteger(sequence) || sequence < 0) throw unavailable('sequence')
-  const context = { scope: normalized, rows, keyCounts: keyCountsOf(rows), expansionKeys, retireRunIds, sequence, governed, complete, installing }
+  const installRefusal = installRefusalOf(installState)
+  const context = { scope: normalized, rows, keyCounts: keyCountsOf(rows), expansionKeys, retireRunIds, sequence, governed, complete, installState }
   const components = doubledComponentsOf(rows)
   if (componentHandle === null) {
     return { listing: true, total: components.length, components: components.slice(0, SHEET_REPAIR_MAX_LISTED_COMPONENTS).map((entry) => analyzeRetireComponent(context, entry)) }
@@ -614,7 +686,7 @@ function analyzeRetire({ scope, rows, expansionKeys, retireRunIds, sequence, gov
   const entry = components.find((candidate) => censusComponentHandle(normalized.tenantId, normalized.projectNo, candidate.component) === componentHandle)
   if (!entry) {
     const refusals = ['component_not_found']
-    if (installing === true) refusals.unshift('install_in_progress')
+    if (installRefusal) refusals.unshift(installRefusal)
     return { listing: false, component: { componentHandle, shape: null, eligible: false, refusals, counts: null, planDigest: null } }
   }
   return { listing: false, component: analyzeRetireComponent(context, entry) }
@@ -645,7 +717,7 @@ function backupEntriesOf(backup) {
  * cells a restore writes are none of those), which is then counted as `versionMovedStampIntact`. A row that is
  * active again, was restamped by a later machine write or is gone is counted by cause and NOT written.
  */
-function analyzeRestore({ scope, run, rows, sequence, governed, installing } = {}) {
+function analyzeRestore({ scope, run, rows, sequence, governed, installState } = {}) {
   const normalized = normalizeScope(scope)
   if (!Array.isArray(rows)) throw unavailable('rows')
   if (!Number.isSafeInteger(sequence) || sequence < 0) throw unavailable('sequence')
@@ -655,7 +727,8 @@ function analyzeRestore({ scope, run, rows, sequence, governed, installing } = {
   }
   const counts = Object.fromEntries(SHEET_REPAIR_RESTORE_COUNT_KEYS.map((key) => [key, 0]))
   const done = (extra = {}) => ({ sourceRunId: run && typeof run.id === 'string' ? run.id : null, eligible: false, refusals, counts, planDigest: null, ...extra })
-  if (installing === true) refuse('install_in_progress')
+  const installRefusal = installRefusalOf(installState)
+  if (installRefusal) refuse(installRefusal)
   if (governed !== false) refuse('project_governed')
   if (!isPlainObject(run) || run.tenantId !== normalized.tenantId || run.sheetId !== normalized.sheetId || run.projectNo !== normalized.projectNo) {
     refuse('run_not_found')
@@ -720,6 +793,115 @@ function analyzeRestore({ scope, run, rows, sequence, governed, installing } = {
     writes: planned.map((item) => ({ recordId: item.recordId, version: item.version, before: item.before })),
     backup: planned.map((item) => [item.recordId, item.version, false, run.id, SHEET_REPAIR_RETIRE_DECISION, SHEET_REPAIR_RETIRE_SUMMARY]),
   }
+}
+
+// ── the continuation: verify and close an open run (coordinator ruling C-3) ──────────────────────────────────────
+
+function runInScope(run, scope) {
+  return isPlainObject(run) && run.tenantId === scope.tenantId && run.sheetId === scope.sheetId && run.projectNo === scope.projectNo
+}
+
+function carriesCells(row, cells) {
+  return row.active === cells.active
+    && row.lastPlmRefreshRunId === cells.lastPlmRefreshRunId
+    && row.lastPlmRefreshDecision === cells.lastPlmRefreshDecision
+    && row.lastPlmConflictSummary === cells.lastPlmConflictSummary
+}
+
+function closeDigestOf({ scope, run }) {
+  return sha256(canonicalJson({
+    scheme: SHEET_REPAIR_CLOSE_SCHEME,
+    body: { tenantId: scope.tenantId, sheetId: scope.sheetId, projectNo: scope.projectNo, runId: run.id, runRecipe: run.recipe, runPlanDigest: run.planDigest, planned: run.plannedCount },
+  }))
+}
+
+/**
+ * The verification of ONE open run against its OWN row (its backup and what its recipe set out to write) and the sheet
+ * as it is NOW — no row is written, by this or by the close that follows it:
+ *   a retire run   every backed-up row must be `active === false` carrying THAT run's retire stamp;
+ *   a restore run  every backed-up row must carry the four cells the SOURCE retire run backed up for it (`sourceRun`).
+ * A row whose four cells are in the target state at another version than the run left it (a person's edit of a human
+ * cell, a batch band write) IS in its target state and is counted (`versionMoved`). ANY row that is not refuses with the
+ * counts: `notWritten` (exactly as the backup read it), `moved` (neither: revived, restamped), `missing`. Never refused
+ * for a governed project or an installing sheet: nothing on the sheet changes, so neither is affected. Answers
+ * `{ runId, runRecipe, eligible, refusals, counts, governed, planDigest }`; the digest names the run, its recipe, its
+ * approved plan digest and its planned count — not a row version (a later human edit does not move it).
+ */
+function analyzeClose({ scope, run, sourceRun = null, rows, governed } = {}) {
+  const normalized = normalizeScope(scope)
+  if (!Array.isArray(rows)) throw unavailable('rows')
+  if (typeof governed !== 'boolean') throw unavailable('governed')
+  const refusals = []
+  const refuse = (token) => {
+    if (!refusals.includes(token)) refusals.push(token)
+  }
+  const counts = Object.fromEntries(SHEET_REPAIR_CLOSE_COUNT_KEYS.map((key) => [key, 0]))
+  const known = runInScope(run, normalized)
+  const done = (extra = {}) => ({
+    runId: known ? run.id : null,
+    runRecipe: known && SHEET_REPAIR_RECIPES.includes(run.recipe) ? run.recipe : null,
+    eligible: false,
+    refusals,
+    counts,
+    governed,
+    planDigest: null,
+    ...extra,
+  })
+  if (!known) {
+    refuse('run_not_found')
+    return done()
+  }
+  if (run.status !== 'running') {
+    refuse('run_not_open')
+    return done()
+  }
+  const entries = backupEntriesOf(run.backup)
+  const retire = run.recipe === RECIPE_RETIRE
+  if (!entries || !SHEET_REPAIR_RECIPES.includes(run.recipe) || entries.length !== run.plannedCount
+    || typeof run.planDigest !== 'string' || !PLAN_DIGEST_PATTERN.test(run.planDigest)
+    || entries.some((entry) => entry.active !== retire)) {
+    refuse('backup_unreadable')
+    return done()
+  }
+  // What the run set out to write on each planned row — from the run's own row, never from the request.
+  let targetOf
+  if (retire) {
+    const target = retireChangesOf(run.id)
+    targetOf = () => target
+  } else {
+    const sourceEntries = runInScope(sourceRun, normalized) && sourceRun.recipe === RECIPE_RETIRE && sourceRun.id === run.sourceRunId ? backupEntriesOf(sourceRun.backup) : null
+    const beforeById = new Map((sourceEntries || []).map((entry) => [entry.recordId, entry.before]))
+    if (!sourceEntries || entries.some((entry) => !beforeById.has(entry.recordId) || entry.before.runId !== sourceRun.id)) {
+      refuse('backup_unreadable')
+      return done()
+    }
+    targetOf = (entry) => restoreChangesOf(beforeById.get(entry.recordId))
+  }
+  const byRecordId = new Map()
+  for (const row of rows) {
+    const ref = isPlainObject(row) ? recordRefOf(row) : null
+    if (ref) byRecordId.set(ref.id, row)
+  }
+  counts.planned = entries.length
+  for (const entry of entries) {
+    const row = byRecordId.get(entry.recordId)
+    if (!row) {
+      counts.missing += 1
+      continue
+    }
+    if (carriesCells(row, targetOf(entry))) {
+      counts.inTargetState += 1
+      const ref = recordRefOf(row)
+      if (ref && Number.isSafeInteger(ref.version) && ref.version !== entry.version + 1) counts.versionMoved += 1
+    } else if (carriesCells(row, { active: entry.active, lastPlmRefreshRunId: entry.before.runId, lastPlmRefreshDecision: entry.before.decision, lastPlmConflictSummary: entry.before.summary })) {
+      counts.notWritten += 1
+    } else {
+      counts.moved += 1
+    }
+  }
+  if (counts.inTargetState !== counts.planned) refuse('rows_not_in_target_state')
+  if (refusals.length > 0) return done()
+  return done({ eligible: true, planDigest: closeDigestOf({ scope: normalized, run }) })
 }
 
 // ── the fills report (design §6.6 「The fills report」, RD G7; values-free) ────────────────────────────────────
@@ -897,10 +1079,12 @@ function requireDeps(deps) {
   if (!isPlainObject(deps)) throw unavailable('deps')
   normalizeScope(deps.scope)
   const store = deps.store
-  for (const method of ['listRunsOf', 'readRun', 'readClaim', 'beginRun', 'finishRun']) {
+  for (const method of ['listRunsOf', 'readRun', 'readClaim', 'beginRun', 'finishRun', 'closeVerifiedRun']) {
     if (!store || typeof store[method] !== 'function') throw repairError(501, SHEET_REPAIR_ERROR_CODES.UNAVAILABLE, 'the sheet-repair ledger is not wired on this server; nothing was done', { field: 'store', partial: false })
   }
-  for (const method of ['readForRetire', 'readForRestore', 'assertNoLiveWriter', 'withLease', 'holderWithinFor', 'leaseOf', 'patchFor', 'auditWithin', 'auditRead', 'newRunId']) {
+  // `installStateOf` and `assertHolder` are REQUIRED like every other dep: a request that cannot read the install state
+  // or cannot check its own guard is refused by name, never run as "not installing" / "still the holder".
+  for (const method of ['installStateOf', 'readForRetire', 'readForRestore', 'assertNoLiveWriter', 'withLease', 'assertHolder', 'holderWithinFor', 'leaseOf', 'patchFor', 'auditWithin', 'auditRead', 'newRunId']) {
     if (typeof deps[method] !== 'function') throw unavailable(method)
   }
   if (!isPlainObject(deps.physicalFieldIds) || SHEET_REPAIR_WRITE_FIELD_IDS.some((fieldId) => !nonBlankString(deps.physicalFieldIds[fieldId]))) throw unavailable('physicalFieldIds')
@@ -909,16 +1093,38 @@ function requireDeps(deps) {
   return deps
 }
 
-function inHostWrite(guard, fn) {
-  return guard && typeof guard.withHostWrite === 'function' ? guard.withHostWrite(fn) : fn()
+// THE HOST-WRITE BRACKET (the N6 rule; rebaseline B-5; ruling C-1). A ledger transaction of the repair takes the sheet
+// lock row FOR UPDATE in its first statement (the holder assert) and holds it to its COMMIT. Outside the guard's
+// bracket the lease's own heartbeat would queue behind that row lock and, past the statement timeout, mark the guard
+// lost with the lease intact. The repair has no lease-less caller, so a guard WITHOUT the bracket is refused — never
+// run unbracketed.
+async function inHostWrite(guard, fn) {
+  if (!guard || typeof guard.withHostWrite !== 'function') throw unavailable('withHostWrite')
+  return guard.withHostWrite(fn)
 }
 
-async function installingOf(deps) {
-  // Absent => the batch identifier is switched off: its ledger is never read (rebaseline B-6 / B-9).
-  if (typeof deps.installStateOf !== 'function') return false
-  const state = await deps.installStateOf()
-  if (!isPlainObject(state) || typeof state.installing !== 'boolean') throw unavailable('installStateOf')
-  return state.installing
+// Read on EVERY analysis, whatever the batch switch says (ruling C-2): a production-write tool never assumes "not
+// installing". An unreadable or unwired ledger is the reader's own refusal (the route's 503); an answer this file
+// does not understand is 500 naming the reader.
+async function installStateOf(deps) {
+  return installStateOfFacts(await deps.installStateOf())
+}
+
+// ONE holder CAS before the begin (ruling C-4): a guard already lost — a heartbeat that failed while the source was
+// read, a lease that lapsed — refuses HERE, before the one-shot claim is spent or a run row is begun. Its refusal keeps
+// its own status and code; nothing was written.
+async function assertHolderBeforeBegin(deps, guard, { planned }) {
+  try {
+    await deps.assertHolder(guard)
+  } catch (error) {
+    if (!error || !Number.isInteger(error.status) || typeof error.code !== 'string') throw error
+    throw repairError(error.status, error.code, error.message || 'the repair no longer holds the sheet write lease; nothing was begun', {
+      ...(isPlainObject(error.details) ? error.details : {}),
+      planned,
+      written: 0,
+      partial: false,
+    })
+  }
 }
 
 async function ledgerOf(deps) {
@@ -931,19 +1137,103 @@ async function ledgerOf(deps) {
 
 /** ONE analysis of the sheet for a request — the preview's, and (inside the lease) the execute's recompute of it. */
 async function analyze(deps, request, { guard = null } = {}) {
-  const installing = await installingOf(deps)
+  const installState = await installStateOf(deps)
   const ledger = await ledgerOf(deps)
   if (request.recipe === RECIPE_RETIRE) {
     const read = await deps.readForRetire({ guard })
     if (!isPlainObject(read) || !Array.isArray(read.rows) || !(read.expansionKeys instanceof Set) || typeof read.governed !== 'boolean' || typeof read.complete !== 'boolean') throw unavailable('readForRetire')
-    const analysis = analyzeRetire({ scope: deps.scope, rows: read.rows, expansionKeys: read.expansionKeys, retireRunIds: ledger.retireRunIds, sequence: ledger.sequence, governed: read.governed, complete: read.complete, installing, componentHandle: request.componentHandle })
-    return { installing, ledger, analysis, plan: analysis.listing ? null : analysis.component }
+    const analysis = analyzeRetire({ scope: deps.scope, rows: read.rows, expansionKeys: read.expansionKeys, retireRunIds: ledger.retireRunIds, sequence: ledger.sequence, governed: read.governed, complete: read.complete, installState, componentHandle: request.componentHandle })
+    return { installState, ledger, analysis, plan: analysis.listing ? null : analysis.component }
   }
   const run = await deps.store.readRun({ ...deps.scope, runId: request.runId })
   const read = await deps.readForRestore({ guard })
   if (!isPlainObject(read) || !Array.isArray(read.rows) || typeof read.governed !== 'boolean') throw unavailable('readForRestore')
-  const analysis = analyzeRestore({ scope: deps.scope, run, rows: read.rows, sequence: ledger.sequence, governed: read.governed, installing })
-  return { installing, ledger, analysis, plan: analysis }
+  const analysis = analyzeRestore({ scope: deps.scope, run, rows: read.rows, sequence: ledger.sequence, governed: read.governed, installState })
+  return { installState, ledger, analysis, plan: analysis }
+}
+
+/** The continuation's ONE analysis (the preview's, and the execute's recompute inside the lease): the run, its source run, the sheet. */
+async function analyzeForClose(deps, request, { guard = null } = {}) {
+  const run = await deps.store.readRun({ ...deps.scope, runId: request.runId })
+  const sourceRun = run && run.recipe === RECIPE_RESTORE && typeof run.sourceRunId === 'string'
+    ? await deps.store.readRun({ ...deps.scope, runId: run.sourceRunId })
+    : null
+  const read = await deps.readForRestore({ guard })
+  if (!isPlainObject(read) || !Array.isArray(read.rows) || typeof read.governed !== 'boolean') throw unavailable('readForRestore')
+  return analyzeClose({ scope: deps.scope, run, sourceRun, rows: read.rows, governed: read.governed })
+}
+
+function closeAnswerOf(plan) {
+  return {
+    runId: plan.runId,
+    runRecipe: plan.runRecipe,
+    eligible: plan.eligible === true,
+    refusals: plan.refusals.slice(),
+    counts: { ...plan.counts },
+    governed: plan.governed === true,
+    planDigest: plan.planDigest,
+  }
+}
+
+async function runClosePreview(deps, request) {
+  await deps.assertNoLiveWriter()
+  const plan = await analyzeForClose(deps, request)
+  await deps.auditRead({
+    mode: SHEET_REPAIR_AUDIT.modes.previewRead,
+    detail: { operation: 'sheet_repair_close_preview', recipe: request.recipe, eligible: plan.eligible === true, refusalCount: plan.refusals.length, planned: plan.counts.planned, inTargetState: plan.counts.inTargetState, governed: plan.governed === true },
+  })
+  return { mode: 'preview', recipe: request.recipe, ...closeAnswerOf(plan), requires: { approvalRef: true, planDigest: plan.planDigest } }
+}
+
+/**
+ * THE CONTINUATION'S EXECUTE (ruling C-3): the sheet lease -> the SAME verification recomputed in the lease -> the
+ * echoed digest -> ONE ledger transaction in the host-write bracket (holder assert first; the run still `running` and
+ * begun under ANOTHER lease; `completed`, its close approval, its audit row) -> after the release, the generation bump
+ * the run itself never got to. No sheet row is written and no claim is spent: a closed run cannot be closed again (409
+ * `run_not_open`).
+ */
+async function runCloseExecute(deps, request) {
+  let closed = false
+  let answer
+  try {
+    answer = await deps.withLease(request.runId, async (guard) => {
+      if (!guard) throw unavailable('withLease')
+      const plan = await analyzeForClose(deps, request, { guard })
+      if (!plan.eligible) throw notApplicable(plan.refusals, plan.counts)
+      if (plan.planDigest !== request.planDigest) throw planChanged('plan_digest_differs')
+      const holderWithin = deps.holderWithinFor(guard)
+      if (typeof holderWithin !== 'function') throw unavailable('holderWithinFor')
+      const lease = deps.leaseOf(guard)
+      const planned = plan.counts.planned
+      // No holder CAS beforehand (unlike the begin): the close spends nothing, and its transaction's own holder assert
+      // decides from the lock row — a guard marked lost by a transient heartbeat failure closes under an intact lease.
+      await inHostWrite(guard, () => deps.store.closeVerifiedRun({
+        ...deps.scope,
+        runId: plan.runId,
+        verifiedCount: plan.counts.inTargetState,
+        versionMoved: plan.counts.versionMoved,
+        governed: plan.governed === true,
+        closeDigest: plan.planDigest,
+        approvalRef: request.approvalRef,
+        lease,
+        holderWithin,
+        auditWithin: deps.auditWithin,
+      }))
+      closed = true
+      return { mode: 'execute', recipe: request.recipe, runId: plan.runId, runRecipe: plan.runRecipe, status: 'completed', planned, verified: plan.counts.inTargetState, versionMoved: plan.counts.versionMoved, governed: plan.governed === true, planDigest: plan.planDigest }
+    })
+  } finally {
+    // The run's own bump never ran (its lease was gone): every token planned before the repair is superseded now.
+    if (closed && typeof deps.bumpAfterRelease === 'function') {
+      try {
+        await deps.bumpAfterRelease()
+        if (answer) answer = { ...answer, generationBumped: true }
+      } catch (error) {
+        logWarn(deps.logger, '[plugin-integration-core] stock-prep sheet repair: the generation bump after a verified close failed', { code: errorCodeOf(error) })
+      }
+    }
+  }
+  return { ...answer, generationBumped: answer.generationBumped === true }
 }
 
 function previewAuditDetailOf(request, state) {
@@ -994,12 +1284,16 @@ function fenceStopError(error, { runId, planned, written }) {
 /**
  * The fenced write of a plan: one version-conditional patch per row, in plan order, the four repair cells only. The
  * FIRST row that cannot be written exactly as planned stops the run — a version conflict is never re-read and retried
- * (design §6.6: 「a version conflict stops the run (never a blind retry)」). Answers `{ written, stop }`; a fence error
- * is thrown (the run row is then closed by whoever takes the sheet next).
+ * (design §6.6: 「a version conflict stops the run (never a blind retry)」). Answers `{ written, attempted, stop }`; a
+ * fence error is thrown (the run row is then closed by whoever takes the sheet next). `attempted` counts every patch
+ * HANDED to the fenced write, confirmed or not (ruling C-5; the apply writer's `countAttemptedHostWrites`): a write that
+ * raised may have landed. A refusal of the pre-write holder CAS is counted too — this loop cannot tell it from a
+ * refusal inside the host, and a bump that was not needed only supersedes tokens.
  */
-async function writePlan({ deps, patch, items, changesOf }) {
+async function writePlan({ deps, patch, items, changesOf, onAttempt }) {
   const allowed = new Set(SHEET_REPAIR_WRITE_FIELD_IDS.map((fieldId) => deps.physicalFieldIds[fieldId]))
   let written = 0
+  let attempted = 0
   for (const item of items) {
     const logical = changesOf(item)
     const changes = {}
@@ -1009,17 +1303,19 @@ async function writePlan({ deps, patch, items, changesOf }) {
     if (keys.length !== allowed.size || Object.keys(logical).length !== SHEET_REPAIR_WRITE_FIELD_IDS.length || keys.some((key) => !allowed.has(key))) throw unavailable('changes')
     if (typeof logical.active !== 'boolean') throw unavailable('changes')
     let updated
+    attempted += 1
+    if (typeof onAttempt === 'function') onAttempt(attempted)
     try {
       updated = await patch({ recordId: item.recordId, changes, expectedVersion: item.version })
     } catch (error) {
       if (error && error.fence === true) throw Object.assign(error, { sheetRepairWritten: written })
-      return { written, stop: stopReasonOf(error), hostCode: errorCodeOf(error) }
+      return { written, attempted, stop: stopReasonOf(error), hostCode: errorCodeOf(error) }
     }
     written += 1
     const version = updated && Number.isSafeInteger(updated.version) ? updated.version : null
-    if (version !== null && version !== item.version + 1) return { written, stop: 'host_version_unexpected', hostCode: null }
+    if (version !== null && version !== item.version + 1) return { written, attempted, stop: 'host_version_unexpected', hostCode: null }
   }
-  return { written, stop: null, hostCode: null }
+  return { written, attempted, stop: null, hostCode: null }
 }
 
 async function runExecute(deps, request) {
@@ -1029,14 +1325,14 @@ async function runExecute(deps, request) {
   const runId = deps.newRunId()
   if (typeof runId !== 'string' || !RUN_ID_PATTERN.test(runId)) throw unavailable('newRunId')
   let written = 0
-  let began = false
+  let attempted = 0
   let answer
   try {
     answer = await deps.withLease(runId, async (guard) => {
       if (!guard) throw unavailable('withLease')
       // GATES, in the lease: nothing of a pull, a recovery, an install or a pilot enable can move the sheet from here.
       const state = await analyze(deps, request, { guard })
-      if (state.installing) throw installInProgress()
+      if (state.installState !== 'none') throw installInProgress(state.installState)
       const plan = state.plan
       if (!plan || !plan.eligible) throw notApplicable(plan ? plan.refusals : ['component_not_found'], plan ? plan.counts : null)
       if (plan.planDigest !== request.planDigest) {
@@ -1053,6 +1349,9 @@ async function runExecute(deps, request) {
       if (typeof patch !== 'function') throw unavailable('patchFor')
       const planned = plan.writes.length
       const subject = request.recipe === RECIPE_RETIRE ? { componentHandle: plan.componentHandle } : { sourceRunId: plan.sourceRunId }
+      // HOLDER — one holder CAS before the claim is spent (ruling C-4). Nothing is awaited between it and the begin's
+      // bracket, so no heartbeat tick runs in between.
+      await assertHolderBeforeBegin(deps, guard, { planned })
       // BEGIN — the backup, the run row and the one-shot claim, before the first sheet write.
       await inHostWrite(guard, () => store.beginRun({
         ...deps.scope,
@@ -1070,7 +1369,6 @@ async function runExecute(deps, request) {
         holderWithin,
         auditWithin: deps.auditWithin,
       }))
-      began = true
       // WRITES.
       let run
       try {
@@ -1079,6 +1377,7 @@ async function runExecute(deps, request) {
           patch,
           items: plan.writes,
           changesOf: request.recipe === RECIPE_RETIRE ? () => retireChangesOf(runId) : (item) => restoreChangesOf(item.before),
+          onAttempt: (count) => { attempted = count },
         })
       } catch (error) {
         written = Number.isSafeInteger(error && error.sheetRepairWritten) ? error.sheetRepairWritten : 0
@@ -1116,9 +1415,10 @@ async function runExecute(deps, request) {
       return { mode: 'execute', recipe: request.recipe, runId, status: 'completed', planned, written, planDigest: plan.planDigest, ...subject }
     })
   } finally {
-    // After the lease is released: every token planned before a repair that wrote is superseded (best effort — the
-    // rows' own hash refuses such a token as well).
-    if (began && written > 0 && typeof deps.bumpAfterRelease === 'function') {
+    // After the lease is released: every token planned before a repair that ATTEMPTED a host write is superseded (best
+    // effort — the rows' own hash refuses such a token as well). Attempted, not confirmed (ruling C-5): a patch that
+    // raised may have landed. Zero attempts (every refusal before the first patch) moves nothing.
+    if (attempted > 0 && typeof deps.bumpAfterRelease === 'function') {
       try {
         await deps.bumpAfterRelease()
         if (answer) answer = { ...answer, generationBumped: true }
@@ -1138,6 +1438,7 @@ async function runExecute(deps, request) {
 async function runSheetRepairRequest(deps, body) {
   const request = normalizeSheetRepairBody(body)
   requireDeps(deps)
+  if (request.recipe === RECIPE_CLOSE) return request.mode === 'execute' ? runCloseExecute(deps, request) : runClosePreview(deps, request)
   return request.mode === 'execute' ? runExecute(deps, request) : runPreview(deps, request)
 }
 
@@ -1175,17 +1476,22 @@ module.exports = {
   SHEET_REPAIR_AUDIT,
   SHEET_REPAIR_BODY_KEYS,
   SHEET_REPAIR_CLAIM_SCHEME,
+  SHEET_REPAIR_CLOSE_COUNT_KEYS,
+  SHEET_REPAIR_CLOSE_SCHEME,
   SHEET_REPAIR_COMPONENT_SHAPES,
+  SHEET_REPAIR_CONTINUATIONS,
   SHEET_REPAIR_ERROR_CODES,
   SHEET_REPAIR_FILLS_QUERY_KEYS,
   SHEET_REPAIR_FILL_CLASSES,
   SHEET_REPAIR_FILL_STATES,
   SHEET_REPAIR_GENERATION_REASON,
+  SHEET_REPAIR_INSTALL_STATES,
   SHEET_REPAIR_LEASE_PURPOSE,
   SHEET_REPAIR_MODES,
   SHEET_REPAIR_PLAN_SCHEME,
   SHEET_REPAIR_RECIPES,
   SHEET_REPAIR_REFUSALS,
+  SHEET_REPAIR_REQUEST_RECIPES,
   SHEET_REPAIR_RETIRE_DECISION,
   SHEET_REPAIR_RETIRE_SUMMARY,
   SHEET_REPAIR_RESTORE_COUNT_KEYS,
@@ -1195,10 +1501,12 @@ module.exports = {
   SHEET_REPAIR_STOP_REASONS,
   SHEET_REPAIR_WRITE_FIELD_IDS,
   StockPreparationSheetRepairError,
+  analyzeClose,
   analyzeRestore,
   analyzeRetire,
   buildFillsReport,
   claimKeyOf,
+  installStateOfFacts,
   normalizeFillsReportQuery,
   normalizeRunsQuery,
   normalizeSheetRepairBody,
@@ -1217,8 +1525,10 @@ module.exports = {
     analyzeRetireComponent,
     backupEntriesOf,
     carriesRetireStamp,
+    closeDigestOf,
     doubledComponentsOf,
     fillClassOf,
+    inHostWrite,
     isMachineSummary,
     planChanged,
     planDigestOf,

@@ -18,6 +18,9 @@
 //   ST-07  the reads: sequence / retire run ids / open run, the values-free run list, a run by id in scope only, the
 //          claim; every failure is 503 with its SQLSTATE — never "nothing there"
 //   ST-08  audit details pass the audit store's own values-free gate and never carry the project number
+//   ST-09  the verified close (coordinator ruling C-3): holder first; the run must be open, of this scope and begun under
+//          ANOTHER lease; `completed` with the planned count and its own close approval; the audit rides the
+//          transaction; no claim is spent; every refusal leaves the run open
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -125,6 +128,16 @@ test('ST-01 migration 108: the closed lists are the library\'s; the kit\'s CHECK
   for (const phrase of ['R-91', 'OWNER GATE ②', 'up-only', 'RunMigrations 0', 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED', 'SELECT, INSERT and UPDATE on integration_stock_prep_sheet_repair_run']) {
     assert.ok(sql.includes(phrase), `the header states: ${phrase}`)
   }
+  // How an open run is closed, as the code does it (ruling C-3; a migration file is immutable once shipped): never by
+  // a preview, by the next EXECUTE's begin, or by the continuation — which the library names.
+  for (const phrase of ['HOW AN OPEN RUN IS CLOSED', 'a PREVIEW never closes it', 'the BEGIN of the next repair EXECUTE on that sheet', `the continuation \`${R.SHEET_REPAIR_CONTINUATIONS[0]}\``, 'On a project that has become GOVERNED since the run']) {
+    assert.ok(sql.includes(phrase), `the header states: ${phrase}`)
+  }
+  assert.equal(sql.includes('closed by the next repair request on that sheet'), false, 'the header no longer says a request (a preview) closes an open run')
+  // The continuation's mode rides the audit list the header names; its approval column is nullable TEXT.
+  assert.ok(sql.includes(`\`${R.SHEET_REPAIR_AUDIT.modes.verifiedClosed}\``))
+  assert.match(code, /\n {2}close_approval_ref TEXT,\n/)
+  assert.equal(db.schema[kit.T.run].columns.close_approval_ref.notNull, false, 'NULL for every run the continuation did not close')
   // The claim key is a digest of the scope, the recipe and the plan digest — a different plan, another key.
   const key = R.claimKeyOf({ ...SCOPE, recipe: RETIRE, planDigest: digestOf('a') })
   assert.match(key, /^[0-9a-f]{64}$/)
@@ -285,6 +298,9 @@ test('ST-04 an open run of the sheet begun under ANOTHER lease is closed `stoppe
     [{ stop_reason: 'because' }, 'integration_stock_prep_sheet_repair_run_stop_reason_check'],
     [{ status: 'paused' }, 'integration_stock_prep_sheet_repair_run_status_check'],
     [{ recipe: 'delete_rows' }, 'integration_stock_prep_sheet_repair_run_recipe_check'],
+    // A close approval only ever sits on a `completed` run.
+    [{ close_approval_ref: 'R-91:close' }, 'integration_stock_prep_sheet_repair_run_close_check'],
+    [{ status: 'stopped', stop_reason: 'abandoned', finished_at: '2026-11-10T00:00:00.000Z', close_approval_ref: 'R-91:close' }, 'integration_stock_prep_sheet_repair_run_close_check'],
   ]) {
     const fresh = mount()
     assert.throws(() => fresh.db.seed(kit.T.run, {
@@ -382,7 +398,8 @@ test('ST-07 the reads: sequence / retire run ids / open run; the values-free run
     [restore.runId, RESTORE, 1, 'stopped', 'record_locked', 1, 0, null, retire.runId],
     [retire.runId, RETIRE, 0, 'completed', null, 2, 2, HANDLE, null],
   ])
-  assert.deepEqual(Object.keys(listed.runs[0]).sort(), ['approvalRef', 'componentHandle', 'finishedAt', 'planDigest', 'planned', 'recipe', 'runId', 'sequence', 'sourceRunId', 'startedAt', 'status', 'stopReason', 'written'])
+  assert.deepEqual(Object.keys(listed.runs[0]).sort(), ['approvalRef', 'closeApprovalRef', 'componentHandle', 'finishedAt', 'planDigest', 'planned', 'recipe', 'runId', 'sequence', 'sourceRunId', 'startedAt', 'status', 'stopReason', 'written'])
+  assert.deepEqual(listed.runs.map((run) => run.closeApprovalRef), [null, null], 'a run that finished itself carries no close approval')
   for (const planted of [SCOPE.projectNo, SCOPE.tenantId, SCOPE.sheetId, 'u_syn_admin', 'rec_old', LEASE_A.leaseId, kit.PULL_RUN_ID]) assert.equal(JSON.stringify(listed).includes(planted), false, `${planted} leaked`)
   // A run by id: with its backup, in THIS scope only.
   const read = await m.store.readRun({ ...SCOPE, runId: retire.runId })
@@ -438,6 +455,112 @@ test('ST-08 every audit entry the store hands over passes the audit store\'s val
   for (const mode of seen.map((entry) => entry.mode)) assert.ok(Object.values(R.SHEET_REPAIR_AUDIT.modes).includes(mode))
   const text = JSON.stringify(seen)
   for (const planted of [SCOPE.projectNo, SCOPE.tenantId, SCOPE.sheetId, 'u_syn_admin', 'rec_old', LEASE_A.leaseId]) assert.equal(text.includes(planted), false, `${planted} leaked`)
+})
+
+// ── ST-09 ────────────────────────────────────────────────────────────────────────────────────────────────
+
+test('ST-09 the verified close: holder first; the run must be open, of this scope and begun under ANOTHER lease; `completed` with the planned count and its own approval; the audit rides the transaction; no claim is spent; every refusal leaves the run open', async () => {
+  const closeInput = (m, runId, extra = {}) => ({ ...SCOPE, runId, verifiedCount: 2, versionMoved: 1, governed: false, closeDigest: digestOf('close-1'), approvalRef: 'R-91:syn-close', lease: LEASE_B, ...m.hooks, ...extra })
+  const m = mount()
+  const open = m.beginInput()
+  await m.store.beginRun(open)
+  m.audits.length = 0
+  m.holders.length = 0
+  m.db.log.length = 0
+  const done = await m.store.closeVerifiedRun(closeInput(m, open.runId))
+  assert.deepEqual({ ...done }, { runId: open.runId, status: 'completed', planned: 2, verified: 2 })
+  assert.deepEqual(m.db.statements(), [['transaction', undefined], ['trx.selectOne', kit.T.run], ['trx.updateRow', kit.T.run], ['commit', undefined]], 'the run row only: no sheet statement, no claim')
+  assert.deepEqual(m.holders, [true], 'the holder assert ran first, on the transaction handle')
+  const row = m.db.rows(kit.T.run)[0]
+  assert.deepEqual(
+    [row.status, row.stop_reason, row.written_count, row.planned_count, row.finished_at !== null, row.close_approval_ref, row.approval_ref, row.lease_id, row.fencing_epoch],
+    ['completed', null, 2, 2, true, 'R-91:syn-close', 'R-91:syn-1', LEASE_A.leaseId, LEASE_A.fencingEpoch],
+    'completed with its planned count; the close approval beside the run\'s own; the run still names the lease that began it',
+  )
+  assert.deepEqual(m.audits, [{ mode: 'sheet_repair_verified_closed', subjectId: open.runId, detail: { operation: 'sheet_repair_verified_close', recipe: RETIRE, planned: 2, verified: 2, versionMoved: 1, governed: false, closeDigest: digestOf('close-1'), approvalRef: 'R-91:syn-close' } }])
+  assert.ok(Object.values(R.SHEET_REPAIR_AUDIT.modes).includes(m.audits[0].mode))
+  assert.equal(m.db.rows(kit.T.claim).length, 1, 'the close spends no claim (the run\'s own stays)')
+  assert.deepEqual({ ...(await m.store.listRunsOf(SCOPE)) }, { sequence: 1, retireRunIds: [open.runId], openRun: false })
+  assert.deepEqual((await m.store.listRuns(SCOPE)).runs.map((run) => [run.status, run.written, run.approvalRef, run.closeApprovalRef]), [['completed', 2, 'R-91:syn-1', 'R-91:syn-close']])
+  assert.equal((await m.store.readRun({ ...SCOPE, runId: open.runId })).closeApprovalRef, 'R-91:syn-close')
+  // One-shot by the run's own status: a closed run cannot be closed again, by any lease.
+  await rejects(m.store.closeVerifiedRun(closeInput(m, open.runId)), { status: 409, code: CODES.RUN_NOT_OPEN, reason: 'run_not_open' })
+  await rejects(m.store.closeVerifiedRun(closeInput(m, open.runId, { lease: { leaseId: 'lease_syn_c', fencingEpoch: 5 } })), { status: 409, code: CODES.RUN_NOT_OPEN })
+  // Every refusal below leaves the run `running` and writes nothing.
+  const other = mount()
+  const run = other.beginInput()
+  await other.store.beginRun(run)
+  const untouched = () => {
+    const now = other.db.rows(kit.T.run)[0]
+    assert.deepEqual([now.status, now.written_count, now.finished_at, now.close_approval_ref], ['running', null, null, null])
+  }
+  // The run's OWN lease: a run finishes itself, it is never "left open" under the lease that is running it.
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { lease: LEASE_A })), { status: 409, code: CODES.RUN_OPEN, reason: 'run_open' })
+  untouched()
+  // Another scope, an unknown run.
+  for (const extra of [{ projectNo: 'SYN-OTHER' }, { sheetId: 'sheet_syn_other' }, { tenantId: 'tenant-other' }]) {
+    await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, extra)), { status: 409, code: CODES.RUN_NOT_OPEN })
+  }
+  await rejects(other.store.closeVerifiedRun(closeInput(other, newRunId())), { status: 409, code: CODES.RUN_NOT_OPEN })
+  untouched()
+  // The verified count must be the row's own planned count: fewer (or more) rows verified closes nothing.
+  for (const verifiedCount of [1, 3]) {
+    await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { verifiedCount, versionMoved: 0 })), { status: 500, code: CODES.UNAVAILABLE, field: 'verifiedCount' })
+  }
+  untouched()
+  // Malformed inputs are refused before any statement; both hooks are required.
+  for (const [extra, field] of [
+    [{ runId: 'run-1' }, 'runId'],
+    [{ approvalRef: 'has space' }, 'approvalRef'],
+    [{ approvalRef: undefined }, 'approvalRef'],
+    [{ closeDigest: 'abc' }, 'closeDigest'],
+    [{ verifiedCount: 0 }, 'verifiedCount'],
+    [{ versionMoved: -1 }, 'versionMoved'],
+    [{ versionMoved: 3 }, 'versionMoved'],
+    [{ governed: undefined }, 'governed'],
+    [{ lease: null }, 'lease'],
+    [{ holderWithin: undefined }, 'holderWithin'],
+    [{ auditWithin: null }, 'auditWithin'],
+    [{ tenantId: '' }, 'scope'],
+  ]) {
+    other.db.log.length = 0
+    await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, extra)), { status: 500, code: CODES.UNAVAILABLE, field })
+    assert.deepEqual(other.db.log, [], `${field}: refused before any statement`)
+  }
+  // A holder refusal (the closer's lease was taken over): the lock's own typed error, nothing recorded; an untyped
+  // holder failure is the ledger's 503.
+  other.db.log.length = 0
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { holderWithin: async () => { throw Object.assign(new Error('lost'), { status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', details: {} }) } })), { status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST' })
+  assert.deepEqual(other.db.statements().filter(([method]) => method.startsWith('trx.')), [], 'the holder assert is FIRST: no statement ran')
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { holderWithin: async () => { throw new Error('boom') } })), { status: 503, code: CODES.STORE_FAILED, operation: 'holder' })
+  untouched()
+  // An audit failure rolls the close back: a run is never closed without its audit row.
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { auditWithin: async () => { throw Object.assign(new Error('audit refused'), { status: 422, code: 'AUDIT_DETAIL_INVALID' }) } })), { status: 422, code: 'AUDIT_DETAIL_INVALID' })
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId, { auditWithin: async () => { throw new Error('driver error') } })), { status: 503, code: CODES.STORE_FAILED, operation: 'close' })
+  untouched()
+  // A read or a write failure is 503 with its SQLSTATE.
+  other.db.faults.selectOne = kit.sqlError('57014', 'canceling statement')
+  assert.equal((await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId)), { status: 503, code: CODES.STORE_FAILED, operation: 'close_read' })).details.sqlState, '57014')
+  other.db.faults.updateRow = kit.sqlError('40001', 'serialization failure')
+  assert.equal((await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId)), { status: 503, code: CODES.STORE_FAILED, operation: 'close_run' })).details.sqlState, '40001')
+  untouched()
+  // A run that finished itself (completed or stopped) is not open: never re-closed, its counts never rewritten.
+  await other.store.finishRun(other.finishInput(run.runId, { status: 'stopped', stopReason: 'version_conflict', writtenCount: 1 }))
+  await rejects(other.store.closeVerifiedRun(closeInput(other, run.runId)), { status: 409, code: CODES.RUN_NOT_OPEN })
+  const stopped = other.db.rows(kit.T.run)[0]
+  assert.deepEqual([stopped.status, stopped.stop_reason, stopped.written_count, stopped.close_approval_ref], ['stopped', 'version_conflict', 1, null])
+  // The close of a RESTORE run: the same transaction; the audit names the run's own recipe.
+  const restored = mount()
+  const retire = restored.beginInput()
+  await restored.store.beginRun(retire)
+  await restored.store.finishRun(restored.finishInput(retire.runId))
+  const restore = restored.beginInput({ recipe: RESTORE, componentHandle: undefined, sourceRunId: retire.runId, planDigest: digestOf('plan-restore'), expectSequence: 1, backup: [['rec_old_1', 4, false, retire.runId, 'inactive', kit.RETIRE_SUMMARY]], plannedCount: 1 })
+  await restored.store.beginRun(restore)
+  restored.audits.length = 0
+  await restored.store.closeVerifiedRun(closeInput(restored, restore.runId, { verifiedCount: 1, versionMoved: 0, governed: true }))
+  assert.deepEqual(restored.audits.map((entry) => [entry.mode, entry.detail.recipe, entry.detail.planned, entry.detail.governed]), [['sheet_repair_verified_closed', RESTORE, 1, true]])
+  assert.deepEqual(restored.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((entry) => [entry.status, entry.close_approval_ref]), [['completed', null], ['completed', 'R-91:syn-close']])
+  for (const planted of [SCOPE.projectNo, SCOPE.tenantId, SCOPE.sheetId, 'u_syn_admin', 'rec_old', LEASE_A.leaseId, LEASE_B.leaseId]) assert.equal(JSON.stringify(restored.audits).includes(planted), false, `${planted} leaked`)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-repair-store.test.cjs', tests)

@@ -18,8 +18,10 @@
 //          list; then the restore of that run puts every stored row back byte-identically; values-free answers
 //   RR-04  (RP-01) a governed project: a preview refusal and 409 for an execute, nothing written — for a retire and
 //          for the restore of a run whose project was governed afterwards
-//   RR-05  the installing gate through the route: enforced while the batch identifier is on; with it off the batch
-//          ledger is never touched; on with the ledger unwired, 503 by name before anything is read
+//   RR-05  the install gate through the route (coordinator ruling C-2): read from the batch ledger on every preview and
+//          execute of a recipe WHATEVER the batch switch says — `installing` and an aborted install whose lock is held
+//          are 409, with the switch off too; its one read is the repair's only batch-ledger statement; an unwired or
+//          unreadable ledger is 503 by name before anything is read; the fills report and the run list never read it
 //   RR-06  mutual exclusion with a pull, a recovery and an install: whoever holds the sheet, the repair is 409
 //          WRITE_LOCKED; while the repair holds it, a pull preview is 409 WRITE_LOCKED naming `sheet_repair`
 //   RR-07  a host that cannot honour the write fence refuses the execute (501) BEFORE the claim is spent; the old root
@@ -30,6 +32,11 @@
 //          patch before it reaches the host; the holder assert the ledger runs is the lock's own
 //   RR-10  the tenancy wall: a registry row that resolves onto ANOTHER tenant's sheet is refused 409 for all three
 //          routes before any sheet, source or ledger read
+//   RR-11  (ruling C-1) the heartbeat N6 rule through the route: every host patch of the route's fenced patch and both
+//          ledger transactions run inside the guard's host-write bracket
+//   RR-12  (ruling C-3) the continuation through the route: a run left `running` after every row was written is
+//          verified and closed — no patch, audited, bumped, the batch ledger never read; refused with counts when a
+//          row moved; works on a project that became governed
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -59,6 +66,7 @@ const test = (name, fn) => tests.push([name, fn])
 const CODES = R.SHEET_REPAIR_ERROR_CODES
 const RETIRE = R.SHEET_REPAIR_RECIPES[0]
 const RESTORE = R.SHEET_REPAIR_RECIPES[1]
+const CLOSE = R.SHEET_REPAIR_CONTINUATIONS[0]
 const TENANT = 'tenant-syn-rpr'
 const PROJECT = F.PROJECT_NO
 const HANDLE = componentHandle(TENANT, PROJECT, 'S-001')
@@ -120,6 +128,7 @@ function makeRecords() {
     },
     async patchRecord({ sheetId, recordId, changes, expectedVersion }) {
       calls.push('patchRecord')
+      if (typeof api.onPatch === 'function') api.onPatch(recordId)
       if (typeof api.beforePatch === 'function') await api.beforePatch(recordId)
       const row = rows.find((entry) => entry.id === recordId && entry.sheetId === sheetId)
       if (!row) throw Object.assign(new Error('Record not found'), { code: 'NOT_FOUND' })
@@ -145,6 +154,27 @@ async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source
   const db = kit.createFakeRepairDb({ clock, pullBatch: true })
   const repairStore = createStockPreparationSheetRepairStore({ db, now: clock.now })
   const lock = lockLib.createStockPreparationProjectWriteLock({ db })
+  // The N6 witness (ruling C-1): the lock the ROUTES are handed is the real one with two things OBSERVED — the host-write
+  // bracket of every lease it grants, and the in-transaction holder assert (the first statement of a ledger transaction).
+  const bracket = { depth: 0, holderAsserts: [], patches: [] }
+  const observedLock = Object.freeze({
+    ...lock,
+    withProjectWriteLease: (scopeKey, options, fn) => lock.withProjectWriteLease(scopeKey, options, (guard) => fn(Object.freeze({
+      ...guard,
+      withHostWrite: async (inner) => {
+        bracket.depth += 1
+        try {
+          return await guard.withHostWrite(inner)
+        } finally {
+          bracket.depth -= 1
+        }
+      },
+    }))),
+    assertHolderWithin: (trx, scopeKey, options) => {
+      bracket.holderAsserts.push([options && options.reason, bracket.depth])
+      return lock.assertHolderWithin(trx, scopeKey, options)
+    },
+  })
   const pullBatchStore = ledger === 'real' ? createStockPreparationPullBatchStore({ db, now: clock.now }) : untouchable('the batch ledger')
   const sourceState = { data: source, reads: 0 }
   const adapter = {
@@ -161,7 +191,7 @@ async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source
     switchOn,
     serviceExtras: {
       stockPreparationSheetRepairStore: repairStore,
-      stockPreparationProjectWriteLock: lock,
+      stockPreparationProjectWriteLock: observedLock,
       stockPreparationPullBatchStore: pullBatchStore,
       stockPreparationConfirmationDecisionLease: LEASE,
       adapterRegistry: { createAdapter() { return adapter }, listAdapterKinds() { return [] } },
@@ -169,6 +199,7 @@ async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source
     },
   })
   const records = makeRecords()
+  records.onPatch = () => { bracket.patches.push(bracket.depth) }
   h.context.api.multitable.records = lockKit.withFakeHostWriteFence(records, { lockDb: db })
   const auditsWithin = []
   h.services.stockPreparationAuditStore.appendWithin = async (trx, entry) => {
@@ -194,7 +225,30 @@ async function mount({ switchOn = true, seed = switchOn, ledger = 'real', source
   }
   const writeScope = seeded ? lockLib.sheetWriteScopeKey(seeded.sheetId) : null
   const st = {
-    h, db, clock, lock, records, repairStore, auditsWithin, sourceState, seeded, physical, writeScope,
+    h, db, clock, lock, bracket, records, repairStore, auditsWithin, sourceState, seeded, physical, writeScope,
+    // Every statement the request made on a batch-identifier table (the install gate's read is the only one allowed).
+    batchStatements: () => db.log.filter(([, args]) => args && typeof args.table === 'string' && args.table.includes('pull_batch')).map(([method, args]) => [method, args.table]),
+    patchCount: () => records.calls.filter((entry) => entry === 'patchRecord').length,
+    /**
+     * A retire whose LAST patch landed and whose finish was then refused (a pull took the sheet over on another
+     * process's clock): every planned row is written and the run is left `running`. Returns the open run's id.
+     */
+    async leaveRetireOpen() {
+      const plan = dataOf(await withEnv(ON, () => preview(st)))
+      let patches = 0
+      let taker = null
+      records.beforePatch = async () => {
+        patches += 1
+        if (patches !== 4) return
+        const other = lockLib.createStockPreparationProjectWriteLock({ db, now: () => new Date(Date.now() + LAPSED_MS) })
+        taker = other.createGuard(await other.acquire(writeScope, { purpose: 'small_apply', runId: 'syn-pull-takeover', tenantId: TENANT }))
+      }
+      const lost = expectRefusal(await withEnv(ON, () => execute(st, plan.planDigest)), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+      assert.deepEqual([lost.details.written, lost.details.planned], [4, 4])
+      records.beforePatch = null
+      await taker.release()
+      return st.runs().find((run) => run.status === 'running').id
+    },
     lockRow: () => db.rows(kit.T.lock).find((row) => row.scope_key === writeScope) || null,
     runs: () => db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no),
     claims: () => db.rows(kit.T.claim),
@@ -343,6 +397,9 @@ test('RR-02 the closed body and the typed project number (before any IO); absent
       [{ mode: 'execute', recipe: RETIRE, componentHandle: HANDLE, planDigest: 'a'.repeat(64) }, 'approvalRef'],
       [{ mode: 'execute', recipe: RETIRE, componentHandle: HANDLE, approvalRef: 'R-91' }, 'planDigest'],
       [{ mode: 'preview', recipe: RESTORE }, 'runId'],
+      [{ mode: 'preview', recipe: CLOSE }, 'runId'],
+      [{ mode: 'preview', recipe: CLOSE, runId: `${R.SHEET_REPAIR_RUN_ID_PREFIX}00000000-0000-4000-8000-000000000000`, componentHandle: HANDLE }, 'componentHandle'],
+      [{ mode: 'execute', recipe: CLOSE, runId: `${R.SHEET_REPAIR_RUN_ID_PREFIX}00000000-0000-4000-8000-000000000000`, planDigest: 'a'.repeat(64) }, 'approvalRef'],
     ]) {
       st.clearLogs()
       expectRefusal(await withEnv(ON, () => repair(st, body)), { status: 400, code: CODES.REQUEST_INVALID, field })
@@ -515,44 +572,79 @@ test('RR-04 (RP-01) a governed project is never repaired: the preview names proj
 
 // ── RR-05 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('RR-05 the installing gate through the route (rebaseline B-9): enforced while the batch identifier is on; off, its ledger is never touched', async () => {
+test('RR-05 the install gate through the route (rebaseline B-9; ruling C-2): read from the batch ledger on every preview and execute WHATEVER the batch switch says; `installing` and an aborted install whose lock is held are 409; an unwired or unreadable ledger is 503 by name; the fills report and the run list never read it', async () => {
   const BOTH = { [REPAIR_ENV]: 'true', [PULL_BATCH_ENV]: 'true' }
-  const st = await mount()
+  const GATE_READ = [['selectOne', pbKit.T.sheet], ['select', pbKit.T.batch]]
+  // The SAME behaviour with the batch switch off (`ON` leaves it unset) and on: the gate does not look at the switch.
+  for (const [label, env] of [['the batch switch OFF', ON], ['the batch switch on', BOTH]]) {
+    const st = await mount()
+    try {
+      // No ledger row (the batch identifier never touched this sheet): repairable.
+      st.clearLogs()
+      assert.equal(dataOf(await withEnv(env, () => preview(st))).eligible, true, label)
+      if (env === ON) assert.deepEqual(st.batchStatements(), GATE_READ, 'off: the gate\'s one read of the sheet state is the request\'s ONLY batch-ledger statement')
+      const sheetRow = pbKit.sheetRow({ tenantId: TENANT, sheetId: st.seeded.sheetId, projectNo: PROJECT, status: 'born_empty' })
+      st.db.seed(pbKit.T.sheet, sheetRow)
+      const plan = dataOf(await withEnv(env, () => preview(st)))
+      assert.equal(plan.eligible, true, `${label}: a resolved sheet is repairable`)
+      // An install begins after the preview: the execute's in-lease read refuses it; so does a new preview.
+      await st.db.updateRow(pbKit.T.sheet, { history_status: 'installing', settings_locked_at: '2026-11-10T00:00:00.000Z' }, { id: sheetRow.id })
+      st.clearLogs()
+      const error = expectRefusal(await withEnv(env, () => execute(st, plan.planDigest)), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_in_progress' })
+      assert.equal(error.details.partial, false)
+      assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims(), st.lockRow().lease_id], [false, [], [], null], label)
+      if (env === ON) assert.deepEqual(st.batchStatements(), GATE_READ, 'off: the execute read the sheet state once, inside the lease, and nothing else of that ledger')
+      const refused = dataOf(await withEnv(env, () => preview(st)))
+      assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest], [false, ['install_in_progress'], null], label)
+      // That install is ABORTED and its settings lock stays held (a label of its plan may be on the sheet, so its next
+      // run would RESUME the persisted plan): refused under the same code, naming the state.
+      await st.db.updateRow(pbKit.T.sheet, { history_status: 'pending', history_plan: { aborted: true }, resolved_at: null, resolved_by: null, history_mode: null, history_batch_count: null }, { id: sheetRow.id })
+      const held = dataOf(await withEnv(env, () => preview(st)))
+      assert.deepEqual([held.eligible, held.refusals, held.planDigest], [false, ['install_aborted_unresolved'], null], label)
+      const heldError = expectRefusal(await withEnv(env, () => execute(st, plan.planDigest)), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_aborted_unresolved' })
+      assert.equal(heldError.details.partial, false)
+      assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims()], [false, [], []], label)
+      // The batch ledger untouched by the repair: the row is exactly what the install left.
+      assert.deepEqual(st.db.rows(pbKit.T.sheet).map((row) => [row.history_status, row.version, row.settings_locked_at]), [['pending', 0, '2026-11-10T00:00:00.000Z']])
+      // The abort RELEASED the lock (no label of the plan on the sheet): the next install plans afresh, so the SAME
+      // approved digest runs.
+      await st.db.updateRow(pbKit.T.sheet, { settings_locked_at: null }, { id: sheetRow.id })
+      assert.equal(dataOf(await withEnv(env, () => execute(st, plan.planDigest))).status, 'completed', label)
+    } finally { st.h.restore() }
+  }
+  // A ledger that cannot be READ (every call throws), switch off: the gate cannot be answered, so a preview and an
+  // execute are refused by name and nothing begins — while the two reads never touch that ledger and still answer.
+  const unreadable = await mount({ ledger: 'untouchable' })
   try {
-    const sheetRow = pbKit.sheetRow({ tenantId: TENANT, sheetId: st.seeded.sheetId, projectNo: PROJECT, status: 'born_empty' })
-    st.db.seed(pbKit.T.sheet, sheetRow)
-    const plan = dataOf(await withEnv(BOTH, () => preview(st)))
-    assert.equal(plan.eligible, true, 'a resolved sheet is repairable')
-    // An install begins after the preview: the execute's in-lease check refuses it; so does a new preview.
-    await st.db.updateRow(pbKit.T.sheet, { history_status: 'installing', settings_locked_at: '2026-11-10T00:00:00.000Z' }, { id: sheetRow.id })
-    const error = expectRefusal(await withEnv(BOTH, () => execute(st, plan.planDigest)), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_in_progress' })
-    assert.equal(error.details.partial, false)
-    assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.claims(), st.lockRow().lease_id], [false, [], [], null])
-    const refused = dataOf(await withEnv(BOTH, () => preview(st)))
-    assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest], [false, ['install_in_progress'], null])
-    // The batch ledger untouched by the repair: the row's version and lock are what they were.
-    assert.deepEqual(st.db.rows(pbKit.T.sheet).map((row) => [row.history_status, row.version]), [['installing', 0]])
-  } finally { st.h.restore() }
-  // The batch identifier OFF: its ledger is never read (a ledger that throws on any call), and the repair runs.
-  const off = await mount({ ledger: 'untouchable' })
-  try {
-    const plan = dataOf(await withEnv(ON, () => preview(off)))
-    const done = dataOf(await withEnv(ON, () => execute(off, plan.planDigest)))
-    assert.deepEqual([done.status, done.written], ['completed', 4])
-    assert.deepEqual(off.db.log.filter(([, args]) => args && typeof args.table === 'string' && args.table.includes('pull_batch')), [], 'zero batch-ledger statements')
-  } finally { off.h.restore() }
-  // The batch identifier ON but its ledger not wired: the gate cannot be answered, so the request is refused by name
-  // before the sheet, the source or the repair ledger's runs are read (never "not installing").
+    for (const send of [() => preview(unreadable), () => execute(unreadable, 'a'.repeat(64))]) {
+      const error = expectRefusal(await withEnv(ON, send), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+      assert.deepEqual([error.details.operation, error.details.partial, unreadable.records.calls.includes('patchRecord'), unreadable.sourceState.reads, unreadable.runs(), unreadable.claims()], ['read_sheet', false, false, 0, [], []])
+    }
+    assert.equal(unreadable.lockRow().lease_id, null, 'the execute\'s lease was released')
+    assert.equal(dataOf(await withEnv(ON, () => call(unreadable, 'GET', PATHS.fills))).total, 1)
+    assert.deepEqual(dataOf(await withEnv(ON, () => call(unreadable, 'GET', PATHS.runs))), { runs: [], truncated: false })
+  } finally { unreadable.h.restore() }
+  // The ledger NOT WIRED, switch off and on: refused by name before the sheet, the source, the lock or the repair
+  // ledger's runs are touched (never "not installing").
   const unwired = await mount({ serviceOverrides: { stockPreparationPullBatchStore: null } })
   try {
-    for (const send of [() => preview(unwired), () => execute(unwired, 'a'.repeat(64))]) {
-      unwired.clearLogs()
-      const error = expectRefusal(await withEnv(BOTH, send), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
-      assert.deepEqual([error.details.operation, error.details.partial, unwired.records.calls, unwired.sourceState.reads, unwired.runs(), unwired.claims(), unwired.lockRow()], ['store_unwired', false, [], 0, [], [], null])
+    for (const env of [ON, BOTH]) {
+      for (const send of [() => preview(unwired), () => execute(unwired, 'a'.repeat(64))]) {
+        unwired.clearLogs()
+        const error = expectRefusal(await withEnv(env, send), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+        assert.deepEqual([error.details.operation, error.details.partial, unwired.records.calls, unwired.sourceState.reads, unwired.runs(), unwired.claims(), unwired.lockRow()], ['store_unwired', false, [], 0, [], [], null])
+      }
     }
-    // Off, the same deployment repairs: the ledger is not asked for.
-    assert.equal(dataOf(await withEnv(ON, () => preview(unwired))).eligible, true)
+    // The reads do not need it.
+    assert.equal(dataOf(await withEnv(ON, () => call(unwired, 'GET', PATHS.fills))).total, 1)
+    assert.deepEqual(dataOf(await withEnv(ON, () => call(unwired, 'GET', PATHS.runs))), { runs: [], truncated: false })
   } finally { unwired.h.restore() }
+  // A ledger that answers something that is not its sheet state is 503 too — never "no row".
+  const odd = await mount({ serviceOverrides: { stockPreparationPullBatchStore: { readSheetState: async () => ({ batches: [] }) } } })
+  try {
+    const error = expectRefusal(await withEnv(ON, () => preview(odd)), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+    assert.equal(error.details.operation, 'read_sheet_shape')
+  } finally { odd.h.restore() }
 })
 
 // ── RR-06 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -692,8 +784,14 @@ test('RR-09 the server-held deps the routes hand the library: the fenced patch r
   } finally { R.runSheetRepairRequest = real }
   try {
     assert.ok(deps && typeof deps.patchFor === 'function' && typeof deps.holderWithinFor === 'function' && typeof deps.withLease === 'function')
-    // No guard => no patch function at all.
+    // The install gate's reader is ALWAYS bound (ruling C-2) and hands values-free facts, whatever the batch switch says.
+    assert.equal(typeof deps.installStateOf, 'function')
+    assert.deepEqual(await deps.installStateOf(), { present: false })
+    // No guard => no patch function at all, and no holder check (ruling C-4).
     assert.throws(() => deps.patchFor(null), (error) => error.status === 501 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.UNAVAILABLE && error.details.reason === 'write_fence_required')
+    assert.equal(typeof deps.assertHolder, 'function')
+    assert.throws(() => deps.assertHolder(null), (error) => error.status === 501 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.UNAVAILABLE && error.details.reason === 'write_fence_required')
+    assert.throws(() => deps.assertHolder({}), (error) => error.status === 501 && error.details.reason === 'write_fence_required')
     const target = st.oldRows()[0]
     const changes = { [st.physical('active')]: false }
     const fences = st.h.context.api.multitable.records.fakeHostFences
@@ -706,6 +804,10 @@ test('RR-09 the server-held deps the routes hand the library: the fenced patch r
         await assert.rejects(patch({ recordId: target.id, changes, expectedVersion }), (error) => error.status === 500 && error.code === CODES.UNAVAILABLE && error.details.field === 'expectedVersion')
       }
       assert.deepEqual([st.records.calls, fences.length, target.version], [[], 0, 1], 'nothing reached the host')
+      // The holder check before a ledger transaction is the guard's own pre-write CAS: it passes for the holder ...
+      const casBefore = st.lockRow().lease_seq
+      await deps.assertHolder(guard)
+      assert.equal(st.lockRow().lease_seq, casBefore + 1, 'one holder CAS reached the lock row')
       // The holder assert the ledger transactions run is the lock's own: it passes for the holder ...
       await st.db.transaction((trx) => deps.holderWithinFor(guard)(trx))
       assert.deepEqual(deps.leaseOf(guard), { leaseId: st.lockRow().lease_id, fencingEpoch: st.lockRow().fencing_epoch })
@@ -715,6 +817,7 @@ test('RR-09 the server-held deps the routes hand the library: the fenced patch r
       taken = true
       // ... then the SAME assert refuses, and the next patch dies at the pre-write holder CAS: the host never sees it.
       await assert.rejects(st.db.transaction((trx) => deps.holderWithinFor(guard)(trx)), (error) => error.status === 409 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+      await assert.rejects(deps.assertHolder(guard), (error) => error.status === 409 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST && error.fence === true)
       await assert.rejects(patch({ recordId: target.id, changes, expectedVersion: 1 }), (error) => error.status === 409 && error.code === lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST && error.fence === true)
       assert.deepEqual([st.records.calls, fences.length, target.version, st.cell(target, 'active')], [[], 0, 1, true], 'the zombie\'s patch never reached the host')
       await taker.release()
@@ -758,6 +861,140 @@ test('RR-10 the tenancy wall: a project whose registry row resolves onto ANOTHER
     }
     assert.equal(st.records.rows.find((row) => row.id === 'rec_foreign_1').version, 1, 'the foreign row is untouched')
   } finally { st.h.restore() }
+})
+
+// ── RR-11 (ruling C-1) ───────────────────────────────────────────────────────────────────────────────────
+
+test('RR-11 the heartbeat N6 rule through the route: every host patch of the route\'s fenced patch and both ledger transactions of a run are inside the guard\'s host-write bracket', async () => {
+  const st = await mount()
+  try {
+    const plan = dataOf(await withEnv(ON, () => preview(st)))
+    assert.deepEqual([st.bracket.patches, st.bracket.holderAsserts], [[], []], 'a preview takes no lease and runs no ledger transaction')
+    const done = dataOf(await withEnv(ON, () => execute(st, plan.planDigest)))
+    assert.deepEqual([done.status, done.written], ['completed', 4])
+    assert.deepEqual(st.bracket.patches, [1, 1, 1, 1], 'sheetRepairFencedPatchFor: every patchRecord ran inside guard.withHostWrite')
+    assert.deepEqual(st.bracket.holderAsserts, [['sheet_repair', 1], ['sheet_repair', 1]], 'the begin\'s and the finish\'s holder assert ran inside the bracket')
+    assert.equal(st.bracket.depth, 0, 'every bracket closed')
+    // The restore of that run: the same.
+    st.bracket.patches.length = 0
+    st.bracket.holderAsserts.length = 0
+    const restorePlan = dataOf(await withEnv(ON, () => repair(st, { mode: 'preview', recipe: RESTORE, runId: done.runId })))
+    assert.equal(dataOf(await withEnv(ON, () => repair(st, { mode: 'execute', recipe: RESTORE, runId: done.runId, planDigest: restorePlan.planDigest, approvalRef: 'R-91:syn-window-2' }))).status, 'completed')
+    assert.deepEqual([st.bracket.patches, st.bracket.holderAsserts, st.bracket.depth], [[1, 1, 1, 1], [['sheet_repair', 1], ['sheet_repair', 1]], 0])
+  } finally { st.h.restore() }
+})
+
+// ── RR-12 (ruling C-3) ───────────────────────────────────────────────────────────────────────────────────
+
+test('RR-12 the continuation through the route: a run left `running` after every row was written is verified and closed — no patch, audited, bumped, the batch ledger never read; refused with counts when a row moved; works on a project that became governed', async () => {
+  const closePreview = (st, runId) => repair(st, { mode: 'preview', recipe: CLOSE, runId })
+  const closeExecute = (st, runId, planDigest, approvalRef = 'R-91:syn-close-1') => repair(st, { mode: 'execute', recipe: CLOSE, runId, planDigest, approvalRef })
+  const st = await mount()
+  try {
+    const runId = await st.leaveRetireOpen()
+    // The dead end: every old row retired, the run open, no retire of the component left to begin.
+    assert.deepEqual(st.runs().map((run) => [run.id, run.status, run.written_count]), [[runId, 'running', null]])
+    for (const row of st.oldRows()) assert.strictEqual(st.cell(row, 'active'), false)
+    const retireAgain = dataOf(await withEnv(ON, () => preview(st)))
+    assert.deepEqual([retireAgain.eligible, retireAgain.refusals, retireAgain.openRun], [false, ['not_two_copy'], true])
+    assert.equal(st.lockRow().generation_reason, null, 'the run never got its bump')
+    const rowsBefore = JSON.stringify(st.records.rows)
+    st.auditsWithin.length = 0
+    st.h.auditAppends.length = 0
+    st.bracket.holderAsserts.length = 0
+    st.bracket.patches.length = 0
+    st.clearLogs()
+    const patchesBefore = st.patchCount()
+    const sourceReads = st.sourceState.reads
+    // The preview: counts and the close's own digest; audited as a read; no lease.
+    const plan = dataOf(await withEnv(ON, () => closePreview(st, runId)))
+    assert.deepEqual([plan.mode, plan.recipe, plan.runId, plan.runRecipe, plan.eligible, plan.refusals, plan.governed], ['preview', CLOSE, runId, RETIRE, true, [], false])
+    assert.deepEqual(plan.counts, { planned: 4, inTargetState: 4, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 })
+    assert.deepEqual(plan.requires, { approvalRef: true, planDigest: plan.planDigest })
+    assert.notEqual(plan.planDigest, st.runs()[0].plan_digest)
+    assert.deepEqual(st.h.auditAppends.map((entry) => [entry.action, entry.mode, entry.detail.operation, entry.projectId === undefined || entry.projectId === null]), [['project_board_read', 'sheet_repair_preview_read', 'sheet_repair_close_preview', true]])
+    assert.deepEqual([st.runs()[0].status, st.lockRow().lease_id], ['running', null])
+    // The execute.
+    const done = dataOf(await withEnv(ON, () => closeExecute(st, runId, plan.planDigest)))
+    assert.deepEqual([done.mode, done.recipe, done.runId, done.runRecipe, done.status, done.planned, done.verified, done.governed, done.generationBumped, done.planDigest], ['execute', CLOSE, runId, RETIRE, 'completed', 4, 4, false, true, plan.planDigest])
+    // NO row write: no patch reached the host and every stored row is byte-identical.
+    assert.deepEqual([st.patchCount(), st.bracket.patches, JSON.stringify(st.records.rows) === rowsBefore], [patchesBefore, [], true])
+    // The source was not read, and the batch ledger never asked (the continuation changes nothing on the sheet).
+    assert.deepEqual([st.sourceState.reads, st.batchStatements()], [sourceReads, []])
+    const run = st.runs()[0]
+    assert.deepEqual([run.status, run.stop_reason, run.written_count, run.close_approval_ref, run.approval_ref], ['completed', null, 4, 'R-91:syn-close-1', 'R-91:syn-window-1'])
+    assert.equal(st.claims().length, 1, 'the close spent no claim')
+    assert.deepEqual(st.auditsWithin.map((entry) => [entry.action, entry.mode, entry.subjectId, entry.projectId, entry.actor, entry.detail.operation, entry.detail.verified, entry.detail.approvalRef, entry.detail.tenantClaimVerified === undefined]), [
+      ['exception_resolve', 'sheet_repair_verified_closed', runId, PROJECT, ADMIN.id, 'sheet_repair_verified_close', 4, 'R-91:syn-close-1', false],
+    ])
+    assert.equal(JSON.stringify(st.auditsWithin.map((entry) => entry.detail)).includes(PROJECT), false)
+    assert.deepEqual([st.bracket.holderAsserts, st.bracket.depth], [[['sheet_repair', 1]], 0], 'the close\'s ledger transaction ran inside the host-write bracket (N6)')
+    const lockRow = st.lockRow()
+    assert.deepEqual([lockRow.lease_id, lockRow.generation_reason, lockRow.generation], [null, 'sheet_repair', 1], 'released, then bumped — the bump the run never got')
+    // The run list shows how it was closed.
+    const listed = dataOf(await withEnv(ON, () => call(st, 'GET', PATHS.runs)))
+    assert.deepEqual(listed.runs.map((entry) => [entry.runId, entry.status, entry.written, entry.approvalRef, entry.closeApprovalRef]), [[runId, 'completed', 4, 'R-91:syn-window-1', 'R-91:syn-close-1']])
+    for (const [label, answer] of [['close preview', plan], ['close execute', done], ['runs', listed]]) assertValuesFree(answer, st, label)
+    // One-shot by the run's own status.
+    const again = expectRefusal(await withEnv(ON, () => closeExecute(st, runId, plan.planDigest)), { status: 409, code: CODES.NOT_APPLICABLE })
+    assert.deepEqual(again.details.reasons, ['run_not_open'])
+    assert.equal(dataOf(await withEnv(ON, () => preview(st))).openRun, false)
+  } finally { st.h.restore() }
+
+  // A planned row moved since (revived by a pull): refused with counts, nothing closed; restoring the run is the way out.
+  const moved = await mount()
+  try {
+    const runId = await moved.leaveRetireOpen()
+    const good = dataOf(await withEnv(ON, () => closePreview(moved, runId)))
+    assert.equal(good.eligible, true)
+    const victim = moved.oldRows()[1]
+    Object.assign(victim.data, { [moved.physical('active')]: true, [moved.physical('lastPlmRefreshRunId')]: 'table-action:syn-pull-2', [moved.physical('lastPlmRefreshDecision')]: 'update', [moved.physical('lastPlmConflictSummary')]: '{"type":"plm_system_refresh","changedFields":["material"]}' })
+    victim.version += 1
+    const refusedPreview = dataOf(await withEnv(ON, () => closePreview(moved, runId)))
+    assert.deepEqual([refusedPreview.eligible, refusedPreview.refusals, refusedPreview.planDigest, refusedPreview.counts], [false, ['rows_not_in_target_state'], null, { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 1, missing: 0 }])
+    const error = expectRefusal(await withEnv(ON, () => closeExecute(moved, runId, good.planDigest)), { status: 409, code: CODES.NOT_APPLICABLE })
+    assert.deepEqual([Array.from(error.details.reasons), { ...error.details.counts }, error.details.partial], [['rows_not_in_target_state'], { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 1, missing: 0 }, false])
+    assert.deepEqual([moved.runs()[0].status, moved.runs()[0].close_approval_ref, moved.lockRow().lease_id, moved.lockRow().generation_reason], ['running', null, null, null])
+    // A digest that is not this close's refuses too (the run's own plan digest included).
+    victim.data[moved.physical('active')] = false
+    Object.assign(victim.data, { [moved.physical('lastPlmRefreshRunId')]: runId, [moved.physical('lastPlmRefreshDecision')]: 'inactive', [moved.physical('lastPlmConflictSummary')]: R.SHEET_REPAIR_RETIRE_SUMMARY })
+    expectRefusal(await withEnv(ON, () => closeExecute(moved, runId, moved.runs()[0].plan_digest)), { status: 409, code: CODES.PLAN_CHANGED, reason: 'plan_digest_differs' })
+    assert.equal(moved.runs()[0].status, 'running')
+    // While another writer holds the sheet nothing of the continuation runs.
+    const holder = await moved.holder('small_apply')
+    expectRefusal(await withEnv(ON, () => closePreview(moved, runId)), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED })
+    expectRefusal(await withEnv(ON, () => closeExecute(moved, runId, good.planDigest)), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED })
+    await holder.release()
+    // The other way out stays: a restore of the run (its begin closes the open run as abandoned).
+    const restorePlan = dataOf(await withEnv(ON, () => repair(moved, { mode: 'preview', recipe: RESTORE, runId })))
+    assert.equal(dataOf(await withEnv(ON, () => repair(moved, { mode: 'execute', recipe: RESTORE, runId, planDigest: restorePlan.planDigest, approvalRef: 'R-91:syn-window-2' }))).status, 'completed')
+    assert.deepEqual(moved.runs().map((run) => [run.recipe, run.status, run.stop_reason]), [[RETIRE, 'stopped', 'abandoned'], [RESTORE, 'completed', null]])
+  } finally { moved.h.restore() }
+
+  // The project became GOVERNED since the run: neither recipe can begin, the verified close still works.
+  const governed = await mount()
+  try {
+    const runId = await governed.leaveRetireOpen()
+    governed.governed()
+    assert.ok(dataOf(await withEnv(ON, () => preview(governed))).refusals.includes('project_governed'))
+    assert.deepEqual(dataOf(await withEnv(ON, () => repair(governed, { mode: 'preview', recipe: RESTORE, runId }))).refusals, ['project_governed'])
+    const plan = dataOf(await withEnv(ON, () => closePreview(governed, runId)))
+    assert.deepEqual([plan.eligible, plan.refusals, plan.governed], [true, [], true])
+    const patches = governed.patchCount()
+    governed.auditsWithin.length = 0
+    const done = dataOf(await withEnv(ON, () => closeExecute(governed, runId, plan.planDigest, 'R-91:syn-close-governed')))
+    assert.deepEqual([done.status, done.governed, done.verified, done.generationBumped, governed.patchCount()], ['completed', true, 4, true, patches])
+    assert.deepEqual(governed.auditsWithin.map((entry) => [entry.mode, entry.detail.governed]), [['sheet_repair_verified_closed', true]])
+    assert.deepEqual([governed.runs()[0].status, governed.runs()[0].close_approval_ref, governed.lockRow().generation_reason], ['completed', 'R-91:syn-close-governed', 'sheet_repair'])
+  } finally { governed.h.restore() }
+
+  // The switch off: the continuation is as invisible as the rest of the surface.
+  const off = await mount()
+  try {
+    off.clearLogs()
+    expectRefusal(await withEnv({ [REPAIR_ENV]: undefined }, () => closePreview(off, `${R.SHEET_REPAIR_RUN_ID_PREFIX}00000000-0000-4000-8000-000000000000`)), { status: 404, code: CODES.DISABLED })
+    off.zeroIo('the continuation with the switch off')
+  } finally { off.h.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-repair-routes.test.cjs', tests)

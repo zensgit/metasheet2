@@ -24,10 +24,27 @@
 //          after the last patch; RP-09c: a fence refusal that is not a lost lease keeps its own status and code)
 //   RP-10  the write surface is exactly the four repair cells (ruling C7), asserted at the send
 //   RP-11  the sequence nonce: a run that began makes every later preview a new digest
-//   RP-12  the generation is bumped after the release, only when something was written; a failed bump never fails the run
+//   RP-12  the generation is bumped after the release whenever a host write was ATTEMPTED (confirmed or not — a write
+//          that raised may have landed); a refusal before the first patch moves nothing; a failed bump never fails the run
 //   RP-13  the preview: refused while a writer holds the sheet; audited before the answer; values-free
-//   NI-01  the installing gate: absent while the batch identifier is off (never read); a refusal token in the preview
-//          and 409 in the lease when on
+//   NI-01  the install gate (coordinator ruling C-2): the install state is read on EVERY analysis and is REQUIRED (no
+//          reader => refused by name, never "not installing"); `installing` and an aborted install whose settings lock is
+//          held refuse the preview and the execute (409 in the lease) for a retire and a restore; a reader that fails or
+//          answers what the library does not understand refuses
+//   N6-01  (ruling C-1) the heartbeat N6 rule: the begin's and the finish's holder assert and every patch run at
+//          host-write depth 1; no heartbeat CAS is attempted while a ledger transaction is open; a guard without the
+//          bracket is refused before anything is begun
+//   HB-01  (ruling C-4) a guard already lost before the begin refuses there: no claim spent, no run row, no patch, no
+//          bump — and the approved digest still runs afterwards
+//   CL-01  (ruling C-3) the continuation's verification, pure: target state per recipe, the counts, every refusal, the
+//          digest
+//   CL-02  the dead end closed: a run left `running` after every row was written is verified and finished `completed`
+//          with NO row write, its own approval, its audit row, the bump the run never got — inside the bracket
+//   CL-03  the continuation refuses, with counts, while any planned row is not in its target state (a partial run, a
+//          revived row, a missing row); a moved digest; a held sheet; restoring the run stays the other way out
+//   CL-04  a project that became GOVERNED since the run: the verified close still works (retire and restore refuse);
+//          a governed project whose planned row moved is refused by both (the stated residual)
+//   CL-05  a RESTORE run left open is verified against its source retire run's backup and closed
 //   FR-01  the fills report: the K2 classes, per-column states, unpaired old rows, paging, values-free
 // Every value is synthetic.
 
@@ -51,6 +68,7 @@ const test = (name, fn) => tests.push([name, fn])
 const CODES = R.SHEET_REPAIR_ERROR_CODES
 const RETIRE = R.SHEET_REPAIR_RECIPES[0]
 const RESTORE = R.SHEET_REPAIR_RECIPES[1]
+const CLOSE = R.SHEET_REPAIR_CONTINUATIONS[0]
 const SCOPE = Object.freeze({ tenantId: kit.TENANT_ID, sheetId: kit.SHEET_ID, projectNo: kit.PROJECT_NO })
 const WRITE_SCOPE = lockLib.sheetWriteScopeKey(kit.SHEET_ID)
 const HANDLE = kit.handleOf()
@@ -93,23 +111,53 @@ function mount({ sheet = kit.doubledSheet(), governed = false, complete = true, 
   const lock = lockLib.createStockPreparationProjectWriteLock({ db, now: clock.now, timers })
   const host = kit.makeHost(sheet.rows)
   const records = lockKit.withFakeHostWriteFence(host, { lockDb: db })
-  const state = { governed, complete, expansionKeys, reads: [], auditsWithin: [], auditReads: [], bumps: 0, failBump: false, beforeFencedPatch: null, patchCalls: 0 }
+  const state = {
+    governed, complete, expansionKeys, reads: [], auditsWithin: [], auditReads: [], bumps: 0, failBump: false, beforeFencedPatch: null, patchCalls: 0,
+    // The batch ledger's facts of the sheet as the route's reader would hand them (no row: never installed).
+    installFacts: { present: false }, installReads: 0,
+    // The N6 witness: how deep inside the guard's host-write bracket each step ran.
+    hostWriteDepth: 0, holderAssertDepths: [], patchDepths: [],
+    onLeaseRead: null, onAuditWithin: null,
+  }
+  // The guard the library is handed: the REAL guard, its host-write bracket observed (the recovery suite's pattern).
+  const observed = (guard) => Object.freeze({
+    ...guard,
+    withHostWrite: async (fn) => {
+      state.hostWriteDepth += 1
+      try {
+        return await guard.withHostWrite(fn)
+      } finally {
+        state.hostWriteDepth -= 1
+      }
+    },
+  })
   const deps = {
     scope: SCOPE,
     actor: 'u_syn_admin',
     store,
     physicalFieldIds: P,
+    installStateOf: async () => {
+      state.installReads += 1
+      return state.installFacts
+    },
     readForRetire: async ({ guard } = {}) => {
       state.reads.push(guard ? 'retire:lease' : 'retire:preview')
+      if (guard && typeof state.onLeaseRead === 'function') await state.onLeaseRead(guard)
       return { governed: state.governed, complete: state.complete, rows: host.rows(), expansionKeys: state.expansionKeys }
     },
     readForRestore: async ({ guard } = {}) => {
       state.reads.push(guard ? 'restore:lease' : 'restore:preview')
+      if (guard && typeof state.onLeaseRead === 'function') await state.onLeaseRead(guard)
       return { governed: state.governed, rows: host.rows() }
     },
     assertNoLiveWriter: () => lock.assertNoLiveWriter(WRITE_SCOPE),
-    withLease: (runId, fn) => lock.withProjectWriteLease(WRITE_SCOPE, { purpose: R.SHEET_REPAIR_LEASE_PURPOSE, runId, tenantId: SCOPE.tenantId }, fn),
-    holderWithinFor: (guard) => (trx) => lock.assertHolderWithin(trx, guard.scopeKey, { leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch, reason: 'sheet_repair' }),
+    withLease: (runId, fn) => lock.withProjectWriteLease(WRITE_SCOPE, { purpose: R.SHEET_REPAIR_LEASE_PURPOSE, runId, tenantId: SCOPE.tenantId }, (guard) => fn(observed(guard))),
+    // The route's holder check, spelled here: the guard's own pre-write holder CAS.
+    assertHolder: (guard) => guard.beforeWrite({ operation: 'sheetRepairBegin', decision: 'sheet_repair' }),
+    holderWithinFor: (guard) => (trx) => {
+      state.holderAssertDepths.push(state.hostWriteDepth)
+      return lock.assertHolderWithin(trx, guard.scopeKey, { leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch, reason: 'sheet_repair' })
+    },
     leaseOf: (guard) => ({ leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch }),
     // The route's fenced patch, spelled here: the host's fence support checked once, then per patch the pre-write
     // holder CAS and the fenced, version-conditional host write.
@@ -120,7 +168,10 @@ function mount({ sheet = kit.doubledSheet(), governed = false, complete = true, 
         if (typeof state.beforeFencedPatch === 'function') await state.beforeFencedPatch(state.patchCalls)
         await guard.beforeWrite({ operation: 'patchRecord', decision: 'sheet_repair' })
         try {
-          return await guard.withHostWrite(() => records.patchRecord({ sheetId: SCOPE.sheetId, recordId, changes, expectedVersion, writeFence: guard.hostWriteFence() }))
+          return await guard.withHostWrite(() => {
+            state.patchDepths.push(state.hostWriteDepth)
+            return records.patchRecord({ sheetId: SCOPE.sheetId, recordId, changes, expectedVersion, writeFence: guard.hostWriteFence() })
+          })
         } catch (error) {
           if (lockLib.isHostWriteFenceError(error)) throw await guard.hostFenceRefused(error)
           throw error
@@ -136,6 +187,7 @@ function mount({ sheet = kit.doubledSheet(), governed = false, complete = true, 
       assert.equal(typeof trx.setLocalLockTimeout, 'function', 'the audit row is handed the ledger TRANSACTION handle')
       auditInternals.assertValuesFreeDetail(entry.detail)
       state.auditsWithin.push({ mode: entry.mode, subjectId: entry.subjectId, detail: { ...entry.detail } })
+      if (typeof state.onAuditWithin === 'function') await state.onAuditWithin(entry)
     },
     auditRead: async (entry) => {
       auditInternals.assertValuesFreeDetail(entry.detail)
@@ -149,12 +201,31 @@ function mount({ sheet = kit.doubledSheet(), governed = false, complete = true, 
   const execute = (planDigest, extra = {}) => run({ mode: 'execute', recipe: RETIRE, confirmProjectNo: SCOPE.projectNo, componentHandle: HANDLE, planDigest, approvalRef: 'R-91:syn-1', ...extra })
   const restorePreview = (runId) => run({ mode: 'preview', recipe: RESTORE, confirmProjectNo: SCOPE.projectNo, runId })
   const restoreExecute = (runId, planDigest) => run({ mode: 'execute', recipe: RESTORE, confirmProjectNo: SCOPE.projectNo, runId, planDigest, approvalRef: 'R-91:syn-2' })
+  const closePreview = (runId) => run({ mode: 'preview', recipe: CLOSE, confirmProjectNo: SCOPE.projectNo, runId })
+  const closeExecute = (runId, planDigest, extra = {}) => run({ mode: 'execute', recipe: CLOSE, confirmProjectNo: SCOPE.projectNo, runId, planDigest, approvalRef: 'R-91:syn-close', ...extra })
+  /** The lock row's holder CAS statements so far (a heartbeat tick or a pre-write check that reached the store). */
+  const lockUpdates = () => db.log.filter(([method, args]) => method === 'updateRow' && args && args.table === kit.T.lock).length
   /** Another writer takes the sheet over (the repair's lease lapsed): returns its guard. */
   const takeOver = async () => {
     clock.advance(lockLib.PROJECT_WRITE_LEASE_TTL_MS + lockLib.PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS + 1000)
     return lock.createGuard(await lock.acquire(WRITE_SCOPE, { purpose: 'small_apply', runId: 'syn-pull-takeover', tenantId: SCOPE.tenantId }))
   }
-  return { clock, db, store, lock, host, records, state, deps, sheet, run, preview, execute, restorePreview, restoreExecute, takeOver }
+  /**
+   * A retire whose LAST patch landed and whose finish was then refused (a pull took the sheet over): every planned row
+   * is written and the run is left `running`. Returns the open run's id; the taker has released the sheet.
+   */
+  const leaveRetireOpen = async () => {
+    const plan = await preview()
+    let taker = null
+    host.beforePatch = async (_recordId, callIndex) => {
+      if (callIndex === 4) taker = await takeOver()
+    }
+    await rejects(execute(plan.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+    host.beforePatch = null
+    await taker.release()
+    return db.rows(kit.T.run).find((row) => row.status === 'running').id
+  }
+  return { clock, db, store, lock, timers, host, records, state, deps, sheet, run, preview, execute, restorePreview, restoreExecute, closePreview, closeExecute, lockUpdates, takeOver, leaveRetireOpen }
 }
 
 const analysisBase = (sheet, extra = {}) => ({
@@ -165,7 +236,7 @@ const analysisBase = (sheet, extra = {}) => ({
   sequence: 0,
   governed: false,
   complete: true,
-  installing: false,
+  installState: 'none',
   componentHandle: HANDLE,
   ...extra,
 })
@@ -175,6 +246,12 @@ const refusalsOf = (sheet, extra) => R.analyzeRetire(analysisBase(sheet, extra))
 
 test('RP-00 the closed vocabularies are frozen; the switch reader is the exact literal; the audit rides existing actions', () => {
   assert.deepEqual(R.SHEET_REPAIR_RECIPES, ['retire_superseded_root_subtree', 'restore_retired_rows'])
+  // The continuation is a request recipe only: it is not in the list migration 108's CHECKs pin.
+  assert.deepEqual(R.SHEET_REPAIR_CONTINUATIONS, ['verify_and_close_run'])
+  assert.deepEqual(R.SHEET_REPAIR_REQUEST_RECIPES, ['retire_superseded_root_subtree', 'restore_retired_rows', 'verify_and_close_run'])
+  assert.deepEqual(R.SHEET_REPAIR_INSTALL_STATES, ['none', 'installing', 'aborted_unresolved'])
+  assert.deepEqual(R.SHEET_REPAIR_CLOSE_COUNT_KEYS, ['planned', 'inTargetState', 'versionMoved', 'notWritten', 'moved', 'missing'])
+  assert.deepEqual(R.SHEET_REPAIR_AUDIT.modes, { started: 'sheet_repair_started', completed: 'sheet_repair_completed', stopped: 'sheet_repair_stopped', abandoned: 'sheet_repair_abandoned', verifiedClosed: 'sheet_repair_verified_closed', previewRead: 'sheet_repair_preview_read', fillsReportRead: 'sheet_fills_report_read', runsRead: 'sheet_repair_runs_read' })
   assert.deepEqual(R.SHEET_REPAIR_MODES, ['preview', 'execute'])
   assert.deepEqual(R.SHEET_REPAIR_RUN_STATUSES, ['running', 'completed', 'stopped'])
   assert.deepEqual(R.SHEET_REPAIR_STOP_REASONS, ['version_conflict', 'record_locked', 'record_missing', 'host_version_unexpected', 'host_write_failed', 'abandoned'])
@@ -186,7 +263,8 @@ test('RP-00 the closed vocabularies are frozen; the switch reader is the exact l
   assert.deepEqual([R.SHEET_REPAIR_LEASE_PURPOSE, R.SHEET_REPAIR_GENERATION_REASON], ['sheet_repair', 'sheet_repair'])
   assert.ok(lockLib.PROJECT_WRITE_PURPOSES.includes(R.SHEET_REPAIR_LEASE_PURPOSE), 'the lock knows the purpose')
   assert.ok(lockLib.PROJECT_WRITE_GENERATION_REASONS.includes(R.SHEET_REPAIR_GENERATION_REASON), 'the lock knows the reason')
-  for (const list of [R.SHEET_REPAIR_RECIPES, R.SHEET_REPAIR_REFUSALS, R.SHEET_REPAIR_STOP_REASONS, R.SHEET_REPAIR_ERROR_CODES, R.SHEET_REPAIR_AUDIT, R.SHEET_REPAIR_AUDIT.modes]) assert.ok(Object.isFrozen(list))
+  for (const list of [R.SHEET_REPAIR_RECIPES, R.SHEET_REPAIR_CONTINUATIONS, R.SHEET_REPAIR_REQUEST_RECIPES, R.SHEET_REPAIR_INSTALL_STATES, R.SHEET_REPAIR_CLOSE_COUNT_KEYS, R.SHEET_REPAIR_REFUSALS, R.SHEET_REPAIR_STOP_REASONS, R.SHEET_REPAIR_ERROR_CODES, R.SHEET_REPAIR_AUDIT, R.SHEET_REPAIR_AUDIT.modes]) assert.ok(Object.isFrozen(list))
+  for (const token of ['install_in_progress', 'install_aborted_unresolved', 'run_not_open', 'rows_not_in_target_state']) assert.ok(R.SHEET_REPAIR_REFUSALS.includes(token), token)
   const codes = Object.values(CODES)
   assert.equal(new Set(codes).size, codes.length)
   for (const code of codes) assert.match(code, /^STOCK_PREP_SHEET_REPAIR_[A-Z_]+$/)
@@ -209,6 +287,7 @@ test('RP-00b the closed bodies: every refusal is 400 naming the FIELD (never its
   assert.deepEqual({ ...R.normalizeSheetRepairBody(ok) }, { mode: 'preview', recipe: RETIRE, confirmProjectNo: 'SYN-1', componentHandle: null, runId: null, planDigest: null, approvalRef: null })
   assert.equal(R.normalizeSheetRepairBody({ ...ok, componentHandle: HANDLE }).componentHandle, HANDLE)
   assert.equal(R.normalizeSheetRepairBody({ mode: 'execute', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId, planDigest: digest, approvalRef: 'R-91:t.1' }).approvalRef, 'R-91:t.1')
+  assert.deepEqual({ ...R.normalizeSheetRepairBody({ mode: 'execute', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, planDigest: digest, approvalRef: 'R-91:close.1' }) }, { mode: 'execute', recipe: CLOSE, confirmProjectNo: 'SYN-1', componentHandle: null, runId, planDigest: digest, approvalRef: 'R-91:close.1' })
   for (const [body, field] of [
     [null, 'body'],
     [[], 'body'],
@@ -233,6 +312,14 @@ test('RP-00b the closed bodies: every refusal is 400 naming the FIELD (never its
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1' }, 'runId'],
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId: 'sheet-repair:not-a-uuid' }, 'runId'],
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId, componentHandle: HANDLE }, 'componentHandle'],
+    // The continuation names the open run it closes; it takes no component; its execute echoes a digest and an approval.
+    [{ mode: 'preview', recipe: CLOSE, confirmProjectNo: 'SYN-1' }, 'runId'],
+    [{ mode: 'preview', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId: 'not-a-run-id' }, 'runId'],
+    [{ mode: 'preview', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, componentHandle: HANDLE }, 'componentHandle'],
+    [{ mode: 'preview', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, approvalRef: 'R-91' }, 'approvalRef'],
+    [{ mode: 'execute', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, approvalRef: 'R-91' }, 'planDigest'],
+    [{ mode: 'execute', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, planDigest: digest }, 'approvalRef'],
+    [{ mode: 'close', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId }, 'mode'],
   ]) {
     const error = throwsSync(() => R.normalizeSheetRepairBody(body), { code: CODES.REQUEST_INVALID, field })
     assert.equal(error.status, 400)
@@ -276,7 +363,8 @@ test('RP-01 retire preconditions: each one refuses with its closed token and pla
     ['project_governed', kit.doubledSheet(), { governed: true }],
     ['project_governed', kit.doubledSheet(), { governed: undefined }],
     ['source_incomplete', kit.doubledSheet(), { complete: false }],
-    ['install_in_progress', kit.doubledSheet(), { installing: true }],
+    ['install_in_progress', kit.doubledSheet(), { installState: 'installing' }],
+    ['install_aborted_unresolved', kit.doubledSheet(), { installState: 'aborted_unresolved' }],
     // The old root's key (or a key under it) is still produced by the source: the next pull would revive it.
     ['old_root_still_expanded', kit.doubledSheet(), { expansionKeys: kit.expansionKeysOf({ includeOldRoot: true }) }],
     ['old_subtree_still_expanded', kit.doubledSheet(), { expansionKeys: kit.expansionKeysOf({ includeOldChild: true }) }],
@@ -478,9 +566,9 @@ test('RP-04b restore: revived, restamped, missing and never-retired rows are tol
   // The library's OWN wall beside the store's scoped read: a run object of another sheet, project or tenant plans
   // nothing (the same refusal as an unknown run, never naming which part differed).
   const own = await m.store.readRun({ ...SCOPE, runId: retired.runId })
-  assert.equal(R.analyzeRestore({ scope: SCOPE, run: own, rows: m.host.rows(), sequence: 2, governed: false, installing: false }).sourceRunId, retired.runId)
+  assert.equal(R.analyzeRestore({ scope: SCOPE, run: own, rows: m.host.rows(), sequence: 2, governed: false, installState: 'none' }).sourceRunId, retired.runId)
   for (const foreign of [{ sheetId: 'sheet_syn_other' }, { projectNo: 'SYN-OTHER' }, { tenantId: 'tenant_syn_other' }]) {
-    const verdict = R.analyzeRestore({ scope: SCOPE, run: { ...own, ...foreign }, rows: m.host.rows(), sequence: 2, governed: false, installing: false })
+    const verdict = R.analyzeRestore({ scope: SCOPE, run: { ...own, ...foreign }, rows: m.host.rows(), sequence: 2, governed: false, installState: 'none' })
     assert.deepEqual([verdict.eligible, verdict.refusals, verdict.sourceRunId, verdict.planDigest], [false, ['run_not_found'], null, null], JSON.stringify(foreign))
   }
 })
@@ -737,7 +825,7 @@ test('RP-11 the sequence nonce: a run that began and wrote NOTHING still makes t
   m.host.beforePatch = () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
   const stop = await rejects(m.execute(preview.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
   assert.deepEqual([stop.details.written, stop.details.partial], [0, false])
-  assert.equal(m.state.bumps, 0, 'nothing was written: no bump')
+  assert.equal(m.state.bumps, 1, 'a host write was ATTEMPTED and raised — it may have landed — so the generation is bumped (ruling C-5)')
   m.host.beforePatch = null
   const next = await m.preview()
   assert.deepEqual([next.eligible, next.sequence, next.counts.toRetire], [true, 1, 4])
@@ -745,7 +833,7 @@ test('RP-11 the sequence nonce: a run that began and wrote NOTHING still makes t
   assert.equal((await m.execute(next.planDigest, { approvalRef: 'R-91:second' })).status, 'completed')
 })
 
-test('RP-12 the generation bump runs after the release and only when something was written; a failed bump never fails the run', async () => {
+test('RP-12 the generation bump runs after the release whenever a host write was ATTEMPTED — confirmed or not; a refusal before the first patch moves nothing; a failed bump never fails the run', async () => {
   const m = mount()
   m.state.failBump = true
   const answer = await m.execute((await m.preview()).planDigest)
@@ -761,13 +849,38 @@ test('RP-12 the generation bump runs after the release and only when something w
   }
   const done = await ok.execute((await ok.preview()).planDigest)
   assert.deepEqual([done.generationBumped, leaseAtBump, ok.state.bumps, ok.db.rows(kit.T.lock)[0].generation_reason], [true, null, 1, R.SHEET_REPAIR_GENERATION_REASON])
-  // ONLY when something was written: a refusal before the begin and a run stopped on its first row move nothing.
+  // ZERO attempts move nothing: a refusal before the begin never reaches a patch.
   const none = mount()
   const plan = await none.preview()
   await rejects(none.execute('c'.repeat(64)), { status: 409, code: CODES.PLAN_CHANGED })
+  assert.deepEqual([none.state.bumps, none.db.rows(kit.T.lock)[0].generation_reason], [0, null])
+  // ATTEMPTED, not confirmed (ruling C-5; the apply writer's precedent): the FIRST patch raises inside the host — the
+  // run confirms zero rows, but that write may have landed, so every token planned before it is superseded.
   none.host.beforePatch = () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
   const stop = await rejects(none.execute(plan.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
-  assert.deepEqual([stop.details.written, none.state.bumps, none.db.rows(kit.T.lock)[0].generation_reason], [0, 0, null])
+  assert.deepEqual([stop.details.written, none.state.bumps, none.db.rows(kit.T.lock)[0].generation_reason], [0, 1, R.SHEET_REPAIR_GENERATION_REASON])
+  // A patch handed to the fenced write is an attempt also when its pre-write holder CAS refuses it (the loop cannot
+  // tell that from a refusal inside the host; a bump that was not needed only supersedes tokens).
+  const fenced = mount()
+  const fencedPlan = await fenced.preview()
+  fenced.state.beforeFencedPatch = async () => {
+    throw new lockLib.StockPreparationProjectWriteLockError(503, lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED, 'the write-lock store could not be read', { operation: 'before_write', partial: false }, { fence: true })
+  }
+  const refused = await rejects(fenced.execute(fencedPlan.planDigest), { status: 503, code: lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED })
+  assert.deepEqual([refused.details.written, fenced.host.calls.length, fenced.state.bumps], [0, 0, 1])
+  // The loop's own count: every patch handed over, confirmed or not.
+  const sent = []
+  const counted = await R.__internals.writePlan({
+    deps: { physicalFieldIds: P },
+    items: [{ recordId: 'rec_1', version: 1 }, { recordId: 'rec_2', version: 1 }, { recordId: 'rec_3', version: 1 }],
+    changesOf: () => R.__internals.retireChangesOf('sheet-repair:x'),
+    patch: async (input) => {
+      sent.push(input.recordId)
+      if (input.recordId === 'rec_2') throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' })
+      return { version: input.expectedVersion + 1 }
+    },
+  })
+  assert.deepEqual([counted.written, counted.attempted, counted.stop, sent], [1, 2, 'host_write_failed', ['rec_1', 'rec_2']])
 })
 
 // ── RP-13 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -800,33 +913,532 @@ test('RP-13 the preview: refused while a writer holds the sheet; audited BEFORE 
 
 // ── NI-01 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('NI-01 the installing gate (rebaseline B-9): no dependency => the batch ledger is never asked; installing => a preview refusal and 409 in the lease, also when the install began after the preview', async () => {
-  const off = mount()
-  assert.equal(off.deps.installStateOf, undefined, 'the batch identifier is off: the route hands no reader')
-  assert.equal((await off.preview()).eligible, true)
-  const on = mount()
-  let asked = 0
-  let installing = true
-  on.deps.installStateOf = async () => { asked += 1; return { installing } }
-  const refused = await on.preview()
-  assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest, asked], [false, ['install_in_progress'], null, 1])
-  // Not installing at the preview, installing by the time the lease is held: the in-lease check decides.
-  installing = false
-  const preview = await on.preview()
-  assert.equal(preview.eligible, true)
-  installing = true
-  const error = await rejects(on.execute(preview.planDigest), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: 'install_in_progress' })
-  assert.equal(error.details.partial, false)
-  assert.deepEqual([on.host.calls.length, on.db.rows(kit.T.run).length, on.db.rows(kit.T.claim).length], [0, 0, 0])
-  assert.equal(on.db.rows(kit.T.lock)[0].lease_id, null)
-  // A restore is gated the same way.
-  installing = false
-  const retired = await on.execute(preview.planDigest)
-  installing = true
-  assert.deepEqual((await on.restorePreview(retired.runId)).refusals, ['install_in_progress'])
-  // A reader that answers anything but a boolean is a wiring defect, never "not installing".
-  on.deps.installStateOf = async () => ({})
-  await rejects(on.preview(), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
+test('NI-01 the install gate (rebaseline B-9; ruling C-2): the install state is read on EVERY analysis and is required; `installing` and an aborted install whose lock is held refuse a retire and a restore — in the preview and, 409, in the lease; an unreadable or unintelligible answer refuses', async () => {
+  // The decision, pure — from the values-free facts of the batch ledger's sheet row.
+  for (const [facts, expected] of [
+    [{ present: false }, 'none'],
+    [{ present: true, historyStatus: 'installing', settingsLocked: true }, 'installing'],
+    [{ present: true, historyStatus: 'installing', settingsLocked: false }, 'installing'],
+    // An aborted FIRST install: the lock still held => its next run may RESUME the persisted plan.
+    [{ present: true, historyStatus: 'pending', settingsLocked: true }, 'aborted_unresolved'],
+    // Never installed, or aborted with the lock released (the abort proved no label of the plan is on the sheet).
+    [{ present: true, historyStatus: 'pending', settingsLocked: false }, 'none'],
+    [{ present: true, historyStatus: 'born_empty', settingsLocked: false }, 'none'],
+    [{ present: true, historyStatus: 'born_empty', settingsLocked: true }, 'none'],
+    [{ present: true, historyStatus: 'backfilled', settingsLocked: true }, 'none'],
+  ]) assert.equal(R.installStateOfFacts(facts), expected, JSON.stringify(facts))
+  for (const facts of [undefined, null, [], {}, { present: 'no' }, { installing: false }, { present: true, historyStatus: 'installing' }, { present: true, historyStatus: 'pending', settingsLocked: 'yes' }, { present: true, historyStatus: 'archived', settingsLocked: false }, { present: true, settingsLocked: false }]) {
+    throwsSync(() => R.installStateOfFacts(facts), { code: CODES.UNAVAILABLE, field: 'installStateOf' })
+  }
+  // A state outside the closed list never reaches a plan.
+  throwsSync(() => R.analyzeRetire(analysisBase(kit.doubledSheet(), { installState: undefined })), { code: CODES.UNAVAILABLE, field: 'installState' })
+  throwsSync(() => R.analyzeRetire(analysisBase(kit.doubledSheet(), { installState: 'unknown' })), { code: CODES.UNAVAILABLE, field: 'installState' })
+  throwsSync(() => R.analyzeRestore({ scope: SCOPE, run: null, rows: [], sequence: 0, governed: false }), { code: CODES.UNAVAILABLE, field: 'installState' })
+  // Read on EVERY analysis: once by a preview, once more by the execute's recompute inside the lease.
+  const plain = mount()
+  const first = await plain.preview()
+  assert.deepEqual([first.eligible, plain.state.installReads], [true, 1])
+  await plain.execute(first.planDigest)
+  assert.equal(plain.state.installReads, 2, 'the execute read it again, in the lease')
+  // REQUIRED: without the reader nothing runs — never "not installing".
+  const unbound = mount()
+  delete unbound.deps.installStateOf
+  await rejects(unbound.preview(), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
+  await rejects(unbound.execute('a'.repeat(64)), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
+  assert.deepEqual([unbound.state.reads, unbound.host.calls.length, unbound.db.rows(kit.T.run).length, unbound.db.rows(kit.T.claim).length, unbound.db.rows(kit.T.lock).length], [[], 0, 0, 0, 0], 'refused before the sheet, the ledger or the lease')
+  for (const [facts, token] of [
+    [{ present: true, historyStatus: 'installing', settingsLocked: true }, 'install_in_progress'],
+    [{ present: true, historyStatus: 'pending', settingsLocked: true }, 'install_aborted_unresolved'],
+  ]) {
+    const on = mount()
+    on.state.installFacts = facts
+    const refused = await on.preview()
+    assert.deepEqual([refused.eligible, refused.refusals, refused.planDigest, on.state.installReads], [false, [token], null, 1], token)
+    // An unknown component names the install state first.
+    assert.deepEqual((await on.preview({ componentHandle: 'f'.repeat(24) })).refusals, [token, 'component_not_found'])
+    // Not installing at the preview, in that state by the time the lease is held: the in-lease read decides.
+    on.state.installFacts = { present: true, historyStatus: 'backfilled', settingsLocked: true }
+    const preview = await on.preview()
+    assert.equal(preview.eligible, true)
+    on.state.installFacts = facts
+    const error = await rejects(on.execute(preview.planDigest), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: token })
+    assert.equal(error.details.partial, false)
+    assert.deepEqual([on.host.calls.length, on.db.rows(kit.T.run).length, on.db.rows(kit.T.claim).length, on.state.bumps], [0, 0, 0, 0], token)
+    assert.equal(on.db.rows(kit.T.lock)[0].lease_id, null)
+    // A restore is gated the same way.
+    on.state.installFacts = { present: false }
+    const retired = await on.execute(preview.planDigest)
+    const restorePlan = await on.restorePreview(retired.runId)
+    assert.equal(restorePlan.eligible, true)
+    on.state.installFacts = facts
+    assert.deepEqual((await on.restorePreview(retired.runId)).refusals, [token])
+    await rejects(on.restoreExecute(retired.runId, restorePlan.planDigest), { status: 409, code: CODES.INSTALL_IN_PROGRESS, reason: token })
+    assert.equal(on.db.rows(kit.T.run).length, 1, 'no restore run began')
+  }
+  // An aborted install whose lock the abort RELEASED does not refuse: its next run plans afresh.
+  const released = mount()
+  released.state.installFacts = { present: true, historyStatus: 'pending', settingsLocked: false }
+  assert.equal((await released.execute((await released.preview()).planDigest)).status, 'completed')
+  // A reader that FAILS (the ledger unreadable — the route's 503) refuses the preview and the execute; nothing begins.
+  const down = mount()
+  const good = await down.preview()
+  down.deps.installStateOf = async () => { throw Object.assign(new Error('the pull-batch ledger could not be read'), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED', details: { operation: 'read_sheet', partial: false } }) }
+  await rejects(down.preview(), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+  await rejects(down.execute(good.planDigest), { status: 503, code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED' })
+  assert.deepEqual([down.host.calls.length, down.db.rows(kit.T.run).length, down.db.rows(kit.T.claim).length, down.db.rows(kit.T.lock)[0].lease_id], [0, 0, 0, null])
+  // A reader that answers what the library does not understand is a wiring defect, never "not installing".
+  for (const answer of [{}, { installing: false }, { present: true, historyStatus: 'archived', settingsLocked: false }]) {
+    down.deps.installStateOf = async () => answer
+    await rejects(down.preview(), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
+    await rejects(down.execute(good.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'installStateOf' })
+  }
+  assert.deepEqual([down.host.calls.length, down.db.rows(kit.T.run).length, down.db.rows(kit.T.claim).length], [0, 0, 0])
+})
+
+// ── N6-01 (ruling C-1) ───────────────────────────────────────────────────────────────────────────────────
+
+test('N6-01 the heartbeat N6 rule: the begin\'s and the finish\'s holder assert and every patch run at host-write depth 1; no heartbeat CAS is attempted while a ledger transaction is open; a guard without the bracket is refused before anything is begun', async () => {
+  const m = mount()
+  const plan = await m.preview()
+  // Calibration: outside any bracket (the in-lease source read) a heartbeat tick DOES reach the store.
+  let ticksOutside = 0
+  m.state.onLeaseRead = async () => {
+    const before = m.lockUpdates()
+    await m.timers.fireAll()
+    ticksOutside += m.lockUpdates() - before
+  }
+  // Inside each ledger transaction (its audit append runs there, the lock row held FOR UPDATE on PostgreSQL): a tick is
+  // SKIPPED — its CAS would queue behind the repair's own transaction and, past the timeout, mark the guard lost.
+  const ticksInside = []
+  m.state.onAuditWithin = async (entry) => {
+    const before = m.lockUpdates()
+    await m.timers.fireAll()
+    ticksInside.push([entry.mode, m.lockUpdates() - before, m.state.hostWriteDepth])
+  }
+  const done = await m.execute(plan.planDigest)
+  assert.deepEqual([done.status, done.written], ['completed', 4])
+  assert.equal(ticksOutside, 1, 'calibration: the heartbeat runs while the repair holds the lease outside a bracket')
+  assert.deepEqual(ticksInside, [['sheet_repair_started', 0, 1], ['sheet_repair_completed', 0, 1]], 'no heartbeat CAS while the begin or the finish transaction is open')
+  assert.deepEqual(m.state.holderAssertDepths, [1, 1], 'the begin\'s and the finish\'s holder assert — the first statement of each ledger transaction — ran at bracket depth 1')
+  assert.deepEqual(m.state.patchDepths, [1, 1, 1, 1], 'every host patch ran at bracket depth 1')
+  assert.equal(m.state.hostWriteDepth, 0, 'every bracket closed')
+  // The helper itself: a guard without the bracket is refused, never run unbracketed.
+  let ran = false
+  await rejects(R.__internals.inHostWrite({ beforeWrite: async () => {} }, async () => { ran = true }), { status: 500, code: CODES.UNAVAILABLE, field: 'withHostWrite' })
+  await rejects(R.__internals.inHostWrite(null, async () => { ran = true }), { status: 500, code: CODES.UNAVAILABLE, field: 'withHostWrite' })
+  assert.equal(ran, false)
+  // Through the run: a guard that lost its bracket (and a patch factory that does not notice) begins NOTHING — no
+  // claim is spent on a run whose ledger transactions could starve its own heartbeat.
+  const bare = mount()
+  const barePlan = await bare.preview()
+  const withLease = bare.deps.withLease
+  bare.deps.withLease = (runId, fn) => withLease(runId, (guard) => {
+    const { withHostWrite: _dropped, ...rest } = guard
+    return fn(Object.freeze(rest))
+  })
+  bare.deps.patchFor = (guard) => async ({ recordId, changes, expectedVersion }) => bare.records.patchRecord({ sheetId: SCOPE.sheetId, recordId, changes, expectedVersion, writeFence: guard.hostWriteFence() })
+  await rejects(bare.execute(barePlan.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'withHostWrite' })
+  assert.deepEqual([bare.db.rows(kit.T.run).length, bare.db.rows(kit.T.claim).length, bare.host.calls.length, bare.state.bumps, bare.db.rows(kit.T.lock)[0].lease_id], [0, 0, 0, 0, null])
+  // With the bracket back the SAME approved digest runs.
+  bare.deps.withLease = withLease
+  assert.equal((await bare.execute(barePlan.planDigest)).status, 'completed')
+})
+
+// ── HB-01 (ruling C-4) ───────────────────────────────────────────────────────────────────────────────────
+
+test('HB-01 a guard already LOST before the begin (a heartbeat whose holder CAS failed while the source was read, the lease itself intact) refuses there: no claim spent, no run row, no patch, no bump — and the approved digest still runs', async () => {
+  const m = mount()
+  const plan = await m.preview()
+  let injected = 0
+  m.state.onLeaseRead = async () => {
+    m.state.onLeaseRead = null
+    // ONE heartbeat tick whose CAS dies in the store (a statement timeout): the guard is lost, the lease row is not.
+    m.db.faults.updateRow = (args) => {
+      if (args.table !== kit.T.lock) return null
+      injected += 1
+      return kit.sqlError('57014', 'canceling statement due to statement timeout')
+    }
+    await m.timers.fireAll()
+    delete m.db.faults.updateRow
+  }
+  const leaseBefore = () => m.db.rows(kit.T.lock)[0]
+  const refused = await rejects(m.execute(plan.planDigest), { status: 503, code: lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED })
+  assert.equal(injected, 1, 'one heartbeat CAS failed')
+  assert.deepEqual([refused.details.planned, refused.details.written, refused.details.partial, refused.details.runId], [4, 0, false, undefined], 'refused BEFORE the begin: no run to name')
+  assert.deepEqual(
+    [m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length, m.host.calls.length, m.state.auditsWithin.length, m.state.bumps, m.state.holderAssertDepths],
+    [0, 0, 0, 0, 0, []],
+    'the one-shot claim is NOT spent: no ledger transaction ran at all',
+  )
+  assert.equal(leaseBefore().lease_id, null, 'the lease was released')
+  // The approval was not burnt: the SAME digest runs.
+  const done = await m.execute(plan.planDigest)
+  assert.deepEqual([done.status, done.written, m.db.rows(kit.T.claim).length], ['completed', 4, 1])
+  // A lease that LAPSED and was taken over before the begin is the same refusal under the lock's own code.
+  const taken = mount()
+  const takenPlan = await taken.preview()
+  let taker = null
+  taken.state.onLeaseRead = async () => {
+    taken.state.onLeaseRead = null
+    taker = await taken.takeOver()
+  }
+  const lost = await rejects(taken.execute(takenPlan.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+  assert.deepEqual([lost.details.written, lost.details.partial, taken.db.rows(kit.T.run).length, taken.db.rows(kit.T.claim).length, taken.host.calls.length, taken.state.bumps], [0, false, 0, 0, 0, 0])
+  await taker.release()
+  assert.equal((await taken.execute(takenPlan.planDigest)).status, 'completed')
+  // The check is REQUIRED wiring; an untyped failure of it is never swallowed.
+  const unbound = mount()
+  delete unbound.deps.assertHolder
+  await rejects(unbound.preview(), { status: 500, code: CODES.UNAVAILABLE, field: 'assertHolder' })
+  const broken = mount()
+  const brokenPlan = await broken.preview()
+  broken.deps.assertHolder = async () => { throw new Error('boom') }
+  let caught = null
+  try { await broken.execute(brokenPlan.planDigest) } catch (error) { caught = error }
+  assert.ok(caught && caught.message === 'boom')
+  assert.deepEqual([broken.db.rows(kit.T.run).length, broken.db.rows(kit.T.claim).length, broken.host.calls.length], [0, 0, 0])
+})
+
+// ── CL-01 … CL-05 (ruling C-3) ───────────────────────────────────────────────────────────────────────────
+
+test('CL-01 the continuation\'s verification, pure: every planned row against the run\'s own backup and intent; the counts; every refusal; the digest names the run, not a row version', async () => {
+  const runId = `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`
+  const planDigest = 'a'.repeat(64)
+  // A retire run that planned the four old rows of the fixture, and the sheet after ALL four were written.
+  const retired = (mutate) => kit.doubledSheet({ mutate: (spec) => {
+    const next = spec.role === 'old' ? { ...spec, version: spec.version + 1, active: false, runId, decision: 'inactive', summary: kit.RETIRE_SUMMARY } : spec
+    return mutate ? mutate(next) : next
+  } })
+  const backup = [['rec_old_4', 6, true, kit.PULL_RUN_ID, 'add', ''], ['rec_old_2', 4, true, kit.PULL_RUN_ID, 'add', ''], ['rec_old_3', 5, true, kit.PULL_RUN_ID, 'add', ''], ['rec_old_1', 3, true, kit.PULL_RUN_ID, 'add', '']]
+  const run = { id: runId, ...SCOPE, recipe: RETIRE, status: 'running', planDigest, plannedCount: 4, backup, sourceRunId: null }
+  const close = (extra = {}, sheet = retired()) => R.analyzeClose({ scope: SCOPE, run, rows: sheet.rows, governed: false, ...extra })
+  const ok = close()
+  assert.deepEqual([ok.runId, ok.runRecipe, ok.eligible, ok.refusals, ok.governed], [runId, RETIRE, true, [], false])
+  assert.deepEqual(ok.counts, { planned: 4, inTargetState: 4, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 })
+  assert.match(ok.planDigest, /^[0-9a-f]{64}$/)
+  assert.notEqual(ok.planDigest, planDigest, 'the close has its OWN digest: an approval of the run\'s plan is not an approval of its close')
+  assert.equal(ok.planDigest, R.__internals.closeDigestOf({ scope: SCOPE, run }))
+  // A person edited a human cell of a retired row since (its version moved): STILL in its target state, counted; and
+  // the digest does not move with it.
+  const edited = close({}, retired((spec) => (spec.id === 'rec_old_3' ? { ...spec, version: spec.version + 2, cells: { notes: 'SENTINEL typed since' } } : spec)))
+  assert.deepEqual([edited.eligible, edited.counts.inTargetState, edited.counts.versionMoved, edited.planDigest], [true, 4, 1, ok.planDigest])
+  assert.equal(JSON.stringify(edited).includes('SENTINEL'), false)
+  // The digest names the run, its recipe, its approved plan and its planned count — and the scope.
+  for (const other of [{ run: { ...run, id: `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}` } }, { run: { ...run, planDigest: 'b'.repeat(64) } }]) {
+    const rows = other.run.id === runId ? retired().rows : kit.doubledSheet({ mutate: (spec) => (spec.role === 'old' ? { ...spec, active: false, runId: other.run.id, decision: 'inactive', summary: kit.RETIRE_SUMMARY } : spec) }).rows
+    const verdict = R.analyzeClose({ scope: SCOPE, rows, governed: false, ...other })
+    assert.equal(verdict.eligible, true)
+    assert.notEqual(verdict.planDigest, ok.planDigest)
+  }
+  // ANY row that is not in its target state refuses, by cause, and plans nothing.
+  for (const [label, sheet, expected] of [
+    // never written by the run: exactly as the backup read it
+    ['not written', retired((spec) => (spec.id === 'rec_old_1' ? { ...spec, version: 3, active: true, runId: kit.PULL_RUN_ID, decision: 'add', summary: '' } : spec)), { inTargetState: 3, notWritten: 1, moved: 0, missing: 0 }],
+    // revived by a pull since (active again under another stamp)
+    ['revived', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, active: true, runId: 'table-action:syn-pull-2', decision: 'update', summary: '{"type":"plm_system_refresh","changedFields":["material"]}' } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
+    // restamped inactive by another machine write
+    ['restamped', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: 'table-action:syn-pull-2', summary: '{"type":"missing_from_plm"}' } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
+    // `active` is not the BOOLEAN false
+    ['string false', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, active: 'false' } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
+    // gone
+    ['missing', retired((spec) => (spec.id === 'rec_old_4' ? null : spec)), { inTargetState: 3, notWritten: 0, moved: 0, missing: 1 }],
+    // a run that wrote nothing at all
+    ['nothing written', kit.doubledSheet(), { inTargetState: 0, notWritten: 4, moved: 0, missing: 0 }],
+  ]) {
+    const verdict = close({}, sheet)
+    assert.deepEqual([verdict.eligible, verdict.refusals, verdict.planDigest], [false, ['rows_not_in_target_state'], null], label)
+    assert.deepEqual(verdict.counts, { planned: 4, versionMoved: 0, ...expected }, label)
+  }
+  // The run itself.
+  for (const [label, extra, token, named] of [
+    ['absent', { run: null }, 'run_not_found', null],
+    ['another sheet', { run: { ...run, sheetId: 'sheet_syn_other' } }, 'run_not_found', null],
+    ['another project', { run: { ...run, projectNo: 'SYN-OTHER' } }, 'run_not_found', null],
+    ['another tenant', { run: { ...run, tenantId: 'tenant-other' } }, 'run_not_found', null],
+    ['completed', { run: { ...run, status: 'completed' } }, 'run_not_open', runId],
+    ['stopped', { run: { ...run, status: 'stopped' } }, 'run_not_open', runId],
+    ['no backup', { run: { ...run, backup: null } }, 'backup_unreadable', runId],
+    ['a backup of another length than planned', { run: { ...run, plannedCount: 5 } }, 'backup_unreadable', runId],
+    ['a retire backup of rows that were inactive', { run: { ...run, backup: backup.map((entry) => [entry[0], entry[1], false, entry[3], entry[4], entry[5]]) } }, 'backup_unreadable', runId],
+    ['an unknown recipe', { run: { ...run, recipe: 'delete_rows' } }, 'backup_unreadable', runId],
+    ['no plan digest', { run: { ...run, planDigest: 'abc' } }, 'backup_unreadable', runId],
+  ]) {
+    const verdict = close(extra)
+    assert.deepEqual([verdict.eligible, verdict.refusals, verdict.planDigest, verdict.runId], [false, [token], null, named], label)
+    for (const refusal of verdict.refusals) assert.ok(R.SHEET_REPAIR_REFUSALS.includes(refusal))
+  }
+  // Governed or not is ANSWERED, never a refusal: nothing on the sheet changes.
+  assert.deepEqual([close({ governed: true }).eligible, close({ governed: true }).governed], [true, true])
+  throwsSync(() => close({ governed: undefined }), { code: CODES.UNAVAILABLE, field: 'governed' })
+  throwsSync(() => close({ rows: null }), { code: CODES.UNAVAILABLE, field: 'rows' })
+  // A RESTORE run: each row's target is what its SOURCE retire run backed up for it.
+  const restoreId = `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`
+  const source = { id: runId, ...SCOPE, recipe: RETIRE, status: 'completed', planDigest, plannedCount: 4, backup, sourceRunId: null }
+  const restore = { id: restoreId, ...SCOPE, recipe: RESTORE, status: 'running', planDigest: 'c'.repeat(64), plannedCount: 2, sourceRunId: runId, backup: [['rec_old_1', 4, false, runId, 'inactive', kit.RETIRE_SUMMARY], ['rec_old_3', 6, false, runId, 'inactive', kit.RETIRE_SUMMARY]] }
+  // After the restore wrote both: rec_old_1 and rec_old_3 are back as the pull left them; the other two are still retired.
+  const restoredSheet = retired((spec) => (['rec_old_1', 'rec_old_3'].includes(spec.id) ? { ...spec, version: spec.version + 1, active: true, runId: kit.PULL_RUN_ID, decision: 'add', summary: '' } : spec))
+  const restoredOk = R.analyzeClose({ scope: SCOPE, run: restore, sourceRun: source, rows: restoredSheet.rows, governed: false })
+  assert.deepEqual([restoredOk.eligible, restoredOk.runRecipe, restoredOk.counts], [true, RESTORE, { planned: 2, inTargetState: 2, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 }])
+  // Not written by the restore (still carrying the retire stamp), and a source run that cannot vouch for the rows.
+  const halfRestored = R.analyzeClose({ scope: SCOPE, run: restore, sourceRun: source, rows: retired((spec) => (spec.id === 'rec_old_1' ? { ...spec, version: spec.version + 1, active: true, runId: kit.PULL_RUN_ID, decision: 'add', summary: '' } : spec)).rows, governed: false })
+  assert.deepEqual([halfRestored.eligible, halfRestored.refusals, halfRestored.counts.inTargetState, halfRestored.counts.notWritten], [false, ['rows_not_in_target_state'], 1, 1])
+  for (const [label, sourceRun] of [
+    ['no source run', null],
+    ['a source run of another id', { ...source, id: restoreId }],
+    ['a source run of another project', { ...source, projectNo: 'SYN-OTHER' }],
+    ['a source that is not a retire', { ...source, recipe: RESTORE }],
+    ['a source that never backed one of the rows up', { ...source, backup: backup.slice(0, 2) }],
+  ]) {
+    const verdict = R.analyzeClose({ scope: SCOPE, run: restore, sourceRun, rows: restoredSheet.rows, governed: false })
+    assert.deepEqual([verdict.eligible, verdict.refusals], [false, ['backup_unreadable']], label)
+  }
+})
+
+test('CL-02 the dead end closed: a run left `running` after EVERY row was written is verified and finished `completed` — no row write, its own approval and audit row, inside the bracket, then the bump the run never got', async () => {
+  const m = mount()
+  const runId = await m.leaveRetireOpen()
+  // The dead end: every old row is retired, the run is open, and no retire of the component can begin to close it.
+  for (const id of m.sheet.ids.old) assert.strictEqual(m.host.dataOf(id).active, false)
+  const open = m.db.rows(kit.T.run)[0]
+  assert.deepEqual([open.id, open.status, open.written_count, open.finished_at], [runId, 'running', null, null])
+  const retireAgain = await m.preview()
+  assert.deepEqual([retireAgain.eligible, retireAgain.refusals, retireAgain.openRun], [false, ['not_two_copy'], true])
+  assert.equal(m.db.rows(kit.T.lock)[0].generation_reason, null, 'the run\'s own bump never landed (the taker held the sheet)')
+  const bumpsBefore = m.state.bumps
+  const patchesBefore = m.host.calls.length
+  const versions = Object.fromEntries(m.sheet.ids.old.concat(m.sheet.ids.copy, m.sheet.ids.other).map((id) => [id, m.host.versionOf(id)]))
+  const cellsBefore = JSON.stringify(m.host.rows())
+  m.state.auditsWithin.length = 0
+  m.state.auditReads.length = 0
+  m.state.holderAssertDepths.length = 0
+  const installReads = m.state.installReads
+  // The preview: values-free counts and the close's own digest. No lease, no write.
+  const plan = await m.closePreview(runId)
+  assert.deepEqual([plan.mode, plan.recipe, plan.runId, plan.runRecipe, plan.eligible, plan.refusals, plan.governed], ['preview', CLOSE, runId, RETIRE, true, [], false])
+  assert.deepEqual(plan.counts, { planned: 4, inTargetState: 4, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 })
+  assert.deepEqual(plan.requires, { approvalRef: true, planDigest: plan.planDigest })
+  assert.notEqual(plan.planDigest, open.plan_digest)
+  assert.deepEqual(m.state.auditReads.map((entry) => [entry.mode, entry.detail.operation, entry.detail.eligible, entry.detail.planned, entry.detail.inTargetState]), [['sheet_repair_preview_read', 'sheet_repair_close_preview', true, 4, 4]])
+  assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.db.rows(kit.T.lock)[0].lease_id], ['running', null])
+  // The execute.
+  const done = await m.closeExecute(runId, plan.planDigest)
+  assert.deepEqual(
+    [done.mode, done.recipe, done.runId, done.runRecipe, done.status, done.planned, done.verified, done.versionMoved, done.governed, done.planDigest, done.generationBumped],
+    ['execute', CLOSE, runId, RETIRE, 'completed', 4, 4, 0, false, plan.planDigest, true],
+  )
+  // NO row was written: no patch reached the host, every version and every cell is what it was.
+  assert.equal(m.host.calls.length, patchesBefore, 'the continuation sent no patch')
+  for (const [id, version] of Object.entries(versions)) assert.equal(m.host.versionOf(id), version, id)
+  assert.equal(JSON.stringify(m.host.rows()), cellsBefore)
+  // The ledger: the run finished `completed` with its planned count and the close's approval beside its own.
+  const closed = m.db.rows(kit.T.run)[0]
+  assert.deepEqual([closed.status, closed.stop_reason, closed.written_count, closed.finished_at !== null, closed.close_approval_ref, closed.approval_ref], ['completed', null, 4, true, 'R-91:syn-close', 'R-91:syn-1'])
+  assert.equal(m.db.rows(kit.T.claim).length, 1, 'no claim was spent by the close')
+  assert.deepEqual(m.state.auditsWithin.map((entry) => [entry.mode, entry.subjectId, entry.detail.operation, entry.detail.recipe, entry.detail.planned, entry.detail.verified, entry.detail.approvalRef, entry.detail.closeDigest]), [
+    ['sheet_repair_verified_closed', runId, 'sheet_repair_verified_close', RETIRE, 4, 4, 'R-91:syn-close', plan.planDigest],
+  ])
+  assert.deepEqual(m.state.holderAssertDepths, [1], 'the close\'s holder assert ran inside the host-write bracket (N6)')
+  assert.deepEqual(m.state.reads.slice(-2), ['restore:preview', 'restore:lease'], 'the verification was recomputed INSIDE the lease')
+  assert.equal(m.state.installReads, installReads, 'the continuation never reads the batch ledger')
+  // Released, then bumped — the bump the run itself never got.
+  const lockRow = m.db.rows(kit.T.lock)[0]
+  assert.deepEqual([lockRow.lease_id, lockRow.generation_reason, m.state.bumps], [null, R.SHEET_REPAIR_GENERATION_REASON, bumpsBefore + 1])
+  // One-shot by the run's own status: the same digest closes nothing twice.
+  const again = await rejects(m.closeExecute(runId, plan.planDigest), { status: 409, code: CODES.NOT_APPLICABLE })
+  assert.deepEqual(again.details.reasons, ['run_not_open'])
+  assert.deepEqual((await m.closePreview(runId)).refusals, ['run_not_open'])
+  assert.equal(m.state.bumps, bumpsBefore + 1, 'a refused close bumps nothing')
+  // The stop condition of migration 108's header: no open run; and the sheet is the repaired one.
+  assert.equal(m.db.rows(kit.T.run).filter((row) => row.status === 'running').length, 0)
+  assert.deepEqual([(await m.preview()).openRun, (await m.preview()).shape], [false, 'inactive_root_remnant'])
+  // Restoring the closed run stays possible (the other way out is not burnt).
+  assert.equal((await m.restorePreview(runId)).eligible, true)
+  for (const text of [JSON.stringify(plan), JSON.stringify(done), JSON.stringify(m.state.auditsWithin), JSON.stringify(m.state.auditReads)]) {
+    for (const planted of [kit.PROJECT_NO, kit.OLD_ROOT, kit.PARENT, 'C-1', kit.TENANT_ID, kit.SHEET_ID, 'rec_old']) assert.equal(text.includes(planted), false, `${planted} leaked`)
+  }
+  // A failed bump never fails the close.
+  const quiet = mount()
+  const quietRun = await quiet.leaveRetireOpen()
+  quiet.state.failBump = true
+  const quietDone = await quiet.closeExecute(quietRun, (await quiet.closePreview(quietRun)).planDigest)
+  assert.deepEqual([quietDone.status, quietDone.generationBumped, quiet.db.rows(kit.T.run)[0].status], ['completed', false, 'completed'])
+})
+
+test('CL-03 the continuation refuses, with counts, while ANY planned row is not in its target state; a moved digest and a held sheet refuse too; the refusals leave the run open and restoring it stays the other way out', async () => {
+  // A PARTIAL run (the lease was lost before the third patch): two rows written, two not.
+  const partial = mount()
+  const plan = await partial.preview()
+  let taker = null
+  partial.state.beforeFencedPatch = async (callIndex) => {
+    if (callIndex === 3) taker = await partial.takeOver()
+  }
+  await rejects(partial.execute(plan.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+  partial.state.beforeFencedPatch = null
+  const partialRun = partial.db.rows(kit.T.run)[0].id
+  // While the taker holds the sheet nothing of the continuation runs.
+  await rejects(partial.closePreview(partialRun), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED })
+  await rejects(partial.closeExecute(partialRun, 'a'.repeat(64)), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.WRITE_LOCKED })
+  await taker.release()
+  const bumps = partial.state.bumps
+  const refusedPreview = await partial.closePreview(partialRun)
+  assert.deepEqual([refusedPreview.eligible, refusedPreview.refusals, refusedPreview.planDigest], [false, ['rows_not_in_target_state'], null])
+  assert.deepEqual(refusedPreview.counts, { planned: 4, inTargetState: 2, versionMoved: 0, notWritten: 2, moved: 0, missing: 0 })
+  const refused = await rejects(partial.closeExecute(partialRun, 'a'.repeat(64)), { status: 409, code: CODES.NOT_APPLICABLE })
+  assert.deepEqual([refused.details.reasons, refused.details.counts, refused.details.partial], [['rows_not_in_target_state'], { planned: 4, inTargetState: 2, versionMoved: 0, notWritten: 2, moved: 0, missing: 0 }, false])
+  assert.deepEqual([partial.db.rows(kit.T.run)[0].status, partial.db.rows(kit.T.run)[0].close_approval_ref, partial.db.rows(kit.T.lock)[0].lease_id, partial.state.bumps], ['running', null, null, bumps], 'refused: the run is still open, the lease released, nothing bumped')
+  // The other ways out are intact: the next retire run closes it `abandoned` and retires the rest.
+  const next = await partial.preview()
+  assert.deepEqual([next.eligible, next.openRun, next.counts.toRetire, next.counts.alreadyRetired], [true, true, 2, 2])
+  assert.equal((await partial.execute(next.planDigest, { approvalRef: 'R-91:after-refusal' })).status, 'completed')
+  assert.deepEqual(partial.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((row) => [row.status, row.stop_reason]), [['stopped', 'abandoned'], ['completed', null]])
+
+  // A FULLY written run of which one row was revived since, and one of which a row is gone: refused by cause.
+  for (const [label, arrange, expected] of [
+    ['revived', (m) => {
+      Object.assign(m.host.records.get('rec_old_2').data, { active: true, lastPlmRefreshRunId: 'table-action:syn-pull-2', lastPlmRefreshDecision: 'update', lastPlmConflictSummary: '{"type":"plm_system_refresh","changedFields":["material"]}' })
+      m.host.records.get('rec_old_2').version += 1
+    }, { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 1, missing: 0 }],
+    ['missing', (m) => { m.host.records.delete('rec_old_4') }, { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 0, missing: 1 }],
+  ]) {
+    const m = mount()
+    const runId = await m.leaveRetireOpen()
+    const good = await m.closePreview(runId)
+    assert.equal(good.eligible, true, label)
+    arrange(m)
+    // The in-lease recompute decides: the digest approved a moment ago closes nothing now.
+    const error = await rejects(m.closeExecute(runId, good.planDigest), { status: 409, code: CODES.NOT_APPLICABLE })
+    assert.deepEqual([error.details.reasons, error.details.counts], [['rows_not_in_target_state'], expected], label)
+    assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.state.auditsWithin.filter((entry) => entry.mode === 'sheet_repair_verified_closed').length], ['running', 0], label)
+    // Restoring the run is the way out: its begin closes the open run, and the rows still retired come back.
+    const restorePlan = await m.restorePreview(runId)
+    assert.deepEqual([restorePlan.eligible, restorePlan.counts.toRestore], [true, 3], label)
+    assert.equal((await m.restoreExecute(runId, restorePlan.planDigest)).status, 'completed', label)
+    assert.deepEqual(m.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((row) => [row.recipe, row.status, row.stop_reason]), [[RETIRE, 'stopped', 'abandoned'], [RESTORE, 'completed', null]], label)
+  }
+
+  // The digest: another run's, a stale one, the RUN's own plan digest — none of them closes this run.
+  const m = mount()
+  const runId = await m.leaveRetireOpen()
+  const good = await m.closePreview(runId)
+  for (const digest of ['f'.repeat(64), m.db.rows(kit.T.run)[0].plan_digest]) {
+    await rejects(m.closeExecute(runId, digest), { status: 409, code: CODES.PLAN_CHANGED, reason: 'plan_digest_differs' })
+  }
+  assert.equal(m.db.rows(kit.T.run)[0].status, 'running')
+  // An unknown run, a run of a foreign scope: the same refusal, nothing named.
+  const unknown = await m.closePreview(`${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`)
+  assert.deepEqual([unknown.eligible, unknown.refusals, unknown.runId, unknown.runRecipe], [false, ['run_not_found'], null, null])
+  // The audit of the close rides its transaction: an audit the store refuses leaves the run open and bumps nothing.
+  const bumpsBefore = m.state.bumps
+  const audit = m.deps.auditWithin
+  m.deps.auditWithin = async () => { throw Object.assign(new Error('audit refused'), { status: 422, code: 'AUDIT_DETAIL_INVALID' }) }
+  await rejects(m.closeExecute(runId, good.planDigest), { status: 422, code: 'AUDIT_DETAIL_INVALID' })
+  assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.db.rows(kit.T.run)[0].close_approval_ref, m.state.bumps, m.db.rows(kit.T.lock)[0].lease_id], ['running', null, bumpsBefore, null])
+  m.deps.auditWithin = audit
+  // A refusing preview audit => no answer.
+  const auditRead = m.deps.auditRead
+  m.deps.auditRead = async () => { throw Object.assign(new Error('audit down'), { status: 503, code: 'AUDIT_STORE_FAILED' }) }
+  await rejects(m.closePreview(runId), { status: 503, code: 'AUDIT_STORE_FAILED' })
+  m.deps.auditRead = auditRead
+  // A guard without the host-write bracket closes nothing (N6).
+  const withLease = m.deps.withLease
+  m.deps.withLease = (id, fn) => withLease(id, (guard) => {
+    const { withHostWrite: _dropped, ...rest } = guard
+    return fn(Object.freeze(rest))
+  })
+  await rejects(m.closeExecute(runId, good.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'withHostWrite' })
+  assert.equal(m.db.rows(kit.T.run)[0].status, 'running')
+  m.deps.withLease = withLease
+  // The closer's own lease is taken over between its verification and its transaction: the holder assert refuses.
+  let late = null
+  m.state.onLeaseRead = async () => {
+    m.state.onLeaseRead = null
+    late = await m.takeOver()
+  }
+  await rejects(m.closeExecute(runId, good.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+  assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.state.bumps], ['running', bumpsBefore])
+  await late.release()
+  // And it still closes afterwards — also under a guard a transient heartbeat failure marked lost while the lease row
+  // is intact: the close spends nothing, and its transaction's own holder assert decides from the lock row.
+  m.state.onLeaseRead = async () => {
+    m.state.onLeaseRead = null
+    m.db.faults.updateRow = (args) => (args.table === kit.T.lock ? kit.sqlError('57014', 'canceling statement due to statement timeout') : null)
+    await m.timers.fireAll()
+    delete m.db.faults.updateRow
+  }
+  const closedLate = await m.closeExecute(runId, good.planDigest)
+  assert.deepEqual([closedLate.status, closedLate.generationBumped, m.db.rows(kit.T.run)[0].status, m.db.rows(kit.T.lock)[0].lease_id], ['completed', true, 'completed', null])
+})
+
+test('CL-04 a project that became GOVERNED since the run: the verified close still works (a retire and a restore refuse); a governed project whose planned row moved is refused by both — the stated residual', async () => {
+  const m = mount()
+  const runId = await m.leaveRetireOpen()
+  m.state.governed = true
+  // Neither recipe can begin on a governed project, so nothing else would close this run.
+  assert.ok((await m.preview()).refusals.includes('project_governed'))
+  assert.deepEqual((await m.restorePreview(runId)).refusals, ['project_governed'])
+  const plan = await m.closePreview(runId)
+  assert.deepEqual([plan.eligible, plan.refusals, plan.governed, plan.counts.inTargetState], [true, [], true, 4])
+  const patches = m.host.calls.length
+  m.state.auditsWithin.length = 0
+  const done = await m.closeExecute(runId, plan.planDigest)
+  assert.deepEqual([done.status, done.governed, done.verified, done.generationBumped, m.host.calls.length], ['completed', true, 4, true, patches])
+  assert.deepEqual(m.state.auditsWithin.map((entry) => [entry.mode, entry.detail.governed]), [['sheet_repair_verified_closed', true]])
+  assert.deepEqual([m.db.rows(kit.T.run)[0].status, m.db.rows(kit.T.lock)[0].generation_reason], ['completed', R.SHEET_REPAIR_GENERATION_REASON])
+  // The residual, pinned: governed AND a planned row moved since (a governed pull revived it) — the close refuses
+  // with counts and a restore refuses the governed project. No tool path closes that run (migration 108's header).
+  const stuck = mount()
+  const stuckRun = await stuck.leaveRetireOpen()
+  stuck.state.governed = true
+  Object.assign(stuck.host.records.get('rec_old_1').data, { active: true, lastPlmRefreshRunId: 'table-action:syn-pull-9', lastPlmRefreshDecision: 'update', lastPlmConflictSummary: '{"type":"plm_system_refresh","changedFields":["material"]}' })
+  stuck.host.records.get('rec_old_1').version += 1
+  const refused = await stuck.closePreview(stuckRun)
+  assert.deepEqual([refused.eligible, refused.refusals, refused.governed, refused.counts.moved], [false, ['rows_not_in_target_state'], true, 1])
+  assert.deepEqual((await stuck.restorePreview(stuckRun)).refusals, ['project_governed'])
+  assert.equal(stuck.db.rows(kit.T.run)[0].status, 'running')
+})
+
+test('CL-05 a RESTORE run left open after every row was put back is verified against its SOURCE retire run\'s backup and closed; the source run unreadable refuses', async () => {
+  const m = mount()
+  const before = Object.fromEntries(m.sheet.ids.old.map((id) => [id, JSON.stringify(m.host.dataOf(id))]))
+  const retired = await m.execute((await m.preview()).planDigest)
+  const restorePlan = await m.restorePreview(retired.runId)
+  // The restore's LAST patch lands, then a pull takes the sheet over: its finish is refused.
+  let taker = null
+  m.host.calls.length = 0
+  m.host.beforePatch = async (_recordId, callIndex) => {
+    if (callIndex === 4) taker = await m.takeOver()
+  }
+  await rejects(m.restoreExecute(retired.runId, restorePlan.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+  m.host.beforePatch = null
+  await taker.release()
+  const open = m.db.rows(kit.T.run).find((row) => row.status === 'running')
+  assert.deepEqual([open.recipe, open.source_run_id], [RESTORE, retired.runId])
+  for (const id of m.sheet.ids.old) assert.equal(JSON.stringify(m.host.dataOf(id)), before[id], 'every row is back, byte-identical')
+  // No restore is left to begin (nothing carries the retire stamp), so only the continuation closes it without a write.
+  assert.deepEqual((await m.restorePreview(retired.runId)).refusals, ['nothing_to_restore'])
+  const plan = await m.closePreview(open.id)
+  assert.deepEqual([plan.eligible, plan.runRecipe, plan.counts], [true, RESTORE, { planned: 4, inTargetState: 4, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 }])
+  const patches = m.host.calls.length
+  const done = await m.closeExecute(open.id, plan.planDigest)
+  assert.deepEqual([done.status, done.runRecipe, done.verified, m.host.calls.length], ['completed', RESTORE, 4, patches])
+  assert.deepEqual(m.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((row) => [row.recipe, row.status, row.close_approval_ref]), [[RETIRE, 'completed', null], [RESTORE, 'completed', 'R-91:syn-close']])
+  // The source run must vouch for every row: unreadable => refused, nothing closed.
+  const blind = mount()
+  const first = await blind.execute((await blind.preview()).planDigest)
+  const second = await blind.restorePreview(first.runId)
+  let blindTaker = null
+  blind.host.calls.length = 0
+  blind.host.beforePatch = async (_recordId, callIndex) => {
+    if (callIndex === 4) blindTaker = await blind.takeOver()
+  }
+  await rejects(blind.restoreExecute(first.runId, second.planDigest), { status: 409, code: lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST })
+  blind.host.beforePatch = null
+  await blindTaker.release()
+  const blindOpen = blind.db.rows(kit.T.run).find((row) => row.status === 'running')
+  const readRun = blind.store.readRun
+  blind.deps.store = { ...blind.store, readRun: async (input) => (input.runId === first.runId ? null : readRun(input)) }
+  assert.deepEqual((await blind.closePreview(blindOpen.id)).refusals, ['backup_unreadable'])
+  assert.equal(blind.db.rows(kit.T.run).find((row) => row.id === blindOpen.id).status, 'running')
 })
 
 // ── FR-01 ────────────────────────────────────────────────────────────────────────────────────────────────

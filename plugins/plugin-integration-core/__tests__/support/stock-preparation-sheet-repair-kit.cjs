@@ -78,6 +78,8 @@ const SHAPE_CHECKS = Object.freeze([
       || (r.status === 'stopped' && (!isNull(r.written_count) || r.stop_reason === 'abandoned'))
       || (r.status === 'running' && isNull(r.written_count)),
   },
+  // Only a run the continuation closed carries a close approval, and such a run is `completed`.
+  { table: T.run, name: 'integration_stock_prep_sheet_repair_run_close_check', test: (r) => isNull(r.close_approval_ref) || r.status === 'completed' },
   { table: T.claim, name: 'integration_stock_prep_sheet_repair_claim_digest_check', test: (r) => typeof r.plan_digest === 'string' && DIGEST.test(r.plan_digest) },
 ])
 

@@ -17,15 +17,17 @@
  * note on the root) AND as a copy nested under P-001 (the second pull's rows) — every row active.
  *
  *   S9D-108  migration 108 applied: both tables, the JSONB backup, every closed CHECK refuses with 23514 under its own
- *            constraint name, a second OPEN run of a sheet and a repeated sequence are 23505, the claim key is a
- *            PRIMARY KEY.
+ *            constraint name (a close approval on a run that is not `completed` among them), a second OPEN run of a
+ *            sheet and a repeated sequence are 23505, the claim key is a PRIMARY KEY.
  *   S9D-11   D1 -> retire -> a clean governed pull. Before the retire the governed planner SUSPENDS the sheet
  *            (`candidate_target_occupied`); the retire through the route writes the BOOLEAN false
  *            (`jsonb_typeof = 'boolean'`) and the three RUN stamps on exactly the four old rows, version + 1 each, one
  *            host revision each, the run / claim / audit rows committed, the lease released and the generation bumped;
  *            the census then reads the component as an inactive-root remnant and the SAME governed computation over the
- *            rows read back from PostgreSQL is clean (no hold, nothing written on the component). The remnant
- *            acknowledgement of the design's S9D-11 is S6-5's (migration 107) and is not part of this case.
+ *            rows read back from PostgreSQL is clean (no hold, nothing written on the component).
+ *            TODO(S6-5, #6842, migration 107): the design's S9D-11 runs "retire -> acknowledgement -> clean governed
+ *            pull". The remnant acknowledgement is S6-5's and was not on main when this case was written; add the
+ *            acknowledgement step here once it is (coordinator ruling C-6).
  *   S9D-12   backup -> retire -> restore: with one retired row's version moved by a person's edit, the restore (its own
  *            digest, approval and claim) writes all four rows at their CURRENT versions; every stored row is
  *            byte-identical to before the retire (`data::text`), version + 2 — the edited row carries the edit, version
@@ -36,8 +38,10 @@
  *            row, no claim, no patch, the lease released.
  *   S9D-15   one sheet, one writer: a pull, a recovery or an install holding the sheet lease refuses the repair 409
  *            WRITE_LOCKED (nothing of it runs); while the repair holds the lease a pull cannot take it (WRITE_LOCKED
- *            naming `sheet_repair`); a sheet whose batch columns are being installed is refused 409
- *            INSTALL_IN_PROGRESS inside the lease, and runs once the install is resolved.
+ *            naming `sheet_repair`); the install gate (coordinator ruling C-2) is read from the batch ledger WHATEVER
+ *            the batch switch says: with the switch OFF a sheet whose batch columns are being installed, and one whose
+ *            aborted first install still holds its settings lock, are refused 409 INSTALL_IN_PROGRESS inside the
+ *            lease; once the lock is released, or the install resolved, the same approved digest runs.
  *   S9D-16   takeover / zombie: the repair's lease lapses mid-run and a pull takes the sheet over — the HOST fence
  *            refuses the zombie's next patch (nothing lands), its answer carries the partial count, its run row stays
  *            open (the 108 stop-condition query answers 1); the next repair run closes it `abandoned` in its own begin
@@ -49,6 +53,17 @@
  *            audit row the REAL audit store refuses rolls the run AND the claim back.
  *   S9D-18   the fills report through the route on real rows: the K2 class of the pair that carries the note, audited
  *            (project_board_read, no project) — and never the note.
+ *   S9D-19   (ruling C-1) the heartbeat N6 rule on real row locks (the S9R-29d pattern): while the begin transaction, a
+ *            host patch and the finish transaction hold the sheet lock row for 3 s each, the lease — heartbeating every
+ *            100 ms over autocommit statements with a 1.5 s statement_timeout — attempts no holder CAS and none fails.
+ *   S9D-20   (ruling C-3) the dead end closed: a run left `running` after every row was written (its finish refused by
+ *            a takeover) is verified and finished `completed` by the continuation — no row write (`data::text` and
+ *            versions unchanged, no host revision), its own approval and audit row, the close transaction inside the
+ *            bracket on real row locks, the generation bump, the 108 stop-condition query back to 0. A planned row
+ *            moved since refuses with counts (the restore stays the other way out). A project governed since still
+ *            closes.
+ *   S9D-21   (ruling C-4) a guard already lost before the begin (one heartbeat CAS failed in the store, the lease row
+ *            intact): refused before the claim is spent; the same approved digest runs afterwards.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -92,6 +107,7 @@ const { SHEET_REPAIR_TABLES: RT, createStockPreparationSheetRepairStore } = repa
 const { PROJECT_WRITE_ERROR_CODES, PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS, PROJECT_WRITE_LEASE_TTL_MS, PROJECT_WRITE_LOCK_TABLE, createStockPreparationProjectWriteLock, sheetWriteScopeKey } = lockLib
 const { readExistingStockPreparationRows } = tableActionsLib.__internals
 const [RETIRE, RESTORE] = SHEET_REPAIR_RECIPES as [string, string]
+const CLOSE: string = repairLib.SHEET_REPAIR_CONTINUATIONS[0]
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -140,6 +156,59 @@ function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () =
     },
   })
 }
+
+type LockEvent = { ok: boolean; at: number; ms: number; code?: string; holderCas: boolean }
+/**
+ * The sheet write lock's db for the heartbeat cases (the S9R-29d pattern): every AUTOCOMMIT statement runs on its own
+ * client under a short statement_timeout (standing for the pool's 30 s), and every UPDATE of the lock row is recorded —
+ * `holderCas` marks the holder CAS shape (a heartbeat tick or a pre-write check). `shouldFail` makes ONE holder CAS fail
+ * before it reaches PostgreSQL (a transient store fault).
+ */
+function timedLockDb(opts: { timeoutMs: number; events: LockEvent[]; shouldFail?: () => boolean }) {
+  return createDb({
+    database: {
+      query: async (sql: string, params?: unknown[]) => {
+        const isLockUpdate = /^\s*UPDATE\s+"?integration_stock_prep_project_write_lock/i.test(sql)
+        const holderCas = isLockUpdate && /lease_heartbeat_at/.test(sql) && /lease_seq/.test(sql)
+        const at = Date.now()
+        if (holderCas && opts.shouldFail && opts.shouldFail()) {
+          opts.events.push({ ok: false, at, ms: 0, code: 'INJECTED', holderCas })
+          throw Object.assign(new Error('injected store fault'), { code: '08006' })
+        }
+        const client = await poolManager.get().getInternalPool().connect()
+        try {
+          await client.query('BEGIN')
+          await client.query(`SET LOCAL statement_timeout = ${opts.timeoutMs}`)
+          const result = await client.query(sql, params)
+          await client.query('COMMIT')
+          if (isLockUpdate) opts.events.push({ ok: true, at, ms: Date.now() - at, holderCas })
+          return result.rows
+        } catch (error: any) {
+          await client.query('ROLLBACK').catch(() => {})
+          if (isLockUpdate) opts.events.push({ ok: false, at, ms: Date.now() - at, code: error && error.code, holderCas })
+          throw error
+        } finally {
+          client.release()
+        }
+      },
+      transaction: async <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await poolManager.get().getInternalPool().connect()
+        try {
+          await client.query('BEGIN')
+          const result = await callback({ query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows, commit: async () => {}, rollback: async () => {} })
+          await client.query('COMMIT')
+          return result
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw error
+        } finally {
+          client.release()
+        }
+      },
+    },
+  })
+}
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 function deferred() {
   let resolve!: () => void
@@ -242,9 +311,12 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
     /**
      * One world: its own tenant, a project sheet provisioned the way the plugin provisions one (the frozen template,
      * the contract option sets, the PLM lock, the registry row), the D1 rows, and the REAL route module over the
-     * production plugin context. `hooks.beforePatch` / `hooks.afterPatch` run around the host's own patchRecord.
+     * production plugin context. `hooks.beforePatch` / `hooks.afterPatch` run around the host's own patchRecord;
+     * `hooks.onSourceRead` runs inside every source read. `opts.lock` builds the lock the routes use (the heartbeat
+     * cases hand a fast-heartbeat lock over a recording db); `opts.audit` wraps the real audit store (a slow append
+     * inside a ledger transaction holds its lock row).
      */
-    async function world(label: string) {
+    async function world(label: string, opts: { lock?: () => any; audit?: (real: any) => any } = {}) {
       const tenantId = `tenant_s66_${label}_${TOKEN}`
       tenants.push(tenantId)
       const projectId = `${tenantId}:integration-core`
@@ -290,12 +362,13 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const sourceAdapter = {
         async read(input: any = {}) {
           source.reads += 1
+          if (hooks.onSourceRead) await hooks.onSourceRead(source.reads)
           const rows = Array.isArray(source.data[input.object]) ? source.data[input.object] : []
           const found = rows.filter((row: any) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
           return { records: found.map((row: any) => ({ ...row })), done: true, nextCursor: null }
         },
       }
-      const hooks: { beforePatch: null | ((input: any) => Promise<void> | void); afterPatch: null | ((input: any) => Promise<void> | void) } = { beforePatch: null, afterPatch: null }
+      const hooks: { beforePatch: null | ((input: any) => Promise<void> | void); afterPatch: null | ((input: any) => Promise<void> | void); onSourceRead: null | ((reads: number) => Promise<void> | void) } = { beforePatch: null, afterPatch: null, onSourceRead: null }
       const patchInputs: any[] = []
       const records = new Proxy(multitable.records, {
         get(real, key, receiver) {
@@ -309,9 +382,10 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
           }
         },
       })
-      const lock = createStockPreparationProjectWriteLock({ db })
+      const lock = opts.lock ? opts.lock() : createStockPreparationProjectWriteLock({ db })
       const continuationStore = continuationStoreLib.createStockPreparationContinuationStore({ db })
-      const audit = auditStoreLib.createStockPreparationAuditStore({ db })
+      const realAudit = auditStoreLib.createStockPreparationAuditStore({ db })
+      const audit = opts.audit ? opts.audit(realAudit) : realAudit
       const repairStore = createStockPreparationSheetRepairStore({ db })
       const pullBatchStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db })
       const routes = new Map<string, any>()
@@ -394,12 +468,32 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       return res.body.error
     }
     const LAPSED = PROJECT_WRITE_LEASE_TTL_MS + PROJECT_WRITE_LEASE_TAKEOVER_GRACE_MS + 60_000
+    /**
+     * A retire whose LAST patch landed and whose finish was then refused (a pull took the sheet over on another
+     * process's clock): every planned row is written and the run is left `running`. Answers the open run's id; the
+     * taker has released the sheet.
+     */
+    async function leaveRetireOpen(st: Awaited<ReturnType<typeof world>>, label: string): Promise<string> {
+      const plan = dataOf(await st.preview())
+      let taker: any = null
+      st.hooks.afterPatch = async () => {
+        if (st.patchInputs.length !== 4) return
+        const other = st.otherLock(LAPSED)
+        taker = other.createGuard(await other.acquire(st.scopeKey, { purpose: 'small_apply', runId: `syn-pull-${label}`, tenantId: st.tenantId }))
+      }
+      const lost = errorOf(await st.execute(plan.planDigest), 409, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+      expect([lost.details.written, lost.details.planned, lost.details.partial]).toEqual([4, 4, true])
+      st.hooks.afterPatch = null
+      expect(taker).not.toBeNull()
+      await taker.release()
+      return String((await st.runs())[0].id)
+    }
 
     test('S9D-108 migration 108 is applied: both tables, the closed CHECKs, one open run per sheet, one claim per approved plan', async () => {
       for (const table of [RT.run, RT.claim]) expect((await q('SELECT to_regclass($1) AS oid', [table])).rows[0].oid, table).not.toBeNull()
       const columns = (await q(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1`, [RT.run])).rows as Array<{ column_name: string; data_type: string }>
       const typeOf = (name: string) => (columns.find((column) => column.column_name === name) || { data_type: null }).data_type
-      expect([typeOf('backup'), typeOf('sequence_no'), typeOf('planned_count'), typeOf('written_count'), typeOf('fencing_epoch')]).toEqual(['jsonb', 'integer', 'integer', 'integer', 'integer'])
+      expect([typeOf('backup'), typeOf('sequence_no'), typeOf('planned_count'), typeOf('written_count'), typeOf('fencing_epoch'), typeOf('close_approval_ref')]).toEqual(['jsonb', 'integer', 'integer', 'integer', 'integer', 'text'])
       const tenantId = `tenant_s66_108_${TOKEN}`
       tenants.push(tenantId)
       const sheetId = `sheet_s66_108_${TOKEN}`
@@ -426,12 +520,17 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       await expectSqlState(insertRun({ planned_count: 0 }), '23514', 'integration_stock_prep_sheet_repair_run_counts_check')
       await expectSqlState(insertRun({ planned_count: 2, status: 'completed', written_count: 1, ...finished }), '23514', 'integration_stock_prep_sheet_repair_run_written_check')
       await expectSqlState(insertRun({ status: 'stopped', stop_reason: 'version_conflict', written_count: null, ...finished }), '23514', 'integration_stock_prep_sheet_repair_run_written_check')
+      // A close approval (the continuation's) only ever sits on a `completed` run.
+      await expectSqlState(insertRun({ close_approval_ref: 'R-91:close' }), '23514', 'integration_stock_prep_sheet_repair_run_close_check')
+      await expectSqlState(insertRun({ status: 'stopped', stop_reason: 'abandoned', close_approval_ref: 'R-91:close', ...finished }), '23514', 'integration_stock_prep_sheet_repair_run_close_check')
       // The shapes the store writes are accepted: an open run; a second open run of the SAME sheet is refused.
       await insertRun({ id: `run_s66_open_${TOKEN}` })
       await expectSqlState(insertRun({ sequence_no: 1 }), '23505', 'uniq_integration_stock_prep_sheet_repair_run_open')
       await q(`UPDATE ${RT.run} SET status = 'stopped', stop_reason = 'abandoned', finished_at = now() WHERE id = $1`, [`run_s66_open_${TOKEN}`])
       await expectSqlState(insertRun({ status: 'completed', written_count: 1, ...finished }), '23505', 'uniq_integration_stock_prep_sheet_repair_run_sequence')
       await insertRun({ sequence_no: 1, recipe: RESTORE, component_handle: null, source_run_id: `run_s66_open_${TOKEN}`, status: 'completed', written_count: 1, ...finished })
+      // The shape the continuation writes: `completed` with its close approval.
+      await insertRun({ sequence_no: 2, status: 'completed', written_count: 1, close_approval_ref: 'R-91:close', ...finished })
       // The claim key is the PRIMARY KEY.
       const insertClaim = (key: string) => q(`INSERT INTO ${RT.claim} (claim_key, tenant_id, sheet_id, project_no, recipe, plan_digest, run_id, approval_ref, claimed_by) VALUES ($1, $2, $3, 'SYN-108', $4, $5, 'run_syn', 'R-91', 'syn')`, [key, tenantId, sheetId, RETIRE, digest])
       await insertClaim(`claim_s66_${TOKEN}`)
@@ -626,25 +725,43 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect(dataOf(await running).status).toBe('completed')
       st.hooks.beforePatch = null
 
-      // (c) The install gate (rebaseline B-9), with the batch identifier on: an `installing` sheet row refuses the
-      // repair INSIDE the lease; resolved, the same approved digest runs.
+      // (c) The install gate (rebaseline B-9; coordinator ruling C-2) is read from the batch ledger WHATEVER the batch
+      // switch says. This file runs with the switch OFF: an `installing` sheet row still refuses the repair INSIDE the
+      // lease (verifier probe VR-IO: before the ruling the same world previewed eligible and completed).
       const inst = await world('d15i')
+      expect(process.env[PULL_BATCH_SWITCH], 'the batch identifier is switched OFF').toBeUndefined()
+      const ok = dataOf(await inst.preview())
+      expect(ok.eligible, 'no ledger row: the batch identifier never touched this sheet').toBe(true)
+      const sheetRowId = `pbs_s66_${TOKEN}`
+      await q(
+        `INSERT INTO ${BI_SHEET_TABLE} (id, tenant_id, sheet_id, project_no, history_status, label_locale, first_pull_batch_rule, label_format, settings_locked_at)
+         VALUES ($1, $2, $3, $4, 'installing', 'zh-CN', 'predecessor_suffix', 'ordinal_date', now())`,
+        [sheetRowId, inst.tenantId, inst.sheetId, PROJECT],
+      )
+      const blockedPreview = dataOf(await inst.preview())
+      expect([blockedPreview.eligible, blockedPreview.refusals, blockedPreview.planDigest]).toEqual([false, ['install_in_progress'], null])
+      const error = errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS)
+      expect([error.details.reason, error.details.partial]).toEqual(['install_in_progress', false])
+      expect([await inst.runs(), await inst.claims(), inst.patchInputs.length, (await inst.lockRow()).lease_id]).toEqual([[], [], 0, null])
+      // That first install is ABORTED and its settings lock stays held (a label of its persisted plan may be on the
+      // sheet, so its next run would RESUME that plan): refused under the same code, naming the state.
+      await q(`UPDATE ${BI_SHEET_TABLE} SET history_status = 'pending', history_plan = '{"aborted": true}'::jsonb WHERE id = $1`, [sheetRowId])
+      const heldPreview = dataOf(await inst.preview())
+      expect([heldPreview.eligible, heldPreview.refusals]).toEqual([false, ['install_aborted_unresolved']])
+      const held = errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS)
+      expect([held.details.reason, held.details.partial]).toEqual(['install_aborted_unresolved', false])
+      expect([await inst.runs(), await inst.claims(), inst.patchInputs.length]).toEqual([[], [], 0])
+      const untouched = (await q(`SELECT history_status, version, settings_locked_at IS NOT NULL AS locked FROM ${BI_SHEET_TABLE} WHERE id = $1`, [sheetRowId])).rows[0]
+      expect([untouched.history_status, Number(untouched.version), untouched.locked], 'the repair never writes the batch ledger').toEqual(['pending', 0, true])
+      // An abort that RELEASED the lock (no label of the plan on the sheet): the next install plans afresh — repairable.
+      await q(`UPDATE ${BI_SHEET_TABLE} SET settings_locked_at = NULL WHERE id = $1`, [sheetRowId])
+      expect(dataOf(await inst.preview()).eligible).toBe(true)
+      // With the batch identifier ON the gate answers the same; resolved, the SAME approved digest runs.
       process.env[PULL_BATCH_SWITCH] = 'true'
       try {
-        const ok = dataOf(await inst.preview())
-        const sheetRowId = `pbs_s66_${TOKEN}`
-        await q(
-          `INSERT INTO ${BI_SHEET_TABLE} (id, tenant_id, sheet_id, project_no, history_status, label_locale, first_pull_batch_rule, label_format, settings_locked_at)
-           VALUES ($1, $2, $3, $4, 'installing', 'zh-CN', 'material', 'ordinal_date', now())`,
-          [sheetRowId, inst.tenantId, inst.sheetId, PROJECT],
-        )
-        const blockedPreview = dataOf(await inst.preview())
-        expect([blockedPreview.eligible, blockedPreview.refusals, blockedPreview.planDigest]).toEqual([false, ['install_in_progress'], null])
-        const error = errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS)
-        expect([error.details.reason, error.details.partial]).toEqual(['install_in_progress', false])
+        await q(`UPDATE ${BI_SHEET_TABLE} SET history_status = 'installing', settings_locked_at = now() WHERE id = $1`, [sheetRowId])
+        expect(errorOf(await inst.execute(ok.planDigest), 409, CODES.INSTALL_IN_PROGRESS).details.reason).toBe('install_in_progress')
         expect([await inst.runs(), await inst.claims(), inst.patchInputs.length, (await inst.lockRow()).lease_id]).toEqual([[], [], 0, null])
-        const untouched = (await q(`SELECT history_status, version FROM ${BI_SHEET_TABLE} WHERE id = $1`, [sheetRowId])).rows[0]
-        expect([untouched.history_status, Number(untouched.version)], 'the repair never writes the batch ledger').toEqual(['installing', 0])
         await q(`UPDATE ${BI_SHEET_TABLE} SET history_status = 'backfilled', history_mode = 'inferred', history_batch_count = 2, resolved_at = now(), resolved_by = 'syn' WHERE id = $1`, [sheetRowId])
         expect(dataOf(await inst.execute(ok.planDigest)).status).toBe('completed')
       } finally {
@@ -781,6 +898,208 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       } finally {
         process.env[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV] = 'true'
       }
+    }, 120_000)
+
+    test('S9D-19 (ruling C-1) the heartbeat N6 rule on real row locks: while the begin transaction, a host patch and the finish transaction hold the sheet lock row (3 s each), the lease heartbeating every 100 ms over autocommit statements with a 1.5 s statement_timeout (standing for the pool\'s 30 s) attempts no holder CAS and none fails; the run completes', async () => {
+      const events: LockEvent[] = []
+      const warnings: any[] = []
+      const windows: Array<{ mode: string; start: number; end?: number }> = []
+      const st = await world('d19', {
+        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events }), heartbeatMs: 100, logger: { warn: (msg: string, meta: unknown) => warnings.push({ msg, meta }), info() {}, error() {} } }),
+        audit: (real: any) => ({
+          ...real,
+          // The begin's and the finish's audit append runs INSIDE the ledger transaction, after its holder assert took
+          // the lock row FOR UPDATE: slowing it holds that row for 3 s.
+          appendWithin: async (trx: any, entry: any) => {
+            if (entry && (entry.mode === 'sheet_repair_started' || entry.mode === 'sheet_repair_completed')) {
+              const w: { mode: string; start: number; end?: number } = { mode: entry.mode, start: Date.now() }
+              windows.push(w)
+              await sleep(3000)
+              w.end = Date.now()
+            }
+            return real.appendWithin(trx, entry)
+          },
+        }),
+      })
+      const plan = dataOf(await st.preview())
+      // Calibration: the in-lease source read takes 450 ms outside any bracket, so the heartbeat ticks before the begin.
+      let armed = true
+      st.hooks.onSourceRead = async () => {
+        if (!armed) return
+        armed = false
+        await sleep(450)
+      }
+      // The FIRST host patch is held inside its write transaction (after the fence took the lock row FOR SHARE) for 3 s:
+      // another session holds that record's row lock.
+      st.hooks.beforePatch = async (input: any) => {
+        if (st.patchInputs.length !== 1) return
+        const client = await poolManager.get().getInternalPool().connect()
+        await client.query('BEGIN')
+        await client.query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [input.recordId])
+        const w: { mode: string; start: number; end?: number } = { mode: 'host_patch_1', start: Date.now() }
+        windows.push(w)
+        setTimeout(() => {
+          w.end = Date.now()
+          client.query('COMMIT').catch(() => {}).finally(() => client.release())
+        }, 3000)
+      }
+      const res = await st.execute(plan.planDigest)
+      st.hooks.beforePatch = null
+      st.hooks.onSourceRead = null
+      const done = dataOf(res)
+      expect([done.status, done.written]).toEqual(['completed', 4])
+      expect(windows.map((w) => w.mode)).toEqual(['sheet_repair_started', 'host_patch_1', 'sheet_repair_completed'])
+      const within = (w: { start: number; end?: number }) => (e: LockEvent) => e.at >= w.start && e.at <= (w.end || Date.now())
+      expect(events.filter((e) => e.holderCas && e.ok && e.at < windows[0].start).length, 'calibration: the lease heartbeat ticks while the repair holds the lease outside a bracket').toBeGreaterThan(0)
+      for (const w of windows) {
+        expect((w.end || 0) - w.start, `${w.mode}: the window was held`).toBeGreaterThanOrEqual(2900)
+        expect(events.filter(within(w)).filter((e) => e.holderCas).length, `${w.mode}: no holder CAS attempted while the lock row was held`).toBe(0)
+        expect(events.filter(within(w)).filter((e) => !e.ok).map((e) => [e.code, e.ms]), `${w.mode}: no lock statement failed`).toEqual([])
+      }
+      expect(events.filter((e) => !e.ok).map((e) => [e.code, e.ms]), 'no heartbeat queued behind the repair\'s own transaction and timed out').toEqual([])
+      expect(warnings.filter((w: any) => /heartbeat failed/.test(w.msg)).length).toBe(0)
+      expect((await st.runs()).map((run: any) => [run.status, run.written_count])).toEqual([['completed', 4]])
+      for (const id of st.oldIds) expect((await st.cells(id)).active).toBe(false)
+    }, 180_000)
+
+    test('S9D-20 (ruling C-3) the dead end closed on the real stack: a run left `running` after every row was written is verified and finished `completed` — no row write, its own approval and audit row, the close transaction inside the bracket on real row locks, the bump; a moved row refuses with counts; a project governed since still closes', async () => {
+      const events: LockEvent[] = []
+      const windows: Array<{ start: number; end?: number }> = []
+      const st = await world('d20', {
+        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events }), heartbeatMs: 100, logger: { warn() {}, info() {}, error() {} } }),
+        audit: (real: any) => ({
+          ...real,
+          appendWithin: async (trx: any, entry: any) => {
+            if (entry && entry.mode === 'sheet_repair_verified_closed') {
+              const w: { start: number; end?: number } = { start: Date.now() }
+              windows.push(w)
+              await sleep(3000)
+              w.end = Date.now()
+            }
+            return real.appendWithin(trx, entry)
+          },
+        }),
+      })
+      const openRuns = async (tenantId: string) => Number((await q(`SELECT count(*)::int AS n FROM ${RT.run} WHERE status = 'running' AND tenant_id = $1`, [tenantId])).rows[0].n)
+      const runId = await leaveRetireOpen(st, 'd20')
+      // The dead end (verifier probe VR-DE): every old row retired, the run open, no retire of the component left.
+      const open = (await st.runs())[0]
+      expect([open.id, open.status, open.written_count, open.close_approval_ref]).toEqual([runId, 'running', null, null])
+      for (const id of st.oldIds) expect((await st.cells(id)).active).toBe(false)
+      expect(await openRuns(st.tenantId)).toBe(1)
+      const named = dataOf(await st.preview())
+      expect([named.eligible, named.refusals, named.openRun, named.shape]).toEqual([false, ['not_two_copy'], true, 'inactive_root_remnant'])
+      expect((await st.lockRow()).generation_reason, 'the run never got its bump (the taker held the sheet)').toBeNull()
+      const before = await st.stored()
+      const revisionsBefore = Number((await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1', [st.sheetId])).rows[0].n)
+      st.patchInputs.length = 0
+      // The preview of the continuation: counts and the close's OWN digest. No lease, no write.
+      const closePlan = dataOf(await st.repair({ mode: 'preview', recipe: CLOSE, runId }))
+      expect([closePlan.eligible, closePlan.refusals, closePlan.runId, closePlan.runRecipe, closePlan.governed]).toEqual([true, [], runId, RETIRE, false])
+      expect(closePlan.counts).toEqual({ planned: 4, inTargetState: 4, versionMoved: 0, notWritten: 0, moved: 0, missing: 0 })
+      expect(closePlan.planDigest).not.toBe(open.plan_digest)
+      expect([(await st.runs())[0].status, (await st.lockRow()).lease_id]).toEqual(['running', null])
+      // The execute.
+      const closed = dataOf(await st.repair({ mode: 'execute', recipe: CLOSE, runId, planDigest: closePlan.planDigest, approvalRef: 'R-91:s66-d20-close' }))
+      expect([closed.status, closed.runId, closed.runRecipe, closed.planned, closed.verified, closed.governed, closed.generationBumped]).toEqual(['completed', runId, RETIRE, 4, 4, false, true])
+      // NO row write: every stored row byte-identical at its version, no patch, no new host revision.
+      expect(await st.stored()).toEqual(before)
+      expect(st.patchInputs.length).toBe(0)
+      expect(Number((await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1', [st.sheetId])).rows[0].n)).toBe(revisionsBefore)
+      // The ledger: completed with its planned count, the close's approval beside the run's own, no second claim.
+      const run = (await st.runs())[0]
+      expect([run.status, run.stop_reason, run.written_count, run.planned_count, run.close_approval_ref, run.approval_ref, run.finished_at !== null]).toEqual(['completed', null, 4, 4, 'R-91:s66-d20-close', 'R-91:s66-d20', true])
+      expect((await st.claims()).map((claim: any) => claim.run_id)).toEqual([runId])
+      expect(await openRuns(st.tenantId), 'the rollback stop condition of migration 108 is back to 0').toBe(0)
+      const writes = (await st.audits()).filter((row: any) => row.action === 'exception_resolve')
+      expect(writes.map((row: any) => [row.mode, row.subject_id, row.project_id, row.actor])).toEqual([
+        ['sheet_repair_started', runId, PROJECT, st.admin.id],
+        ['sheet_repair_verified_closed', runId, PROJECT, st.admin.id],
+      ])
+      expect([writes[1].detail.operation, writes[1].detail.recipe, writes[1].detail.planned, writes[1].detail.verified, writes[1].detail.approvalRef, writes[1].detail.closeDigest, writes[1].detail.governed]).toEqual(['sheet_repair_verified_close', RETIRE, 4, 4, 'R-91:s66-d20-close', closePlan.planDigest, false])
+      expect(JSON.stringify(writes.map((row: any) => row.detail)).includes(PROJECT)).toBe(false)
+      const lockRow = await st.lockRow()
+      expect([lockRow.lease_id, lockRow.generation_reason], 'released, then bumped — the bump the run never got').toEqual([null, 'sheet_repair'])
+      // N6 on real row locks: the close transaction held the lock row for 3 s inside the bracket — no holder CAS was
+      // attempted in that window and no lock statement failed in it.
+      expect(windows.length).toBe(1)
+      const inWindow = (e: LockEvent) => e.at >= windows[0].start && e.at <= (windows[0].end || Date.now())
+      expect((windows[0].end || 0) - windows[0].start).toBeGreaterThanOrEqual(2900)
+      expect(events.filter((e) => e.holderCas && e.ok && e.at < windows[0].start).length, 'calibration: this lock\'s holder CAS reaches the store').toBeGreaterThan(0)
+      expect(events.filter(inWindow).filter((e) => e.holderCas).length, 'no holder CAS attempted while the close held the lock row').toBe(0)
+      expect(events.filter(inWindow).filter((e) => !e.ok).map((e) => [e.code, e.ms])).toEqual([])
+      // One-shot by the run's own status; the run list shows how it was closed; the sheet is the repaired one.
+      expect(errorOf(await st.repair({ mode: 'execute', recipe: CLOSE, runId, planDigest: closePlan.planDigest, approvalRef: 'R-91:s66-d20-close' }), 409, CODES.NOT_APPLICABLE).details.reasons).toEqual(['run_not_open'])
+      expect(dataOf(await st.call('GET', PATHS.runs)).runs.map((entry: any) => [entry.runId, entry.status, entry.written, entry.approvalRef, entry.closeApprovalRef])).toEqual([[runId, 'completed', 4, 'R-91:s66-d20', 'R-91:s66-d20-close']])
+      expect(censusLib.publicCensusOf(censusLib.censusOfRows(await st.readerRows()))).toMatchObject({ twoCopyComponents: 0, inactiveRootRemnantComponents: 1 })
+
+      // A planned row MOVED since (a pull revived it): refused with counts, nothing closed, the run still open.
+      const moved = await world('d20m')
+      const movedRun = await leaveRetireOpen(moved, 'd20m')
+      const good = dataOf(await moved.repair({ mode: 'preview', recipe: CLOSE, runId: movedRun }))
+      expect(good.eligible).toBe(true)
+      await q('UPDATE meta_records SET data = data || $2::jsonb, version = version + 1 WHERE id = $1', [moved.oldIds[1], JSON.stringify({ [moved.fields.active]: true, [moved.fields.lastPlmRefreshRunId]: 'table-action:syn-pull-2', [moved.fields.lastPlmRefreshDecision]: 'update', [moved.fields.lastPlmConflictSummary]: '{"type":"plm_system_refresh","changedFields":["material"]}' })])
+      const refusedPreview = dataOf(await moved.repair({ mode: 'preview', recipe: CLOSE, runId: movedRun }))
+      expect([refusedPreview.eligible, refusedPreview.refusals, refusedPreview.planDigest, refusedPreview.counts]).toEqual([false, ['rows_not_in_target_state'], null, { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 1, missing: 0 }])
+      const refused = errorOf(await moved.repair({ mode: 'execute', recipe: CLOSE, runId: movedRun, planDigest: good.planDigest, approvalRef: 'R-91:s66-d20m-close' }), 409, CODES.NOT_APPLICABLE)
+      expect([refused.details.reasons, { ...refused.details.counts }, refused.details.partial]).toEqual([['rows_not_in_target_state'], { planned: 4, inTargetState: 3, versionMoved: 0, notWritten: 0, moved: 1, missing: 0 }, false])
+      const stillOpen = (await moved.runs())[0]
+      expect([stillOpen.status, stillOpen.close_approval_ref, (await moved.lockRow()).lease_id, (await moved.lockRow()).generation_reason]).toEqual(['running', null, null, null])
+      expect(await openRuns(moved.tenantId)).toBe(1)
+      // Restoring the run is the other way out: its begin closes the open run and the rows still retired come back.
+      const restorePlan = dataOf(await moved.repair({ mode: 'preview', recipe: RESTORE, runId: movedRun }))
+      expect([restorePlan.eligible, restorePlan.counts.toRestore, restorePlan.counts.revived]).toEqual([true, 3, 1])
+      expect(dataOf(await moved.repair({ mode: 'execute', recipe: RESTORE, runId: movedRun, planDigest: restorePlan.planDigest, approvalRef: 'R-91:s66-d20m-restore' })).status).toBe('completed')
+      expect((await moved.runs()).map((entry: any) => [entry.recipe, entry.status, entry.stop_reason])).toEqual([[RETIRE, 'stopped', 'abandoned'], [RESTORE, 'completed', null]])
+      expect(await openRuns(moved.tenantId)).toBe(0)
+
+      // The project became GOVERNED since the run (the pilot marker set on its registry row): neither recipe can
+      // begin, and the verified close still works.
+      const gov = await world('d20g')
+      const govRun = await leaveRetireOpen(gov, 'd20g')
+      await q(`UPDATE ${REGISTRY_TABLE} SET pilot_enabled_at = now(), pilot_enabled_by = 'syn', pilot_readiness_version = 1 WHERE tenant_id = $1 AND project_no = $2`, [gov.tenantId, PROJECT])
+      expect(dataOf(await gov.preview()).refusals).toContain('project_governed')
+      expect(dataOf(await gov.repair({ mode: 'preview', recipe: RESTORE, runId: govRun })).refusals).toEqual(['project_governed'])
+      const govPlan = dataOf(await gov.repair({ mode: 'preview', recipe: CLOSE, runId: govRun }))
+      expect([govPlan.eligible, govPlan.refusals, govPlan.governed]).toEqual([true, [], true])
+      const govBefore = await gov.stored()
+      const govClosed = dataOf(await gov.repair({ mode: 'execute', recipe: CLOSE, runId: govRun, planDigest: govPlan.planDigest, approvalRef: 'R-91:s66-d20g-close' }))
+      expect([govClosed.status, govClosed.governed, govClosed.verified, govClosed.generationBumped]).toEqual(['completed', true, 4, true])
+      expect(await gov.stored()).toEqual(govBefore)
+      const govRow = (await gov.runs())[0]
+      expect([govRow.status, govRow.close_approval_ref, (await gov.lockRow()).generation_reason]).toEqual(['completed', 'R-91:s66-d20g-close', 'sheet_repair'])
+      expect(await openRuns(gov.tenantId)).toBe(0)
+    }, 240_000)
+
+    test('S9D-21 (ruling C-4) a guard already LOST before the begin (one heartbeat whose holder CAS failed in the store while the source was read, the lease row itself intact): refused before the claim is spent — no run row, no claim, no patch — and the same approved digest runs afterwards', async () => {
+      const events: LockEvent[] = []
+      let failNext = false
+      const st = await world('d21', {
+        lock: () => createStockPreparationProjectWriteLock({
+          db: timedLockDb({ timeoutMs: 5000, events, shouldFail: () => { if (!failNext) return false; failNext = false; return true } }),
+          heartbeatMs: 60,
+          logger: { warn() {}, info() {}, error() {} },
+        }),
+      })
+      const plan = dataOf(await st.preview())
+      let armed = true
+      st.hooks.onSourceRead = async () => {
+        if (!armed) return
+        armed = false
+        failNext = true
+        await sleep(400)
+      }
+      const refused = errorOf(await st.execute(plan.planDigest), 503, PROJECT_WRITE_ERROR_CODES.STORE_FAILED)
+      st.hooks.onSourceRead = null
+      expect(events.filter((e) => e.code === 'INJECTED').length, 'exactly one holder CAS was failed').toBe(1)
+      expect([refused.details.written, refused.details.planned, refused.details.partial, refused.details.runId]).toEqual([0, 4, false, undefined])
+      expect([await st.runs(), await st.claims(), st.patchInputs.length], 'the one-shot claim was NOT spent').toEqual([[], [], 0])
+      const lockRow = await st.lockRow()
+      expect([lockRow.lease_id, lockRow.generation_reason], 'released; nothing was attempted, so nothing was bumped').toEqual([null, null])
+      // The approval is still good: the SAME digest runs.
+      const done = dataOf(await st.execute(plan.planDigest))
+      expect([done.status, done.written]).toEqual(['completed', 4])
+      expect((await st.claims()).length).toBe(1)
     }, 120_000)
   })
 }

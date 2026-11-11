@@ -8,12 +8,23 @@
 //   integration_stock_prep_sheet_repair_claim   the ONE-SHOT claim of an approved plan (claim_key PRIMARY KEY)
 // through the scoped db helper (lib/db.cjs): equality WHERE only, SELECT * projections, no raw SQL.
 //
-// EVERY WRITE IS LEASED. `beginRun` and `finishRun` each run ONE transaction whose FIRST step is the caller's holder
-// assert (`holderWithin(trx)`: the sheet write lock's in-transaction assert — the lock row FOR UPDATE, the caller's
-// lease id and fencing epoch still the row's, else 409 LEASE_LOST and a full rollback). So a run row is only ever
-// written by the process that holds the sheet's lease right now; a writer frozen across a takeover can neither begin
-// nor finish a run. The route runs both inside the guard's host-write bracket (the heartbeat skips while the
-// transaction holds the lock row — the N6 rule).
+// EVERY WRITE IS LEASED. `beginRun`, `finishRun` and `closeVerifiedRun` each run ONE transaction whose FIRST step is the
+// caller's holder assert (`holderWithin(trx)`: the sheet write lock's in-transaction assert — the lock row FOR UPDATE,
+// the caller's lease id and fencing epoch still the row's, else 409 LEASE_LOST and a full rollback). So a run row is
+// only ever written by the process that holds the sheet's lease right now; a writer frozen across a takeover can neither
+// begin nor finish a run. The library runs all three inside the guard's host-write bracket (the heartbeat skips while
+// the transaction holds the lock row — the N6 rule) and refuses a guard that has none.
+//
+// HOW AN OPEN RUN IS CLOSED. A run is `running` from its begin to its own finish. When its finish never ran (its lease
+// was taken over, or the finish transaction failed), exactly three things close it — never a preview, never a clock:
+//   * the BEGIN of the next repair EXECUTE on that sheet (step 2 below) — a retire of the rows that are left, or a
+//     restore of that very run: `stopped / abandoned`;
+//   * `closeVerifiedRun` — the continuation `verify_and_close_run`: `completed`, with `close_approval_ref`, after the
+//     library verified under the lease that every planned row is in its target state. This is the way out when every
+//     row WAS written, so that no further retire of the component can begin and a restore would undo the repair;
+//   * nothing else. On a project that has since become governed no recipe can begin, so only the verified close is
+//     left there; if a governed pull has moved a planned row since, it refuses and no tool path closes the run (an
+//     owner-approved runbook step). A repair window therefore ends — no open run — before a pilot enable.
 //
 // THE BEGIN (one transaction, in this order):
 //   1. the holder assert;
@@ -168,6 +179,7 @@ function rowToRun(row) {
     fencingEpoch: intOrNull(row.fencing_epoch),
     startedAt: isoOrNull(row.started_at),
     finishedAt: isoOrNull(row.finished_at),
+    closeApprovalRef: row.close_approval_ref || null,
   })
 }
 
@@ -187,6 +199,8 @@ function publicRunOf(run) {
     sourceRunId: run.sourceRunId,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    // Non-null only for a run the continuation closed: the approval of THAT close (the run's own is `approvalRef`).
+    closeApprovalRef: run.closeApprovalRef,
   }
 }
 
@@ -494,6 +508,72 @@ function createStockPreparationSheetRepairStore({ db, now } = {}) {
     }
   }
 
+  /**
+   * THE VERIFIED CLOSE (coordinator ruling C-3) of a run left `running` after its rows were written: holder assert ->
+   * the run row (still `running`, of this scope, begun under ANOTHER lease — the caller holds the sheet's lease now, so
+   * that lease is gone and the run can neither write nor finish) -> `completed` with `written_count = planned_count`
+   * and `close_approval_ref` -> the audit row. The CALLER verified, under this lease, that every planned row is in its
+   * target state; `verifiedCount` must equal the row's own planned count or nothing is closed. A run that is not open is
+   * 409 STOCK_PREP_SHEET_REPAIR_RUN_NOT_OPEN; one begun under THIS lease is 409 RUN_OPEN (a run finishes itself). No
+   * sheet row is written and no claim is spent.
+   */
+  async function closeVerifiedRun(input = {}) {
+    const scope = normalizeScope(input)
+    if (typeof input.runId !== 'string' || !RUN_ID_PATTERN.test(input.runId)) throw inputInvalid('runId')
+    if (typeof input.approvalRef !== 'string' || !APPROVAL_REF_PATTERN.test(input.approvalRef)) throw inputInvalid('approvalRef')
+    if (typeof input.closeDigest !== 'string' || !PLAN_DIGEST_PATTERN.test(input.closeDigest)) throw inputInvalid('closeDigest')
+    if (!Number.isSafeInteger(input.verifiedCount) || input.verifiedCount < 1) throw inputInvalid('verifiedCount')
+    if (!Number.isSafeInteger(input.versionMoved) || input.versionMoved < 0 || input.versionMoved > input.verifiedCount) throw inputInvalid('versionMoved')
+    if (typeof input.governed !== 'boolean') throw inputInvalid('governed')
+    const lease = normalizeLease(input.lease)
+    // Both hooks are REQUIRED: a run is never closed without its holder assert or its audit row.
+    if (typeof input.holderWithin !== 'function') throw inputInvalid('holderWithin')
+    if (typeof input.auditWithin !== 'function') throw inputInvalid('auditWithin')
+    const at = nowIso()
+    try {
+      return await db.transaction(async (handle) => {
+        const trx = requireTrx(handle)
+        await runHolder(input.holderWithin, trx)
+        let row
+        try {
+          row = await trx.selectOne(SHEET_REPAIR_TABLES.run, { id: input.runId })
+        } catch (error) {
+          throw storeFailed('close_read', error)
+        }
+        if (!row || row.tenant_id !== scope.tenantId || row.sheet_id !== scope.sheetId || row.project_no !== scope.projectNo || row.status !== 'running') {
+          throw repairError(409, SHEET_REPAIR_ERROR_CODES.RUN_NOT_OPEN, 'this repair run is not open; nothing was closed', { reason: 'run_not_open', partial: false })
+        }
+        if (row.lease_id === lease.leaseId && intOrNull(row.fencing_epoch) === lease.fencingEpoch) throw runOpen()
+        const planned = intOrNull(row.planned_count)
+        if (input.verifiedCount !== planned) throw inputInvalid('verifiedCount')
+        let updated
+        try {
+          updated = rowsOf(await trx.updateRow(SHEET_REPAIR_TABLES.run, { status: 'completed', stop_reason: null, written_count: planned, finished_at: at, close_approval_ref: input.approvalRef }, { id: input.runId, status: 'running' }))
+        } catch (error) {
+          throw storeFailed('close_run', error)
+        }
+        if (updated.length !== 1) throw storeFailed('close_run', null, { reason: 'run_moved' })
+        await runAudit(input.auditWithin, trx, {
+          mode: SHEET_REPAIR_AUDIT.modes.verifiedClosed,
+          subjectId: input.runId,
+          detail: {
+            operation: 'sheet_repair_verified_close',
+            recipe: row.recipe,
+            planned,
+            verified: planned,
+            versionMoved: input.versionMoved,
+            governed: input.governed,
+            closeDigest: input.closeDigest,
+            approvalRef: input.approvalRef,
+          },
+        })
+        return Object.freeze({ runId: input.runId, status: 'completed', planned, verified: planned })
+      })
+    } catch (error) {
+      throw translate(error, 'close')
+    }
+  }
+
   return Object.freeze({
     probeReadable,
     listRunsOf,
@@ -502,6 +582,7 @@ function createStockPreparationSheetRepairStore({ db, now } = {}) {
     readClaim,
     beginRun,
     finishRun,
+    closeVerifiedRun,
   })
 }
 

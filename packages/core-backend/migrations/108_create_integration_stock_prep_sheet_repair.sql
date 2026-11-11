@@ -14,8 +14,11 @@
 --       [recordId, versionBefore, activeBefore, runIdBefore, decisionBefore, summaryBefore]
 --     — exactly the four cells a recipe writes, as they were read under the lease. A restore puts those four cells back
 --     and nothing else, so a retire followed by its restore leaves a row's stored data byte-identical (its version is
---     two higher). `status` is `completed` (every planned row written), `stopped` (a row moved, was locked or was gone;
---     a host refusal; or the run was found abandoned by a later run that took the sheet lease over) or `running`.
+--     two higher). `status` is `completed` (every planned row written — recorded by the run's own finish, or, for a
+--     run whose finish never ran, by the owner-approved continuation `verify_and_close_run` after it VERIFIED under the
+--     sheet lease that every planned row is in its target state: that close writes no sheet row and records its own
+--     approval in `close_approval_ref`, NULL for every other run), `stopped` (a row moved, was locked or was gone; a
+--     host refusal; or the run was found abandoned by a later run that took the sheet lease over) or `running`.
 --     AT MOST ONE OPEN RUN PER SHEET is the partial unique index below, not a convention.
 --   * integration_stock_prep_sheet_repair_claim — the one-shot claim: claim_key (PRIMARY KEY) =
 --     sha256 over (scheme, tenant, sheet, project, recipe, plan digest). Claiming is a plain INSERT in the run's begin
@@ -38,10 +41,10 @@
 -- counts). The library refuses, before any write, a row whose stamp cells are not of that machine shape, so no cell a
 -- person typed and no material value is ever stored here. Owner gate Q-B is not widened (design §14.2 O6-9).
 --
--- AUDIT: no vocabulary change. Run starts and finishes ride the EXISTING action `exception_resolve` with closed modes
--- (`sheet_repair_started` / `sheet_repair_completed` / `sheet_repair_stopped`), the reads the EXISTING
--- `project_board_read` (`sheet_repair_preview_read` / `sheet_fills_report_read` / `sheet_repair_runs_read`) — the D9
--- precedent (design T6-12).
+-- AUDIT: no vocabulary change. Run starts, finishes and closes ride the EXISTING action `exception_resolve` with closed
+-- modes (`sheet_repair_started` / `sheet_repair_completed` / `sheet_repair_stopped` / `sheet_repair_abandoned` /
+-- `sheet_repair_verified_closed`), the reads the EXISTING `project_board_read` (`sheet_repair_preview_read` /
+-- `sheet_fills_report_read` / `sheet_repair_runs_read`) — the D9 precedent (design T6-12).
 --
 -- DEPLOY SHAPE (design §7.4). Nothing but the repair routes reads these tables, and those routes answer 404 before
 -- any IO while MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED is not exactly 'true' (default OFF). With the switch
@@ -54,8 +57,22 @@
 -- ROLLBACK. Plugin SQL migrations are up-only; there is no down(). Roll back with the older build and RunMigrations 0;
 -- the two tables then stay, inert (no older build reads them). Before rolling back, no run may be open:
 --   SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'running';
--- must answer 0 (an open run is closed by the next repair request on that sheet, or by restoring it). Rows a retire
--- wrote stay retired on the sheet: an older build reads them as ordinary inactive rows.
+-- must answer 0. Rows a retire wrote stay retired on the sheet: an older build reads them as ordinary inactive rows.
+--
+-- HOW AN OPEN RUN IS CLOSED. A run is `running` from its begin to its own finish. A run whose finish never ran (its
+-- sheet lease was taken over, or the finish transaction failed) stays `running`; a PREVIEW never closes it and no
+-- clock does. It is closed by exactly one of:
+--   1. the BEGIN of the next repair EXECUTE on that sheet — a retire of the rows that are left, or a restore of that
+--      very run (which puts its rows back): the open run becomes `stopped / abandoned`. Decided by lease identity
+--      inside the holder-asserted transaction;
+--   2. the continuation `verify_and_close_run` (its own preview digest, its own approvalRef): `completed`, with
+--      `close_approval_ref`. This is the way out when EVERY planned row was written before the finish was lost — the
+--      component then has no further retire to begin, and a restore would undo the repair. It refuses, with counts,
+--      while any planned row is not in its target state.
+-- On a project that has become GOVERNED since the run, no recipe can begin (1 is not available) and only 2 is left. So
+-- a repair window must END — no open run — before its project is pilot-enabled. If it did not, and 2 refuses there
+-- because a governed pull has since moved a planned row, no tool path closes the run: it is then an owner-approved
+-- runbook step (nothing in this tool writes a governed project's rows or closes a run it could not verify).
 
 CREATE TABLE IF NOT EXISTS integration_stock_prep_sheet_repair_run (
   id                TEXT PRIMARY KEY,
@@ -79,6 +96,7 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_sheet_repair_run (
   started_by        TEXT NOT NULL,
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at       TIMESTAMPTZ,
+  close_approval_ref TEXT,
   CONSTRAINT integration_stock_prep_sheet_repair_run_recipe_check
     CHECK (recipe IN ('retire_superseded_root_subtree','restore_retired_rows')),
   CONSTRAINT integration_stock_prep_sheet_repair_run_status_check
@@ -100,7 +118,9 @@ CREATE TABLE IF NOT EXISTS integration_stock_prep_sheet_repair_run (
   CONSTRAINT integration_stock_prep_sheet_repair_run_written_check
     CHECK ((status = 'completed' AND written_count = planned_count)
            OR (status = 'stopped' AND (written_count IS NOT NULL OR stop_reason = 'abandoned'))
-           OR (status = 'running' AND written_count IS NULL))
+           OR (status = 'running' AND written_count IS NULL)),
+  CONSTRAINT integration_stock_prep_sheet_repair_run_close_check
+    CHECK (close_approval_ref IS NULL OR status = 'completed')
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_stock_prep_sheet_repair_run_open
   ON integration_stock_prep_sheet_repair_run (sheet_id) WHERE status = 'running';

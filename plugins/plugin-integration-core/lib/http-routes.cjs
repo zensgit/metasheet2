@@ -305,11 +305,14 @@ const ROUTES = [
   // stock-prep:admin; all three 404 after the gate, with zero IO, while the project-sheets switch or the repair switch
   // (MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED, default OFF) is off — preview and reads included.
   //   POST target/sheet-repair               `{ mode: preview | execute, recipe: retire_superseded_root_subtree |
-  //                                          restore_retired_rows, confirmProjectNo, componentHandle?, runId?,
-  //                                          planDigest?, approvalRef? }` (closed). An execute recomputes the preview
-  //                                          INSIDE the `sheet_repair` lease, requires the echoed digest, spends a
-  //                                          one-shot claim and backs every row up before the first fenced patch; it is
-  //                                          refused while the batch columns of the sheet are being installed. Every
+  //                                          restore_retired_rows | verify_and_close_run, confirmProjectNo,
+  //                                          componentHandle?, runId?, planDigest?, approvalRef? }` (closed). An execute
+  //                                          recomputes the preview INSIDE the `sheet_repair` lease, requires the echoed
+  //                                          digest, spends a one-shot claim and backs every row up before the first
+  //                                          fenced patch; it is refused while the batch columns of the sheet are being
+  //                                          installed (read from the batch ledger whatever the batch switch says).
+  //                                          `verify_and_close_run` writes NO row: it verifies that every planned row
+  //                                          of a run left open is in its target state and finishes that run. Every
   //                                          real run is owner gate ② per sheet.
   //   GET  target/sheet-repair/fills-report  which old row / copy pairs carry human fills and what the K2 carry could
   //                                          do with each — values-free, audited before the answer.
@@ -6696,7 +6699,7 @@ function requireStockPreparationAudit() {
   }
   function requireStockPreparationSheetRepairStore() {
     const store = stockPreparationSheetRepairStore
-    for (const method of ['probeReadable', 'listRunsOf', 'listRuns', 'readRun', 'readClaim', 'beginRun', 'finishRun']) {
+    for (const method of ['probeReadable', 'listRunsOf', 'listRuns', 'readRun', 'readClaim', 'beginRun', 'finishRun', 'closeVerifiedRun']) {
       if (!store || typeof store[method] !== 'function') {
         throw new HttpRouteError(501, stockPreparationSheetRepair.SHEET_REPAIR_ERROR_CODES.UNAVAILABLE, 'the sheet-repair ledger is not wired on this server; nothing was done', { field: 'store', partial: false })
       }
@@ -6802,12 +6805,33 @@ function requireStockPreparationAudit() {
       }
     }
   }
+  // 批次标识 (rebaseline B-9; coordinator ruling C-2) — THE INSTALL STATE of the sheet as the repair's gate reads it: the
+  // VALUES-FREE facts of the sheet's batch-ledger row (the library decides from them; this only reads). No row =>
+  // `{ present: false }`; else the row's history status and whether its settings lock is held. A read that fails, or
+  // answers something that is not the ledger's shape, is 503 by name — never "no row".
+  async function sheetRepairInstallFactsOf(scope) {
+    let state
+    try {
+      state = await stockPreparationPullBatchStore.readSheetState(scope)
+    } catch (error) {
+      if (error && Number.isInteger(error.status) && typeof error.code === 'string') throw error
+      throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger could not be read; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'read_sheet', partial: false })
+    }
+    if (!isPlainObject(state) || !Object.prototype.hasOwnProperty.call(state, 'sheet') || (state.sheet !== null && !isPlainObject(state.sheet))) {
+      throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger answered no sheet state; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'read_sheet_shape', partial: false })
+    }
+    if (state.sheet === null) return { present: false }
+    return { present: true, historyStatus: state.sheet.historyStatus, settingsLocked: state.sheet.settingsLockedAt !== null && state.sheet.settingsLockedAt !== undefined }
+  }
   /**
    * The repair's server-held deps, built per request. Nothing guard-bound is built eagerly: the fenced patch, the holder
-   * assert and the in-lease source read are FACTORIES the library calls inside the lease. The source read of a retire is
-   * the pull's own (B2a authorization, the source adapter, the governance consult) — for a preview without a guard, for
-   * an execute inside the `sheet_repair` lease. 批次标识 (rebaseline B-6 / B-9): the `installing` gate reads the pull-batch
-   * ledger ONLY while that switch is on; off, the dep is absent and the ledger is never read.
+   * check, the holder assert and the in-lease source read are FACTORIES the library calls inside the lease. The source
+   * read of a retire is the pull's own (B2a authorization, the source adapter, the governance consult) — for a preview
+   * without a guard, for an execute inside the `sheet_repair` lease. 批次标识 (rebaseline B-9; ruling C-2): the install
+   * gate reads the batch ledger's sheet row on EVERY preview and execute of a recipe, WHATEVER the batch switch says — a
+   * production-write tool never assumes "not installing", and migration 105 is on every build that has 108. It is the
+   * repair's ONLY statement on the batch ledger and it is a read; the fills report and the run list never make it. So
+   * with the batch switch off nothing else of the deployment changes (rebaseline B-6 stands for every other surface).
    */
   function sheetRepairDepsFor(req, ctx) {
     const { tenantId, projectNo, action, actor, tenantClaimVerified } = ctx
@@ -6818,10 +6842,9 @@ function requireStockPreparationAudit() {
     const scope = { tenantId, sheetId: target.sheetId, projectNo }
     const writeScope = sheetWriteScopeKey(target.sheetId)
     const parameters = { projectNo }
-    const pullBatchEnabled = pullBatchLanes.stockPrepPullBatchEnabled()
-    // While the batch identifier is on, the `installing` gate MUST be answerable: an unwired batch ledger refuses the
-    // request by name before the sheet, the source or the repair ledger is touched (never "not installing").
-    if (pullBatchEnabled && (!stockPreparationPullBatchStore || typeof stockPreparationPullBatchStore.readSheetState !== 'function')) {
+    // The install gate MUST be answerable, switch on or off: an unwired batch ledger refuses the request by name before
+    // the sheet, the source or the repair ledger is touched (never "not installing").
+    if (!stockPreparationPullBatchStore || typeof stockPreparationPullBatchStore.readSheetState !== 'function') {
       throw new HttpRouteError(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', 'the pull-batch ledger is not wired on this server; a sheet is not repaired without knowing whether its batch columns are being installed', { operation: 'store_unwired', partial: false })
     }
     const readRows = sheetRepairRowsReaderFor(ctx)
@@ -6830,12 +6853,7 @@ function requireStockPreparationAudit() {
       actor,
       store: requireStockPreparationSheetRepairStore(),
       physicalFieldIds: Object.fromEntries(stockPreparationSheetRepair.SHEET_REPAIR_WRITE_FIELD_IDS.map((fieldId) => [fieldId, stockPreparationPhysicalFieldIdOf(fieldId, target.fieldIdMap)])),
-      ...(pullBatchEnabled ? {
-        installStateOf: async () => {
-          const state = await stockPreparationPullBatchStore.readSheetState(scope)
-          return { installing: Boolean(state && state.sheet && state.sheet.historyStatus === 'installing') }
-        },
-      } : {}),
+      installStateOf: () => sheetRepairInstallFactsOf(scope),
       readForRetire: async ({ guard } = {}) => {
         const readRunId = b2aRunId('sheet-repair-read')
         const authorized = await assertB2aStockPreparationReadAuthorized(action, parameters, {
@@ -6876,6 +6894,14 @@ function requireStockPreparationAudit() {
       },
       assertNoLiveWriter: () => lock.assertNoLiveWriter(writeScope),
       withLease: (runId, fn) => lock.withProjectWriteLease(writeScope, { purpose: stockPreparationSheetRepair.SHEET_REPAIR_LEASE_PURPOSE, runId, tenantId }, fn),
+      // Ruling C-4: ONE holder CAS of the guard before the begin spends the one-shot claim — the guard's own pre-write
+      // check, so a guard already lost (a failed heartbeat, a lapsed lease) refuses there and the approval is not burnt.
+      assertHolder: (guard) => {
+        if (!guard || typeof guard.beforeWrite !== 'function') {
+          throw new HttpRouteError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'the sheet repair requires the sheet write fence; nothing is begun without it', { reason: 'write_fence_required' })
+        }
+        return guard.beforeWrite({ operation: 'sheetRepairBegin', decision: 'sheet_repair' })
+      },
       holderWithinFor: (guard) => (trx) => lock.assertHolderWithin(trx, guard.scopeKey, { leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch, reason: 'sheet_repair' }),
       leaseOf: (guard) => ({ leaseId: guard.hostWriteFence().leaseId, fencingEpoch: guard.fencingEpoch }),
       patchFor: (guard) => sheetRepairFencedPatchFor(target, guard),
@@ -12354,7 +12380,9 @@ function requireStockPreparationAudit() {
     // the logic is the repair library's). Every one: stock-prep:admin -> the project-sheets switch and the repair switch
     // (404, zero IO) -> its closed input (pure) -> the shared guard chain (stockPreparationSheetRepairContext). A real run
     // (`mode: execute`) is owner gate ② per sheet: the switch, the typed project, the echoed preview digest, an
-    // approvalRef and the one-shot claim; it is refused while the sheet's batch columns are being installed.
+    // approvalRef and the one-shot claim; it is refused while the sheet's batch columns are being installed (or an
+    // aborted install still holds its plan), read from the batch ledger whatever the batch switch says. The
+    // continuation `verify_and_close_run` (its own digest and approvalRef) writes no row.
     async stockPreparationProjectSheetRepair(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireStockPreparationSheetRepairEnabled()
