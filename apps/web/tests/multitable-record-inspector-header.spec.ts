@@ -1133,6 +1133,38 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(input.value).toBe('Server value')
   })
 
+  it('Escape after typing again on a committed title shows the committed title, not the record\'s (which can still lag behind the commit), and saves nothing more', async () => {
+    const { patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+    typeInto(input, 'Alpha XY')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape after a value landed while the title held typing shows that value', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+  })
+
   it('a move to another record while the title holds typing writes that record\'s title and drops the typing history: the next Cmd+Z does nothing', async () => {
     const { record, gridUndo, title, typeInto, press } = mountWithUndo()
     await flushUi()

@@ -206,6 +206,24 @@ const SCENARIOS = {
     await qty.click(); await page.keyboard.type('3'); await leave(page)
     check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_2:fld_qty=3'])
   },
+  async 'a date typed part by part while the record is redrawn (the day half-typed, then the redraw, then its last digit): the date typed is saved, and nothing empties it'(page) {
+    const due = page.locator('#drawer_field_fld_due')
+    await due.focus(); await page.keyboard.press('ArrowRight')
+    await page.keyboard.type('0')
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    await page.keyboard.type('9'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_due')), ['rec_1:fld_due=2031-01-09'])
+  },
+  async 'a negative number typed while the record is redrawn ("-", the redraw, then "3"): -3 is saved'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.press('Backspace'); await leave(page)
+    // the server took the empty box: the record comes back without a number
+    await page.evaluate(() => window.undoDemo.setField('rec_1', 'fld_qty', null)); await page.waitForTimeout(100)
+    await qty.click(); await page.keyboard.type('-')
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_1:fld_qty=null', 'rec_1:fld_qty=-3'])
+  },
   async 'a number box holding a draft it cannot read ("-"), left: nothing is saved, the stored number stays'(page) {
     const qty = page.locator('#drawer_field_fld_qty')
     await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('-')

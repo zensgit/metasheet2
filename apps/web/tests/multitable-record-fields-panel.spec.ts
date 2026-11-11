@@ -835,6 +835,116 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     expect(box.value).toBe(typed)
   })
 
+  it.each(BOXES)('%s: a move to another record writes that record\'s value, also over typing', async (_label, field, stored, typed, landing) => {
+    const { container, set } = mountBoundPanel({ fields: [field as unknown as MetaField], record: boxRecord(field, 'rec_A', stored), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#drawer_field_${field.id}`)!
+    box.focus()
+    box.value = typed
+    set({ record: boxRecord(field, 'rec_B', landing) })
+    await flushUi()
+    expect(box.value).toBe(String(landing))
+  })
+
+  // Counts what is written into the box from now on.
+  function countWrites(box: HTMLInputElement) {
+    const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!
+    let writes = 0
+    Object.defineProperty(box, 'value', {
+      configurable: true,
+      get() { return native.get!.call(this) },
+      set(next: string) { writes += 1; native.set!.call(this, next) },
+    })
+    return () => writes
+  }
+
+  it('after a commit, a redraw that brings the same value leaves the box alone (a date box commits while it is still being typed in)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    const writes = countWrites(box)
+    set({ record: textRecord('rec_A', 'n2X', 2) })
+    await flushUi()
+    expect(writes()).toBe(0)
+    // one that differs (a rollback) is written
+    set({ record: textRecord('rec_A', 'n2', 3) })
+    await flushUi()
+    expect(writes()).toBe(1)
+    expect(box.value).toBe('n2')
+  })
+
+  it('a draft the box cannot read (a half-typed date, a number box\'s "-") is typing: a value that lands, or the redraw after its own commit, does not clear it', async () => {
+    const F_DAY = { id: 'fld_day', name: 'Day', type: 'date' } as unknown as MetaField
+    const dayRecord = (day: string | null, version: number) => ({ id: 'rec_A', version, data: { fld_day: day } }) as unknown as MetaRecord
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_DAY], record: dayRecord('2031-01-02', 1), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_day')!
+    const validity = { badInput: false }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.focus()
+    // the day half-typed: the box reads "" and fires its change
+    validity.badInput = true
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch).not.toHaveBeenCalled()
+    const writes = countWrites(box)
+    set({ record: dayRecord('2031-01-02', 2) })
+    await flushUi()
+    set({ record: dayRecord('2031-03-04', 3) })
+    await flushUi()
+    expect(writes()).toBe(0)
+    // typed in full: committed
+    validity.badInput = false
+    box.value = '2031-01-09'
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_day', '2031-01-09']])
+  })
+
+  it('a date box cleared in full (not half-typed) commits the empty date', async () => {
+    const onPatch = vi.fn()
+    const F_DAY = { id: 'fld_day', name: 'Day', type: 'date' } as unknown as MetaField
+    const { container } = mountBoundPanel({ fields: [F_DAY], record: { id: 'rec_A', version: 1, data: { fld_day: '2031-01-02' } } as unknown as MetaRecord, onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_day')!
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_day', '']])
+  })
+
+  it('a value that landed while the box held typing is dropped once another value is written (typing undone, then a newer one lands)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'C', 2) })
+    await flushUi()
+    box.value = 'alpha'
+    set({ record: textRecord('rec_A', 'D', 3) })
+    await flushUi()
+    expect(box.value).toBe('D')
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('D')
+  })
+
+  it('focus that leaves with the typing still there and no commit (a window switch) keeps the typing', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'C', 2) })
+    await flushUi()
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('alphaB')
+  })
+
   it('typed, then undone, while a value landed: left with no net typing, the box shows that value', async () => {
     const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
     await flushUi()

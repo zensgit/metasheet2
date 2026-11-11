@@ -209,7 +209,7 @@
             v-field-value="[formatDateOnlyValue(controlValue(field.id)) ?? '', record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
-            @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
+            @change="onDateChange(field.id, $event)"
           />
           <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
                `change` carries the parsed UTC ISO (or null) and fires only when the instant differs. B2: a
@@ -565,6 +565,14 @@ const rejectedDrafts = ref<Record<string, unknown>>({})
 /** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") commits
  *  nothing, where "" would clear the stored number. The box shows the stored number again when it is next drawn
  *  (v-field-value: the value after a commit, or another record's). */
+/** A date box commits on every part typed (day, month, year); one still half-typed holds a draft it cannot read
+ *  (`validity.badInput`, whose value then reads "") and commits nothing, where "" would clear the stored date. */
+function onDateChange(fieldId: string, event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.validity.badInput) return
+  emitPatch(fieldId, input.value)
+}
+
 function numberControlText(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
 }
