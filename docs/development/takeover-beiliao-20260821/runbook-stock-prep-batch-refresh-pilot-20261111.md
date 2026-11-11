@@ -2,7 +2,7 @@
 
 > **用途。** 这是分批刷新第一期上客户机的现场手册（plan §7 的 G10）：先装 main 基线包，再逐表准备，最后开启第一个试点；中间任何时候都可能要做恢复，或者要回退。设计见 `design-stock-prep-batch-refresh-step6-20261027.md`（**开头的 2026-11-09 改正节优先于正文**），决策见登记册 **R-91**（第 6 步）、**R-65**（批次标识）、R-54 / R-55（试点启用）、R-56 / R-57 / R-61 / R-63 / R-77（对所有项目生效的默认值）。
 >
-> **基线。** 下文所有 `path:line` 都在 `origin/main` **0232a25f2**（#6842 合入）上亲读核过；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）。**还没合入**：S6-6 #6843（修复工具，迁移 108，仍在修正轮，行为可能变）、S6-9a #6844（G9 验收工具）、S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖这三项的地方都标了 **【待定 #6843】**、**【待定 #6844】** 或 **【待定 S6-9】**；它们合入后要回到本手册改写，改之前不按这些段落执行。
+> **基线。** 下文所有 `path:line` 都在 `origin/main` **0232a25f2**（#6842 合入）上亲读核过；发布前 main 前进到 48aaac6b4（#6857：多一个平台迁移，`migrate.ts` 只改了帮助文字；本手册引用的其他文件都没动），§1.1 的迁移清单按它重算，引用的 `migrate.ts:129-130` 未变；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）。**还没合入**：S6-6 #6843（修复工具，迁移 108，仍在修正轮，行为可能变）、S6-9a #6844（G9 验收工具）、S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖这三项的地方都标了 **【待定 #6843】**、**【待定 #6844】** 或 **【待定 S6-9】**；它们合入后要回到本手册改写，改之前不按这些段落执行。
 >
 > **owner 闸门。** 本手册里每一次装包、改 `app.env`、逐表写入（批次标识装机、残留确认、修复、启用）、读客户数据（普查）、回退，都是 owner 动作，按 §0 的表逐项先批后做。没有批复的步骤一律不做。
 >
@@ -28,12 +28,12 @@
 
 ### 1.1 这个包比 R83 多跑哪些迁移
 
-在 `onprem-r83` 与 0232a25f2 之间比对迁移文件名（`packages/core-backend/migrations/` 与 `packages/core-backend/src/db/migrations/`）：R83 有、main 没有的名字是 **0 个**；main 多出 16 个：
+在 `onprem-r83` 与 main（48aaac6b4）之间比对迁移文件名（`packages/core-backend/migrations/` 与 `packages/core-backend/src/db/migrations/`）：R83 有、main 没有的名字是 **0 个**；main 多出 17 个：
 
 迁移名 = 文件名去掉扩展名（SQL：`packages/core-backend/src/db/migration-provider.ts:243`；其余：`:169`）。
 
 - 备料 SQL 迁移 7 个：`100_create_integration_stock_prep_project_write_lock`（表写锁）、`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable`（试点列与审计词表）、`102_create_integration_stock_prep_continuation`（沿用关系）、`103_create_integration_stock_prep_refresh_state`（刷新状态、待定、执行台账）、`104_create_integration_stock_prep_change_plan`（变更计划）、`106_extend_integration_stock_prep_refresh_execution_for_recovery`（执行 intent 日志与关闭形态）、`107_create_integration_stock_prep_component_ruling`（部件裁定 / 残留确认）。`105` 两边逐字节相同，R83 已经跑过。
-- 平台 Kysely 迁移 9 个：`zzzz20261022150000_add_meta_sheets_grid_export_closure`、`zzzz20261031120000_add_users_recycle_bin`、`zzzz20261101090000_create_directory_handovers`、`zzzz20261102150000_dingtalk_login_repairs`、`zzzz20261103120000_outbound_intent_attempt_lease_target_key`、`zzzz20261104150000_create_task_source_links`、`zzzz20261106120000_create_security_action_challenges`、`zzzz20261106130000_create_directory_integration_capabilities`、`zzzz20261107010000_deprovision_effect_provider`。
+- 平台 Kysely 迁移 10 个：`zzzz20261022150000_add_meta_sheets_grid_export_closure`、`zzzz20261031120000_add_users_recycle_bin`、`zzzz20261101090000_create_directory_handovers`、`zzzz20261102150000_dingtalk_login_repairs`、`zzzz20261103120000_outbound_intent_attempt_lease_target_key`、`zzzz20261104150000_create_task_source_links`、`zzzz20261106120000_create_security_action_challenges`、`zzzz20261106130000_create_directory_integration_capabilities`、`zzzz20261107010000_deprovision_effect_provider`、`zzzz20261111093417_create_user_notification_endpoints_preferences`（#6857，2026-11-11 合入；切包提交更新时按实际再算一次）。
 - **【待定 #6843】** 迁移 `108`（修复台账与一次性占用）。切包提交里有 #6843 时才有它，到时把它加进清单。
 
 **全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。所以这次升级**绝不用 `-RunMigrations 0`**（升级脚本默认 `'1'`，`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:269`；为 `0` 时跳过迁移，`:2864-2878`）。
@@ -49,7 +49,7 @@
   ```
 
   `--list` 只读（`packages/core-backend/src/db/migrate.ts:129`）。通过：Pending 为 0、Applied 等于 R83 自带的迁移数——说明现场库只跑过 R83 自带的迁移；R83 的名字全部在 main 里（§1.1），新包的迁移器不会报「missing」。
-- 再用只读 SQL 核 §1.1 的 16 个名字**一个都还没跑**（Kysely 的默认记录表 `kysely_migration`，同 `r61-release-checklist-draft-20260928.md` 的做法；本手册所写，未在库上执行过）：
+- 再用只读 SQL 核 §1.1 的 17 个名字**一个都还没跑**（Kysely 的默认记录表 `kysely_migration`，同 `r61-release-checklist-draft-20260928.md` 的做法；本手册所写，未在库上执行过）：
 
   ```sql
   BEGIN READ ONLY;
@@ -57,7 +57,7 @@
     FROM unnest(ARRAY[
       '<§1.1 的第 1 个名字>',
       '<§1.1 的第 2 个名字>'
-      -- ……16 个逐条列出（有 #6843 时 17 个）
+      -- ……17 个逐条列出（有 #6843 时 18 个）
     ]) AS n ORDER BY n;
   ROLLBACK;
   ```
@@ -369,7 +369,7 @@ SELECT kind, count(*) FROM integration_stock_prep_component_ruling WHERE status 
 格式示例：
 
 ```
-[S6-8] 2026-11-xx 装机窗口：Pending 16 → 0；--confirm 100/101/102/103/104/106/107 全为 0；授权 14 表全真；装后计数全 0
+[S6-8] 2026-11-xx 装机窗口：Pending 17 → 0；--confirm 100/101/102/103/104/106/107 全为 0；授权 14 表全真；装后计数全 0
 [S6-8] 普查 第 1 页：序号 1 complete D1=0 D2=0；序号 2 incomplete reason=pack_unreadable；序号 3 complete D1=0 D2=1 governed=none
 [S6-8] 序号 3 就绪 v5：failing=[continuation_support_version]
 ```
