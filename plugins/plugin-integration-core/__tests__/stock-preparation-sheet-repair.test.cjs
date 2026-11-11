@@ -9,6 +9,11 @@
 //   RP-01  retire preconditions, each refused BEFORE any write with its token: governed / unknown governance, an
 //          incomplete source read, not D1, an ambiguous or unreadable old root, keyless rows, duplicate keys, no /
 //          two paired copies, an old key still in the expansion, an unaddressable row, a row that is not machine-shaped
+//   CA-01  F-11 on both sides: every row of the nested copy a retire leaves live must hold `active` as the BOOLEAN
+//          true — a copy row whose cell is 'false', 0, null, absent, 'true' or 1 refuses the retire, counted, in the
+//          preview and (409) by the recompute inside the lease
+//   MS-01  what a backup may hold: the machine-shape gate of the three RUN stamp cells — the summary is checked AS
+//          TEXT (a duplicated key, padding or an escape refuses), its list items and its keys are checked
 //   RP-02  the write: `active` is the BOOLEAN false (F-11) with the three RUN stamps; deepest row first, the root last
 //   RP-03  the backup (run row + claim, one transaction) is committed BEFORE the first patch
 //   RP-04  restore against CURRENT versions: a row whose version moved under an intact stamp IS restored at its current
@@ -509,6 +514,50 @@ test('CA-01 every row of the nested copy a retire leaves LIVE must hold `active`
   for (const text of [JSON.stringify(refused), JSON.stringify(listing), JSON.stringify(error.details)]) {
     for (const planted of [kit.PROJECT_NO, kit.OLD_ROOT, kit.PARENT, 'C-1', 'rec_copy']) assert.equal(text.includes(planted), false, `${planted} leaked`)
   }
+})
+
+// ── MS-01 (what a backup may hold; write-safety review of round 1) ───────────────────────────────────────
+
+test('MS-01 the machine-shape gate of the three RUN stamp cells — what a BACKUP may hold: a summary is checked AS TEXT (a duplicated key, padding or an escape refuses), its list items and its keys are checked; a row that fails refuses the retire, is counted and stores nothing', () => {
+  const analyzed = (patch) => refusalsOf(kit.doubledSheet({ mutate: (spec) => (spec.id === 'rec_old_2' ? { ...spec, ...patch } : spec) }))
+  const refused = (label, patch) => {
+    const component = analyzed(patch)
+    assert.deepEqual([component.eligible, component.refusals, component.counts.notMachineShaped, component.planDigest, component.backup], [false, ['row_not_machine_shaped'], 1, null, undefined], label)
+    assert.equal(JSON.stringify(component).includes('SENTINEL'), false, `${label}: the refusal is values-free`)
+  }
+  /** The row is planned, and its backup entry holds EXACTLY these cells: [activeBefore, runIdBefore, decisionBefore, summaryBefore]. */
+  const stored = (label, patch, expected) => {
+    const component = analyzed(patch)
+    assert.equal(component.eligible, true, `${label}: ${JSON.stringify(component.refusals)}`)
+    assert.deepEqual(component.backup.find((entry) => entry[0] === 'rec_old_2').slice(2), expected, label)
+  }
+  // The summary's LIST ITEMS and its KEYS are checked one by one (the reviewer's mutants Y27b and Y28 survived round 1).
+  refused('a list item with a space', { summary: '{"type":"plm_system_refresh","changedFields":["SENTINEL has space"]}' })
+  refused('a list item in CJK', { summary: '{"type":"plm_system_refresh","changedFields":["material","SENTINEL图号"]}' })
+  refused('a list item that is an object', { summary: '{"type":"plm_system_refresh","changedFields":[{"a":"SENTINEL"}]}' })
+  refused('a list item that is a list', { summary: '{"type":"plm_system_refresh","changedFields":[["SENTINEL"]]}' })
+  refused('a list item that is a boolean', { summary: '{"type":"plm_system_refresh","changedFields":[true]}' })
+  refused('a key with a space', { summary: '{"type":"x","SENTINEL key":1}' })
+  refused('a key in CJK', { summary: '{"type":"x","SENTINEL备注":1}' })
+  refused('a key that starts with a digit', { summary: '{"type":"x","1SENTINEL":1}' })
+  refused('a key with a hyphen', { summary: '{"type":"x","SENTINEL-key":1}' })
+  // The TEXT is what the backup stores, so the text itself must be exactly the serialization of the object that was
+  // checked. A duplicated key (JSON.parse keeps the LAST one), padding or an escape would ride in unchecked.
+  refused('a duplicated key whose FIRST value is free text', { summary: '{"note":"SENTINEL free text a person typed","note":"ok","type":"x"}' })
+  refused('duplicated changedFields, the first one free text', { summary: '{"type":"plm_system_refresh","changedFields":["SENTINEL free text"],"changedFields":["material"]}' })
+  refused('a duplicated type', { summary: '{"type":"SENTINEL free text","type":"missing_from_plm"}' })
+  refused('padding inside the planner\'s own shape', { summary: '{ "type" : "missing_from_plm" }' })
+  refused('a trailing newline', { summary: '{"type":"missing_from_plm"}\n' })
+  refused('an escaped value', { summary: '{"type":"x","a":"\\u0053ENTINEL"}' })
+  refused('a number that is not in its canonical form', { summary: '{"type":"x","count":1.0}' })
+  // The writers' own texts are canonical and are stored byte for byte.
+  for (const summary of ['', '{"type":"missing_from_plm"}', '{"type":"plm_system_refresh","changedFields":["componentName","ext_componentSortNo"]}', '{"type":"change_plan_update","changePlanId":"chp_1a2b","changedFields":["material"]}', kit.RETIRE_SUMMARY]) {
+    stored(`the writer's own text ${summary}`, { summary }, [true, kit.PULL_RUN_ID, 'add', summary])
+  }
+  // THE STATED LIMIT: this is a test of SHAPE, not of origin. A handle-shaped value sitting in a stamp cell passes it
+  // and IS stored with the backup (the library's header and migration 108's header say so).
+  stored('a part-id-shaped value in the run-id cell', { runId: 'S-001' }, [true, 'S-001', 'add', ''])
+  stored('a summary of an unknown type with handle-shaped values', { summary: '{"type":"note","drawing":"D100-01-03"}' }, [true, kit.PULL_RUN_ID, 'add', '{"type":"note","drawing":"D100-01-03"}'])
 })
 
 // ── RP-02 / RP-03 ────────────────────────────────────────────────────────────────────────────────────────

@@ -50,10 +50,13 @@
 // The begin, the finish and the continuation's close each run INSIDE the guard's host-write bracket (the N6 rule: the
 // lease's own heartbeat skips while the transaction holds the lock row); a guard without that bracket is refused.
 //
-// VALUES. Answers, errors, audit details and the ledger carry handles (record ids, run ids, the census's private
-// component handle), closed tokens, digests, integers and booleans — never a project number, a key, a part id, a
-// path or a cell a person typed. The fills report says WHETHER a human cell is filled and whether two cells are
-// equal, never what they hold.
+// VALUES. Answers, errors and audit details carry handles (record ids, run ids, the census's private component
+// handle), closed tokens, digests, integers and booleans — never a project number, a key, a part id, a path or a cell
+// a person typed. The fills report says WHETHER a human cell is filled and whether two cells are equal, never what
+// they hold. THE LEDGER'S BACKUP is the one place where cells are stored AS READ from the sheet: the three RUN stamp
+// cells of every planned row (a restore puts them back byte-identically), in a table no route answers. What it can
+// hold is decided by `stampCellsOf` below and is said there — it is a test of the cell's SHAPE, never a claim that no
+// person typed it.
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
@@ -433,7 +436,7 @@ function normalizeRunsQuery(query) {
   return Object.freeze({})
 }
 
-// ── the machine shape of the cells a recipe writes (the backup stays values-free by construction) ─────────────
+// ── the machine shape of the cells a recipe writes (what a backup may hold) ───────────────────────────────────
 
 function isMachineSummaryValue(value) {
   if (value === null || typeof value === 'boolean') return true
@@ -446,7 +449,12 @@ function isMachineSummaryValue(value) {
   return false
 }
 
-/** `''`, or the planner's conflict-summary JSON: an object with a token `type` whose other values are handles, numbers, booleans or flat lists of them. */
+/**
+ * `''`, or the planner's conflict-summary JSON: an object with a token `type` whose other values are handles, numbers,
+ * booleans or flat lists of them — AS CANONICAL TEXT. The backup stores the TEXT, not what `JSON.parse` made of it, so
+ * the text must be exactly the serialization of the object that was checked (the writers' own `JSON.stringify`): a
+ * duplicated key (the parser keeps the last one), padding or an escape would otherwise ride into the backup unchecked.
+ */
 function isMachineSummary(text) {
   if (text === '') return true
   if (text.length > STAMP_SUMMARY_MAX_LENGTH) return false
@@ -457,12 +465,17 @@ function isMachineSummary(text) {
     return false
   }
   if (!isPlainObject(parsed) || typeof parsed.type !== 'string' || !STAMP_TOKEN_PATTERN.test(parsed.type)) return false
-  return Object.entries(parsed).every(([key, value]) => STAMP_KEY_PATTERN.test(key) && isMachineSummaryValue(value))
+  if (!Object.entries(parsed).every(([key, value]) => STAMP_KEY_PATTERN.test(key) && isMachineSummaryValue(value))) return false
+  return JSON.stringify(parsed) === text
 }
 
 /**
  * The three RUN stamp cells of a row as a backup may hold them, or null when the row is not machine-shaped: each cell
  * must be PRESENT (a patch cannot put an absent cell back) and a string of the plugin's own shape, or an explicit null.
+ * A SHAPE test — a handle-like run id, a decision of the closed vocabulary, a canonical summary of tokens, handles,
+ * numbers and flat lists of them. It refuses free text; it does NOT prove that a writer of this plugin produced the
+ * cell: a handle-shaped value sitting in a stamp cell (a part id or a drawing number in the run-id column) passes it
+ * and is stored with the backup.
  */
 function stampCellsOf(row) {
   for (const fieldId of SHEET_REPAIR_STAMP_FIELD_IDS) {

@@ -33,13 +33,19 @@
 -- (plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs); a hermetic test reads this file and pins
 -- the two to each other (stock-preparation-sheet-repair-store.test.cjs).
 --
--- VALUES. Both tables are values-free. `project_no` is a customer value stored exactly as the project registry (087)
--- stores it. Everything else is ids, closed tokens, digests, integers and server clocks. `component_handle` is the
--- census's private component handle (a digest; design §6.4 keeps it out of public evidence). `backup` holds record-id
--- handles, integer versions, the boolean `active` cell and the three RUN stamp cells as read: a run id, a decision token
--- of the planner's closed vocabulary and the planner's own conflict-summary JSON (type tokens, field ids, ids,
--- counts). The library refuses, before any write, a row whose stamp cells are not of that machine shape, so no cell a
--- person typed and no material value is ever stored here. Owner gate Q-B is not widened (design §14.2 O6-9).
+-- VALUES. `project_no` is a customer value stored exactly as the project registry (087) stores it. `component_handle`
+-- is the census's private component handle (a digest; design §6.4 keeps it out of public evidence). Outside `backup`
+-- everything else is ids, closed tokens, digests, integers and server clocks. `backup` holds record-id handles, integer
+-- versions, the boolean `active` cell and the three RUN stamp cells AS READ from the sheet (a restore puts them back
+-- byte-identically): the run-id cell, the decision cell and the conflict-summary cell.
+--   WHAT CAN BE STORED. The library refuses, before any write, a row whose stamp cells are not of the plugin's machine
+--   SHAPE: a handle-like run id, a decision token of the planner's closed vocabulary, and a summary that is the
+--   canonical JSON text of an object of tokens, handles, numbers and flat lists of them. Free text is therefore never
+--   stored. It is a test of shape, not of origin: a handle-shaped value sitting in a stamp cell — a part id or a
+--   drawing number in the run-id column — passes it and is stored with the backup.
+--   WHERE, AND WHO READS IT. Only in `backup` of this table. No route answers it (the run list leaves it out); the
+--   ledger store reads it for a restore and for the verified close. Step-6 design §14.2 O6-9 and register R-91 speak of
+--   owner gate Q-B; whether a stamp cell stored as read falls under it is not decided by this file.
 --
 -- AUDIT: no vocabulary change. Run starts, finishes and closes ride the EXISTING action `exception_resolve` with closed
 -- modes (`sheet_repair_started` / `sheet_repair_completed` / `sheet_repair_stopped` / `sheet_repair_abandoned` /

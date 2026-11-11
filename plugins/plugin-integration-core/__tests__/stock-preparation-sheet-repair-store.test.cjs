@@ -134,6 +134,14 @@ test('ST-01 migration 108: the closed lists are the library\'s; the kit\'s CHECK
     assert.ok(sql.includes(phrase), `the header states: ${phrase}`)
   }
   assert.equal(sql.includes('closed by the next repair request on that sheet'), false, 'the header no longer says a request (a preview) closes an open run')
+  // What `backup` can hold (write-safety review of round 1): the header states it as the library's gate decides it —
+  // the stamp cells AS READ, where they are stored and who reads them — and no longer carries the absolutes.
+  for (const phrase of ['AS READ from the sheet', 'WHAT CAN BE STORED', 'WHERE, AND WHO READS IT', 'No route answers it']) {
+    assert.ok(sql.includes(phrase), `the header states: ${phrase}`)
+  }
+  for (const overclaim of ['Both tables are values-free', 'no material value is ever stored here', 'Owner gate Q-B is not widened']) {
+    assert.equal(sql.includes(overclaim), false, `the header no longer claims: ${overclaim}`)
+  }
   // The continuation's mode rides the audit list the header names; its approval column is nullable TEXT.
   assert.ok(sql.includes(`\`${R.SHEET_REPAIR_AUDIT.modes.verifiedClosed}\``))
   assert.match(code, /\n {2}close_approval_ref TEXT,\n/)
