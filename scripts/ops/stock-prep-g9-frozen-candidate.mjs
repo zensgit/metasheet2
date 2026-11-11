@@ -14,9 +14,14 @@
 //   --dispatch --sha <sha> [--tag <name>]   WRITES: create the annotated tag at <sha>, push it, dispatch plugin-tests.yml
 //                                           and stock-prep-powershell51.yml on refs/tags/<tag>. Owner/coordinator only.
 //   --collect --tag <name> [--out <dir>]    read the tag's runs (gh run list --branch <tag>); when plugin-tests.yml is
-//                                           complete, save its whole log and evaluate it as --parse-log does
-//   --parse-log <file> [--expect-sha <sha>] evaluate a saved log: every realDb id needs one `[G9] <id> ok` line, the log
-//                                           must name the sha, and no vitest FAIL line may name a G9 case
+//                                           complete, save its whole log and evaluate it as --parse-log does, expecting
+//                                           the TAG'S OWN COMMIT (`git rev-parse <tag>^{commit}`, never a run's headSha)
+//   --parse-log <file> --expect-sha <sha>   evaluate a saved log: every realDb id needs one `[G9] <id> ok` line, no vitest
+//                                           FAIL line may name a G9 case, and THE TESTED COMMIT must be <sha> (40-hex,
+//                                           mandatory for a PASS): every job checkout's `git log -1 --format=%H` answer
+//                                           (actions/checkout prints it) — at least one, all equal to <sha>. A sha merely
+//                                           MENTIONED in the log (a merge subject, a branch name) never counts: a
+//                                           pull_request run tests the merge commit, not the head it names.
 //   --old-build-drill --sha <sha>           print the U07 old-build half (design §7.5): a pre-step-6 build against a
 //                                           database migrated by the candidate and carrying the G9-U07 artifacts
 //   --self-test                             the parser against synthetic logs (green, missing id, red case, caret ANSI)
@@ -60,9 +65,27 @@ export function stripAnsi(text) {
   return String(text).replace(ANSI, '')
 }
 
+// actions/checkout prints `[command]/usr/bin/git log -1 --format=%H` and, on the next line, the commit it checked out.
+// Both saved-log forms carry a prefix: the job-log API's `<timestamp> `, `gh run view --log`'s `<job>\t<step>\t<timestamp> `.
+const TESTED_COMMAND = /\[command\]\S*git log -1 --format=%H\s*$/
+const TESTED_ANSWER = /^(?:[^\t]*\t[^\t]*\t)?(?:\d{4}-\d\d-\d\dT[0-9:.]+Z )?([0-9a-f]{40})$/
+
+/** Every job checkout's tested commit, in log order (one per `git log -1 --format=%H` the log carries; null = unreadable). */
+export function testedCommitsOf(log) {
+  const lines = stripAnsi(log).split('\n').map((line) => line.replace(/\r$/, ''))
+  const commits = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!TESTED_COMMAND.test(lines[index])) continue
+    const answer = index + 1 < lines.length ? TESTED_ANSWER.exec(lines[index + 1].trim()) : null
+    commits.push(answer ? answer[1] : null)
+  }
+  return commits
+}
+
 /**
  * Evaluate one CI log against the matrix. `ok` only when every realDb id printed exactly one ok line, no vitest FAIL
- * line names a G9 case, and (when asked) the log names the sha. Pure; values-free answer.
+ * line names a G9 case, `expectSha` is a 40-hex sha, and the log's tested commits (testedCommitsOf) are at least one
+ * and ALL equal to it. Pure; values-free answer.
  */
 export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
   const log = stripAnsi(rawLog)
@@ -76,16 +99,24 @@ export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
     if (!/\bFAIL\s+tests\//.test(line)) continue
     for (const id of matrix.realDb) if (line.includes(`> ${id} `)) failedCases.push(id)
   }
-  const shaNamed = expectSha ? log.includes(expectSha) : null
-  const ok = missing.length === 0 && duplicated.length === 0 && failedCases.length === 0 && shaNamed !== false
+  const tested = testedCommitsOf(log)
+  let shaVerdict
+  if (typeof expectSha !== 'string' || !SHA_PATTERN.test(expectSha)) shaVerdict = 'expect_sha_missing_or_not_40_hex'
+  else if (tested.length === 0) shaVerdict = 'no_tested_commit_in_log'
+  else if (tested.some((commit) => commit !== expectSha)) shaVerdict = 'tested_commit_differs'
+  else shaVerdict = 'tested_commit_matches'
+  const ok = missing.length === 0 && duplicated.length === 0 && failedCases.length === 0 && shaVerdict === 'tested_commit_matches'
   return {
     ok,
+    expectSha: typeof expectSha === 'string' ? expectSha : null,
+    shaVerdict,
+    testedCommits: [...new Set(tested.map((commit) => commit || 'unreadable'))],
+    checkouts: tested.length,
     passed: matrix.realDb.filter((id) => seen.get(id) === 1),
     missing,
     duplicated,
     unknown,
     failedCases: [...new Set(failedCases)],
-    shaNamed,
     pending: matrix.pending.map((entry) => `${entry.id} (${entry.owner})`),
     manual: matrix.manual.map((entry) => entry.id),
   }
@@ -107,6 +138,7 @@ function planCommands(sha, tag) {
 
 function printVerdict(verdict) {
   console.log(JSON.stringify(verdict, null, 2))
+  console.log(`tested commit(s): ${verdict.testedCommits.join(', ') || 'none found'} (expected ${verdict.expectSha || 'none given'}: ${verdict.shaVerdict})`)
   console.log(verdict.ok
     ? 'G9 real-DB half: PASS on this log. Still required: the PR-only contexts from the S6-9 PR at the same sha, the pending ids above and the manual items.'
     : 'G9 real-DB half: NOT PASSED on this log.')
@@ -115,14 +147,36 @@ function printVerdict(verdict) {
 function selfTest() {
   const matrix = { realDb: ['S3A-02', 'G9-U08'], pending: [{ id: 'G9-S65-V5', owner: 'S6-5' }], manual: [{ id: 'U09' }] }
   const sha = 'a'.repeat(40)
-  const green = `checkout ${sha}\n[G9] S3A-02 ok {}\n[G9] G9-U08 ok {"a":1}\n Tests 2 passed`
-  const caret = `checkout ${sha}\n^[[32m[G9] S3A-02 ok {}^[[39m\n[G9] G9-U08 ok {}\n^[[31m FAIL  tests/integration/x.test.ts > a > G9-U08 (U08) the run^[[39m`
+  const base = 'b'.repeat(40)
+  const merge = 'c'.repeat(40)
+  const stamp = '2026-11-10T05:32:45.8992399Z'
+  // The job-log API form, and the `gh run view --log` form (job / step / timestamp, CRLF) of one checkout.
+  const checkout = (commit) => `${stamp} [command]/usr/bin/git log -1 --format=%H\n${stamp} ${commit}\n`
+  const ghCheckout = (job, commit) => `${job}\tCheckout repository\t${stamp} [command]/usr/bin/git log -1 --format=%H\r\n${job}\tCheckout repository\t${stamp} ${commit}\r\n`
+  const cases = '[G9] S3A-02 ok {}\n[G9] G9-U08 ok {"a":1}\n Tests 2 passed'
+  const green = `${checkout(sha)}${cases}`
+  // A pull_request run: the checkout tested the MERGE commit; the head and the base appear only in its subject.
+  const prRun = `${stamp} HEAD is now at ${merge.slice(0, 7)} Merge ${sha} into ${base}\n${checkout(merge)}${cases}`
+  const caret = `${checkout(sha)}^[[32m[G9] S3A-02 ok {}^[[39m\n[G9] G9-U08 ok {}\n^[[31m FAIL  tests/integration/x.test.ts > a > G9-U08 (U08) the run^[[39m`
+  const twoJobs = `${ghCheckout('db (20.x)', sha)}${ghCheckout('unit (20.x)', sha)}${cases}`
+  const mixedJobs = `${ghCheckout('db (20.x)', sha)}${ghCheckout('unit (20.x)', merge)}${cases}`
+  const unreadable = `${stamp} [command]/usr/bin/git log -1 --format=%H\n${stamp} not-a-sha\n${cases}`
+  const verdictOf = (log, expectSha) => evaluateLog(log, matrix, { expectSha })
   const checks = [
-    ['green', evaluateLog(green, matrix, { expectSha: sha }).ok === true],
-    ['missing id', evaluateLog(`checkout ${sha}\n[G9] S3A-02 ok {}`, matrix, { expectSha: sha }).missing.join() === 'G9-U08'],
-    ['duplicate id', evaluateLog(`${green}\n[G9] S3A-02 ok {}`, matrix).duplicated.join() === 'S3A-02'],
-    ['red case through caret ANSI', evaluateLog(caret, matrix).failedCases.join() === 'G9-U08' && evaluateLog(caret, matrix).ok === false],
-    ['wrong sha', evaluateLog(green, matrix, { expectSha: 'b'.repeat(40) }).ok === false],
+    ['green (the tested commit is the expected one)', verdictOf(green, sha).ok === true && verdictOf(green, sha).testedCommits.join() === sha],
+    ['missing id', verdictOf(`${checkout(sha)}[G9] S3A-02 ok {}`, sha).missing.join() === 'G9-U08'],
+    ['duplicate id', verdictOf(`${green}\n[G9] S3A-02 ok {}`, sha).duplicated.join() === 'S3A-02'],
+    ['red case through caret ANSI', verdictOf(caret, sha).failedCases.join() === 'G9-U08' && verdictOf(caret, sha).ok === false],
+    ['wrong sha', verdictOf(green, base).ok === false && verdictOf(green, base).shaVerdict === 'tested_commit_differs'],
+    ['no --expect-sha is never a pass', verdictOf(green, null).ok === false && verdictOf(green, null).shaVerdict === 'expect_sha_missing_or_not_40_hex'],
+    ['short sha refused', verdictOf(green, sha.slice(0, 12)).ok === false && verdictOf(green, 'a').ok === false],
+    ['head named only in a merge subject', verdictOf(prRun, sha).ok === false && verdictOf(prRun, sha).testedCommits.join() === merge],
+    ['base named only in a merge subject', verdictOf(prRun, base).ok === false],
+    ['the merge commit the run did test', verdictOf(prRun, merge).ok === true],
+    ['sha named, no checkout line', verdictOf(`sha ${sha}\n${cases}`, sha).shaVerdict === 'no_tested_commit_in_log' && verdictOf(`sha ${sha}\n${cases}`, sha).ok === false],
+    ['gh run view form, every job tested it', verdictOf(twoJobs, sha).ok === true && verdictOf(twoJobs, sha).checkouts === 2],
+    ['one job tested another commit', verdictOf(mixedJobs, sha).ok === false],
+    ['checkout answer unreadable', verdictOf(unreadable, sha).ok === false && verdictOf(unreadable, sha).testedCommits.join() === 'unreadable'],
   ]
   for (const [name, passed] of checks) console.log(`${passed ? 'ok' : 'NOT OK'} ${name}`)
   return checks.every(([, passed]) => passed)
@@ -138,7 +192,9 @@ export function main(argv = process.argv.slice(2)) {
   const matrix = loadMatrix()
   const sha = argValue(argv, '--sha')
   if (argv.includes('--parse-log')) {
-    const verdict = evaluateLog(readFileSync(argValue(argv, '--parse-log'), 'utf8'), matrix, { expectSha: argValue(argv, '--expect-sha') })
+    const expectSha = argValue(argv, '--expect-sha')
+    if (!expectSha || !SHA_PATTERN.test(expectSha)) throw new Error('--parse-log needs --expect-sha <40-hex>: the commit the log must have TESTED')
+    const verdict = evaluateLog(readFileSync(argValue(argv, '--parse-log'), 'utf8'), matrix, { expectSha })
     printVerdict(verdict)
     return verdict.ok ? 0 : 1
   }
@@ -163,6 +219,10 @@ export function main(argv = process.argv.slice(2)) {
   if (argv.includes('--collect')) {
     const tag = argValue(argv, '--tag')
     if (!tag) throw new Error('--collect needs --tag <name>')
+    // The TAG's commit is the one the dispatch must have tested; a run's own headSha is not evidence of that.
+    const resolved = run('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}^{commit}`], { allowFail: true })
+    const tagSha = resolved.status === 0 ? resolved.stdout.trim() : ''
+    if (!SHA_PATTERN.test(tagSha)) throw new Error(`--collect: refs/tags/${tag} does not resolve to a commit here (fetch the tag first)`)
     const runs = WORKFLOWS.map((workflow) => {
       const listed = JSON.parse(run('gh', ['run', 'list', '--workflow', workflow, '--branch', tag, '--limit', '1', '--json', 'databaseId,status,conclusion,headSha']).stdout || '[]')
       return { workflow, run: listed[0] || null }
@@ -177,9 +237,9 @@ export function main(argv = process.argv.slice(2)) {
     mkdirSync(out, { recursive: true })
     const file = join(out, `plugin-tests-${plugin.databaseId}.log`)
     writeFileSync(file, run('gh', ['run', 'view', String(plugin.databaseId), '--log']).stdout)
-    const verdict = evaluateLog(readFileSync(file, 'utf8'), matrix, { expectSha: plugin.headSha })
+    const verdict = evaluateLog(readFileSync(file, 'utf8'), matrix, { expectSha: tagSha })
     verdict.workflows = runs.map((entry) => ({ workflow: entry.workflow, conclusion: entry.run ? entry.run.conclusion : null, sha: entry.run ? entry.run.headSha : null }))
-    verdict.ok = verdict.ok && runs.every((entry) => entry.run && entry.run.conclusion === 'success' && entry.run.headSha === plugin.headSha)
+    verdict.ok = verdict.ok && runs.every((entry) => entry.run && entry.run.conclusion === 'success' && entry.run.headSha === tagSha)
     printVerdict(verdict)
     return verdict.ok ? 0 : 1
   }
