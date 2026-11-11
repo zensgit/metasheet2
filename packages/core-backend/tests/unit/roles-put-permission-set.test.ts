@@ -874,23 +874,26 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
     expect(db.permissionsOf('admin')).toEqual(['*:*', 'admin:users', 'roles:read'])
   })
 
-  it('PROTECTED ROLE: DELETE of the platform-admin role is refused for a non-admin and allowed for an admin', async () => {
+  it('PROTECTED ROLE: DELETE of the platform-admin role is refused before any role write', async () => {
     const db = seed()
     wire(db)
     const refused = mockResponse()
 
     await deleteRole(refused, 'admin')
 
-    expect(refused.statusCode).toBe(403)
-    expect((refused.body as { error: { code: string } }).error.code).toBe('PROTECTED_ROLE_FORBIDDEN')
+    expect(refused.statusCode).toBe(409)
+    expect((refused.body as { error: { code: string } }).error.code).toBe('RESERVED_ADMIN_ROLE_DELETE_FORBIDDEN')
     expect(db.nameOf('admin')).toBe('platform admin')
+    expect(db.statements.some((statement) => /DELETE FROM (roles|user_roles|role_permissions)/i.test(statement.sql))).toBe(false)
     expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(['delete_denied'])
 
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     const allowed = mockResponse()
     await deleteRole(allowed, 'admin')
-    expect(allowed.statusCode).toBe(200)
-    expect(db.nameOf('admin')).toBeUndefined()
+    expect(allowed.statusCode).toBe(409)
+    expect((allowed.body as { error: { code: string } }).error.code).toBe('RESERVED_ADMIN_ROLE_DELETE_FORBIDDEN')
+    expect(db.nameOf('admin')).toBe('platform admin')
+    expect(db.statements.some((statement) => /DELETE FROM (roles|user_roles|role_permissions)/i.test(statement.sql))).toBe(false)
   })
 
   it('DELETE of an ordinary role is untouched by the protection', async () => {
@@ -1561,17 +1564,22 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
   })
 
-  it('the seeded platform-admin role is NOT emptied of members by its own delete (a lock-out is a separate decision)', async () => {
+  it('the seeded platform-admin role cannot be deleted, with or without a role_id cascade', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    const db = seedAdminRoles({ cascade: false })
-    wire(db)
-    const res = mockResponse()
+    for (const cascade of [false, true]) {
+      const db = seedAdminRoles({ cascade })
+      wire(db)
+      const res = mockResponse()
 
-    await deleteRole(res, 'admin')
+      await deleteRole(res, 'admin')
 
-    expect(res.statusCode).toBe(200)
-    expect(db.membersOf('admin')).toEqual(['owner-9'])
-    expect(membershipWrites(db)).toEqual([])
+      expect(res.statusCode).toBe(409)
+      expect((res.body as { error: { code: string } }).error.code).toBe('RESERVED_ADMIN_ROLE_DELETE_FORBIDDEN')
+      expect(db.nameOf('admin')).toBeTruthy()
+      expect(db.membersOf('admin')).toEqual(['owner-9'])
+      expect(membershipWrites(db)).toEqual([])
+      expect(db.statements.some((statement) => /DELETE FROM roles/i.test(statement.sql))).toBe(false)
+    }
   })
 
   it('POSITIVE CONTROL — an ordinary role is still deleted by any roles:write holder, with no membership statement', async () => {

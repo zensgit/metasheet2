@@ -88,6 +88,7 @@ const { makeStrictRecordsApi, physicalFieldId, physicalRow } = require(path.join
 const { createInMemoryProjectWriteLock } = require('./support/stock-preparation-project-write-lock-kit.cjs')
 const { withRefreshGovernance } = require('./support/stock-preparation-refresh-governance-wiring.cjs')
 const refreshKit = require('./support/stock-preparation-refresh-store-kit.cjs')
+const { emptyIntentFor } = refreshKit
 const CF = require('./support/stock-preparation-continuation-fixtures.cjs')
 const { sheetWriteScopeKey: handoffScopeKeyOf } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
 const projectSheet = require('./support/stock-preparation-project-sheet-harness.cjs')
@@ -905,16 +906,20 @@ async function main() {
 
   // ── XR-06 ──────────────────────────────────────────────────────────────────────────────────────
   await run('XR-06 the interleavings through the route: (a) a lease after G0 => C1 executing; (b) a lease taken and released during R => G1 epoch moved; (c) a bump during R => G1 token moved; (d) a lease live at G1; (e) THE REVIEWER\'S zero-write FAILED execution inside C2\'s snapshot-to-lock-read gap => C2 derives complete, the digest matches, G1\'s epoch refuses; (f) the same failure before G0 => C1 failed_pending_recovery; (g) a zero-write SELF-SETTLED success before G0 => 200', async () => {
-    async function zeroWriteRun(h, { status, settle = false }) {
+    // Step 6a-1 (S6-1; R-91): a failed run with zero writes AND zero attempts now SELF-VERIFIES (transparent), so the
+    // interleaving legs below seed a zero-write failed run that ATTEMPTED one host call (unprovable: it stays failed);
+    // leg (h) pins the 0/0 self-verified one.
+    async function zeroWriteRun(h, { status, settle = false, attemptedWrites = status === 'succeeded' ? 0 : 1 }) {
       const grant = await h.rawLock.acquire(h.scopeKey, { purpose: 'small_apply', runId: `run_xg_${status}`, tenantId: GOV_TENANT })
       const gen = await h.rawLock.readGeneration(h.scopeKey)
       const begun = await h.env.store.beginExecution({
         ...GOV_SCOPE, lane: 'small_apply',
         guard: { leaseRunId: `run_xg_${status}`, leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
         tokenRevision: 'rev_xg', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: 'u_xg_puller',
+        intent: emptyIntentFor('e'.repeat(64)),
       })
       await h.env.store.finishExecution({
-        ...GOV_SCOPE, executionId: begun.id, status, written: 0, attemptedWrites: 0,
+        ...GOV_SCOPE, executionId: begun.id, status, written: 0, attemptedWrites,
         ...(settle ? { settlement: { generationToken: gen.generationToken, sourceContentDigest: 'c'.repeat(64), sheetMachineDigest: await h.currentDigest() } } : {}),
       })
       await h.rawLock.createGuard(grant).release()
@@ -1004,6 +1009,18 @@ async function main() {
     {
       const h = await settledStack()
       await zeroWriteRun(h, { status: 'succeeded', settle: true })
+      const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+      assert.equal(h.auditAppends[0].detail.refreshState, 'complete')
+    }
+    // (h) step 6a-1 (S6-1, design §3.3 / §3.4): a failed run that wrote AND attempted NOTHING (both integers 0) closes
+    //     itself verified_closed / nothing_landed / self_verified, TRANSPARENT (bound to no change plan): the project is
+    //     exactly as before the attempt — complete, the earlier settlement still names its subject — so the export is 200.
+    {
+      const h = await settledStack()
+      await zeroWriteRun(h, { status: 'failed', attemptedWrites: 0 })
+      const closed = (await h.env.rows('execution')).find((row) => row.status === 'verified_closed')
+      assert.deepEqual([closed.closed_mode, closed.verified_result, closed.settlement_subject], ['self_verified', 'nothing_landed', false])
       const res = await h.exportAs(GOV_OPERATOR, GOV_PROJECT)
       assert.equal(res.statusCode, 200, JSON.stringify(res.body))
       assert.equal(h.auditAppends[0].detail.refreshState, 'complete')
@@ -1217,6 +1234,7 @@ async function main() {
       plannedCounts: { add: 0, update: 2, inactive: 0 },
       refreshBinding: { continuations: [], changePlanId: confirmed.changePlanId, holdSetFingerprint: null },
       startedBy: 'u_xg_puller',
+      intent: emptyIntentFor('plan_xr11'),
     })
     const plan = storeModule.__internals.rowToChangePlan(h.env.rows('changePlan').find((row) => row.id === confirmed.changePlanId))
     for (const record of plan.recordSet) {
@@ -1376,8 +1394,11 @@ async function main() {
           ...H_SCOPE, lane: 'small_apply',
           guard: { leaseRunId: 'run_xh5', leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, generation: gen.generation, generationToken: gen.generationToken },
           tokenRevision: 'rev_xh5', planDigest: 'e'.repeat(64), plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: 'u_xh5',
+          intent: emptyIntentFor('e'.repeat(64)),
         })
-        await h.env.store.finishExecution({ ...H_SCOPE, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 0 })
+        // Step 6a-1 (S6-1; R-91), as in XR-06: a failed run with zero writes AND zero attempts self-verifies (transparent),
+        // so the gap's run wrote nothing but ATTEMPTED one host call — unprovable, it stays failed (failed_pending_recovery).
+        await h.env.store.finishExecution({ ...H_SCOPE, executionId: begun.id, status: 'failed', written: 0, attemptedWrites: 1 })
         await h.lock.createGuard(grant).release()
       },
     })
