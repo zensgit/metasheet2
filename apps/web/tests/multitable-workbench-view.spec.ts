@@ -745,6 +745,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           }),
           // A control only rec_1 shows (a field hidden on another record), and the drawer's open tab.
           this.record?.id === 'rec_1' ? h('input', { 'data-rec1-only': 'true' }) : null,
+          // An editable surface, as the rich text editor's (jsdom has no isContentEditable: the cell sets it).
+          h('div', { 'data-stub-editable': 'true', contenteditable: 'true', tabindex: 0 }, 'two words'),
           h('div', { role: 'tabpanel', tabindex: 0, 'data-stub-tabpanel': 'true' }),
         ]),
         h(
@@ -5600,6 +5602,21 @@ describe('MultitableWorkbench view wiring', () => {
       other.focus()
       await flushUi()
       expect(document.activeElement).toBe(other)
+    })
+
+    it('a rich text editor gets the focus back with the caret at the end of its text', async () => {
+      await openRec1()
+      const editor = container!.querySelector<HTMLElement>('[data-stub-editable]')!
+      Object.defineProperty(editor, 'isContentEditable', { value: true, configurable: true })
+      editor.focus()
+      document.getSelection()!.collapse(editor, 0)
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(editor)
+      const selection = document.getSelection()!
+      expect(selection.isCollapsed).toBe(true)
+      expect(selection.anchorNode).toBe(editor)
+      expect(selection.anchorOffset).toBe(editor.childNodes.length)
     })
 
     it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
