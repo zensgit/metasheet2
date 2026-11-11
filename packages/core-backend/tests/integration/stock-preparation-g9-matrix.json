@@ -1,0 +1,71 @@
+{
+  "comment": "Batch-refresh step 6 S6-9a (register R-91; 批次标识 R-65): the G9 frozen-candidate acceptance matrix of the step-6 design section 9.5. ONE list read by the real-DB cases module (stock-preparation-g9-acceptance-realdb.cases.ts: every realDb id must have exactly one registered case) and by the runner (scripts/ops/stock-prep-g9-frozen-candidate.mjs: every realDb id must print one '[G9] <id> ok' line in the CI log of the frozen sha). Values-free: ids and words only.",
+  "version": 1,
+  "registerRows": ["R-91", "R-65"],
+  "describe": "G9 frozen-candidate acceptance",
+  "hostFile": "stock-preparation-p4-repair-once-realdb.test.ts",
+  "realDb": [
+    "S3A-02",
+    "S3A-03",
+    "S3A-04",
+    "S3A-05",
+    "S3A-09",
+    "S3A-10",
+    "S3A-14",
+    "S3A-15",
+    "S3A-16",
+    "S3A-20",
+    "S3A-21",
+    "S3A-24",
+    "S3A-25",
+    "S3A-26",
+    "G9-U08",
+    "G9-U03",
+    "G9-S9X-01",
+    "G9-U07",
+    "G9-PE",
+    "G9-S65-V5",
+    "G9-S65-U03"
+  ],
+  "pending": [
+    { "id": "G9-S66-U03", "owner": "S6-6", "what": "U03: the repair routes (preview / retire / restore) join the drilled capability set" },
+    { "id": "G9-S66-U07", "owner": "S6-6", "what": "U07: a repair run left running makes its stop-condition query non-zero; the drill refuses the rollback while it is" },
+    { "id": "G9-S66-INSTALLING", "owner": "S6-6", "what": "B-9: a repair is refused while the sheet's pull-batch row is installing" }
+  ],
+  "u03InertForeignSteps": {
+    "steps": [
+      "pull.dry-run-job-start",
+      "pull.dry-run-job-get",
+      "pull.large-bom-expansion-start",
+      "pull.large-bom-expansion-get",
+      "pull.large-bom-expansion-run",
+      "pull.large-bom-expansion-plan",
+      "pull.large-bom-apply-start",
+      "pull.large-bom-apply-get",
+      "pull.large-bom-apply-run",
+      "pull.large-bom-expansion-cancel"
+    ],
+    "reason": "G9-U03 drills these pull steps' tiers like every route (below the pull tier 403 with nothing written and no audit row; at or above it admitted), but sends the tenantless and cross-tenant callers only INERT requests (an empty body, made-up job ids): the S3A real stack configures no large lane, so no real expansion / apply job id of this tenant exists to address, and a valid start from a foreign caller would leave background work running past the case. Their tenant derivation is the dry-run's own (resolveOperatorValueScope), which the drill does reach on pull.dry-run, pull.apply and pull.reconcile with valid bodies."
+  },
+  "u03BodyValidationStops": {
+    "codePattern": "^400:[A-Z0-9_]*(?:REQUEST_INVALID|CONFIG_INVALID|PARAMETERS_INVALID|BODY_INVALID|CONFIRM_MISMATCH)$",
+    "reason": "G9-U03 refuses any NON-INERT foreign call (the real id, the bogus id and every steering carrier) that stops at body validation instead of reaching the tenant gate or the scoped read, unless it is listed here. The list is EXACT both ways: an unlisted stop and a listed stop that no longer happens both turn G9-U03 red. Every entry is the BODY carrier: the route reads a CLOSED body (an unknown key, here tenantId, is refused before any IO), so that carrier cannot reach the gate on that route by construction; the query and params carriers of the same route do reach it and are refused there.",
+    "entries": [
+      { "route": "projectTarget.pilotEnable", "leg": "steer-body", "callers": ["tenantless", "crossAdmin"], "why": "the pilot-enable body is closed ({ confirmProjectNo })" },
+      { "route": "pullBatch.settingsSet", "leg": "steer-body", "callers": ["tenantless", "crossAdmin"], "why": "the tenant pull-batch settings body is closed ({ expectedVersion, <settings> })" },
+      { "route": "projectTarget.pullBatchSettingsSet", "leg": "steer-body", "callers": ["tenantless", "crossAdmin"], "why": "the per-sheet pull-batch settings body is closed ({ confirmProjectNo, expectedVersion, <settings> })" },
+      { "route": "projectTarget.pullBatchInstall", "leg": "steer-body", "callers": ["tenantless", "crossAdmin"], "why": "the pull-batch install body is closed ({ confirmProjectNo, mode })" },
+      { "route": "pull.dry-run", "leg": "steer-body", "callers": ["tenantless"], "why": "the table-action body is closed; the tenantless admin passes the legacy access branch and stops at that parse (a tenant-holding caller is refused at the operator scope first)" },
+      { "route": "pull.apply", "leg": "steer-body", "callers": ["tenantless"], "why": "as pull.dry-run" },
+      { "route": "pull.reconcile", "leg": "steer-body", "callers": ["tenantless"], "why": "as pull.dry-run" }
+    ]
+  },
+  "manual": [
+    { "id": "U07-OLD-BUILD", "what": "the section 7.5 drill proper: a pre-step-6 build (the parent of migration 106's first commit) against a database migrated by the candidate and carrying the G9-U07 artifacts; preview / apply / export refused where the stop queries say so; no ADD or INACTIVE written (runner: --old-build-drill prints the commands)" },
+    { "id": "U09", "what": "the pilot pages in a real browser on a deployment built from the frozen sha" },
+    { "id": "MUTANTS", "what": "the plan section 9 mutant list (step-4 section 19, step-6 section 11, BI section 11.4), each turning its named case red on a scratch copy, restored byte-identical" },
+    { "id": "PE-DEPLOY", "what": "the positive pilot-enable leg on a real deployment built from the frozen sha, values-free evidence" },
+    { "id": "PR-ONLY-CONTEXTS", "what": "the required contexts that run only on pull requests come from the S6-9 PR at the same sha, not from the tag dispatch" },
+    { "id": "G9-U03-LEGACY-TENANTLESS-ADMIN", "ownerGated": true, "what": "tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — owner ruling pending", "where": "PRE-EXISTING product behaviour, not changed by S6-9a: plugins/plugin-integration-core/lib/http-routes.cjs requireTableActionAccess (the legacy integration:* branch, :1526-1553) returns before the operator scope, so a tenantless integration:admin naming a tenant (query or params tenantId) previews AND applies into that tenant's governed stock-prep sheet; assertVerifiedTenantClaim (:1754) closes it only when MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED is exactly 'true' (default off). G9-U03 PINS the measured outcome under this id (flag off: dry-run 200 with a minted token, apply 200 written 1; flag on: 403 OPERATOR_SCOPE_TENANT_REQUIRED on every carrier, nothing written) — pinned, never certified: no G9 PASS covers it." }
+  ]
+}
