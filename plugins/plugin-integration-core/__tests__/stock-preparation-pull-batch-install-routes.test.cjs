@@ -265,6 +265,7 @@ test('IR-RL-WALL (R line) a registry row naming a foreign sheet: dry_run and ins
       assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH', body.mode)
       assert.deepEqual(h.records.calls, [], `${body.mode}: no records read`)
       assert.equal(h.db.log.length, 0, `${body.mode}: no ledger statement`)
+      assert.deepEqual(h.auditAppends, [], `${body.mode}: no plain (out-of-transaction) audit append either`)
       assert.equal(h.provisioning.calls.some(([name]) => /runObjectFieldsRepairTransaction|ensureView|promoteObjectViewToFirst|patchObjectFieldProperty/.test(name)), false, `${body.mode}: no host write`)
       assert.equal(JSON.stringify(res.body).includes('sheet_planted_elsewhere'), false)
     }

@@ -343,6 +343,7 @@ test('SR-03 (R line, N13) the status read is walled to the tenant: a registry ro
       assert.equal(res.statusCode, 409, JSON.stringify(res.body))
       assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH')
       assert.deepEqual(h.records.calls, [], 'no records read of a foreign sheet')
+      assert.deepEqual(h.auditAppends, [], 'no audit append (plain or in-transaction)')
       assert.equal(JSON.stringify(res.body).includes('sheet_planted_elsewhere'), false, 'the foreign sheet id is never echoed')
     } finally { h.restore() }
   }
