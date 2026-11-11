@@ -1564,6 +1564,8 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # substring check in BOTH directions finds no token that contains it or is contained by it (its neighbours diverge
 # right after `StockPreparationP` / `StockPreparation`). The manifest was regenerated with the same command.
 exec npx vitest run \
+  adminAccess.spec.ts \
+  adminAuthorizationConfirm.spec.ts \
   adminPageContentSearch.spec.ts \
   adminUserBatch \
   amountAutoSum \
@@ -1735,6 +1737,7 @@ exec npx vitest run \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \
+  guardPolicy.managementScope.spec.ts \
   integrationErrorCodeLabels \
   IntegrationK3WiseSetupView \
   IntegrationPipelineRunSection \
@@ -1977,13 +1980,17 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionChecker.spec.ts \
+  permissionExceptionSources.spec.ts \
   permissionManagementView \
   personal-view-client \
+  platform-shell-nav.spec.ts \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMemberAuthorization.spec.ts \
   roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \

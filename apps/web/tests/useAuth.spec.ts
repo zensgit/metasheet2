@@ -366,13 +366,52 @@ describe('useAuth', () => {
     store.user_permissions = JSON.stringify(['permissions:write'])
     store.user_roles = JSON.stringify(['admin'])
 
-    const { getAccessSnapshot, hasAdminAccess } = useAuth()
+    const { getAccessSnapshot, hasAdminAccess, hasPermission } = useAuth()
     const snapshot = getAccessSnapshot()
 
     expect(snapshot.email).toBe('admin@example.com')
     expect(snapshot.roles).toContain('admin')
     expect(snapshot.permissions).toContain('permissions:write')
-    expect(hasAdminAccess()).toBe(true)
+    expect(snapshot.isAdmin).toBe(true)
+    expect(hasPermission('roles:read')).toBe(true)
+    expect(hasAdminAccess()).toBe(false)
+  })
+
+  it('does not promote ordinary write codes to platform admin', () => {
+    const { getAccessSnapshot, hasAdminAccess, hasPermission } = useAuth()
+
+    store.user_permissions = JSON.stringify(['users:write'])
+    expect(getAccessSnapshot().isAdmin).toBe(false)
+    expect(hasAdminAccess()).toBe(false)
+    expect(hasPermission('users:read')).toBe(true)
+    expect(hasPermission('users:write')).toBe(true)
+    expect(hasPermission('roles:read')).toBe(false)
+
+    store.user_permissions = JSON.stringify(['roles:write'])
+    expect(hasAdminAccess()).toBe(false)
+    expect(hasPermission('roles:read')).toBe(true)
+    expect(hasPermission('attendance:read')).toBe(false)
+
+    store.user_permissions = JSON.stringify(['permissions:write'])
+    expect(hasAdminAccess()).toBe(false)
+    expect(hasPermission('permissions:read')).toBe(true)
+
+    store.user_roles = JSON.stringify(['admin'])
+    store.user_permissions = JSON.stringify(['*:*'])
+    expect(getAccessSnapshot().isAdmin).toBe(true)
+    expect(hasPermission('attendance:read')).toBe(true)
+    expect(hasAdminAccess()).toBe(false)
+
+    store.user_roles = JSON.stringify([])
+    store.user_permissions = JSON.stringify(['*:*'])
+    expect(getAccessSnapshot().isAdmin).toBe(true)
+    expect(hasPermission('roles:read')).toBe(true)
+    expect(hasAdminAccess()).toBe(false)
+
+    store.user_permissions = JSON.stringify(['admin:all'])
+    expect(getAccessSnapshot().isAdmin).toBe(true)
+    expect(hasPermission('stock-prep:read')).toBe(true)
+    expect(hasAdminAccess()).toBe(false)
   })
 
   it('matches integration permissions with backend-compatible hierarchy', () => {

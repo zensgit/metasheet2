@@ -322,6 +322,31 @@
           <span>创建后立即启用</span>
         </label>
       </div>
+      <fieldset v-if="namespaceAdmissionCapability === 'ready'" class="user-admin__create-grid" data-testid="create-admission-namespaces">
+        <legend>插件使用（默认都不开通）</legend>
+        <p v-for="note in createAdmissionOffer.notes" :key="note" class="user-admin__hint" data-testid="create-admission-unknown">{{ note }}</p>
+        <p v-if="createAdmissionOffer.namespaces.length === 0 && createAdmissionOffer.notes.length === 0" class="user-admin__hint">没有可勾选的插件使用。</p>
+        <label v-for="namespace in createAdmissionOffer.namespaces" :key="namespace" class="user-admin__toggle">
+          <input
+            type="checkbox"
+            :checked="createAdmissionNamespaces.includes(namespace)"
+            @change="toggleCreateAdmission(namespace, $event)"
+          />
+          <span>{{ namespace }}</span>
+        </label>
+      </fieldset>
+      <p v-else-if="namespaceAdmissionCapability === 'unavailable'" class="user-admin__hint" data-testid="namespace-admission-capability">
+        {{ EXPLICIT_ADMISSION_CREATE_UNAVAILABLE }}
+      </p>
+      <button
+        v-if="namespaceAdmissionCapability === 'unavailable'"
+        class="user-admin__button user-admin__button--secondary"
+        type="button"
+        data-testid="retry-access-presets"
+        @click="void loadAccessPresets()"
+      >
+        重试加载
+      </button>
       <p v-if="attendanceSetupLoadError" class="user-admin__hint">
         {{ attendanceSetupLoadError }}
       </p>
@@ -330,7 +355,7 @@
         {{ attendanceOnboardingOrgNote }}
       </p>
       <div class="user-admin__role-actions">
-        <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
+        <button class="user-admin__button" type="button" :disabled="busy || namespaceAdmissionCapability !== 'ready'" @click="void requestCreateUser()">
           创建用户
         </button>
         <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="!createdInviteMessage" @click="void copyInviteMessage()">
@@ -367,7 +392,19 @@
       <div v-if="selectedPreset" class="user-admin__preset">
         <strong>{{ selectedPreset.name }}</strong>
         <p>{{ selectedPreset.description }}</p>
-        <small>推荐入口：{{ selectedPreset.homePath }} · 权限：{{ selectedPreset.permissions.join(', ') }}</small>
+        <small>推荐入口：{{ selectedPreset.homePath }}</small>
+        <div data-testid="preset-direct-permissions">
+          <strong>预设自带的权限</strong>
+          <p v-if="selectedPreset.permissions.length > 0">{{ selectedPreset.permissions.join('、') }}</p>
+          <p v-else>这个预设没有单独列出权限。</p>
+        </div>
+        <div data-testid="preset-inherited-permissions">
+          <strong>角色继承的权限</strong>
+          <p v-if="!createForm.roleId">未选择角色，没有角色继承的权限。</p>
+          <p v-else-if="!presetInheritedPreview.known">角色目录里没有这个角色，不能把预设自带的权限说成角色继承。</p>
+          <p v-else-if="presetInheritedPreview.codes.length === 0">这个角色没有列出继承权限。</p>
+          <p v-else>{{ presetInheritedPreview.codes.join('、') }}</p>
+        </div>
       </div>
       <p v-if="createdOnboarding?.acceptInviteUrl" class="user-admin__hint">
         首次设置密码链接：
@@ -429,6 +466,21 @@
           <button class="user-admin__button" type="button" :disabled="bulkBusy || pastedEmailList.length === 0" @click="void submitPastedEmails()">邀请这些邮箱</button>
         </div>
         <p v-if="pastedEmailList.length" class="user-admin__hint">将邀请 {{ pastedEmailList.length }} 个邮箱。</p>
+      </div>
+      <div v-if="batchCreatePreview" class="user-admin__confirm" role="dialog" aria-label="确认批量创建" data-testid="batch-create-preview">
+        <strong>确认创建这些账号</strong>
+        <p class="user-admin__hint" data-testid="batch-create-effects">不写入直接权限。直接权限：无。插件使用默认都不开通。</p>
+        <p v-if="batchCreateHoldsPlatformAdmin" class="user-admin__hint" data-testid="batch-create-platform-admin">
+          {{ PLATFORM_ADMIN_AUTHORITY_NOTE }}
+        </p>
+        <p v-for="(target, index) in batchCreatePreview.targets" :key="`${target.email}-${index}`" class="user-admin__hint" data-testid="batch-create-target">
+          {{ target.email || '—' }}<template v-if="target.name">（{{ target.name }}）</template>：角色 {{ target.roleName }}<template v-if="target.roleId">（{{ target.roleId }}）</template>。
+          角色继承权限：<template v-if="target.permissionsKnown && target.permissionCodes.length">{{ target.permissionCodes.join('、') }}</template><template v-else-if="target.permissionsKnown">无</template><template v-else>角色目录没有这份角色，不能把缺失列表当作没有继承权限。</template>
+        </p>
+        <div class="user-admin__role-actions">
+          <button class="user-admin__button" type="button" data-testid="batch-create-confirm" :disabled="batchCreateConfirmDisabled" @click="void submitBatchCreatePreview()">确认创建</button>
+          <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="batch-create-cancel" @click="cancelBatchCreatePreview()">取消</button>
+        </div>
       </div>
       </section>
     </div>
@@ -574,7 +626,7 @@
             <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0" @click="void clearSelectedUsers()">
               清空选择
             </button>
-            <button class="user-admin__button" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0 || !selectedNamespace" @click="void bulkUpdateNamespaceAdmissions(true)">
+            <button class="user-admin__button" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0 || !selectedNamespace" @click="requestBulkNamespaceEnable()">
               批量开通插件使用
             </button>
             <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0 || !selectedNamespace" @click="void bulkUpdateNamespaceAdmissions(false)">
@@ -610,9 +662,31 @@
           <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
             <strong>{{ bulkConfirmTitle }}</strong>
             <p>将影响 {{ selectedUserIds.length }} 人：{{ selectedUserLabels }}</p>
+            <div v-if="bulkConfirm === 'namespace' && bulkAdmissionPreview" data-testid="bulk-admission-preview">
+              <p class="user-admin__hint">将开通插件使用「{{ bulkAdmissionPreview.namespace }}」。不改变这些用户的角色，也不写入直接权限。</p>
+              <p v-for="target in bulkAdmissionPreview.targets" :key="target.userId" class="user-admin__hint" data-testid="bulk-admission-target">
+                {{ target.label }}（{{ target.userId }}）
+              </p>
+            </div>
+            <div v-if="bulkConfirm === 'role'" data-testid="bulk-role-preview">
+              <p v-if="!roleReplacementPreview" class="user-admin__hint">正在读取所选用户的当前角色，确认前不会写入。</p>
+              <template v-else>
+                <p v-for="target in roleReplacementPreview.targets" :key="target.userId" class="user-admin__hint" data-testid="bulk-role-target">
+                  {{ target.label }}（{{ target.userId }}）：角色改为 {{ target.nextRoleId }}。
+                  权限码：{{ target.permissionsKnown ? (target.permissionCodes.join('、') || '角色目录里没有权限码') : '角色目录不完整，不能编造权限码' }}。
+                  {{ target.admissionEffect }}
+                </p>
+              </template>
+              <label v-if="roleReplacementPreview?.requiresTypedPhrase" class="user-admin__hint">
+                请输入「{{ PLATFORM_ADMIN_REMOVAL_PHRASE }}」以确认取消平台管理员
+                <input data-testid="bulk-admin-removal-phrase" type="text" :value="roleReplacementPreview.phrase" @input="onRoleReplacementPhrase" />
+              </label>
+            </div>
             <div class="user-admin__role-actions">
-              <button class="user-admin__button" type="button" data-testid="bulk-confirm-submit" @click="void submitBulkConfirm()">确认</button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" @click="bulkConfirm = null">取消</button>
+              <button v-if="bulkConfirm === 'namespace'" class="user-admin__button" type="button" data-testid="bulk-confirm-submit" :disabled="bulkNamespaceConfirmDisabled" @click="void submitBulkNamespaceEnable()">确认</button>
+              <button v-else-if="bulkConfirm !== 'role'" class="user-admin__button" type="button" data-testid="bulk-confirm-submit" @click="void submitBulkConfirm()">确认</button>
+              <button v-else class="user-admin__button" type="button" data-testid="bulk-confirm-submit" :disabled="roleReplacementConfirmDisabled" @click="void submitRoleReplacement()">确认</button>
+              <button class="user-admin__button user-admin__button--secondary" type="button" @click="cancelBulkConfirm()">取消</button>
             </div>
           </div>
           <details class="user-admin__danger">
@@ -630,10 +704,23 @@
           <div v-for="row in reimportPreview" :key="row.index" class="user-admin__hint">
             {{ row.email || row.userId }}：{{ row.message }}<template v-if="row.changes.length">（{{ row.changes.map((change) => `${change.field} ${change.before || '空'} → ${change.after || '空'}`).join('；') }}）</template>
           </div>
+          <div v-if="roleReplacementPreview?.source === 'reimport'" data-testid="reimport-role-preview">
+            <p v-for="target in roleReplacementPreview.targets" :key="`${target.userId}-${target.nextRoleId}`" class="user-admin__hint" data-testid="reimport-role-target">
+              {{ target.label }}（{{ target.userId }}）：角色改为 {{ target.nextRoleId }}。
+              权限码：{{ target.permissionsKnown ? (target.permissionCodes.join('、') || '角色目录里没有权限码') : '角色目录不完整，不能编造权限码' }}。
+              {{ target.admissionEffect }}
+            </p>
+            <label v-if="roleReplacementPreview.requiresTypedPhrase" class="user-admin__hint">
+              请输入「{{ PLATFORM_ADMIN_REMOVAL_PHRASE }}」以确认取消平台管理员
+              <input data-testid="bulk-admin-removal-phrase" type="text" :value="roleReplacementPreview.phrase" @input="onRoleReplacementPhrase" />
+            </label>
+            <button class="user-admin__button" type="button" data-testid="reimport-role-confirm" :disabled="roleReplacementConfirmDisabled" @click="void submitRoleReplacement()">确认写入角色</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="cancelRoleReplacement()">取消这次角色更新</button>
+          </div>
           <div class="user-admin__role-actions">
             <button class="user-admin__button" type="button" :disabled="bulkBusy || reimportPreview.length === 0" @click="void submitReimport(true)">预览差异</button>
-            <button class="user-admin__button" type="button" :disabled="bulkBusy || !reimportReady" @click="void submitReimport(false)">确认更新</button>
-            <button class="user-admin__button user-admin__button--secondary" type="button" @click="reimportOpen = false">取消</button>
+            <button class="user-admin__button" type="button" :disabled="bulkBusy || !reimportReady || roleReplacementPreview?.source === 'reimport'" @click="void requestReimportWrite()">确认更新</button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="closeReimport()">取消</button>
           </div>
           <p v-if="batchReport" class="user-admin__hint">成功 {{ batchReport.successCount }}，失败 {{ batchReport.failureCount }}</p>
         </div>
@@ -761,6 +848,10 @@
           <p class="user-admin__hint" data-testid="member-authorization-outline">
             成员授权分四层：角色分配决定身份；插件准入和角色一起决定能否使用插件；权限来源记录角色继承和直接授予，不是最终业务访问结论；管理范围只说明委派管理员能分配哪些成员和角色。
           </p>
+          <div class="user-admin__section">
+            <h3 data-testid="effective-access-title">生效权限</h3>
+            <p class="user-admin__hint" data-testid="effective-access-note">业务对象范围仍由服务端控制，本页不能修改这些范围。</p>
+          </div>
 
           <div class="user-admin__section">
             <div class="user-admin__section-head">
@@ -1295,6 +1386,15 @@
       </section>
     </div>
     </div>
+    <AdminAuthorizationConfirmDialog
+      v-if="authorizationDraft"
+      :draft="authorizationDraft"
+      :phrase="authorizationPhrase"
+      :busy="authorizationBusy"
+      @update:phrase="authorizationPhrase = $event"
+      @confirm="void confirmAuthorization()"
+      @cancel="cancelAuthorization()"
+    />
   </section>
 </template>
 
@@ -1329,6 +1429,23 @@ import {
   type RoleMembershipSnapshot,
   type RoleMembershipWriteOutcome,
 } from './adminUserRoleAction'
+import AdminAuthorizationConfirmDialog from './AdminAuthorizationConfirmDialog.vue'
+import {
+  LAST_PLATFORM_ADMIN_MESSAGE,
+  PLATFORM_ADMIN_AUTHORITY_NOTE,
+  PLATFORM_ADMIN_REMOVAL_PHRASE,
+  ROLE_VERSION_MISMATCH_MESSAGE,
+  adminAuthorizationStillCurrent,
+  admissionChangesForRevoke,
+  describeAdmissionChange,
+  buildAdmissionEnableAuthorization,
+  buildCreateUserAuthorization,
+  buildRoleMembershipAuthorization,
+  catalogPermissionCodesForRoles,
+  readAdmissionNamespaceFact,
+  readExplicitNamespaceAdmissionCapability,
+} from './AdminAuthorizationConfirm'
+import type { AdminAuthorizationDraft } from './AdminAuthorizationConfirm'
 import { presentPermission, presentRoleTitle } from './builtinCatalogPresentation'
 import {
   ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
@@ -1373,6 +1490,8 @@ type RoleCatalogItem = {
   name: string
   permissions: string[]
   memberCount: number
+  updatedAt?: string | null
+  admissionNamespaces?: unknown
 }
 
 type UserAccess = {
@@ -1554,6 +1673,7 @@ type AccessPreset = {
   homePath: string
   welcomeTitle: string
   checklist: string[]
+  admissionNamespaces?: unknown
 }
 
 type OnboardingPacket = {
@@ -1647,12 +1767,77 @@ const inviteNote = ref('')
 const pasteEmails = ref('')
 const pasteRoleId = ref('')
 const importPreview = ref<ImportPreviewRow[]>([])
+const importInputGeneration = ref(0)
+const EXPLICIT_ADMISSION_CREATE_UNAVAILABLE = '当前服务还不能按你的选择开通插件使用，已暂停创建，避免创建时自动开通。请重试加载。'
+type BatchCreateTarget = {
+  email: string
+  name: string
+  roleId: string
+  roleName: string
+  permissionCodes: string[]
+  permissionsKnown: boolean
+  holdsPlatformAdmin: boolean
+}
+type BatchCreatePreview = {
+  source: 'import' | 'paste'
+  items: Array<Record<string, unknown>>
+  targets: BatchCreateTarget[]
+  fingerprint: string
+}
+const batchCreatePreview = ref<BatchCreatePreview | null>(null)
 const reimportOpen = ref(false)
 const reimportPreview = ref<UpdatePreviewRow[]>([])
 const reimportReady = ref(false)
+const reimportInputGeneration = ref(0)
 const bulkRoleId = ref('')
 const bulkDepartment = ref('')
-const bulkConfirm = ref<null | 'role' | 'department' | 'enable' | 'disable'>(null)
+const bulkConfirm = ref<null | 'role' | 'department' | 'enable' | 'disable' | 'namespace'>(null)
+type BulkAdmissionTarget = { userId: string; label: string }
+type BulkAdmissionPreview = {
+  namespace: string
+  userIds: string[]
+  targets: BulkAdmissionTarget[]
+  fingerprint: string
+}
+const bulkAdmissionPreview = ref<BulkAdmissionPreview | null>(null)
+type RoleReplacementTarget = {
+  userId: string
+  label: string
+  nextRoleId: string
+  permissionCodes: string[]
+  permissionsKnown: boolean
+  admissionEffect: string
+  holdsPlatformAdmin: boolean | null
+}
+type RoleReplacementPreview = {
+  source: 'bulk-role' | 'reimport'
+  items: Array<Record<string, unknown>>
+  targets: RoleReplacementTarget[]
+  requiresTypedPhrase: boolean
+  phrase: string
+  capturedUserIds: string[]
+  capturedRoleId: string
+  fingerprint: string
+}
+const roleReplacementPreview = ref<RoleReplacementPreview | null>(null)
+let rolePreviewToken = 0
+let bulkRoleFreezeKey = ''
+const roleReplacementConfirmDisabled = computed(() => {
+  const preview = roleReplacementPreview.value
+  if (!preview || bulkBusy.value) return true
+  return preview.requiresTypedPhrase && preview.phrase !== PLATFORM_ADMIN_REMOVAL_PHRASE
+})
+const bulkNamespaceConfirmDisabled = computed(() => {
+  const preview = bulkAdmissionPreview.value
+  if (!preview || bulkBusy.value || bulkConfirm.value !== 'namespace') return true
+  return preview.fingerprint !== bulkAdmissionLiveFingerprint()
+})
+const batchCreateHoldsPlatformAdmin = computed(() => batchCreatePreview.value?.targets.some((target) => target.holdsPlatformAdmin) === true)
+const batchCreateConfirmDisabled = computed(() => {
+  const preview = batchCreatePreview.value
+  if (!preview || bulkBusy.value || namespaceAdmissionCapability.value !== 'ready') return true
+  return preview.fingerprint !== batchCreateLiveFingerprint()
+})
 const hardDeletePhrase = ref('')
 const loadingRecycle = ref(false)
 const recycleBusy = ref(false)
@@ -1727,6 +1912,12 @@ const attendanceOrgOptionsFailed = ref(false)
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedNamespace = ref('')
 const selectedUserId = ref('')
+const retainedSelectionId = ref('')
+const namespaceAdmissionCapability = ref<'unknown' | 'ready' | 'unavailable'>('unknown')
+const createAdmissionNamespaces = ref<string[]>([])
+const authorizationDraft = ref<AdminAuthorizationDraft | null>(null)
+const authorizationPhrase = ref('')
+const authorizationBusy = ref(false)
 const userAccessReadGeneration = ref(0)
 const selectedRoleId = ref('')
 const roleActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
@@ -1826,6 +2017,8 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const createAdmissionOffer = computed(() => offeredCreateNamespaces())
+const presetInheritedPreview = computed(() => presetInheritedState())
 const attendanceOrgHint = computed(() => {
   if (attendanceOrgOptionsFailed.value) return '组织列表暂不可用；不指定组织时不会写入组织归属。'
   if (!attendanceOrgOptionsLoading.value && attendanceOrgOptions.value.length === 0) {
@@ -1977,6 +2170,7 @@ const bulkConfirmTitle = computed(() => {
   if (bulkConfirm.value === 'department') return `确认把所选用户的部门改为 ${bulkDepartment.value}？`
   if (bulkConfirm.value === 'enable') return '确认启用所选用户？'
   if (bulkConfirm.value === 'disable') return '确认停用所选用户？停用可恢复，历史会保留。'
+  if (bulkConfirm.value === 'namespace') return `确认开通插件使用：${bulkAdmissionPreview.value?.namespace || selectedNamespace.value}？`
   return ''
 })
 const visibleInviteRecords = computed(() => {
@@ -2406,7 +2600,9 @@ const namespaceOptions = computed(() => {
   }
 
   for (const role of roleCatalog.value) {
+    if (!Array.isArray(role.permissions)) continue
     for (const permission of role.permissions) {
+      if (typeof permission !== 'string') continue
       const namespace = extractNamespaceFromPermission(permission)
       if (namespace) append(namespace)
     }
@@ -2565,6 +2761,8 @@ function clearSelectionForCriteriaChange(): void {
   selectedUserIds.value = []
   selectedUserRecords.clear()
   bulkConfirm.value = null
+  bulkAdmissionPreview.value = null
+  cancelRoleReplacement()
   hardDeletePhrase.value = ''
 }
 
@@ -3056,22 +3254,26 @@ async function loadUsers(): Promise<void> {
     rememberUsers(items)
     reconcileSelectedUsers()
 
-    if (!selectedUserId.value && users.value.length > 0) {
-      const requestedUser = userNavigation.value.userId
-        ? users.value.find((item) => item.id === userNavigation.value.userId)
-        : null
-      if (requestedUser) detailOpen.value = true
-      await selectUser((requestedUser || users.value[0]).id)
-    } else if (userNavigation.value.userId) {
-      const navigationKey = buildUserNavigationKey(userNavigation.value)
-      const requestedUser = users.value.find((item) => item.id === userNavigation.value.userId)
-      if (
-        requestedUser
-        && (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey)
-      ) {
-        detailOpen.value = true
-        await selectUser(requestedUser.id)
+    const retainId = retainedSelectionId.value
+    retainedSelectionId.value = ''
+    const requestedId = userNavigation.value.userId.trim()
+    if (requestedId) {
+      const requestedUser = users.value.find((item) => item.id === requestedId)
+      if (!requestedUser) {
+        clearStaleUserSelection()
+      } else {
+        const navigationKey = buildUserNavigationKey(userNavigation.value)
+        if (selectedUserId.value !== requestedUser.id || appliedUserNavigationKey.value !== navigationKey) {
+          detailOpen.value = true
+          await selectUser(requestedUser.id)
+        }
       }
+    } else if (
+      selectedUserId.value
+      && !users.value.some((item) => item.id === selectedUserId.value)
+      && selectedUserId.value !== retainId
+    ) {
+      clearStaleUserSelection()
     }
   } catch (error) {
     if (generation !== userListGeneration) return
@@ -3108,7 +3310,9 @@ async function loadAccessPresets(): Promise<void> {
 
     const data = payload.data as { items?: AccessPreset[] } | undefined
     accessPresets.value = Array.isArray(data?.items) ? data.items : []
+    namespaceAdmissionCapability.value = readExplicitNamespaceAdmissionCapability(payload) ? 'ready' : 'unavailable'
   } catch (error) {
+    namespaceAdmissionCapability.value = 'unavailable'
     setStatus(error instanceof Error ? error.message : '加载访问预设失败', 'error')
   }
 }
@@ -3200,6 +3404,7 @@ async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
 }
 
 async function selectUser(userId: string): Promise<void> {
+  clearAuthorization()
   const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
   userAccessReadGeneration.value = generation
   selectedUserId.value = userId
@@ -3412,32 +3617,331 @@ async function refreshCurrentDetailMemberAdmissionIfNeeded(userIds: string[]): P
   await loadMemberAdmission(selectedUserId.value)
 }
 
-async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
-  if (!access.value) return
-  busy.value = true
+function catalogRole(roleId: string): RoleCatalogItem | undefined {
+  return roleCatalog.value.find((role) => role.id === roleId)
+}
+
+function nonEmptyUpdatedAt(role: RoleCatalogItem | undefined): string | null {
+  const value = role?.updatedAt
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+function userDisplayName(user: { id: string; name?: string | null; email?: string | null }): string {
+  return user.name || user.email || user.id
+}
+
+function namespacesByRoleId(): Record<string, unknown> {
+  const record: Record<string, unknown> = {}
+  for (const role of roleCatalog.value) {
+    if (Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces')) {
+      record[role.id] = role.admissionNamespaces
+    }
+  }
+  return record
+}
+
+function catalogPermissionsByRoleId(): Record<string, unknown> {
+  const record: Record<string, unknown> = {}
+  for (const role of roleCatalog.value) {
+    if (Object.prototype.hasOwnProperty.call(role, 'permissions')) {
+      record[role.id] = role.permissions
+    }
+  }
+  return record
+}
+
+function membershipPermissionFact(roleId: string): { known: boolean; codes: string[] } {
+  return catalogPermissionCodesForRoles([roleId], catalogPermissionsByRoleId())
+}
+
+function addUniqueNamespaces(target: string[], values: readonly string[]): void {
+  const seen = new Set(target)
+  for (const value of values) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    target.push(value)
+  }
+}
+
+function offeredCreateNamespaces(): { namespaces: string[]; notes: string[] } {
+  const namespaces: string[] = []
+  const notes: string[] = []
+  const preset = selectedPreset.value
+  if (preset) {
+    if (!Object.prototype.hasOwnProperty.call(preset, 'admissionNamespaces')) {
+      notes.push('所选预设没有报告可开通的插件范围。未列出的范围不会自动开通。')
+    } else {
+      const fact = readAdmissionNamespaceFact(preset.admissionNamespaces)
+      if (!fact.known) notes.push('所选预设没有报告可开通的插件范围。未列出的范围不会自动开通。')
+      else addUniqueNamespaces(namespaces, fact.namespaces)
+    }
+  }
+  const roleId = createForm.value.roleId.trim()
+  if (roleId) {
+    const role = catalogRole(roleId)
+    if (!role) notes.push('所选角色没有出现在角色目录里，不能列出它会开通的插件范围。')
+    else if (!Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces')) {
+      notes.push('所选角色没有报告可开通的插件范围。未列出的范围不会自动开通。')
+    } else {
+      const fact = readAdmissionNamespaceFact(role.admissionNamespaces)
+      if (!fact.known) notes.push('所选角色没有报告可开通的插件范围。未列出的范围不会自动开通。')
+      else addUniqueNamespaces(namespaces, fact.namespaces)
+    }
+  }
+  return { namespaces, notes }
+}
+
+function presetInheritedState(): { known: boolean; codes: string[] } {
+  const roleId = createForm.value.roleId.trim()
+  if (!roleId) return { known: true, codes: [] }
+  const role = catalogRole(roleId)
+  if (!role) return { known: false, codes: [] }
+  return { known: true, codes: Array.isArray(role.permissions) ? role.permissions : [] }
+}
+
+function checkedCreateNamespaces(): string[] {
+  const allowed = new Set(offeredCreateNamespaces().namespaces)
+  return createAdmissionNamespaces.value.filter((namespace) => allowed.has(namespace))
+}
+
+function buildCreateRequestBody(): Record<string, unknown> {
+  return {
+    name: createForm.value.name,
+    email: createForm.value.email,
+    username: createForm.value.username || undefined,
+    mobile: createForm.value.mobile || undefined,
+    employeeNo: createForm.value.employeeNo || undefined,
+    department: createForm.value.department || undefined,
+    position: createForm.value.position || undefined,
+    hireDate: createForm.value.hireDate || undefined,
+    attendanceGroupId: createForm.value.attendanceGroupId || undefined,
+    defaultShiftId: createForm.value.defaultShiftId || undefined,
+    defaultShiftStartDate: createForm.value.defaultShiftStartDate || undefined,
+    attendanceOrgId: createForm.value.attendanceOrgId || undefined,
+    password: createForm.value.password || undefined,
+    presetId: createForm.value.presetId || undefined,
+    role: createForm.value.role || undefined,
+    roleId: createForm.value.roleId || undefined,
+    isActive: createForm.value.isActive,
+    admissionNamespaces: checkedCreateNamespaces(),
+  }
+}
+
+function buildLiveCreateDraft(): AdminAuthorizationDraft {
+  const inherited = presetInheritedState()
+  const roleId = createForm.value.roleId.trim()
+  const role = roleId ? catalogRole(roleId) : undefined
+  return buildCreateUserAuthorization({
+    targetName: createForm.value.name || createForm.value.username || createForm.value.email || '新用户',
+    roleId,
+    roleName: role ? role.name : (roleId || '不分配角色'),
+    directPermissionCodes: selectedPreset.value?.permissions || [],
+    inheritedPermissionCodes: inherited.codes,
+    inheritedKnown: inherited.known,
+    admissionNamespaces: checkedCreateNamespaces(),
+    createPayload: buildCreateRequestBody(),
+  })
+}
+
+function buildLiveMembershipDraft(draft: AdminAuthorizationDraft): AdminAuthorizationDraft | null {
+  if (!access.value || access.value.user.id !== draft.targetUserId) return null
+  const action = draft.kind === 'assign-role' ? 'assign' : 'unassign'
+  const role = catalogRole(draft.roleId)
+  const permissions = membershipPermissionFact(draft.roleId)
+  return buildRoleMembershipAuthorization({
+    action,
+    userId: draft.targetUserId,
+    userName: userDisplayName(access.value.user),
+    roleId: draft.roleId,
+    roleName: role ? roleTitleFromCatalog(role) : roleIdTitle(draft.roleId),
+    permissionCodes: permissions.codes,
+    permissionKnown: permissions.known,
+    expectedUpdatedAt: nonEmptyUpdatedAt(role),
+    heldRoleIds: access.value.roles,
+    heldRolesKnown: true,
+    namespacesByRoleId: namespacesByRoleId(),
+    dropdownRoleId: selectedRoleId.value,
+  })
+}
+
+function buildLiveAdmissionDraft(draft: AdminAuthorizationDraft): AdminAuthorizationDraft | null {
+  if (!access.value || access.value.user.id !== draft.targetUserId) return null
+  const namespace = draft.admissionNamespaces[0] || ''
+  return buildAdmissionEnableAuthorization({
+    userId: draft.targetUserId,
+    userName: userDisplayName(access.value.user),
+    namespace,
+    roleIds: access.value.roles,
+    catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
+    dropdownRoleId: selectedRoleId.value,
+  })
+}
+
+function liveAuthorizationFingerprint(): string {
+  const draft = authorizationDraft.value
+  if (!draft) return ''
+  if (draft.kind === 'create-user') return buildLiveCreateDraft().fingerprint
+  if (draft.kind === 'enable-admission') return buildLiveAdmissionDraft(draft)?.fingerprint || ''
+  return buildLiveMembershipDraft(draft)?.fingerprint || ''
+}
+
+function clearAuthorization(): void {
+  authorizationDraft.value = null
+  authorizationPhrase.value = ''
+}
+
+function cancelAuthorization(): void {
+  if (authorizationBusy.value) return
+  clearAuthorization()
+}
+
+function clearStaleUserSelection(): void {
+  userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
+  selectedUserId.value = ''
+  access.value = null
+  detailOpen.value = false
+  roleActionFeedback.value = null
+  clearAuthorization()
+}
+
+function readErrorCode(payload: Record<string, unknown>): string {
+  const error = payload.error
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const code = (error as Record<string, unknown>).code
+    if (typeof code === 'string') return code
+  }
+  return typeof payload.code === 'string' ? payload.code : ''
+}
+
+function toggleCreateAdmission(namespace: string, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked
+  const current = new Set(createAdmissionNamespaces.value)
+  if (checked) current.add(namespace)
+  else current.delete(namespace)
+  createAdmissionNamespaces.value = [...current]
+}
+
+function requestCreateUser(): void {
+  if (busy.value || authorizationBusy.value) return
+  if (namespaceAdmissionCapability.value !== 'ready') {
+    setStatus('当前服务还不能按你的选择开通插件使用，已暂停创建，避免创建时自动开通。请重试加载。', 'error')
+    return
+  }
+  authorizationPhrase.value = ''
+  authorizationDraft.value = buildLiveCreateDraft()
+}
+
+function requestRoleMembership(action: 'assign' | 'unassign', roleId: string): void {
+  if (!access.value || !roleSnapshotReady.value || busy.value || authorizationBusy.value) return
+  const requestedRoleId = roleId.trim()
+  if (!requestedRoleId) return
+  const role = catalogRole(requestedRoleId)
+  const permissions = membershipPermissionFact(requestedRoleId)
+  authorizationPhrase.value = ''
+  authorizationDraft.value = buildRoleMembershipAuthorization({
+    action,
+    userId: access.value.user.id,
+    userName: userDisplayName(access.value.user),
+    roleId: requestedRoleId,
+    roleName: role ? roleTitleFromCatalog(role) : roleIdTitle(requestedRoleId),
+    permissionCodes: permissions.codes,
+    permissionKnown: permissions.known,
+    expectedUpdatedAt: nonEmptyUpdatedAt(role),
+    heldRoleIds: access.value.roles,
+    heldRolesKnown: true,
+    namespacesByRoleId: namespacesByRoleId(),
+    dropdownRoleId: selectedRoleId.value,
+  })
+}
+
+function requestAdmissionEnable(admission: NamespaceAdmission): void {
+  if (!access.value || busy.value || authorizationBusy.value) return
+  authorizationPhrase.value = ''
+  authorizationDraft.value = buildAdmissionEnableAuthorization({
+    userId: access.value.user.id,
+    userName: userDisplayName(access.value.user),
+    namespace: admission.namespace,
+    roleIds: access.value.roles,
+    catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
+    dropdownRoleId: selectedRoleId.value,
+  })
+}
+
+function admissionReadStillCurrent(generation: number, userId: string): boolean {
+  return accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)
+}
+
+function memberAdmissionFromData(data: Record<string, unknown> | undefined): MemberAdmission {
+  return {
+    ...(data as MemberAdmission),
+    namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
+    organizations: normalizeMemberOrganizations(data?.organizations),
+  }
+}
+
+async function readMemberAdmissionOrThrow(userId: string): Promise<MemberAdmission> {
+  const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true) {
+    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '成员准入回读失败'))
+  }
+  return memberAdmissionFromData(payload.data as Record<string, unknown> | undefined)
+}
+
+async function commitNamespaceAdmission(userId: string, namespace: string, enabled: boolean): Promise<void> {
+  const generation = userAccessReadGeneration.value
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/namespaces/${encodeURIComponent(namespace)}/admission`, {
       method: 'PATCH',
       body: JSON.stringify({ enabled }),
     })
     const payload = await readJson(response)
+    if (!admissionReadStillCurrent(generation, userId)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新插件使用准入失败'))
     }
 
-    const data = payload.data as Record<string, unknown> | undefined
-    if (data?.namespaceAdmissions !== undefined) {
-      memberAdmission.value = {
-        ...(memberAdmission.value as MemberAdmission),
-        ...(data as MemberAdmission),
-        namespaceAdmissions: normalizeNamespaceAdmissions(data.namespaceAdmissions),
-      }
-    } else {
-      await loadMemberAdmission(access.value.user.id)
+    const admission = await readMemberAdmissionOrThrow(userId)
+    if (!admissionReadStillCurrent(generation, userId)) return
+    const readBack = admission.namespaceAdmissions.find((item) => item.namespace === namespace)
+    if (!readBack || readBack.enabled !== enabled) {
+      memberAdmission.value = admission
+      access.value = null
+      setStatus(enabled
+        ? `插件使用回读未显示「${namespace}」已开通，本次未记为成功。`
+        : `插件使用回读未显示「${namespace}」已关闭，本次未记为成功。`, 'error')
+      return
     }
-    setStatus(enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`)
+
+    const snapshot = await fetchUserAccessOrThrow(userId)
+    if (!admissionReadStillCurrent(generation, userId)) return
+    if (!userAccessSnapshotMatches(snapshot, userId)) {
+      memberAdmission.value = admission
+      access.value = null
+      setStatus('生效权限回读与当前用户不一致，本次插件使用未记为成功。', 'error')
+      return
+    }
+    memberAdmission.value = admission
+    access.value = snapshot
+    syncProfileDraftFromAccess()
+    setStatus(enabled ? `已开通 ${namespace} 插件使用` : `已关闭 ${namespace} 插件使用`)
   } catch (error) {
+    if (!admissionReadStillCurrent(generation, userId)) return
+    access.value = null
     setStatus(error instanceof Error ? error.message : '更新插件使用准入失败', 'error')
+  }
+}
+
+async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
+  if (!access.value || busy.value || authorizationBusy.value) return
+  if (enabled) {
+    requestAdmissionEnable(admission)
+    return
+  }
+  busy.value = true
+  try {
+    await commitNamespaceAdmission(access.value.user.id, admission.namespace, false)
   } finally {
     busy.value = false
   }
@@ -3544,10 +4048,104 @@ async function bulkDisableMissingOpenIdDingTalkGrants(): Promise<void> {
   }
 }
 
-async function bulkUpdateNamespaceAdmissions(enabled: boolean): Promise<void> {
-  const userIds = Array.from(new Set(selectedUserIds.value)).filter((userId) => userId.length > 0)
+function bulkAdmissionUserIds(): string[] {
+  return Array.from(new Set(selectedUserIds.value)).filter((userId) => userId.length > 0)
+}
+
+function bulkAdmissionLiveFingerprint(): string {
+  return JSON.stringify({
+    namespace: selectedNamespace.value.trim(),
+    userIds: bulkAdmissionUserIds(),
+  })
+}
+
+function requestBulkNamespaceEnable(): void {
+  if (bulkBusy.value) return
   const namespace = selectedNamespace.value.trim()
-  if (userIds.length === 0 || !namespace) return
+  const userIds = bulkAdmissionUserIds()
+  if (!namespace || userIds.length === 0) return
+  cancelRoleReplacement()
+  const targets = userIds.map((userId) => {
+    const listed = selectedUsers.value.find((user) => user.id === userId)
+      || users.value.find((user) => user.id === userId)
+    return { userId, label: listed?.name || listed?.email || userId }
+  })
+  bulkAdmissionPreview.value = {
+    namespace,
+    userIds,
+    targets,
+    fingerprint: bulkAdmissionLiveFingerprint(),
+  }
+  bulkConfirm.value = 'namespace'
+}
+
+async function submitBulkNamespaceEnable(): Promise<void> {
+  const preview = bulkAdmissionPreview.value
+  if (!preview || bulkNamespaceConfirmDisabled.value || bulkBusy.value) return
+  if (preview.fingerprint !== bulkAdmissionLiveFingerprint()) {
+    bulkAdmissionPreview.value = null
+    bulkConfirm.value = null
+    return
+  }
+  const namespace = preview.namespace
+  const userIds = [...preview.userIds]
+  bulkAdmissionPreview.value = null
+  bulkConfirm.value = null
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/namespaces/${encodeURIComponent(namespace)}/admission/bulk`, {
+      method: 'POST',
+      body: JSON.stringify({ userIds, enabled: true }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '批量更新插件使用失败'))
+    }
+    const mismatches: string[] = []
+    let detailAdmission: MemberAdmission | null = null
+    for (const userId of userIds) {
+      const admission = await readMemberAdmissionOrThrow(userId)
+      const enabled = admission.userId === userId
+        && admission.namespaceAdmissions.some((item) => item.namespace === namespace && item.enabled === true)
+      if (!enabled) mismatches.push(userId)
+      if (userId === selectedUserId.value) detailAdmission = admission
+    }
+    if (mismatches.length > 0) {
+      if (detailAdmission && detailAdmission.userId === selectedUserId.value) memberAdmission.value = detailAdmission
+      setStatus(`插件使用回读未显示「${namespace}」已对所选用户开通，本次未记为成功。`, 'error')
+      return
+    }
+    if (detailAdmission && selectedUserId.value === detailAdmission.userId) {
+      const detailUserId = selectedUserId.value
+      const detailGeneration = userAccessReadGeneration.value
+      const snapshot = await fetchUserAccessOrThrow(detailUserId)
+      // A late read must not land on a newer selection, including A → B → A.
+      if (accessReadStillCurrent(detailGeneration, userAccessReadGeneration.value, detailUserId, selectedUserId.value)) {
+        if (!userAccessSnapshotMatches(snapshot, detailUserId)) {
+          memberAdmission.value = detailAdmission
+          access.value = null
+          setStatus('生效权限回读与当前用户不一致，本次插件使用未记为成功。', 'error')
+          return
+        }
+        memberAdmission.value = detailAdmission
+        access.value = snapshot
+        syncProfileDraftFromAccess()
+      }
+    }
+    await loadUsers()
+    await refreshCurrentDetailMemberAdmissionIfNeeded(userIds)
+    setStatus(`已批量开通 ${namespace} 插件使用`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量更新插件使用失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function bulkUpdateNamespaceAdmissions(enabled: boolean): Promise<void> {
+  const userIds = bulkAdmissionUserIds()
+  const namespace = selectedNamespace.value.trim()
+  if (userIds.length === 0 || !namespace || enabled) return
 
   bulkBusy.value = true
   try {
@@ -3565,7 +4163,7 @@ async function bulkUpdateNamespaceAdmissions(enabled: boolean): Promise<void> {
 
     await loadUsers()
     await refreshCurrentDetailMemberAdmissionIfNeeded(userIds)
-    setStatus(enabled ? `已批量开通 ${namespace} 插件使用` : `已批量关闭 ${namespace} 插件使用`)
+    setStatus(`已批量关闭 ${namespace} 插件使用`)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '批量更新插件使用失败', 'error')
   } finally {
@@ -3597,8 +4195,7 @@ function buildAttendanceAdminSectionLocation(sectionId: string): string {
   return `/attendance?${params.toString()}`
 }
 
-async function createUser(): Promise<void> {
-  busy.value = true
+async function commitCreateUser(draft: AdminAuthorizationDraft): Promise<void> {
   createdTemporaryPassword.value = ''
   createdInviteMessage.value = ''
   createdOnboarding.value = null
@@ -3606,25 +4203,7 @@ async function createUser(): Promise<void> {
   try {
     const response = await apiFetch('/api/admin/users', {
       method: 'POST',
-      body: JSON.stringify({
-        name: createForm.value.name,
-        email: createForm.value.email,
-        username: createForm.value.username || undefined,
-        mobile: createForm.value.mobile || undefined,
-        employeeNo: createForm.value.employeeNo || undefined,
-        department: createForm.value.department || undefined,
-        position: createForm.value.position || undefined,
-        hireDate: createForm.value.hireDate || undefined,
-        attendanceGroupId: createForm.value.attendanceGroupId || undefined,
-        defaultShiftId: createForm.value.defaultShiftId || undefined,
-        defaultShiftStartDate: createForm.value.defaultShiftStartDate || undefined,
-        attendanceOrgId: createForm.value.attendanceOrgId || undefined,
-        password: createForm.value.password || undefined,
-        presetId: createForm.value.presetId || undefined,
-        role: createForm.value.role || undefined,
-        roleId: createForm.value.roleId || undefined,
-        isActive: createForm.value.isActive,
-      }),
+      body: JSON.stringify(draft.createPayload || {}),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
@@ -3639,6 +4218,8 @@ async function createUser(): Promise<void> {
     access.value = payload.data as UserAccess
     syncProfileDraftFromAccess()
     selectedUserId.value = access.value.user.id
+    retainedSelectionId.value = access.value.user.id
+    detailOpen.value = true
     createdTemporaryPassword.value = String((payload.data as Record<string, unknown>).temporaryPassword || '')
     createdOnboarding.value = ((payload.data as Record<string, unknown>).onboarding as OnboardingPacket | undefined) || null
     createdInviteMessage.value = String(createdOnboarding.value?.inviteMessage || '')
@@ -3662,13 +4243,12 @@ async function createUser(): Promise<void> {
       roleId: '',
       isActive: true,
     }
+    createAdmissionNamespaces.value = []
     presetModeFilter.value = ''
     await Promise.all([loadUsers(), loadInviteRecords(access.value?.user.id), loadMemberAdmission(access.value?.user.id)])
     setStatus('用户已创建')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '创建用户失败', 'error')
-  } finally {
-    busy.value = false
   }
 }
 
@@ -3905,19 +4485,26 @@ function finishRoleWrite(
   return true
 }
 
-async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
-  if (!selectedUserId.value || !selectedRoleId.value || !roleSnapshotReady.value) return
-  const requestedUserId = selectedUserId.value
-  const requestedRoleId = selectedRoleId.value
+async function commitRoleMembership(draft: AdminAuthorizationDraft): Promise<void> {
+  const action: 'assign' | 'unassign' = draft.kind === 'unassign-role' ? 'unassign' : 'assign'
+  const requestedUserId = draft.targetUserId
+  const requestedRoleId = draft.roleId
   const generation = userAccessReadGeneration.value
-  busy.value = true
+  const body: Record<string, unknown> = { roleId: requestedRoleId }
+  if (action === 'assign' && draft.expectedUpdatedAt) body.expectedUpdatedAt = draft.expectedUpdatedAt
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId: requestedRoleId }),
+      body: JSON.stringify(body),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
+      const code = readErrorCode(payload)
+      if (code === 'LAST_PLATFORM_ADMIN') throw new Error(LAST_PLATFORM_ADMIN_MESSAGE)
+      if (response.status === 409) {
+        await loadRoles()
+        throw new Error(ROLE_VERSION_MISMATCH_MESSAGE)
+      }
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
     }
 
@@ -3945,63 +4532,47 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
       errorMessage: message,
     })
     finishRoleWrite(generation, requestedUserId, outcome, null)
-  } finally {
-    busy.value = false
   }
 }
 
-async function updateNamedRole(roleId: string, enabled: boolean): Promise<void> {
-  if (!selectedUserId.value || !roleSnapshotReady.value) return
-  const requestedUserId = selectedUserId.value
-  const requestedRoleId = roleId
-  const action: 'assign' | 'unassign' = enabled ? 'assign' : 'unassign'
-  const generation = userAccessReadGeneration.value
+async function commitAdmissionEnable(draft: AdminAuthorizationDraft): Promise<void> {
+  const namespace = draft.admissionNamespaces[0]
+  if (!namespace) return
+  await commitNamespaceAdmission(draft.targetUserId, namespace, true)
+}
+
+async function confirmAuthorization(): Promise<void> {
+  const draft = authorizationDraft.value
+  if (!draft || authorizationBusy.value || busy.value) return
+  if (draft.requiresTypedPhrase && authorizationPhrase.value !== draft.requiresTypedPhrase) return
+  if (!adminAuthorizationStillCurrent(draft, liveAuthorizationFingerprint())) {
+    clearAuthorization()
+    return
+  }
+  authorizationBusy.value = true
   busy.value = true
+  const frozen = draft
+  clearAuthorization()
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
-      method: 'POST',
-      body: JSON.stringify({ roleId: requestedRoleId }),
-    })
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员角色失败'))
-    }
-
-    const result = roleWriteOutcomeFromPayload(payload.data, {
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: requestedRoleId,
-    })
-    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
-    await loadRoles()
-    await loadUsers()
-    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-      await loadMemberAdmission(requestedUserId)
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '保存管理员角色失败'
-    const outcome = describeRoleMembershipWrite({
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: requestedRoleId,
-      persistedRoleIds: [],
-      ok: false,
-      errorMessage: message,
-    })
-    finishRoleWrite(generation, requestedUserId, outcome, null)
+    if (frozen.kind === 'create-user') await commitCreateUser(frozen)
+    else if (frozen.kind === 'enable-admission') await commitAdmissionEnable(frozen)
+    else await commitRoleMembership(frozen)
   } finally {
+    authorizationBusy.value = false
     busy.value = false
   }
 }
 
-async function assignRole(): Promise<void> {
-  await updateRole('assign')
+function assignRole(): void {
+  requestRoleMembership('assign', selectedRoleId.value)
 }
 
-async function unassignRole(): Promise<void> {
-  await updateRole('unassign')
+function unassignRole(): void {
+  requestRoleMembership('unassign', selectedRoleId.value)
+}
+
+function updateNamedRole(roleId: string, enabled: boolean): void {
+  requestRoleMembership(enabled ? 'assign' : 'unassign', roleId)
 }
 
 async function saveUserProfile(): Promise<void> {
@@ -4061,13 +4632,180 @@ async function saveUserProfile(): Promise<void> {
 }
 
 function openBulkConfirm(kind: 'role' | 'department' | 'enable' | 'disable'): void {
+  if (bulkConfirm.value === 'namespace') bulkAdmissionPreview.value = null
+  if (kind === 'role') {
+    const roleId = bulkRoleId.value.trim()
+    if (!roleId || selectedUsers.value.length === 0 || bulkBusy.value) return
+    const items = selectedUsers.value.map((user) => ({
+      userId: user.id,
+      email: user.email,
+      roleId,
+    }))
+    bulkRoleFreezeKey = `${roleId}\n${selectedUserIds.value.join('\n')}`
+    bulkConfirm.value = 'role'
+    void openRoleReplacementPreview('bulk-role', items, roleId)
+    return
+  }
+  cancelRoleReplacement()
   bulkConfirm.value = kind
 }
 
-async function readBatchPayload(response: Response): Promise<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>>; dryRun?: boolean }> {
-  const payload = await readJson(response)
-  const data = (payload.data || {}) as { successCount?: number; failureCount?: number; results?: Array<Record<string, unknown>>; dryRun?: boolean }
-  if (!response.ok || payload.ok !== true) {
+function cancelBulkConfirm(): void {
+  bulkConfirm.value = null
+  bulkAdmissionPreview.value = null
+  if (roleReplacementPreview.value?.source === 'bulk-role') cancelRoleReplacement()
+}
+
+function closeReimport(): void {
+  reimportOpen.value = false
+  if (roleReplacementPreview.value?.source === 'reimport') cancelRoleReplacement()
+}
+
+function cancelRoleReplacement(): void {
+  rolePreviewToken += 1
+  roleReplacementPreview.value = null
+}
+
+function onRoleReplacementPhrase(event: Event): void {
+  const preview = roleReplacementPreview.value
+  if (!preview || !(event.target instanceof HTMLInputElement)) return
+  roleReplacementPreview.value = { ...preview, phrase: event.target.value }
+}
+
+function permissionPreviewForRole(roleId: string): { known: boolean; codes: string[] } {
+  return catalogPermissionCodesForRoles([roleId], catalogPermissionsByRoleId())
+}
+
+function admissionEffectForReplacement(currentRoleIds: string[] | null, nextRoleId: string): string {
+  if (!currentRoleIds) return '目前看不出这次会不会关闭插件使用。'
+  const removed = currentRoleIds.filter((roleId) => roleId !== nextRoleId)
+  if (removed.length === 0) return '按目前读到的角色，这次不会撤销其他角色，也不会因此关闭插件使用。'
+  const namespaces = new Set<string>()
+  const optOutNotes: string[] = []
+  for (const roleId of removed) {
+    const effect = admissionChangesForRevoke(roleId, [roleId, nextRoleId], namespacesByRoleId())
+    if (!effect.known) return '目前看不出这次会不会关闭插件使用。'
+    for (const change of effect.changes) {
+      if (change.effect === 'may-close') namespaces.add(change.namespace)
+      if (change.effect === 'source-opt-out') optOutNotes.push(`${describeAdmissionChange(change)}。`)
+    }
+  }
+  const closeSentence = namespaces.size === 0
+    ? '按目前的角色目录，这次不会关闭插件使用。'
+    : `如果没有其他角色仍覆盖这些范围，可能会关闭插件使用：${[...namespaces].join('、')}。`
+  return `${closeSentence}${optOutNotes.join('')}`
+}
+
+async function readTargetAuthority(userId: string): Promise<{ roleIds: string[] | null; holdsPlatformAdmin: boolean | null }> {
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+      return { roleIds: null, holdsPlatformAdmin: null }
+    }
+    const data = payload.data as Record<string, unknown>
+    const user = data.user && typeof data.user === 'object' && !Array.isArray(data.user)
+      ? data.user as Record<string, unknown>
+      : null
+    if (!user || user.id !== userId) return { roleIds: null, holdsPlatformAdmin: null }
+    const explicitAdmin = data.isAdmin === true || user.is_admin === true || user.role === 'admin'
+    const roles = Array.isArray(data.roles) && data.roles.every((item) => typeof item === 'string')
+      ? data.roles as string[]
+      : null
+    if (!roles) return { roleIds: null, holdsPlatformAdmin: explicitAdmin ? true : null }
+    return { roleIds: roles, holdsPlatformAdmin: roles.includes('admin') || explicitAdmin }
+  } catch {
+    return { roleIds: null, holdsPlatformAdmin: null }
+  }
+}
+
+async function openRoleReplacementPreview(
+  source: 'bulk-role' | 'reimport',
+  items: Array<Record<string, unknown>>,
+  capturedRoleId: string,
+): Promise<void> {
+  const token = ++rolePreviewToken
+  const fingerprintAtStart = source === 'reimport' ? reimportRoleFingerprint() : ''
+  const capturedUserIds = items.map((item) => String(item.userId || '')).filter(Boolean)
+  const roleItems = items.filter((item) => typeof item.roleId === 'string' && item.roleId.trim().length > 0)
+  const targets: RoleReplacementTarget[] = []
+  for (const item of roleItems) {
+    if (token !== rolePreviewToken) return
+    const userId = String(item.userId || '')
+    const nextRoleId = String(item.roleId || '').trim()
+    if (!userId || !nextRoleId) continue
+    const authority = await readTargetAuthority(userId)
+    if (token !== rolePreviewToken) return
+    if (source === 'bulk-role' && (bulkRoleId.value.trim() !== capturedRoleId || selectedUserIds.value.join('\n') !== capturedUserIds.join('\n'))) {
+      if (token === rolePreviewToken && bulkConfirm.value === 'role') bulkConfirm.value = null
+      return
+    }
+    const permissions = permissionPreviewForRole(nextRoleId)
+    const listed = selectedUsers.value.find((user) => user.id === userId)
+      || users.value.find((user) => user.id === userId)
+    targets.push({
+      userId,
+      label: listed?.name || listed?.email || userId,
+      nextRoleId,
+      permissionCodes: permissions.codes,
+      permissionsKnown: permissions.known,
+      admissionEffect: admissionEffectForReplacement(authority.roleIds, nextRoleId),
+      holdsPlatformAdmin: authority.holdsPlatformAdmin,
+    })
+  }
+  if (token !== rolePreviewToken || targets.length === 0) return
+  if (source === 'reimport' && reimportRoleFingerprint() !== fingerprintAtStart) return
+  const requiresTypedPhrase = targets.some((target) => target.nextRoleId !== 'admin' && target.holdsPlatformAdmin !== false)
+  roleReplacementPreview.value = {
+    source,
+    items: items.map((item) => ({ ...item })),
+    targets,
+    requiresTypedPhrase,
+    phrase: '',
+    capturedUserIds,
+    capturedRoleId,
+    fingerprint: source === 'reimport' ? reimportRoleFingerprint() : '',
+  }
+}
+
+function roleReplacementStillFrozen(preview: RoleReplacementPreview): boolean {
+  if (preview.source === 'bulk-role') {
+    return bulkConfirm.value === 'role'
+      && bulkRoleId.value.trim() === preview.capturedRoleId
+      && selectedUserIds.value.join('\n') === preview.capturedUserIds.join('\n')
+  }
+  return reimportOpen.value
+    && preview.fingerprint.length > 0
+    && preview.fingerprint === reimportRoleFingerprint()
+}
+
+async function submitRoleReplacement(): Promise<void> {
+  const preview = roleReplacementPreview.value
+  if (!preview || roleReplacementConfirmDisabled.value) return
+  if (!roleReplacementStillFrozen(preview)) {
+    cancelRoleReplacement()
+    if (preview.source === 'bulk-role') bulkConfirm.value = null
+    return
+  }
+  const items = preview.items.map((item) => ({ ...item }))
+  const source = preview.source
+  cancelRoleReplacement()
+  if (source === 'bulk-role') bulkConfirm.value = null
+  await postUserBatchUpdate(
+    items,
+    source === 'reimport' ? false : undefined,
+    { reimport: source === 'reimport' },
+  )
+}
+
+function batchReportFromPayload(
+  payload: Record<string, unknown>,
+  responseOk: boolean,
+): { successCount: number; failureCount: number; results: Array<Record<string, unknown>>; dryRun?: boolean } {
+  const data = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)
+    ? payload.data as { successCount?: number; failureCount?: number; results?: Array<Record<string, unknown>>; dryRun?: boolean }
+    : {}
+  if (!responseOk || payload.ok !== true) {
     const error = payload.error as { message?: string; details?: { results?: Array<Record<string, unknown>>; successCount?: number; failureCount?: number } } | undefined
     if (error?.details?.results) {
       return {
@@ -4081,9 +4819,13 @@ async function readBatchPayload(response: Response): Promise<{ successCount: num
   return {
     successCount: data.successCount || 0,
     failureCount: data.failureCount || 0,
-    results: data.results || [],
+    results: Array.isArray(data.results) ? data.results : [],
     dryRun: data.dryRun,
   }
+}
+
+async function readBatchPayload(response: Response): Promise<{ successCount: number; failureCount: number; results: Array<Record<string, unknown>>; dryRun?: boolean }> {
+  return batchReportFromPayload(await readJson(response), response.ok)
 }
 
 async function rowsFromUpload(file: File): Promise<Array<Record<string, string>>> {
@@ -4135,7 +4877,23 @@ function downloadImportTemplate(kind: 'csv' | 'xlsx'): void {
 async function onImportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
-  const rows = await rowsFromUpload(input.files[0])
+  const file = input.files[0]
+  const generation = importInputGeneration.value + 1
+  importInputGeneration.value = generation
+  batchCreatePreview.value = null
+  importPreview.value = []
+  let rows: Array<Record<string, string>>
+  try {
+    rows = await rowsFromUpload(file)
+  } catch (error) {
+    if (generation !== importInputGeneration.value) return
+    importPreview.value = []
+    input.value = ''
+    const message = error instanceof Error && error.message.trim() ? error.message : '读取文件失败'
+    setStatus(message, 'error')
+    return
+  }
+  if (generation !== importInputGeneration.value) return
   const limitMessage = describeImportLimitExceeded(rows.length)
   batchReport.value = null
   input.value = ''
@@ -4169,26 +4927,101 @@ async function submitBatchCreate(items: Array<Record<string, unknown>>): Promise
   }
 }
 
-async function submitImport(): Promise<void> {
-  const items = importPreview.value.filter((row) => row.ok).map((row) => ({
+function importCreateItems(): Array<Record<string, unknown>> {
+  return importPreview.value.filter((row) => row.ok).map((row) => ({
     name: row.name || undefined,
     email: row.email,
     roleId: row.roleId || undefined,
     department: row.department || undefined,
   }))
-  await submitBatchCreate(items)
 }
 
-async function submitPastedEmails(): Promise<void> {
-  const limitMessage = describeImportLimitExceeded(pastedEmailList.value.length)
+function pasteCreateItems(): Array<Record<string, unknown>> {
+  return pastedEmailList.value.map((email) => ({
+    email,
+    roleId: pasteRoleId.value || undefined,
+  }))
+}
+
+function batchCreateLiveFingerprint(): string {
+  return JSON.stringify({
+    generation: importInputGeneration.value,
+    importRows: importPreview.value.map((row) => ({
+      index: row.index,
+      email: row.email,
+      name: row.name,
+      roleId: row.roleId,
+      department: row.department,
+      ok: row.ok,
+    })),
+    pastedEmails: pasteEmails.value,
+    pasteRoleId: pasteRoleId.value,
+    roles: roleCatalogFingerprint(),
+    capability: namespaceAdmissionCapability.value,
+  })
+}
+
+function describeBatchCreateTarget(item: Record<string, unknown>): BatchCreateTarget {
+  const roleId = typeof item.roleId === 'string' ? item.roleId : ''
+  const role = roleId ? catalogRole(roleId) : undefined
+  const fact = roleId ? membershipPermissionFact(roleId) : { known: true, codes: [] }
+  return {
+    email: typeof item.email === 'string' ? item.email : '',
+    name: typeof item.name === 'string' ? item.name : '',
+    roleId,
+    roleName: role?.name || (roleId || '普通成员'),
+    permissionCodes: fact.codes,
+    permissionsKnown: fact.known,
+    holdsPlatformAdmin: roleId === 'admin',
+  }
+}
+
+function refuseBatchCreateUntilCapabilityReady(): boolean {
+  if (namespaceAdmissionCapability.value === 'ready') return false
+  if (namespaceAdmissionCapability.value === 'unavailable') {
+    setStatus(EXPLICIT_ADMISSION_CREATE_UNAVAILABLE, 'error')
+  }
+  return true
+}
+
+function openBatchCreatePreview(source: 'import' | 'paste'): void {
+  if (bulkBusy.value || refuseBatchCreateUntilCapabilityReady()) return
+  const items = source === 'import' ? importCreateItems() : pasteCreateItems()
+  if (items.length === 0) return
+  const limitMessage = describeImportLimitExceeded(items.length)
   if (limitMessage) {
     setStatus(limitMessage, 'error')
     return
   }
-  const items = pastedEmailList.value.map((email) => ({
-    email,
-    roleId: pasteRoleId.value || undefined,
-  }))
+  batchCreatePreview.value = {
+    source,
+    items,
+    targets: items.map((item) => describeBatchCreateTarget(item)),
+    fingerprint: batchCreateLiveFingerprint(),
+  }
+}
+
+function cancelBatchCreatePreview(): void {
+  batchCreatePreview.value = null
+}
+
+function submitImport(): void {
+  openBatchCreatePreview('import')
+}
+
+function submitPastedEmails(): void {
+  openBatchCreatePreview('paste')
+}
+
+async function submitBatchCreatePreview(): Promise<void> {
+  const preview = batchCreatePreview.value
+  if (!preview || bulkBusy.value) return
+  if (refuseBatchCreateUntilCapabilityReady() || preview.fingerprint !== batchCreateLiveFingerprint()) {
+    batchCreatePreview.value = null
+    return
+  }
+  const items = preview.items
+  batchCreatePreview.value = null
   await submitBatchCreate(items)
 }
 
@@ -4225,7 +5058,7 @@ async function copyAndClearBatchPasswords(): Promise<void> {
 async function submitBulkConfirm(): Promise<void> {
   const kind = bulkConfirm.value
   bulkConfirm.value = null
-  if (!kind || selectedUserIds.value.length === 0) return
+  if (!kind || kind === 'role' || kind === 'namespace' || selectedUserIds.value.length === 0) return
   bulkBusy.value = true
   try {
     if (kind === 'enable' || kind === 'disable') {
@@ -4238,17 +5071,14 @@ async function submitBulkConfirm(): Promise<void> {
       const items = selectedUsers.value.map((user) => ({
         userId: user.id,
         email: user.email,
-        roleId: kind === 'role' ? bulkRoleId.value : undefined,
-        department: kind === 'department' ? bulkDepartment.value : undefined,
+        department: bulkDepartment.value,
       }))
-      const response = await apiFetch('/api/admin/users/batch/update', {
-        method: 'POST',
-        body: JSON.stringify({ items }),
-      })
-      batchReport.value = await readBatchPayload(response)
+      await postUserBatchUpdate(items, undefined, { manageBusy: false })
+      return
     }
     await loadUsers()
-    setStatus(`批量操作完成：成功 ${batchReport.value?.successCount || 0}，失败 ${batchReport.value?.failureCount || 0}`)
+    const completion = describeBatchCompletion('批量操作完成', batchReport.value)
+    setStatus(completion, completion.includes(LAST_PLATFORM_ADMIN_MESSAGE) ? 'error' : 'info')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '批量操作失败', 'error')
   } finally {
@@ -4262,9 +5092,26 @@ async function exportUsersForUpdate(): Promise<void> {
   setStatus(`已导出 ${source.length} 名用户，可修改后重新导入`)
 }
 
+function roleCatalogFingerprint(): string {
+  return JSON.stringify(roleCatalog.value.map((role) => ({
+    id: role.id,
+    permissions: Object.prototype.hasOwnProperty.call(role, 'permissions') ? role.permissions : null,
+    admissionNamespaces: Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces') ? role.admissionNamespaces : null,
+  })))
+}
+
+function reimportRoleFingerprint(): string {
+  return JSON.stringify({
+    generation: reimportInputGeneration.value,
+    items: reimportItems(),
+    roles: roleCatalogFingerprint(),
+  })
+}
+
 async function onReimportFile(event: Event): Promise<void> {
   const input = event.target
   if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return
+  reimportInputGeneration.value += 1
   const rows = await rowsFromUpload(input.files[0])
   const limitMessage = describeImportLimitExceeded(rows.length)
   reimportReady.value = false
@@ -4278,8 +5125,8 @@ async function onReimportFile(event: Event): Promise<void> {
   reimportPreview.value = previewUpdateRows(rows, users.value, knownRoleIds.value)
 }
 
-async function submitReimport(dryRun: boolean): Promise<void> {
-  const items = reimportPreview.value.filter((row) => row.ok && (row.userId || row.email)).map((row) => ({
+function reimportItems(): Array<Record<string, unknown>> {
+  return reimportPreview.value.filter((row) => row.ok && (row.userId || row.email)).map((row) => ({
     userId: row.userId || undefined,
     email: row.email || undefined,
     name: row.name || undefined,
@@ -4287,29 +5134,81 @@ async function submitReimport(dryRun: boolean): Promise<void> {
     department: row.department,
     isActive: row.isActive === 'true' ? true : row.isActive === 'false' ? false : undefined,
   }))
+}
+
+function describeBatchCompletion(
+  prefix: string,
+  report: { successCount: number; failureCount: number; results: Array<Record<string, unknown>> } | null,
+): string {
+  const successCount = report?.successCount || 0
+  const failureCount = report?.failureCount || 0
+  const lastAdmin = (report?.results || []).some((item) => item.code === 'LAST_PLATFORM_ADMIN')
+  const base = `${prefix}：成功 ${successCount}，失败 ${failureCount}`
+  return lastAdmin ? `${base}。${LAST_PLATFORM_ADMIN_MESSAGE}` : base
+}
+
+async function postUserBatchUpdate(
+  items: Array<Record<string, unknown>>,
+  dryRun: boolean | undefined,
+  options: { manageBusy?: boolean; reimport?: boolean } = {},
+): Promise<void> {
   const limitMessage = describeImportLimitExceeded(items.length)
   if (limitMessage) {
     setStatus(limitMessage, 'error')
     return
   }
-  bulkBusy.value = true
+  const manageBusy = options.manageBusy !== false
+  if (manageBusy) bulkBusy.value = true
   try {
     const response = await apiFetch('/api/admin/users/batch/update', {
       method: 'POST',
-      body: JSON.stringify({ items, dryRun }),
+      body: JSON.stringify(dryRun === undefined ? { items } : { items, dryRun }),
     })
-    batchReport.value = await readBatchPayload(response)
-    reimportReady.value = dryRun && (batchReport.value.failureCount === 0 || batchReport.value.successCount > 0)
-    if (!dryRun) {
-      await loadUsers()
-      reimportOpen.value = false
+    const payload = await readJson(response)
+    if (readErrorCode(payload) === 'LAST_PLATFORM_ADMIN') {
+      try {
+        batchReport.value = batchReportFromPayload(payload, response.ok)
+      } catch {
+        batchReport.value = null
+      }
+      setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+      return
     }
-    setStatus(dryRun ? '已生成差异预览，确认后才会写入' : `更新完成：成功 ${batchReport.value.successCount}，失败 ${batchReport.value.failureCount}`)
+    batchReport.value = batchReportFromPayload(payload, response.ok)
+    if (options.reimport) {
+      reimportReady.value = dryRun === true && (batchReport.value.failureCount === 0 || batchReport.value.successCount > 0)
+      if (dryRun !== true) {
+        await loadUsers()
+        reimportOpen.value = false
+      }
+      const completion = describeBatchCompletion('更新完成', batchReport.value)
+      setStatus(
+        dryRun === true ? '已生成差异预览，确认后才会写入' : completion,
+        dryRun === true || !completion.includes(LAST_PLATFORM_ADMIN_MESSAGE) ? 'info' : 'error',
+      )
+      return
+    }
+    await loadUsers()
+    const completion = describeBatchCompletion('批量操作完成', batchReport.value)
+    setStatus(completion, completion.includes(LAST_PLATFORM_ADMIN_MESSAGE) ? 'error' : 'info')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '导入更新失败', 'error')
+    setStatus(error instanceof Error ? error.message : (options.reimport ? '导入更新失败' : '批量操作失败'), 'error')
   } finally {
-    bulkBusy.value = false
+    if (manageBusy) bulkBusy.value = false
   }
+}
+
+async function submitReimport(dryRun: boolean): Promise<void> {
+  await postUserBatchUpdate(reimportItems(), dryRun, { reimport: true })
+}
+
+async function requestReimportWrite(): Promise<void> {
+  const items = reimportItems()
+  if (items.some((item) => typeof item.roleId === 'string' && item.roleId.trim().length > 0)) {
+    await openRoleReplacementPreview('reimport', items, '')
+    return
+  }
+  await submitReimport(false)
 }
 
 async function submitHardDelete(): Promise<void> {
@@ -4471,8 +5370,61 @@ watch(surface, (value) => {
   if (value === 'recycle') void loadRecycleBin()
 })
 
+watch([selectedUserIds, bulkRoleId], () => {
+  const preview = roleReplacementPreview.value
+  const pendingBulk = bulkConfirm.value === 'role' || preview?.source === 'bulk-role'
+  if (!pendingBulk) return
+  const expected = preview?.source === 'bulk-role'
+    ? `${preview.capturedRoleId}\n${preview.capturedUserIds.join('\n')}`
+    : bulkRoleFreezeKey
+  if (`${bulkRoleId.value.trim()}\n${selectedUserIds.value.join('\n')}` === expected) return
+  cancelRoleReplacement()
+  if (bulkConfirm.value === 'role') bulkConfirm.value = null
+})
+
+watch([selectedUserIds, selectedNamespace], () => {
+  if (bulkConfirm.value !== 'namespace' && !bulkAdmissionPreview.value) return
+  const preview = bulkAdmissionPreview.value
+  if (!preview || preview.fingerprint !== bulkAdmissionLiveFingerprint()) {
+    bulkAdmissionPreview.value = null
+    if (bulkConfirm.value === 'namespace') bulkConfirm.value = null
+  }
+})
+
+watch([reimportPreview, roleCatalog, reimportInputGeneration], () => {
+  const preview = roleReplacementPreview.value
+  if (preview?.source !== 'reimport') return
+  if (preview.fingerprint === reimportRoleFingerprint()) return
+  cancelRoleReplacement()
+}, { deep: true })
+
+watch(
+  [importPreview, importInputGeneration, pasteEmails, pasteRoleId, roleCatalog, namespaceAdmissionCapability],
+  () => {
+    const preview = batchCreatePreview.value
+    if (!preview || preview.fingerprint === batchCreateLiveFingerprint()) return
+    batchCreatePreview.value = null
+  },
+  { deep: true },
+)
+
+watch(
+  [selectedUserId, selectedRoleId, createForm, createAdmissionNamespaces, roleCatalog, access, namespaceAdmissionCapability],
+  () => {
+    const draft = authorizationDraft.value
+    if (!draft || authorizationBusy.value) return
+    if (draft.kind === 'create-user' && namespaceAdmissionCapability.value !== 'ready') {
+      clearAuthorization()
+      return
+    }
+    if (!adminAuthorizationStillCurrent(draft, liveAuthorizationFingerprint())) clearAuthorization()
+  },
+  { deep: true },
+)
+
 function onUserAdminKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape') return
+  if (authorizationDraft.value) return
   if (inviteOpen.value) {
     closeInvite()
     return

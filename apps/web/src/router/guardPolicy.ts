@@ -12,12 +12,17 @@
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
  *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
- *      (#4711 R0) + exact /learn and /admin/elearning (reachability only),
+ *      (#4711 R0) + exact /learn and /admin/elearning (reachability only)
+ *      + exact /admin/role-delegation when canManageScope,
  *      else redirect /attendance
- *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning,
+ *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning
+ *      + exact /admin/role-delegation when canManageScope,
  *      else redirect /plm
- *   5. allow
+ *   5. ordinary shell         → exact /admin/role-delegation only when canManageScope;
+ *      exact /admin/permissions only when canManagePermissions
+ *   6. allow
  */
+import { adminAccessCapabilitiesState, reconcileAdminAccessCapabilities } from '../composables/adminAccessCapabilities'
 import { isRoutePermitted } from './routeAccess'
 import { isAttendanceGroupContextPath } from './attendanceGroupContextRoute'
 import {
@@ -108,6 +113,25 @@ export interface RouteGuardPolicyContext {
   attendanceFocused: boolean
   plmWorkbenchFocused: boolean
   resolveHomePath: () => string
+  /**
+   * Exact `/admin/role-delegation` in the ordinary shell and in attendance or PLM
+   * focus. Omitted or false does not open that path, and it never opens any other
+   * `/admin` path. The API flag is reachability: live platform admin, or at least
+   * one delegable namespace.
+   */
+  canManageScope?: boolean
+  /**
+   * Exact `/admin/permissions`. Omitted or false denies that path. A legacy
+   * `users.role` admin is not enough.
+   */
+  canManagePermissions?: boolean
+}
+
+const ROLE_DELEGATION_PATH = '/admin/role-delegation'
+const PERMISSION_SOURCE_PATH = '/admin/permissions'
+
+function focusedRoleDelegationAllowed(ctx: RouteGuardPolicyContext, path: string): boolean {
+  return ctx.canManageScope === true && path === ROLE_DELEGATION_PATH
 }
 
 
@@ -192,6 +216,7 @@ export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardP
     (permission) => deps.auth.hasPermission(permission),
     () => deps.auth.getAccessSnapshot(),
   )
+  reconcileAdminAccessCapabilities()
   return {
     hasFeature: (feature) => deps.flags.hasFeature(feature),
     hasPermission: (permission) => permissionProbe(permission),
@@ -200,6 +225,10 @@ export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardP
       typeof deps.flags.isPlmWorkbenchFocused === 'function' &&
       (deps.flags.isPlmWorkbenchFocused as () => boolean)(),
     resolveHomePath: () => deps.flags.resolveHomePath(),
+    canManageScope:
+      adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManageScope === true,
+    canManagePermissions:
+      adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManagePermissions === true,
   }
 }
 
@@ -227,23 +256,38 @@ export function resolveRouteGuardDecision(
   const path = String(input.path || '')
 
   // 3. attendance focus: exact-path set + bounded #4711 group-context prefix
-  //    + exact cloud-classroom paths.
+  //    + exact cloud-classroom paths + exact /admin/role-delegation when canManageScope.
   if (
     ctx.attendanceFocused
     && !isAttendanceFocusAllowedPath(path)
     && !isElearningFocusExactPath(path)
+    && !focusedRoleDelegationAllowed(ctx, path)
   ) {
     return { action: 'redirect', target: '/attendance' }
   }
 
-  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths.
+  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths
+  //    + exact /admin/role-delegation when canManageScope.
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    ) || isElearningFocusExactPath(path)
+    ) || isElearningFocusExactPath(path) || focusedRoleDelegationAllowed(ctx, path)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }
+  }
+
+  // Ordinary shell. Focus mode already redirected these paths to its own home.
+  if (
+    !ctx.attendanceFocused
+    && !ctx.plmWorkbenchFocused
+    && path === ROLE_DELEGATION_PATH
+    && ctx.canManageScope !== true
+  ) {
+    return { action: 'redirect', target: ctx.resolveHomePath() }
+  }
+  if (path === PERMISSION_SOURCE_PATH && ctx.canManagePermissions !== true) {
+    return { action: 'redirect', target: ctx.resolveHomePath() }
   }
 
   return { action: 'allow' }

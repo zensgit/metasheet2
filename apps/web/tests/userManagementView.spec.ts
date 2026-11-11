@@ -43,6 +43,26 @@ function createJsonResponse(payload: unknown, status = 200) {
   }
 }
 
+function oneShotJsonResponse(payload: unknown, status = 200) {
+  let used = false
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => {
+      if (used) throw new Error('body already read')
+      used = true
+      return payload
+    },
+  }
+}
+
+function realJsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes(text))
   if (!(button instanceof HTMLButtonElement)) {
@@ -57,6 +77,28 @@ function findUserRow(container: HTMLElement, keyword: string): HTMLElement {
     throw new Error(`User row not found: ${keyword}`)
   }
   return row
+}
+
+async function openListedUser(container: HTMLElement, name: string): Promise<void> {
+  const button = findUserRow(container, name).querySelector('button.user-admin__user-body')
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`User button missing: ${name}`)
+  button.click()
+  await waitForCondition(() => container.querySelector('[data-testid="selected-user-heading"]')?.textContent?.includes(name) ?? false)
+}
+
+async function confirmAdminAuthorization(container: HTMLElement, phrase?: string): Promise<void> {
+  await waitForCondition(() => Boolean(container.querySelector('[data-testid="admin-authorization-confirm"]')))
+  if (phrase) {
+    const input = container.querySelector('[data-testid="admin-authorization-phrase"]')
+    if (!(input instanceof HTMLInputElement)) throw new Error('authorization phrase input missing')
+    input.value = phrase
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+  }
+  const confirm = container.querySelector('[data-testid="admin-authorization-confirm"]')
+  if (!(confirm instanceof HTMLButtonElement)) throw new Error('authorization confirm missing')
+  if (confirm.disabled) throw new Error('authorization confirm is disabled')
+  confirm.click()
 }
 
 function findNamespaceSelect(container: HTMLElement): HTMLSelectElement {
@@ -435,6 +477,7 @@ function createApiImplementation(
       return createJsonResponse({
         ok: true,
         data: { items: [] },
+        capabilities: { explicitNamespaceAdmission: true },
       })
     }
 
@@ -603,7 +646,7 @@ function createApiImplementation(
       const rawBody = typeof init?.body === 'string' ? init.body : ''
       const parsed = rawBody ? JSON.parse(rawBody) as { items?: unknown[]; dryRun?: boolean } : {}
       const count = Array.isArray(parsed.items) ? parsed.items.length : 0
-      return createJsonResponse({
+      return oneShotJsonResponse({
         ok: true,
         data: {
           successCount: count,
@@ -761,20 +804,33 @@ function createApiImplementation(
     }
 
     const namespaceAdmissionMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/namespaces\/([^/]+)\/admission$/)
-    if (namespaceAdmissionMatch) {
+    if (namespaceAdmissionMatch && (init?.method || 'GET').toUpperCase() === 'PATCH') {
+      const user = findUserById(decodeURIComponent(namespaceAdmissionMatch[1]))
       const namespace = decodeURIComponent(namespaceAdmissionMatch[2])
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { enabled?: unknown } : {}
+      const enabled = parsed.enabled === true
+      const existing = user.namespaceAdmissions.find((item) => item.namespace === namespace)
+      if (existing) {
+        existing.enabled = enabled
+        existing.effective = enabled && existing.hasRole
+        existing.updatedAt = '2026-04-10T00:00:00.000Z'
+      } else {
+        user.namespaceAdmissions = [
+          ...user.namespaceAdmissions,
+          {
+            namespace,
+            enabled,
+            effective: enabled,
+            hasRole: true,
+            updatedAt: '2026-04-10T00:00:00.000Z',
+          },
+        ]
+      }
       return createJsonResponse({
         ok: true,
         data: {
-          namespaceAdmissions: [
-            {
-              namespace,
-              enabled: true,
-              effective: true,
-              hasRole: true,
-              updatedAt: '2026-04-10T00:00:00.000Z',
-            },
-          ],
+          namespaceAdmissions: user.namespaceAdmissions.map((item) => ({ ...item })),
         },
       })
     }
@@ -867,6 +923,7 @@ describe('UserManagementView', () => {
     })
     app.mount(container!)
     await flushUi(20)
+    await openListedUser(container!, 'Alpha')
 
     expect(container?.textContent).toContain('钉钉扫码登录')
     expect(container?.textContent).toContain('插件使用')
@@ -892,6 +949,7 @@ describe('UserManagementView', () => {
       throw new Error('Namespace open button not found')
     }
     namespaceOpenButton.click()
+    await confirmAdminAuthorization(container!)
     await waitForCondition(() => container?.textContent?.includes('已开通 crm 插件使用') ?? false)
 
     expect(container?.textContent).toContain('已开通 crm 插件使用')
@@ -1456,6 +1514,7 @@ describe('UserManagementView', () => {
     registerRouterLink(app, true)
     app.mount(container!)
     await flushUi(20)
+    await openListedUser(container!, 'Alpha')
 
     const permissionLink = container!.querySelector('[data-testid="member-permission-source-link"]')
     const scopeLink = container!.querySelector('[data-testid="management-scope-link"]')
@@ -1551,6 +1610,16 @@ describe('UserManagementView', () => {
     const admissionBefore = callLog.filter((url) => url.includes('/api/admin/users/user-2/member-admission')).length
 
     findButtonByText(container!, '批量开通插件使用').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="bulk-admission-target"]') !== null)
+    expect(apiFetchMock.mock.calls.some((args) => String(args[0]).includes('/admission/bulk'))).toBe(false)
+    const frozenTarget = container!.querySelector('[data-testid="bulk-admission-target"]')?.textContent || ''
+    expect(frozenTarget).toContain('Bravo')
+    expect(frozenTarget).toContain('user-2')
+    expect(container!.textContent).toContain('将开通插件使用「finance」。不改变这些用户的角色，也不写入直接权限。')
+    const confirm = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(confirm instanceof HTMLButtonElement)) throw new Error('bulk admission confirm missing')
+    expect(confirm.disabled).toBe(false)
+    confirm.click()
     await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/namespaces/finance/admission/bulk'))
 
     const bulkCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/namespaces/finance/admission/bulk')
@@ -1560,7 +1629,7 @@ describe('UserManagementView', () => {
       enabled: true,
     })
     await waitForCondition(() => callLog.filter((url) => url.includes('/api/admin/users/user-2/member-admission')).length > admissionBefore)
-    await flushUi()
+    await waitForCondition(() => container?.textContent?.includes('已批量开通 finance 插件使用') === true)
     expect(container?.textContent).toContain('已批量开通 finance 插件使用')
     expect(container?.textContent).toContain('finance')
     expect(container?.textContent).toContain('插件使用已开通')
@@ -1826,7 +1895,9 @@ describe('UserManagementView', () => {
     shiftStartDateInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi(2)
 
+    await waitForCondition(() => !findButtonByText(container!, '创建用户').disabled)
     findButtonByText(container!, '创建用户').click()
+    await confirmAdminAuthorization(container!)
     await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
     await flushUi(8)
 
@@ -1846,6 +1917,7 @@ describe('UserManagementView', () => {
       defaultShiftStartDate: '2026-06-01',
       role: 'user',
       isActive: true,
+      admissionNamespaces: [],
     })
     expect(container?.textContent).toContain('用户已创建')
     expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
@@ -1901,7 +1973,9 @@ describe('UserManagementView', () => {
         input.dispatchEvent(new Event('input', { bubbles: true }))
       }
       await flushUi(2)
+      await waitForCondition(() => !findButtonByText(container!, '创建用户').disabled)
       findButtonByText(container!, '创建用户').click()
+      await confirmAdminAuthorization(container!)
       await waitForCondition(() => Boolean(container!.querySelector('.user-admin__status--error')))
     }
 
@@ -2012,7 +2086,9 @@ describe('UserManagementView', () => {
       usernameInput.value = 'org.tester'
       usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
       await flushUi(2)
+      await waitForCondition(() => !findButtonByText(container!, '创建用户').disabled)
       findButtonByText(container!, '创建用户').click()
+      await confirmAdminAuthorization(container!)
       await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
       await flushUi(8)
       const createCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST')
@@ -2371,6 +2447,7 @@ describe('UserManagementView', () => {
       registerRouterLink(app)
       app.mount(container!)
       await flushUi(20)
+      await openListedUser(container!, 'Alpha')
       await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
       await flushUi(8)
     }
@@ -2559,6 +2636,7 @@ describe('UserManagementView', () => {
       registerRouterLink(app)
       app.mount(container!)
       await flushUi(20)
+      await openListedUser(container!, 'Alpha')
       await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
       await flushUi(8)
       await waitForCondition(() => container!.textContent?.includes('平台账号') ?? false)
@@ -2708,6 +2786,7 @@ describe('UserManagementView', () => {
       app.mount(container!)
       await flushUi(20)
       await waitForCondition(() => container!.querySelector('.user-admin__user') !== null)
+      await openListedUser(container!, 'Alpha')
     }
 
     it("refuter scenario: user-1's slow admission landing while user-2 is shown neither replaces user-2's panel nor offers a join", async () => {
@@ -2920,6 +2999,7 @@ describe('UserManagementView', () => {
       registerRouterLink(app)
       app.mount(container!)
       await flushUi(20)
+      await openListedUser(container!, 'Alpha')
       await waitForCondition(() => callLog.some((url) => url.endsWith('/dingtalk-access'))
         && callLog.some((url) => url.endsWith('/member-admission')))
       await flushUi(8)
@@ -2967,6 +3047,7 @@ describe('UserManagementView', () => {
       const openButton = Array.from(namespaceCard?.querySelectorAll('button') ?? []).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
       if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
       openButton.click()
+      await confirmAdminAuthorization(container!)
       await waitForCondition(() => topBanner()?.textContent?.includes('已开通 crm 插件使用') ?? false)
       const bannerBefore = { text: topBanner()!.textContent, className: topBanner()!.className }
 
@@ -3153,6 +3234,8 @@ describe('UserManagementView', () => {
       app = createApp(UserManagementView)
       registerRouterLink(app)
       app.mount(container!)
+      await waitForCondition(() => container!.querySelector('.user-admin__user') !== null)
+      await openListedUser(container!, 'Alpha')
       await waitForCondition(() => ruleEl() !== null)
     }
 
@@ -3763,10 +3846,23 @@ describe('UserManagementView', () => {
     if (count <= 100) {
       expect(container!.textContent).toContain('可导入 100 行')
       findButtonByText(container!, '确认导入').click()
+      await waitForCondition(() => Boolean(container!.querySelector('[data-testid="batch-create-confirm"]')))
+      expect(apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/batch/create').length).toBe(before)
+      const confirm = container!.querySelector('[data-testid="batch-create-confirm"]')
+      if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) throw new Error('batch create confirm is not ready')
+      confirm.click()
       await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/batch/create'))
       const call = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/batch/create')
-      const items = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)).items as unknown[]
-      expect(items).toHaveLength(100)
+      const body = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)) as { items?: Array<Record<string, unknown>> }
+      expect(body.items).toHaveLength(100)
+      expect(body.items?.[0]).toEqual({
+        name: '用户001',
+        email: 'batch1@example.com',
+        roleId: 'crm_admin',
+        department: '装配',
+      })
+      expect(Object.prototype.hasOwnProperty.call(body, 'admissionNamespaces')).toBe(false)
+      expect(body.items?.some((item) => Object.prototype.hasOwnProperty.call(item, 'admissionNamespaces'))).toBe(false)
     } else {
       expect(container!.textContent).toContain(`共 ${count} 行，超出 ${count - 100} 行`)
       expect(container!.textContent).toContain('未写入任何数据')
@@ -3855,5 +3951,1681 @@ describe('UserManagementView', () => {
     const items = JSON.parse(String((call?.[1] as RequestInit | undefined)?.body)).items as Array<{ userId?: string; roleId?: string }>
     expect(items.find((item) => item.userId === 'user-1')?.roleId).toBeUndefined()
     expect(items.find((item) => item.userId === 'user-2')?.roleId).toBeUndefined()
+  })
+
+  function userCheckbox(name: string): HTMLInputElement {
+    const input = findUserRow(container!, name).querySelector('input[type="checkbox"]')
+    if (!(input instanceof HTMLInputElement)) throw new Error(`checkbox missing: ${name}`)
+    return input
+  }
+
+  function setUserChecked(name: string, checked: boolean): void {
+    const input = userCheckbox(name)
+    input.checked = checked
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  function batchUpdateBodies(): Array<Record<string, unknown>> {
+    return apiFetchMock.mock.calls
+      .filter((args) => String(args[0]).includes('/api/admin/users/batch/update'))
+      .map((args) => JSON.parse(String((args[1] as RequestInit | undefined)?.body || '{}')) as Record<string, unknown>)
+  }
+
+  async function mountMembers(): Promise<void> {
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+  }
+
+  async function chooseBulkRole(roleId: string): Promise<void> {
+    await waitForCondition(() => container!.querySelector(`select[aria-label="批量角色"] option[value="${roleId}"]`) !== null)
+    const select = container!.querySelector('select[aria-label="批量角色"]')
+    if (!(select instanceof HTMLSelectElement)) throw new Error('bulk role select missing')
+    await setSelectValue(select, roleId)
+    findButtonByText(container!, '应用角色').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="bulk-role-target"]') !== null)
+  }
+
+  it('shows role-catalog codes in the admission dialog and does not relabel the access snapshot as inherited', async () => {
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const response = await base(input, init)
+      if (new URL(String(input), 'http://localhost').pathname !== '/api/admin/users/user-1/access') return response
+      const payload = await response.json() as { data: { permissions: string[] } }
+      payload.data.permissions = ['aggregate:only', 'crm:admin']
+      return createJsonResponse(payload)
+    })
+    await mountMembers()
+    await openListedUser(container!, 'Alpha')
+    const codes = Array.from(container!.querySelectorAll('.user-admin__chip--permission .user-admin__code')).map((node) => node.textContent?.trim())
+    expect(codes).toContain('aggregate:only')
+    const namespaceCard = container!.querySelector('.user-admin__role-card--namespace')
+    const openButton = Array.from(namespaceCard?.querySelectorAll('button') ?? []).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
+    if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
+    openButton.click()
+    await waitForCondition(() => Boolean(container!.querySelector('[data-testid="admin-authorization-dialog"]')))
+    const dialog = container!.querySelector('[data-testid="admin-authorization-dialog"]')
+    const inherited = dialog?.querySelector('[data-testid="admin-authorization-inherited-permissions"]')
+    expect(inherited?.textContent).toContain('crm:admin')
+    expect(inherited?.textContent).not.toContain('aggregate:only')
+    expect(dialog?.textContent).toContain('下列权限码来自这些角色在角色目录中的清单。')
+    expect(dialog?.textContent).not.toContain('aggregate:only')
+    ;(dialog?.querySelector('[data-testid="admin-authorization-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(apiFetchMock.mock.calls.some((args) => (
+      new URL(String(args[0]), 'http://localhost').pathname.includes('/admission')
+      && ((args[1] as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'PATCH'
+    ))).toBe(false)
+  })
+
+  it('does not apply a stale admission write when the same user is selected again', async () => {
+    const base = createApiImplementation(callLog)
+    let releasePatch: (() => void) | null = null
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      if (method === 'PATCH' && /\/namespaces\/[^/]+\/admission$/.test(pathname)) {
+        await new Promise<void>((resolve) => {
+          releasePatch = resolve
+        })
+      }
+      return base(input, init)
+    })
+    await mountMembers()
+    await openListedUser(container!, 'Alpha')
+    const openButton = Array.from(container!.querySelectorAll('.user-admin__role-card--namespace button')).find((candidate) => candidate.textContent?.trim() === '开通插件使用')
+    if (!(openButton instanceof HTMLButtonElement)) throw new Error('Namespace open button not found')
+    openButton.click()
+    await confirmAdminAuthorization(container!)
+    await waitForCondition(() => releasePatch !== null)
+    const admissionCount = () => callLog.filter((url) => url.includes('/api/admin/users/user-1/member-admission')).length
+    const accessCount = () => callLog.filter((url) => url.includes('/api/admin/users/user-1/access')).length
+    const admissionsBeforeReturn = admissionCount()
+    await openListedUser(container!, 'Bravo')
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => admissionCount() > admissionsBeforeReturn)
+    await flushUi(8)
+    const admissionsBeforeRelease = admissionCount()
+    const accessBeforeRelease = accessCount()
+    releasePatch?.()
+    releasePatch = null
+    await flushUi(16)
+    const status = container!.querySelector('.user-admin__status')?.textContent || ''
+    expect(status).not.toContain('已开通')
+    expect(container!.textContent).toContain('插件使用未开通')
+    expect(accessCount()).toBe(accessBeforeRelease)
+    expect(admissionCount()).toBe(admissionsBeforeRelease)
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+  })
+
+  it('cancels bulk role replacement without a write and drops it when the selection changes', async () => {
+    await mountMembers()
+    setUserChecked('Delta', true)
+    await flushUi()
+    expect(userCheckbox('Delta').checked).toBe(true)
+    await chooseBulkRole('finance_admin')
+    const preview = container!.querySelector('[data-testid="bulk-role-target"]')?.textContent || ''
+    expect(preview).toContain('user-4')
+    expect(preview).toContain('finance_admin')
+    expect(preview).toContain('finance:admin')
+    expect(preview).toContain('目前看不出这次会不会关闭插件使用。')
+    expect(container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')).toBeTruthy()
+    const dialog = container!.querySelector('[data-testid="bulk-confirm"]')
+    const cancel = Array.from(dialog?.querySelectorAll('button') ?? []).find((button) => button.textContent?.trim() === '取消')
+    if (!(cancel instanceof HTMLButtonElement)) throw new Error('bulk cancel missing')
+    cancel.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(batchUpdateBodies()).toEqual([])
+    expect(userCheckbox('Delta').checked).toBe(true)
+
+    setUserChecked('Alpha', true)
+    await flushUi()
+    await chooseBulkRole('finance_admin')
+    setUserChecked('Alpha', false)
+    await flushUi()
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(batchUpdateBodies()).toEqual([])
+    expect(userCheckbox('Delta').checked).toBe(true)
+    expect(userCheckbox('Alpha').checked).toBe(false)
+  })
+
+  it('requires the platform-admin phrase before bulk role replacement can remove an admin', async () => {
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      if (String(input).includes('/api/admin/users/batch/update') && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as { dryRun?: boolean }
+        if (body.dryRun !== true) {
+          return oneShotJsonResponse({
+            ok: true,
+            data: {
+              successCount: 0,
+              failureCount: 1,
+              results: [{
+                index: 0,
+                ok: false,
+                userId: 'user-4',
+                email: 'delta@example.com',
+                code: 'LAST_PLATFORM_ADMIN',
+                message: '至少保留一名可登录的平台管理员',
+              }],
+            },
+          })
+        }
+      }
+      return base(input, init)
+    })
+    await mountMembers()
+    setUserChecked('Delta', true)
+    await flushUi()
+    await chooseBulkRole('finance_admin')
+    const submit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(submit instanceof HTMLButtonElement)) throw new Error('bulk submit missing')
+    expect(submit.disabled).toBe(true)
+    const phrase = container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')
+    if (!(phrase instanceof HTMLInputElement)) throw new Error('bulk phrase missing')
+    phrase.value = '取消'
+    phrase.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(submit.disabled).toBe(true)
+    expect(batchUpdateBodies()).toEqual([])
+    phrase.value = '取消平台管理员'
+    phrase.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(submit.disabled).toBe(false)
+    submit.click()
+    await waitForCondition(() => container!.querySelector('.user-admin__status')?.textContent?.includes('不能取消最后一名平台管理员') === true)
+    expect(batchUpdateBodies()).toEqual([{
+      items: [{ userId: 'user-4', email: 'delta@example.com', roleId: 'finance_admin' }],
+    }])
+    const status = container!.querySelector('.user-admin__status')?.textContent || ''
+    expect(status).toContain('不能取消最后一名平台管理员')
+    expect(status).not.toContain('已撤销')
+    expect(status).not.toContain('至少保留一名可登录的平台管理员')
+    expect(userCheckbox('Delta').checked).toBe(true)
+  })
+
+  it('keeps a top-level last-admin rejection in Chinese and does not claim the role was removed', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const method = (init?.method || 'GET').toUpperCase()
+      if (String(input).includes('/api/admin/users/batch/update') && method === 'POST') {
+        return oneShotJsonResponse({
+          ok: false,
+          error: { code: 'LAST_PLATFORM_ADMIN', message: 'Cannot remove the last platform administrator' },
+        }, 409)
+      }
+      return createApiImplementation(callLog)(input, init)
+    })
+    await mountMembers()
+    setUserChecked('Delta', true)
+    await flushUi()
+    await chooseBulkRole('finance_admin')
+    const phrase = container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')
+    if (!(phrase instanceof HTMLInputElement)) throw new Error('bulk phrase missing')
+    phrase.value = '取消平台管理员'
+    phrase.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="bulk-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => container!.querySelector('.user-admin__status')?.textContent?.includes('不能取消最后一名平台管理员') === true)
+    const status = container!.querySelector('.user-admin__status')?.textContent || ''
+    expect(status).not.toContain('已撤销')
+    expect(status).not.toContain('Cannot remove the last platform administrator')
+    expect(batchUpdateBodies()).toHaveLength(1)
+  })
+
+  it('previews a role-bearing reimport before writing and leaves selection unchanged on cancel', async () => {
+    await mountMembers()
+    setUserChecked('Delta', true)
+    await flushUi()
+    findButtonByText(container!, '导入更新').click()
+    await flushUi()
+    const csv = [
+      'userId,email,name,roleId,department,isActive,roleIds',
+      'user-4,delta@example.com,Delta,finance_admin,装配,true,admin',
+    ].join('\n')
+    await uploadCsv('reimport-file', csv, 'role-update.csv')
+    findButtonByText(container!, '预览差异').click()
+    await waitForCondition(() => batchUpdateBodies().length === 1)
+    expect(batchUpdateBodies()[0]?.dryRun).toBe(true)
+    findButtonByText(container!, '确认更新').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="reimport-role-target"]') !== null)
+    expect(batchUpdateBodies()).toHaveLength(1)
+    const target = container!.querySelector('[data-testid="reimport-role-target"]')?.textContent || ''
+    expect(target).toContain('user-4')
+    expect(target).toContain('finance_admin')
+    expect(target).toContain('finance:admin')
+    expect(target).toContain('目前看不出这次会不会关闭插件使用。')
+    const write = container!.querySelector('[data-testid="reimport-role-confirm"]')
+    if (!(write instanceof HTMLButtonElement)) throw new Error('reimport role confirm missing')
+    expect(write.disabled).toBe(true)
+    findButtonByText(container!, '取消这次角色更新').click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="reimport-role-preview"]')).toBeNull()
+    expect(batchUpdateBodies()).toHaveLength(1)
+    expect(userCheckbox('Delta').checked).toBe(true)
+
+    findButtonByText(container!, '确认更新').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="reimport-role-target"]') !== null)
+    const phrase = container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')
+    if (!(phrase instanceof HTMLInputElement)) throw new Error('reimport phrase missing')
+    phrase.value = '取消平台管理员'
+    phrase.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="reimport-role-confirm"]') as HTMLButtonElement).click()
+    await waitForCondition(() => batchUpdateBodies().length === 2)
+    expect(batchUpdateBodies()[1]).toEqual({
+      dryRun: false,
+      items: [{
+        userId: 'user-4',
+        email: 'delta@example.com',
+        name: 'Delta',
+        roleId: 'finance_admin',
+        department: '装配',
+        isActive: true,
+      }],
+    })
+    await waitForCondition(() => container!.querySelector('.user-admin__status')?.textContent?.includes('更新完成') === true)
+    expect(container!.querySelector('[data-testid="reimport-dialog"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="reimport-role-preview"]')).toBeNull()
+    const status = container!.querySelector('.user-admin__status')?.textContent || ''
+    expect(status).toContain('更新完成：成功 1，失败 0')
+    expect(status).not.toContain('批量操作完成')
+    expect(userCheckbox('Delta').checked).toBe(true)
+  })
+
+  it('still writes a department-only reimport without a role confirmation', async () => {
+    await mountMembers()
+    findButtonByText(container!, '导入更新').click()
+    await flushUi()
+    const csv = [
+      'userId,email,name,roleId,department,isActive,roleIds',
+      'user-2,bravo@example.com,Bravo,,新部门,true,',
+    ].join('\n')
+    await uploadCsv('reimport-file', csv, 'department-update.csv')
+    findButtonByText(container!, '预览差异').click()
+    await waitForCondition(() => batchUpdateBodies().some((body) => body.dryRun === true))
+    findButtonByText(container!, '确认更新').click()
+    await waitForCondition(() => batchUpdateBodies().some((body) => body.dryRun === false))
+    expect(container!.querySelector('[data-testid="reimport-role-preview"]')).toBeNull()
+    const write = batchUpdateBodies().find((body) => body.dryRun === false)
+    const items = write?.items as Array<{ userId?: string; roleId?: string; department?: string }>
+    expect(items).toEqual([{
+      userId: 'user-2',
+      email: 'bravo@example.com',
+      name: 'Bravo',
+      department: '新部门',
+      isActive: true,
+    }])
+    expect(items?.some((item) => item.roleId)).toBe(false)
+    await waitForCondition(() => container!.querySelector('.user-admin__status')?.textContent?.includes('更新完成') === true)
+    expect(container!.querySelector('[data-testid="reimport-dialog"]')).toBeNull()
+    const departmentStatus = container!.querySelector('.user-admin__status')?.textContent || ''
+    expect(departmentStatus).toContain('更新完成')
+    expect(departmentStatus).not.toContain('批量操作完成')
+  })
+
+  function pageStatus(): string {
+    return container!.querySelector('.user-admin__status')?.textContent || ''
+  }
+
+  function namespaceBulkPosts(): Array<Record<string, unknown>> {
+    return apiFetchMock.mock.calls
+      .filter((args) => String(args[0]).includes('/namespaces/') && String(args[0]).includes('/admission/bulk'))
+      .map((args) => JSON.parse(String((args[1] as RequestInit | undefined)?.body || '{}')) as Record<string, unknown>)
+  }
+
+  function installRealBatchUpdate(payload: unknown, status = 200): void {
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      if (pathname === '/api/admin/users/batch/update') return realJsonResponse(payload, status)
+      return base(input, init)
+    })
+  }
+
+  async function confirmDepartmentUpdate(): Promise<void> {
+    setUserChecked('Alpha', true)
+    await flushUi()
+    const input = container!.querySelector('input[aria-label="批量部门"]')
+    if (!(input instanceof HTMLInputElement)) throw new Error('department input missing')
+    input.value = '装配车间'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    findButtonByText(container!, '应用部门').click()
+    await flushUi()
+    const submit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(submit instanceof HTMLButtonElement)) throw new Error('department confirm missing')
+    submit.click()
+  }
+
+  async function openFinanceAdmissionConfirm(name = 'Bravo'): Promise<void> {
+    await setSelectValue(findNamespaceSelect(container!), 'finance')
+    setUserChecked(name, true)
+    await flushUi()
+    findButtonByText(container!, '批量开通插件使用').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="bulk-admission-target"]') !== null)
+  }
+
+  function roleUpdateCsv(roleId: string): string {
+    return [
+      'userId,email,name,roleId,department,isActive,roleIds',
+      `user-4,delta@example.com,Delta,${roleId},装配,true,admin`,
+    ].join('\n')
+  }
+
+  async function openReimportRolePreview(csv: string, fileName: string): Promise<void> {
+    if (!container!.querySelector('[data-testid="reimport-dialog"]')) {
+      findButtonByText(container!, '导入更新').click()
+      await flushUi()
+    }
+    await uploadCsv('reimport-file', csv, fileName)
+    findButtonByText(container!, '预览差异').click()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('确认更新'))
+      return Boolean(button && !button.disabled && batchUpdateBodies().some((body) => body.dryRun === true))
+    })
+    findButtonByText(container!, '确认更新').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="reimport-role-target"]') !== null)
+  }
+
+  async function typeBulkAdminPhrase(): Promise<void> {
+    const phrase = container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')
+    if (!(phrase instanceof HTMLInputElement)) throw new Error('bulk phrase missing')
+    phrase.value = '取消平台管理员'
+    phrase.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+  }
+
+  it('reads a real batch-update Response once for success, failure, and last-admin', async () => {
+    installRealBatchUpdate({
+      ok: true,
+      data: {
+        successCount: 1,
+        failureCount: 0,
+        results: [{ index: 0, ok: true, userId: 'user-1', code: null, message: 'ok' }],
+      },
+    })
+    await mountMembers()
+    await confirmDepartmentUpdate()
+    await waitForCondition(() => pageStatus().includes('批量操作完成：成功 1，失败 0'))
+    expect(pageStatus()).not.toContain('批量操作失败')
+    expect(batchUpdateBodies()).toEqual([{
+      items: [{ userId: 'user-1', email: 'alpha@example.com', department: '装配车间' }],
+    }])
+
+    app?.unmount()
+    installRealBatchUpdate({ ok: false, error: { message: '批量写入失败' } }, 500)
+    await mountMembers()
+    await confirmDepartmentUpdate()
+    await waitForCondition(() => pageStatus().includes('批量写入失败'))
+    expect(pageStatus()).not.toContain('批量操作完成')
+    expect(pageStatus()).not.toContain('成功 1')
+
+    app?.unmount()
+    installRealBatchUpdate({
+      ok: true,
+      data: {
+        successCount: 0,
+        failureCount: 1,
+        results: [{
+          index: 0,
+          ok: false,
+          userId: 'user-1',
+          code: 'LAST_PLATFORM_ADMIN',
+          message: '至少保留一名可登录的平台管理员',
+        }],
+      },
+    })
+    await mountMembers()
+    await confirmDepartmentUpdate()
+    await waitForCondition(() => pageStatus().includes('不能取消最后一名平台管理员'))
+    const itemStatus = pageStatus()
+    expect(itemStatus).toContain('批量操作完成：成功 0，失败 1。不能取消最后一名平台管理员')
+    expect(itemStatus).not.toContain('已撤销')
+    expect(itemStatus).not.toContain('至少保留一名可登录的平台管理员')
+
+    app?.unmount()
+    installRealBatchUpdate({
+      ok: false,
+      error: { code: 'LAST_PLATFORM_ADMIN', message: 'Cannot remove the last platform administrator' },
+    }, 409)
+    await mountMembers()
+    await confirmDepartmentUpdate()
+    await waitForCondition(() => pageStatus().includes('不能取消最后一名平台管理员'))
+    const topStatus = pageStatus()
+    expect(topStatus).not.toContain('Cannot remove the last platform administrator')
+    expect(topStatus).not.toContain('批量操作完成')
+    expect(topStatus).not.toContain('已撤销')
+  })
+
+  it('requires the platform-admin phrase when the access payload belongs to a different user', async () => {
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const match = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
+      if (match && decodeURIComponent(match[1]) === 'user-4') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user: { id: 'user-1', name: 'Alpha', role: 'user', is_active: true, is_admin: false },
+            roles: ['crm_admin'],
+            permissions: ['crm:admin'],
+            isAdmin: false,
+          },
+        })
+      }
+      return base(input, init)
+    })
+    await mountMembers()
+    setUserChecked('Delta', true)
+    await flushUi()
+    await chooseBulkRole('finance_admin')
+    const submit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(submit instanceof HTMLButtonElement)) throw new Error('bulk submit missing')
+    expect(submit.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')).toBeTruthy()
+    expect(batchUpdateBodies()).toEqual([])
+
+    const dialog = container!.querySelector('[data-testid="bulk-confirm"]')
+    const cancel = Array.from(dialog?.querySelectorAll('button') ?? []).find((button) => button.textContent?.trim() === '取消')
+    if (!(cancel instanceof HTMLButtonElement)) throw new Error('bulk cancel missing')
+    cancel.click()
+    await flushUi()
+    setUserChecked('Delta', false)
+    setUserChecked('Alpha', true)
+    await flushUi()
+    await chooseBulkRole('finance_admin')
+    expect(container!.querySelector('[data-testid="bulk-admin-removal-phrase"]')).toBeNull()
+    const alphaSubmit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(alphaSubmit instanceof HTMLButtonElement)) throw new Error('alpha bulk submit missing')
+    expect(alphaSubmit.disabled).toBe(false)
+    expect(batchUpdateBodies()).toEqual([])
+  })
+
+  it('drops a frozen role reimport when a new file arrives, even with the same rows', async () => {
+    await mountMembers()
+    const csv = roleUpdateCsv('finance_admin')
+    await openReimportRolePreview(csv, 'role-update.csv')
+    await typeBulkAdminPhrase()
+    const confirm = container!.querySelector('[data-testid="reimport-role-confirm"]')
+    if (!(confirm instanceof HTMLButtonElement)) throw new Error('reimport role confirm missing')
+    expect(confirm.disabled).toBe(false)
+    const writesBefore = batchUpdateBodies().filter((body) => body.dryRun === false).length
+    await uploadCsv('reimport-file', csv, 'role-update-again.csv')
+    expect(container!.querySelector('[data-testid="reimport-dialog"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="reimport-role-preview"]')).toBeNull()
+    expect(batchUpdateBodies().filter((body) => body.dryRun === false)).toHaveLength(writesBefore)
+    expect(findButtonByText(container!, '确认更新').disabled).toBe(true)
+  })
+
+  it('drops a frozen role reimport when the uploaded role rows change', async () => {
+    await mountMembers()
+    await openReimportRolePreview(roleUpdateCsv('finance_admin'), 'role-finance.csv')
+    await typeBulkAdminPhrase()
+    await uploadCsv('reimport-file', roleUpdateCsv('crm_admin'), 'role-crm.csv')
+    expect(container!.querySelector('[data-testid="reimport-dialog"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="reimport-role-preview"]')).toBeNull()
+    expect(batchUpdateBodies().some((body) => body.dryRun === false)).toBe(false)
+    findButtonByText(container!, '预览差异').click()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('确认更新'))
+      return Boolean(button && !button.disabled && batchUpdateBodies().filter((body) => body.dryRun === true).length >= 2)
+    })
+    findButtonByText(container!, '确认更新').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="reimport-role-target"]') !== null)
+    expect(container!.querySelector('[data-testid="reimport-role-target"]')?.textContent).toContain('crm_admin')
+    expect(container!.querySelector('[data-testid="reimport-role-target"]')?.textContent).not.toContain('finance_admin')
+    expect(batchUpdateBodies().some((body) => body.dryRun === false)).toBe(false)
+  })
+
+  it('drops a frozen role reimport when the role catalog changes', async () => {
+    let catalogChanged = false
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (url.pathname === '/api/admin/roles' && catalogChanged) {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'crm_admin', name: 'CRM 管理员', memberCount: 1, permissions: ['crm:admin'] },
+              {
+                id: 'finance_admin',
+                name: '财务管理员',
+                memberCount: 1,
+                permissions: ['finance:changed'],
+                admissionNamespaces: ['finance'],
+              },
+            ],
+          },
+        })
+      }
+      if (method === 'POST' && /\/roles\/assign$/.test(url.pathname)) {
+        catalogChanged = true
+        return createJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'Role catalog version mismatch' } }, 409)
+      }
+      return base(input, init)
+    })
+    await mountMembers()
+    await openListedUser(container!, 'Alpha')
+    await openReimportRolePreview(roleUpdateCsv('finance_admin'), 'role-catalog.csv')
+    await typeBulkAdminPhrase()
+    expect((container!.querySelector('[data-testid="reimport-role-confirm"]') as HTMLButtonElement).disabled).toBe(false)
+    const roleSelect = container!.querySelector('[data-testid="user-role-select"]')
+    if (!(roleSelect instanceof HTMLSelectElement)) throw new Error('role select missing')
+    await setSelectValue(roleSelect, 'finance_admin')
+    const assign = container!.querySelector('[data-testid="assign-role-button"]')
+    if (!(assign instanceof HTMLButtonElement)) throw new Error('assign missing')
+    expect(assign.disabled).toBe(false)
+    assign.click()
+    await confirmAdminAuthorization(container!)
+    await waitForCondition(() => container!.querySelector('[data-testid="reimport-role-preview"]') === null)
+    expect(container!.querySelector('[data-testid="reimport-dialog"]')).toBeTruthy()
+    expect(pageStatus()).toContain('角色目录已变化，本次未写入。请刷新角色后再确认。')
+    expect(batchUpdateBodies().some((body) => body.dryRun === false)).toBe(false)
+  })
+
+  it('cancels bulk plugin admission without posting and drops a stale selection or namespace', async () => {
+    await mountMembers()
+    await openFinanceAdmissionConfirm()
+    expect(container!.querySelector('[data-testid="bulk-admission-preview"]')?.textContent).toContain('不改变这些用户的角色，也不写入直接权限。')
+    expect(container!.textContent).toContain('确认开通插件使用：finance？')
+    const dialog = container!.querySelector('[data-testid="bulk-confirm"]')
+    const cancel = Array.from(dialog?.querySelectorAll('button') ?? []).find((button) => button.textContent?.trim() === '取消')
+    if (!(cancel instanceof HTMLButtonElement)) throw new Error('admission cancel missing')
+    cancel.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(namespaceBulkPosts()).toEqual([])
+    expect(userCheckbox('Bravo').checked).toBe(true)
+
+    findButtonByText(container!, '批量开通插件使用').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="bulk-admission-target"]') !== null)
+    setUserChecked('Bravo', false)
+    const staleSubmit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(staleSubmit instanceof HTMLButtonElement)) throw new Error('stale admission confirm missing')
+    staleSubmit.click()
+    await flushUi()
+    expect(namespaceBulkPosts()).toEqual([])
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+
+    setUserChecked('Bravo', true)
+    await flushUi()
+    findButtonByText(container!, '批量开通插件使用').click()
+    await waitForCondition(() => container!.querySelector('[data-testid="bulk-admission-target"]') !== null)
+    await setSelectValue(findNamespaceSelect(container!), 'crm')
+    const namespaceSubmit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (namespaceSubmit instanceof HTMLButtonElement) namespaceSubmit.click()
+    await flushUi()
+    expect(namespaceBulkPosts()).toEqual([])
+    expect(container!.querySelector('[data-testid="bulk-confirm"]')).toBeNull()
+    expect(userCheckbox('Bravo').checked).toBe(true)
+  })
+
+  it('posts bulk plugin admission once when confirm is clicked twice', async () => {
+    await mountMembers()
+    await openListedUser(container!, 'Bravo')
+    await openFinanceAdmissionConfirm()
+    const submit = container!.querySelector('[data-testid="bulk-confirm-submit"]')
+    if (!(submit instanceof HTMLButtonElement)) throw new Error('admission confirm missing')
+    submit.click()
+    submit.click()
+    await waitForCondition(() => pageStatus().includes('已批量开通 finance 插件使用'))
+    expect(namespaceBulkPosts()).toEqual([{ userIds: ['user-2'], enabled: true }])
+    expect(pageStatus()).toContain('已批量开通 finance 插件使用')
+  })
+
+  it('does not claim bulk plugin admission succeeded before the enabled readback matches', async () => {
+    const state = createApiState()
+    const base = createApiImplementation(callLog, state)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'POST' && url.pathname === '/api/admin/users/namespaces/finance/admission/bulk') {
+        return createJsonResponse({
+          ok: true,
+          data: { namespace: 'finance', userIds: ['user-2'], enabled: true, updatedCount: 1 },
+        })
+      }
+      return base(input, init)
+    })
+    await mountMembers()
+    await openListedUser(container!, 'Bravo')
+    await openFinanceAdmissionConfirm()
+    ;(container!.querySelector('[data-testid="bulk-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => pageStatus().includes('插件使用回读未显示「finance」已对所选用户开通，本次未记为成功。'))
+    expect(namespaceBulkPosts()).toEqual([{ userIds: ['user-2'], enabled: true }])
+    expect(pageStatus()).not.toContain('已批量开通')
+    expect(container!.textContent).not.toContain('插件使用已开通')
+  })
+
+  function installDeferredBulkDetailAccess(): { waiting: () => boolean; release: () => void } {
+    const state = createApiState()
+    const base = createApiImplementation(callLog, state)
+    let bulkPosted = false
+    let heldBulkAccess = false
+    let bulkAccessWaiting = false
+    let releaseBulkAccess: () => void = () => {}
+    const bulkAccessHold = new Promise<void>((resolve) => {
+      releaseBulkAccess = resolve
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'POST' && url.pathname === '/api/admin/users/namespaces/finance/admission/bulk') {
+        bulkPosted = true
+      }
+      if (method === 'GET' && url.pathname === '/api/admin/users/user-1/access' && bulkPosted && !heldBulkAccess) {
+        heldBulkAccess = true
+        bulkAccessWaiting = true
+        await bulkAccessHold
+        const response = await base(input, init)
+        const payload = await response.json() as { data: { user: { name: string }; permissions: string[] } }
+        payload.data.user.name = 'Stale Alpha'
+        payload.data.permissions = ['stale-bulk-access']
+        return createJsonResponse(payload)
+      }
+      if (method === 'GET' && url.pathname === '/api/admin/users/user-1/access' && heldBulkAccess) {
+        const response = await base(input, init)
+        const payload = await response.json() as { data: { user: { name: string }; permissions: string[] } }
+        payload.data.user.name = 'Alpha Again'
+        payload.data.permissions = ['alpha-reselected']
+        return createJsonResponse(payload)
+      }
+      if (method === 'GET' && url.pathname === '/api/admin/users/user-2/access') {
+        const response = await base(input, init)
+        const payload = await response.json() as { data: { permissions: string[] } }
+        payload.data.permissions = ['bravo-live-access']
+        return createJsonResponse(payload)
+      }
+      return base(input, init)
+    })
+    return {
+      waiting: () => bulkAccessWaiting,
+      release: () => releaseBulkAccess(),
+    }
+  }
+
+  it('leaves the current detail untouched when bulk access readback returns after A switches to B', async () => {
+    const deferred = installDeferredBulkDetailAccess()
+    try {
+      await mountMembers()
+      await openListedUser(container!, 'Alpha')
+      await openFinanceAdmissionConfirm('Alpha')
+      ;(container!.querySelector('[data-testid="bulk-confirm-submit"]') as HTMLButtonElement).click()
+      await waitForCondition(() => deferred.waiting())
+      expect(namespaceBulkPosts()).toEqual([{ userIds: ['user-1'], enabled: true }])
+      expect(apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/user-1/member-admission')).toBe(true)
+      expect(pageStatus()).not.toContain('已批量开通')
+      await openListedUser(container!, 'Bravo')
+      await waitForCondition(() => container!.textContent?.includes('bravo-live-access') === true)
+      deferred.release()
+      await waitForCondition(() => pageStatus().includes('已批量开通 finance 插件使用'))
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(container!.querySelector('[data-testid="user-access-unread"]')).toBeNull()
+      expect(container!.textContent).toContain('bravo-live-access')
+      expect(container!.textContent).not.toContain('stale-bulk-access')
+      expect(container!.textContent).not.toContain('Stale Alpha')
+      expect(pageStatus()).not.toContain('生效权限回读与当前用户不一致')
+      const namespaceCards = Array.from(container!.querySelectorAll('.user-admin__role-card--namespace')).map((card) => card.textContent || '')
+      expect(namespaceCards.some((text) => text.includes('finance'))).toBe(false)
+      expect(namespaceCards.some((text) => text.includes('crm') && text.includes('插件使用未开通'))).toBe(true)
+    } finally {
+      deferred.release()
+    }
+  })
+
+  it('does not apply a stale bulk access readback when the detail returns from B to A', async () => {
+    const deferred = installDeferredBulkDetailAccess()
+    try {
+      await mountMembers()
+      await openListedUser(container!, 'Alpha')
+      await openFinanceAdmissionConfirm('Alpha')
+      ;(container!.querySelector('[data-testid="bulk-confirm-submit"]') as HTMLButtonElement).click()
+      await waitForCondition(() => deferred.waiting())
+      expect(pageStatus()).not.toContain('已批量开通')
+      await openListedUser(container!, 'Bravo')
+      await waitForCondition(() => container!.textContent?.includes('bravo-live-access') === true)
+      await openListedUser(container!, 'Alpha')
+      await waitForCondition(() => container!.textContent?.includes('alpha-reselected') === true)
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha Again')
+      deferred.release()
+      await waitForCondition(() => pageStatus().includes('已批量开通 finance 插件使用'))
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha Again')
+      expect(container!.querySelector('[data-testid="user-access-unread"]')).toBeNull()
+      expect(container!.textContent).toContain('alpha-reselected')
+      expect(container!.textContent).not.toContain('stale-bulk-access')
+      expect(container!.textContent).not.toContain('Stale Alpha')
+      expect(pageStatus()).not.toContain('生效权限回读与当前用户不一致')
+      expect(namespaceBulkPosts()).toEqual([{ userIds: ['user-1'], enabled: true }])
+    } finally {
+      deferred.release()
+    }
+  })
+
+  it('does not claim bulk plugin admission succeeded when the access readback is for another user', async () => {
+    const base = createApiImplementation(callLog)
+    let bulkPosted = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'POST' && url.pathname === '/api/admin/users/namespaces/finance/admission/bulk') {
+        bulkPosted = true
+      }
+      const response = await base(input, init)
+      if (bulkPosted && url.pathname === '/api/admin/users/user-2/access') {
+        const payload = await response.json() as { data: { user: { id: string } } }
+        payload.data.user.id = 'user-9'
+        return createJsonResponse(payload)
+      }
+      return response
+    })
+    await mountMembers()
+    await openListedUser(container!, 'Bravo')
+    await openFinanceAdmissionConfirm()
+    ;(container!.querySelector('[data-testid="bulk-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => pageStatus().includes('生效权限回读与当前用户不一致，本次插件使用未记为成功。'))
+    expect(namespaceBulkPosts()).toEqual([{ userIds: ['user-2'], enabled: true }])
+    expect(pageStatus()).not.toContain('已批量开通')
+  })
+})
+
+describe('UserManagementView authorization handlers', () => {
+  let app: App<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    window.history.replaceState({}, '', '/')
+    apiFetchMock.mockReset()
+  })
+
+  function adminSideResponse(pathname: string) {
+    if (pathname.endsWith('/sessions')) return createJsonResponse({ ok: true, data: { items: [] } })
+    if (pathname.endsWith('/dingtalk-access')) {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          provider: 'dingtalk',
+          requireGrant: false,
+          grant: { exists: false, enabled: false, grantedBy: null, createdAt: null, updatedAt: null },
+          identity: { exists: false, corpId: null, unionId: null, openId: null, hasUnionId: false, hasOpenId: false, lastLoginAt: null, createdAt: null, updatedAt: null },
+        },
+      })
+    }
+    if (pathname.endsWith('/member-admission')) {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          userId: pathname.split('/')[4] || '',
+          accountEnabled: true,
+          platformAdminEnabled: false,
+          attendanceAdminEnabled: false,
+          businessRoleIds: [],
+          directoryMemberships: [],
+          dingtalk: { grant: { enabled: false } },
+          namespaceAdmissions: [],
+        },
+      })
+    }
+    return null
+  }
+
+  function postCalls(): Array<{ url: string; body: Record<string, unknown> }> {
+    return apiFetchMock.mock.calls
+      .filter((args) => ((args[1] as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST')
+      .map((args) => ({
+        url: String(args[0]),
+        body: JSON.parse(String((args[1] as RequestInit).body || '{}')) as Record<string, unknown>,
+      }))
+  }
+
+  function install(handlers: {
+    capability?: boolean
+    users?: Array<Record<string, unknown>>
+    presets?: Array<Record<string, unknown>>
+    roleItems?: Array<Record<string, unknown>>
+    roleWrite?: { status: number; error?: Record<string, unknown> }
+  } = {}): void {
+    const users = handlers.users ?? [
+      { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true, is_admin: false },
+      { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true, is_admin: false },
+    ]
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {}
+      if (url.pathname === '/api/admin/roles') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: handlers.roleItems ?? [
+              {
+                id: 'crm_admin',
+                name: 'CRM 管理员',
+                memberCount: 1,
+                permissions: ['crm:read'],
+                updatedAt: '2026-11-01T00:00:00.000Z',
+                admissionNamespaces: ['stock-prep'],
+              },
+              {
+                id: 'admin',
+                name: '平台管理员',
+                memberCount: 1,
+                permissions: [],
+                updatedAt: '2026-11-01T00:00:00.000Z',
+                admissionNamespaces: [],
+              },
+            ],
+          },
+        })
+      }
+      if (url.pathname === '/api/admin/access-presets') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: handlers.presets ?? [] },
+          capabilities: handlers.capability === false ? { explicitNamespaceAdmission: false } : { explicitNamespaceAdmission: true },
+        })
+      }
+      if (url.pathname === '/api/admin/users' && method === 'GET') {
+        const query = url.searchParams.get('q')
+        const items = query ? users.filter((user) => String(user.name || '').includes(query)) : users
+        return createJsonResponse({ ok: true, data: { items, total: items.length } })
+      }
+      if (url.pathname === '/api/admin/users' && method === 'POST') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user: { id: 'user-created', name: String(body.name || '新用户'), role: 'user', is_active: true, is_admin: false },
+            roles: [],
+            permissions: [],
+            isAdmin: false,
+          },
+        })
+      }
+      const accessMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
+      if (accessMatch) {
+        const userId = decodeURIComponent(accessMatch[1])
+        const user = users.find((item) => item.id === userId) || { id: userId, name: userId, role: 'user', is_active: true, is_admin: false }
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user,
+            roles: userId === 'user-1' ? ['crm_admin'] : [],
+            permissions: userId === 'user-1' ? ['crm:read'] : [],
+            isAdmin: false,
+          },
+        })
+      }
+      const roleMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles\/(assign|unassign)$/)
+      if (roleMatch && method === 'POST') {
+        if (handlers.roleWrite) {
+          return createJsonResponse({ ok: false, error: handlers.roleWrite.error || { message: 'conflict' } }, handlers.roleWrite.status)
+        }
+        const userId = decodeURIComponent(roleMatch[1])
+        const roleId = String(body.roleId || '')
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user: { id: userId, name: userId === 'user-1' ? 'Alpha' : 'Bravo' },
+            roles: roleMatch[2] === 'assign' ? ['crm_admin', roleId] : [],
+            permissions: [],
+            isAdmin: false,
+            changedRoleId: roleId,
+            roleHeld: roleMatch[2] === 'assign',
+            membershipChanged: true,
+          },
+        })
+      }
+      const side = adminSideResponse(url.pathname)
+      if (side) return side
+      if (method === 'GET') return createJsonResponse({ ok: true, data: { items: [] } })
+      return createJsonResponse({ ok: false, error: { message: 'unexpected' } }, 500)
+    })
+  }
+
+  async function mount(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container)
+    await flushUi(20)
+    return container
+  }
+
+  it('does not select the first user, keeps an explicit selection when the deep link is removed, and skips a missing deep link', async () => {
+    install()
+    const root = await mount()
+    await waitForCondition(() => root.textContent?.includes('Alpha') ?? false)
+    expect(root.querySelector('[data-testid="selected-user-heading"]')).toBeNull()
+    expect(apiFetchMock.mock.calls.some((args) => /\/api\/admin\/users\/[^/]+\/access(?:\?|$)/.test(String(args[0])))).toBe(false)
+
+    await openListedUser(root, 'Alpha')
+    expect(root.querySelector('[data-testid="effective-access-title"]')?.textContent).toBe('生效权限')
+    expect(root.querySelector('[data-testid="effective-access-note"]')?.textContent).toContain('服务端控制')
+    expect(root.textContent).toContain('不是最终业务访问结论')
+
+    window.history.replaceState({}, '', '/admin/users')
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+
+    app?.unmount()
+    container?.remove()
+    apiFetchMock.mockReset()
+    window.history.replaceState({}, '', '/admin/users?userId=missing-user')
+    install()
+    const missing = await mount()
+    await waitForCondition(() => missing.textContent?.includes('Alpha') ?? false)
+    expect(missing.querySelector('[data-testid="selected-user-heading"]')).toBeNull()
+    expect(apiFetchMock.mock.calls.some((args) => /\/api\/admin\/users\/[^/]+\/access(?:\?|$)/.test(String(args[0])))).toBe(false)
+  })
+
+  it('sends no create request before confirm, defaults admission to an empty list, and opts in only checked namespaces', async () => {
+    install({
+      presets: [{
+        id: 'preset-stock',
+        name: '备料预设',
+        description: '给备料同事',
+        productMode: 'platform',
+        role: 'user',
+        roleId: 'missing-role',
+        permissions: ['crm:read'],
+        admissionNamespaces: ['stock-prep'],
+        homePath: '/stock',
+        welcomeTitle: '欢迎',
+        checklist: [],
+      }],
+    })
+    const root = await mount()
+    const nameInput = Array.from(root.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input')).find((input) => input.placeholder === '姓名')
+    if (!nameInput) throw new Error('name input missing')
+    nameInput.value = '林岚'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const preset = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('备料预设'))
+    if (!(preset instanceof HTMLSelectElement)) throw new Error('preset select missing')
+    preset.value = 'preset-stock'
+    preset.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('[data-testid="preset-direct-permissions"]')?.textContent).toContain('crm:read')
+    expect(root.querySelector('[data-testid="preset-inherited-permissions"]')?.textContent).toContain('不能把预设自带的权限说成角色继承')
+    const namespaceBox = Array.from(root.querySelectorAll('[data-testid="create-admission-namespaces"] input')).find((input) => input.parentElement?.textContent?.includes('stock-prep'))
+    expect(namespaceBox).toBeTruthy()
+    expect(root.querySelector('[data-testid="create-admission-namespaces"]')?.textContent).not.toContain('crm:read')
+    expect((namespaceBox as HTMLInputElement).checked).toBe(false)
+
+    findButtonByText(root, '创建用户').click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="admin-authorization-dialog"]')))
+    expect(postCalls()).toEqual([])
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')?.textContent).not.toContain('admissionNamespaces')
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')?.textContent).not.toContain('前缀')
+    ;(root.querySelector('[data-testid="admin-authorization-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(postCalls()).toEqual([])
+
+    ;(namespaceBox as HTMLInputElement).checked = true
+    namespaceBox?.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    findButtonByText(root, '创建用户').click()
+    await confirmAdminAuthorization(root)
+    await waitForCondition(() => postCalls().some((call) => call.url === '/api/admin/users'))
+    const created = postCalls().find((call) => call.url === '/api/admin/users')
+    expect(created?.body.admissionNamespaces).toEqual(['stock-prep'])
+    expect(created?.body.roleId).toBe('missing-role')
+  })
+
+  it('blocks create until explicit namespace capability is loaded and does not replay a 409 role write', async () => {
+    let capability = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (url.pathname === '/api/admin/access-presets') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [] },
+          capabilities: { explicitNamespaceAdmission: capability },
+        })
+      }
+      if (url.pathname === '/api/admin/roles') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [{ id: 'crm_admin', name: 'CRM 管理员', memberCount: 1, permissions: ['crm:read'], updatedAt: '2026-11-01T00:00:00.000Z', admissionNamespaces: [] }],
+          },
+        })
+      }
+      if (url.pathname === '/api/admin/users' && method === 'GET') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com', role: 'user', is_active: true, is_admin: false }], total: 1 },
+        })
+      }
+      const roleMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles\/assign$/)
+      if (roleMatch && method === 'POST') {
+        return createJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'Role catalog version mismatch' } }, 409)
+      }
+      const accessMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
+      if (accessMatch) {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user: { id: 'user-1', name: 'Alpha', role: 'user', is_active: true, is_admin: false },
+            roles: [],
+            permissions: [],
+            isAdmin: false,
+          },
+        })
+      }
+      const side = adminSideResponse(url.pathname)
+      if (side) return side
+      if (method === 'GET') return createJsonResponse({ ok: true, data: { items: [] } })
+      return createJsonResponse({ ok: false, error: { message: 'unexpected' } }, 500)
+    })
+    const root = await mount()
+    expect(root.querySelector('[data-testid="namespace-admission-capability"]')?.textContent).toContain('已暂停创建')
+    expect(findButtonByText(root, '创建用户').disabled).toBe(true)
+    findButtonByText(root, '创建用户').click()
+    await flushUi()
+    expect(postCalls()).toEqual([])
+
+    capability = true
+    ;(root.querySelector('[data-testid="retry-access-presets"]') as HTMLButtonElement).click()
+    await waitForCondition(() => !findButtonByText(root, '创建用户').disabled)
+    const nameInput = Array.from(root.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input')).find((input) => input.placeholder === '姓名')
+    if (!nameInput) throw new Error('name input missing')
+    nameInput.value = '林岚'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    findButtonByText(root, '创建用户').click()
+    await confirmAdminAuthorization(root)
+    await waitForCondition(() => postCalls().some((call) => call.url === '/api/admin/users'))
+    expect(postCalls().find((call) => call.url === '/api/admin/users')?.body.admissionNamespaces).toEqual([])
+
+    await openListedUser(root, 'Alpha')
+    const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
+    select.value = 'crm_admin'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+    await confirmAdminAuthorization(root)
+    await waitForCondition(() => root.textContent?.includes('角色目录已变化，本次未写入。请刷新角色后再确认。') ?? false)
+    expect(root.textContent).not.toContain('已分配角色')
+    expect(root.textContent).not.toContain('Role catalog version mismatch')
+    expect(root.querySelector('[data-testid="user-access-unread"]')).toBeTruthy()
+    const assign = postCalls().find((call) => call.url.includes('/roles/assign'))
+    expect(assign?.body).toEqual({ roleId: 'crm_admin', expectedUpdatedAt: '2026-11-01T00:00:00.000Z' })
+  })
+
+  it('drops a pending role confirmation when the user changes and refuses the last platform admin in Chinese', async () => {
+    install({
+      users: [
+        { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'admin', is_active: true, is_admin: true },
+        { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true, is_admin: false },
+      ],
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (url.pathname === '/api/admin/access-presets') {
+        return createJsonResponse({ ok: true, data: { items: [] }, capabilities: { explicitNamespaceAdmission: true } })
+      }
+      if (url.pathname === '/api/admin/roles') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'admin', name: '平台管理员', memberCount: 1, permissions: [], updatedAt: '2026-11-01T00:00:00.000Z', admissionNamespaces: [] }] },
+        })
+      }
+      if (url.pathname === '/api/admin/users' && method === 'GET') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', name: 'Alpha', email: 'alpha@example.com', role: 'admin', is_active: true, is_admin: true },
+              { id: 'user-2', name: 'Bravo', email: 'bravo@example.com', role: 'user', is_active: true, is_admin: false },
+            ],
+            total: 2,
+          },
+        })
+      }
+      const accessMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
+      if (accessMatch) {
+        const userId = decodeURIComponent(accessMatch[1])
+        return createJsonResponse({
+          ok: true,
+          data: {
+            user: { id: userId, name: userId === 'user-1' ? 'Alpha' : 'Bravo', role: userId === 'user-1' ? 'admin' : 'user', is_active: true, is_admin: userId === 'user-1' },
+            roles: userId === 'user-1' ? ['admin'] : [],
+            permissions: [],
+            isAdmin: userId === 'user-1',
+          },
+        })
+      }
+      if (url.pathname.endsWith('/roles/unassign') && method === 'POST') {
+        return createJsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN', message: 'Cannot remove the last platform administrator' } }, 409)
+      }
+      const side = adminSideResponse(url.pathname)
+      if (side) return side
+      if (method === 'GET') return createJsonResponse({ ok: true, data: { items: [] } })
+      return createJsonResponse({ ok: false, error: { message: 'unexpected' } }, 500)
+    })
+    const root = await mount()
+    await openListedUser(root, 'Alpha')
+    ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="admin-authorization-dialog"]')))
+    expect(root.querySelector('[data-testid="admin-authorization-platform-admin"]')?.textContent).toContain('权限码列表即使为空')
+    await openListedUser(root, 'Bravo')
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
+    expect(postCalls().some((call) => call.url.includes('/roles/'))).toBe(false)
+
+    await openListedUser(root, 'Alpha')
+    ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
+    await confirmAdminAuthorization(root, '取消平台管理员')
+    await waitForCondition(() => root.textContent?.includes('不能取消最后一名平台管理员') ?? false)
+    const outcome = `${root.querySelector('.user-admin__status')?.textContent || ''} ${root.querySelector('[data-testid="role-action-feedback"]')?.textContent || ''}`
+    expect(outcome).toContain('不能取消最后一名平台管理员')
+    expect(outcome).not.toContain('已撤销')
+    expect(outcome).not.toContain('Cannot remove the last platform administrator')
+    expect(root.querySelector('[data-testid="user-access-unread"]')).toBeTruthy()
+  })
+
+  it('shows an unknown inherited list when unassigning a role the catalog does not describe', async () => {
+    install({
+      users: [
+        { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'admin', is_active: true, is_admin: true },
+      ],
+      roleItems: [
+        {
+          id: 'crm_admin',
+          name: 'CRM 管理员',
+          memberCount: 1,
+          permissions: ['crm:read'],
+          updatedAt: '2026-11-01T00:00:00.000Z',
+          admissionNamespaces: ['stock-prep'],
+        },
+      ],
+    })
+    const root = await mount()
+    await openListedUser(root, 'Alpha')
+    const revoke = root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement
+    expect(revoke.disabled).toBe(false)
+    revoke.click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="admin-authorization-dialog"]')))
+    const inherited = root.querySelector('[data-testid="admin-authorization-inherited-permissions"]')
+    expect(inherited?.textContent).toContain('角色目录没有这份角色，不能把缺失列表当作没有继承权限。')
+    expect(inherited?.textContent).not.toContain('无')
+    const confirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    expect(postCalls().some((call) => call.url.includes('/roles/unassign'))).toBe(false)
+    await confirmAdminAuthorization(root, '取消平台管理员')
+    await waitForCondition(() => postCalls().some((call) => call.url.includes('/roles/unassign')))
+    expect(postCalls().find((call) => call.url.includes('/roles/unassign'))?.body).toEqual({ roleId: 'admin' })
+  })
+
+  it('does not present a malformed catalog permission list as an empty inherited list', async () => {
+    install({
+      users: [
+        { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'admin', is_active: true, is_admin: true },
+      ],
+      roleItems: [
+        {
+          id: 'admin',
+          name: '平台管理员',
+          memberCount: 1,
+          permissions: ['crm:read', 1],
+          updatedAt: '2026-11-01T00:00:00.000Z',
+          admissionNamespaces: [],
+        },
+      ],
+    })
+    const root = await mount()
+    await openListedUser(root, 'Alpha')
+    ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="admin-authorization-dialog"]')))
+    const inherited = root.querySelector('[data-testid="admin-authorization-inherited-permissions"]')
+    expect(inherited?.textContent).toContain('角色目录没有这份角色，不能把缺失列表当作没有继承权限。')
+    expect(inherited?.textContent).not.toContain('无')
+    expect(inherited?.textContent).not.toContain('crm:read')
+    await confirmAdminAuthorization(root, '取消平台管理员')
+    await waitForCondition(() => postCalls().some((call) => call.url.includes('/roles/unassign')))
+    expect(postCalls().find((call) => call.url.includes('/roles/unassign'))?.body).toEqual({ roleId: 'admin' })
+  })
+
+  function batchCreatePosts(): Array<{ url: string; body: Record<string, unknown> }> {
+    return postCalls().filter((call) => call.url === '/api/admin/users/batch/create')
+  }
+
+  function allowBatchCreate(): void {
+    const base = apiFetchMock.getMockImplementation()
+    if (!base) throw new Error('api mock missing')
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (url.pathname === '/api/admin/users/batch/create' && method === 'POST') {
+        const parsed = JSON.parse(String(init?.body || '{}')) as { items?: Array<Record<string, unknown>> }
+        const items = Array.isArray(parsed.items) ? parsed.items : []
+        return createJsonResponse({
+          ok: true,
+          data: {
+            successCount: items.length,
+            failureCount: 0,
+            results: items.map((item, index) => ({
+              index,
+              ok: true,
+              email: typeof item.email === 'string' ? item.email : '',
+              temporaryPassword: 'Temp#123456',
+              message: 'ok',
+            })),
+          },
+        })
+      }
+      return base(input, init)
+    })
+  }
+
+  async function uploadCsv(root: HTMLElement, testId: string, csv: string, fileName: string): Promise<void> {
+    const input = root.querySelector<HTMLInputElement>(`[data-testid="${testId}"]`)
+    if (!input) throw new Error(`File input not found: ${testId}`)
+    const file = new File([csv], fileName, { type: 'text/csv' })
+    if (typeof file.text !== 'function') {
+      Object.defineProperty(file, 'text', { value: async () => csv })
+    }
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(12)
+  }
+
+  function deferredCsvFile(csv: string, fileName: string): { file: File; release: () => void; fail: (error?: Error) => void } {
+    let resolveText: (value: string) => void = () => {}
+    let rejectText: (error: Error) => void = () => {}
+    const pending = new Promise<string>((resolve, reject) => {
+      resolveText = resolve
+      rejectText = reject
+    })
+    const file = new File([csv], fileName, { type: 'text/csv' })
+    Object.defineProperty(file, 'text', { configurable: true, value: () => pending })
+    return {
+      file,
+      release: () => resolveText(csv),
+      fail: (error?: Error) => rejectText(error ?? new Error('读取文件失败')),
+    }
+  }
+
+  async function chooseImportFile(root: HTMLElement, file: File): Promise<void> {
+    const input = root.querySelector<HTMLInputElement>('[data-testid="batch-import-file"]')
+    if (!input) throw new Error('File input not found: batch-import-file')
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+  }
+
+  async function setPasteEmails(root: HTMLElement, value: string): Promise<void> {
+    const input = root.querySelector('textarea[aria-label="粘贴多个邮箱"]')
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error('paste box missing')
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+  }
+
+  async function setPasteRole(root: HTMLElement, roleId: string): Promise<void> {
+    const select = root.querySelector('select[aria-label="粘贴邀请角色"]')
+    if (!(select instanceof HTMLSelectElement)) throw new Error('paste role missing')
+    select.value = roleId
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+  }
+
+  it('cancels an import preview and drops it when the file or rows change before any create', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    const csv = 'name,email,roleId,department\n林岚,lin@example.com,crm_admin,装配\n'
+    await uploadCsv(root, 'batch-import-file', csv, 'create.csv')
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    const preview = root.querySelector('[data-testid="batch-create-preview"]')
+    expect(preview?.textContent).toContain('crm:read')
+    expect(preview?.textContent).toContain('不写入直接权限')
+    expect(preview?.textContent).toContain('默认都不开通')
+    expect(root.querySelector('[data-testid="batch-create-platform-admin"]')).toBeNull()
+    ;(root.querySelector('[data-testid="batch-create-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    const confirm = root.querySelector('[data-testid="batch-create-confirm"]') as HTMLButtonElement
+    await uploadCsv(root, 'batch-import-file', csv, 'create-again.csv')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    confirm.click()
+    await flushUi()
+    expect(batchCreatePosts()).toEqual([])
+
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-target"]')?.textContent).toContain('lin@example.com')
+    await uploadCsv(root, 'batch-import-file', 'name,email,roleId,department\n周宁,zhou@example.com,crm_admin,财务\n', 'other.csv')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(root.textContent).toContain('zhou@example.com')
+    expect(batchCreatePosts()).toEqual([])
+  })
+
+  it('posts the frozen import rows only after confirmation and then clears temporary passwords', async () => {
+    install()
+    allowBatchCreate()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      const root = await mount()
+      await uploadCsv(root, 'batch-import-file', 'name,email,roleId,department\n林岚,lin@example.com,crm_admin,装配\n', 'create.csv')
+      findButtonByText(root, '确认导入').click()
+      await flushUi()
+      expect(batchCreatePosts()).toEqual([])
+      const confirm = root.querySelector('[data-testid="batch-create-confirm"]') as HTMLButtonElement
+      expect(confirm.disabled).toBe(false)
+      confirm.click()
+      confirm.click()
+      await waitForCondition(() => root.textContent?.includes('Temp#123456') === true)
+      expect(batchCreatePosts()).toEqual([{
+        url: '/api/admin/users/batch/create',
+        body: { items: [{ name: '林岚', email: 'lin@example.com', roleId: 'crm_admin', department: '装配' }] },
+      }])
+      ;(root.querySelector('[data-testid="copy-batch-passwords"]') as HTMLButtonElement).click()
+      await waitForCondition(() => root.textContent?.includes('临时密码已复制，并从页面上清除') === true)
+      expect(root.querySelector('[data-testid="batch-temporary-passwords"]')).toBeNull()
+      expect(root.textContent).not.toContain('Temp#123456')
+      expect(writeText).toHaveBeenCalledWith('lin@example.com\tTemp#123456')
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+      else delete (navigator as { clipboard?: unknown }).clipboard
+    }
+  })
+
+  it('cancels a paste preview and drops it when the emails or role change before any create', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    await setPasteEmails(root, 'a@example.com, b@example.com')
+    await setPasteRole(root, 'crm_admin')
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    expect(root.querySelectorAll('[data-testid="batch-create-target"]')).toHaveLength(2)
+    expect(root.querySelector('[data-testid="batch-create-effects"]')?.textContent).toContain('直接权限：无')
+    ;(root.querySelector('[data-testid="batch-create-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    await setPasteEmails(root, 'c@example.com')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-target"]')?.textContent).toContain('c@example.com')
+    await setPasteRole(root, 'admin')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+  })
+
+  it('requires confirmation before a pasted admin invite and posts only the frozen email and role', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    await setPasteEmails(root, 'Admin-Invite@example.com')
+    await setPasteRole(root, 'admin')
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    expect(batchCreatePosts()).toEqual([])
+    const target = root.querySelector('[data-testid="batch-create-target"]')
+    expect(target?.textContent).toContain('admin-invite@example.com')
+    expect(target?.textContent).toContain('角色继承权限：无')
+    expect(target?.textContent).not.toContain('角色目录没有这份角色')
+    expect(root.querySelector('[data-testid="batch-create-platform-admin"]')?.textContent).toContain('平台管理员拥有平台管理权限')
+    expect(root.querySelector('[data-testid="batch-create-effects"]')?.textContent).toContain('插件使用默认都不开通')
+    ;(root.querySelector('[data-testid="batch-create-confirm"]') as HTMLButtonElement).click()
+    await waitForCondition(() => batchCreatePosts().length === 1)
+    expect(batchCreatePosts()).toEqual([{
+      url: '/api/admin/users/batch/create',
+      body: { items: [{ email: 'admin-invite@example.com', roleId: 'admin' }] },
+    }])
+  })
+
+  it('says inherited permissions are unknown when a batch role has no honest catalog list', async () => {
+    install({
+      roleItems: [
+        { id: 'gap', name: '缺口角色', memberCount: 0 },
+        { id: 'crm_admin', name: 'CRM 管理员', memberCount: 1, permissions: ['crm:read', 1], admissionNamespaces: [] },
+      ],
+    })
+    allowBatchCreate()
+    const root = await mount()
+    await uploadCsv(
+      root,
+      'batch-import-file',
+      'name,email,roleId,department\n林岚,lin@example.com,gap,装配\n周宁,zhou@example.com,crm_admin,财务\n',
+      'gaps.csv',
+    )
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    const targets = Array.from(root.querySelectorAll('[data-testid="batch-create-target"]'))
+    expect(targets).toHaveLength(2)
+    expect(targets[0]?.textContent).toContain('角色目录没有这份角色，不能把缺失列表当作没有继承权限。')
+    expect(targets[0]?.textContent).not.toContain('角色继承权限：无')
+    expect(targets[1]?.textContent).toContain('角色目录没有这份角色，不能把缺失列表当作没有继承权限。')
+    expect(targets[1]?.textContent).not.toContain('crm:read')
+    expect(batchCreatePosts()).toEqual([])
+  })
+
+  it('drops a frozen paste preview when the role catalog changes and sends no create', async () => {
+    install()
+    allowBatchCreate()
+    const base = apiFetchMock.getMockImplementation()
+    if (!base) throw new Error('api mock missing')
+    let permissions = ['crm:read']
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/admin/roles') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [{
+              id: 'crm_admin',
+              name: 'CRM 管理员',
+              memberCount: 1,
+              permissions: [...permissions],
+              updatedAt: '2026-11-01T00:00:00.000Z',
+              admissionNamespaces: [],
+            }],
+          },
+        })
+      }
+      return base(input, init)
+    })
+    const root = await mount()
+    await setPasteEmails(root, 'a@example.com')
+    await setPasteRole(root, 'crm_admin')
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-target"]')?.textContent).toContain('crm:read')
+    permissions = ['crm:write']
+    await openListedUser(root, 'Alpha')
+    const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
+    select.value = 'crm_admin'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+    await confirmAdminAuthorization(root)
+    await waitForCondition(() => root.querySelector('[data-testid="batch-create-preview"]') === null)
+    expect(batchCreatePosts()).toEqual([])
+    expect(postCalls().some((call) => call.url.includes('/roles/assign'))).toBe(true)
+  })
+
+  it('sends no batch create when the server has no explicit admission capability', async () => {
+    let releasePresets: (() => void) | null = null
+    let presetsSettled = false
+    let explicitCapability: boolean | null = null
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      const method = (init?.method || 'GET').toUpperCase()
+      if (url.pathname === '/api/admin/access-presets') {
+        if (!presetsSettled) {
+          await new Promise<void>((resolve) => {
+            releasePresets = () => {
+              presetsSettled = true
+              resolve()
+            }
+          })
+        }
+        const payload: Record<string, unknown> = { ok: true, data: { items: [] } }
+        if (explicitCapability !== null) payload.capabilities = { explicitNamespaceAdmission: explicitCapability }
+        return createJsonResponse(payload)
+      }
+      if (url.pathname === '/api/admin/roles') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'crm_admin', name: 'CRM 管理员', memberCount: 1, permissions: ['crm:read'], admissionNamespaces: [] }] },
+        })
+      }
+      if (url.pathname === '/api/admin/users' && method === 'GET') {
+        return createJsonResponse({ ok: true, data: { items: [], total: 0 } })
+      }
+      if (url.pathname === '/api/admin/users/batch/create' && method === 'POST') {
+        return createJsonResponse({ ok: true, data: { successCount: 1, failureCount: 0, results: [] } })
+      }
+      if (method === 'GET') return createJsonResponse({ ok: true, data: { items: [] } })
+      return createJsonResponse({ ok: false, error: { message: 'unexpected' } }, 500)
+    })
+    const root = await mount()
+    await uploadCsv(root, 'batch-import-file', 'name,email,roleId,department\n林岚,lin@example.com,crm_admin,装配\n', 'create.csv')
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="namespace-admission-capability"]')).toBeNull()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(root.textContent).not.toContain('已暂停创建')
+    expect(batchCreatePosts()).toEqual([])
+
+    releasePresets?.()
+    await waitForCondition(() => root.querySelector('[data-testid="namespace-admission-capability"]')?.textContent?.includes('已暂停创建') === true)
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    await setPasteEmails(root, 'a@example.com')
+    findButtonByText(root, '邀请这些邮箱').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(root.querySelector('p.user-admin__status')?.textContent).toContain('已暂停创建')
+    expect(root.querySelector('[data-testid="retry-access-presets"]')).toBeTruthy()
+    expect(batchCreatePosts()).toEqual([])
+
+    explicitCapability = false
+    ;(root.querySelector('[data-testid="retry-access-presets"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+
+    explicitCapability = true
+    ;(root.querySelector('[data-testid="retry-access-presets"]') as HTMLButtonElement).click()
+    await waitForCondition(() => !findButtonByText(root, '创建用户').disabled)
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeTruthy()
+    expect(batchCreatePosts()).toEqual([])
+    ;(root.querySelector('[data-testid="batch-create-confirm"]') as HTMLButtonElement).click()
+    await waitForCondition(() => batchCreatePosts().length === 1)
+    expect(batchCreatePosts()[0]?.body).toEqual({
+      items: [{ name: '林岚', email: 'lin@example.com', roleId: 'crm_admin', department: '装配' }],
+    })
+  })
+
+  it('does not preview or write the previous import while the next file is still reading', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    await uploadCsv(root, 'batch-import-file', 'name,email,roleId,department\n林岚,import-a@example.com,crm_admin,装配\n', 'a.csv')
+    expect(root.textContent).toContain('import-a@example.com')
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-target"]')?.textContent).toContain('import-a@example.com')
+
+    const pending = deferredCsvFile('name,email,roleId,department\n周宁,import-b@example.com,crm_admin,财务\n', 'b.csv')
+    await chooseImportFile(root, pending.file)
+    expect(root.textContent).not.toContain('import-a@example.com')
+    expect(root.textContent).not.toContain('import-b@example.com')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(findButtonByText(root, '确认导入').disabled).toBe(true)
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(batchCreatePosts()).toEqual([])
+
+    pending.release()
+    await waitForCondition(() => root.textContent?.includes('import-b@example.com') === true)
+    expect(root.textContent).not.toContain('import-a@example.com')
+    expect(findButtonByText(root, '确认导入').disabled).toBe(false)
+    expect(batchCreatePosts()).toEqual([])
+  })
+
+  it('keeps the faster import when an earlier file read finishes later', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    const slowA = deferredCsvFile('name,email,roleId,department\n林岚,import-a@example.com,crm_admin,装配\n', 'a.csv')
+    const fastB = deferredCsvFile('name,email,roleId,department\n周宁,import-b@example.com,crm_admin,财务\n', 'b.csv')
+    await chooseImportFile(root, slowA.file)
+    await chooseImportFile(root, fastB.file)
+    fastB.release()
+    await waitForCondition(() => root.textContent?.includes('import-b@example.com') === true)
+    expect(root.textContent).not.toContain('import-a@example.com')
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="batch-create-confirm"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.textContent?.includes('Temp#123456') === true)
+    expect(batchCreatePosts()).toEqual([{
+      url: '/api/admin/users/batch/create',
+      body: { items: [{ name: '周宁', email: 'import-b@example.com', roleId: 'crm_admin', department: '财务' }] },
+    }])
+
+    slowA.release()
+    await flushUi(12)
+    expect(root.textContent).toContain('import-b@example.com')
+    expect(root.textContent).not.toContain('import-a@example.com')
+    expect(root.textContent).toContain('Temp#123456')
+    expect(batchCreatePosts()).toHaveLength(1)
+  })
+
+  it('drops the previous import rows when the current file cannot be read', async () => {
+    install()
+    allowBatchCreate()
+    const root = await mount()
+    await uploadCsv(root, 'batch-import-file', 'name,email,roleId,department\n林岚,import-a@example.com,crm_admin,装配\n', 'a.csv')
+    expect(root.textContent).toContain('import-a@example.com')
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeTruthy()
+
+    const broken = deferredCsvFile('name,email,roleId,department\n周宁,import-b@example.com,crm_admin,财务\n', 'b.csv')
+    await chooseImportFile(root, broken.file)
+    expect(root.textContent).not.toContain('import-a@example.com')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    broken.fail(new Error('读取文件失败'))
+    await waitForCondition(() => root.querySelector('p.user-admin__status')?.textContent?.includes('读取文件失败') === true)
+    expect(root.textContent).not.toContain('import-a@example.com')
+    expect(root.textContent).not.toContain('import-b@example.com')
+    expect(root.querySelector('[data-testid="batch-create-preview"]')).toBeNull()
+    expect(findButtonByText(root, '确认导入').disabled).toBe(true)
+    findButtonByText(root, '确认导入').click()
+    await flushUi()
+    expect(batchCreatePosts()).toEqual([])
   })
 })

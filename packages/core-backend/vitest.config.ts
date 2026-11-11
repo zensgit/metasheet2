@@ -89,6 +89,9 @@ export default defineConfig({
       'tests/integration/permission-role-delete-realdb.test.ts',
       // Real Chromium + HTTP + database; runs under its dedicated trust-off configuration.
       'tests/integration/permission-browser-realdb.test.ts',
+      // Real PostgreSQL with token trust disabled before imports; covered by
+      // Admin Users Real DB Review's permission-ux-* matrix slices.
+      'tests/integration/permission-ux-*.db.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

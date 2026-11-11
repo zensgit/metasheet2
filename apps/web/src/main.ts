@@ -21,6 +21,7 @@ import './styles/form-layout-utilities.css'
 import App from './App.vue'
 import { probeDeleteTransport } from './utils/delete-fallback'
 import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
+import { refreshAdminAccessCapabilities } from './composables/adminAccessCapabilities'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
 import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'
@@ -126,7 +127,8 @@ router.beforeEach(async (to, _from, next) => {
       return next(flags.resolveHomePath())
     }
 
-    const adminRedirect = await resolveAdminRouteRedirect(to, auth, flags)
+    const capabilities = await refreshAdminAccessCapabilities()
+    const adminRedirect = await resolveAdminRouteRedirect(to, auth, flags, capabilities)
     if (adminRedirect) {
       return next(adminRedirect)
     }

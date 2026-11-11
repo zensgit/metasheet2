@@ -5,7 +5,8 @@ const state = vi.hoisted(() => ({
   authUser: {
     id: 'admin-1',
     role: 'user',
-  },
+  } as { id: string; role: string; tenantId?: string },
+  authenticatedTenantId: undefined as string | undefined,
 }))
 
 const pgMocks = vi.hoisted(() => ({
@@ -61,6 +62,7 @@ const attendanceW4Mocks = vi.hoisted(() => ({
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
     req.user = state.authUser as never
+    if (state.authenticatedTenantId) req.authenticatedTenantId = state.authenticatedTenantId
     next()
   },
 }))
@@ -278,6 +280,7 @@ describe('admin-users routes', () => {
       id: 'admin-1',
       role: 'user',
     }
+    state.authenticatedTenantId = undefined
     pgMocks.query.mockReset()
     pgMocks.query.mockResolvedValue({ rows: [] })
     loginAliasWriterMocks.claimNonEmptyLoginAliasesOrThrow.mockReset()
@@ -1525,6 +1528,7 @@ describe('admin-users routes', () => {
           id: 'crm_operator',
           name: 'CRM Operator',
           permissions: ['crm:read', 'crm:write'],
+          updated_at: new Date('2026-06-01T00:00:00.000Z'),
         }],
       })
       .mockResolvedValueOnce({
@@ -1565,6 +1569,38 @@ describe('admin-users routes', () => {
         }),
       ],
     })
+    const catalog = (response.body as Record<string, any>).data.roleCatalog as Array<Record<string, unknown>>
+    expect(catalog).toEqual([
+      expect.objectContaining({
+        id: 'crm_operator',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ])
+  })
+
+  it('sends a cooked catalog predicate that keeps the crm_ separator', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+
+    // The string query() received after the template literal was cooked.
+    // The summary body is not this check: fetchDelegatedRoleCatalogs still
+    // drops a non-matching role id through roleIdMatchesNamespaces.
+    const catalogCall = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('FROM unnest($1::text[]) AS namespace'))
+    expect(catalogCall).toBeTruthy()
+    const sql = String(catalogCall?.[0])
+    const params = catalogCall?.[1] as unknown[]
+    expect(params).toEqual([['crm']])
+    expect(sql).toContain("r.id = namespace\n            OR starts_with(r.id, namespace || '_')")
+    expect(sql).not.toContain("LIKE namespace || '_%'")
+    expect(sql).not.toContain("ESCAPE ''")
+    expect(`${(params[0] as string[])[0]}_`).toBe('crm_')
   })
 
   it('filters delegated access member groups to the actor-visible delegated groups', async () => {
@@ -1665,6 +1701,8 @@ describe('admin-users routes', () => {
         enabled: true,
       }),
     ])
+    expect((response.body as Record<string, any>).data.manageableNamespaces).toEqual(['crm'])
+    expect(pgMocks.query.mock.calls.filter((call) => String(call[0]).includes('WITH RECURSIVE'))).toHaveLength(1)
   })
 
   it('updates platform namespace admission and writes audit log', async () => {
@@ -2359,6 +2397,9 @@ describe('admin-users routes', () => {
       resourceId: 'user-2:crm:dept-1',
     }))
     expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
+    const scopeInsert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))
+    expect(String(scopeInsert?.[0])).toContain('include_children = EXCLUDED.include_children')
+    expect(scopeInsert?.[1]).toEqual(['user-2', 'crm', 'dept-1', true, 'admin-1'])
   })
 
   it('refuses a department scope assign when the role is gone under the admission lock', async () => {
@@ -2726,9 +2767,14 @@ describe('admin-users routes', () => {
         expect.objectContaining({
           directoryDepartmentId: 'dept-1',
           departmentFullPath: '总部 / 销售部',
+          includeChildren: true,
         }),
       ],
     })
+    const templateInsert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_scope_template_departments'))
+    expect(String(templateInsert?.[0])).toContain('ON CONFLICT (template_id, directory_department_id)')
+    expect(String(templateInsert?.[0])).toContain('include_children = EXCLUDED.include_children')
+    expect(templateInsert?.[1]).toEqual(['template-1', 'dept-1', true])
   })
 
   it('applies a scope template to a delegated admin namespace', async () => {
@@ -2818,6 +2864,9 @@ describe('admin-users routes', () => {
       }),
     }))
     expectScopeWriteSerialized('user-2', 'INSERT INTO delegated_role_admin_scopes')
+    const applied = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))
+    expect(String(applied?.[0])).toContain('include_children = EXCLUDED.include_children')
+    expect(applied?.[1]).toEqual(['user-2', 'crm', 'dept-1', true, 'admin-1'])
   })
 
   it('updates dingtalk grant and records an audit entry', async () => {
@@ -3106,6 +3155,8 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect(pgMocks.query.mock.calls.some((call) => call[0] === 'SELECT id FROM roles WHERE id = $1 FOR SHARE')).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('updated_at FROM roles'))).toBe(false)
     expect((response.body as Record<string, any>).data.changedRoleId).toBe('attendance_admin')
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -3164,6 +3215,204 @@ describe('admin-users routes', () => {
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
     census.record('admin-users:role-assign')
     census.record('admin-users:busy-delegation')
+  })
+
+  it('rejects an invalid expectedUpdatedAt before the role share', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee', expectedUpdatedAt: 'not-a-timestamp' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('EXPECTED_UPDATED_AT_INVALID')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('FOR SHARE'))).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('returns ROLE_MODIFIED when the locked role timestamp disagrees', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement === 'SELECT id FROM roles WHERE id = $1') return { rows: [{ id: 'attendance_employee' }] }
+      if (statement.includes('SELECT id, updated_at FROM roles')) {
+        return { rows: [{ id: 'attendance_employee', updated_at: '2020-01-01T00:00:00.000Z' }] }
+      }
+      if (statement.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      throw new Error(`unexpected query ${statement.slice(0, 160)}`)
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee', expectedUpdatedAt: '2026-06-01T00:00:00.000Z' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_MODIFIED')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO user_roles'))).toBe(false)
+  })
+
+  it('rejects a non-string expectedUpdatedAt before the role share', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    for (const expectedUpdatedAt of [1717200000000, null, '', '   ']) {
+      pgMocks.query.mockClear()
+      auditMocks.auditLog.mockClear()
+      const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+        params: { userId: 'user-1' },
+        body: { roleId: 'attendance_employee', expectedUpdatedAt },
+      })
+
+      expect(response.statusCode, JSON.stringify(expectedUpdatedAt)).toBe(400)
+      expect((response.body as Record<string, any>).error.code).toBe('EXPECTED_UPDATED_AT_INVALID')
+      expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('FOR SHARE'))).toBe(false)
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    }
+  })
+
+  it('returns ROLE_MODIFIED when the locked role has no updated_at', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement === 'SELECT id FROM roles WHERE id = $1') return { rows: [{ id: 'attendance_employee' }] }
+      if (statement.includes('SELECT id, updated_at FROM roles')) {
+        return { rows: [{ id: 'attendance_employee', updated_at: null }] }
+      }
+      if (statement.includes('FOR UPDATE')) {
+        const id = String(params?.[0] ?? '')
+        return lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+      }
+      if (statement.includes('FROM user_roles')) {
+        const id = String(params?.[0] ?? '')
+        return { rows: [{ role_id: id === 'admin-1' ? 'admin' : 'attendance_employee' }] }
+      }
+      if (statement.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+            updated_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/assign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee', expectedUpdatedAt: '2026-06-01T00:00:00.000Z' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_MODIFIED')
+    expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO user_roles'))).toBe(false)
+  })
+
+  it('delegated assign returns ROLE_MODIFIED without a refusal audit', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ allowed: true }] }
+      if (statement.includes('delegated_role_admin_member_groups')) return { rows: [] }
+      if (statement.includes('delegated_role_admin_scopes')) return { rows: [{ id: 'scope-1' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement === 'SELECT id FROM roles WHERE id = $1') return { rows: [{ id: 'crm_operator' }] }
+      if (statement.includes('SELECT id, updated_at FROM roles')) {
+        return { rows: [{ id: 'crm_operator', updated_at: '2020-01-01T00:00:00.000Z' }] }
+      }
+      if (statement.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      throw new Error(`unexpected delegated query ${statement.slice(0, 180)}`)
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'assign' },
+      body: { roleId: 'crm_operator', expectedUpdatedAt: '2026-06-01T00:00:00.000Z' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('ROLE_MODIFIED')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('delegated unassign ignores expectedUpdatedAt and keeps the plain role share', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ allowed: true }] }
+      if (statement.includes('AS configured')) return { rows: [{ configured: true }] }
+      if (statement.includes('delegated_role_admin_member_groups')) return { rows: [] }
+      if (statement.includes('delegated_role_admin_scopes')) return { rows: [{ id: 'scope-1' }] }
+      if (statement.includes('is_sign_in_admin')) return { rows: [{ is_sign_in_admin: false }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 2 }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('permission_code FROM role_permissions')) {
+        return { rows: [{ permission_code: 'crm:read' }] }
+      }
+      if (statement === 'SELECT id FROM roles WHERE id = $1') return { rows: [{ id: 'crm_operator' }] }
+      if (statement === 'SELECT id FROM roles WHERE id = $1 FOR SHARE') return { rows: [{ id: 'crm_operator' }] }
+      if (statement.includes('FOR UPDATE')) return lockedUserResult(String(params?.[0] ?? 'user-1'), 'user')
+      if (statement.includes('FROM users')) {
+        return {
+          rows: [{
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'unassign' },
+      body: { roleId: 'crm_operator', expectedUpdatedAt: 'not-a-timestamp' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(pgMocks.query.mock.calls.some((call) => call[0] === 'SELECT id FROM roles WHERE id = $1 FOR SHARE')).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('updated_at FROM roles'))).toBe(false)
   })
 
   it('assigns platform admin and syncs legacy admin columns', async () => {
@@ -3647,6 +3896,7 @@ describe('admin-users routes', () => {
       name: 'Attendance Admin',
       memberCount: 3,
       permissions: ['attendance:admin', 'attendance:read'],
+      admissionNamespaces: ['attendance'],
     })
   })
 
@@ -3656,7 +3906,12 @@ describe('admin-users routes', () => {
     const response = await invokeRoute('get', '/api/admin/access-presets')
 
     expect(response.statusCode).toBe(200)
-    expect((response.body as Record<string, any>).data.items.some((item: Record<string, unknown>) => item.id === 'attendance-employee')).toBe(true)
+    const body = (response.body as Record<string, any>).data
+    expect(body.capabilities).toEqual({ explicitNamespaceAdmission: true })
+    const attendance = (body.items as Array<Record<string, unknown>>).find((item) => item.id === 'attendance-employee')
+    expect(attendance?.admissionNamespaces).toEqual(['attendance'])
+    const viewer = (body.items as Array<Record<string, unknown>>).find((item) => item.id === 'platform-viewer')
+    expect(viewer?.admissionNamespaces).toEqual([])
   })
 
   it('filters access presets by product mode', async () => {
@@ -3670,6 +3925,102 @@ describe('admin-users routes', () => {
     const items = (response.body as Record<string, any>).data.items as Array<Record<string, unknown>>
     expect(items.length).toBeGreaterThan(0)
     expect(items.every((item) => item.productMode === 'attendance')).toBe(true)
+  })
+
+  it('reports live database capabilities and ignores a token admin claim', async () => {
+    const readCapabilities = async (
+      account: Record<string, unknown> | null,
+      roleIds: string[],
+    ) => {
+      pgMocks.query.mockImplementation(async (sql: string) => {
+        const statement = String(sql)
+        if (statement.includes('to_jsonb(users)')) {
+          return { rows: account ? [account] : [] }
+        }
+        if (statement.includes('FROM user_roles')) {
+          return { rows: roleIds.map((roleId) => ({ role_id: roleId })) }
+        }
+        return { rows: [] }
+      })
+      return invokeRoute('get', '/api/admin/access-capabilities')
+    }
+    const operable = {
+      role: 'user',
+      is_active: true,
+      activation_status: 'activated',
+      deleted_at: null,
+      purged_at: null,
+      is_admin: true,
+    }
+
+    state.authUser = { id: 'user-1', role: 'admin' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    let response = await readCapabilities(operable, [])
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toEqual({
+      isPlatformAdmin: false,
+      canManageScope: false,
+      canManagePermissions: false,
+      delegableNamespaces: [],
+    })
+
+    response = await readCapabilities({ ...operable, role: 'admin', is_admin: false }, [])
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toEqual({
+      isPlatformAdmin: true,
+      canManageScope: true,
+      canManagePermissions: false,
+      delegableNamespaces: [],
+    })
+
+    response = await readCapabilities(operable, ['admin', 'attendance_admin'])
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toEqual({
+      isPlatformAdmin: true,
+      canManageScope: true,
+      canManagePermissions: true,
+      delegableNamespaces: [],
+    })
+
+    response = await readCapabilities(operable, ['attendance_admin'])
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toEqual({
+      isPlatformAdmin: false,
+      canManageScope: true,
+      canManagePermissions: false,
+      delegableNamespaces: ['attendance'],
+    })
+
+    response = await readCapabilities({ ...operable, is_active: false, role: 'admin' }, ['attendance_admin'])
+    expect(response.statusCode).toBe(401)
+
+    response = await readCapabilities({ ...operable, activation_status: 'pending_activation', role: 'admin' }, ['admin'])
+    expect(response.statusCode).toBe(401)
+
+    response = await readCapabilities({ ...operable, deleted_at: '2026-01-01T00:00:00.000Z', role: 'admin' }, ['admin'])
+    expect(response.statusCode).toBe(401)
+
+    response = await readCapabilities({
+      ...operable,
+      deleted_at: '2026-01-01T00:00:00.000Z',
+      purged_at: '2026-01-01T00:00:00.000Z',
+      role: 'admin',
+    }, ['admin'])
+    expect(response.statusCode).toBe(401)
+
+    response = await readCapabilities(null, ['admin'])
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toEqual({
+      isPlatformAdmin: false,
+      canManageScope: false,
+      canManagePermissions: false,
+      delegableNamespaces: [],
+    })
+
+    state.authUser = { id: '', role: 'admin' }
+    response = await readCapabilities(operable, ['admin'])
+    expect(response.statusCode).toBe(401)
+    expect((response.body as Record<string, any>).error.code).toBe('UNAUTHENTICATED')
   })
 
   it('updates user active status', async () => {
@@ -3866,22 +4217,18 @@ describe('admin-users routes', () => {
       '2026-05-29',
     ]))
     expect(auditMocks.auditLog).toHaveBeenCalled()
-    // The grant's two halves must land together: without the enabled admission row the
-    // permission codes written alongside it are filtered out of every effective-permission
-    // read, so the provisioned role would resolve to nothing. Asserted on the DERIVED
-    // namespaces and on the transaction client, not on a literal.
-    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).toHaveBeenCalledTimes(1)
-    const [admissionExecutor, admissionOptions] = namespaceAdmissionMocks.grantNamespaceAdmissions.mock.calls[0] as [
-      { query: unknown },
-      { userId: string; namespaces: string[]; source?: string },
-    ]
-    expect(typeof admissionExecutor?.query).toBe('function')
-    expect(admissionOptions.namespaces).toEqual(['attendance'])
-    const usersInsert = pgMocks.query.mock.calls.find((args) => String(args[0]).includes('INSERT INTO users ('))
-    expect(admissionOptions.userId).toBe(String((usersInsert?.[1] as unknown[])?.[0]))
+    // Default create enables nothing. Attendance is persisted disabled so a missing
+    // row cannot bootstrap attendance_employee on the next login.
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
+      namespace: 'attendance',
+      enabled: false,
+      source: 'admin_create',
+    }), expect.anything())
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO user_namespace_admissions'))).toBe(false)
   })
 
-  it('POSITIVE CONTROL — provisioning a preset that derives no namespace writes no admission', async () => {
+  it('POSITIVE CONTROL — a preset that derives no namespace still persists disabled attendance', async () => {
     // Without this, the leg above would also pass against a route that enables an admission
     // unconditionally — which would over-grant every platform preset.
     rbacMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
@@ -3912,6 +4259,179 @@ describe('admin-users routes', () => {
 
     expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
     expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenCalledWith(expect.objectContaining({
+      namespace: 'attendance',
+      enabled: false,
+      source: 'admin_create',
+    }), expect.anything())
+  })
+
+  it('opens only an explicitly requested namespace that the selected role derives', async () => {
+    rbacMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM roles r') && statement.includes('role_permissions')) {
+        return { rows: [{ id: 'attendance_employee', permissions: ['attendance:read'] }] }
+      }
+      if (statement.includes('FROM users') && statement.includes('WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-new',
+            email: 'new@example.com',
+            name: 'New User',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+        presetId: 'attendance-employee',
+        admissionNamespaces: [' attendance ', 'attendance'],
+      },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).toHaveBeenCalledTimes(1)
+    const admissionOptions = namespaceAdmissionMocks.grantNamespaceAdmissions.mock.calls[0]?.[1] as {
+      namespaces: string[]
+      source?: string
+    }
+    expect(admissionOptions.namespaces).toEqual(['attendance'])
+    expect(admissionOptions.source).toBe('admin_create')
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).not.toHaveBeenCalled()
+  })
+
+  it('rejects an admission list that is not derived from the selected role and writes nothing', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM roles r')) {
+        return { rows: [{ id: 'attendance_employee', permissions: ['attendance:read'] }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+        presetId: 'attendance-employee',
+        admissionNamespaces: ['attendance', 'stock-prep'],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('ADMISSION_NAMESPACE_NOT_DERIVED')
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).not.toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users ('))).toBe(false)
+  })
+
+  it('rejects a non-array admission list before any user insert', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+        presetId: 'attendance-employee',
+        admissionNamespaces: 'attendance',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('ADMISSION_NAMESPACES_INVALID')
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).not.toHaveBeenCalled()
+  })
+
+  it('rejects a namespace the admission control does not support', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockImplementation(
+      (namespace: string) => namespace === 'attendance',
+    )
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM roles r')) {
+        return { rows: [{ id: 'attendance_employee', permissions: ['attendance:read', 'multitable:read'] }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'new@example.com',
+        name: 'New User',
+        password: 'WelcomePass9A',
+        presetId: 'attendance-employee',
+        admissionNamespaces: ['multitable'],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('NAMESPACE_NOT_SUPPORTED')
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).not.toHaveBeenCalled()
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users ('))).toBe(false)
+  })
+
+  it('derives an explicit admission from the role permission codes when the preset has none', async () => {
+    rbacMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM roles r')) {
+        return { rows: [{ id: 'attendance_employee', permissions: ['attendance:write'] }] }
+      }
+      if (statement.includes('FROM users') && statement.includes('WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-role-ns',
+            email: 'role-ns@example.com',
+            name: 'Role Ns',
+            role: 'user',
+            is_active: true,
+            is_admin: false,
+            created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'role-ns@example.com',
+        name: 'Role Ns',
+        password: 'WelcomePass9A',
+        presetId: 'platform-viewer',
+        roleId: 'attendance_employee',
+        admissionNamespaces: ['attendance'],
+      },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const admissionOptions = namespaceAdmissionMocks.grantNamespaceAdmissions.mock.calls[0]?.[1] as {
+      namespaces: string[]
+    }
+    expect(admissionOptions.namespaces).toEqual(['attendance'])
+    expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).not.toHaveBeenCalled()
   })
 
   it('creates attendance group membership and default shift assignment during user provisioning', async () => {
@@ -5344,6 +5864,414 @@ describe('admin-users routes', () => {
       expect(response.statusCode, tooShort).toBe(400)
       expect((response.body as Record<string, any>).error.message, tooShort).toBe(LOGIN_NAME_RULE_MESSAGE)
     }
+  })
+
+  it('rejects a non-boolean includeChildren before a scope write', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    for (const includeChildren of [null, 'yes', 1, { nested: true }]) {
+      pgMocks.query.mockClear()
+      const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+        params: { userId: 'user-2', action: 'assign' },
+        body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren },
+      })
+
+      expect(response.statusCode, JSON.stringify(includeChildren)).toBe(400)
+      expect((response.body as Record<string, any>).error.code).toBe('INCLUDE_CHILDREN_INVALID')
+      expect(pgMocks.query).not.toHaveBeenCalled()
+    }
+  })
+
+  it('persists includeChildren false and updates it on conflict', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('FOR UPDATE')) {
+        const id = String(params?.[0] ?? '')
+        return lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('FROM directory_departments')) return { rows: [{ id: 'dept-1' }] }
+      if (statement.includes('FROM users')) {
+        return { rows: [{ id: 'user-2', name: 'Plugin Admin', role: 'user', is_active: true }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: false },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const scopeInsert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))
+    expect(String(scopeInsert?.[0])).toContain('include_children = EXCLUDED.include_children')
+    expect(scopeInsert?.[1]).toEqual(['user-2', 'crm', 'dept-1', false, 'admin-1'])
+  })
+
+  it('ignores includeChildren on scope unassign', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('FOR UPDATE')) {
+        const id = String(params?.[0] ?? '')
+        return lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('FROM users')) {
+        return { rows: [{ id: 'user-2', name: 'Plugin Admin', role: 'user', is_active: true }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'unassign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: 'no' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('DELETE FROM delegated_role_admin_scopes'))).toBe(true)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
+  })
+
+  it('expands delegated department scope only when the seed includes children', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) {
+        return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1', include_children: false }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users', {})
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const statements = pgMocks.query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sql) => sql.includes('WITH RECURSIVE'))
+    expect(statements.length).toBeGreaterThan(0)
+    for (const sql of statements) {
+      expect(sql).toContain('bool_or(COALESCE(s.include_children, TRUE))')
+      expect(sql).toContain('parent.include_children IS TRUE')
+    }
+    const items = (response.body as Record<string, any>).data.items as Array<Record<string, unknown>>
+    expect(items[0]).not.toHaveProperty('selectable')
+    expect((response.body as Record<string, any>).data.scopeAssignments[0].includeChildren).toBe(false)
+  })
+
+  it('adds grey rows only for includeIneligible=true and strips everything but id and name', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user', tenantId: 'org-1' } as typeof state.authUser
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('corp_id IS NOT NULL')) {
+        return { rows: [{ id: 'grey-1', name: 'Grey Person', email: 'grey@example.com', role: 'user' }] }
+      }
+      if (statement.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-1' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) {
+        return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1', include_children: true }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true', q: 'Grey' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const items = (response.body as Record<string, any>).data.items as Array<Record<string, unknown>>
+    expect(items[0]).toMatchObject({ id: 'user-1', selectable: true })
+    expect(items[1]).toEqual({
+      id: 'grey-1',
+      name: 'Grey Person',
+      selectable: false,
+      disabledReason: 'ROLE_DELEGATION_USER_OUT_OF_SCOPE',
+    })
+    expect(items[1]).not.toHaveProperty('email')
+    const greyCall = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('corp_id IS NOT NULL'))
+    const greySql = String(greyCall?.[0])
+    expect(greySql).toContain('user_orgs')
+    expect(greySql).toContain("i.status = 'active'")
+    expect(greySql).not.toContain('user_tenants')
+    expect(greySql).not.toContain('email')
+    expect(greyCall?.[1]?.[3]).toBe('%Grey%')
+  })
+
+  it('omits a user from grey when any link is already authorized, including off the current page, and skips purged rows', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    state.authenticatedTenantId = 'org-1'
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('corp_id IS NOT NULL')) {
+        return { rows: [{ id: 'grey-1', name: 'Outside Only' }] }
+      }
+      if (statement.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-1' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }, { role_id: 'qa_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) {
+        return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1', include_children: true }] }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true', page: '1', pageSize: '20' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const greySql = String(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('corp_id IS NOT NULL'))?.[0])
+    const authority = greySql.slice(greySql.indexOf('authority_seeds AS ('), greySql.indexOf('scope_seeds AS ('))
+    expect(authority).toContain('l.local_user_id')
+    expect(authority).toContain('authority_departments')
+    expect(authority).toContain('namespace = ANY($2::text[])')
+    expect(authority).not.toContain('i.org_id')
+    expect(authority).not.toContain('i.status')
+    expect(authority).not.toContain('i.provider')
+    expect(authority).not.toContain('corp_id')
+    expect(authority).not.toContain('ILIKE')
+    expect(authority).not.toContain('LIMIT')
+    const expansion = greySql.slice(greySql.indexOf('scope_seeds AS ('))
+    expect(expansion).toContain("i.status = 'active'")
+    expect(expansion).toContain('i.org_id = $3')
+    expect(expansion).toContain('d.provider = i.provider')
+    expect(expansion).toContain('i.corp_id IS NOT NULL')
+    expect(expansion).toContain('auth_user.id = u.id')
+    expect(greySql).not.toContain('scoped_ad.directory_account_id = a.id')
+    expect(greySql).toContain('u.purged_at IS NULL')
+    expect(greySql).toContain('actor_user.purged_at IS NULL')
+    const authorizedList = pgMocks.query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sql) => sql.includes('WITH RECURSIVE') && !sql.includes('authority_seeds'))
+    expect(authorizedList.length).toBeGreaterThan(0)
+    for (const sql of authorizedList) expect(sql).not.toContain('authority_seeds')
+    const orgProof = pgMocks.query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sql) => sql.includes('FROM user_orgs') && !sql.includes('corp_id IS NOT NULL'))
+    expect(orgProof.length).toBeGreaterThan(0)
+    for (const sql of orgProof) expect(sql).toContain('u.purged_at IS NULL')
+    const ids = ((response.body as Record<string, any>).data.items as Array<{ id: string }>).map((item) => item.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('limits grey suggestions to the requested page and never more than 100 while search still applies', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    state.authenticatedTenantId = 'org-1'
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('corp_id IS NOT NULL')) return { rows: [{ id: 'grey-1', name: 'Outside Only' }] }
+      if (statement.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-1' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ id: 'user-1', name: 'Alpha' }] }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1' }] }
+      }
+      return { rows: [] }
+    })
+
+    for (const [requested, expected] of [['20', 20], ['500', 100]] as const) {
+      pgMocks.query.mockClear()
+      const response = await invokeRoute('get', '/api/admin/role-delegation/users', {
+        query: { includeIneligible: 'true', q: 'Grey', pageSize: requested },
+      })
+      expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+      const greyCall = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('LIMIT $5'))
+      expect(String(greyCall?.[0])).toContain('LIMIT $5')
+      expect(greyCall?.[1]?.[3]).toBe('%Grey%')
+      expect(greyCall?.[1]?.[4]).toBe(expected)
+    }
+  })
+
+  it('keeps the authorized list when the grey query fails or the org is not provable', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user', tenantId: 'org-1' } as typeof state.authUser
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('corp_id IS NOT NULL')) throw new Error('grey lookup failed')
+      if (statement.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-1' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1' }] }
+      }
+      return { rows: [] }
+    })
+
+    const failed = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(failed.statusCode, JSON.stringify(failed.body)).toBe(200)
+    expect((failed.body as Record<string, any>).data.items).toEqual([
+      expect.objectContaining({ id: 'user-1', selectable: true }),
+    ])
+
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    pgMocks.query.mockClear()
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-a' }, { org_id: 'org-b' }] }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ id: 'user-1', name: 'Alpha' }] }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1' }] }
+      }
+      return { rows: [] }
+    })
+    const unprovable = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(unprovable.statusCode).toBe(200)
+    expect((unprovable.body as Record<string, any>).data.items).toEqual([
+      expect.objectContaining({ id: 'user-1', selectable: true }),
+    ])
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('corp_id IS NOT NULL'))).toBe(false)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('user_tenants'))).toBe(false)
+
+    state.authUser = { id: 'crm-admin-1', role: 'user', tenantId: 'org-header' }
+    state.authenticatedTenantId = undefined
+    pgMocks.query.mockClear()
+    const headerOnly = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(headerOnly.statusCode).toBe(200)
+    expect((headerOnly.body as Record<string, any>).data.items).toEqual([
+      expect.objectContaining({ id: 'user-1', selectable: true }),
+    ])
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('corp_id IS NOT NULL'))).toBe(false)
+
+    state.authenticatedTenantId = 'org-scoped'
+    pgMocks.query.mockClear()
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('corp_id IS NOT NULL')) {
+        return { rows: [{ id: 'grey-1', name: 'Grey Person' }] }
+      }
+      if (statement.includes('FROM user_orgs')) {
+        return params?.[1] ? { rows: [{ org_id: params[1] }] } : { rows: [{ org_id: 'org-a' }, { org_id: 'org-b' }] }
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ id: 'user-1', name: 'Alpha' }] }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1' }] }
+      }
+      return { rows: [] }
+    })
+    const bound = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(bound.statusCode).toBe(200)
+    expect((bound.body as Record<string, any>).data.items.map((item: { id: string }) => item.id)).toContain('grey-1')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes("i.status = 'active'"))).toBe(true)
+  })
+
+  it('does not add grey rows for a member-only scope or a platform admin', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user', tenantId: 'org-1' } as typeof state.authUser
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('WITH RECURSIVE')) return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      if (statement.includes('delegated_role_admin_member_groups')) {
+        return { rows: [{ id: 'group-scope-1', namespace: 'crm', group_id: 'group-1' }] }
+      }
+      return { rows: [] }
+    })
+
+    const memberOnly = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(memberOnly.statusCode, JSON.stringify(memberOnly.body)).toBe(200)
+    expect((memberOnly.body as Record<string, any>).data.items).toEqual([
+      expect.objectContaining({ id: 'user-1', name: 'Alpha', selectable: true }),
+    ])
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('corp_id IS NOT NULL'))).toBe(false)
+
+    state.authUser = { id: 'admin-1', role: 'admin', tenantId: 'org-1' } as typeof state.authUser
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('COUNT(*)')) return { rows: [{ c: 1 }] }
+      if (statement.includes('FROM users')) return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com' }] }
+      return { rows: [] }
+    })
+    const platform = await invokeRoute('get', '/api/admin/role-delegation/users', {
+      query: { includeIneligible: 'true' },
+    })
+    expect(platform.statusCode).toBe(200)
+    const platformItems = (platform.body as Record<string, any>).data.items as Array<Record<string, unknown>>
+    expect(platformItems[0]).not.toHaveProperty('selectable')
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('user_orgs'))).toBe(false)
+  })
+
+  it('filters delegated access and assignable roles to the namespaces that contain the target', async () => {
+    state.authUser = { id: 'plugin-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('WITH RECURSIVE')) {
+        const namespaces = Array.isArray(params?.[1]) ? params?.[1] as string[] : []
+        if (namespaces.length === 1) return { rows: [{ allowed: namespaces[0] === 'crm' }] }
+        return { rows: [{ allowed: true }] }
+      }
+      if (statement.includes('FROM user_roles')) {
+        const id = String(params?.[0] ?? '')
+        if (id === 'plugin-admin-1') return { rows: [{ role_id: 'crm_admin' }, { role_id: 'qa_admin' }] }
+        return { rows: [{ role_id: 'crm_operator' }, { role_id: 'qa_operator' }] }
+      }
+      if (statement.includes('FROM users')) {
+        return { rows: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com', role: 'user', is_active: true }] }
+      }
+      if (statement.includes('delegated_role_admin_scopes')) {
+        return { rows: [{ id: 'scope-1', namespace: 'crm', directory_department_id: 'dept-1' }] }
+      }
+      if (statement.includes('FROM roles r')) {
+        return {
+          rows: [
+            { id: 'crm_operator', name: 'CRM Operator', permissions: ['crm:read'], updated_at: '2026-06-01T00:00:00.000Z' },
+            { id: 'qa_operator', name: 'QA Operator', permissions: ['qa:read'], updated_at: '2026-06-01T00:00:00.000Z' },
+          ],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/users/:userId/access', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    const data = (response.body as Record<string, any>).data
+    expect(data.delegableNamespaces).toEqual(['crm', 'qa'])
+    expect(data.manageableNamespaces).toEqual(['crm'])
+    expect(data.roleCatalog.map((role: { id: string }) => role.id)).toEqual(['crm_operator'])
+    expect(data.delegableRoles).toEqual(['crm_operator'])
+    expect(data.roleCatalog[0].updatedAt).toBe('2026-06-01T00:00:00.000Z')
+    const perNamespace = pgMocks.query.mock.calls.filter((call) => {
+      const namespaces = (call[1] as unknown[] | undefined)?.[1]
+      return String(call[0]).includes('WITH RECURSIVE') && Array.isArray(namespaces) && namespaces.length === 1
+    })
+    expect(perNamespace).toHaveLength(2)
   })
 
 // O2-A1 (census reachability): one discriminating behaviour leg PER

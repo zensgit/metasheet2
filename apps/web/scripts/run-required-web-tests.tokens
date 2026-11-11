@@ -5,6 +5,8 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminAccess.spec.ts
+adminAuthorizationConfirm.spec.ts
 adminPageContentSearch.spec.ts
 adminUserBatch
 amountAutoSum
@@ -228,6 +230,7 @@ featureFlagsApprovalMobile
 formViewValidation
 fwb-rule-authoring
 fwb-rule-authoring-helpers
+guardPolicy.managementScope.spec.ts
 integrationErrorCodeLabels
 IntegrationK3WiseSetupView
 IntegrationPipelineRunSection
@@ -476,16 +479,20 @@ newTodoPill
 pageShell
 parallelBranchRunsView
 permission-match-parity
+permissionChecker.spec.ts
+permissionExceptionSources.spec.ts
 permissionManagementView
 personal-view-client
 platform-app-entry-mismatch-inventory
 platform-app-launcher
 platform-app-shell
+platform-shell-nav.spec.ts
 public-multitable-form
 recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
+roleMemberAuthorization.spec.ts
 roleMembers
 routePreviewErrors
 run-required-web-tests-shape
