@@ -70,6 +70,7 @@
  */
 import { createRequire } from 'module'
 import path from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
@@ -163,22 +164,44 @@ function hostLikeDb(hook: (event: StatementEvent) => Promise<void> | void = () =
   })
 }
 
-type LockEvent = { ok: boolean; at: number; ms: number; code?: string; holderCas: boolean }
+type LockEvent = { ok: boolean; order: number; ms: number; code?: string; holderCas: boolean }
+/** The PROGRAM ORDER of the heartbeat cases: one counter, read when a lock statement is INVOKED and when a window opens / closes. */
+type LockOrder = { n: number }
+type LockWindow = { mode: string; openedAt: number; opened: number; closedAt?: number; closed?: number }
+/** Opens a window NOW: every lock statement invoked from here until `closeLockWindow` is inside it. */
+function openLockWindow(order: LockOrder, mode: string): LockWindow {
+  return { mode, openedAt: order.n, opened: performance.now() }
+}
+function closeLockWindow(order: LockOrder, w: LockWindow): void {
+  w.closedAt = order.n
+  w.closed = performance.now()
+}
+/**
+ * The lock statements INVOKED while the window was open — decided by order, never by timestamps: at millisecond
+ * resolution a statement invoked just BEFORE a window opens can carry the window's own opening millisecond (the first
+ * patch's pre-write holder CAS and the patch's window did, about one run in eight on a fast database).
+ */
+function invokedIn(w: LockWindow, events: LockEvent[]): LockEvent[] {
+  if (w.closedAt === undefined) throw new Error(`the window ${w.mode} was never closed`)
+  return events.filter((e) => e.order > w.openedAt && e.order <= (w.closedAt as number))
+}
 /**
  * The sheet write lock's db for the heartbeat cases (the S9R-29d pattern): every AUTOCOMMIT statement runs on its own
- * client under a short statement_timeout (standing for the pool's 30 s), and every UPDATE of the lock row is recorded —
- * `holderCas` marks the holder CAS shape (a heartbeat tick or a pre-write check). `shouldFail` makes ONE holder CAS fail
- * before it reaches PostgreSQL (a transient store fault).
+ * client under a short statement_timeout (standing for the pool's 30 s), and every UPDATE of the lock row is recorded
+ * with its place in `order` (taken at the INVOCATION) — `holderCas` marks the holder CAS shape (a heartbeat tick or a
+ * pre-write check). `shouldFail` makes ONE holder CAS fail before it reaches PostgreSQL (a transient store fault).
  */
-function timedLockDb(opts: { timeoutMs: number; events: LockEvent[]; shouldFail?: () => boolean }) {
+function timedLockDb(opts: { timeoutMs: number; events: LockEvent[]; order?: LockOrder; shouldFail?: () => boolean }) {
+  const order = opts.order || { n: 0 }
   return createDb({
     database: {
       query: async (sql: string, params?: unknown[]) => {
         const isLockUpdate = /^\s*UPDATE\s+"?integration_stock_prep_project_write_lock/i.test(sql)
         const holderCas = isLockUpdate && /lease_heartbeat_at/.test(sql) && /lease_seq/.test(sql)
-        const at = Date.now()
+        const at = performance.now()
+        const place = isLockUpdate ? (order.n += 1) : order.n
         if (holderCas && opts.shouldFail && opts.shouldFail()) {
-          opts.events.push({ ok: false, at, ms: 0, code: 'INJECTED', holderCas })
+          opts.events.push({ ok: false, order: place, ms: 0, code: 'INJECTED', holderCas })
           throw Object.assign(new Error('injected store fault'), { code: '08006' })
         }
         const client = await poolManager.get().getInternalPool().connect()
@@ -187,11 +210,11 @@ function timedLockDb(opts: { timeoutMs: number; events: LockEvent[]; shouldFail?
           await client.query(`SET LOCAL statement_timeout = ${opts.timeoutMs}`)
           const result = await client.query(sql, params)
           await client.query('COMMIT')
-          if (isLockUpdate) opts.events.push({ ok: true, at, ms: Date.now() - at, holderCas })
+          if (isLockUpdate) opts.events.push({ ok: true, order: place, ms: Math.round(performance.now() - at), holderCas })
           return result.rows
         } catch (error: any) {
           await client.query('ROLLBACK').catch(() => {})
-          if (isLockUpdate) opts.events.push({ ok: false, at, ms: Date.now() - at, code: error && error.code, holderCas })
+          if (isLockUpdate) opts.events.push({ ok: false, order: place, ms: Math.round(performance.now() - at), code: error && error.code, holderCas })
           throw error
         } finally {
           client.release()
@@ -934,20 +957,21 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
 
     test('S9D-19 (ruling C-1) the heartbeat N6 rule on real row locks: while the begin transaction, a host patch and the finish transaction hold the sheet lock row (3 s each), the lease heartbeating every 100 ms over autocommit statements with a 1.5 s statement_timeout (standing for the pool\'s 30 s) attempts no holder CAS and none fails; the run completes', async () => {
       const events: LockEvent[] = []
+      const order: LockOrder = { n: 0 }
       const warnings: any[] = []
-      const windows: Array<{ mode: string; start: number; end?: number }> = []
+      const windows: LockWindow[] = []
       const st = await world('d19', {
-        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events }), heartbeatMs: 100, logger: { warn: (msg: string, meta: unknown) => warnings.push({ msg, meta }), info() {}, error() {} } }),
+        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events, order }), heartbeatMs: 100, logger: { warn: (msg: string, meta: unknown) => warnings.push({ msg, meta }), info() {}, error() {} } }),
         audit: (real: any) => ({
           ...real,
           // The begin's and the finish's audit append runs INSIDE the ledger transaction, after its holder assert took
           // the lock row FOR UPDATE: slowing it holds that row for 3 s.
           appendWithin: async (trx: any, entry: any) => {
             if (entry && (entry.mode === 'sheet_repair_started' || entry.mode === 'sheet_repair_completed')) {
-              const w: { mode: string; start: number; end?: number } = { mode: entry.mode, start: Date.now() }
+              const w = openLockWindow(order, entry.mode)
               windows.push(w)
               await sleep(3000)
-              w.end = Date.now()
+              closeLockWindow(order, w)
             }
             return real.appendWithin(trx, entry)
           },
@@ -956,10 +980,14 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const plan = dataOf(await st.preview())
       // Calibration: the in-lease source read takes 450 ms outside any bracket, so the heartbeat ticks before the begin.
       let armed = true
+      let calibration: LockWindow | null = null
       st.hooks.onSourceRead = async () => {
         if (!armed) return
         armed = false
+        const w = openLockWindow(order, 'source_read')
         await sleep(450)
+        closeLockWindow(order, w)
+        calibration = w
       }
       // The FIRST host patch is held inside its write transaction (after the fence took the lock row FOR SHARE) for 3 s:
       // another session holds that record's row lock.
@@ -968,10 +996,10 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         const client = await poolManager.get().getInternalPool().connect()
         await client.query('BEGIN')
         await client.query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [input.recordId])
-        const w: { mode: string; start: number; end?: number } = { mode: 'host_patch_1', start: Date.now() }
+        const w = openLockWindow(order, 'host_patch_1')
         windows.push(w)
         setTimeout(() => {
-          w.end = Date.now()
+          closeLockWindow(order, w)
           client.query('COMMIT').catch(() => {}).finally(() => client.release())
         }, 3000)
       }
@@ -981,12 +1009,14 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const done = dataOf(res)
       expect([done.status, done.written]).toEqual(['completed', 4])
       expect(windows.map((w) => w.mode)).toEqual(['sheet_repair_started', 'host_patch_1', 'sheet_repair_completed'])
-      const within = (w: { start: number; end?: number }) => (e: LockEvent) => e.at >= w.start && e.at <= (w.end || Date.now())
-      expect(events.filter((e) => e.holderCas && e.ok && e.at < windows[0].start).length, 'calibration: the lease heartbeat ticks while the repair holds the lease outside a bracket').toBeGreaterThan(0)
+      // Calibration: during the 450 ms source read — inside the lease, outside any bracket — the heartbeat DID tick.
+      expect(calibration, 'the in-lease source read ran').not.toBeNull()
+      expect(invokedIn(calibration as unknown as LockWindow, events).filter((e) => e.holderCas && e.ok).length, 'calibration: the lease heartbeat ticks while the repair holds the lease outside a bracket').toBeGreaterThan(0)
       for (const w of windows) {
-        expect((w.end || 0) - w.start, `${w.mode}: the window was held`).toBeGreaterThanOrEqual(2900)
-        expect(events.filter(within(w)).filter((e) => e.holderCas).length, `${w.mode}: no holder CAS attempted while the lock row was held`).toBe(0)
-        expect(events.filter(within(w)).filter((e) => !e.ok).map((e) => [e.code, e.ms]), `${w.mode}: no lock statement failed`).toEqual([])
+        expect((w.closed || 0) - w.opened, `${w.mode}: the window was held`).toBeGreaterThanOrEqual(2900)
+        // By program order, not by timestamps: no lock statement was INVOKED between the window's open and its close.
+        expect(invokedIn(w, events).filter((e) => e.holderCas).length, `${w.mode}: no holder CAS attempted while the lock row was held`).toBe(0)
+        expect(invokedIn(w, events).filter((e) => !e.ok).map((e) => [e.code, e.ms]), `${w.mode}: no lock statement failed`).toEqual([])
       }
       expect(events.filter((e) => !e.ok).map((e) => [e.code, e.ms]), 'no heartbeat queued behind the repair\'s own transaction and timed out').toEqual([])
       expect(warnings.filter((w: any) => /heartbeat failed/.test(w.msg)).length).toBe(0)
@@ -996,17 +1026,18 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
 
     test('S9D-20 (ruling C-3) the dead end closed on the real stack: a run left `running` after every row was written is verified and finished `completed` — no row write, its own approval and audit row, the close transaction inside the bracket on real row locks, the bump; a moved row refuses with counts; a project governed since still closes', async () => {
       const events: LockEvent[] = []
-      const windows: Array<{ start: number; end?: number }> = []
+      const order: LockOrder = { n: 0 }
+      const windows: LockWindow[] = []
       const st = await world('d20', {
-        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events }), heartbeatMs: 100, logger: { warn() {}, info() {}, error() {} } }),
+        lock: () => createStockPreparationProjectWriteLock({ db: timedLockDb({ timeoutMs: 1500, events, order }), heartbeatMs: 100, logger: { warn() {}, info() {}, error() {} } }),
         audit: (real: any) => ({
           ...real,
           appendWithin: async (trx: any, entry: any) => {
             if (entry && entry.mode === 'sheet_repair_verified_closed') {
-              const w: { start: number; end?: number } = { start: Date.now() }
+              const w = openLockWindow(order, entry.mode)
               windows.push(w)
               await sleep(3000)
-              w.end = Date.now()
+              closeLockWindow(order, w)
             }
             return real.appendWithin(trx, entry)
           },
@@ -1055,11 +1086,11 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       // N6 on real row locks: the close transaction held the lock row for 3 s inside the bracket — no holder CAS was
       // attempted in that window and no lock statement failed in it.
       expect(windows.length).toBe(1)
-      const inWindow = (e: LockEvent) => e.at >= windows[0].start && e.at <= (windows[0].end || Date.now())
-      expect((windows[0].end || 0) - windows[0].start).toBeGreaterThanOrEqual(2900)
-      expect(events.filter((e) => e.holderCas && e.ok && e.at < windows[0].start).length, 'calibration: this lock\'s holder CAS reaches the store').toBeGreaterThan(0)
-      expect(events.filter(inWindow).filter((e) => e.holderCas).length, 'no holder CAS attempted while the close held the lock row').toBe(0)
-      expect(events.filter(inWindow).filter((e) => !e.ok).map((e) => [e.code, e.ms])).toEqual([])
+      expect((windows[0].closed || 0) - windows[0].opened).toBeGreaterThanOrEqual(2900)
+      expect(events.filter((e) => e.holderCas && e.ok && e.order <= windows[0].openedAt).length, 'calibration: this lock\'s holder CAS reaches the store').toBeGreaterThan(0)
+      // By program order, not by timestamps: no lock statement was INVOKED while the close's transaction was open.
+      expect(invokedIn(windows[0], events).filter((e) => e.holderCas).length, 'no holder CAS attempted while the close held the lock row').toBe(0)
+      expect(invokedIn(windows[0], events).filter((e) => !e.ok).map((e) => [e.code, e.ms])).toEqual([])
       // One-shot by the run's own status; the run list shows how it was closed; the sheet is the repaired one.
       expect(errorOf(await st.repair({ mode: 'execute', recipe: CLOSE, runId, planDigest: closePlan.planDigest, approvalRef: 'R-91:s66-d20-close' }), 409, CODES.NOT_APPLICABLE).details.reasons).toEqual(['run_not_open'])
       expect(dataOf(await st.call('GET', PATHS.runs)).runs.map((entry: any) => [entry.runId, entry.status, entry.written, entry.approvalRef, entry.closeApprovalRef])).toEqual([[runId, 'completed', 4, 'R-91:s66-d20', 'R-91:s66-d20-close']])
