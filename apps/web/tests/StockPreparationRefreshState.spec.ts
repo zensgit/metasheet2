@@ -230,7 +230,13 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     expect(stockPrepRefreshBanner(stanza('executed_pending_settlement'), { canOpenQueue: true })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('complete'))?.key).toBe('unsettled')
     expect(stockPrepRefreshBanner(stanza('complete'))?.zh).toContain('待核对')
-    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toContain('执行失败待恢复')
+    // S6-3 (step-6 design §5.4, R-91): 「上次写入未完成,等待拉取人员核对;正式导出已暂停」 — re-pinned from 执行失败待恢复;
+    // the second line names the card (拉取待确认) and keeps the runbook for an unprovable check (平台管理员).
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toBe('本项目上次写入未完成,等待拉取人员核对;正式导出已暂停。')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('拉取待确认')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('平台管理员按手册')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: true })?.link).toBe(true)
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: false })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('change_pending_review'))?.zh).toContain('变更待复核')
     expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: false, status: 'unreadable' }))?.zh).toContain('读取失败')
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
@@ -259,11 +265,12 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
       expect(entry?.enNext, name).toContain('awaiting check')
       expect(entry?.enNext, name).not.toMatch(/still opens|presses “Check” again|is still needed/)
     }
-    // Every other unfinished status keeps no link (only pending_confirmation and change_pending_review have one).
+    // Every other unfinished status keeps no link (only pending_confirmation, change_pending_review and — S6-3, R-91:
+    // the recovery card — failed_pending_recovery have one). The link set 2 → 3 statuses is that decision.
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
       const banner = stockPrepRefreshBanner(status === 'unreadable' ? parseStockPrepRefreshStanza({ readable: false, status }) : parseStockPrepRefreshStanza({ readable: true, status, governed: 'pilot', settled: false, counts: { pendingConfirm: 1, pendingReviews: 1 } }), { canOpenQueue: true })
       if (!banner) continue
-      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review')
+      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review' || status === 'failed_pending_recovery')
     }
     // A confirmed change plan reads confirmed_pending_execution too: its words name both.
     expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: true, status: 'confirmed_pending_execution', governed: 'pilot', settled: false, counts: null }))?.zh).toContain('变更计划')
@@ -788,7 +795,8 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
       ['executed_pending_settlement', 'check'],
       ['confirmed_pending_execution', 'resync'],
       ['executing', null],
-      ['failed_pending_recovery', null],
+      // S6-3 (R-91): null → 'go-refresh-queue' — the recovery card is a section of 「拉取待确认」 (NS-6).
+      ['failed_pending_recovery', 'go-refresh-queue'],
       // PR-9 (R-77 ⑥): null → 'go-refresh-queue' — the review is a section of 「拉取待确认」 (NS-5).
       ['change_pending_review', 'go-refresh-queue'],
       ['unreadable', null],
@@ -818,6 +826,19 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
     expect(confirmed.en).toContain('change plan')
     const confirmedFloor = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
     expect(confirmedFloor.zh).toContain('变更计划')
+  })
+
+  it('NS-6 (S6-3): failed_pending_recovery — a puller is sent to the recovery card; the floor gets the sentence and no action', () => {
+    const puller = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, refreshPendingConfirmCount: 0, canOpenRefreshQueue: true }))
+    expect(puller).toMatchObject({ key: 'refresh', action: 'go-refresh-queue', actionZh: '去核对' })
+    expect(puller.zh).toContain('拉取待确认')
+    expect(puller.zh).toContain('结束这次执行')
+    expect(puller.zh).not.toContain('平台管理员')
+    const floor = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(floor.action).toBeNull()
+    expect(floor.actionZh).toBe('')
+    expect(floor.zh).toContain('等待拉取人员核对')
+    expect(floor.zh).toContain('请联系拉取人员')
   })
 
   it('NS-2: absent / not_governed / complete ∧ settled never fire rule 3b (dormancy)', () => {
