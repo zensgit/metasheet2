@@ -5,7 +5,11 @@ import { Logger } from '../core/logger'
 import { ensurePlatformAdmin } from './admin-directory'
 import { query, transaction } from '../db/pg'
 import { readApprovalRoutingStatus, type ApprovalRoutingStatus } from '../directory/approval-routing-status'
-import { isApprovalRoutingPolicyRequired, isApprovalRoutingRequirePolicyEnabled } from '../directory/pull-source-rule'
+import {
+  isApprovalRoutingPolicyRequired,
+  isApprovalRoutingRequirePolicyEnabled,
+  type PullSourceRuleStatus,
+} from '../directory/pull-source-rule'
 import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -87,7 +91,11 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *                                   count, candidates, same-enterprise groups, linked accounts
  *                                   under non-active sources) is added whether the switch is on
  *                                   or off; when it cannot be read it is omitted and the other
- *                                   fields are returned unchanged.
+ *                                   fields are returned unchanged. The 'policy-required' label
+ *                                   rests on the rule judgement alone (source count and policy
+ *                                   presence), which the block reports too: once that judgement
+ *                                   is read, the label holds whether or not the rest of the
+ *                                   block can be read.
  *   PATCH /:purpose               — the ONLY write point. `{ canonicalIntegrationId: uuid }` sets
  *                                   (upsert; target must exist in THIS org and be 'active' — a
  *                                   policy pointing at a broken target is rejected 409 at write
@@ -103,7 +111,11 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *                                   In the 'policy-required' state the report stays available:
  *                                   a user whose current resolution is refused for the missing
  *                                   policy is reported `blocked` with `before: null`, and the
- *                                   candidate leg is computed as usual.
+ *                                   candidate leg is computed as usual. `current.source` is
+ *                                   the judgement for this organisation; `blocked` rows and
+ *                                   `blockedCount` report the sampled users whose current
+ *                                   resolution is refused, and `blockedCount` is present only
+ *                                   when there is at least one such row.
  *
  * All routes are platform-admin-only. Org identity is server-resolved (never from the request).
  */
@@ -128,16 +140,20 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         [orgId],
       )
       // The status block is additive and read on its own: a failed read (an unreadable source
-      // count included) omits the block and leaves every other field as it is.
+      // count included) omits the block and leaves every other field as it is. The rule judgement
+      // is read first and once; the block reports that same judgement.
+      let ruleStatus: PullSourceRuleStatus | undefined
       let approvalRouting: ApprovalRoutingStatus | undefined
       try {
-        approvalRouting = await readApprovalRoutingStatus(query, orgId)
+        ruleStatus = await isApprovalRoutingPolicyRequired(query, orgId)
+        approvalRouting = await readApprovalRoutingStatus(query, orgId, ruleStatus)
       } catch (error) {
         logger.warn(`Approval routing status block omitted: ${describeFailure(error)}`)
       }
       // Refusing is not the legacy path, so it is not labelled as one. The label needs both the
       // switch and the data judgement; with the switch off the legacy path really is in effect.
-      const approvalRoutingRefused = approvalRouting?.enforced === true && approvalRouting.policyRequired
+      // It rests on the rule judgement alone, so it does not depend on the rest of the block.
+      const approvalRoutingRefused = isApprovalRoutingRequirePolicyEnabled() && ruleStatus?.required === true
       const byPurpose = new Map(rows.rows.map((r) => [r.purpose, r]))
       const purposes = PURPOSES.map((purpose) => {
         const p = byPurpose.get(purpose)

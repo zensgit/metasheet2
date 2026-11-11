@@ -490,8 +490,8 @@ export async function resolveApprovalRequesterOrgRelations(
 
   // 0b) Multi-source rule. With the require-policy switch on, an org the requester is linked in
   //     that holds two or more distinct active pull sources and has no `approval_routing` policy
-  //     gets NO source picked for it: the typed error below replaces the "latest updated account"
-  //     pick, so the outcome never depends on update time, creation time or row order.
+  //     gets NO source picked for it: the typed error below is raised before any requester pick,
+  //     so the outcome never depends on update time, creation time or row order.
   //     The check runs only when all three hold:
   //       - the switch is on (read per call; off ⇒ no statement is issued here);
   //       - this is not a preview override (`overrideCanonicalIntegrationId` undefined);

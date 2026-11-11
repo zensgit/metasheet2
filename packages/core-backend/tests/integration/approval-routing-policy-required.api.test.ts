@@ -23,8 +23,11 @@
  *  - the admin GET keeps `orgId` and `purposes` byte for byte, labels the refused state
  *    `policy-required` only while the switch is on, and adds a read-only `approvalRouting` block
  *    whether the switch is on or off; when the block cannot be read it is omitted and the rest of the
- *    response is unchanged;
- *  - the admin preview stays available in the refused state and writes nothing.
+ *    response is unchanged. The label rests on the source count and the policy presence alone: once
+ *    those are read, a failed read of any other part of the block omits the block and leaves the
+ *    label as judged;
+ *  - the admin preview stays available in the refused state and writes nothing; with the switch on
+ *    and a single active pull source it answers exactly as with the switch off.
  *
  * Organisation `default` is shared with the other files of the lane, which run serially. Before the
  * fixtures are built, every active pull-type integration already in it is given a marker status and
@@ -39,6 +42,11 @@ import type { Pool } from 'pg'
 
 import { Logger } from '../../src/core/logger'
 import { pool, query } from '../../src/db/pg'
+import {
+  APPROVAL_ROUTING_CANDIDATES_SQL,
+  APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL,
+  NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL,
+} from '../../src/directory/approval-routing-status'
 import {
   APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED,
   COUNT_ACTIVE_PULL_SOURCES_SQL,
@@ -90,6 +98,17 @@ const LEGACY_FIELDS = JSON.stringify({
   orgId: 'default',
   purposes: PURPOSES.map((purpose) => ({ purpose, source: 'legacy-default' })),
 })
+/** The same two fields in the refused state: only the `approval_routing` label differs. */
+const REFUSED_FIELDS = JSON.stringify({
+  orgId: 'default',
+  purposes: PURPOSES.map((purpose) => ({ purpose, source: purpose === 'approval_routing' ? 'policy-required' : 'legacy-default' })),
+})
+/** Statements of the status block that take no part in the rule judgement. */
+const BLOCK_DETAIL_STATEMENTS = [
+  ['candidates', APPROVAL_ROUTING_CANDIDATES_SQL],
+  ['pull-type rows', APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL],
+  ['linked account count', NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL],
+] as const
 const SELECTOR_FAILURE_BODY = '{"ok":false,"error":{"code":"APPROVAL_DEPARTMENT_DIRECTORY_FAILED","message":"Failed to list approval departments"}}'
 
 interface Reply {
@@ -225,6 +244,7 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
   // unchanged unless a fault is armed for the statement text.
   let probeFault = false
   let countFault: 'none' | 'empty' | 'throw' = 'none'
+  let statementFault: string | null = null
   let faultFired = 0
   let querySpy: MockInstance | null = null
   const servicePool = pool as Pool | null
@@ -392,6 +412,10 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
         if (countFault === 'throw') return Promise.reject(new Error('simulated failure of the source count'))
         return Promise.resolve({ rows: [], rowCount: 0, command: 'SELECT', oid: 0, fields: [] })
       }
+      if (statementFault !== null && text === statementFault) {
+        faultFired += 1
+        return Promise.reject(new Error('simulated failure of a status block statement'))
+      }
       return Reflect.apply(originalQuery, this, args)
     })
 
@@ -458,6 +482,7 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
   afterEach(async () => {
     probeFault = false
     countFault = 'none'
+    statementFault = null
     delete process.env[APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED]
     await clearPolicy('default')
     await clearPolicy(OTHER_ORG)
@@ -688,6 +713,8 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
 
     expect(reply.status, reply.text).toBe(200)
     expect(reply.body.data.current).toEqual({ source: 'policy-required' })
+    expect(requesterRow, 'the requester of the fixture is among the sampled users').toBeDefined()
+    expect(onlyBRow, 'the user linked in the second source only is among the sampled users').toBeDefined()
     expect(requesterRow).toEqual({ userId: REQ, changed: true, blocked: true, before: null, after: expect.objectContaining({ title: 'Source A' }) })
     expect(onlyBRow).toEqual({ userId: ONLY_B, changed: true, blocked: true, before: null, after: { departmentName: null, title: null, managerId: null, deptHeadId: null } })
     expect(reply.body.data.blockedCount).toBe(rows.filter((row) => row.blocked === true).length)
@@ -723,6 +750,22 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
     expect(reply.body.data.current).toEqual({ source: 'policy', canonicalIntegrationId: sourceB })
     expect('blockedCount' in reply.body.data).toBe(false)
     expect(rows.some((row) => 'blocked' in row)).toBe(false)
+  })
+
+  it('A6 with the switch on and a single active pull source the admin preview answers as with the switch off', async () => {
+    await setStatus(sourceB, 'paused')
+
+    const off = await switchOff(() => preview(sourceA))
+    const on = await switchOn(() => preview(sourceA))
+    const rows = (on.body?.data?.rows ?? []) as Array<Record<string, unknown>>
+
+    expect(on.status, on.text).toBe(200)
+    expect(on.body.data.current).toEqual({ source: 'legacy-default' })
+    expect(Object.keys(on.body.data)).toEqual(['orgId', 'purpose', 'current', 'candidate', 'sampleSize', 'changedCount', 'rows'])
+    expect('blockedCount' in on.body.data).toBe(false)
+    expect(rows.some((row) => 'blocked' in row)).toBe(false)
+    expect(rows.find((row) => row.userId === REQ), 'the requester of the fixture is among the sampled users').toMatchObject({ userId: REQ, before: expect.objectContaining({ title: expect.any(String) }) })
+    expect(on.text).toBe(off.text)
   })
 
   it('A7 an approval in flight keeps its snapshot and assignments when the organisation becomes refused', async () => {
@@ -992,6 +1035,40 @@ describeIfDatabase('approval routing multi-source rule through the HTTP surface 
     } finally {
       warn.mockRestore()
     }
+  })
+
+  it.each(BLOCK_DETAIL_STATEMENTS)('A12 switch on, refused, the %s cannot be read: the admin GET omits the status block and keeps the policy-required label', async (_name, statement) => {
+    const warn = vi.spyOn(Logger.prototype, 'warn')
+    faultFired = 0
+    try {
+      statementFault = statement
+      const reply = await switchOn(adminGet)
+      statementFault = null
+      const lines = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.startsWith('Approval routing status block omitted'))
+
+      expect(faultFired).toBe(1)
+      expect(reply.status, reply.text).toBe(200)
+      expect(reply.text).toBe(`{"ok":true,"data":${REFUSED_FIELDS}}`)
+      expect(lines).toEqual(['Approval routing status block omitted: Error'])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it.each([
+    ['switch on, a single active pull source', true, true],
+    ['switch off, two active pull sources', false, false],
+  ] as const)('A12 %s, the candidates cannot be read: the admin GET omits the status block and keeps the legacy-default label', async (_name, on, singleSource) => {
+    if (singleSource) await setStatus(sourceB, 'paused')
+    faultFired = 0
+
+    statementFault = APPROVAL_ROUTING_CANDIDATES_SQL
+    const reply = await (on ? switchOn : switchOff)(adminGet)
+    statementFault = null
+
+    expect(faultFired).toBe(1)
+    expect(reply.status, reply.text).toBe(200)
+    expect(reply.text).toBe(`{"ok":true,"data":${LEGACY_FIELDS}}`)
   })
 
   it('A13 rows of one enterprise are grouped with counts and booleans only', async () => {

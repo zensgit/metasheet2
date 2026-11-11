@@ -14,6 +14,8 @@
  *    from its fragments and do not restate those conditions.
  *  - Any failed read (the source count included) rejects: the caller omits the whole block rather
  *    than present a partial one.
+ *  - The rule judgement is read once per block. A caller that needs it on its own reads it first
+ *    and passes it in; the block then reports that same judgement and does not read it again.
  */
 import { readDirectoryIdentityStatus, readDirectoryIntegrationAppKey, type DirectoryIdentityStatus } from './integration-identity'
 import {
@@ -22,6 +24,7 @@ import {
   nonActivePullTypePredicateSql,
   pullTypePredicateSql,
   type PullSourceRuleQuery,
+  type PullSourceRuleStatus,
 } from './pull-source-rule'
 
 export interface ApprovalRoutingCandidate {
@@ -119,8 +122,16 @@ export function groupSameCorpRows(
     }))
 }
 
-export async function readApprovalRoutingStatus(query: PullSourceRuleQuery, orgId: string): Promise<ApprovalRoutingStatus> {
-  const rule = await isApprovalRoutingPolicyRequired(query, orgId)
+/**
+ * `ruleStatus` is the rule judgement of the same organisation when the caller has already read it;
+ * without it the judgement is read here, before the other statements.
+ */
+export async function readApprovalRoutingStatus(
+  query: PullSourceRuleQuery,
+  orgId: string,
+  ruleStatus?: PullSourceRuleStatus,
+): Promise<ApprovalRoutingStatus> {
+  const rule = ruleStatus ?? await isApprovalRoutingPolicyRequired(query, orgId)
   const candidates = await query(APPROVAL_ROUTING_CANDIDATES_SQL, [orgId])
   const pullTypeRows = await query(APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL, [orgId])
   const linkedAccounts = await query(NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL, [orgId])

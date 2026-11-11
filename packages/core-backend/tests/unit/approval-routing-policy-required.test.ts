@@ -665,6 +665,44 @@ describe('approval routing status block', () => {
     expect(on).toEqual({ ...off, enforced: true })
   })
 
+  it('reads the rule judgement first, then the three other statements, each once', async () => {
+    const { statements, query } = fake({ count: 2, linked: 0 })
+
+    await readApprovalRoutingStatus(query, 'org-a')
+
+    expect(statements).toEqual([
+      COUNT_ACTIVE_PULL_SOURCES_SQL,
+      APPROVAL_ROUTING_POLICY_EXISTS_SQL,
+      APPROVAL_ROUTING_CANDIDATES_SQL,
+      APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL,
+      NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL,
+    ])
+  })
+
+  it('reports a rule judgement passed in by the caller and does not read it again', async () => {
+    const { statements, query } = fake({ count: 0, linked: 0 })
+
+    const block = await readApprovalRoutingStatus(query, 'org-a', { required: true, sourceCount: 2, hasPolicy: false })
+
+    expect(block).toMatchObject({ hasPolicy: false, activePullSourceCount: 2, policyRequired: true })
+    expect(statements).toEqual([
+      APPROVAL_ROUTING_CANDIDATES_SQL,
+      APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL,
+      NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL,
+    ])
+  })
+
+  it('the admin GET reads the rule judgement once, hands it to the block and labels from it alone', () => {
+    const route = srcFile('routes/admin-directory-routing-policy.ts')
+    const handler = route.slice(route.indexOf("router.get('/', async"), route.indexOf("router.patch('/:purpose'"))
+
+    expect(handler.match(/isApprovalRoutingPolicyRequired\(/g)).toHaveLength(1)
+    expect(handler).toContain('ruleStatus = await isApprovalRoutingPolicyRequired(query, orgId)')
+    expect(handler).toContain('approvalRouting = await readApprovalRoutingStatus(query, orgId, ruleStatus)')
+    expect(handler).toContain('const approvalRoutingRefused = isApprovalRoutingRequirePolicyEnabled() && ruleStatus?.required === true')
+    expect(handler).not.toMatch(/approvalRouting\??\.(policyRequired|enforced)/)
+  })
+
   it('a policy or a single source means no policy is required', async () => {
     const governed = await readApprovalRoutingStatus(fake({ count: 3, policy: [{ present: 1 }], linked: 4 }).query, 'org-a')
     const single = await readApprovalRoutingStatus(fake({ count: 1, linked: '0' }).query, 'org-a')
