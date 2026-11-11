@@ -388,6 +388,48 @@ describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no 
     container.remove()
   })
 
+  it('a value that came while focused, then an edit committed: going back in and out again keeps the commit shown (the model lags behind it)', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    // a value from elsewhere while focused, shown on the unchanged blur
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'from elsewhere'
+    await nextTick()
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(editable.innerHTML).toBe('from elsewhere')
+    // another one while focused, then an edit committed over it
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'newer from elsewhere'
+    await nextTick()
+    editable.innerHTML = 'from elsewhere X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    // back in and out with no edit before the host took the commit
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['from elsewhere X']])
+    expect(editable.innerHTML).toBe('from elsewhere X')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a value that came while focused, then Cmd/Ctrl+Enter: the blur after it keeps the commit shown (the model lags behind it)', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'from elsewhere'
+    await nextTick()
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    expect(editable.innerHTML).toBe('rich X')
+    app.unmount()
+    container.remove()
+  })
+
   it('a move to another record while the editor is focused (no edit) shows that record\'s value on the blur, and commits nothing', async () => {
     const { container, app, modelValue, syncKey, changeSpy, editable } = mountReactiveEditor('value of A')
     await nextTick()

@@ -804,21 +804,76 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     document.body.innerHTML = ''
   })
 
-  it.each([
-    ['a text input', F_TEXT, '#drawer_field_fld_text'],
-    ['a textarea', F_NOTES, '#drawer_field_fld_notes'],
-  ] as const)('%s: a value that lands while it is focused and typed in leaves the typing, which the next blur commits', async (_label, field, selector) => {
+  // Every box the drawer edits by typing: [field, stored, typed since, the value that lands meanwhile, committed]
+  const BOXES = [
+    ['a text input', F_TEXT, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a textarea', F_NOTES, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a barcode box', { id: 'fld_bar', name: 'Barcode', type: 'barcode' }, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a QR code box', { id: 'fld_qr', name: 'QR', type: 'qrcode' }, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a location box', { id: 'fld_loc', name: 'Place', type: 'location' }, 'n2', 'n2XQQ', 'n2X', { address: 'n2XQQ' }],
+    ['a number box', F_NUM, 12, '123', 1, 123],
+    ['a date box', { id: 'fld_day', name: 'Day', type: 'date' }, '2031-01-02', '2031-01-09', '2031-01-05', '2031-01-09'],
+  ] as const
+  const boxRecord = (field: { id: string; type: string }, id: string, stored: unknown, version = 1) =>
+    ({ id, version, data: { [field.id]: field.type === 'location' ? { address: stored } : stored } }) as unknown as MetaRecord
+
+  it.each(BOXES)('%s: a value that lands while it is focused and typed in leaves the typing, which the next blur commits', async (_label, field, stored, typed, landing, committed) => {
     const onPatch = vi.fn()
-    const { container, set } = mountBoundPanel({ fields: [field], record: textRecord('rec_A', 'n2'), onPatch })
+    const { container, set } = mountBoundPanel({ fields: [field as unknown as MetaField], record: boxRecord(field, 'rec_A', stored), onPatch })
     await flushUi()
-    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!
+    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#drawer_field_${field.id}`)!
     box.focus()
-    box.value = 'n2XQQ'
+    box.value = typed
+    set({ record: boxRecord(field, 'rec_A', landing, 2) })
+    await flushUi()
+    expect(box.value).toBe(typed)
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([[field.id, committed]])
+    // The commit supersedes the value that landed: leaving does not bring it back.
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe(typed)
+  })
+
+  it('typed, then undone, while a value landed: left with no net typing, the box shows that value', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'zzz', 2) })
+    await flushUi()
+    expect(box.value).toBe('alphaB')
+    box.value = 'alpha'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('zzz')
+  })
+
+  it('a stored value the box holds differently (a line break in a single-line box) is not typing: a value that lands is shown', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'line1\nline2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    set({ record: textRecord('rec_A', 'fresh', 2) })
+    await flushUi()
+    expect(box.value).toBe('fresh')
+  })
+
+  it('a box that committed what it holds shows the next value, also a rejected commit\'s rollback while it is still focused', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    // the optimistic value, then the rollback
     set({ record: textRecord('rec_A', 'n2X', 2) })
     await flushUi()
-    expect(box.value).toBe('n2XQQ')
-    box.dispatchEvent(new Event('change'))
-    expect(onPatch.mock.calls).toEqual([[field.id, 'n2XQQ']])
+    set({ record: textRecord('rec_A', 'n2', 3) })
+    await flushUi()
+    expect(document.activeElement).toBe(box)
+    expect(box.value).toBe('n2')
   })
 
   it.each([

@@ -495,10 +495,15 @@ function onBlur(): void {
   dismissMention()
   const value = currentValue()
   emit('update:modelValue', value)
-  if (value !== committedOnFocus) emit('change', value)
-  // Nothing to commit: show the value that came while the editor was focused, if one did. (Not otherwise: the
-  // model can still lag behind this editor's own commit, which must stay shown until the host takes it.)
-  else if (modelChangedWhileFocused) syncFromModel()
+  if (value !== committedOnFocus) {
+    emit('change', value)
+    // This commit supersedes a value that came while the editor was focused.
+    modelChangedWhileFocused = false
+  } else if (modelChangedWhileFocused) {
+    // Nothing to commit: show the value that came while the editor was focused. (Not otherwise: the model can
+    // still lag behind this editor's own commit, which must stay shown until the host takes it.)
+    syncFromModel()
+  }
 }
 
 /**
@@ -513,6 +518,7 @@ function onConfirm(): void {
   emit('update:modelValue', value)
   emit('change', value)
   committedOnFocus = value
+  modelChangedWhileFocused = false
   emit('confirm')
 }
 

@@ -299,7 +299,7 @@
           ref="titleInputRef"
           class="meta-record-drawer__title-input"
           type="text"
-          :value="primaryFieldTextValue"
+          v-field-value="[primaryFieldTextValue, record?.id]"
           :aria-label="l('record.titleFieldAria')"
           @change="onTitleChange"
           @keydown.enter="onTitleEnter"
@@ -693,6 +693,7 @@ import { workbenchLabel } from '../utils/workbench-labels'
 import { manualRowLabel } from '../utils/manual-row-labels'
 import { bomRelationsLabel, type BomRelationKind } from '../utils/bom-relations'
 import { isImeKeyEvent } from '../utils/ime-keys'
+import { vFieldValue } from '../utils/field-value-directive'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,

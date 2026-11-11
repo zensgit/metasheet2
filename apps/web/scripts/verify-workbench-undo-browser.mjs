@@ -72,9 +72,11 @@ const SCENARIOS = {
     await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
     check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
   },
-  async 'title rewritten by the record (grid undo, a record re-render), Cmd+Z: nothing'(page) {
+  async 'title rewritten by the record (grid undo, a record re-render) after its typing was left, Cmd+Z: nothing'(page) {
     const t = page.locator('.meta-record-drawer__title-input'); await t.click(); await page.keyboard.press('End'); await page.keyboard.type(' T')
+    await leave(page)
     await page.evaluate(() => window.undoDemo.rewrite('fld_title', 'Server value')); await page.waitForTimeout(150)
+    await t.click()
     await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('title', s.title, 'Server value'); check('grid', s.grid, { undo: 0, redo: 0 })
   },
@@ -185,6 +187,24 @@ const SCENARIOS = {
     check('typing kept', await note.inputValue(), 'betaXQ')
     await leave(page)
     check('saved', (await saved(page)).filter((p) => p.includes('fld_note')), ['rec_1:fld_note=betaX', 'rec_1:fld_note=betaXQ'])
+  },
+  async 'a number box typed in while the record is redrawn (another field\'s value came back): the typing stays, and the number typed is saved'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('12')
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    check('typing kept', await qty.inputValue(), '12')
+    await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_1:fld_qty=123'])
+  },
+  async 'a number draft it cannot read ("-"), then the next-record chord: the next record\'s box shows its own value, and a number typed there is saved as typed'(page) {
+    await page.evaluate(() => window.undoDemo.setField('rec_2', 'fld_qty', null))
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('-')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    check('the draft is gone', await qty.evaluate((el) => [el.value, el.validity.badInput]), ['', false])
+    await qty.click(); await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_2:fld_qty=3'])
   },
   async 'a number box holding a draft it cannot read ("-"), left: nothing is saved, the stored number stays'(page) {
     const qty = page.locator('#drawer_field_fld_qty')

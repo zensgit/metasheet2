@@ -5571,9 +5571,6 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
-    // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
-    // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
-    // and then gets the focus back, so the chord and Esc go on working.
     // Every move to another record commits the drawer's focused field first (releaseDrawerFocus in selectRecord), not
     // only the drawer's own previous / next: here the record in the address (the browser's back / forward), a
     // deep link to a record off the page while a deep-linked record is shown, and a declined discard prompt.
@@ -5612,6 +5609,8 @@ describe('MultitableWorkbench view wiring', () => {
         linkSummaries: {},
       })
       acceptNextPatch()
+      // The far record's comments are still loading: the focus comes back without waiting for them.
+      loadCommentsSpy.mockImplementationOnce(() => new Promise(() => {}))
       host.recordId = 'rec_far'
       await flushUi(8)
       expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
@@ -5642,6 +5641,9 @@ describe('MultitableWorkbench view wiring', () => {
       expect(document.activeElement).toBe(field)
     })
 
+    // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
+    // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
+    // and then gets the focus back, so the chord and Esc go on working.
     it('navigating with the caret still in a field commits that field to the record it was typed on, moves on, and gives the focus back', async () => {
       await openRec1()
       const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
@@ -5689,11 +5691,19 @@ describe('MultitableWorkbench view wiring', () => {
 
     it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
       await openRec1()
-      container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
-      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
-      await flushUi()
-      expect(container!.querySelector('[data-rec1-only]')).toBeNull()
-      expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+      // a tab panel outside the drawer, before it in the page: never the one that gets the focus
+      const decoy = document.body.insertBefore(document.createElement('div'), document.body.firstChild)
+      decoy.setAttribute('role', 'tabpanel')
+      decoy.tabIndex = 0
+      try {
+        container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(container!.querySelector('[data-rec1-only]')).toBeNull()
+        expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+      } finally {
+        decoy.remove()
+      }
     })
 
     it('a move leaves a focused control outside the drawer alone', async () => {

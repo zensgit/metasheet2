@@ -127,8 +127,9 @@ createApp({
         if (target === record.value.id) undo.beginCommit(drawerCommitContainers(fieldId, FIELDS[0].id))()
         window.undoDemo.patches.push(`${target}:${fieldId}=${String(value)}`)
       },
-      // As in MultitableWorkbench (onDrawerNavigate): a move to another record blurs the drawer's focused control
-      // first, then gives the focus back to it (the caret at the end of a rich text editor), or to the open tab.
+      // As in MultitableWorkbench (releaseDrawerFocus, from selectRecord): a move to another record blurs the drawer's
+      // focused control first, then gives the focus back to it (the caret at the end of a rich text editor), or to
+      // the open tab.
       onNavigate: async (id) => {
         if (id === record.value.id) return
         const active = document.activeElement

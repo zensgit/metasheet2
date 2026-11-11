@@ -6156,8 +6156,10 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, selectOpts)
+    // The focus comes back as soon as the drawer shows the record, not after its comments load.
+    const selected = selectRecord(recordId, selectOpts)
     void restoreDrawerFocus?.()
+    await selected
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }

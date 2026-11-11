@@ -1109,7 +1109,7 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     return { container, record, gridUndo, patches, title, typeInto, press }
   }
 
-  it('a re-render that rewrites the focused title drops its typing history: the next Cmd+Z does nothing (no stale draft, no grid)', async () => {
+  it('a value for the same record that lands while the title holds its own typing does not overwrite it: the typing stays undoable, and left with no net typing the title shows that value', async () => {
     const { record, gridUndo, title, typeInto, press } = mountWithUndo()
     await flushUi()
     const input = title()
@@ -1119,16 +1119,33 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(input.value).toBe('Alpha')
     expect(gridUndo).not.toHaveBeenCalled()
-    // redo it, then the record changes underneath (as grid undo or a record switch does)
+    // redo it, then a value for this record lands (someone else's, or the title's own earlier commit)
     expect(press(input, { key: 'Z', metaKey: true, shiftKey: true })).toBe(true)
     expect(input.value).toBe('Alpha draft')
     record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
     await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(gridUndo).not.toHaveBeenCalled()
+    input.blur()
+    await flushUi()
     expect(input.value).toBe('Server value')
+  })
+
+  it('a move to another record while the title holds typing writes that record\'s title and drops the typing history: the next Cmd+Z does nothing', async () => {
+    const { record, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_2', version: 1, data: { fld_title: 'Beta', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Beta')
     expect(document.activeElement).toBe(input)
     expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(gridUndo).not.toHaveBeenCalled()
-    expect(input.value).toBe('Server value')
+    expect(input.value).toBe('Beta')
   })
 
   it('a title commit (Enter, then the change the blur fires) ends the title\'s history: the next Cmd+Z does nothing, with no second patch', async () => {

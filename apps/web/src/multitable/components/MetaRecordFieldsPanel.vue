@@ -196,7 +196,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="number"
-            :value="controlValue(field.id) ?? ''"
+            v-field-value="[numberControlText(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="onNumberChange(field.id, $event)"
@@ -206,7 +206,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="date"
-            :value="formatDateOnlyValue(controlValue(field.id)) ?? ''"
+            v-field-value="[formatDateOnlyValue(controlValue(field.id)) ?? '', record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -401,7 +401,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch, type Directive } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type {
   LinkedRecordSummary,
   PersonSummary,
@@ -458,6 +458,7 @@ import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
 import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
 import { qrSvgFromText } from '../utils/qr-code'
 import { isImeKeyEvent } from '../utils/ime-keys'
+import { vFieldValue } from '../utils/field-value-directive'
 import {
   canEditField as canEditFieldShared,
   formatRecordFieldValue,
@@ -561,27 +562,13 @@ watch(() => props.record, () => {
 // the user just entered in this panel — nothing is fetched or derived.
 const rejectedDrafts = ref<Record<string, unknown>>({})
 
-/**
- * `v-field-value="[value, record id]"` on the drawer's text boxes, in place of `:value`. A value that arrives
- * while the box is focused and has been typed in since it was last set (the box's own commit, still in flight
- * then, accepted now) does not overwrite the typing: the next blur commits it. A move to another record always
- * sets it, and so does any value while the box is not focused or not typed in.
- */
-const vFieldValue: Directive<HTMLInputElement | HTMLTextAreaElement, readonly [string, string | undefined]> = {
-  mounted(el, { value: [text] }) {
-    el.value = text
-  },
-  updated(el, { value: [text, recordId], oldValue }) {
-    if (el.value === text) return
-    const [previous, previousRecordId] = oldValue ?? [text, recordId]
-    const typedSince = el.ownerDocument.activeElement === el && el.value !== previous
-    if (typedSince && recordId === previousRecordId) return
-    el.value = text
-  },
+/** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") commits
+ *  nothing, where "" would clear the stored number. The box shows the stored number again when it is next drawn
+ *  (v-field-value: the value after a commit, or another record's). */
+function numberControlText(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
 }
 
-/** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") commits
- *  nothing, where "" would clear the stored number. The draft stays in the box, as a date-time draft does. */
 function onNumberChange(fieldId: string, event: Event) {
   const input = event.target as HTMLInputElement
   if (input.validity.badInput) return

@@ -1104,13 +1104,13 @@ describe('MetaFormView A4 form logic', () => {
 })
 
 describe('MetaFormView number draft', () => {
-  it('a number box holding a draft it cannot read leaves the form value as it was, so Save does not clear the stored number', async () => {
+  it.each(['number', 'currency', 'percent'])('a %s box holding a draft it cannot read leaves the form value as it was, so Save does not clear the stored number', async (type) => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const submitSpy = vi.fn()
     const app = createApp({
       render: () => h(MetaFormView, {
-        fields: [{ id: 'fld_num', name: 'Amount', type: 'number' }],
+        fields: [{ id: 'fld_num', name: 'Amount', type }],
         record: { id: 'rec_A', version: 1, data: { fld_num: 5 } },
         loading: false,
         readOnly: false,
