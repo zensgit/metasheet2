@@ -6,7 +6,8 @@ type ValueBox = HTMLInputElement | HTMLTextAreaElement
  *  line breaks, a textarea turns CRLF into LF, a number box keeps only what it can read), and from what value;
  *  or what the box last committed. */
 const written = new WeakMap<ValueBox, { held: string; from: string }>()
-/** A value that arrived while the box held typing of its own: shown once the box is left with no net typing. */
+/** A value that arrived while the box held typing of its own: shown once the box is left with no net typing (or
+ *  dropped by its commit). */
 const pending = new WeakMap<ValueBox, string>()
 
 function write(el: ValueBox, text: string) {
@@ -24,9 +25,9 @@ function heldTyping(el: ValueBox): boolean {
 function onFocusOut(event: Event) {
   const el = event.target as ValueBox
   const next = pending.get(el)
-  if (next === undefined) return
-  pending.delete(el)
-  if (!heldTyping(el)) write(el, next)
+  // Left with typing still there and no commit (a window switch): the value waits on.
+  if (next === undefined || heldTyping(el)) return
+  write(el, next)
 }
 
 /** The box committed what it holds (its `change`): that is no longer typing of its own, and it supersedes a value
@@ -75,7 +76,9 @@ export const vFieldValue: Directive<ValueBox, readonly [string, string | undefin
       return
     }
     if (el.ownerDocument.activeElement === el && heldTyping(el)) {
-      pending.set(el, text)
+      // Only a value that changed has arrived; a redraw that brings the same one (which can still be the value from
+      // before the box's own commit) is not one.
+      if (!oldValue || text !== oldValue[0]) pending.set(el, text)
       return
     }
     if (heldTyping(el) || written.get(el)?.from !== text) write(el, text)

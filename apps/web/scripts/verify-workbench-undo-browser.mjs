@@ -206,13 +206,24 @@ const SCENARIOS = {
     await qty.click(); await page.keyboard.type('3'); await leave(page)
     check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_2:fld_qty=3'])
   },
-  async 'a date typed part by part while the record is redrawn (the day half-typed, then the redraw, then its last digit): the date typed is saved, and nothing empties it'(page) {
+  async 'a date typed part by part while the record is redrawn (the day half-typed, then the redraw, then its last digit): the date typed is saved last, and the box keeps it'(page) {
     const due = page.locator('#drawer_field_fld_due')
     await due.focus(); await page.keyboard.press('ArrowRight')
     await page.keyboard.type('0')
-    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    // the answer to the half-typed day's save: the record comes back without a date
+    await page.evaluate(() => window.undoDemo.setField('rec_1', 'fld_due', '')); await page.waitForTimeout(100)
     await page.keyboard.type('9'); await leave(page)
-    check('saved', (await saved(page)).filter((p) => p.includes('fld_due')), ['rec_1:fld_due=2031-01-09'])
+    check('the box', await due.inputValue(), '2031-01-09')
+    check('saved last', (await saved(page)).filter((p) => p.includes('fld_due')).at(-1), 'rec_1:fld_due=2031-01-09')
+  },
+  async 'a date cleared part by part with the keyboard: the empty date is saved'(page) {
+    const due = page.locator('#drawer_field_fld_due')
+    await due.focus()
+    await page.keyboard.press('Backspace'); await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Backspace'); await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Backspace'); await leave(page)
+    check('the box', await due.inputValue(), '')
+    check('saved last', (await saved(page)).filter((p) => p.includes('fld_due')).at(-1), 'rec_1:fld_due=')
   },
   async 'a negative number typed while the record is redrawn ("-", the redraw, then "3"): -3 is saved'(page) {
     const qty = page.locator('#drawer_field_fld_qty')

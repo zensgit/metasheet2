@@ -1151,6 +1151,42 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
   })
 
+  it('Escape after typing again on a committed title shows the committed title also after a redraw that brings the record\'s older title', async () => {
+    const { record, patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    typeInto(input, 'Alpha XY')
+    // another field's answer redraws the record; its title has not taken the commit yet
+    record.value = { ...record.value, version: 2, data: { ...record.value.data, fld_title: 'Alpha', fld_notes: 'n' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches.filter((p) => p.includes('fld_title'))).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape shows a value that landed, and records it: a newer value that lands then is shown, not kept out as typing', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+    record.value = { id: 'rec_1', version: 3, data: { fld_title: 'Newer', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Newer')
+  })
+
   it('Escape after a value landed while the title held typing shows that value', async () => {
     const { record, title, typeInto } = mountWithUndo()
     await flushUi()

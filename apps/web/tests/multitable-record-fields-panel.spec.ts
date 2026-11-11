@@ -886,13 +886,14 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     const validity = { badInput: false }
     Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
     box.focus()
-    // the day half-typed: the box reads "" and fires its change
+    // the day half-typed: the box reads "" and fires its change (the drawer saves "", as before)
     validity.badInput = true
     box.value = ''
     box.dispatchEvent(new Event('change'))
-    expect(onPatch).not.toHaveBeenCalled()
+    expect(onPatch.mock.calls).toEqual([['fld_day', '']])
     const writes = countWrites(box)
-    set({ record: dayRecord('2031-01-02', 2) })
+    // the server's answer (the date it took), then a value from elsewhere
+    set({ record: dayRecord(null, 2) })
     await flushUi()
     set({ record: dayRecord('2031-03-04', 3) })
     await flushUi()
@@ -901,7 +902,7 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     validity.badInput = false
     box.value = '2031-01-09'
     box.dispatchEvent(new Event('change'))
-    expect(onPatch.mock.calls).toEqual([['fld_day', '2031-01-09']])
+    expect(onPatch.mock.calls).toEqual([['fld_day', ''], ['fld_day', '2031-01-09']])
   })
 
   it('a date box cleared in full (not half-typed) commits the empty date', async () => {
@@ -932,7 +933,7 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     expect(box.value).toBe('D')
   })
 
-  it('focus that leaves with the typing still there and no commit (a window switch) keeps the typing', async () => {
+  it('focus that leaves with the typing still there and no commit (a window switch) keeps the typing, and the value waits: undone and left later, the box shows it', async () => {
     const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
     await flushUi()
     const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
@@ -943,6 +944,29 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     box.blur()
     await flushUi()
     expect(box.value).toBe('alphaB')
+    box.focus()
+    box.value = 'alpha'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('C')
+  })
+
+  it('a redraw that brings the same value while the box holds typing is not a value that landed (it can be the value from before the box\'s own commit)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    // typing again; the record is redrawn with the value from before the commit (not taken yet)
+    box.value = 'n2XY'
+    set({ record: textRecord('rec_A', 'n2', 1) })
+    await flushUi()
+    // the typing undone and the box left: it shows what it committed, not the older value
+    box.value = 'n2X'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('n2X')
   })
 
   it('typed, then undone, while a value landed: left with no net typing, the box shows that value', async () => {

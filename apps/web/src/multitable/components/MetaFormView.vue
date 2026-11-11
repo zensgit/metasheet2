@@ -129,7 +129,7 @@
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
-            @input="onNumberInput(field.id, $event)"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
             <input type="checkbox" :disabled="isFieldReadOnly(field.id)" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
@@ -267,7 +267,7 @@
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :value="formData[field.id] ?? ''"
-            @input="onNumberInput(field.id, $event)"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
           />
           <div v-else-if="field.type === 'rating'" class="meta-form-view__rating">
             <button
@@ -511,14 +511,6 @@ const editableFields = computed(() => {
 // renders `currentPageFields` ⊆ `editableFields`; `validate` iterates
 // `editableFields`), so a field hidden by a visibility rule is never treated as
 // conditionally required.
-/** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") leaves the
- *  form's value as it was, where "" would clear it (and Save would clear the stored number). */
-function onNumberInput(fieldId: string, event: Event) {
-  const input = event.target as HTMLInputElement
-  if (input.validity.badInput) return
-  formData[fieldId] = input.value === '' ? null : Number(input.value)
-}
-
 function fieldIsRequired(field: MetaField): boolean {
   if (field.required) return true
   return isFieldConditionallyRequired(field, formData, fieldsById.value)
