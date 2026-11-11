@@ -406,7 +406,12 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
     let waiting = false
     const deadline = Date.now() + 4000
     while (Date.now() < deadline && !settled) {
-      const result = await run(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)
+      const result = await run(
+        `SELECT count(*)::int AS n FROM pg_locks
+          WHERE locktype = 'advisory' AND NOT granted AND objsubid = 2
+            AND classid = hashtext('notif-user:' || $1::text)::oid AND objid = hashtext($2::text)::oid`,
+        [org, user],
+      )
       if (result.rows[0].n > 0) {
         waiting = true
         break
@@ -1536,27 +1541,34 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
   })
 
   describe('#13 suite cleanup', () => {
-    it('a whole-table delete of the integrations succeeds once the endpoint rows are gone, and is refused while one remains', async () => {
+    it('deleting the integrations of the suite by id is refused while an endpoint row refers to them, and succeeds once the endpoint and preference rows are gone', async () => {
       const w = await scene()
       await insertEndpoint({ org: w.org, user: w.users[0], connection: w.id })
-      const wholeTable = async (): Promise<PgError | null> => {
-        const client = await pool.connect()
+      const ids = [w.id]
+      const client = await pool.connect()
+      const attempt = async (savepoint: string): Promise<PgError | null> => {
+        await client.query(`SAVEPOINT ${savepoint}`)
         try {
-          await client.query('BEGIN')
-          await client.query('DELETE FROM directory_integrations')
+          await client.query('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [ids])
           return null
         } catch (error) {
           return error as PgError
         } finally {
-          await client.query('ROLLBACK')
-          client.release()
+          await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
         }
       }
-      const refused = await wholeTable()
-      expect(refused?.code).toBe('23503')
-      await run(`DELETE FROM ${PREFERENCES} WHERE org_id = $1`, [w.org])
-      await run(`DELETE FROM ${ENDPOINTS} WHERE org_id = $1`, [w.org])
-      expect(await wholeTable()).toBeNull()
+      try {
+        await client.query('BEGIN')
+        const refused = await attempt('own_refused')
+        expect([refused?.code, refused?.constraint !== undefined && ['une_conn_org_fk', 'une_conn_provider_fk'].includes(refused.constraint)]).toEqual(['23503', true])
+        await client.query(`DELETE FROM ${PREFERENCES} WHERE org_id = $1`, [w.org])
+        await client.query(`DELETE FROM ${ENDPOINTS} WHERE org_id = $1`, [w.org])
+        expect(await attempt('own_released')).toBeNull()
+      } finally {
+        await client.query('ROLLBACK')
+        client.release()
+      }
+      expect(await rowsOf(ENDPOINTS, 'org_id = $1', [w.org])).toHaveLength(1)
     })
   })
 
