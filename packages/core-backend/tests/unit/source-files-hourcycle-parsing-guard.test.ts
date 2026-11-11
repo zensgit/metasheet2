@@ -221,6 +221,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'parsing',
   },
   {
+    // notifications/quiet-hours.ts `localMinutes()` — formatToParts, hour/minute parts read as
+    // numbers; `hourCycle: 'h23'` with a `% 24` fold. PARSING and compliant.
+    file: 'packages/core-backend/src/notifications/quiet-hours.ts',
+    lineText: "formatter = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' })",
+    kind: 'parsing',
+  },
+  {
     // AttendanceNotificationDeliveryWorker.ts `isAttendanceNotificationQuietHours()` —
     // formatToParts, hour/minute parts read directly as HH:MM comparison inputs.
     file: 'packages/core-backend/src/services/AttendanceNotificationDeliveryWorker.ts',
@@ -758,7 +765,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 31 = 29 + two hour-free attendance timezone validity probes.
     // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
     // 38 = 37 + the daily scheduler's hour-free year/month/day key.
-    expect(KNOWN_SITES.length).toBe(38)
+    // 39 = 38 + the quiet-hours parsing formatter (hourCycle 'h23').
+    expect(KNOWN_SITES.length).toBe(39)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {
