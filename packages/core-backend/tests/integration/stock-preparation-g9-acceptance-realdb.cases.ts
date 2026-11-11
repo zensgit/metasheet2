@@ -42,6 +42,9 @@
  *            default). G9-U03 PINS the measured writes of that path (never certifies it) and, with the flag exactly
  *            'true' (test env only), that assertVerifiedTenantClaim (:1754) refuses the same caller 403 on every carrier
  *            with nothing written while this tenant's own puller with a verified claim still previews (ready, a token).
+ *            RULED 2026-11-11 (owner, register R-91, option A): the legacy path stays for non-pilot use while the flag is
+ *            off, and the flag being on is a PILOT-ENABLE PRECONDITION — readiness v6's tenant_claim_required, held by
+ *            G9-PE below (flag off ⇒ the enable refused with exactly that id). It gates the enable only.
  *   G9-S9X-01 (C-8, RD G2) the MVP archive identity — the default snapshotBatchId and syncRunId, both derived from
  *            buildArchiveRevision — is unchanged across the 批次标识 install + history backfill of an unchanged GOVERNED
  *            sheet, with the switch ON and OFF: the archive after the install keeps the batch already archived.
@@ -57,6 +60,9 @@
  *            with the marker 1 IN MEMORY the readiness is green and the enable 200 stamps the registry with the current
  *            PILOT_READINESS_VERSION (read from the module, never a literal). Readiness v5's component ruling ledger
  *            (S6-5, migration 107) is wired, so its no_unacknowledged_inactive_root_remnant passes on the prepared sheet.
+ *            Readiness v6 (owner ruling 2026-11-11, R-91 option A): the leg HOLDS the tenant-claim flag exactly 'true'
+ *            (this process's env, restored in finally; every call carries the verified claim) to pass, and its negative
+ *            leg — marker 1, flag OFF — is 409 with `tenant_claim_required` the ONLY failing id and nothing done.
  *   G9-S65-V5  (S6-5, #6842) on the same prepared sheet: an inactive-root remnant fails ONLY that v5 id beyond the
  *            marker; the project census lists exactly its handle; the acknowledgement through the REAL route lifts
  *            exactly that check and the revoke restores it; the enable stays 409.
@@ -118,9 +124,11 @@ export const G9_MATRIX = JSON.parse(fs.readFileSync(MATRIX_PATH, 'utf8')) as {
 }
 // The owner-gated item G9-U03 pins (never certifies); the runner prints its sentence in every verdict.
 const LEGACY_TENANTLESS_ADMIN_ID = 'G9-U03-LEGACY-TENANTLESS-ADMIN'
-const LEGACY_TENANTLESS_ADMIN_WHAT = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — owner ruling pending'
+const LEGACY_TENANTLESS_ADMIN_WHAT = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — ruled 2026-11-11: option A — the flag is a pilot-enable precondition; the legacy path stays for non-pilot use while the flag is off'
 // The staged tenant-claim door (http-routes.cjs stockPreparationTenantClaimRequired: exactly 'true' after trim / lower).
 const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+// The flag as the p4 host process had it when this module loaded: every leg that sets it restores it (afterAll asserts).
+const TENANT_CLAIM_FLAG_AT_LOAD = process.env[TENANT_CLAIM_FLAG]
 // The pull-batch pure module: the settings vocabulary's own default (a schema-valid settings patch, never a literal).
 const pullBatchPureLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch.cjs')) as any
 
@@ -390,6 +398,8 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }
     // The marker is process-global for the whole p4 file: G9-PE must have restored it.
     expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(0)
+    // So is the tenant-claim flag (G9-U03's claim leg, G9-PE's flag-on legs): restored to what the host had.
+    expect(process.env[TENANT_CLAIM_FLAG]).toBe(TENANT_CLAIM_FLAG_AT_LOAD)
   })
 
   describe(`${G9_MATRIX.describe} (S6-9a, R-91 / R-65): the step-6 §9.5 matrix on real Postgres, the real routes, lock, stores and host`, () => {
@@ -1356,7 +1366,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         }
       }
       const afterRefusals = await tenantRows()
-      // ── THE OWNER-GATED LEG G9-U03-LEGACY-TENANTLESS-ADMIN (PRE-EXISTING product behaviour, escalated to the owner) ──
+      // ── THE OWNER-GATED LEG G9-U03-LEGACY-TENANTLESS-ADMIN (PRE-EXISTING product behaviour; ruled 2026-11-11, option A) ──
       const dryRunEntry = drilled.find((route: any) => route.id === 'pull.dry-run')
       const applyEntry = drilled.find((route: any) => route.id === 'pull.apply')
       const pullBody = { parameters: { projectNo: st.projectNo } }
@@ -1432,7 +1442,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         applyRowsAdded: (await st.main()).count - mainBeforeApply,
         applyAudits: afterLegacyApply.audits - afterLegacyDryRun.audits,
       }
-      console.log(`[G9-OWNER] ${LEGACY_TENANTLESS_ADMIN_ID} measured (pinned, NOT certified; owner ruling pending) ${JSON.stringify({ legacy, claimLeg })}`)
+      console.log(`[G9-OWNER] ${LEGACY_TENANTLESS_ADMIN_ID} measured (pinned, NOT certified; ruled 2026-11-11 option A: the flag is a pilot-enable precondition, readiness v6) ${JSON.stringify({ legacy, claimLeg })}`)
       // Phase 2 — the callers at or above the tier are admitted (an inert request may still be a 4xx; never a 401 / 403).
       const admitted: Record<string, string[]> = {}
       for (const [name, user] of Object.entries(callers)) {
@@ -1499,7 +1509,8 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         leaks: [],
         refusalsWroteNothing: true,
         refusalsAudited: 0,
-        // G9-U03-LEGACY-TENANTLESS-ADMIN — THE MEASURED LEGACY OUTCOME, PINNED (pre-existing; owner ruling pending): with
+        // G9-U03-LEGACY-TENANTLESS-ADMIN — THE MEASURED LEGACY OUTCOME, PINNED (pre-existing; ruled 2026-11-11, option A:
+        // the path stays for non-pilot use while the flag is off; a pilot cannot be enabled until it is on): with
         // the flag off the tenantless admin's preview of THIS tenant mints tokens and moves the step-4 / lock rows; its
         // apply WRITES (written 1); the superseded token is refused. Any change to this outcome turns G9-U03 red.
         legacy: {
@@ -1687,27 +1698,61 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const { installed } = await installBand(st, st.users.admin)
       expect(installed).toMatchObject({ resolved: true, historyStatus: 'backfilled' })
       const spAdmin = { id: `u_g9_pe_${TOKEN}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_ADMIN] }
-      const read = () => both(true, () => callRoute(st.routes, 'GET', PILOT_PATH, { user: spAdmin, params: { projectNo: st.projectNo }, query: {} }))
-      const enable = () => both(true, () => callRoute(st.routes, 'POST', PILOT_PATH, { user: spAdmin, params: { projectNo: st.projectNo }, body: { confirmProjectNo: st.projectNo } }))
+      // Readiness v6: the pilot calls carry the VERIFIED tenant claim (req.authenticatedTenantId, which the kit's callRoute
+      // drops) — what a tenant-bound admin token sends once the tenant-claim door is on.
+      const claimedPilotCall = (method: string, body?: any) => both(true, async () => {
+        const handler = st.routes.get(`${method} ${PILOT_PATH}`)
+        if (!handler) throw new Error(`route ${method} ${PILOT_PATH} is not registered`)
+        const res: any = { statusCode: 200, headers: {}, body: undefined }
+        res.status = (code: number) => { res.statusCode = code; return res }
+        res.json = (payload: unknown) => { res.body = payload; return res }
+        res.setHeader = (name: string, value: unknown) => { res.headers[name] = value; return res }
+        res.send = (payload: unknown) => { res.body = payload; return res }
+        res.end = () => res
+        await handler({ user: spAdmin, params: { projectNo: st.projectNo }, query: {}, body: body || {}, authenticatedTenantId: st.tenantId }, res)
+        return res
+      })
+      const read = () => claimedPilotCall('GET')
+      const enable = () => claimedPilotCall('POST', { confirmProjectNo: st.projectNo })
       const registry = async () => (await q('SELECT pilot_enabled_at IS NOT NULL AS enabled, pilot_readiness_version FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo])).rows[0]
       return { st, spAdmin, read, enable, registry }
     }
 
-    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store and the component ruling ledger wired: with the marker at 0 `continuation_support_version` is the ONLY failing id (readiness v5\'s no_unacknowledged_inactive_root_remnant passes) and the enable is 409 with nothing done; with the marker 1 IN MEMORY (restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
+    // Readiness v6 (owner ruling 2026-11-11, R-91 option A): the tenant-claim door for one block, restored in finally
+    // (`null` = absent, the default).
+    const withTenantClaim = async <T>(value: string | null, fn: () => Promise<T>): Promise<T> => {
+      const before = process.env[TENANT_CLAIM_FLAG]
+      if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+      else process.env[TENANT_CLAIM_FLAG] = value
+      try {
+        return await fn()
+      } finally {
+        if (before === undefined) delete process.env[TENANT_CLAIM_FLAG]
+        else process.env[TENANT_CLAIM_FLAG] = before
+      }
+    }
+
+    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store and the component ruling ledger wired, the tenant-claim flag HELD ON (readiness v6, owner ruling 2026-11-11 option A): with the marker at 0 `continuation_support_version` is the ONLY failing id (readiness v5\'s no_unacknowledged_inactive_root_remnant passes) and the enable is 409 with nothing done; NEGATIVE LEG — the marker 1 IN MEMORY and the flag OFF: `tenant_claim_required` is the ONLY failing id and the enable is 409 with nothing done; with the marker 1 and the flag ON (both restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
       const { st, read, enable, registry } = await preparedPilotSheet('g9_pe')
       const gen0 = await st.generation()
-      const atZero = await read()
-      const refused = await enable()
+      const { atZero, refused } = await withTenantClaim('true', async () => ({ atZero: await read(), refused: await enable() }))
       const genAfterRefusal = await st.generation()
       const registryAfterRefusal = await registry()
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
       expect(markerBefore).toBe(0)
+      let flagOffAtOne: any
+      let flagOffRefused: any
+      let genAfterFlagOffRefusal: any
+      let registryAfterFlagOffRefusal: any
       let atOne: any
       let enabled: any
       continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
       try {
-        atOne = await read()
-        enabled = await enable()
+        // The NEGATIVE leg FIRST: the enable is set-once, so it must be refused before the positive enable lands.
+        ;({ flagOffAtOne, flagOffRefused } = await withTenantClaim(null, async () => ({ flagOffAtOne: await read(), flagOffRefused: await enable() })))
+        genAfterFlagOffRefusal = await st.generation()
+        registryAfterFlagOffRefusal = await registry()
+        ;({ atOne, enabled } = await withTenantClaim('true', async () => ({ atOne: await read(), enabled: await enable() })))
       } finally {
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
       }
@@ -1717,10 +1762,15 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         failingAtZero: atZero.body.data.readiness.failing,
         refused: [refused.statusCode, codeOf(refused)],
         refusalDidNothing: sameJson(genAfterRefusal, gen0) && registryAfterRefusal.enabled === false,
+        flagOffFailingAtOne: flagOffAtOne.body.data.readiness.failing,
+        flagOffMayEnable: flagOffAtOne.body.data.may,
+        flagOffRefused: [flagOffRefused.statusCode, codeOf(flagOffRefused), flagOffRefused.body.error && flagOffRefused.body.error.details ? JSON.parse(JSON.stringify(flagOffRefused.body.error.details)).failing : null],
+        flagOffRefusalDidNothing: sameJson(genAfterFlagOffRefusal, gen0) && registryAfterFlagOffRefusal.enabled === false,
         failingAtOne: atOne.body.data.readiness.failing,
         enabled: [enabled.statusCode, enabled.body.data && enabled.body.data.enabled],
         registry: await registry(),
         markerRestored: continuationSupport.CONTINUATION_SUPPORT_VERSION,
+        flagRestored: process.env[TENANT_CLAIM_FLAG] === TENANT_CLAIM_FLAG_AT_LOAD,
       }
       expect(observed).toEqual({
         version: readinessLib.PILOT_READINESS_VERSION,
@@ -1728,16 +1778,21 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         failingAtZero: ['continuation_support_version'],
         refused: [409, readinessLib.PILOT_READINESS_CHECK_IDS.length ? 'STOCK_PREP_PILOT_NOT_READY' : null],
         refusalDidNothing: true,
+        flagOffFailingAtOne: ['tenant_claim_required'],
+        flagOffMayEnable: { enable: false },
+        flagOffRefused: [409, 'STOCK_PREP_PILOT_NOT_READY', ['tenant_claim_required']],
+        flagOffRefusalDidNothing: true,
         failingAtOne: [],
         enabled: [200, true],
         registry: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
         markerRestored: 0,
+        flagRestored: true,
       })
       g9Pass('G9-PE', observed)
     })
 
     // ── G9-S65-V5: readiness v5's remnant check on the prepared sheet (S6-5, #6842) ─────────────────────────────────────
-    g9Case('G9-S65-V5', '(S6-5 readiness v5, §9.5) on the G9-PE prepared sheet: the v5 check no_unacknowledged_inactive_root_remnant is in the readiness and passes; an inactive-root remnant (PART-A\'s old ROOT row inactive while PART-A stays active under S-001) fails ONLY that id beyond the marker, the project census lists exactly its handle, the acknowledgement through the REAL route lifts exactly that check (back to G9-PE\'s marker-0 answer) and the revoke restores it; the enable stays 409 and the registry unmarked throughout', async () => {
+    g9Case('G9-S65-V5', '(S6-5 readiness v5, §9.5) on the G9-PE prepared sheet, the tenant-claim flag at its default OFF (so readiness v6\'s tenant_claim_required fails beside the marker throughout): the v5 check no_unacknowledged_inactive_root_remnant is in the readiness and passes; an inactive-root remnant (PART-A\'s old ROOT row inactive while PART-A stays active under S-001) fails ONLY that id beyond the marker, the project census lists exactly its handle, the acknowledgement through the REAL route lifts exactly that check (back to G9-PE\'s marker-0 answer) and the revoke restores it; the enable stays 409 and the registry unmarked throughout', async () => {
       const { st, spAdmin, read, enable, registry } = await preparedPilotSheet('g9_v5')
       const failing = async () => {
         const res = await read()
@@ -1779,14 +1834,14 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       expect(observed).toEqual({
         v5CheckPresent: true,
         version: readinessLib.PILOT_READINESS_VERSION,
-        prepared: inOrder('continuation_support_version'),
-        withRemnant: inOrder('no_unacknowledged_inactive_root_remnant', 'continuation_support_version'),
+        prepared: inOrder('tenant_claim_required', 'continuation_support_version'),
+        withRemnant: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'continuation_support_version'),
         censusComponents: [[true, true]],
         refusedWithRemnant: [409, 'STOCK_PREP_PILOT_NOT_READY'],
-        afterAcknowledge: inOrder('continuation_support_version'),
+        afterAcknowledge: inOrder('tenant_claim_required', 'continuation_support_version'),
         ledger: [{ kind: 'remnant_acknowledged', status: 'active', same_handle: true }],
         revoke: [200, 'revoked'],
-        afterRevoke: inOrder('no_unacknowledged_inactive_root_remnant', 'continuation_support_version'),
+        afterRevoke: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'continuation_support_version'),
         refusedAfterRevoke: [409, 'STOCK_PREP_PILOT_NOT_READY'],
         rowsAdded: 1,
         registry: { enabled: false, pilot_readiness_version: null },

@@ -2,7 +2,7 @@
 
 > **用途。** 这是分批刷新第一期上客户机的现场手册（plan §7 的 G10）：先装 main 基线包，再逐表准备，最后开启第一个试点；中间任何时候都可能要做恢复，或者要回退。设计见 `design-stock-prep-batch-refresh-step6-20261027.md`（**开头的 2026-11-09 改正节优先于正文**），决策见登记册 **R-91**（第 6 步）、**R-65**（批次标识）、R-54 / R-55（试点启用）、R-56 / R-57 / R-61 / R-63 / R-77（对所有项目生效的默认值）。
 >
-> **基线。** 下文所有 `path:line` 都在 `origin/main` **0232a25f2**（#6842 合入）上亲读核过；发布前 main 前进到 48aaac6b4（#6857：多一个平台迁移，`migrate.ts` 只改了帮助文字；本手册引用的其他文件都没动），§1.1 的迁移清单按它重算，引用的 `migrate.ts:129-130` 未变；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）。**还没合入**：S6-6 #6843（修复工具，迁移 108，仍在修正轮，行为可能变）、S6-9a #6844（G9 验收工具）、S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖这三项的地方都标了 **【待定 #6843】**、**【待定 #6844】** 或 **【待定 S6-9】**；它们合入后要回到本手册改写，改之前不按这些段落执行。
+> **基线。** 下文所有 `path:line` 都在 `origin/main` **0232a25f2**（#6842 合入）上亲读核过；发布前 main 前进到 48aaac6b4（#6857：多一个平台迁移，`migrate.ts` 只改了帮助文字；本手册引用的其他文件都没动），§1.1 的迁移清单按它重算，引用的 `migrate.ts:129-130` 未变；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）。**还没合入**：S6-6 #6843（修复工具，迁移 108，仍在修正轮，行为可能变）、S6-9a #6844（G9 验收工具）、S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖这三项的地方都标了 **【待定 #6843】**、**【待定 #6844】** 或 **【待定 S6-9】**；它们合入后要回到本手册改写，改之前不按这些段落执行。**2026-11-11 补充（owner 裁定，R-91 ㉘–㉜）：** §0 的闸门表、§1.6、§3 第 4–7 步与 §8 按裁定改写；这些段落里的 `path:line` 在 main a59fa1c59（#6844 已合入）加上「试点就绪要求租户声明开关」（就绪 v6）的改动之后亲读核过。
 >
 > **owner 闸门。** 本手册里每一次装包、改 `app.env`、逐表写入（批次标识装机、残留确认、修复、启用）、读客户数据（普查）、回退，都是 owner 动作，按 §0 的表逐项先批后做。没有批复的步骤一律不做。
 >
@@ -12,17 +12,20 @@
 
 | 顺序 | 动作 | 谁批 | 写不写生产 |
 |---|---|---|---|
-| 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**未裁** | 否 |
-| 1 | Q-B：同意在 102 / 103 / 104 的私有列里存业务值，并定保留期（102 头注释 `102_create_integration_stock_prep_continuation.sql:41-43`：**部署 102 之前**要批） | owner。**未裁** | 否 |
+| 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**已裁（2026-11-11，R-91 ㉙ ㉚）：试点随基于 main 的客户包发布，这个库的 R 线到此为止；第一个 main 包带 S6-9。** 切包提交本身仍未定 | 否 |
+| 1 | Q-B：同意在 102 / 103 / 104 的私有列里存业务值，并定保留期（102 头注释 `102_create_integration_stock_prep_continuation.sql:41-43`：**部署 102 之前**要批） | owner。**已裁（2026-11-11，R-91 ㉛）：批准，只存在客户自己的库里，随记录保留（按设计行从不删除）** | 否 |
 | 2 | 接受对所有项目生效的行为变化（§2） | owner（G-B9） | 否 |
 | 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、换定时拉取脚本（§1） | owner（gate 4） | 是（迁移，只加表 / 加列） |
+| 3a | **打开租户声明开关** `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`（§1.6）。这是**启用试点的前提**：开关关着时，就绪检查 `tenant_claim_required` 不通过，任何项目都启用不了试点（R-91 ㉘，方案 A）。打开之前先确认定时拉取用的令牌绑定了租户（只记「是 / 否」） | owner（装机时另批，不随第 3 步的批复） | 是（改 `app.env`、重启） |
 | 4 | 逐表：批次标识装机（另一本手册）→ 普查（§5）→ 需要时客户回答 Q1 / Q3 → 残留确认或修复窗口 → 看就绪 → 启用（§3） | 装机 O-BI-1；普查 O6-3；残留确认 O6-5；修复 O6-6；启用 G-C12 | 装机、确认、修复、启用都写 |
 | 5 | 恢复：哪天一次写入没正常结束，拉取人员在「拉取待确认」页核对并结束（§4）；证明不了时平台管理员按手册结束 | 拉取人员不用另批；按手册结束要工单（O6-7 定谁能做，**未裁**） | 是（插件库） |
 | 6 | 回退：先跑停止条件（§7），全为 0 才回退 | owner | 是 |
 
 **翻转 `CONTINUATION_SUPPORT_VERSION`（S6-9）不等「BOM 快照批次与差异」页（S6-4）。** owner 2026-11-10 把该页延到试点之后（O6-2，登记 R-91 ㉔）。翻转之前，任何项目都启用不了试点：就绪清单最后一项 `continuation_support_version` 要求 1，而 `stock-preparation-continuation-support.cjs:21` 仍是 0（`stock-preparation-pilot-readiness.cjs:114`、`:417-419`）。
 
-**仍由 owner 另裁、本手册不替 owner 选的事：** 第 0 步的切包提交和 S6-9 随包与否；Q-B；O6-7（现场谁可以按手册结束，默认 `stock-prep:admin`）；试点项目（不是第 10 项那个项目，不是双份表，在上限以内，第 1 批已拉、下一批还没拉）；指定 1–2 名拉取人员（G-A2）；现场事实（`specField`、客户包声明、第 ④ 步开关）。
+**租户声明开关也是启用的前提（就绪 v6，R-91 ㉘）。** 开关关着时，`requireTableActionAccess` 的旧分支允许无租户的平台管理员指名一个租户、在它的表上试算并应用（`http-routes.cjs:1526-1553`）；开关打开后 `assertVerifiedTenantClaim`（`:1754`，读取器 `stockPreparationTenantClaimRequired`，`:1850-1852`）拒绝这种调用。所以就绪清单在 `continuation_support_version` 之前多了一项 `tenant_claim_required`，只在这个读取器答「真」时通过（`stock-preparation-pilot-readiness.cjs:431-434`；路由把读取结果交给它，`http-routes.cjs:5499`）。旧分支本身和非试点项目不变。
+
+**仍由 owner 另裁、本手册不替 owner 选的事：** 第 0 步的切包提交（S6-9 随包已裁，R-91 ㉚）；第 3a 步在客户机上打开开关的时间；O6-7（现场谁可以按手册结束，默认 `stock-prep:admin`）；试点项目（不是第 10 项那个项目，不是双份表，在上限以内，第 1 批已拉、下一批还没拉）；指定 1–2 名拉取人员（G-A2）；现场事实（`specField`、客户包声明、第 ④ 步开关）。
 
 ## 1. 装机顺序（main 基线包，客户机现跑 R83）
 
@@ -160,6 +163,21 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 
 两次 SHA-256 必须相同，计数应 ≥ 1。然后恢复定时任务，手动触发一次：还没有试点时，每个项目的结果应与升级前相同。
 
+### 1.6 打开租户声明开关（启用试点的前提；装机时 owner 另批，R-91 ㉘）
+
+开关打开后，令牌里没有租户声明的请求一律 403 `OPERATOR_SCOPE_TENANT_REQUIRED`（`http-routes.cjs:1754-1766`），而且覆盖整个集成插件，不只备料（交付说明 `customer-delivery-guide-20260904.md` §5-5）。**定时拉取用的令牌没有租户声明，开关一开它就停。** 所以顺序是：
+
+1. **确认定时拉取的令牌绑定了租户（只记「是 / 否」，不记令牌、账号、租户）。** 两条都要「是」：
+   - 定时任务的命令行里**没有** `--allow-tenantless`（只数次数，应为 0）。没有这个参数时，脚本每次运行都先解开令牌、只看有没有非空的 `tenantId` 声明，没有就拒绝运行、退出码 1（`scripts/ops/stock-preparation-scheduled-pull.mjs:43-48`、`:187`、`:787-797`）；
+   - 第 3 步换上新版脚本后手动触发的那一次，退出码为 0、没有 `MS_TOKEN does not carry a tenantId claim` 这句（只数次数，应为 0）。
+
+   任一条是「否」：先按交付说明 §5-5 第 2 步用 `--tenant-id` 重新换发令牌（`scripts/ops/attendance-window-runner-mint-token.mjs`），换好再从第 1 步查起。**不要**为了让脚本跑通而加 `--allow-tenantless`。
+2. 按交付说明 §5-5 的前置顺序做完其余几步（`user_orgs` 每个账号恰好一条活跃行、全员重新登录）。
+3. 在 `app.env` 里加一行 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`，重启后端；按 §5-5 第 4 步核两条（进程环境里能看到这一行；一个没有租户声明的旧令牌被拒 403 `OPERATOR_SCOPE_TENANT_REQUIRED`）。
+4. 再手动触发一次定时拉取：每个项目的结果应与打开前相同。
+
+**停止条件：只要有任何一个试点已启用，就不得删掉这一行。** 就绪检查只管「启用」这一下：启用之后没有任何东西重新评估就绪，试点也不会因此被拒（试点标记只能由 §3 的手册语句清掉）。删掉这一行，这张试点表上旧分支的路径就重新打开。交付说明 §5-5 的「回滚 = 删掉这一行」**只在没有试点启用时**适用；有试点时要回滚，先由 owner 裁定，按 §3「退出试点」处理每个试点之后才删。
+
 ## 2. 对所有项目生效的行为变化（不只试点项目）
 
 这些是 T 层默认值，装了 main 包就对客户机上**每一个**备料项目生效，owner 在 G-B9 一次接受：
@@ -185,9 +203,10 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
    - 问客户（经 owner 转达；开发机从不直接联系客户）：Q1「这个部件现在还单独下单吗」，Q3「现在大家填的是哪一份」。
    - D2 残留：**只有在 owner 转达了客户对 Q1 的回答（不再单独下单）之后**，才记残留确认（O6-5，§5.3）。
    - D1 双份：走修复窗口（O6-6，§6）**【待定 #6843】**。
-4. **看就绪。** `GET /api/integration/stock-preparation/projects/<项目号>/target/pilot`，`stock-prep:admin`（`http-routes.cjs:257`、`:11998-11999`）。回答是 `{ version, ready, checks: [{ id, ok }], failing: [id] }`（`stock-preparation-pilot-readiness.cjs:13`、`:472-478`），外加 `may.enable`。现在 `readiness.version` 是 **5**（`:113`），共 **27** 项（`:139-165`）：版本 3 加了批次标识六项，版本 4 加了 `change_plan_store_readable`、`execution_recovery_ready`，版本 5 加了 `no_unacknowledged_inactive_root_remnant`，最后一项永远是 `continuation_support_version`。**在 S6-9 之前，`failing` 里至少有 `continuation_support_version`。** 只有它一项不通过，说明这张表已经准备好，等翻转。switch-on 手册附录 B.1 写的「版本 2、18 项」已过时，按本节读。
-5. **启用 【待定 S6-9】。** 翻转合入、新包装上之后，按 `runbook-stock-prep-project-sheets-switch-on-20261014.md` 附录 B.2（旧大作业处置）、B.3（启用与「答 500 ⇒ 再 POST」）做。B.2 / B.3 描述的路由与请求体（`{"confirmProjectNo": "<项目号>"}`，`stock-prep:admin`，`http-routes.cjs:258`、`:12471-12473`）在 0232a25f2 上仍成立。启用前还要：Q-B 已批、拉取人员已指定、R-91 的否决窗口已过。
+4. **看就绪。** `GET /api/integration/stock-preparation/projects/<项目号>/target/pilot`，`stock-prep:admin`（`http-routes.cjs:257`、`:11998-11999`）。回答是 `{ version, ready, checks: [{ id, ok }], failing: [id] }`（`stock-preparation-pilot-readiness.cjs:13`、`:472-478`），外加 `may.enable`。现在 `readiness.version` 是 **6**（`:125`），共 **28** 项（`:151-179`）：版本 3 加了批次标识六项，版本 4 加了 `change_plan_store_readable`、`execution_recovery_ready`，版本 5 加了 `no_unacknowledged_inactive_root_remnant`，版本 6 加了 `tenant_claim_required`（R-91 ㉘：租户声明开关打开才通过，§1.6），最后一项永远是 `continuation_support_version`。**在 S6-9 之前，`failing` 里至少有 `continuation_support_version`。** 只有它一项不通过，说明这张表已经准备好，等翻转。`failing` 里有 `tenant_claim_required`：开关没开（或没有生效），先做 §1.6，别的项不用查。switch-on 手册附录 B.1 写的「版本 2、18 项」已过时，按本节读。
+5. **启用 【待定 S6-9】。** 翻转合入、新包装上之后，按 `runbook-stock-prep-project-sheets-switch-on-20261014.md` 附录 B.2（旧大作业处置）、B.3（启用与「答 500 ⇒ 再 POST」）做。B.2 / B.3 描述的路由与请求体（`{"confirmProjectNo": "<项目号>"}`，`stock-prep:admin`，`http-routes.cjs:258`、`:12471-12473`）在 0232a25f2 上仍成立。启用前还要：租户声明开关已打开（§1.6，就绪里 `tenant_claim_required` 为真）、拉取人员已指定、R-91 的否决窗口已过（Q-B 已于 2026-11-11 批准，R-91 ㉛）。启用仍是逐表、owner 批准的一步（R-91 ㉚）。
 6. **试点开启后的两条限制，要告诉拉取人员。** 试点项目每条大车道路由都答 409 `STOCK_PREP_PILOT_LARGE_LANE_REFUSED`；小车道试算撞到上限时答 `STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED`，**不会**转去大车道（`stock-preparation-pilot-gate.cjs:6-11`、`:33-34`）。所以超上限的项目不能做试点。试点表的通用网格导出被宿主关闭（附录 B.3）。
+7. **试点启用之后，租户声明开关不得删（§1.6 的停止条件）。** 启用之后只有就绪的 GET（第 4 步那条路由）会重新评估就绪（`http-routes.cjs:12028-12041`；启用 POST 在 `:12504` 用的是同一次评估）：开关被删后，它的回答里 `pilot.enabled` 仍为 `true`，`readiness.failing` 里重新出现 `tenant_claim_required`。项目备料页在试点启用后**不再显示**不通过的检查项（`apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue:2341`），所以要看就直接读这条 GET 的回答，或核 `app.env` 那一行还在。
 
 **退出试点：** 没有路由。101 头注释给了 owner 批准的一条手册数据库语句（一次清三列，`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable.sql:24-29`）：
 
@@ -372,7 +391,8 @@ SELECT kind, count(*) FROM integration_stock_prep_component_ruling WHERE status 
 ```
 [S6-8] 2026-11-xx 装机窗口：Pending 17 → 0；--confirm 100/101/102/103/104/106/107 全为 0；授权 14 表全真；装后计数全 0
 [S6-8] 普查 第 1 页：序号 1 complete D1=0 D2=0；序号 2 incomplete reason=pack_unreadable；序号 3 complete D1=0 D2=1 governed=none
-[S6-8] 序号 3 就绪 v5：failing=[continuation_support_version]
+[S6-8] 序号 3 就绪 v6：failing=[continuation_support_version]
+[S6-8] 租户声明开关（§1.6）：定时拉取令牌绑定租户 = 是；--allow-tenantless 计数 0；开关已加、旧令牌 403
 ```
 
 **只能进私有记录**：项目号、序号与项目 / objectId 的对照、`componentHandle`（它是业务值的摘要，可被反推）、执行 id、完整的普查 / 核对应答文件、待处理页里的部件编码和名称、主机、地址、令牌、数据源 id、批复原文里的任何业务值。
@@ -384,4 +404,4 @@ SELECT kind, count(*) FROM integration_stock_prep_component_ruling WHERE status 
 | 【待定 #6843】 | §1.1 迁移 108；§3 第 3 步 D1 修复；§5.4 第 3 条；§6 全节；§7.2 的 108 停止条件 | 按合入代码写修复窗口的路由、请求体、码与开关行为；补 108 的停止条件查询；把 #6843 的登记文本补进 R-91 |
 | 【待定 #6844 / S6-9】 | §7.2 U07 演练 | 用 G9 工具在冻结候选上跑 U07 演练，结果写进本手册 |
 | 【待定 S6-9】 | §0 启用；§3 第 5 步 | 翻转合入后，重核附录 B.2 / B.3 并写正向一腿的实际回答 |
-| owner 未裁 | §0（切包提交与是否带 S6-9、Q-B、O6-7、试点项目、拉取人员） | 裁定后记进登记册，再执行对应步骤 |
+| owner 未裁 | §0（切包提交、第 3a 步打开开关的时间、O6-7、试点项目、拉取人员；S6-9 随包与 Q-B 已于 2026-11-11 裁定，R-91 ㉚ ㉛） | 裁定后记进登记册，再执行对应步骤 |

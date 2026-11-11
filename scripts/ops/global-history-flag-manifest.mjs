@@ -890,6 +890,18 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled',
   },
   {
+    key: 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // `.trim().toLowerCase() === 'true'` (http-routes.cjs stockPreparationTenantClaimRequired)
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: nothing re-evaluates readiness after an enable, so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback = delete the line and restart; nothing persists.",
+    source: 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired',
+  },
+  {
     key: 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH',
     type: 'enum',
     activationValue: "a path to a deploy-local JSON object file (trimmed); unset / blank = no pilot declarations (today's behaviour); set but unreadable / not JSON / not an object = the plugin fails to load (logged), never 'nothing declared'",
