@@ -21,11 +21,11 @@
     "G9-U03",
     "G9-S9X-01",
     "G9-U07",
-    "G9-PE"
+    "G9-PE",
+    "G9-S65-V5",
+    "G9-S65-U03"
   ],
   "pending": [
-    { "id": "G9-S65-V5", "owner": "S6-5", "what": "readiness v5: the positive leg also proves no_unacknowledged_inactive_root_remnant on the prepared sheet, and a sheet carrying an inactive-root remnant fails ONLY that id until acknowledged" },
-    { "id": "G9-S65-U03", "owner": "S6-5", "what": "U03: the census route and the remnant acknowledgement join the drilled capability set" },
     { "id": "G9-S66-U03", "owner": "S6-6", "what": "U03: the repair routes (preview / retire / restore) join the drilled capability set" },
     { "id": "G9-S66-U07", "owner": "S6-6", "what": "U07: a repair run left running makes its stop-condition query non-zero; the drill refuses the rollback while it is" },
     { "id": "G9-S66-INSTALLING", "owner": "S6-6", "what": "B-9: a repair is refused while the sheet's pull-batch row is installing" }

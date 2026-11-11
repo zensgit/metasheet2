@@ -47,11 +47,18 @@
  *            install route with its history RESOLVED (backfilled, not born empty), views live, the switch ON: with the
  *            marker at 0 `continuation_support_version` is the ONLY failing id and the enable is 409 with nothing done;
  *            with the marker 1 IN MEMORY the readiness is green and the enable 200 stamps the registry with the current
- *            PILOT_READINESS_VERSION (read from the module, never a literal).
+ *            PILOT_READINESS_VERSION (read from the module, never a literal). Readiness v5's component ruling ledger
+ *            (S6-5, migration 107) is wired, so its no_unacknowledged_inactive_root_remnant passes on the prepared sheet.
+ *   G9-S65-V5  (S6-5, #6842) on the same prepared sheet: an inactive-root remnant fails ONLY that v5 id beyond the
+ *            marker; the project census lists exactly its handle; the acknowledgement through the REAL route lifts
+ *            exactly that check and the revoke restores it; the enable stays 409.
+ *   G9-S65-U03 (S6-5, #6842) rides G9-U03 (`G9-U03 + G9-S65-U03`): the census and remnant routes join the drill, with a
+ *            real component handle and acknowledgement id of this tenant.
  *
  * EXTENSION POINTS (the matrix file's `pending` list; each is a `test.todo` below so the gap is visible in every run):
- *   S6-5 (#6842 likely; migration 107, readiness v5): G9-S65-V5 and G9-S65-U03. S6-6 (migration 108): G9-S66-U03,
- *   G9-S66-U07, G9-S66-INSTALLING. Whoever lands them replaces the todo with the case and moves the id to `realDb`.
+ *   S6-6 (migration 108): G9-S66-U03, G9-S66-U07, G9-S66-INSTALLING. Whoever lands them replaces the todo with the case
+ *   and moves the id to `realDb`. G9-U03's scope is the whole capability manifest minus a named pre-step-4 list, so a
+ *   route S6-6 adds fails its manifest equality until it is drilled.
  */
 import { createRequire } from 'module'
 import path from 'node:path'
@@ -81,6 +88,9 @@ const continuationSupport = require(path.join(PLUGIN_LIB, 'stock-preparation-con
 const access = require(path.join(PLUGIN_LIB, 'stock-preparation-workbench-access.cjs')) as any
 const mvpProvisioningLib = require(path.join(PLUGIN_LIB, 'stock-preparation-mvp-provisioning.cjs')) as any
 const sourceBindingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-source-binding-store.cjs')) as any
+// S6-5 (#6842, readiness v5, migration 107): the component ruling ledger and the census's own handle derivation.
+const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
+const sheetCensusLib = require(path.join(PLUGIN_LIB, 'stock-preparation-sheet-census.cjs')) as any
 // The MVP archive's four sheets (the p4 host's set); the batch sheet holds snapshotBatchId and syncRunId.
 const BATCH_OBJECT_ID = 'plm_stock_preparation_bom_snapshot_batch'
 const MVP_OBJECT_IDS = ['plm_stock_preparation_project', BATCH_OBJECT_ID, 'plm_stock_preparation_bom_snapshot_line', 'plm_stock_preparation_run']
@@ -107,6 +117,10 @@ const RP = {
 }
 const PILOT_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pilot'
 const INSTALL_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch'
+const CENSUS_READ_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/census'
+const REMNANT_ACK_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements'
+const REMNANT_REVOKE_PATH = `${REMNANT_ACK_PATH}/:acknowledgementId/revoke`
+const RULING_TABLE: string = componentRulingStoreLib.COMPONENT_RULING_TABLE
 
 /** One line per passed case; the runner counts them. Printed only after every assertion of the case held. */
 function g9Pass(id: string, summary: unknown) {
@@ -145,10 +159,13 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     kvTokens, stepFour, createProductionPluginContext, dropSheet,
   } = kit
   const registered: string[] = []
-  // A case of the matrix: registered under its id, so the id census below is exact.
-  const g9Case = (id: string, title: string, fn: () => Promise<void>, timeout = 300000) => {
-    registered.push(id)
-    test(`${id} ${title}`, fn, timeout)
+  // A case of the matrix: registered under its id, so the id census below is exact. An extension id that rides an
+  // existing case (G9-S65-U03 joins G9-U03's drill) is registered with it and named in the title as `<id> + <id>`; the
+  // case prints one ok line per id.
+  const g9Case = (ids: string | string[], title: string, fn: () => Promise<void>, timeout = 300000) => {
+    const list = Array.isArray(ids) ? ids : [ids]
+    registered.push(...list)
+    test(`${list.join(' + ')} ${title}`, fn, timeout)
   }
   const both = async <T>(pull: boolean, fn: () => Promise<T>): Promise<T> => {
     const before = { pull: process.env[PULL_SWITCH], sheets: process.env[SWITCH] }
@@ -252,6 +269,29 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
     return { dry: dry.body.data, installed: answer.body.data }
   }
+  // S6-5 (design §6.1 D2, the item-10 shape S9D-01r seeds): <part>'s old ROOT row left INACTIVE while <part> stays
+  // active under its parent — one host-created record, its cells set by SQL. Returns the record id.
+  async function seedInactiveRootRemnant(st: any, part: string) {
+    const p = physicalOf(st)
+    const created = await st.multitable.records.createRecord({ sheetId: st.sheetId, data: { [p('projectNo')]: st.projectNo } })
+    const cells = { [p('idempotencyKey')]: `g9-remnant-${part}`, [p('componentSourceId')]: part, [p('parentSourceId')]: '', [p('active')]: false }
+    await q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [created.id, JSON.stringify(cells)])
+    return created.id as string
+  }
+  const censusRead = (st: any, user: any) => both(true, () => callRoute(st.routes, 'GET', CENSUS_READ_PATH, { user, params: { projectNo: st.projectNo }, query: {} }))
+  const acknowledgeRemnant = (st: any, user: any, componentHandle: string) => both(true, () => callRoute(st.routes, 'POST', REMNANT_ACK_PATH, {
+    user,
+    params: { projectNo: st.projectNo },
+    query: {},
+    body: { confirmProjectNo: st.projectNo, componentHandle, basis: 'head_not_ordered', runbookRef: 'R-91.g9', acknowledge: { customerAnswered: true } },
+  }))
+  const revokeRemnant = (st: any, user: any, acknowledgementId: string) => both(true, () => callRoute(st.routes, 'POST', REMNANT_REVOKE_PATH, {
+    user,
+    params: { projectNo: st.projectNo, acknowledgementId },
+    query: {},
+    body: { confirmProjectNo: st.projectNo, runbookRef: 'R-91.g9-rev' },
+  }))
+  const rulingStore = () => componentRulingStoreLib.createStockPreparationComponentRulingStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
   const ledgerOf = async (tenantId: string) => ({
     batches: (await q('SELECT batch_no, status, closed_reason, origin FROM integration_stock_prep_pull_batch WHERE tenant_id = $1 ORDER BY batch_no', [tenantId])).rows,
     links: (await q('SELECT refresh_execution_id, writer_status, created_row_count, verified_outcome FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1 ORDER BY joined_at, id', [tenantId])).rows,
@@ -326,7 +366,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
   afterAll(async () => {
     for (const sheetId of mvpSheets) await dropSheet(sheetId)
     for (const tenantId of tenants) {
-      for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_pack_install', 'integration_stock_prep_source_binding']) {
+      for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_pack_install', 'integration_stock_prep_source_binding', RULING_TABLE]) {
         await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
       }
     }
@@ -1013,9 +1053,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }, 600000)
 
     // ── G9-U03: the authorization drill ─────────────────────────────────────────────────────────────────────────────
-    g9Case('G9-U03', '(U03) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus every pull step of the operator split: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin, sent THIS tenant\'s REAL hold / continuation / execution / change-plan ids with minimally valid bodies and steering tenantId carriers, answer exactly what they answer for ids that exist nowhere, are refused 403 at the tenant gate when a carrier names this tenant, never 2xx for the tenantless admin (save the pinned platform-admin values-free trial steer), never echo this tenant\'s ids and never write', async () => {
+    g9Case(['G9-U03', 'G9-S65-U03'], '(U03; S6-5\'s census and remnant routes join it) every step-4/5/6 route and every 批次标识 route of the capability manifest, plus every pull step of the operator split: below its tier 403 with no audit row and nothing written; the pull / admin tiers admitted; a TENANTLESS platform admin and a cross-tenant puller / admin, sent THIS tenant\'s REAL hold / continuation / execution / change-plan ids with minimally valid bodies and steering tenantId carriers, answer exactly what they answer for ids that exist nowhere, are refused 403 at the tenant gate when a carrier names this tenant, never 2xx for the tenantless admin (save the pinned platform-admin values-free trial steer), never echo this tenant\'s ids and never write', async () => {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
-      const st = await s3aStack('g9_u03', { pilot: true, serviceExtras: { stockPreparationPullBatchStore: ledgerStore } })
+      const st = await s3aStack('g9_u03', { pilot: true, serviceExtras: { stockPreparationPullBatchStore: ledgerStore, stockPreparationComponentRulingStore: rulingStore() } })
       tenants.push(st.tenantId)
       // THE FIXTURE: this tenant owns one of every id kind the routes address — ledger batches (the band born empty, two
       // landed pulls), a continuation (the route confirm), executions, a change plan (the route confirm) and holds.
@@ -1038,13 +1078,27 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       expect(cp.statusCode, JSON.stringify(cp.body)).toBe(201)
       const holdRows = await st.holds()
       const executionRows = await st.executions()
-      const REAL = {
+      const REAL: Record<string, string> = {
         holdId: (holdRows.find((row: any) => row.status === 'open') || holdRows[holdRows.length - 1]).id as string,
         continuationId: confirmed.continuationId as string,
         executionId: executionRows[executionRows.length - 1].id as string,
         changePlanId: cp.body.data.changePlanId as string,
       }
-      const BOGUS = { holdId: 'hold_g9_u03_none', continuationId: 'cont_g9_u03_none', executionId: 'exe_g9_u03_none', changePlanId: 'cp_g9_u03_none' }
+      // S6-5 (G9-S65-U03): an inactive-root remnant and its acknowledgement through the REAL route — a real component handle
+      // and a real acknowledgement id of this tenant for the census / remnant routes.
+      await seedInactiveRootRemnant(st, 'PART-A')
+      const spAdminOfSt = { id: `u_g9_u03_ack_${TOKEN}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_ADMIN] }
+      const componentHandle: string = sheetCensusLib.__internals.componentHandle(st.tenantId, st.projectNo, 'PART-A')
+      const acknowledged = await acknowledgeRemnant(st, spAdminOfSt, componentHandle)
+      expect(acknowledged.statusCode, JSON.stringify(acknowledged.body)).toBe(201)
+      REAL.componentHandle = componentHandle
+      REAL.acknowledgementId = acknowledged.body.data.acknowledgementId
+      // Well-formed ids that exist nowhere (a handle of no component, a ruling id never minted): the shape checks pass.
+      const BOGUS: Record<string, string> = {
+        holdId: 'hold_g9_u03_none', continuationId: 'cont_g9_u03_none', executionId: 'exe_g9_u03_none', changePlanId: 'cp_g9_u03_none',
+        componentHandle: sheetCensusLib.__internals.componentHandle(st.tenantId, st.projectNo, 'G9-NO-SUCH-PART'),
+        acknowledgementId: 'cr_00000000-0000-4000-8000-000000000000',
+      }
       const ledgerIds = [
         ...(await q('SELECT id FROM integration_stock_prep_pull_batch WHERE tenant_id = $1', [st.tenantId])).rows.map((row: any) => row.id),
         ...(await q('SELECT id FROM integration_stock_prep_pull_batch_execution WHERE tenant_id = $1', [st.tenantId])).rows.map((row: any) => row.id),
@@ -1075,6 +1129,11 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         'refresh.executions': 'pull',
         'refresh.recover': 'pull',
         'refresh.closeUnverified': 'admin',
+        // S6-5 (#6842, G9-S65-U03): the doubled-sheet census (tenant-wide and per project) and the remnant acknowledgement.
+        'projectTarget.census': 'admin',
+        'projectTarget.censusRead': 'admin',
+        'projectTarget.remnantAcknowledge': 'admin',
+        'projectTarget.remnantRevoke': 'admin',
         // EVERY pull step of the operator split (STOCK_PREP_OPERATOR_PULL_STEPS): the pull tier for stock-prep callers.
         'pull.dry-run': 'pull',
         'pull.dry-run-job-start': 'pull',
@@ -1090,7 +1149,18 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         'pull.large-bom-expansion-cancel': 'pull',
         'pull.reconcile': 'pull',
       }
-      const inScope = (entry: any) => /\/refresh\/|\/target\/pilot$|\/target\/pull-batch|\/pull-batch\/settings$|\/prep-lines\/export$/.test(entry.path)
+      // THE SCOPE IS THE WHOLE MANIFEST minus the capabilities that predate step 4 (their own permission-matrix suites
+      // drill them), listed by name: a capability any later PR adds (S6-6's repair routes) lands in manifestTiers and
+      // fails the equality below until it is drilled here.
+      const PRE_STEP_FOUR = new Set([
+        'confirmationQueue.readiness', 'confirmationQueue.list', 'confirmationQueue.valueEntry', 'confirmationQueue.confirm',
+        'confirmationQueue.projectDirectory', 'handoff.read', 'handoff.advance', 'confirmationQueue.projectBoard',
+        'projectTarget.read', 'projectTarget.create', 'projectTarget.list', 'projectTarget.archive', 'projectTarget.restore',
+        'projectFields.read', 'projectFields.update', 'projectOverview.refresh', 'projectOverview.ensure',
+        'projectTarget.manualRowsRead', 'projectTarget.manualRowsSet', 'confirmationQueue.ensure', 'confirmationQueue.reconcile',
+        'members.read', 'members.customRoleCreate', 'members.customRoleUpdate', 'members.customRoleProjectTargets',
+      ])
+      const inScope = (entry: any) => !PRE_STEP_FOUR.has(entry.capability)
       const manifestTiers = Object.fromEntries(access.STOCK_PREP_WORKBENCH_CAPABILITIES.filter(inScope).map((entry: any) => [entry.capability, String(entry.code).replace(/^stock-prep:/, '')]))
       for (const step of access.STOCK_PREP_OPERATOR_PULL_STEPS) manifestTiers[`pull.${step.step}`] = 'pull'
       // S6-5 / S6-6 (pending G9-S65-U03 / G9-S66-U03): their new capabilities fail THIS equality until they are added above.
@@ -1118,10 +1188,10 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         crossPuller: { id: `u_g9_xp_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] },
         crossAdmin: { id: `u_g9_xa_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_ADMIN] },
       }
-      const paramsFor = (ids: typeof REAL) => ({ projectNo: st.projectNo, actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, holdId: ids.holdId, id: ids.continuationId, executionId: ids.executionId, jobId: 'job_g9_u03_none', applyJobId: 'ajob_g9_u03_none' })
+      const paramsFor = (ids: Record<string, string>) => ({ projectNo: st.projectNo, actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, holdId: ids.holdId, id: ids.continuationId, executionId: ids.executionId, acknowledgementId: ids.acknowledgementId, jobId: 'job_g9_u03_none', applyJobId: 'ajob_g9_u03_none' })
       // The minimally valid request of each route, so a foreign caller reaches the tenant gate instead of stopping at body
       // validation: the typed project (+ the mode, the body-carried id) on every decision route; the pull lanes' parameters.
-      const validRequest = (entry: any, ids: typeof REAL) => {
+      const validRequest = (entry: any, ids: Record<string, string>) => {
         const confirmProjectNo = st.projectNo
         const bodies: Record<string, any> = {
           'refresh.confirm': { confirmProjectNo, holdId: ids.holdId },
@@ -1134,6 +1204,8 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           'pull.dry-run': { parameters: { projectNo: st.projectNo } },
           'pull.apply': { parameters: { projectNo: st.projectNo }, confirm: { dryRunToken: 'tok_g9_u03_none' } },
           'pull.reconcile': { parameters: { projectNo: st.projectNo } },
+          'projectTarget.remnantAcknowledge': { confirmProjectNo, componentHandle: ids.componentHandle, basis: 'head_not_ordered', runbookRef: 'R-91.g9-u03', acknowledge: { customerAnswered: true } },
+          'projectTarget.remnantRevoke': { confirmProjectNo, runbookRef: 'R-91.g9-u03' },
         }
         const body = entry.method === 'GET' ? {} : (bodies[entry.id] || (entry.id.startsWith('refresh.') || entry.id === 'projectTarget.pilotEnable' ? { confirmProjectNo } : {}))
         const query = entry.id === 'confirmationQueue.export' ? { projectNo: st.projectNo } : {}
@@ -1150,12 +1222,13 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         const lock = (await q(`SELECT generation, generation_token, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows
         const registry = (await q('SELECT status, pilot_enabled_at, pilot_readiness_version, sheet_id FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows
         const settings = (await q('SELECT * FROM integration_stock_prep_pull_batch_settings WHERE tenant_id = $1', [st.tenantId])).rows
+        const rulings = (await q(`SELECT id, kind, status, component_digest FROM ${RULING_TABLE} WHERE tenant_id = $1 ORDER BY id`, [st.tenantId])).rows
         const sheetLedger = (await q('SELECT history_status, version, first_pull_batch_rule, label_format FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [st.tenantId])).rows
         const ledger = await ledgerOf(st.tenantId)
-        return { audits, fingerprint: JSON.stringify([await stepFour(st.tenantId), await st.main(), await continuations(st), plans, lock, registry, settings, sheetLedger, ledger, await stTokens()]) }
+        return { audits, fingerprint: JSON.stringify([await stepFour(st.tenantId), await st.main(), await continuations(st), plans, lock, registry, settings, sheetLedger, rulings, ledger, await stTokens()]) }
       }
       // THIS tenant's ids — none may appear in a foreign answer of ANY status, except an id the caller itself sent.
-      const tenantIds = [st.sheetId, st.objectId, ...(await st.rows()).map((row: any) => row.id), ...holdRows.map((row: any) => row.id), ...executionRows.map((row: any) => row.id), REAL.continuationId, REAL.changePlanId, ...ledgerIds]
+      const tenantIds = [st.sheetId, st.objectId, ...(await st.rows()).map((row: any) => row.id), ...holdRows.map((row: any) => row.id), ...executionRows.map((row: any) => row.id), REAL.continuationId, REAL.changePlanId, REAL.componentHandle, REAL.acknowledgementId, ...ledgerIds]
       const leaks: string[] = []
       const leakCheck = (label: string, res: any, sent: string[]) => {
         const text = JSON.stringify(res.body || {})
@@ -1168,6 +1241,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         const entry = drilled.find((route: any) => route.id === id)
         ownControl[id] = answerOf(await send(entry, st.users.puller, validRequest(entry, REAL)))
       }
+      ownControl['projectTarget.censusRead'] = answerOf(await censusRead(st, callers.spAdmin))
       ownControl['refresh.closeUnverified'] = answerOf(await send(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), callers.spAdmin, validRequest(drilled.find((route: any) => route.id === 'refresh.closeUnverified'), REAL)))
       // Phase 1 — every caller that must be refused, then the no-write / no-audit proof.
       const before = await tenantRows()
@@ -1267,6 +1341,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           'refresh.continuation': '200:-',
           'refresh.recover': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
           'refresh.closeUnverified': '409:STOCK_PREP_REFRESH_EXECUTION_NOT_UNFINISHED',
+          'projectTarget.censusRead': '200:-',
         },
         belowTierNot403: [],
         tenantless2xx: [],
@@ -1279,8 +1354,12 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         refusalsAudited: 0,
         admittedRefused: {},
       })
-      expect(drilled.length).toBeGreaterThanOrEqual(33)
+      expect(drilled.length).toBeGreaterThanOrEqual(37)
       g9Pass('G9-U03', { ...observed, foreign2xx: foreign2xx.length, steeringCalls: Object.values(steering).reduce((n, answers) => n + Object.keys(answers).length, 0) })
+      // G9-S65-U03 rides this drill: S6-5's four routes are in the tier oracle, the manifest equality and every leg above.
+      const s65 = ['projectTarget.census', 'projectTarget.censusRead', 'projectTarget.remnantAcknowledge', 'projectTarget.remnantRevoke']
+      expect(s65.every((id) => drilled.some((route: any) => route.id === id))).toBe(true)
+      g9Pass('G9-S65-U03', { drilled: s65.length, foreign: Object.fromEntries(Object.entries(foreignAnswers).map(([name, answers]) => [name, s65.map((id) => answers[id])])) })
     }, 900000)
 
     // ── G9-S9X-01: the MVP archive identity across the 批次标识 install + backfill ──────────────────────────────────────
@@ -1411,11 +1490,18 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }, 600000)
 
     // ── G9-PE: the positive pilot-enable leg ────────────────────────────────────────────────────────────────────────
-    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store wired: with the marker at 0 `continuation_support_version` is the ONLY failing id and the enable is 409 with nothing done; with the marker 1 IN MEMORY (restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
+    // The fully prepared synthetic sheet (shared by G9-PE and G9-S65-V5): two switch-off pulls, the band installed by the
+    // REAL install route with its history backfilled, the recovery store, the pack ledger and (readiness v5, S6-5) the
+    // component ruling ledger wired.
+    async function preparedPilotSheet(label: string) {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
-      const st = await s3aStack('g9_pe', {
+      const st = await s3aStack(label, {
         pilot: false,
-        serviceExtras: { stockPreparationPullBatchStore: ledgerStore, stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db: createDb({ database: createProductionPluginContext().api.database }) }) },
+        serviceExtras: {
+          stockPreparationPullBatchStore: ledgerStore,
+          stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db: createDb({ database: createProductionPluginContext().api.database }) }),
+          stockPreparationComponentRulingStore: rulingStore(),
+        },
         routeConfigExtras: { stockPreparationPilot: { specReadPlanSlot: 'not_applicable', customerPack: 'not_applicable' } },
       })
       tenants.push(st.tenantId)
@@ -1433,6 +1519,11 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const read = () => both(true, () => callRoute(st.routes, 'GET', PILOT_PATH, { user: spAdmin, params: { projectNo: st.projectNo }, query: {} }))
       const enable = () => both(true, () => callRoute(st.routes, 'POST', PILOT_PATH, { user: spAdmin, params: { projectNo: st.projectNo }, body: { confirmProjectNo: st.projectNo } }))
       const registry = async () => (await q('SELECT pilot_enabled_at IS NOT NULL AS enabled, pilot_readiness_version FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo])).rows[0]
+      return { st, spAdmin, read, enable, registry }
+    }
+
+    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store and the component ruling ledger wired: with the marker at 0 `continuation_support_version` is the ONLY failing id (readiness v5\'s no_unacknowledged_inactive_root_remnant passes) and the enable is 409 with nothing done; with the marker 1 IN MEMORY (restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
+      const { st, read, enable, registry } = await preparedPilotSheet('g9_pe')
       const gen0 = await st.generation()
       const atZero = await read()
       const refused = await enable()
@@ -1472,6 +1563,65 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         markerRestored: 0,
       })
       g9Pass('G9-PE', observed)
+    })
+
+    // ── G9-S65-V5: readiness v5's remnant check on the prepared sheet (S6-5, #6842) ─────────────────────────────────────
+    g9Case('G9-S65-V5', '(S6-5 readiness v5, §9.5) on the G9-PE prepared sheet: the v5 check no_unacknowledged_inactive_root_remnant is in the readiness and passes; an inactive-root remnant (PART-A\'s old ROOT row inactive while PART-A stays active under S-001) fails ONLY that id beyond the marker, the project census lists exactly its handle, the acknowledgement through the REAL route lifts exactly that check (back to G9-PE\'s marker-0 answer) and the revoke restores it; the enable stays 409 and the registry unmarked throughout', async () => {
+      const { st, spAdmin, read, enable, registry } = await preparedPilotSheet('g9_v5')
+      const failing = async () => {
+        const res = await read()
+        expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+        return res.body.data.readiness.failing as string[]
+      }
+      const inOrder = (...ids: string[]) => readinessLib.PILOT_READINESS_CHECK_IDS.filter((id: string) => ids.includes(id))
+      const prepared = await failing()
+      const rows0 = (await st.main()).count
+      await seedInactiveRootRemnant(st, 'PART-A')
+      const withRemnant = await failing()
+      const census = await censusRead(st, spAdmin)
+      expect(census.statusCode, JSON.stringify(census.body)).toBe(200)
+      const components = census.body.data.components as Array<{ componentHandle: string; acknowledgement: unknown }>
+      const handle = sheetCensusLib.__internals.componentHandle(st.tenantId, st.projectNo, 'PART-A')
+      const refusedWithRemnant = await enable()
+      const acknowledged = await acknowledgeRemnant(st, spAdmin, handle)
+      expect(acknowledged.statusCode, JSON.stringify(acknowledged.body)).toBe(201)
+      const afterAcknowledge = await failing()
+      const ledger = (await q(`SELECT kind, status, component_digest = $2 AS same_handle FROM ${RULING_TABLE} WHERE tenant_id = $1 ORDER BY id`, [st.tenantId, handle])).rows
+      const revoked = await revokeRemnant(st, spAdmin, acknowledged.body.data.acknowledgementId)
+      const afterRevoke = await failing()
+      const refusedAfterRevoke = await enable()
+      const observed = {
+        v5CheckPresent: readinessLib.PILOT_READINESS_CHECK_IDS.includes('no_unacknowledged_inactive_root_remnant'),
+        version: readinessLib.PILOT_READINESS_VERSION,
+        prepared,
+        withRemnant,
+        censusComponents: components.map((entry) => [entry.componentHandle === handle, entry.acknowledgement === null]),
+        refusedWithRemnant: [refusedWithRemnant.statusCode, codeOf(refusedWithRemnant)],
+        afterAcknowledge,
+        ledger,
+        revoke: [revoked.statusCode, revoked.body.data && revoked.body.data.status],
+        afterRevoke,
+        refusedAfterRevoke: [refusedAfterRevoke.statusCode, codeOf(refusedAfterRevoke)],
+        rowsAdded: (await st.main()).count - rows0,
+        registry: await registry(),
+      }
+      expect(observed).toEqual({
+        v5CheckPresent: true,
+        version: readinessLib.PILOT_READINESS_VERSION,
+        prepared: inOrder('continuation_support_version'),
+        withRemnant: inOrder('no_unacknowledged_inactive_root_remnant', 'continuation_support_version'),
+        censusComponents: [[true, true]],
+        refusedWithRemnant: [409, 'STOCK_PREP_PILOT_NOT_READY'],
+        afterAcknowledge: inOrder('continuation_support_version'),
+        ledger: [{ kind: 'remnant_acknowledged', status: 'active', same_handle: true }],
+        revoke: [200, 'revoked'],
+        afterRevoke: inOrder('no_unacknowledged_inactive_root_remnant', 'continuation_support_version'),
+        refusedAfterRevoke: [409, 'STOCK_PREP_PILOT_NOT_READY'],
+        rowsAdded: 1,
+        registry: { enabled: false, pilot_readiness_version: null },
+      })
+      // Values-free evidence: the check ids and booleans, never the handle.
+      g9Pass('G9-S65-V5', { ...observed, censusComponents: observed.censusComponents.length, ledger: ledger.length })
     })
 
     // ── extension points for the PRs still in flight (the matrix file's `pending` list) ─────────────────────────────

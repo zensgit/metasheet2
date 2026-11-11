@@ -97,7 +97,8 @@ export function evaluateLog(rawLog, matrix, { expectSha = null } = {}) {
   const failedCases = []
   for (const line of log.split('\n')) {
     if (!/\bFAIL\s+tests\//.test(line)) continue
-    for (const id of matrix.realDb) if (line.includes(`> ${id} `)) failedCases.push(id)
+    // A case names its id as `> <id> ` — or `+ <id> ` for an extension id riding another case (`G9-U03 + G9-S65-U03`).
+    for (const id of matrix.realDb) if (line.includes(`> ${id} `) || line.includes(`+ ${id} `)) failedCases.push(id)
   }
   const tested = testedCommitsOf(log)
   let shaVerdict
@@ -177,6 +178,7 @@ function selfTest() {
     ['gh run view form, every job tested it', verdictOf(twoJobs, sha).ok === true && verdictOf(twoJobs, sha).checkouts === 2],
     ['one job tested another commit', verdictOf(mixedJobs, sha).ok === false],
     ['checkout answer unreadable', verdictOf(unreadable, sha).ok === false && verdictOf(unreadable, sha).testedCommits.join() === 'unreadable'],
+    ['a red case carrying a riding id flags both', evaluateLog(`${checkout(sha)}[G9] S3A-02 ok {}\n FAIL  tests/integration/x.test.ts > a > S3A-02 + G9-U08 (U08) the run`, matrix, { expectSha: sha }).failedCases.join() === 'S3A-02,G9-U08'],
   ]
   for (const [name, passed] of checks) console.log(`${passed ? 'ok' : 'NOT OK'} ${name}`)
   return checks.every(([, passed]) => passed)
