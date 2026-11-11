@@ -145,6 +145,8 @@ vi.mock('../../src/directory/access-graph-mutex', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'access-graph-mutex'))
 vi.mock('../../src/services/ApprovalDirectoryOrg', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'approval-directory-org'))
+vi.mock('../../src/directory/pull-source-write-gate', async (importOriginal) =>
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'pull-source-write-gate'))
 vi.mock('../../src/integrations/dingtalk/work-notification-settings', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'dingtalk-work-notification-settings'))
 vi.mock('../../src/integrations/dingtalk/work-notification-verify', async (importOriginal) =>

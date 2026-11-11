@@ -1566,3 +1566,24 @@ test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: both environment templates list i
     assert.match(text, /already in the multi-source, no-policy state/, template)
   }
 })
+
+// Turning the switch off does not undo everything the package introduces. The registry entry and both
+// environment templates state the two rules that hold whatever the switch says, in the same words, so an
+// operator who reads either one before a rollback finds them.
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: the registry entry and both environment templates state the two rules that do not depend on the switch', () => {
+  const sentence =
+    'Two rules do not depend on this switch: an approval_routing policy cannot be cleared while the organisation has two or more active pull sources, and an entry that adds a pull source of a further provider is always checked. Turning the switch off again leaves both in force.'
+  const purpose = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED.purpose
+  assert.equal(purpose.split(sentence).length - 1, 1, 'the registry entry states the sentence exactly once')
+  // The "Off:" clause names what is byte-identical and is followed directly by the sentence.
+  assert.match(purpose, /Off: routing resolution and the legacy integration write paths \(creating an integration, the generic integration save\) are byte-identical to before the switch existed\. Two rules do not depend on this switch:/)
+  for (const template of ['docker/app.env.example', 'docker/app.staging.env.example']) {
+    // Comment lines, re-flowed: strip the leading "# " of each line and join.
+    const comment = readRepoSource(template)
+      .split('\n')
+      .filter((line) => line.startsWith('#'))
+      .map((line) => line.replace(/^#\s?/, ''))
+      .join(' ')
+    assert.equal(comment.split(sentence).length - 1, 1, `${template} states the sentence exactly once`)
+  }
+})

@@ -135,6 +135,8 @@ import {
 } from '../../src/db/recovery-conflict'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
 import { DingTalkCorpNotAllowedError } from '../../src/integrations/dingtalk/runtime-policy'
+import { DirectoryRoutingPolicyRequiredError, PullSourceCountUnavailableError } from '../../src/directory/pull-source-rule'
+import { DirectoryRoutingGateBusyError, DirectoryRoutingGateUnavailableError } from '../../src/directory/pull-source-write-gate'
 // NOT mocked: the R-41 typed validation sentence lives in its own module, so the route's `instanceof` sees the
 // real class even though work-notification-settings / approval-card-config are replaced by factories above.
 import { DingTalkConfigValidationError } from '../../src/integrations/dingtalk/config-validation-error'
@@ -1020,6 +1022,63 @@ describe('the specific branches in front of sendDirectoryFailure still win', () 
       const res = await invoke(call)
       expect(res.statusCode).toBe(400)
       expect(res.body).toEqual({ ok: false, error: { code, message: sentence, details: undefined } })
+    })
+  }
+
+  // The pull-source write gate's refusals, typed by their own classes, on the two routes that write an
+  // integration row: a fixed status, code and sentence each, one values-free log line, and no audit row.
+  const gateRefusals: Array<{ label: string; make: () => Error; status: number; code: string; message: string; log: Record<string, unknown> }> = [
+    {
+      label: 'a routing policy is required',
+      make: () => new DirectoryRoutingPolicyRequiredError(),
+      status: 409,
+      code: 'DIRECTORY_ROUTING_POLICY_REQUIRED',
+      message: 'A routing policy is required before another directory source can be added',
+      log: { code: 'DIRECTORY_ROUTING_POLICY_REQUIRED' },
+    },
+    ...['40P01', '55P03', '57014'].map((sqlState) => ({
+      label: `the gate transaction ended with ${sqlState}`,
+      make: () => new DirectoryRoutingGateBusyError(sqlState),
+      status: 503,
+      code: 'DIRECTORY_ROUTING_GATE_BUSY',
+      message: 'The directory source check is busy with a concurrent change; nothing was changed. Retry.',
+      log: { code: 'DIRECTORY_ROUTING_GATE_BUSY', sqlState },
+    })),
+    {
+      label: 'the source count could not be read',
+      make: () => new DirectoryRoutingGateUnavailableError(),
+      status: 503,
+      code: 'DIRECTORY_ROUTING_GATE_UNAVAILABLE',
+      message: 'The directory source check could not be completed; nothing was changed. Retry.',
+      log: { code: 'DIRECTORY_ROUTING_GATE_UNAVAILABLE' },
+    },
+  ]
+  for (const { call, fn } of corpCalls) {
+    const context = call.params ? { actorId: 'admin-1', integrationId: call.params.integrationId } : { actorId: 'admin-1' }
+    for (const refusal of gateRefusals) {
+      it(`${describeCall(call)}: ${refusal.label} → ${refusal.status} ${refusal.code} with the fixed sentence, logged values-free, not audited`, async () => {
+        fn.mockRejectedValue(refusal.make())
+        const res = await invoke(call)
+        expect(res.statusCode).toBe(refusal.status)
+        expect(res.body).toEqual({ ok: false, error: { code: refusal.code, message: refusal.message, details: undefined } })
+        expect(warnSpy.mock.calls.map((args) => args[1])).toEqual([{ ...refusal.log, ...context }])
+        expect(auditMocks.auditLog).not.toHaveBeenCalled()
+        expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+      })
+    }
+    it(`${describeCall(call)}: the operator is handed to the service for its audit row`, async () => {
+      fn.mockResolvedValue({ id: INTEGRATION.integrationId })
+      const res = await invoke(call)
+      expect(res.statusCode).toBe(200)
+      expect(fn.mock.calls[0].at(-1)).toEqual({ actorId: 'admin-1' })
+    })
+    it(`${describeCall(call)}: an unreadable count that is not the gate's own error stays the fixed 500, and the same sentence untyped does too`, async () => {
+      for (const error of [new PullSourceCountUnavailableError('org-secret-1'), new Error('A routing policy is required before another directory source can be added')]) {
+        fn.mockRejectedValue(error)
+        const res = await invoke(call)
+        expect(res.statusCode).toBe(500)
+        expect(bodyAndHeaders(res)).not.toContain('org-secret-1')
+      }
     })
   }
 })

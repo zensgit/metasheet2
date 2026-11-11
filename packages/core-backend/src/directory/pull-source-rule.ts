@@ -108,17 +108,46 @@ export interface PullSourceRuleStatus {
   hasPolicy: boolean
 }
 
-/** Number of distinct active pull sources in the organisation. */
-export async function countActivePullSources(query: PullSourceRuleQuery, orgId: string): Promise<number> {
-  const result = await query(COUNT_ACTIVE_PULL_SOURCES_SQL, [orgId])
-  const raw = result.rows[0]?.pull_source_count
+/**
+ * A count column read from a result row. An unreadable count (no row, not a non-negative integer) fails
+ * closed: a gate treats it as a refusal and a status view omits its block; it is never zero.
+ */
+function readSourceCount(raw: unknown, orgId: string): number {
   const count = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN
-  // An unreadable count fails closed: a gate treats it as a refusal and a status view omits its block;
-  // it is never zero.
   if (!Number.isSafeInteger(count) || count < 0) {
     throw new PullSourceCountUnavailableError(orgId)
   }
   return count
+}
+
+/** Number of distinct active pull sources in the organisation. */
+export async function countActivePullSources(query: PullSourceRuleQuery, orgId: string): Promise<number> {
+  const result = await query(COUNT_ACTIVE_PULL_SOURCES_SQL, [orgId])
+  return readSourceCount(result.rows[0]?.pull_source_count, orgId)
+}
+
+/**
+ * The organisation's active pull sources other than the external source `($2, $3)` = `(provider, corp_id)`.
+ * Rows of that same external source are left out, so a further row of a source the organisation already
+ * has does not count against it.
+ */
+export const COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL =
+  `SELECT count(DISTINCT ${PULL_SOURCE_KEY_SQL})::int AS other_source_count ` +
+  `FROM directory_integrations i WHERE i.org_id = $1 AND ${PULL_SOURCE_PREDICATE_SQL} ` +
+  `AND NOT (i.provider = $2 AND i.corp_id = $3)`
+
+/**
+ * Number of distinct active pull sources in the organisation, not counting the external source
+ * `(provider, corpId)`. Unreadable counts raise the same error as `countActivePullSources`.
+ */
+export async function countOtherActivePullSources(
+  query: PullSourceRuleQuery,
+  orgId: string,
+  provider: string,
+  corpId: string,
+): Promise<number> {
+  const result = await query(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, [orgId, provider, corpId])
+  return readSourceCount(result.rows[0]?.other_source_count, orgId)
 }
 
 /**

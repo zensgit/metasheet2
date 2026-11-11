@@ -25,6 +25,7 @@ const STEP_ID = REAL_DB_STEP_IDS.approval
 const SUITES = [
   'tests/integration/approval-routing-policy-required.db.test.ts',
   'tests/integration/approval-routing-policy-required.api.test.ts',
+  'tests/integration/directory-pull-source-gate.db.test.ts',
 ]
 
 const vitestConfig = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
