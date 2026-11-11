@@ -10,7 +10,7 @@
  * each of the panel's 7 emits fires upward with the exact payload shape the drawer relays unchanged.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaRecordFieldsPanel from '../src/multitable/components/MetaRecordFieldsPanel.vue'
 import type { AiShortcutState } from '../src/multitable/composables/useAiShortcut'
 import type { MetaField, MetaFieldPermission, MetaRecord, MetaRowActions } from '../src/multitable/types'
@@ -254,5 +254,62 @@ describe('MetaRecordFieldsPanel (W2 S1 extraction)', () => {
       ;(globalThis as any).fetch = originalFetch
       app.unmount()
     })
+  })
+})
+
+// R-line: main's #6852 bound-panel harness (reactive props, so `record` can change under a mounted panel) is not
+// on this line; this is the minimal copy the block below needs.
+const boundApps: App[] = []
+type PanelProps = Record<string, unknown>
+function mountBoundPanel(initial: PanelProps): { container: HTMLElement; set: (patch: PanelProps) => void } {
+  const state = ref<PanelProps>({ fields: [], canEdit: true, canComment: false, ...initial })
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const app = createApp({ render: () => h(MetaRecordFieldsPanel, { ...state.value }) })
+  app.mount(container)
+  boundApps.push(app)
+  return { container, set: (patch) => { state.value = { ...state.value, ...patch } } }
+}
+
+describe('MetaRecordFieldsPanel — a control reused for the next record shows that record\'s value', () => {
+  // The drawer blurs the focused control and moves on in the same tick; both records hold the same value here, so
+  // the value the control is given does not change, only the record.
+  const F_RICH = { id: 'fld_rich', name: 'Notes', type: 'longText', property: { rich: true } } as unknown as MetaField
+  const F_AT = { id: 'fld_at', name: 'When', type: 'dateTime' } as unknown as MetaField
+  const sameRecord = (id: string) => ({ id, version: 1, data: { fld_rich: 'same', fld_at: null } }) as unknown as MetaRecord
+
+  afterEach(() => {
+    while (boundApps.length) boundApps.pop()!.unmount()
+    document.body.innerHTML = ''
+  })
+
+  it('the rich text editor: typed on A, then B (same value) shows its own value, and passing through it again commits nothing', async () => {
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_RICH], record: sameRecord('rec_A'), onPatch })
+    await flushUi()
+    const editable = container.querySelector<HTMLElement>('[data-test="rich-longtext-editor"]')!
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'same typed on A'
+    editable.dispatchEvent(new Event('blur'))
+    set({ record: sameRecord('rec_B') })
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_rich', 'same typed on A']])
+    expect(editable.innerHTML).toBe('same')
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur'))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('the date-time box: a draft typed on A is dropped when B (same, empty value) is shown', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_AT], record: sameRecord('rec_A'), onPatch: vi.fn() })
+    await flushUi()
+    const input = container.querySelector<HTMLInputElement>('#drawer_field_fld_at')!
+    input.value = '2031-05-06 07:08'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    set({ record: sameRecord('rec_B') })
+    await flushUi()
+    expect(input.value).toBe('')
   })
 })

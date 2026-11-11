@@ -136,6 +136,7 @@
           <MetaRichLongTextEditor
             v-else-if="canEditField(field.id) && field.type === 'longText' && isRichLongTextField(field)"
             :model-value="controlValue(field.id)"
+            :sync-key="record?.id"
             :is-zh="isZh"
             :mention-suggestions="mentionSuggestions"
             :mention-search="mentionSearch"
@@ -221,6 +222,7 @@
                 class="meta-record-drawer__input"
                 :model-value="controlValue(field.id)"
                 :timezone="resolveDateTimeTimezone(field.property)"
+                :sync-key="record?.id"
                 :aria-invalid="fieldAriaInvalid(field.id)"
                 :aria-describedby="fieldAriaDescribedBy(field.id)"
                 @change="emitPatch(field.id, $event)"
