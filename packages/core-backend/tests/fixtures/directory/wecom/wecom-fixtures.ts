@@ -38,7 +38,7 @@ export function abortError(): Error {
 export interface RecordedRequest {
   /** As passed to `fetch`; `undefined` when the caller passed none. */
   method: string | undefined
-  route: 'gettoken' | 'agent' | 'departments' | 'users' | 'other'
+  route: 'gettoken' | 'agent' | 'departments' | 'users' | 'userinfo' | 'member' | 'other'
   origin: string
   path: string
   query: Record<string, string>
@@ -54,6 +54,8 @@ function routeOf(pathname: string): RecordedRequest['route'] {
   if (pathname === '/cgi-bin/agent/get') return 'agent'
   if (pathname === '/cgi-bin/department/list') return 'departments'
   if (pathname === '/cgi-bin/user/list') return 'users'
+  if (pathname === '/cgi-bin/auth/getuserinfo') return 'userinfo'
+  if (pathname === '/cgi-bin/user/get') return 'member'
   return 'other'
 }
 
@@ -63,6 +65,10 @@ export interface WeComStubSpec {
   departments?: WeComStubResponder
   /** One responder for every department, or one per department id. */
   users?: WeComStubResponder | Record<string, WeComStubResponder>
+  /** `auth/getuserinfo` (the login-code exchange). */
+  userinfo?: WeComStubResponder
+  /** `user/get`; one responder for every userid, or one per userid exactly as requested. */
+  member?: WeComStubResponder | Record<string, WeComStubResponder>
   /** Runs for every request before the reply is produced (clock advance, ordering probes). */
   onRequest?: (request: RecordedRequest) => void
 }
@@ -74,7 +80,7 @@ export interface WeComFetchStub {
   pathsOf(route: RecordedRequest['route']): string[]
 }
 
-function isResponderMap(value: WeComStubSpec['users']): value is Record<string, WeComStubResponder> {
+function isResponderMap(value: WeComStubSpec['users'] | WeComStubSpec['member']): value is Record<string, WeComStubResponder> {
   return typeof value === 'object' && value !== null && !('kind' in value)
 }
 
@@ -118,6 +124,12 @@ export function createWeComFetchStub(spec: WeComStubSpec): WeComFetchStub {
       const departmentId = url.searchParams.get('department_id') ?? ''
       const responder = isResponderMap(spec.users) ? spec.users[departmentId] : spec.users
       reply = resolve(`users:${departmentId}`, responder)
+    } else if (route === 'userinfo') {
+      reply = resolve('userinfo', spec.userinfo)
+    } else if (route === 'member') {
+      const userid = url.searchParams.get('userid') ?? ''
+      const responder = isResponderMap(spec.member) ? spec.member[userid] : spec.member
+      reply = resolve(`member:${userid}`, responder)
     } else {
       throw new Error(`fixture stub: unexpected path ${url.pathname}`)
     }
@@ -183,6 +195,33 @@ export function departmentsPayload(departments: unknown[]): Record<string, unkno
 
 export function usersPayload(userlist: unknown): Record<string, unknown> {
   return { errcode: 0, errmsg: 'ok', userlist }
+}
+
+/** `auth/getuserinfo` for a member of the corporation. */
+export function userinfoPayload(extra: Record<string, unknown> = {}, userid: string | null = 'Zhang.San'): Record<string, unknown> {
+  return { errcode: 0, errmsg: 'ok', ...(userid === null ? {} : { userid }), ...extra }
+}
+
+/** `auth/getuserinfo` for someone who is not a member of the corporation. */
+export function nonMemberPayload(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { errcode: 0, errmsg: 'ok', openid: 'fixture-openid-canary', external_userid: 'fixture-external-canary', ...extra }
+}
+
+/** `user/get` with the contact fields the adapter must never surface; pass `{ status: undefined }` as `extra` to omit the status. */
+export function memberPayload(userid = 'Zhang.San', status: unknown = 1, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    errcode: 0,
+    errmsg: 'ok',
+    userid,
+    name: 'fixture-name-canary',
+    mobile: '13800000000',
+    email: 'canary@fixture.example.test',
+    avatar: 'https://img.example.test/canary.png',
+    department: [1],
+    position: 'fixture-position-canary',
+    status,
+    ...extra,
+  }
 }
 
 export const dept = (id: number, parentid: number, name = `dept-${id}`, order?: number): Record<string, unknown> => ({
