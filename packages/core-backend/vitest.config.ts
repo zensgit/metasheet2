@@ -434,6 +434,13 @@ export default defineConfig({
       // (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-lifecycle-ci-wiring.test.ts).
       'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts',
+      // User notification endpoints and preferences against real PostgreSQL: the two tables and their
+      // constraints, the resolver over live rows, the endpoint and preference writes with their locks and
+      // revision checks, collisions across organizations, and the migration timeout round trip.
+      // DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot skip-green
+      // it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
+      // plugin-tests-parallel-contract.test.mjs and tests/unit/notification-ci-wiring.test.ts).
+      'tests/integration/notification-endpoints-preferences.db.test.ts',
       // Approval routing multi-source rule against real PostgreSQL: the requester resolver's
       // policy-required refusal, its organisation boundary, its read-only probe and the leaf count
       // statement (db file), and the same rule through the HTTP surface of a real server (api file).

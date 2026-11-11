@@ -405,6 +405,16 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // sheet). It derives its staging project in its deps helper (`pullBatchInstallDepsFor`, from the scope's tenant with no
   // request projectId), not inline, so it is not in the inline-staging set below.
   'stockPreparationProjectPullBatchInstall',
+  // Batch-refresh step 6d-1b (S6-5; register R-91). The two CENSUS reads answer the caller's OWN tenant's registry rows and
+  // project sheets (counts; the project form also the PRIVATE component handles, admin), and the acknowledgement / revoke
+  // are WRITES to that tenant's component ruling ledger — keyed by the tenant this scope proves: a header-fillable tenant
+  // here would read another tenant's sheets or acknowledge a remnant on its project. They derive the staging project in
+  // the shared census helpers (`readStockPreparationCensusRows` / `readStockPreparationCensusHumanFieldIds`, from the
+  // scope's tenant with no request projectId), not inline, so none is in the inline-staging set below.
+  'stockPreparationSheetCensusList',
+  'stockPreparationProjectSheetCensusGet',
+  'stockPreparationProjectRemnantAcknowledge',
+  'stockPreparationProjectRemnantAcknowledgementRevoke',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and

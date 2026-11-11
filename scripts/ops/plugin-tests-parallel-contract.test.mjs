@@ -96,7 +96,7 @@ const directoryClientLintStep = {
   name: 'Run DingTalk directory client lint',
   if: "matrix.node-version == '20.x'",
   'working-directory': 'packages/core-backend',
-  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts src/directory/directory-adapter.ts src/directory/directory-adapter-registry.ts src/directory/adapters/index.ts src/directory/adapters/dingtalk-directory-adapter.ts src/directory/directory-user-pagination.ts src/directory/department-manager-enrichment.ts src/integrations/wecom/client.ts src/directory/adapters/wecom-directory-adapter.ts src/directory/adapters/wecom-directory-errors.ts',
+  run: 'pnpm exec eslint --no-cache src/integrations/dingtalk/client.ts src/integrations/dingtalk/directory-response-ids.ts src/directory/directory-sync.ts src/directory/directory-department-cycle.ts src/directory/directory-adapter.ts src/directory/directory-adapter-registry.ts src/directory/adapters/index.ts src/directory/adapters/dingtalk-directory-adapter.ts src/directory/directory-user-pagination.ts src/directory/department-manager-enrichment.ts src/integrations/wecom/client.ts src/directory/adapters/wecom-directory-adapter.ts src/directory/adapters/wecom-directory-errors.ts src/auth/external/wecom-identity-adapter.ts',
 }
 
 function resultUpload(suite) {
@@ -217,9 +217,12 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(departureVouchingAddition + feishuSmokeAddition), 'Keep the Feishu mock harness smoke suite right after the departure vouching suite')
         const lifecycleHistoryAddition = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'
         assert.equal(step.run.split(lifecycleHistoryAddition).length - 1, 1, 'Directory integration lifecycle history DB suite must run exactly once')
+        const notificationEndpointsAddition = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'
+        assert.equal(step.run.split(notificationEndpointsAddition).length - 1, 1, 'User notification endpoints and preferences DB suite must run exactly once')
+        assert.ok(step.run.includes(lifecycleHistoryAddition + notificationEndpointsAddition), 'Keep the user notification endpoints and preferences suite right after the directory integration lifecycle history suite')
         const routingPolicyRequiredDbAddition = '  tests/integration/approval-routing-policy-required.db.test.ts \\\n'
         assert.equal(step.run.split(routingPolicyRequiredDbAddition).length - 1, 1, 'Approval routing policy-required DB suite must run exactly once')
-        assert.ok(step.run.includes(lifecycleHistoryAddition + routingPolicyRequiredDbAddition), 'Keep the approval routing policy-required DB suite right after the directory integration lifecycle history suite')
+        assert.ok(step.run.includes(notificationEndpointsAddition + routingPolicyRequiredDbAddition), 'Keep the approval routing policy-required DB suite right after the user notification endpoints and preferences suite')
         const routingPolicyRequiredApiAddition = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'
         assert.equal(step.run.split(routingPolicyRequiredApiAddition).length - 1, 1, 'Approval routing policy-required API suite must run exactly once')
         assert.ok(step.run.includes(routingPolicyRequiredDbAddition + routingPolicyRequiredApiAddition), 'Keep the approval routing policy-required API suite right after its DB suite')
@@ -237,6 +240,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(deferAddition, '')
         step.run = step.run.replace(departureVouchingAddition, '')
         step.run = step.run.replace(lifecycleHistoryAddition, '')
+        step.run = step.run.replace(notificationEndpointsAddition, '')
         step.run = step.run.replace(routingPolicyRequiredDbAddition, '')
         step.run = step.run.replace(routingPolicyRequiredApiAddition, '')
       }
@@ -341,6 +345,9 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     ...['db', 'api'].flatMap(kind => [
       doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
       doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`, anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
@@ -357,6 +364,7 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/integrations/wecom/client.ts')); step.run = step.run.replace(' src/integrations/wecom/client.ts', '') },
     doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/directory/adapters/wecom-directory-adapter.ts')); step.run = step.run.replace(' src/directory/adapters/wecom-directory-adapter.ts', '') },
     doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/directory/adapters/wecom-directory-errors.ts')); step.run = step.run.replace(' src/directory/adapters/wecom-directory-errors.ts', '') },
+    doc => { const step = doc.jobs.unit.steps.find(s => s.name === directoryClientLintStep.name); assert.ok(step.run.includes(' src/auth/external/wecom-identity-adapter.ts')); step.run = step.run.replace(' src/auth/external/wecom-identity-adapter.ts', '') },
     doc => { doc.jobs.unit.steps.pop() },
     doc => { doc.jobs.unit.steps.find(step => step.name === 'Run core-backend tests').run += ' -t selected' },
     doc => { doc.jobs['attendance-db'].steps.find(step => step.id === 'attendance-real-db-integration').if = false },
