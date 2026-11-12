@@ -1842,6 +1842,17 @@ jobs:
           state_write
           IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 300 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" up -d --no-deps --force-recreate web </dev/null >>"${RUN_DIR}/compose-up.out" 2>&1 \
             || fail "compose up web failed"
+          # compose up returns once the container started, not once nginx listens: wait for the
+          # web port before the single-shot smoke request below.
+          web_ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://127.0.0.1:8081 >/dev/null 2>>"${RUN_DIR}/curl.err"; then
+              web_ready=1
+              break
+            fi
+            sleep 2
+          done
+          [[ "$web_ready" == "1" ]] || fail "new web did not answer on its port"
           echo "=== DEPLOY END ==="
           WINDOW_MAIN
           remote_cmds+=(

@@ -1170,6 +1170,22 @@ describe('production deploy window: remote_deploy step run against test doubles'
     })
   }
 
+  scenario('new web refuses its first requests after the start -> the window waits for its port, done-new', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_WEB_REFUSE_FIRST: '3' } })
+    checkHappy(r, { appdata: false })
+    assert.equal(readFileSync(path.join(world.ds, 'web_refused'), 'utf8'), '3', 'the first requests to the new web were refused')
+  })
+
+  scenario('new web never answers on its port -> 73: the new web stopped, the verified backend left running', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_WEB_REFUSE_FIRST: '1000' } })
+    assertCommon(r, 73)
+    assert.match(r.windowLog, /new web did not answer on its port/)
+    assert.ok(any(r, (call) => isStop('metasheet-web')(call) && /^new-web-/.test(call.meta.target)), 'the unverified new web is stopped')
+    assert.ok(!any(r, (call) => isStop('metasheet-backend')(call) && /^new-backend-/.test(call.meta.target)), 'the verified backend keeps running')
+  })
+
   scenario('bootstrap: no window.pid within 30 s -> 76', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { runText: mutate(REMOTE_RUN, `'echo "$$" > window.pid'\n`, `'exit 0'\n`) })

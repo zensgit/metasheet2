@@ -37,6 +37,16 @@ case "$url" in
     ;;
   http://127.0.0.1:8081|http://127.0.0.1:8081/)
     running metasheet-web || exit 7
+    # H_WEB_REFUSE_FIRST=N: the new web container refuses its first N requests (nginx not yet
+    # listening right after the container start).
+    if [[ -n "${H_WEB_REFUSE_FIRST:-}" && "$(cat "${C}/metasheet-web/image_id")" == sha256:new* ]]; then
+      refused="$(cat "${H_DS}/web_refused" 2>/dev/null || echo 0)"
+      if (( refused < H_WEB_REFUSE_FIRST )); then
+        printf '%s' "$((refused + 1))" > "${H_DS}/web_refused"
+        echo "curl: (56) Recv failure: Connection reset by peer" >&2
+        exit 56
+      fi
+    fi
     echo '<!doctype html><title>harness</title>'
     ;;
   *)
