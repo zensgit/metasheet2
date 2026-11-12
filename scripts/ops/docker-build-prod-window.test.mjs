@@ -1170,6 +1170,31 @@ describe('production deploy window: remote_deploy step run against test doubles'
     })
   }
 
+  scenario('the .env write fails after the commit -> 74: env_written stays old, nothing started, the outcome says so', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_ENV_RO_AT_MIGRATE: '1' } })
+    assertCommon(r, 74)
+    assert.equal(r.state.phase, 'needs-owner')
+    assert.equal(r.state.env_written, 'old', 'env_written is set only after the read-back')
+    assert.equal(dotEnvTag(r), SHA_OLD)
+    const ledger = readFileSync(path.join(world.ds, 'ledger'), 'utf8').split('\n').filter(Boolean)
+    assert.deepEqual(ledger, [...BASE_MIGRATIONS, ...INPLAY], 'the migration committed')
+    assert.doesNotMatch(r.windowLog, /persisted IMAGE_OWNER and IMAGE_TAG/, 'a failed write is not reported as persisted')
+    assert.doesNotMatch(r.windowLog, /env_written=new/)
+    assert.match(r.windowLog, /^\[deploy-window\] warning env_written=old: .*start nothing until the owner has read the ledger$/m)
+    assert.ok(!any(r, (call) => /^start /.test(call.args)), 'nothing started')
+    assert.ok(!any(r, isUp), 'nothing created')
+  })
+
+  it('.env not writable by the deploy user -> 70 before anything is stopped', { timeout: 300_000, skip: process.getuid?.() === 0 ? 'root can write any file' : false }, async (t) => {
+    const world = makeWorld(t)
+    chmodSync(path.join(world.repo, '.env'), 0o444)
+    const r = await runWindow(t, world)
+    checkRefused(r)
+    assert.match(r.windowLog, /\.env is not a regular file the deploy user can read and write/)
+    assert.ok(!any(r, isPull), 'refused before the pull')
+  })
+
   scenario('new web refuses its first requests after the start -> the window waits for its port, done-new', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_WEB_REFUSE_FIRST: '3' } })

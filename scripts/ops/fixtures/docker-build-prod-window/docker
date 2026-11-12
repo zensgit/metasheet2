@@ -294,6 +294,8 @@ run_migrate() {
   : > "${DS}/migrate_started"
   if [[ "${H_MIGRATE_IGNORE_EXCLUDE:-0}" == "1" ]]; then excl=""; fi
   if [[ "${H_ABORT_ON:-}" == "migrate" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+  # H_ENV_RO_AT_MIGRATE=1: .env becomes read-only while the migration runs (the write at the commit fails).
+  if [[ "${H_ENV_RO_AT_MIGRATE:-0}" == "1" ]]; then chmod 0444 "${H_REPO}/.env"; fi
   while IFS= read -r n; do
     if [[ -z "$n" || ",${excl}," == *",${n},"* ]]; then continue; fi
     todo+=("$n")

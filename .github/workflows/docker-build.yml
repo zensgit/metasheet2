@@ -927,6 +927,14 @@ jobs:
             terminal done-restored-old 71
           }
 
+          # env_names_new: .env in the current directory names the dispatched image (read back after a write).
+          env_names_new() {
+            local tag owner
+            tag="$(sed -n 's/^IMAGE_TAG=//p' .env 2>/dev/null | tail -n 1 || true)"
+            owner="$(sed -n 's/^IMAGE_OWNER=//p' .env 2>/dev/null | tail -n 1 || true)"
+            [[ -n "$tag" && "$tag" == "$DEPLOY_IMAGE_TAG" && "$owner" == "${DEPLOY_IMAGE_OWNER:-zensgit}" ]]
+          }
+          # ensure_env_new: writes .env and sets env_written=new only when the read-back names the new image.
           ensure_env_new() {
             if [[ "$w_env_written" == "new" ]]; then
               return 0
@@ -1026,6 +1034,9 @@ jobs:
             wlog "outcome=${w_phase} rc=${final} raw_rc=${raw}"
             if [[ "$final" != "0" && "$final" != "75" && "$w_env_written" == "new" ]]; then
               wlog "warning env_written=new: never start the old containers; .env already names the new image"
+            fi
+            if [[ "$final" == "74" && "$w_env_written" != "new" ]]; then
+              wlog "warning env_written=old: .env does not name the new image, but the ledger may be committed; start nothing until the owner has read the ledger"
             fi
             printf '%s\n' "$final" > "${RUN_DIR}/rc.tmp" && mv -f "${RUN_DIR}/rc.tmp" "${RUN_DIR}/rc"
             exit "$final"
@@ -1284,7 +1295,12 @@ jobs:
           if [[ -f docker/app.env ]] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(MIGRATION_EXCLUDE|MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL|ALLOW_DB_RESET)[[:space:]]*=' docker/app.env; then
             fail "docker/app.env sets MIGRATION_EXCLUDE, MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL or ALLOW_DB_RESET; remove the key first"
           fi
-          # ---- phase 0.8: .env tag versus the running backend (logged only) ----
+          # ---- phase 0.8: .env must be writable at the commit; its tag versus the running backend (logged only) ----
+          if [[ -e .env ]]; then
+            [[ -f .env && -r .env && -w .env ]] || fail ".env is not a regular file the deploy user can read and write"
+          else
+            [[ -w . ]] || fail "the deploy directory is not writable, so .env cannot be created at the commit"
+          fi
           w_old_backend_image="$(ctr_get metasheet-backend '{{.Config.Image}}')" || fail "cannot read the running backend image name"
           w_old_web_image="$(ctr_get metasheet-web '{{.Config.Image}}')" || fail "cannot read the running web image name"
           env_tag="$(sed -n 's/^IMAGE_TAG=//p' .env 2>/dev/null | tail -n 1 || true)"
@@ -1390,7 +1406,7 @@ jobs:
             '# Moved: .env now names the new image only once the migration has committed (phase 4).'
             'write_compose_env_new() {'
             'COMPOSE_ENV_FILE=".env"'
-            'python3 - "${COMPOSE_ENV_FILE}" "${DEPLOY_IMAGE_OWNER}" "${DEPLOY_IMAGE_TAG}" <<'\''PY'\'''
+            'python3 - "${COMPOSE_ENV_FILE}" "${DEPLOY_IMAGE_OWNER}" "${DEPLOY_IMAGE_TAG}" <<'\''PY'\'' || return 1'
             'from pathlib import Path'
             'import sys'
             'path = Path(sys.argv[1])'
@@ -1427,6 +1443,7 @@ jobs:
             '        updated.append(f"{key}={entries[key]}")'
             'path.write_text("\n".join(updated) + "\n")'
             'PY'
+            'env_names_new || return 1'
             'echo "[deploy] persisted IMAGE_OWNER and IMAGE_TAG in ${COMPOSE_ENV_FILE}"'
             '}'
           )
@@ -1766,9 +1783,7 @@ jobs:
           fi
           wlog "MIGRATE COMMITTED ledger=$(( L0 + w_inplay ))"
           set_phase committed
-          write_compose_env_new
-          w_env_written="new"
-          state_write
+          ensure_env_new || fail ".env does not name the new image after the commit"
           # Post-commit checks: any mismatch ends with rc 74 and nothing started.
           post_list_rc=0
           IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 120 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-postlist-${WINDOW_RUN}" -e "APP_NAME=metasheet-window-postlist-${WINDOW_RUN}" backend sh -c '[ -z "${MIGRATION_EXCLUDE+x}" ] && [ -z "${MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL+x}" ] && [ -z "${ALLOW_DB_RESET+x}" ] && exec node packages/core-backend/dist/src/db/migrate.js --list' </dev/null >"${RUN_DIR}/list-after.out" 2>&1 || post_list_rc=$?
