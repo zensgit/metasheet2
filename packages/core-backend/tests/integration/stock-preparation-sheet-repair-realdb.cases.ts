@@ -89,6 +89,10 @@
  *   S9D-25   (ruling R3-6) the close's holder assert on real row locks: a takeover between the continuation's in-lease
  *            verification and its close transaction is refused by that transaction's holder assert (409 LEASE_LOST, the
  *            run still open, no close audit row, no bump, no row written); the same approved close digest then runs.
+ *   S9D-26   (S6-5b, readiness v7) the open run on the real stack: a retire left `running` (leaveRetireOpen) puts
+ *            no_open_sheet_repair_run among the pilot readiness's failing ids (with the repair switch on AND off) and the
+ *            enable is refused 409 naming it, nothing marked; the continuation's verified close (`verify_and_close_run`,
+ *            the real route) lifts exactly that id.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -552,6 +556,46 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       await taker.release()
       return String((await st.runs())[0].id)
     }
+
+    test('S9D-26 (S6-5b, readiness v7) a retire left running refuses the pilot enable with no_open_sheet_repair_run, whatever the repair switch says; the continuation\'s verified close lifts exactly that id', async () => {
+      const st = await world('d26')
+      const pilot = async () => {
+        const res = await st.call('GET', PILOT_PATH)
+        expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+        return res.body.data.readiness
+      }
+      const marked = async () => (await q(`SELECT pilot_enabled_at IS NOT NULL AS enabled FROM ${REGISTRY_TABLE} WHERE tenant_id = $1`, [st.tenantId])).rows[0].enabled
+      const before = await pilot()
+      expect(before.version).toBe(7)
+      expect(before.failing.includes('no_open_sheet_repair_run'), 'no run yet: the ledger answered, nothing open').toBe(false)
+      const runId = await leaveRetireOpen(st, 'd26')
+      expect((await st.runs()).map((run: any) => run.status)).toEqual(['running'])
+      const withOpen = await pilot()
+      expect(withOpen.failing).toContain('no_open_sheet_repair_run')
+      expect(withOpen.checks.find((check: any) => check.id === 'no_open_sheet_repair_run')).toEqual({ id: 'no_open_sheet_repair_run', ok: false })
+      // The repair switch OFF: the ledger is still read (a run opened while it was on stays open).
+      const switchBefore = process.env[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV]
+      process.env[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV] = 'false'
+      let failingSwitchOff: string[]
+      try {
+        failingSwitchOff = (await pilot()).failing
+      } finally {
+        process.env[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV] = switchBefore
+      }
+      expect(failingSwitchOff).toContain('no_open_sheet_repair_run')
+      const refused = await st.call('POST', PILOT_PATH, { body: { confirmProjectNo: PROJECT } })
+      expect([refused.statusCode, refused.body.error && refused.body.error.code], JSON.stringify(refused.body)).toEqual([409, 'STOCK_PREP_PILOT_NOT_READY'])
+      expect(JSON.parse(JSON.stringify(refused.body.error.details)).failing).toContain('no_open_sheet_repair_run')
+      expect(await marked()).toBe(false)
+      // The continuation's verified close through the real route: completed; the check passes again.
+      const closePlan = dataOf(await st.repair({ mode: 'preview', recipe: CLOSE, runId }))
+      expect([closePlan.eligible, closePlan.refusals]).toEqual([true, []])
+      const closed = dataOf(await st.repair({ mode: 'execute', recipe: CLOSE, runId, planDigest: closePlan.planDigest, approvalRef: 'R-91:s65b-d26-close' }))
+      expect(closed.status).toBe('completed')
+      const after = await pilot()
+      expect(after.failing.includes('no_open_sheet_repair_run'), JSON.stringify(after.failing)).toBe(false)
+      expect(await marked()).toBe(false)
+    }, 180_000)
 
     test('S9D-108 migration 108 is applied: both tables, the closed CHECKs, one open run per sheet, one claim per approved plan', async () => {
       for (const table of [RT.run, RT.claim]) expect((await q('SELECT to_regclass($1) AS oid', [table])).rows[0].oid, table).not.toBeNull()

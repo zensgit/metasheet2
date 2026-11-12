@@ -25,6 +25,11 @@
 //          id, the cell sits under the PHYSICAL id (the host's getFieldId derivation); both forms count its hidden fills
 //   SC-10  the pack read is strict on both forms: a ledger, host field read or id-derivation failure is the list row
 //          incomplete / pack_unreadable with no counts and the project form 503 PACK_UNREADABLE (never template-only)
+//   SC-11  (S6-5b, R-91 ㉕ closed) a sheet that lost a census KEY column (each of SHEET_CENSUS_KEY_FIELD_IDS in turn): the
+//          list row answers incomplete / field_missing with NO counts (the list audit counts it incomplete), the project
+//          form 409 FIELD_MISSING before any record read and before its audit row; a host that cannot answer from the
+//          database (no db-backed existence read, or a throwing one) is the list row rows_unreadable and the project
+//          form 503 FIELDS_UNREADABLE — never "present", never "missing"; the acknowledgement re-proof is not gated
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -35,7 +40,7 @@ const harness = require('./support/stock-preparation-project-sheet-harness.cjs')
 const rulingKit = require('./support/stock-preparation-component-ruling-kit.cjs')
 const { createStockPreparationComponentRulingStore, COMPONENT_RULING_ERROR_CODES } = require(path.join(LIB, 'stock-preparation-component-ruling-store.cjs'))
 const { REMNANT_ACKNOWLEDGEMENT_ERROR_CODES } = require(path.join(LIB, 'stock-preparation-remnant-acknowledgement.cjs'))
-const { SHEET_CENSUS_COUNT_KEYS, __internals: { componentHandle } } = require(path.join(LIB, 'stock-preparation-sheet-census.cjs'))
+const { SHEET_CENSUS_COUNT_KEYS, SHEET_CENSUS_KEY_FIELD_IDS, __internals: { componentHandle } } = require(path.join(LIB, 'stock-preparation-sheet-census.cjs'))
 const { STOCK_PREP_ADMIN, STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 
 const tests = []
@@ -417,6 +422,85 @@ test('SC-10 the pack read is STRICT on both forms: a ledger / host field read / 
   }
 })
 
+test('SC-11 (S6-5b) a sheet without a census KEY column: the list row incomplete / field_missing with no counts, the project form 409 FIELD_MISSING before any record read or audit row; an unprovable host read is rows_unreadable / 503 FIELDS_UNREADABLE', async () => {
+  assert.deepEqual([...SHEET_CENSUS_KEY_FIELD_IDS], ['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'active'])
+  for (const fieldId of SHEET_CENSUS_KEY_FIELD_IDS) {
+    const h = mount()
+    try {
+      const one = h.seedRegistryRow(PROJECT)
+      await seedSheetRows(h, one, PROJECT, D2)
+      // Calibration: with every key column on the sheet the same rows ARE a complete census (one remnant).
+      const before = dataOf(await call(h, 'GET', PATHS.list, { user: ADMIN, query: {} })).items[0]
+      assert.equal(before.status, 'complete', `${fieldId}: calibration ${JSON.stringify(before)}`)
+      assert.equal(before.inactiveRootRemnantComponents, 1)
+      // The column is removed from the sheet (the cells stay in the rows, as a deleted column leaves them).
+      const object = h.provisioning.objects.get(`${h.staging}/${one.objectId}`)
+      assert.ok(object && object.fields.delete(fieldId), `${fieldId}: removed from the host`)
+      h.auditAppends.length = 0
+      const page = dataOf(await call(h, 'GET', PATHS.list, { user: ADMIN, query: {} }))
+      const [row] = page.items
+      assert.equal(row.status, 'incomplete', `${fieldId}: ${JSON.stringify(row)}`)
+      assert.equal(row.reason, 'field_missing', fieldId)
+      for (const key of [...SHEET_CENSUS_COUNT_KEYS, 'acknowledgedComponents', 'rulingComponents', 'unacknowledgedRemnantComponents']) assert.ok(!(key in row), `${fieldId}: an incomplete row carries no ${key}`)
+      assert.deepEqual(h.auditAppends.map((entry) => [entry.action, entry.mode, entry.detail.completeCount, entry.detail.incompleteCount, entry.detail.remnantComponents]), [['project_board_read', 'sheet_census_read', 0, 1, 0]], `${fieldId}: the list read is audited, counted incomplete`)
+      assert.ok(!JSON.stringify(h.auditAppends).includes(fieldId), `${fieldId}: the audit names no field`)
+      h.auditAppends.length = 0
+      h.records.calls.length = 0
+      const res = await call(h, 'GET', PATHS.project, { user: ADMIN, params: { projectNo: PROJECT }, query: {} })
+      const error = expectRefusal(res, 409, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING)
+      assert.equal(REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, 'STOCK_PREP_SHEET_CENSUS_FIELD_MISSING')
+      assert.deepEqual(JSON.parse(JSON.stringify(error.details)), { reason: 'field_missing', missing: 1, partial: false }, fieldId)
+      assert.ok(!JSON.stringify(res.body).includes(fieldId) && !JSON.stringify(res.body).includes(PROJECT), `${fieldId}: values-free refusal`)
+      assert.deepEqual(h.records.calls, [], `${fieldId}: refused before any record read`)
+      assert.deepEqual(h.auditAppends, [], `${fieldId}: no census answered, no audit row`)
+    } finally { h.restore() }
+  }
+  // Two columns gone: the count is 2 (an integer, never the ids).
+  const two = mount()
+  try {
+    const one = two.seedRegistryRow(PROJECT)
+    const object = two.provisioning.objects.get(`${two.staging}/${one.objectId}`)
+    object.fields.delete('active')
+    object.fields.delete('parentSourceId')
+    const error = expectRefusal(await call(two, 'GET', PATHS.project, { user: ADMIN, params: { projectNo: PROJECT }, query: {} }), 409, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING)
+    assert.equal(error.details.missing, 2)
+  } finally { two.restore() }
+  // UNPROVABLE: the host cannot say from the database (no db-backed read: computed ids never omit a column; or a throw).
+  const unprovable = {
+    computedOnly: (h) => { delete h.provisioning.resolveExistingObjectFieldIds },
+    throwing: (h) => { h.provisioning.resolveExistingObjectFieldIds = async () => { throw Object.assign(new Error('host down'), { code: 'SYN_DOWN' }) } },
+    noMap: (h) => { h.provisioning.resolveExistingObjectFieldIds = async () => null },
+  }
+  for (const [name, inject] of Object.entries(unprovable)) {
+    const h = mount()
+    try {
+      const one = h.seedRegistryRow(PROJECT)
+      await seedSheetRows(h, one, PROJECT, D2)
+      inject(h)
+      const [row] = dataOf(await call(h, 'GET', PATHS.list, { user: ADMIN, query: {} })).items
+      assert.equal(row.status, 'incomplete', `${name}: ${JSON.stringify(row)}`)
+      assert.equal(row.reason, 'rows_unreadable', `${name}: unprovable is not "missing"`)
+      for (const key of SHEET_CENSUS_COUNT_KEYS) assert.ok(!(key in row), `${name}: no ${key}`)
+      h.auditAppends.length = 0
+      const res = await call(h, 'GET', PATHS.project, { user: ADMIN, params: { projectNo: PROJECT }, query: {} })
+      const error = expectRefusal(res, 503, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELDS_UNREADABLE)
+      assert.deepEqual(JSON.parse(JSON.stringify(error.details)), { reason: 'fields_unreadable', partial: false }, name)
+      assert.ok(!JSON.stringify(res.body).includes('down'), `${name}: no error text`)
+      assert.deepEqual(h.auditAppends, [], `${name}: no audit row`)
+    } finally { h.restore() }
+  }
+  // The acknowledgement's re-proof is NOT gated by the key-column guard (it shares only the walled read): with a key
+  // column gone it still answers through its own re-proof (here: no remnant on the fresh read, 409 NOT_PRESENT).
+  const ack = mount()
+  try {
+    const one = ack.seedRegistryRow(PROJECT)
+    await seedSheetRows(ack, one, PROJECT, D2)
+    ack.provisioning.objects.get(`${ack.staging}/${one.objectId}`).fields.delete('idempotencyKey')
+    const res = await call(ack, 'POST', PATHS.acknowledge, { user: ADMIN, params: { projectNo: PROJECT }, body: ackBody() })
+    assert.notEqual(res.body && res.body.error && res.body.error.code, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, JSON.stringify(res.body))
+  } finally { ack.restore() }
+})
+
 test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenant BEFORE the reader, and every census / acknowledgement handler reads rows only through it', () => {
   const fs = require('node:fs')
   const source = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8').replace(/\r\n/g, '\n')
@@ -425,6 +509,12 @@ test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenan
   const wall = body.indexOf('assertTableActionTargetBelongsToTenant(')
   const read = body.indexOf('readExistingStockPreparationRows(')
   assert.ok(start > 0 && wall > 0 && read > wall, 'the wall runs before the read')
+  // S6-5b: the key-column guard (afterWall) runs after the wall and before the read.
+  const guard = body.indexOf('await afterWall()')
+  assert.ok(guard > wall && guard < read, 'the key-column guard runs between the wall and the read')
+  for (const handler of ['stockPreparationSheetCensusList', 'stockPreparationProjectSheetCensusGet']) assert.ok(source.includes(handler), handler)
+  const rowOf = source.slice(source.indexOf('async function stockPreparationCensusRowOf('), source.indexOf('async function stockPreparationCensusRowOf(') + 3000)
+  assert.match(rowOf, /readStockPreparationCensusRows\(tenantId, action, registryRow\.projectNo, progress, async \(\) => \{\n\s+const keyFields = await readStockPreparationCensusKeyFields\(tenantId, action\)/, 'the list row passes the guard')
   assert.match(body, /targetProjectId: resolveIntegrationStagingProjectId\(tenantId, undefined\)/, 'the staging project is the scope\'s, never a request one')
   for (const handler of ['stockPreparationSheetCensusList', 'stockPreparationProjectSheetCensusGet', 'stockPreparationProjectRemnantAcknowledge', 'stockPreparationProjectRemnantAcknowledgementRevoke']) {
     const at = source.indexOf(`    async ${handler}(req, res) {`)
