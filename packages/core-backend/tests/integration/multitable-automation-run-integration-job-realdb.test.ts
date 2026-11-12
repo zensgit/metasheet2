@@ -87,6 +87,9 @@ import {
   type JobLeaseTransaction,
 } from '../../src/multitable/automation-job-lease'
 import { deriveOutboundTargetKey, type OutboundIntentIdentity } from '../../src/multitable/automation-outbound-intent'
+// R-69 1b-ii (conditions refusal, bottom of the file): the real save path on a real automation_rules row.
+import { RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE } from '../../src/multitable/automation-run-integration-job'
+import { AutomationRuleValidationError as RuleValidationError, AutomationService as RuleService } from '../../src/multitable/automation-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
@@ -1295,4 +1298,81 @@ describeIfDatabase('ADR §11 permission equivalence: port principal codes ≡ re
       }
     }
   }, 30_000)
+})
+
+// R-69 1b-ii (owner-approved 2026-11-11): a run_integration_job rule cannot carry conditions — its schedule trigger
+// fires with an empty record, so a condition would skip every fire and no summary would ever be published. On the
+// real save path and a real automation_rules row: a refused save leaves NO row (create) or the row BYTE-IDENTICAL
+// (update: md5 of the whole row as JSON before and after); the on/off switch and clearing stay open on a row that
+// already carries conditions (planted with a direct UPDATE: a row saved before this check).
+describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions (real automation_rules rows)', () => {
+  const savedFlag = process.env[FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+  const principalId = `svcc_${RUN}`
+  const sheet = `sheetc_${RUN}`
+  const project = `PC-${RUN}`
+  const conditions = { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }
+  const job = { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } }
+  const base = {
+    name: `cond_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    actionType: 'run_integration_job', actionConfig: job, createdBy: principalId,
+  }
+  const digest = async (ruleId: string): Promise<string | undefined> =>
+    ((await q(`SELECT md5(row_to_json(r)::text) AS d FROM automation_rules r WHERE id = $1`, [ruleId])).rows[0] as { d?: string } | undefined)?.d
+  const refusalOf = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => error)
+  const expectConditionsRefusal = (error: unknown) => {
+    expect(error).toBeInstanceOf(RuleValidationError)
+    expect((error as InstanceType<typeof RuleValidationError>).code).toBe('VALIDATION_ERROR')
+    expect((error as Error).message).toBe(RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE)
+  }
+
+  beforeAll(async () => {
+    process.env[FLAG] = 'true'
+    // R-69 I6a: a job rule saves only on the binding tenant's registered project sheet (the switch on, the row active).
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await registerRuleSheet(sheet, TENANT, project)
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcc'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+  })
+  afterAll(async () => {
+    if (savedFlag === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = savedFlag
+    if (savedProjectSheets === undefined) delete process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+    else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
+    await unregisterRuleSheets()
+    await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
+    await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)
+  })
+
+  test('create with conditions writes no row; a conditions-only edit adding them, and an action re-save or a trigger edit of a row that already has them, leave the row byte-identical; the switch and clearing still work', async () => {
+    const service = new RuleService(new EventBus(), db as never, q as never)
+    expectConditionsRefusal(await refusalOf(service.createRule(sheet, { ...base, conditions } as never)))
+    expect((await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [sheet])).rows).toHaveLength(0)
+    // control: the same rule without conditions saves (the binding is stamped from the creator's one tenant)
+    const rule = await service.createRule(sheet, base as never)
+    try {
+      const saved = await digest(rule.id)
+      expect(saved).toMatch(/^[0-9a-f]{32}$/)
+      // (b) a conditions-only edit that ADDS conditions to the stored job rule
+      expectConditionsRefusal(await refusalOf(service.updateRule(rule.id, sheet, { conditions } as never)))
+      expect(await digest(rule.id)).toBe(saved)
+      // a row that already carries conditions (saved before this check): action re-save and trigger edit are refused
+      await q(`UPDATE automation_rules SET conditions = $2::jsonb WHERE id = $1`, [rule.id, JSON.stringify(conditions)])
+      const planted = await digest(rule.id)
+      expect(planted).not.toBe(saved)
+      expectConditionsRefusal(await refusalOf(service.updateRule(rule.id, sheet, { actionConfig: job } as never)))
+      expect(await digest(rule.id)).toBe(planted)
+      expectConditionsRefusal(await refusalOf(service.updateRule(rule.id, sheet, { triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } } as never)))
+      expect(await digest(rule.id)).toBe(planted)
+      // the on/off switch stays open on that row, and clearing the conditions is allowed
+      expect((await service.setRuleEnabled(rule.id, sheet, false))?.enabled).toBe(false)
+      const cleared = await service.updateRule(rule.id, sheet, { conditions: null } as never)
+      expect(cleared?.conditions ?? null).toBeNull()
+      expect((await q(`SELECT enabled, conditions FROM automation_rules WHERE id = $1`, [rule.id])).rows[0]).toEqual({ enabled: false, conditions: null })
+    } finally {
+      service.unregisterSchedule(rule.id)
+      await q(`DELETE FROM automation_rules WHERE id = $1`, [rule.id]).catch(() => undefined)
+    }
+  }, 20_000)
 })
