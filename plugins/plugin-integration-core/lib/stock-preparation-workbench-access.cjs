@@ -411,6 +411,33 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
     control: null,
   }),
+  // 备料分批拉取第一期 step 6d-2a (S6-6; step-6 design §6.6; register R-91) — THE DOUBLED-SHEET REPAIR of one project sheet:
+  // the preview / execute route (retire a superseded root subtree, restore a retire run), the values-free fills report
+  // and the run list. All ADMIN: a real run is an owner-gated production write (gate ② per sheet — the repair switch, the
+  // typed project, the echoed preview digest, an approvalRef and a one-shot claim). All three answer 404 with zero IO
+  // while MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED or the project-sheets switch is off. `control: null` is
+  // deliberate: there is no web control for a repair — it runs through these routes under the owner's runbook.
+  Object.freeze({
+    capability: 'projectTarget.sheetRepair',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairFillsReport',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairRuns',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
