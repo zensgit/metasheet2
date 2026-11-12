@@ -565,7 +565,10 @@ export class AutomationScheduler {
    */
   private armLongInterval(rule: AutomationRule, intervalMs: number, targetMs: number): void {
     this.armRuleTimer(rule.id, targetMs, () => {
+      const leg = this.timers.get(rule.id)
       this.runScheduledRule(rule)
+      // A callback that synchronously unregistered / replaced this rule wins: do not re-arm over it.
+      if (this.timers.get(rule.id) !== leg) return
       let nextMs = targetMs + intervalMs
       const nowMs = Date.now()
       if (nextMs <= nowMs) nextMs = targetMs + (Math.floor((nowMs - targetMs) / intervalMs) + 1) * intervalMs

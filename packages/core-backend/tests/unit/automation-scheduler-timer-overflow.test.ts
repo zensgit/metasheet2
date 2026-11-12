@@ -6,12 +6,13 @@
  * monthly cron just after it fired, or a schedule.interval above ~24.8 days, fired in a 1 ms loop. These pin:
  *   O1 — a yearly cron runs exactly once at its target, never before, across many intermediate hops.
  *   O2 — a 30-day interval runs once per period on the registration grid, never early, across hops.
- *   O3 — unregister / replace / destroy during an intermediate wait cancel the pending hop (no leaked timer).
+ *   O3 — unregister / replace / destroy / leader loss during an intermediate wait cancel the pending hop (no
+ *        leaked timer; hops stay unref'd); a long-interval callback that drops its own rule is not re-armed.
  *   O4 — a wall-clock jump past several long-interval periods runs once, not a burst.
  *   O5 — the DST fall-back fire-once cron case still holds through the bounded arm.
  *   O6 — a short cron and a short interval (and an interval exactly at the bound) keep their single-timer path.
  *   O7 — the date-field timer delay is always far below the bound (no hop needed).
- *   O8 — REAL timers: registering a yearly cron and a 30-day interval emits no TimeoutOverflowWarning.
+ *   O8 — REAL timers: registering two yearly crons and a 30-day interval emits no TimeoutOverflowWarning.
  * Each case starts with a few-ms advance so a 1 ms-loop mutant fails fast instead of hanging the run.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -225,12 +226,76 @@ describe('AutomationScheduler — waits longer than the 2^31-1 ms timer limit (f
     expect(cb).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(26 * DAY)
     expect(vi.getTimerCount()).toBe(2)
+    // The second legs are unref'd too (a pending hop never keeps the process alive).
+    for (const id of ['yearly', 'long']) {
+      const leg = handleOf(s, id) as { hasRef(): boolean }
+      expect(leg).not.toBe(firstLegs[id === 'yearly' ? 0 : 1])
+      expect(leg.hasRef()).toBe(false)
+    }
     await s.destroy()
     await vi.advanceTimersByTimeAsync(5) // let the logger's own setImmediate flushes drain
     expect(vi.getTimerCount()).toBe(0)
     expect(s.activeCount).toBe(0)
     await vi.advanceTimersByTimeAsync(400 * DAY)
     expect(cb).not.toHaveBeenCalled()
+  })
+
+  it('O3d: leader loss during an intermediate wait clears the pending hop', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:30.000Z'))
+    const { cb } = recordingCallback()
+    const s = new AutomationScheduler(cb) // no leader options ⇒ leader
+    try {
+      s.register(cronRule('yearly', '0 0 1 1 *'))
+      s.register(intervalRule('long', 30 * DAY))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(26 * DAY)
+      expect(vi.getTimerCount()).toBe(2)
+      ;(s as unknown as { relinquishLeadership(reason: string): void }).relinquishLeadership('test')
+      expect(s.leader).toBe(false)
+      await vi.advanceTimersByTimeAsync(5) // let the logger's own setImmediate flushes drain
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(400 * DAY)
+      expect(cb).not.toHaveBeenCalled()
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O3e: a long-interval callback that synchronously unregisters or replaces its rule is not re-armed over', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-01T00:00:00.000Z'))
+    const period = 30 * DAY
+    let s!: AutomationScheduler
+    const ran: string[] = []
+    const cb = vi.fn((rule: AutomationRule) => {
+      ran.push(rule.name)
+      if (rule.id === 'gone') s.unregister('gone')
+      if (rule.id === 'swap' && rule.name === 'rule swap') {
+        const next = cronRule('swap', '0 12 * * *')
+        next.name = 'swapped'
+        s.register(next)
+      }
+    })
+    s = new AutomationScheduler(cb)
+    try {
+      s.register(intervalRule('gone', period))
+      s.register(intervalRule('swap', period))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(period - 5)
+      expect(ran).toEqual(['rule gone', 'rule swap'])
+      expect(s.isRegistered('gone')).toBe(false)
+      expect(s.isRegistered('swap')).toBe(true)
+      await vi.advanceTimersByTimeAsync(5) // let the logger's own setImmediate flushes drain
+      expect(vi.getTimerCount()).toBe(1) // only the replacement daily cron
+      await vi.advanceTimersByTimeAsync(2 * period)
+      expect(ran.filter((n) => n === 'rule gone' || n === 'rule swap')).toHaveLength(2) // never ran again
+      expect(ran.filter((n) => n === 'swapped').length).toBeGreaterThanOrEqual(59)
+    } finally {
+      await s.destroy()
+    }
   })
 
   it('O4: a wall-clock jump past several long-interval periods runs once, then stays on the registration grid', async () => {
@@ -363,7 +428,7 @@ describe('date-field timer delay stays far below the bound (O7)', () => {
 })
 
 describe('AutomationScheduler — no TimeoutOverflowWarning (O8, real timers)', () => {
-  it('registering a yearly cron and a 30-day interval emits no TimeoutOverflowWarning', async () => {
+  it('registering two yearly crons and a 30-day interval emits no TimeoutOverflowWarning', async () => {
     vi.useRealTimers()
     const overflow: string[] = []
     const onWarning = (warning: Error) => {
@@ -373,9 +438,11 @@ describe('AutomationScheduler — no TimeoutOverflowWarning (O8, real timers)', 
     const cb = vi.fn()
     const s = new AutomationScheduler(cb)
     try {
-      s.register(cronRule('yearly', '0 0 1 1 *'))
+      // Two yearly crons six months apart: whatever today's date, at least one is > 24.8 days away.
+      s.register(cronRule('yearly-jan', '0 0 1 1 *'))
+      s.register(cronRule('yearly-jul', '0 0 1 7 *'))
       s.register(intervalRule('long', 30 * DAY))
-      expect(s.activeCount).toBe(2)
+      expect(s.activeCount).toBe(3)
       // process.emitWarning delivers on the next tick; let it (and any 1 ms clamp) land before asserting.
       await new Promise<void>((resolve) => setImmediate(resolve))
       await new Promise<void>((resolve) => {
