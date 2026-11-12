@@ -52,8 +52,9 @@ function strictServer(records: MetaRecord[], pageIds: string[], options: ServerO
         })
       })
     }
-    // A view load: what the server stores for the page's records.
-    const rows = pageIds.map((id) => ({ id, version: stored.get(id)!.version, data: { ...stored.get(id)!.data } }))
+    // A view load: what the server stores for the page's records (another sheet has none of them).
+    const ids = input.includes('sheetId=sheet_2') ? [] : pageIds
+    const rows = ids.map((id) => ({ id, version: stored.get(id)!.version, data: { ...stored.get(id)!.data } }))
     return Promise.resolve(json({ ok: true, data: { fields: FIELDS, rows, page: { offset: 0, limit: 50, total: rows.length, hasMore: false } } }))
   })
   async function tick() {
@@ -109,7 +110,7 @@ async function setup(records: MetaRecord[], options: ServerOptions & { server?: 
   const grid = useMultitableGrid({ sheetId, viewId, client: new MultitableApiClient({ fetchFn: server.fetchFn }) })
   await grid.loadViewData(0)
   expect(grid.rows.value.map((record) => record.id)).toEqual(records.map((record) => record.id))
-  return { grid, server, sheetId }
+  return { grid, server, sheetId, viewId }
 }
 
 const r1 = (): MetaRecord => ({ id: 'r1', version: 1, data: { f1: 'a', f2: 'x', f3: 'k', f_due: '2031-01-02', f_qty: 5, f_link: ['p_a'] } })
@@ -188,6 +189,17 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     void grid.patchCell('r1', 'f3', 'z', 1)
     await server.answerAll()
     expect(server.sent.map((change) => change.fieldId)).toEqual(['f1', 'f2', 'f3'])
+  })
+
+  it('a waiting write replaced by a newer one of its cell goes last, so the undo history keeps the order of the edits', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    void grid.patchCell('r1', 'f3', 'z', 1)
+    void grid.patchCell('r1', 'f2', 'w', 1)
+    await server.answerAll()
+    expect(server.sent.map((change) => [change.fieldId, change.value])).toEqual([['f1', 'b'], ['f3', 'z'], ['f2', 'w']])
+    expect(grid.editHistory.value.map((edit) => edit.fieldId)).toEqual(['f1', 'f3', 'f2'])
   })
 
   it('a replaced write leaves nothing counted as in flight: a range write is refused while writes are out, and goes once they are answered', async () => {
@@ -330,6 +342,24 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(row(grid).data).toMatchObject({ f1: 'a', f2: 'y' })
     await server.answerAll()
     expect(row(grid).data.f2).toBe('y')
+  })
+
+  it.each([
+    ['a realtime merge', async (grid: ReturnType<typeof useMultitableGrid>, server: ReturnType<typeof strictServer>) => {
+      const stored = server.stored.get('r1')!
+      grid.mergeRemoteRecord({ id: 'r1', version: stored.version, data: { ...stored.data } })
+    }],
+    ['a reload', async (grid: ReturnType<typeof useMultitableGrid>) => { await grid.loadViewData(0) }],
+  ] as const)('one write out, another user writes the cell first and %s shows their value; the write conflicts: the row keeps their value', async (_name, replace) => {
+    const { grid, server } = await setup([r1()])
+    const only = grid.patchCell('r1', 'f1', 'b', 1)
+    const stored = server.stored.get('r1')!
+    stored.version += 1
+    stored.data.f1 = 'theirs'
+    await replace(grid, server)
+    await server.answerAll()
+    expect(await only).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(row(grid).data.f1).toBe('theirs')
   })
 
   it('the row reloaded after another user moved the record on: an accepted write does not overwrite what the reload showed', async () => {
@@ -490,5 +520,18 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     await server.answerAll()
     expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
     expect(grid.conflict.value).toBeNull()
+  })
+
+  it('a waiting write rejected as a conflict after a move to another view of the sheet, with the record still on the page: the conflict is raised (its retry works)', async () => {
+    const { grid, server, viewId } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f2', 'y', 1)
+    viewId.value = 'view_2'
+    await nextTick()
+    await server.answer()
+    server.stored.get('r1')!.version += 1
+    await server.answerAll()
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(grid.conflict.value).toMatchObject({ recordId: 'r1', fieldId: 'f2', attemptedValue: 'y' })
   })
 })

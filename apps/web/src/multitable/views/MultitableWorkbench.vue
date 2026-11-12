@@ -3750,11 +3750,11 @@ function setCopyField(recordId: string, fieldId: string, value: unknown) {
   deepLinkedRecord.value = { ...copy, data: { ...copy.data, [fieldId]: value } }
 }
 
-function syncCopyFieldFromRow(recordId: string, fieldId: string) {
+function syncCopyFromRow(recordId: string) {
   const copy = deepLinkedRecord.value
   const row = pageRow(recordId)
   if (copy?.id !== recordId || !row) return
-  deepLinkedRecord.value = { ...copy, version: row.version, data: { ...copy.data, [fieldId]: row.data[fieldId] } }
+  deepLinkedRecord.value = { ...copy, version: row.version, data: { ...copy.data, ...row.data } }
 }
 
 // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`): the
@@ -3775,13 +3775,19 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   // that fails while this one waits sets it later, and is not this one's).
   const refusedLocally = grid.error.value
   // The drawer can show a copy of a record that is on the page too (a realtime merge keeps one for the record
-  // shown). That copy's field follows the grid's row: it shows the save at once (as the row does), and once the save
-  // is answered the row's value and version (the newest save of the field still waiting, or the stored value after
-  // a rejection), never an older save's value while a newer one waits.
-  const followsRow = deepLinkedRecord.value?.id === record.id && pageRow(record.id) !== null
-  if (followsRow && !refusedLocally) setCopyField(record.id, fieldId, value)
+  // shown). Such a copy follows the grid's row: it shows the save at once (as the row does), and once the save is
+  // answered it takes the row as it is then, its data with its version (the newest save of each field still
+  // waiting, the stored value after a rejection, and a change from elsewhere the row has). Decided again at the
+  // answer: a merge can make the copy meanwhile, and the record can leave the page. A copy of a record off the page
+  // takes an accepted save (below), and goes back on a rejected one.
+  const copyAtCall = deepLinkedRecord.value?.id === record.id ? deepLinkedRecord.value : null
+  const valueBefore = copyAtCall?.data[fieldId]
+  if (copyAtCall && pageRow(record.id) && !refusedLocally) setCopyField(record.id, fieldId, value)
   const failure = await write
-  if (followsRow) syncCopyFieldFromRow(record.id, fieldId)
+  const followsRow = deepLinkedRecord.value?.id === record.id && pageRow(record.id) !== null
+  if (followsRow) syncCopyFromRow(record.id)
+  else if (copyAtCall && failure && failure !== CELL_WRITE_SUPERSEDED && deepLinkedRecord.value?.id === record.id
+    && deepLinkedRecord.value.data[fieldId] === value) setCopyField(record.id, fieldId, valueBefore)
   // Replaced before it was sent by a newer save of the same field, whose answer is the field's.
   if (failure === CELL_WRITE_SUPERSEDED) return
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner

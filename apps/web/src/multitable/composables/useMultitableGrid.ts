@@ -1499,8 +1499,8 @@ export function useMultitableGrid(opts: {
    *   server's answer to an older write brings its own link summaries for every link field). A write accepted after
    *   the row was reloaded from an older version is shown on it; one rejected is rolled back on it.
    * - It counts as in flight from the call on (undo, redo and range writes are refused until it is answered), and
-   *   goes to the sheet and view it was made in; its answer after a move to another sheet or view enters neither
-   *   that one's undo history nor its conflict.
+   *   goes to the sheet and view it was made in; its answer after a move to another sheet or view does not enter
+   *   that one's undo history, nor its conflict unless the record is on its page.
    */
   async function patchCell(
     recordId: string,
@@ -1555,14 +1555,13 @@ export function useMultitableGrid(opts: {
     } else {
       const at = queue.waiting.findIndex((queued) => queued.fieldId === fieldId)
       if (at >= 0) {
-        const older = queue.waiting[at]
+        // The newer write goes last, as if the older one had not been made: the undo history keeps the order of edits.
+        const [older] = queue.waiting.splice(at, 1)
         write.oldValue = older.oldValue
         write.oldLinkSummaries = older.oldLinkSummaries
-        queue.waiting[at] = write
         older.wake(CELL_WRITE_SUPERSEDED)
-      } else {
-        queue.waiting.push(write)
       }
+      queue.waiting.push(write)
       const turn = await new Promise<'send' | typeof CELL_WRITE_SUPERSEDED>((resolve) => { write.wake = resolve })
       if (turn === CELL_WRITE_SUPERSEDED) {
         activeGridWrites--
@@ -1614,7 +1613,6 @@ export function useMultitableGrid(opts: {
         if (live && live !== row && typeof liveVersion === 'number' && liveVersion < committedVersion
           && !turns.waiting.some((queued) => queued.fieldId === fieldId)) {
           live.data[fieldId] = value
-          if (write.nextLinkSummaries && !result.linkSummaries?.[recordId]?.[fieldId]) setLinkSummaries(recordId, fieldId, write.nextLinkSummaries)
         }
         options?.onCommitted?.(committedVersion)
       }
@@ -1646,7 +1644,9 @@ export function useMultitableGrid(opts: {
       }
       showWaiting()
       lastBatchId.value = null
-      if (e?.code === 'VERSION_CONFLICT' && contextId === rangeContextId) {
+      // Not after a move to another sheet: the record is not there (after a move to another view of the sheet it
+      // usually is, and the banner's retry works).
+      if (e?.code === 'VERSION_CONFLICT' && (contextId === rangeContextId || rows.value.some((r) => r.id === recordId))) {
         conflict.value = {
           recordId,
           fieldId,
