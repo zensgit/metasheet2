@@ -159,7 +159,7 @@ async function holdLock(lockPath) {
 const ctrFields = (fields) => fields
 function makeWorld(t, options = {}) {
   const tmpBase = realpathSync(os.tmpdir())
-  const root = realpathSync(mkdtempSync(path.join(tmpBase, 'd5-window-')))
+  const root = realpathSync(mkdtempSync(path.join(tmpBase, 'deploy-window-')))
   const tag = `${path.basename(root)}-${process.pid}`
   const world = { root, tag, holders: [], pgids: new Set() }
   t.after(() => {
@@ -549,7 +549,7 @@ function checkHappy(r, { appdata }) {
   // Of the deploy user's crontab only the docker GC / prune count is logged.
   assert.match(r.deployLog, /^\[deploy-window\] crontab docker_gc_entries=0$/m)
   assert.doesNotMatch(r.deployLog, /crontab entries=/)
-  // Main-session decision: no git auto-gc/maintenance during the prologue sync, and only there.
+  // No git auto-gc/maintenance during the prologue sync, and only there.
   const gitCalls = r.calls.filter((call) => call.kind === 'git')
   for (const sub of ['fetch origin main', 'merge --ff-only origin/main']) {
     const call = gitCalls.find((entry) => entry.args === sub)
@@ -690,7 +690,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['pre-pull disk gate', {}, { H_DF_FREE_KB: String(1024 * 1024) }],
     ['post-pull disk gate (database larger than the free space)', {}, { H_DB_BYTES: String(200 * 1024 ** 3) }],
     ['in-play sha mismatch', {}, { EXPECTED_PENDING_SHA256: 'f'.repeat(64) }],
-    ['in-play sha with a trailing newline is refused (names joined by newline without a trailing one: recorded deviation 13)', {}, { EXPECTED_PENDING_SHA256: sha256(INPLAY.join('\n') + '\n') }],
+    ['in-play sha with a trailing newline is refused (names joined by newline without a trailing one)', {}, { EXPECTED_PENDING_SHA256: sha256(INPLAY.join('\n') + '\n') }],
     ['excluded name missing from the image', {}, { H_IMAGE_MIGRATIONS: [...BASE_MIGRATIONS, ...INPLAY].join(',') }],
     ['app.env key in export form', { appEnv: 'DATABASE_URL=postgres://u:p@postgres:5432/db\nexport MIGRATION_EXCLUDE=x\n' }, {}],
     ['app.env key with spaces', { appEnv: 'DATABASE_URL=postgres://u:p@postgres:5432/db\n  ALLOW_DB_RESET = true\n' }, {}],
@@ -1369,7 +1369,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!any(r, isDump))
   })
 
-  for (const [label, env] of [['ops-switch line is not off (normal delivery)', { H_OPS_SWITCH: 'on (holding deliveries)' }], ['/api/plugins does not answer', { H_PLUGINS_FAIL: '1' }]]) {
+  for (const [label, env] of [['ops-switch line is not off (normal delivery)', { H_OPS_SWITCH: 'on (subscription webhook sends paused)' }], ['/api/plugins does not answer', { H_PLUGINS_FAIL: '1' }]]) {
     scenario(`new backend check fails: ${label} -> 73, web never upped`, async (t) => {
       const world = makeWorld(t)
       const r = await runWindow(t, world, { env })
@@ -1497,22 +1497,22 @@ describe('production deploy window: remote_deploy step run against test doubles'
     await assert.rejects(runWindow(t, world, { runText: mutated }), /still running/)
   })
 
-  // ---------- recorded deviations and tool probes ----------
-  scenario('pre-existing SHA guard in the prologue ends as 70 refused-unchanged (rc from phase: recorded deviation 5)', async (t) => {
+  // ---------- prologue exits, bootstrap and host tool probes ----------
+  scenario('pre-existing SHA guard in the prologue ends as 70 refused-unchanged (the rc comes from the window phase)', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { DEPLOY_IMAGE_TAG: 'latest', DEPLOY_EXPECTED_COMMIT: 'latest' } })
     checkRefused(r)
     assert.ok(!any(r, isPull))
   })
 
-  scenario('compose v2 missing in the prologue ends as 70 refused-unchanged (recorded deviation 5)', async (t) => {
+  scenario('compose v2 missing in the prologue ends as 70 refused-unchanged (the rc comes from the window phase)', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_COMPOSE_MISSING: '1' } })
     checkRefused(r)
     assert.deepEqual(r.calls.filter((call) => call.kind === 'docker-compose').map((call) => call.args), ['--version'], 'only the docker-compose double ran')
   })
 
-  scenario('bootstrap: the run directory already exists -> 76, nothing runs (recorded deviation 7)', async (t) => {
+  scenario('bootstrap: the run directory already exists -> 76, nothing runs (a run directory is never reused)', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { preRunDir: true })
     assert.equal(r.out.deploy_rc, '76')
@@ -1520,7 +1520,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)), [])
   })
 
-  scenario('host without setsid: the window still starts and refuses 70 (recorded deviation 8)', async (t) => {
+  scenario('host without setsid: the window still starts (nohup only) and refuses 70', async (t) => {
     const world = makeWorld(t, { absentTools: ['setsid'] })
     const r = await runWindow(t, world)
     checkRefused(r)
@@ -1540,7 +1540,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)), [])
   })
 
-  scenario('drain probe with the import and sync tables absent proceeds (recorded deviation 16)', async (t) => {
+  scenario('drain probe with the import and sync tables absent proceeds (older schemas)', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_TABLES_ABSENT: '1' } })
     assertCommon(r, 0)
@@ -1574,7 +1574,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!text.includes(Buffer.from(FAKE_SECRET).toString('base64')))
     assert.ok(!capture.includes(FAKE_SECRET), 'the secret crosses ssh only encoded on stdin, never in clear')
     // Every docker stop/start/exec/inspect/kill/cp is bounded by timeout, except the two pinned
-    // digest lines whose pinned prefix cannot take one (recorded deviation 2).
+    // digest lines whose pinned prefix cannot take one.
     const unbounded = code.map((line) => line.replace(/\b(werr|wlog|fail|echo)\s+"[^"]*"/g, '$1 MESSAGE'))
       .filter((line) => /\bdocker\s+(stop|start|exec|inspect|kill|cp|image\s+inspect)\b/.test(line))
       .filter((line) => !/\btimeout\s+\S+\s+docker\b/.test(line))
