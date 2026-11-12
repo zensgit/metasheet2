@@ -42,7 +42,7 @@
 - 备料 SQL 迁移 8 个：`100_create_integration_stock_prep_project_write_lock`（表写锁）、`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable`（试点列与审计词表）、`102_create_integration_stock_prep_continuation`（沿用关系）、`103_create_integration_stock_prep_refresh_state`（刷新状态、待定、执行台账）、`104_create_integration_stock_prep_change_plan`（变更计划）、`106_extend_integration_stock_prep_refresh_execution_for_recovery`（执行 intent 日志与关闭形态）、`107_create_integration_stock_prep_component_ruling`（部件裁定 / 残留确认）、`108_create_integration_stock_prep_sheet_repair`（修复台账与一次性占用，S6-6 #6843）。`105` 两边逐字节相同，R83 已经跑过。
 - 平台 Kysely 迁移 10 个：`zzzz20261022150000_add_meta_sheets_grid_export_closure`、`zzzz20261031120000_add_users_recycle_bin`、`zzzz20261101090000_create_directory_handovers`、`zzzz20261102150000_dingtalk_login_repairs`、`zzzz20261103120000_outbound_intent_attempt_lease_target_key`、`zzzz20261104150000_create_task_source_links`、`zzzz20261106120000_create_security_action_challenges`、`zzzz20261106130000_create_directory_integration_capabilities`、`zzzz20261107010000_deprovision_effect_provider`、`zzzz20261111093417_create_user_notification_endpoints_preferences`（#6857，2026-11-11 合入；切包提交更新时按实际再算一次）。
 
-**全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。108 缺失时，修复路由在开关打开后答 503、什么都不写（`108_create_integration_stock_prep_sheet_repair.sql:67-70`）；**而且**从 S6-5b 起，就绪 v7 的 `no_open_sheet_repair_run` 读不出修复台账，对每个项目都不通过，和 107 一样（S6-5b；108 头注释只写了修复路由，本 PR 没有改迁移文件）。所以这次升级**绝不用 `-RunMigrations 0`**（升级脚本默认 `'1'`，`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:269`；为 `0` 时跳过迁移，`:2864-2878`）。
+**全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。108 缺失时，修复路由在开关打开后答 503、什么都不写（`108_create_integration_stock_prep_sheet_repair.sql:67-70`）；**而且**从 S6-5b 起，就绪 v7 的 `no_open_sheet_repair_run` 读不出修复台账，对每个项目都不通过，和 107 一样（S6-5b；108 头注释 DEPLOY SHAPE 段 `108_…:67-70` 由 S6-8c 补上了这一点，只改注释、DDL 不变）。所以这次升级**绝不用 `-RunMigrations 0`**（升级脚本默认 `'1'`，`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:269`；为 `0` 时跳过迁移，`:2864-2878`）。
 
 ### 1.2 只读预检（窗口之前，结果只记计数）
 
@@ -312,6 +312,8 @@ Remove-Variable token
 ```json
 { "confirmProjectNo": "<项目号>", "componentHandle": "<一个项目普查里列出的句柄>", "basis": "head_not_ordered", "runbookRef": "<工单号>", "acknowledge": { "customerAnswered": true } }
 ```
+
+重新证明之前，先过和普查一样的关键列守卫（同 §5.2，S6-5b）：表上缺了五个关键列中的任何一个，答 409 `STOCK_PREP_SHEET_CENSUS_FIELD_MISSING`、什么都不记（不写确认行，也不写审计行）；宿主从数据库答不出时答 503 `STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE`，同样什么都不记（`http-routes.cjs:12541-12543`，守卫在 `:5602-5617`）。按 owner 批准的步骤补回列（不是本手册的步骤）、重跑这个项目的普查之后，再记确认。
 
 服务端在一次新的读取上重新证明这个句柄**现在**是 D2 残留，不是就 409 `STOCK_PREP_REMNANT_NOT_PRESENT`、什么都不写（`stock-preparation-remnant-acknowledgement.cjs:207-212`）；是就在一个事务里写确认行（迁移 107）和审计 `exception_resolve` / `remnant_acknowledged`。确认**不是**计划的输入：确认错了也是安全一侧——第一次受治理计算若仍读到这个部件的订单头，项目会挂起 `dropped_order_head_unresolved`，直到有裁定或退出试点（设计 §6.3）。
 
