@@ -291,7 +291,7 @@ jobs:
             docker/nginx.conf \
             scripts/ops/attendance-preflight.sh \
           | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
-              "set -euo pipefail; mkdir -p '${remote_repo_path}/docker' '${remote_repo_path}/scripts/ops'; tar -xzf - -C '${remote_repo_path}'"
+              "set -euo pipefail; w=\"\$HOME/metasheet2-deploy-window\"; if [ -d \"\$w\" ]; then command -v flock >/dev/null 2>&1 || { echo '[host-sync][error] flock is missing on the deploy host' >&2; exit 75; }; flock -n \"\$w/lock\" true || { echo '[host-sync][error] a deploy window holds the host lock' >&2; exit 75; }; if [ -f \"\$w/state\" ]; then case \"\$(sed -n 's/^phase=//p' \"\$w/state\")\" in done-new|done-restored-old|refused-unchanged) ;; *) echo '[host-sync][error] deploy window state is unfinished or needs the owner; read it before any deploy' >&2; exit 75 ;; esac; fi; fi; mkdir -p '${remote_repo_path}/docker' '${remote_repo_path}/scripts/ops'; tar -xzf - -C '${remote_repo_path}'"
           )
           sync_rc=$?
           set -e
