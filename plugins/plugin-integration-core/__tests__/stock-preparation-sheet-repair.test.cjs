@@ -336,6 +336,10 @@ test('RP-00b the closed bodies: every refusal is 400 naming the FIELD (never its
     [{ ...ok, mode: 'execute', componentHandle: HANDLE, planDigest: digest }, 'approvalRef'],
     [{ ...ok, mode: 'execute', componentHandle: HANDLE, planDigest: digest, approvalRef: 'has space' }, 'approvalRef'],
     [{ ...ok, mode: 'execute', componentHandle: HANDLE, planDigest: digest, approvalRef: 'x'.repeat(65) }, 'approvalRef'],
+    // An EMPTY approval names nothing (ruling R3-6): refused here, before the audit's own values-free gate would refuse it.
+    [{ ...ok, mode: 'execute', componentHandle: HANDLE, planDigest: digest, approvalRef: '' }, 'approvalRef'],
+    [{ mode: 'execute', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId, planDigest: digest, approvalRef: '' }, 'approvalRef'],
+    [{ mode: 'execute', recipe: CLOSE, confirmProjectNo: 'SYN-1', runId, planDigest: digest, approvalRef: '' }, 'approvalRef'],
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1' }, 'runId'],
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId: 'sheet-repair:not-a-uuid' }, 'runId'],
     [{ mode: 'preview', recipe: RESTORE, confirmProjectNo: 'SYN-1', runId, componentHandle: HANDLE }, 'componentHandle'],
@@ -1781,6 +1785,10 @@ test('CL-01 the continuation\'s verification, pure: every planned row against th
     ['restamped', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: 'table-action:syn-pull-2', summary: '{"type":"missing_from_plm"}' } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
     // `active` is not the BOOLEAN false
     ['string false', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, active: 'false' } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
+    // ANOTHER repair run's retire stamp — the same boolean false, decision and summary, only the run id differs (ruling
+    // R3-6): not this run's target state. (Reachable only by an edit of the machine run-id cell: any other execute's
+    // begin closes this open run first.)
+    ['another repair run\'s stamp', retired((spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}` } : spec)), { inTargetState: 3, notWritten: 0, moved: 1, missing: 0 }],
     // gone
     ['missing', retired((spec) => (spec.id === 'rec_old_4' ? null : spec)), { inTargetState: 3, notWritten: 0, moved: 0, missing: 1 }],
     // a run that wrote nothing at all

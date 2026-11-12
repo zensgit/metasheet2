@@ -84,6 +84,9 @@
  *            audit details or the answers, and the restore puts every stamp back byte for byte. And (ruling R3-2) no
  *            answer of that retire or of its restore — the previews, a STOPPED refusal of each (the first patch fails in
  *            the host), the execute answers — carries either cell of that backup; each answer has exactly its own keys.
+ *   S9D-25   (ruling R3-6) the close's holder assert on real row locks: a takeover between the continuation's in-lease
+ *            verification and its close transaction is refused by that transaction's holder assert (409 LEASE_LOST, the
+ *            run still open, no close audit row, no bump, no row written); the same approved close digest then runs.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -367,9 +370,10 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
      * production plugin context. `hooks.beforePatch` / `hooks.afterPatch` run around the host's own patchRecord;
      * `hooks.onSourceRead` runs inside every source read. `opts.lock` builds the lock the routes use (the heartbeat
      * cases hand a fast-heartbeat lock over a recording db); `opts.audit` wraps the real audit store (a slow append
-     * inside a ledger transaction holds its lock row).
+     * inside a ledger transaction holds its lock row); `opts.store` wraps the real repair ledger store (S9D-25: a
+     * takeover between the continuation's in-lease verification and its close transaction).
      */
-    async function world(label: string, opts: { lock?: () => any; audit?: (real: any) => any } = {}) {
+    async function world(label: string, opts: { lock?: () => any; audit?: (real: any) => any; store?: (real: any) => any } = {}) {
       const tenantId = `tenant_s66_${label}_${TOKEN}`
       tenants.push(tenantId)
       const projectId = `${tenantId}:integration-core`
@@ -439,7 +443,8 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const continuationStore = continuationStoreLib.createStockPreparationContinuationStore({ db })
       const realAudit = auditStoreLib.createStockPreparationAuditStore({ db })
       const audit = opts.audit ? opts.audit(realAudit) : realAudit
-      const repairStore = createStockPreparationSheetRepairStore({ db })
+      const realRepairStore = createStockPreparationSheetRepairStore({ db })
+      const repairStore = opts.store ? opts.store(realRepairStore) : realRepairStore
       const pullBatchStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db })
       const routes = new Map<string, any>()
       const routeContext = {
@@ -1417,6 +1422,49 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         expect(after.get(id)!.data, `${st.oldIds.includes(id) ? 'old' : 'copy'} row: byte-identical`).toBe(row.data)
         expect(after.get(id)!.version).toBe(row.version + (st.oldIds.includes(id) ? 2 : 0))
       }
+    }, 180_000)
+
+    test('S9D-25 (ruling R3-6) the close\'s holder assert on real row locks: a takeover between the continuation\'s in-lease verification and its close transaction is refused by that transaction\'s holder assert — 409 LEASE_LOST, the run still `running`, no close approval, no close audit row, no bump, no row written; once the taker released the sheet, the SAME approved close digest completes', async () => {
+      const takeover: { armed: boolean; taker: any; st: any } = { armed: false, taker: null, st: null }
+      const st = await world('d25', {
+        store: (real: any) => ({
+          ...real,
+          // By program order: the verification under the close's lease has run; its close transaction has not begun.
+          closeVerifiedRun: async (input: any) => {
+            if (takeover.armed) {
+              takeover.armed = false
+              const other = takeover.st.otherLock(LAPSED)
+              takeover.taker = other.createGuard(await other.acquire(takeover.st.scopeKey, { purpose: 'small_apply', runId: 'syn-pull-d25', tenantId: takeover.st.tenantId }))
+            }
+            return real.closeVerifiedRun(input)
+          },
+        }),
+      })
+      takeover.st = st
+      const runId = await leaveRetireOpen(st, 'd25')
+      st.patchInputs.length = 0
+      const closePlan = dataOf(await st.repair({ mode: 'preview', recipe: CLOSE, runId }))
+      expect([closePlan.eligible, closePlan.refusals, closePlan.counts.inTargetState]).toEqual([true, [], 4])
+      const before = await st.stored()
+      const close = () => st.repair({ mode: 'execute', recipe: CLOSE, runId, planDigest: closePlan.planDigest, approvalRef: 'R-91:s66-d25-close' })
+      takeover.armed = true
+      const refused = errorOf(await close(), 409, PROJECT_WRITE_ERROR_CODES.LEASE_LOST)
+      expect(takeover.taker, 'the takeover landed between the verification and the close transaction').not.toBeNull()
+      expect(JSON.stringify(refused).includes(PROJECT), 'values-free').toBe(false)
+      const open = (await st.runs())[0]
+      expect([open.id, open.status, open.close_approval_ref, open.written_count, open.finished_at]).toEqual([runId, 'running', null, null, null])
+      expect((await st.audits()).filter((row: any) => row.mode === 'sheet_repair_verified_closed'), 'no close audit row').toEqual([])
+      const held = await st.lockRow()
+      expect([held.lease_id !== null, held.lease_purpose, held.generation_reason], 'the taker holds the sheet; nothing was bumped').toEqual([true, 'small_apply', null])
+      expect([await st.stored(), st.patchInputs.length], 'no row written').toEqual([before, 0])
+      // The taker releases the sheet: the SAME approved close digest completes — the refusal spent nothing.
+      await takeover.taker.release()
+      const closed = dataOf(await close())
+      expect([closed.status, closed.runId, closed.verified, closed.generationBumped]).toEqual(['completed', runId, 4, true])
+      const run = (await st.runs())[0]
+      expect([run.status, run.close_approval_ref, (await st.lockRow()).generation_reason]).toEqual(['completed', 'R-91:s66-d25-close', 'sheet_repair'])
+      expect((await st.audits()).filter((row: any) => row.mode === 'sheet_repair_verified_closed').length).toBe(1)
+      expect([await st.stored(), st.patchInputs.length], 'the close writes no row').toEqual([before, 0])
     }, 180_000)
   })
 }
