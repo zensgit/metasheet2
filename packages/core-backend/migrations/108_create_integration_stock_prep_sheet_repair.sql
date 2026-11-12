@@ -64,10 +64,10 @@
 -- `sheet_repair_verified_closed`), the reads the EXISTING `project_board_read` (`sheet_repair_preview_read` /
 -- `sheet_fills_report_read` / `sheet_repair_runs_read`) — the D9 precedent (design T6-12).
 --
--- DEPLOY SHAPE (design §7.4). Nothing but the repair routes reads these tables, and those routes answer 404 before
--- any IO while MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED is not exactly 'true' (default OFF). With the switch
--- on and this migration missing, the repair routes answer 503 STOCK_PREP_SHEET_REPAIR_STORE_FAILED and write
--- nothing; no pull, export or readiness check is affected.
+-- DEPLOY SHAPE (design §7.4). While MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED is not exactly 'true' (default
+-- OFF) the repair routes answer 404 before any IO; with it on and this migration missing they answer 503
+-- STOCK_PREP_SHEET_REPAIR_STORE_FAILED and write nothing. No pull or export reads these tables, but since pilot
+-- readiness v7 (S6-5b) readiness and the enable read the run table whatever the switch says: without 108, not ready.
 --
 -- RUNBOOK: the plugin runtime role needs SELECT, INSERT and UPDATE on integration_stock_prep_sheet_repair_run, and
 -- SELECT and INSERT on integration_stock_prep_sheet_repair_claim.
