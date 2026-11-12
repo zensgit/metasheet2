@@ -2714,6 +2714,7 @@ jobs:
             tests/integration/feishu-mock-harness-smoke.db.test.ts \
             tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \
             tests/integration/notification-endpoints-preferences.db.test.ts \
+            tests/integration/session-token-invite-lifecycle.db.test.ts \
             tests/integration/approval-routing-policy-required.db.test.ts \
             tests/integration/approval-routing-policy-required.api.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \

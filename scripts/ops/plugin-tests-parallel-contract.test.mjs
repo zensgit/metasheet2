@@ -220,9 +220,12 @@ function assertParallelWorkflow(doc) {
         const notificationEndpointsAddition = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'
         assert.equal(step.run.split(notificationEndpointsAddition).length - 1, 1, 'User notification endpoints and preferences DB suite must run exactly once')
         assert.ok(step.run.includes(lifecycleHistoryAddition + notificationEndpointsAddition), 'Keep the user notification endpoints and preferences suite right after the directory integration lifecycle history suite')
+        const sessionTokenInviteAddition = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'
+        assert.equal(step.run.split(sessionTokenInviteAddition).length - 1, 1, 'Session token and invite lifecycle DB suite must run exactly once')
+        assert.ok(step.run.includes(notificationEndpointsAddition + sessionTokenInviteAddition), 'Keep the session token and invite lifecycle suite right after the user notification endpoints and preferences suite')
         const routingPolicyRequiredDbAddition = '  tests/integration/approval-routing-policy-required.db.test.ts \\\n'
         assert.equal(step.run.split(routingPolicyRequiredDbAddition).length - 1, 1, 'Approval routing policy-required DB suite must run exactly once')
-        assert.ok(step.run.includes(notificationEndpointsAddition + routingPolicyRequiredDbAddition), 'Keep the approval routing policy-required DB suite right after the user notification endpoints and preferences suite')
+        assert.ok(step.run.includes(sessionTokenInviteAddition + routingPolicyRequiredDbAddition), 'Keep the approval routing policy-required DB suite right after the session token and invite lifecycle suite')
         const routingPolicyRequiredApiAddition = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'
         assert.equal(step.run.split(routingPolicyRequiredApiAddition).length - 1, 1, 'Approval routing policy-required API suite must run exactly once')
         assert.ok(step.run.includes(routingPolicyRequiredDbAddition + routingPolicyRequiredApiAddition), 'Keep the approval routing policy-required API suite right after its DB suite')
@@ -241,6 +244,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(departureVouchingAddition, '')
         step.run = step.run.replace(lifecycleHistoryAddition, '')
         step.run = step.run.replace(notificationEndpointsAddition, '')
+        step.run = step.run.replace(sessionTokenInviteAddition, '')
         step.run = step.run.replace(routingPolicyRequiredDbAddition, '')
         step.run = step.run.replace(routingPolicyRequiredApiAddition, '')
       }
@@ -348,6 +352,9 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     ...['db', 'api'].flatMap(kind => [
       doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
       doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`, anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
