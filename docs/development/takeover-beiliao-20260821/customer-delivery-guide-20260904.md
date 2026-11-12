@@ -396,7 +396,7 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | 3 | **全员重新登录**(旧令牌不会自己长出声明,重登才会) | 抽查:把重登后拿到的令牌 payload 解开(JWT 中段 base64),里面必须有非空租户字段。**不要用"调个接口通不通"来验**——flag 还没开的时候,有声明和没声明的令牌都会通,那是一次空校验 |
 | 4 | 最后才写入 env 并重载重启 | 两条都要:①`pm2 env 0` 里看到 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`;②用一个**没有**租户声明的旧令牌打 `GET /api/integration/stock-preparation/confirmation-decisions/readiness`,得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED` |
 
-**回滚**:删掉 env 里那一行 → 重载/重启。没有数据迁移、没有落库状态,回滚即刻恢复今天的行为。
+**回滚**:删掉 env 里那一行 → 重载/重启。没有数据迁移、没有落库状态,回滚即刻恢复今天的行为。**例外(带 S6-9 的包,登记 R-91 ㉘):只要有任何一个备料试点已启用,就不得删这一行。** 试点就绪只在「启用」那一下要求这个开关打开;启用之后删掉它,这张试点表上无租户平台管理员的旧路径会重新打开。有试点时要回滚,先由 owner 裁定,按 `runbook-stock-prep-batch-refresh-pilot-20261111.md` §1.6 与 §3「退出试点」处理每个试点之后再删。
 
 **开了之后一线会看到什么**:如果某个账号的令牌仍然没有租户声明,页面上是一句专门写给它的话——「当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。」——**不要让人反复刷新**,重试不会变好,要么补 `user_orgs` 要么换账号重登。
 

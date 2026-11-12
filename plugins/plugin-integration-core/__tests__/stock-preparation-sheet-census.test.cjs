@@ -29,7 +29,9 @@ const PACK_DIR = path.join(REPO_ROOT, 'scripts', 'ops', 'stock-prep-sheet-census
 const {
   SHEET_CENSUS_SCHEME,
   SHEET_CENSUS_COUNT_KEYS,
+  SHEET_CENSUS_KEY_FIELD_IDS,
   StockPreparationSheetCensusError,
+  censusKeyFieldVerdict,
   censusOfRows,
   publicCensusOf,
   __internals: { componentHandle },
@@ -302,9 +304,28 @@ test('SC-02 the pack\'s human-field list is HUMAN_PRESERVED_FIELD_IDS; its requi
   const ids = [...block.matchAll(/'([A-Za-z]+)'/g)].map((match) => match[1])
   assert.deepEqual(ids, HUMAN_PRESERVED_FIELD_IDS.slice())
   const required = [...PACK.match(/ARRAY\[([^\]]+)\]::text\[\] AS required/)[1].matchAll(/'([A-Za-z]+)'/g)].map((match) => match[1])
-  assert.deepEqual(required, ['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'active'])
+  // S6-5b: the pack's `required` list IS the module's census key columns (the routes refuse field_missing on the same set).
+  assert.deepEqual(required, [...SHEET_CENSUS_KEY_FIELD_IDS])
+  assert.deepEqual([...SHEET_CENSUS_KEY_FIELD_IDS], ['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'active'])
   const templateIds = new Set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
   for (const id of [...required, ...ids]) assert.ok(templateIds.has(id), `${id} is a main-template field`)
+})
+
+test('SC-12 (S6-5b) censusKeyFieldVerdict: only a db answer is evidence; it counts the key columns the database does not list; values-free', () => {
+  const all = Object.fromEntries(SHEET_CENSUS_KEY_FIELD_IDS.map((id) => [id, `fld_${id}`]))
+  assert.deepEqual({ ...censusKeyFieldVerdict({ resolved: all, fieldExistenceMode: 'db' }) }, { provable: true, missing: 0 })
+  for (const id of SHEET_CENSUS_KEY_FIELD_IDS) {
+    const { [id]: _gone, ...rest } = all
+    assert.deepEqual({ ...censusKeyFieldVerdict({ resolved: rest, fieldExistenceMode: 'db' }) }, { provable: true, missing: 1 }, id)
+    assert.deepEqual({ ...censusKeyFieldVerdict({ resolved: { ...all, [id]: '  ' }, fieldExistenceMode: 'db' }) }, { provable: true, missing: 1 }, `${id} blank`)
+  }
+  assert.deepEqual({ ...censusKeyFieldVerdict({ resolved: {}, fieldExistenceMode: 'db' }) }, { provable: true, missing: SHEET_CENSUS_KEY_FIELD_IDS.length })
+  // Extra columns are irrelevant.
+  assert.deepEqual({ ...censusKeyFieldVerdict({ resolved: { ...all, notes: 'fld_notes' }, fieldExistenceMode: 'db' }) }, { provable: true, missing: 0 })
+  for (const existence of [{ resolved: all, fieldExistenceMode: 'computed' }, { resolved: all, fieldExistenceMode: 'computed_scope_unavailable' }, { resolved: null, fieldExistenceMode: 'db' }, null, undefined, 'db', []]) {
+    assert.deepEqual({ ...censusKeyFieldVerdict(existence) }, { provable: false, missing: null }, JSON.stringify(existence))
+  }
+  assert.ok(Object.isFrozen(SHEET_CENSUS_KEY_FIELD_IDS))
 })
 
 test('SC-02 the pack derives ids exactly as provisioning.ts stableMetaId does', () => {

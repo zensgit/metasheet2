@@ -1589,6 +1589,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
     // Readiness v5 (batch-refresh step 6d-1b): the component ruling ledger store D20's readiness reads.
     const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
+    // Readiness v7 (batch-refresh S6-5b, R-91): the sheet-repair ledger (migration 108) the open-run check reads.
+    const sheetRepairStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-sheet-repair-store.cjs')) as any
 
     function routeResponse() {
       const res: any = { statusCode: 200, body: null, headers: {} }
@@ -1750,6 +1752,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
           // Readiness v5 (batch-refresh step 6d-1b, R-91): the real component ruling ledger (migration 107; nothing acknowledged).
           stockPreparationComponentRulingStore: componentRulingStoreLib.createStockPreparationComponentRulingStore({ db }),
+          // Readiness v7 (batch-refresh S6-5b, R-91): the real sheet-repair ledger (migration 108; no run of this sheet).
+          stockPreparationSheetRepairStore: sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
@@ -5790,8 +5794,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         // The six refresh routes (lib/http-routes.cjs stockPreparationRefresh*, lib/stock-preparation-refresh-decisions.cjs)
         // over the production host, lock, registry, audit store and refresh services, and the lock's in-transaction bump
         // (`bumpGenerationWithin`) inside the store's REAL transaction on PostgreSQL. Nested in S3A for its stack and
-        // helpers. The pilot column is SEEDED DIRECTLY (pilot enable is impossible on this build: the readiness marker
-        // CONTINUATION_SUPPORT_VERSION is 0). Synthetic values only.
+        // helpers. The pilot column is SEEDED DIRECTLY (these cases never run the enable route; the readiness marker
+        // CONTINUATION_SUPPORT_VERSION was 0 when they were written and is 1 since S6-9). Synthetic values only.
         //   S4-01 bumpGenerationWithin interleavings: (a) an ABANDONED carry_confirm lease with no execution row is cleared
         //         by the confirm's own transaction (epoch + 1, interruption recorded, the stalled holder LEASE_LOST); (b) a
         //         crashed apply (a `running` execution of a dead lease) refuses the ROUTE confirm RECOVERY_PENDING with the
