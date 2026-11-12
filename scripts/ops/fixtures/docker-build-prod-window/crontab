@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Test double for `crontab -l`: prints $H_CRONTAB_FILE, or behaves like an empty crontab.
+printf 'crontab\t-\t-\t-\t%s\n' "$*" >> "${H_CALLS}"
+[[ "${1:-}" == "-l" ]] || exit 99
+if [[ -n "${H_CRONTAB_FILE:-}" && -f "${H_CRONTAB_FILE}" ]]; then cat "${H_CRONTAB_FILE}"; exit 0; fi
+echo "no crontab for $(id -un)" >&2
+exit 1

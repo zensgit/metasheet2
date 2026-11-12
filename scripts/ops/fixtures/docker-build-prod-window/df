@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test double for `df -Pk <path>`: one filesystem with $H_DF_FREE_KB available.
+free="${H_DF_FREE_KB:-104857600}"
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "harnessfs 209715200 1000 ${free} 1% /"

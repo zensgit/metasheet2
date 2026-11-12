@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Test double for `ssh`: no network. Ignores options, takes the destination, and runs the remote
+# command words locally with `bash -c` in a clean environment (HOME = the fake host home; only
+# PATH, HOME, locale and the H_* harness variables cross over, as nothing else would over ssh).
+# H_SSH_MODE: run (default) | capture (save stdin, run nothing) | drop (run, then drop the
+# session after the window stops metasheet-web: the whole remote process group gets HUP and
+# TERM, and ssh exits 255).
+set -u
+args=("$@")
+while (( $# )); do
+  case "$1" in
+    -o|-i|-p|-l|-F) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+shift
+cmd="$*"
+flat="${args[*]}"
+flat="${flat//$'\n'/ }"
+printf 'ssh\t-\t-\tmode=%s\t%s\n' "${H_SSH_MODE:-run}" "${flat//$'\t'/ }" >> "${H_CALLS}"
+remote_env=(PATH="${PATH}" HOME="${H_HOST_HOME}" LANG=C LC_ALL=C USER="$(id -un)" LOGNAME="$(id -un)")
+for v in $(compgen -e); do
+  if [[ "$v" == H_* ]]; then remote_env+=("${v}=${!v}"); fi
+done
+cd "${H_HOST_HOME}" || exit 255
+case "${H_SSH_MODE:-run}" in
+  capture)
+    cat > "${H_ROOT}/ssh-capture.txt"
+    exit 0
+    ;;
+  drop)
+    exec 3<&0
+    perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' env -i "${remote_env[@]}" bash -c "$cmd" <&3 &
+    remote=$!
+    exec 3<&-
+    while kill -0 "$remote" 2>/dev/null; do
+      if grep -qE $'^docker\t.*\tstop -t [0-9]+ metasheet-web$' "${H_CALLS}" 2>/dev/null; then
+        printf 'ssh-drop\t-\t-\t-\tremote process group %s\n' "$remote" >> "${H_CALLS}"
+        kill -HUP -- "-${remote}" 2>/dev/null
+        kill -TERM -- "-${remote}" 2>/dev/null
+        exit 255
+      fi
+      /bin/sleep 0.05
+    done
+    wait "$remote"
+    exit $?
+    ;;
+  *)
+    exec env -i "${remote_env[@]}" bash -c "$cmd"
+    ;;
+esac

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Test double for `curl`: answers from the docker double's container state, never the network.
+set -u
+C="${H_DS:?}/ctr"
+url=""
+for a in "$@"; do
+  case "$a" in
+    -*|[0-9]*) ;;
+    *) url="$a" ;;
+  esac
+done
+printf 'curl\t-\t-\t-\t%s\n' "$url" >> "${H_CALLS}"
+running() { [[ -d "${C}/$1" && "$(cat "${C}/$1/running")" == "true" ]]; }
+rev_of() {
+  local id k
+  id="$(cat "${C}/$1/image_id")"
+  k="${id//\//_}"; k="${k//:/_}"; k="${k//@/_}"
+  cat "${H_DS}/img/${k}/rev"
+}
+case "$url" in
+  */api/plugins)
+    running metasheet-backend || exit 7
+    if [[ "${H_PLUGINS_FAIL:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then exit 22; fi
+    echo '{"plugins":[]}'
+    ;;
+  */build-info.json)
+    running metasheet-web || exit 7
+    printf '{"commit":"%s"}\n' "$(rev_of metasheet-web)"
+    ;;
+  */health)
+    running metasheet-backend || exit 7
+    commit="$(rev_of metasheet-backend)"
+    if [[ "${H_NEW_HEALTH_FAIL:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then exit 22; fi
+    if [[ "${H_OLD_RESTART_WRONG:-0}" == "1" && -e "${C}/metasheet-backend/restarted" ]]; then commit="$(printf 'e%.0s' {1..40})"; fi
+    if [[ "${H_OLD_HEALTH_WRONG:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:old* ]]; then commit="$(printf 'e%.0s' {1..40})"; fi
+    printf '{"status":"ok","build":{"commit":"%s"}}\n' "$commit"
+    ;;
+  http://127.0.0.1:8081|http://127.0.0.1:8081/)
+    running metasheet-web || exit 7
+    echo '<!doctype html><title>harness</title>'
+    ;;
+  *)
+    printf 'UNMODELED\t-\t-\t-\tcurl %s\n' "$url" >> "${H_CALLS}"
+    exit 99
+    ;;
+esac

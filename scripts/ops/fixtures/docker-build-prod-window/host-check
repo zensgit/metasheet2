@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stand-in for an owner-installed host check: records the phase; fails for phases in H_HOSTCHECK_FAIL.
+printf '%s\n' "${1:-}" >> "${H_ROOT}/hostchecks.log"
+case ",${H_HOSTCHECK_FAIL:-}," in
+  *",${1:-},"*) exit 1 ;;
+esac
+exit 0
