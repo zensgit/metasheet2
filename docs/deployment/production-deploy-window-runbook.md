@@ -78,6 +78,11 @@ never any other backend).
 Read first: `$HOME/metasheet2-deploy-window/state`, then the run directory's `rc` and
 `window.log`.
 
+A rolled-back batch still prints `migration "<name>" was executed successfully` lines
+for its earlier migrations before the `failed to execute migration` line; those
+migrations are not applied, and the ledger (the window's `ledger` lines and `state`)
+decides, not those lines.
+
 | rc | Final phase | Production | What to do |
 |---|---|---|---|
 | 0 | `done-new` | new version serving | unset the probe silence; keep the dump until the next committed run |

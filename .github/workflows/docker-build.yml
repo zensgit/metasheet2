@@ -1187,6 +1187,8 @@ jobs:
             'cd "$DEPLOY_REPO_PATH"'
             'echo "[deploy] repo_path=${DEPLOY_REPO_PATH}"'
             "# Keep host-mounted config (e.g. docker/nginx.conf) in sync with main."
+            '# No automatic gc/maintenance from the sync: a detached one would inherit the window lock fd.'
+            'export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0 GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false'
             'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then'
             '  echo "[deploy] git sync=enabled"'
             '  git fetch origin main'
@@ -1201,6 +1203,7 @@ jobs:
             '  echo "[deploy][warn] pwd=$(pwd)"'
             '  ls -la || true'
             'fi'
+            'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1'
             'if docker compose version >/dev/null 2>&1; then'
             '  COMPOSE_CMD="docker compose"'
             'elif command -v docker-compose >/dev/null 2>&1; then'
@@ -2377,28 +2380,6 @@ jobs:
             echo "- Last env_written seen in the log: \`${window_env_written:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if [[ "${SYNC_RC:-}" == "0" && "${DRILL_FAIL_STAGE:-none}" == "none" ]]; then
-            {
-              echo ""
-              echo "#### Operator actions"
-              echo ""
-              case "${DEPLOY_RC:-}" in
-                73|74|76|255|"")
-                  echo "- If the host state has env_written=new (always for 73): do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up before confirming .env names the new image."
-                  ;;
-              esac
-              case "${DEPLOY_RC:-}" in
-                72)
-                  echo "- Pre-commit abort with production down: the stopped old containers may be started only after the owner decides whether restarting the previous version is allowed (see the runbook)."
-                  ;;
-                76|255|"")
-                  echo "- Read the host state first (metasheet2-deploy-window/state and the run's rc and window.log under the deploy user's home); the window may still be running."
-                  ;;
-              esac
-              echo "- Unset PROD_HEALTH_PROBE_SILENCE after verification."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
           if [[ -f "$deploy_log" ]]; then
             if [[ "${deploy_stage}" != "PASS" && "${deploy_stage}" != "UNKNOWN" ]]; then
               # Deploy failures often contain the most actionable error message near the end.
@@ -2494,6 +2475,32 @@ jobs:
           echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Immutable deploy traceability: ${repo_url}/blob/main/docs/operations/deploy-immutable-traceability-runbook.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Production deploy window: ${repo_url}/blob/main/docs/deployment/production-deploy-window-runbook.md" >> "$GITHUB_STEP_SUMMARY"
+
+          # Operator actions. For every non-drill dispatch (a failed sync included, since the
+          # probe silence was set for it) the summary's last line is the silence reminder.
+          if [[ "${DRILL_FAIL_STAGE:-none}" == "none" ]]; then
+            {
+              echo ""
+              echo "### Operator actions"
+              echo ""
+              if [[ "${SYNC_RC:-}" == "0" ]]; then
+                case "${DEPLOY_RC:-}" in
+                  73|74|76|255|"")
+                    echo "- If the host state has env_written=new (always for 73): do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up before confirming .env names the new image."
+                    ;;
+                esac
+                case "${DEPLOY_RC:-}" in
+                  72)
+                    echo "- Pre-commit abort with production down: the stopped old containers may be started only after the owner decides whether restarting the previous version is allowed (see the runbook)."
+                    ;;
+                  76|255|"")
+                    echo "- Read the host state first (metasheet2-deploy-window/state and the run's rc and window.log under the deploy user's home); the window may still be running."
+                    ;;
+                esac
+              fi
+              echo "- Unset PROD_HEALTH_PROBE_SILENCE after verification."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # Archive step summary alongside deploy.log for offline audit/review.
           mkdir -p output/deploy
