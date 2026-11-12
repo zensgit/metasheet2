@@ -2737,8 +2737,10 @@ export interface Notification {
  *                    It is provider acceptance, NOT proof of delivery or of being read.
  *   - `simulated`  — a development simulation handled the message; NO transport call was made. Never a
  *                    business success.
- *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled, or
- *                    every recipient was filtered by preference. `metadata.reason` names which.
+ *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled,
+ *                    every recipient was filtered by preference, a channel that addresses recipients through
+ *                    a bound endpoint had no usable endpoint for any of them, or its allow-set was empty
+ *                    (`recipients_not_bound`, `recipients_not_allowed`). `metadata.reason` names which.
  *   - `failed`     — configuration failure, transport error, or a channel with no sender configured.
  *                    `failedReason` is redacted text; `metadata.acceptedCount` (when present) counts the
  *                    recipients accepted before the failure.

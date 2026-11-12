@@ -165,7 +165,8 @@ function mountReady(options = {}) {
     configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE, customerPack: CUSTOMER_PACK_NOT_APPLICABLE } },
     ...options,
     // Readiness version 3 (批次标识 BI-1b): a pull-batch ledger whose sheet row is resolved (born_empty), no batches.
-    serviceExtras: { stockPreparationPullBatchStore: resolvedPullBatchLedger(), ...(options.serviceExtras || {}) },
+    // Readiness version 5 (batch-refresh step 6d-1b): a component ruling ledger that answers (nothing acknowledged).
+    serviceExtras: { stockPreparationPullBatchStore: resolvedPullBatchLedger(), stockPreparationComponentRulingStore: answeringRulingLedger(), ...(options.serviceExtras || {}) },
   })
   h.pullBatchReady = true
   const originalRestore = h.restore
@@ -203,6 +204,16 @@ function resolvedPullBatchLedger() {
     // Readiness version 4 (batch-refresh step 6a-2): the recovery's link read and close hook are wired (never called).
     async readBatchLink() { throw new Error('readiness never reads a link') },
     async batchWithin() { throw new Error('readiness never closes a batch') },
+  }
+}
+
+// Readiness version 5 (batch-refresh step 6d-1b, R-91): the component ruling ledger answers an empty list (no row).
+function answeringRulingLedger() {
+  return {
+    async listActiveRulings() { return [] },
+    async listRulings() { return [] },
+    async recordRemnantAcknowledgement() { throw new Error('readiness never records') },
+    async revokeRemnantAcknowledgement() { throw new Error('readiness never revokes') },
   }
 }
 
@@ -357,7 +368,7 @@ test('P-04 GET: absent → 200 absent; active (plain mount) → the readiness li
     // no 规格 declaration, no customer-pack declaration (pack_columns_installed, readiness version 2), inert
     // registries, and the shipped build marker.
     // Readiness version 3: the pull-batch switch is off on a plain mount, so the six v3 checks fail too (with no IO).
-    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'continuation_support_version'])
+    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'continuation_support_version'])
     const text = JSON.stringify(active.body)
     assert.ok(!text.includes(sheetId) && !text.includes(objectId) && !text.includes(TENANT), 'values-free: no sheet id, objectId or tenant in the answer')
     assert.ok(!h.provisioning.calls.some(([verb]) => /^(ensure|patch|grant|close)/.test(verb)), 'GET writes nothing on the host')
@@ -376,7 +387,7 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
     const res = await enablePilot(h, WORKBENCH_ADMIN)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, PILOT_ERROR_CODES.NOT_READY)
-    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'continuation_support_version'], partial: false })
+    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'continuation_support_version'], partial: false })
     assert.deepEqual(await h.projectWriteLock.readState(scope), before, 'the generation did not move and no lease was taken')
     assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
     assert.ok(!h.db.calls.some((call) => /^(updateRow|transaction)/.test(call)), 'no registry write')

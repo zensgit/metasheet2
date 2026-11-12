@@ -163,6 +163,7 @@ import {
   collectRunIntegrationJobOccurrences,
   isIntegrationAutomationRunActionEnabled,
   stampRunIntegrationJobConfig,
+  validateRunIntegrationJobConditions,
   validateRunIntegrationJobConfig,
   validateRunIntegrationJobTriggerCoupling,
 } from './automation-run-integration-job'
@@ -1611,6 +1612,34 @@ export class AutomationService {
     this.syntheticPreview = createAutomationSyntheticPreviewRuntime(createDefaultSyntheticPreviewDependencies(this.logService))
     this.scheduler = new AutomationScheduler(
       async (rule) => {
+        // STORED `enabled` — the SCHEDULED lane, checked at fire start.
+        //
+        // A timer is a per-process snapshot taken at register time, and nothing invalidates it across
+        // processes: with the leader lock off (the default) every process arms its own timers, and with it
+        // on a PATCH / DELETE handled by a non-leader only touches that non-leader's (empty) timer map. So a
+        // rule disabled or deleted through ANOTHER instance kept firing here until this process restarted.
+        // One indexed primary-key read per fire closes that; a missing row (deleted elsewhere) skips too.
+        // Kept a separate read from the liveness check below so `loadSheetLiveness` stays the one definition
+        // of "live" (sheet-liveness.ts). A failed read skips that tick (FAIL-CLOSED: an unconfirmed rule
+        // does not send) and is logged values-free — the error class / SQLSTATE, never the driver text.
+        // The executor is not touched: `simulate` stays DB-free and the other lanes keep their own gates.
+        let storedState: 'enabled' | 'disabled' | 'absent' | 'lookup_failed'
+        let lookupError: ReturnType<typeof describeLookupError> | undefined
+        try {
+          storedState = await this.loadScheduledRuleEnabledState(rule.id)
+        } catch (err) {
+          storedState = 'lookup_failed'
+          lookupError = describeLookupError(err)
+        }
+        if (storedState !== 'enabled') {
+          console.warn('[automation] skipping a scheduled rule that is not enabled in the database', {
+            ruleId: rule.id,
+            sheetId: rule.sheetId,
+            reason: storedState,
+            ...(lookupError ?? {}),
+          })
+          return
+        }
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
         //
         // The record-triggered lanes are gated by `loadEnabledRules` below, but a scheduled rule
@@ -1774,6 +1803,7 @@ export class AutomationService {
       actions,
       allActions: actionsForValidation,
       createdBy: input.createdBy ?? null,
+      conditions: input.conditions ?? null,
     })
     if (runIntegrationJobSave) {
       actionConfig = runIntegrationJobSave.actionConfig
@@ -1935,7 +1965,10 @@ export class AutomationService {
       execution_mode: executionMode,
     }
 
-    this.registerSchedule(rule)
+    // Same rule as updateRule and the boot loader: only an ENABLED rule gets a timer. Neither
+    // registerSchedule nor AutomationScheduler.register looks at `enabled`, so registering unconditionally
+    // here let a schedule rule CREATED with `enabled: false` fire until the next save or restart.
+    if (rule.enabled) this.registerSchedule(rule)
     return rule
   }
 
@@ -2072,6 +2105,8 @@ export class AutomationService {
         actions: normalizedNextActions,
         allActions: actionsForValidation,
         createdBy: existing.created_by ?? null,
+        // the NEXT stored conditions: the incoming ones when sent, else the stored ones
+        conditions: input.conditions !== undefined ? input.conditions : existing.conditions ?? null,
       })
       const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
       const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
@@ -2211,6 +2246,30 @@ export class AutomationService {
       ) as Record<string, unknown> | null
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(nextTriggerType, nextTriggerConfig)
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+    }
+
+    // R-69 1b-ii: a run_integration_job rule cannot carry conditions, judged on the NEXT stored state. An
+    // action-shaped edit ran this inside assertRunIntegrationJobAtSave above; this covers the edits that skip that
+    // gate but still set the conditions or the trigger (conditions-only, trigger-only), with the STORED actions
+    // deciding whether the rule is a job rule. A rename or a pure on/off switch does not open it (setRuleEnabled
+    // routes through updateRule): an operator can always turn a rule off. Every shape that opens it is also a T1-2
+    // shape, so `existingRuleSnapshot` is already fetched (no extra getRule).
+    if (!shouldValidateActions && (input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined)) {
+      const existingForConditions = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForConditions
+      if (!existingForConditions || existingForConditions.sheet_id !== sheetId) return null
+      const storedJob = collectRunIntegrationJobOccurrences(
+        existingForConditions.action_type,
+        (existingForConditions.action_config ?? null) as Record<string, unknown> | null,
+        existingForConditions.actions ?? null,
+        existingForConditions.actions ?? null,
+      )
+      if (storedJob.occurrences.length > 0) {
+        const conditionsError = validateRunIntegrationJobConditions(
+          input.conditions !== undefined ? input.conditions : existingForConditions.conditions ?? null,
+        )
+        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+      }
     }
 
     // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
@@ -2802,8 +2861,10 @@ export class AutomationService {
   async runDateReminderScanNow(ruleId: string): Promise<void> {
     const rule = await this.getRule(ruleId)
     if (!rule) return
-    // A DISABLED rule never fires via the scheduler (registerSchedule gates on enabled); the deterministic
-    // ops/test seam honors the same gate so a disabled rule can't be made to fire through this path.
+    // A DISABLED rule does not fire via the scheduler: createRule / updateRule / the boot loader register only
+    // enabled rules (registerSchedule itself does NOT look at `enabled`), and the scheduled lane re-reads the
+    // stored flag at fire start. This deterministic ops/test seam honors the same gate so a disabled rule
+    // can't be made to fire through this path.
     if (!rule.enabled) return
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
@@ -3015,6 +3076,8 @@ export class AutomationService {
     actions: AutomationAction[] | null
     allActions: AutomationAction[]
     createdBy: string | null
+    /** The rule's NEXT stored conditions (create: the input; update: the input when sent, else the stored ones). */
+    conditions: ConditionGroup | null
   }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
     const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
     if (error) throw new AutomationRuleValidationError(error)
@@ -3029,6 +3092,9 @@ export class AutomationService {
       const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
       if (configError) throw new AutomationRuleValidationError(configError)
     }
+    // No conditions on a job rule: its schedule trigger has no record, so a condition would skip every fire (400).
+    const conditionsError = validateRunIntegrationJobConditions(input.conditions)
+    if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
     const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
     if (couplingError) throw new AutomationRuleValidationError(couplingError)
     const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
@@ -3317,6 +3383,17 @@ export class AutomationService {
     if (error) return error
     if (occurrences.length === 0) return null
     return validateRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)
+  }
+
+  /**
+   * The scheduled lane's fire-start read of the STORED `enabled` flag (see the scheduler callback in the
+   * constructor). `absent` = the row is gone (deleted, possibly through another instance).
+   */
+  private async loadScheduledRuleEnabledState(ruleId: string): Promise<'enabled' | 'disabled' | 'absent'> {
+    const res = await this.queryFn('SELECT enabled FROM automation_rules WHERE id = $1', [ruleId])
+    const row = (res.rows as Array<{ enabled?: unknown } | undefined>)[0]
+    if (!row) return 'absent'
+    return row.enabled === true ? 'enabled' : 'disabled'
   }
 
   /**
