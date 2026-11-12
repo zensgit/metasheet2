@@ -2,7 +2,9 @@
  * Automation Scheduler — V1
  * Manages cron and interval triggers.
  * Cron triggers use UTC minute-resolution next-occurrence scheduling; interval
- * and date-field scans use fixed setInterval cadences.
+ * triggers use a fixed setInterval cadence (chained bounded timeouts when the
+ * interval exceeds the platform timer limit); date-field scans use a daily
+ * self-re-arming setTimeout aligned to the rule's timeOfDay.
  */
 
 import { Logger } from '../core/logger'
@@ -24,6 +26,15 @@ import type { RedisLeaderLock } from './redis-leader-lock'
 const logger = new Logger('AutomationScheduler')
 
 export type ScheduleCallback = (rule: AutomationRule) => void | Promise<void>
+
+/**
+ * Largest delay Node's setTimeout / setInterval honour (2^31-1 ms, about 24.8 days). A larger delay is
+ * silently treated as 1 ms (plus a TimeoutOverflowWarning), so a yearly cron or a 30-day interval armed
+ * directly would fire in a tight loop. Waits longer than this are split into intermediate timeouts that only
+ * re-arm toward the same target instant (see `armRuleTimer`). Using the platform limit itself (not a smaller
+ * chunk) keeps every wait that is legal today on exactly its previous single-timer path.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /**
  * Minimal Prometheus gauge shape used via dependency injection so the
@@ -505,7 +516,9 @@ export class AutomationScheduler {
 
   /**
    * Cancel a rule timer. The `timers` map mixes setTimeout handles (cron,
-   * which re-arm) and setInterval handles (interval / date_field scans).
+   * long intervals and date_field scans, which re-arm — including the
+   * intermediate hops of a wait longer than MAX_TIMER_DELAY_MS) and
+   * setInterval handles (intervals up to MAX_TIMER_DELAY_MS).
    * Node's `clearTimeout` cancels both kinds — they share one `Timeout`
    * object — so routing every rule-timer teardown through this one helper
    * keeps the call sites consistent without tracking each handle's kind. The
@@ -516,6 +529,53 @@ export class AutomationScheduler {
     clearTimeout(timer)
   }
 
+  /**
+   * Arm a one-shot rule timer for the absolute instant `targetMs`, never handing Node a delay above
+   * MAX_TIMER_DELAY_MS. When the remaining wait fits, this is a single setTimeout whose fire calls `onDue`
+   * (the same timer the callers armed before). When it does not, an intermediate timeout of
+   * MAX_TIMER_DELAY_MS is armed whose wake ONLY re-arms toward the same `targetMs` — it never runs `onDue`.
+   * Every leg is stored in `this.timers` under the rule id (so unregister / replace / destroy / leader loss
+   * cancel whichever leg is pending) and unref'd; a stale leg is ignored by the identity guard. A NaN or
+   * infinite target never becomes a 1 ms timer: it keeps hopping at the bound and never fires.
+   */
+  private armRuleTimer(ruleId: string, targetMs: number, onDue: () => void): void {
+    if (this.destroyed) return
+    const remainingMs = targetMs - Date.now()
+    const finalLeg = remainingMs <= MAX_TIMER_DELAY_MS
+    const delayMs = finalLeg ? Math.max(0, remainingMs) : MAX_TIMER_DELAY_MS
+    const timer = setTimeout(() => {
+      if (this.destroyed || this.timers.get(ruleId) !== timer) return
+      if (finalLeg) {
+        onDue()
+        return
+      }
+      // Intermediate wake: re-arm toward the SAME target; the rule does not run here.
+      this.armRuleTimer(ruleId, targetMs, onDue)
+    }, delayMs)
+    if (typeof timer.unref === 'function') {
+      timer.unref()
+    }
+    this.timers.set(ruleId, timer)
+  }
+
+  /**
+   * schedule.interval longer than MAX_TIMER_DELAY_MS: emulate setInterval with chained bounded timeouts. One
+   * run per interval on the grid anchored at registration (registeredAt + k·intervalMs); a late wake (e.g.
+   * after the host slept) skips the missed periods instead of bursting them — no catch-up, at most one run.
+   */
+  private armLongInterval(rule: AutomationRule, intervalMs: number, targetMs: number): void {
+    this.armRuleTimer(rule.id, targetMs, () => {
+      const leg = this.timers.get(rule.id)
+      this.runScheduledRule(rule)
+      // A callback that synchronously unregistered / replaced this rule wins: do not re-arm over it.
+      if (this.timers.get(rule.id) !== leg) return
+      let nextMs = targetMs + intervalMs
+      const nowMs = Date.now()
+      if (nextMs <= nowMs) nextMs = targetMs + (Math.floor((nowMs - targetMs) / intervalMs) + 1) * intervalMs
+      this.armLongInterval(rule, intervalMs, nextMs)
+    })
+  }
+
   private registerCron(rule: AutomationRule, expression: string, timeZone?: string): void {
     if (this.destroyed) return
     const nextMs = nextCronOccurrenceMs(expression, Date.now(), timeZone)
@@ -523,19 +583,18 @@ export class AutomationScheduler {
       logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
       return
     }
-    const delayMs = Math.max(1_000, nextMs - Date.now())
-    const timer = setTimeout(() => {
-      if (!this.timers.has(rule.id)) return
+    // The target instant is computed ONCE here (1 s floor kept). It is an absolute UTC instant whose DST
+    // fall-back repeat has already been suppressed by the scan, so intermediate hops of a long wait recompute
+    // nothing that could move it.
+    const nowMs = Date.now()
+    const targetMs = nowMs + Math.max(1_000, nextMs - nowMs)
+    this.armRuleTimer(rule.id, targetMs, () => {
       this.runScheduledRule(rule)
       this.timers.delete(rule.id)
       // Re-arm from NOW (no catch-up — Q3 at-most-once). On a DST fall-back day the next-occurrence scan
       // suppresses the repeated wall-clock minute, so the timer advances past the overlap (fire-once).
       if (this.isLeader && !this.destroyed) this.registerCron(rule, expression, timeZone)
-    }, delayMs)
-    if (typeof timer.unref === 'function') {
-      timer.unref()
-    }
-    this.timers.set(rule.id, timer)
+    })
     logger.info(
       `Registered cron schedule for rule ${rule.id} (next: ${new Date(nextMs).toISOString()}${timeZone ? `, tz=${timeZone}` : ''})`,
     )
@@ -584,6 +643,11 @@ export class AutomationScheduler {
         logger.warn(`Rule ${rule.id}: interval too small (${intervalMs}ms), minimum 1000ms`)
         return
       }
+      if (!Number.isFinite(intervalMs)) {
+        // e.g. a persisted 1e400 parses to Infinity; setInterval(Infinity) would fire every 1 ms.
+        logger.warn(`Rule ${rule.id}: interval is not a finite number (${intervalMs}) — not scheduled`)
+        return
+      }
     } else if (trigger.type === 'schedule.cron') {
       cronExpression = typeof trigger.config.expression === 'string'
         ? trigger.config.expression
@@ -611,6 +675,15 @@ export class AutomationScheduler {
       return
     }
 
+    if (intervalMs > MAX_TIMER_DELAY_MS) {
+      // setInterval would clamp this to 1 ms and fire forever; chain bounded timeouts instead.
+      this.armLongInterval(rule, intervalMs, Date.now() + intervalMs)
+      logger.info(
+        `Registered schedule for rule ${rule.id} (interval: ${intervalMs}ms, above the ${MAX_TIMER_DELAY_MS}ms timer limit — chained bounded timeouts)`,
+      )
+      return
+    }
+
     const timer = setInterval(() => this.runScheduledRule(rule), intervalMs)
 
     // Prevent timer from keeping the process alive in tests
@@ -626,7 +699,9 @@ export class AutomationScheduler {
    * DR-A: arm a setTimeout to the rule's NEXT UTC `timeOfDay` boundary; on fire, run the scan and re-arm for
    * the next day — UNLESS the rule was unregistered/replaced meanwhile (the stored timer is no longer this one,
    * so the `=== timer` guard stops the re-arm). No boot-time anchoring. Leader-only (caller guards). The handle
-   * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
+   * lives in `this.timers`, so `unregister`'s clear cancels a pending fire. The delay is at most one civil day
+   * plus a DST shift (never NaN: a junk timeOfDay falls back to 09:00), far below MAX_TIMER_DELAY_MS, so this
+   * timer needs no bounded-arm hops.
    */
   private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
     if (this.destroyed) return
