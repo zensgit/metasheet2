@@ -51,6 +51,10 @@
 //          bracket is refused before anything is begun
 //   HB-01  (ruling C-4) a guard already lost before the begin refuses there: no claim spent, no run row, no patch, no
 //          bump — and the approved digest still runs afterwards
+//   HB-02  (ruling R3-1) the same in the IN-FLIGHT shape: a heartbeat CAS still pending when the check is entered,
+//          failing afterwards without landing — the check's own CAS succeeds, the re-test of the guard refuses under the
+//          stored loss (no runId); the controls; a guard the begin cannot re-test, or one lost that still passes, refused;
+//          no macrotask boundary between a clean re-test and the begin's bracket
 //   CL-01  (ruling C-3) the continuation's verification, pure: target state per recipe, the counts, every refusal, the
 //          digest
 //   CL-02  the dead end closed: a run left `running` after every row was written is verified and finished `completed`
@@ -1505,6 +1509,150 @@ test('HB-01 a guard already LOST before the begin (a heartbeat whose holder CAS 
   try { await broken.execute(brokenPlan.planDigest) } catch (error) { caught = error }
   assert.ok(caught && caught.message === 'boom')
   assert.deepEqual([broken.db.rows(kit.T.run).length, broken.db.rows(kit.T.claim).length, broken.host.calls.length], [0, 0, 0])
+})
+
+// ── HB-02 (ruling R3-1) ──────────────────────────────────────────────────────────────────────────────────
+
+test('HB-02 (ruling R3-1) a heartbeat CAS still IN FLIGHT when the pre-begin check is entered, failing afterwards WITHOUT landing: the check\'s own CAS queues behind it and succeeds, the RE-TEST of the guard refuses under the heartbeat\'s stored loss — no runId, no run row, no claim, no patch, no bump — and the same approved digest then completes; the controls; a guard the begin cannot re-test, or one lost that still passes its check, is refused', async () => {
+  /**
+   * One execute of the fixture's approved retire. Its in-lease source read fires ONE heartbeat tick; that tick's holder
+   * CAS reaches the store and is HELD there. Only once the pre-begin check has been ENTERED (its own CAS then queues
+   * behind the held one on the guard's chain) is the held CAS settled, on the next macrotask: `fail` rejects it without
+   * landing (a statement stuck on a dead connection, then cancelled); `pass` lands it; `landThenFail` lands it and then
+   * loses the answer.
+   */
+  const inFlight = async (settle) => {
+    const m = mount()
+    const plan = await m.preview()
+    const realUpdate = m.db.updateRow
+    const window = { held: null, enteredWhileHeld: false, checks: 0, seqAtLease: null, fallback: null }
+    let tick = null
+    const assertHolder = m.deps.assertHolder
+    m.deps.assertHolder = (guard) => {
+      window.checks += 1
+      if (window.held && !window.held.settled) {
+        window.enteredWhileHeld = true
+        setImmediate(() => window.held.settle())
+      }
+      return assertHolder(guard)
+    }
+    m.state.onLeaseRead = async () => {
+      m.state.onLeaseRead = null
+      window.seqAtLease = m.db.rows(kit.T.lock)[0].lease_seq
+      m.db.updateRow = (name, set, where) => {
+        if (name !== kit.T.lock || window.held !== null) return realUpdate(name, set, where)
+        return new Promise((resolve, reject) => {
+          window.held = {
+            settled: false,
+            settle: () => {
+              window.held.settled = true
+              if (settle === 'fail') reject(kit.sqlError('57014', 'canceling statement due to statement timeout'))
+              else if (settle === 'pass') realUpdate(name, set, where).then(resolve, reject)
+              else realUpdate(name, set, where).then(() => reject(kit.sqlError('08006', 'connection failure')), reject)
+            },
+          }
+        })
+      }
+      // ONE heartbeat tick: its holder CAS reaches the store and stays pending there.
+      tick = m.timers.fireAll()
+      for (let i = 0; i < 200 && window.held === null; i += 1) await Promise.resolve()
+      assert.ok(window.held, 'the heartbeat CAS reached the store')
+      // Bounded: a build that never enters the check still gets its held CAS settled (and this case still ends).
+      window.fallback = setTimeout(() => { if (!window.held.settled) window.held.settle() }, 250)
+    }
+    let outcome
+    try {
+      outcome = { ok: true, value: await m.execute(plan.planDigest) }
+    } catch (error) {
+      outcome = { ok: false, error }
+    }
+    clearTimeout(window.fallback)
+    await tick
+    m.db.updateRow = realUpdate
+    return { m, plan, outcome, window }
+  }
+  const nothingBegun = (m, label) => assert.deepEqual(
+    [m.db.rows(kit.T.run).length, m.db.rows(kit.T.claim).length, m.host.calls.length, m.state.auditsWithin.length, m.state.bumps, m.state.holderAssertDepths, m.db.rows(kit.T.lock)[0].lease_id],
+    [0, 0, 0, 0, 0, [], null],
+    `${label}: no ledger transaction ran, no claim is spent, nothing was written, the lease was released`,
+  )
+
+  // THE WINDOW. The heartbeat's CAS fails WITHOUT landing after the check was entered.
+  const lost = await inFlight('fail')
+  assert.equal(lost.window.enteredWhileHeld, true, 'the check was entered while the heartbeat CAS was still in flight')
+  assert.equal(lost.m.db.rows(kit.T.lock)[0].lease_seq, lost.window.seqAtLease + 1, 'the heartbeat CAS never landed; the check\'s own CAS did (one lease_seq step)')
+  assert.equal(lost.outcome.ok, false, 'refused before the begin')
+  const refused = lost.outcome.error
+  assert.deepEqual([refused.status, refused.code, refused.details.operation], [503, lockLib.PROJECT_WRITE_ERROR_CODES.STORE_FAILED, 'heartbeat'], 'the heartbeat\'s own stored loss, under its own status and code')
+  assert.deepEqual([refused.details.planned, refused.details.written, refused.details.partial, refused.details.runId], [4, 0, false, undefined], 'refused BEFORE the begin: no run to name')
+  assert.equal(lost.window.checks, 2, 'one holder CAS, then the lost guard asked once more')
+  nothingBegun(lost.m, 'in flight, failed without landing')
+  // The approval was not burnt: the SAME digest completes.
+  const done = await lost.m.execute(lost.plan.planDigest)
+  assert.deepEqual([done.status, done.written, lost.m.db.rows(kit.T.claim).length], ['completed', 4, 1])
+
+  // CONTROL: the held CAS LANDS — the check queues behind it, the guard is not lost, the run completes.
+  const passed = await inFlight('pass')
+  assert.equal(passed.window.enteredWhileHeld, true)
+  assert.equal(passed.outcome.ok, true, passed.outcome.error && passed.outcome.error.message)
+  assert.deepEqual([passed.outcome.value.status, passed.outcome.value.written, passed.m.db.rows(kit.T.claim).length, passed.m.host.calls.length, passed.window.checks], ['completed', 4, 1, 4, 1])
+  // CONTROL: the held CAS LANDS and its answer is lost — lease_seq moved under the guard, so the check's own CAS matches
+  // nothing and refuses (the lock's own code); nothing is spent.
+  const landed = await inFlight('landThenFail')
+  assert.equal(landed.window.enteredWhileHeld, true)
+  assert.equal(landed.outcome.ok, false)
+  assert.deepEqual([landed.outcome.error.status, landed.outcome.error.code, landed.outcome.error.details.runId, landed.outcome.error.details.written], [409, lockLib.PROJECT_WRITE_ERROR_CODES.LEASE_LOST, undefined, 0])
+  nothingBegun(landed.m, 'in flight, landed, then failed')
+  assert.equal((await landed.m.execute(landed.plan.planDigest)).status, 'completed')
+
+  // A guard the begin cannot RE-TEST (no `isLost`) is refused by name before its holder CAS, as one without the bracket
+  // is (ruling C-1); with the guard whole again the SAME approved digest runs.
+  const bare = mount()
+  const barePlan = await bare.preview()
+  const withLease = bare.deps.withLease
+  bare.deps.withLease = (runId, fn) => withLease(runId, (guard) => {
+    const { isLost: _dropped, ...rest } = guard
+    return fn(Object.freeze(rest))
+  })
+  const casesBefore = bare.lockUpdates()
+  await rejects(bare.execute(barePlan.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'isLost' })
+  assert.equal(bare.lockUpdates(), casesBefore, 'no holder CAS was spent on it')
+  nothingBegun(bare, 'no isLost')
+  bare.deps.withLease = withLease
+  assert.equal((await bare.execute(barePlan.planDigest)).status, 'completed')
+  // A guard that reports LOST and still passes its own check is not one a run begins under (fail closed).
+  const odd = mount()
+  const oddPlan = await odd.preview()
+  const oddLease = odd.deps.withLease
+  odd.deps.withLease = (runId, fn) => oddLease(runId, (guard) => fn(Object.freeze({ ...guard, isLost: () => true })))
+  await rejects(odd.execute(oddPlan.planDigest), { status: 500, code: CODES.UNAVAILABLE, field: 'isLost' })
+  nothingBegun(odd, 'lost and still passing')
+  odd.deps.withLease = oddLease
+  assert.equal((await odd.execute(oddPlan.planDigest)).status, 'completed')
+
+  // NOTHING IS AWAITED between a CLEAN re-test and the begin's bracket: no macrotask boundary — the only place where a
+  // tick of the lease's real interval timer could run — lies between the guard's `isLost` read and the begin's
+  // `withHostWrite`. A marker set on the next macrotask after the read must still be unset when the bracket is entered.
+  const tight = mount()
+  const tightPlan = await tight.preview()
+  const tightLease = tight.deps.withLease
+  const seen = { retests: 0, crossed: null, atBracket: [] }
+  tight.deps.withLease = (runId, fn) => tightLease(runId, (guard) => fn(Object.freeze({
+    ...guard,
+    isLost: () => {
+      seen.retests += 1
+      seen.crossed = false
+      setImmediate(() => { seen.crossed = true })
+      return guard.isLost()
+    },
+    withHostWrite: (inner) => {
+      seen.atBracket.push(seen.crossed)
+      return guard.withHostWrite(inner)
+    },
+  })))
+  assert.equal((await tight.execute(tightPlan.planDigest)).status, 'completed')
+  assert.equal(seen.retests, 1, 'the guard is re-tested once, before the begin')
+  assert.equal(seen.atBracket[0], false, 'the begin\'s bracket is entered in the same macrotask as the clean re-test')
 })
 
 // ── CL-01 … CL-05 (ruling C-3) ───────────────────────────────────────────────────────────────────────────

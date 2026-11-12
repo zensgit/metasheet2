@@ -37,8 +37,11 @@
 //             carries an aborted first install's persisted plan (or its settings lock), => 409 -> the IN-LEASE
 //             recompute of the preview (a fresh source read for a retire) -> preconditions -> the plan digest must
 //             equal the echoed one
-//   holder    ONE holder CAS of the guard BEFORE the begin (ruling C-4): a guard already lost (a failed heartbeat, a
-//             lapsed lease) refuses here, so the one-shot claim is never spent by a run that cannot write
+//   holder    ONE holder CAS of the guard BEFORE the begin, then ONE re-test of the guard (rulings C-4, R3-1): a guard
+//             already lost — its heartbeat CAS failed before the check was entered, or was still in flight then and
+//             failed without landing; its lease lapsed and was taken over — refuses here under the loss's own status
+//             and code, before the one-shot claim is spent; a guard that cannot be re-tested is refused. Nothing is
+//             awaited between a clean re-test and the begin's bracket
 //   begin     ONE ledger transaction, holder assert first: an abandoned open run of this sheet is closed, the one-shot
 //             claim is inserted, the run row with its BACKUP is inserted, the audit row is appended
 //   writes    one fenced, version-conditional patch per planned row, deepest row first and the root last; the four
@@ -1180,12 +1183,24 @@ async function installStateOf(deps) {
   return installStateOfFacts(await deps.installStateOf())
 }
 
-// ONE holder CAS before the begin (ruling C-4): a guard already lost — a heartbeat that failed while the source was
-// read, a lease that lapsed — refuses HERE, before the one-shot claim is spent or a run row is begun. Its refusal keeps
-// its own status and code; nothing was written.
+// THE HOLDER CHECK BEFORE THE BEGIN (ruling C-4, completed by ruling R3-1): a guard already lost — a heartbeat that
+// failed while the source was read, a lease that lapsed — refuses HERE, before the one-shot claim is spent or a run row
+// is begun. ONE holder CAS of the guard, then ONE RE-TEST of the guard itself. The CAS alone cannot see a heartbeat CAS
+// that was still IN FLIGHT when the check was entered and then failed WITHOUT landing: the check's own CAS queued behind
+// it on the guard's chain and succeeds against the unmoved lease_seq, while the failure has marked the guard lost. A
+// guard that reports lost after a clean CAS is asked once more and throws the loss it stored, under its own status and
+// code. The re-test is synchronous: nothing is awaited between a clean re-test and the begin's bracket, so no heartbeat
+// tick runs in between. A guard the begin cannot re-test (no `isLost`) is refused before its CAS, as one without the
+// bracket is (ruling C-1); one that reports lost and still passes its own check is refused too (fail closed). The
+// refusal keeps its own status and code; nothing was written.
 async function assertHolderBeforeBegin(deps, guard, { planned }) {
   try {
+    if (!guard || typeof guard.isLost !== 'function') throw unavailable('isLost')
     await deps.assertHolder(guard)
+    if (guard.isLost()) {
+      await deps.assertHolder(guard)
+      throw unavailable('isLost')
+    }
   } catch (error) {
     if (!error || !Number.isInteger(error.status) || typeof error.code !== 'string') throw error
     throw repairError(error.status, error.code, error.message || 'the repair no longer holds the sheet write lease; nothing was begun', {
@@ -1420,8 +1435,8 @@ async function runExecute(deps, request) {
       if (typeof patch !== 'function') throw unavailable('patchFor')
       const planned = plan.writes.length
       const subject = request.recipe === RECIPE_RETIRE ? { componentHandle: plan.componentHandle } : { sourceRunId: plan.sourceRunId }
-      // HOLDER — one holder CAS before the claim is spent (ruling C-4). Nothing is awaited between it and the begin's
-      // bracket, so no heartbeat tick runs in between.
+      // HOLDER — one holder CAS and one re-test of the guard before the claim is spent (rulings C-4, R3-1). Nothing is
+      // awaited between a clean re-test and the begin's bracket, so no heartbeat tick runs in between.
       await assertHolderBeforeBegin(deps, guard, { planned })
       // BEGIN — the backup, the run row and the one-shot claim, before the first sheet write.
       await inHostWrite(guard, () => store.beginRun({
