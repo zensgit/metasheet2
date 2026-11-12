@@ -1503,17 +1503,16 @@ jobs:
             awk '{ n++; b += $1 } END { printf "%d %.0f\n", n, b }' "${RUN_DIR}/appdata.sizes"
           }
           # appdata_read_back: "<files> <bytes>" of regular files under the paths, read out of the
-          # created (not yet started) new backend with docker cp, before its first start.
+          # created (not yet started) new backend with docker cp, before its first start. The tar
+          # stream is listed on the fly, so no second copy of the app data lands on the disk.
           appdata_read_back() {
             local p f b files=0 bytes=0
             for p in "${appdata_paths[@]}"; do
-              timeout 600 docker cp "metasheet-backend:${p}" - >"${RUN_DIR}/appdata.readback.tar" 2>>"${RUN_DIR}/appdata.err" || return 1
-              tar -tvf "${RUN_DIR}/appdata.readback.tar" >"${RUN_DIR}/appdata.readback.list" 2>>"${RUN_DIR}/appdata.err" || return 1
+              timeout 600 docker cp "metasheet-backend:${p}" - 2>>"${RUN_DIR}/appdata.err" | tar -tvf - >"${RUN_DIR}/appdata.readback.list" 2>>"${RUN_DIR}/appdata.err" || return 1
               read -r f b <<< "$(awk '/^-/ { n++; s += $3 } END { printf "%d %.0f\n", n, s }' "${RUN_DIR}/appdata.readback.list")"
               files=$(( files + f ))
               bytes=$(( bytes + b ))
             done
-            rm -f -- "${RUN_DIR}/appdata.readback.tar"
             printf '%s %s\n' "$files" "$bytes"
           }
           read -r w_appdata_files appdata_bytes <<< "$(appdata_measure || true)"
