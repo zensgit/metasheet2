@@ -1505,11 +1505,23 @@ jobs:
           # appdata_read_back: "<files> <bytes>" of regular files under the paths, read out of the
           # created (not yet started) new backend with docker cp, before its first start. The tar
           # stream is listed on the fly, so no second copy of the app data lands on the disk.
+          # docker cp also returns volumes mounted below a path (the attendance-import volume under
+          # the uploads path), which the copy-out record leaves out (find -xdev, tar
+          # --one-file-system); entries under a mount point of the created container are not counted.
           appdata_read_back() {
-            local p f b files=0 bytes=0
+            local p d f b files=0 bytes=0
+            timeout 30 docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' metasheet-backend >"${RUN_DIR}/appdata.mounts" 2>>"${RUN_DIR}/docker.err" || return 1
             for p in "${appdata_paths[@]}"; do
+              # Listing names start at the path's last component (docker cp of /app/uploads lists uploads/...).
+              : > "${RUN_DIR}/appdata.readback.skip"
+              while IFS= read -r d; do
+                d="${d%/}"
+                if [[ -n "$d" && "$d" == "$p"/* ]]; then
+                  printf '%s/\n' "${p##*/}${d#"$p"}" >> "${RUN_DIR}/appdata.readback.skip"
+                fi
+              done < "${RUN_DIR}/appdata.mounts"
               timeout 600 docker cp "metasheet-backend:${p}" - 2>>"${RUN_DIR}/appdata.err" | tar -tvf - >"${RUN_DIR}/appdata.readback.list" 2>>"${RUN_DIR}/appdata.err" || return 1
-              read -r f b <<< "$(awk '/^-/ { n++; s += $3 } END { printf "%d %.0f\n", n, s }' "${RUN_DIR}/appdata.readback.list")"
+              read -r f b <<< "$(awk 'FILENAME == ARGV[1] { if ($0 != "") skip[n++] = $0; next } /^-/ { name = $0; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, "", name); sub(/^\.\//, "", name); for (i = 0; i < n; i++) if (index(name, skip[i]) == 1) next; c++; s += $3 } END { printf "%d %.0f\n", c, s }' "${RUN_DIR}/appdata.readback.skip" "${RUN_DIR}/appdata.readback.list")"
               files=$(( files + f ))
               bytes=$(( bytes + b ))
             done

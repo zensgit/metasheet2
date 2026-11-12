@@ -4,6 +4,10 @@
 #   ctr/<name>/   running, health, id, image_id, config_image, volume, label.<key>, fs/ (backend files)
 #   img/<key>/    rev, id, digests (keyed by image reference and by image id)
 #   ledger        applied migration names, one per line
+#   volumes/attendance-import/  contents of the backend's named volume mounted at
+#                 /app/uploads/attendance-import (compose); outside every container fs, so find
+#                 and the copy-out tar do not see it (as -xdev / --one-file-system), recreate keeps
+#                 it, and only `docker cp <ctr>:<path> -` of a parent path includes it
 #   oneoff/<name> one-off containers that are alive
 # Every call is appended to $H_CALLS (tab separated):
 #   kind  IMAGE_TAG  IMAGE_OWNER  meta  argv
@@ -185,6 +189,11 @@ do_inspect() {
     '{{.State.Running}}') get "$name" running; echo ;;
     '{{if .State.Health}}'*) get "$name" health; echo ;;
     '{{index .Config.Labels "'*) local k="${fmt#*\"}"; k="${k%%\"*}"; get "$name" "label.${k}"; echo ;;
+    '{{range .Mounts}}{{println .Destination}}{{end}}')
+      # The compose file mounts the attendance-import volume into every backend container.
+      if [[ "$name" == "metasheet-backend" ]]; then echo /app/uploads/attendance-import; fi
+      echo
+      ;;
     '{{range .Mounts}}'*) get "$name" volume; echo ;;
     '{{.Image}}') get "$name" image_id; echo ;;
     '{{.Config.Image}}') get "$name" config_image; echo ;;
@@ -421,6 +430,9 @@ recreate() {
   put "$name" config_image "$ref"
   put "$name" running "$running"
   put "$name" health none
+  if [[ "$name" == "metasheet-backend" && -d "${DS}/volumes/attendance-import" ]]; then
+    mkdir -p "${C}/${name}/fs/app/uploads/attendance-import"
+  fi
 }
 
 compose_up() {
@@ -655,6 +667,18 @@ do_cp() {
     p="${1#*:}"
     if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
     if [[ ! -e "${C}/${target}/fs${p}" ]]; then echo "Error: Could not find the file ${p} in container ${target}" >&2; exit 1; fi
+    if [[ "$target" == "metasheet-backend" && -d "${DS}/volumes/attendance-import" && "/app/uploads/attendance-import" == "${p%/}"/* ]]; then
+      # docker cp includes the volume mounted below the path.
+      local stage rel="/app/uploads/attendance-import"
+      rel="${rel#"${p%/}"}"
+      stage="$(mktemp -d "${DS}/cp-stage.XXXXXX")"
+      cp -R "${C}/${target}/fs${p}" "${stage}/"
+      mkdir -p "${stage}/$(basename "$p")${rel}"
+      cp -R "${DS}/volumes/attendance-import/." "${stage}/$(basename "$p")${rel}/"
+      (cd "$stage" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "$(basename "$p")")
+      rm -rf "$stage"
+      return
+    fi
     (cd "${C}/${target}/fs$(dirname "$p")" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "$(basename "$p")")
     return
   fi

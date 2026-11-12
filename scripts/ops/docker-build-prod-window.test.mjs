@@ -279,6 +279,14 @@ function makeWorld(t, options = {}) {
     writeFileSync(path.join(att, 'a.txt'), 'hello')
     writeFileSync(path.join(att, 'sheet-1/b.bin'), 'hello world')
   }
+  if (options.attVolume) {
+    // The compose file's attendance-import named volume, mounted at /app/uploads/attendance-import
+    // of the backend: the double keeps its contents outside the container filesystem.
+    const vol = path.join(ds, 'volumes/attendance-import/org1')
+    mkdirSync(vol, { recursive: true })
+    writeFileSync(path.join(vol, 'upload.csv'), 'a,b\n')
+    mkdirSync(path.join(ds, 'ctr/metasheet-backend/fs/app/uploads/attendance-import'), { recursive: true })
+  }
   if (options.extraNames) writeFileSync(path.join(ds, 'extra_names'), options.extraNames.join('\n') + '\n')
   writeFileSync(path.join(ds, 'ledger'), BASE_MIGRATIONS.join('\n') + '\n')
   if (options.crontab) writeFileSync(path.join(root, 'crontab'), options.crontab)
@@ -1110,6 +1118,25 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.match(r.windowLog, /appdata read_back files=2 bytes=16/)
     assert.match(r.windowLog, /appdata after_start files=1 bytes=11/)
     assert.match(r.windowLog, /appdata after_start has fewer files than the copy; accepted/)
+  })
+
+  scenario('app data present and the attendance-import volume holds a file -> the read-back leaves the volume out, done-new', async (t) => {
+    const world = makeWorld(t, { appdata: true, attVolume: true })
+    const r = await runWindow(t, world)
+    checkHappy(r, { appdata: true })
+    assert.ok(any(r, (call) => call.args === 'cp metasheet-backend:/app/uploads -'), 'the uploads path is read back too')
+    assert.match(readFileSync(path.join(r.runDir, 'appdata.readback.list'), 'utf8'), /uploads\/attendance-import\/org1\/upload\.csv$/m,
+      'control: the read-back stream did carry the volume file')
+    assert.match(r.windowLog, /appdata read_back files=2 bytes=16/)
+  })
+
+  scenario('app data present with the attendance-import volume, the read-back misses a file outside it -> 73: never started', async (t) => {
+    const world = makeWorld(t, { appdata: true, attVolume: true })
+    const r = await runWindow(t, world, { env: { H_CP_IN_SHORT: '1' } })
+    assertCommon(r, 73)
+    assert.match(r.windowLog, /app data read back from the created backend does not match the copy-out record/)
+    assert.ok(!any(r, (call) => /^start /.test(call.args)), 'neither the new nor the old backend is started')
+    assert.ok(!any(r, isUpWeb))
   })
 
   scenario('19 post-backend host check fails -> 73: web never upped', async (t) => {
