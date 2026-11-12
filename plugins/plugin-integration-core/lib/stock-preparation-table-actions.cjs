@@ -3753,6 +3753,82 @@ async function recoverStockPreparationExecution(input = {}) {
   return Object.freeze({ operation, closed })
 }
 
+// ── batch-refresh step 6d-2a (S6-6; register R-91): the doubled-sheet repair's source read ─────────────────────────
+
+/**
+ * THE SOURCE READ OF A SHEET REPAIR (step-6 design §6.6 「Recipes」: 「S's old root key is absent from the current
+ * expansion (fresh admin dry-run in the lease)」). The same read every pull makes — the B2a authorization, the target
+ * field probe, the governance consult, the source expansion, the project-scoped sheet read with the batch band stripped —
+ * and NOTHING ELSE: no token, no reconciliation, no record write. Called by the repair route twice: for a preview
+ * (no guard) and, for an execute, INSIDE the `sheet_repair` lease it holds (`projectWriteGuard`, scope-checked here).
+ * Answers what the repair's preconditions are decided from:
+ *   governed        the consult's verdict (a governed project is never repaired — RP-01)
+ *   complete        the source was read completely (no global error, no row error, not truncated, found): only then
+ *                   does a key's absence from `expansionKeys` prove anything
+ *   rows            the project's existing rows (logical ids, the record ref on its Symbol, band cells stripped)
+ *   expansionKeys   the idempotency keys of the current expansion
+ * A deployment without the refresh governance wired is refused 501: "not governed" is never assumed.
+ */
+async function readStockPreparationSheetRepairSource(input = {}) {
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
+  if (input.projectWriteGuard !== undefined && input.projectWriteGuard !== null) {
+    assertProjectWriteGuardScope(requireProjectWriteGuard(input.projectWriteGuard), action)
+  }
+  if (input.refreshGovernance === undefined || input.refreshGovernance === null) {
+    throw recoveryError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the refresh governance is not wired on this deployment; a sheet repair never assumes a project is not governed', { reason: 'governance_handle' })
+  }
+  const tenantId = optionalString(input.tenantId)
+  if (!tenantId) throw recoveryError(500, REFRESH_STORE_ERROR_CODES.INPUT_INVALID, 'the sheet repair needs the proven tenant', { field: 'tenantId' })
+  const b2aSourceObjects = stockPreparationB2aSourceObjects({ registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects })
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
+    tenantId,
+    action,
+    parameters,
+    runId: input.b2aRunId,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    now: input.now,
+    sourceObjects: b2aSourceObjects,
+  })
+  const tableScopeReview = input.policyStore ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore }) : null
+  const dryRun = await computeDryRun({
+    action,
+    parameters,
+    sourceAdapter: input.sourceAdapter,
+    recordsApi: input.recordsApi,
+    plannedAt: input.plannedAt,
+    runId: input.runId,
+    runOnlyReview: normalizeRunOnlyConflictPolicyReview(undefined),
+    tableScopeReview,
+    installedFieldProperties: input.installedFieldProperties,
+    targetFieldExistence: input.targetFieldExistence,
+    extFieldMapping: input.extFieldMapping,
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aSourceObjects,
+    b2aNow: input.now,
+    refreshGovernance: input.refreshGovernance,
+    // 批次标识 (BI §3.4, RS-2): the reader strip (always) — a repair never reads or writes a band cell (ruling C7).
+    pullBatchLane,
+  })
+  if (!dryRun.refresh) throw recoveryError(501, REFRESH_STORE_ERROR_CODES.STORE_UNAVAILABLE, 'the source read of the sheet repair carries no governance verdict; nothing was decided', { reason: 'governance_verdict' })
+  const expansionRows = dryRun.expansion && Array.isArray(dryRun.expansion.rows) ? dryRun.expansion.rows : []
+  const expansionKeys = new Set()
+  for (const row of expansionRows) {
+    if (isPlainObject(row) && typeof row.idempotencyKey === 'string' && row.idempotencyKey.trim() !== '') expansionKeys.add(row.idempotencyKey)
+  }
+  return Object.freeze({
+    governed: dryRun.refresh.governed === true,
+    complete: dryRun.refresh.complete === true,
+    rows: dryRun.existingRows,
+    expansionKeys,
+  })
+}
+
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
@@ -3785,6 +3861,8 @@ module.exports = {
   // Batch-refresh step 6a-2 (S6-2).
   RECOVERY_OPERATIONS,
   recoverStockPreparationExecution,
+  // Batch-refresh step 6d-2a (S6-6).
+  readStockPreparationSheetRepairSource,
   __internals: {
     // Step 6a-1 (XS-03): the best-effort failed finish and its pre-IO rule.
     finishExecutionFailedBestEffort,
