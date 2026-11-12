@@ -81,7 +81,9 @@
  *            summary whose text carries a duplicated key — refuses the retire before any write (`row_not_machine_shaped`,
  *            counted; 409 inside the lease), so no run row and no backup exist; another WRITER's stamp (the large lane's
  *            run id, an UPDATE's decision and summary) is stored as read, nothing planted is anywhere in the ledger, the
- *            audit details or the answers, and the restore puts every stamp back byte for byte.
+ *            audit details or the answers, and the restore puts every stamp back byte for byte. And (ruling R3-2) no
+ *            answer of that retire or of its restore — the previews, a STOPPED refusal of each (the first patch fails in
+ *            the host), the execute answers — carries either cell of that backup; each answer has exactly its own keys.
  * Values-free: every id is synthetic and per run; the project number, part ids and the note are the fixtures' synthetic
  * values.
  */
@@ -1312,7 +1314,7 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect(await activeOf(st.oldIds), 'the retired old subtree: the boolean false on every row').toEqual(st.oldIds.map(() => ['boolean', false]))
     }, 180_000)
 
-    test('S9D-24 what a backup may hold, on real rows: an old row whose STORED stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose text carries a duplicated key — refuses the retire before any write, so nothing of it is stored; another WRITER\'s stamp (the large lane\'s run id, an UPDATE\'s summary) is stored as read and put back byte for byte by the restore', async () => {
+    test('S9D-24 what a backup may hold, on real rows: an old row whose STORED stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose text carries a duplicated key — refuses the retire before any write, so nothing of it is stored; another WRITER\'s stamp (the large lane\'s run id, an UPDATE\'s summary) is stored as read and put back byte for byte by the restore — and no answer of the retire or of its restore (the previews, a STOPPED refusal of each, the execute answers) carries either cell', async () => {
       const st = await world('d24')
       const F = st.fields
       const cellOf = async (id: string, field: string) => (await q('SELECT data ->> $2 AS v FROM meta_records WHERE id = $1', [id, field])).rows[0].v as string | null
@@ -1351,21 +1353,65 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       const before = await st.stored()
       const again = dataOf(await st.preview())
       expect([again.eligible, again.counts.notMachineShaped, again.planDigest], 'no version moved: the same digest').toEqual([true, 0, ok.planDigest])
-      const done = dataOf(await st.execute(ok.planDigest))
+      // (c) THE BACKUP IS ANSWERED BY NO ROUTE (ruling R3-2). From here on every answer — of the retire and of its restore:
+      // the previews, a STOPPED refusal of each, the execute answers — is searched for the two cells this row's backup
+      // holds (the large lane's run id, the UPDATE's summary), as stored, JSON-escaped or by part.
+      const backupCells = [largeLane[F.lastPlmRefreshRunId], largeLane[F.lastPlmConflictSummary]]
+      const noBackupCell = (label: string, res: any) => {
+        const text = JSON.stringify(res.body)
+        for (const needle of [...backupCells, JSON.stringify(backupCells[1]).slice(1, -1), 'large-bom-expansion', 'plm_system_refresh', 'ext_componentSortNo']) expect(text.includes(needle), `${label} carries ${needle}`).toBe(false)
+      }
+      const STOP_DETAILS = ['hostCode', 'partial', 'planned', 'reason', 'runId', 'written']
+      const hostDown = async () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
+      // A retire STOPPED on its first patch (the host fails): its run's backup holds both cells already.
+      st.hooks.beforePatch = hostDown
+      const stoppedRes = await st.execute(ok.planDigest)
+      st.hooks.beforePatch = null
+      noBackupCell('the retire\'s STOPPED refusal', stoppedRes)
+      const stopped = errorOf(stoppedRes, 409, CODES.STOPPED)
+      expect([stopped.details.reason, stopped.details.written, Object.keys(stopped.details).sort()]).toEqual(['host_write_failed', 0, STOP_DETAILS])
+      const stoppedRun = (await st.runs()).find((row: any) => row.id === stopped.details.runId)
+      expect(stoppedRun.backup.find((entry: any[]) => entry[0] === stamped).slice(2), 'the positive control: the stopped run\'s backup holds both cells').toEqual([true, largeLane[F.lastPlmRefreshRunId], 'update', largeLane[F.lastPlmConflictSummary]])
+      expect(await st.stored(), 'the stopped retire wrote nothing').toEqual(before)
+      const rerun = dataOf(await st.preview())
+      expect([rerun.eligible, rerun.sequence, rerun.planDigest === ok.planDigest]).toEqual([true, 1, false])
+      const doneRes = await st.execute(rerun.planDigest, { approvalRef: 'R-91:s66-d24-rerun' })
+      noBackupCell('the retire\'s execute answer', doneRes)
+      const done = dataOf(doneRes)
       expect([done.status, done.planned, done.written]).toEqual(['completed', 4, 4])
-      const run = (await st.runs())[0]
+      const run = (await st.runs()).find((row: any) => row.id === done.runId)
       expect(new Map(run.backup.map((entry: any[]) => [entry[0], entry.slice(2)]))).toEqual(new Map(st.oldIds.map((id) => [id, id === stamped
         ? [true, largeLane[F.lastPlmRefreshRunId], 'update', largeLane[F.lastPlmConflictSummary]]
         : [true, SMALL_LANE_RUN_ID, 'add', '']])))
       // Nothing that was planted in (a) is anywhere: not in the ledger, not in an audit detail, not in an answer.
       const runsAnswer = dataOf(await st.call('GET', PATHS.runs))
-      const everything = JSON.stringify([await st.runs(), await st.claims(), (await st.audits()).map((row: any) => row.detail), again, done, runsAnswer])
+      const everything = JSON.stringify([await st.runs(), await st.claims(), (await st.audits()).map((row: any) => row.detail), again, stoppedRes.body, done, runsAnswer])
       for (const planted of ['S-001', CF.RUN_ID, 'D100-01-03', 'zhang.san', 'synthetic free text']) expect(everything.includes(planted), `${planted} is nowhere in the ledger, the audit details or the answers`).toBe(false)
       expect(JSON.stringify(runsAnswer).includes('large-bom-expansion'), 'the run list never answers a backup cell').toBe(false)
-      // And the restore puts every stamp back byte for byte — the large lane's included.
-      const plan = dataOf(await st.repair({ mode: 'preview', recipe: RESTORE, runId: done.runId }))
-      const restored = dataOf(await st.repair({ mode: 'execute', recipe: RESTORE, runId: done.runId, planDigest: plan.planDigest, approvalRef: 'R-91:s66-d24-restore' }))
+      // The restore: its preview, a STOPPED refusal (its first patch fails), the preview again, its execute — none carries
+      // either cell; and it puts every stamp back byte for byte, the large lane's included.
+      const restore = (body: Record<string, unknown>) => st.repair({ recipe: RESTORE, runId: done.runId, ...body })
+      const planRes = await restore({ mode: 'preview' })
+      noBackupCell('the restore preview', planRes)
+      const plan = dataOf(planRes)
+      st.hooks.beforePatch = hostDown
+      const restoreStoppedRes = await restore({ mode: 'execute', planDigest: plan.planDigest, approvalRef: 'R-91:s66-d24-restore-stop' })
+      st.hooks.beforePatch = null
+      noBackupCell('the restore\'s STOPPED refusal', restoreStoppedRes)
+      const restoreStopped = errorOf(restoreStoppedRes, 409, CODES.STOPPED)
+      expect([restoreStopped.details.reason, restoreStopped.details.written, Object.keys(restoreStopped.details).sort()]).toEqual(['host_write_failed', 0, STOP_DETAILS])
+      const planAgainRes = await restore({ mode: 'preview' })
+      noBackupCell('the restore preview after the stop', planAgainRes)
+      const restoredRes = await restore({ mode: 'execute', planDigest: dataOf(planAgainRes).planDigest, approvalRef: 'R-91:s66-d24-restore' })
+      noBackupCell('the restore\'s execute answer', restoredRes)
+      const restored = dataOf(restoredRes)
       expect([restored.status, restored.written]).toEqual(['completed', 4])
+      // Each answer has exactly its own keys (BK-01's pins, through the route).
+      expect([Object.keys(plan).sort(), Object.keys(done).sort(), Object.keys(restored).sort()]).toEqual([
+        ['counts', 'eligible', 'mode', 'openRun', 'planDigest', 'recipe', 'refusals', 'requires', 'sequence', 'sourceRunId'],
+        ['componentHandle', 'generationBumped', 'mode', 'planDigest', 'planned', 'recipe', 'runId', 'status', 'written'],
+        ['generationBumped', 'mode', 'planDigest', 'planned', 'recipe', 'runId', 'sourceRunId', 'status', 'written'],
+      ])
       const after = await st.stored()
       for (const [id, row] of before.entries()) {
         expect(after.get(id)!.data, `${st.oldIds.includes(id) ? 'old' : 'copy'} row: byte-identical`).toBe(row.data)

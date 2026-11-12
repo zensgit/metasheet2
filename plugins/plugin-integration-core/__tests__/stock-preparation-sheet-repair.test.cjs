@@ -28,6 +28,9 @@
 //          plan) is 409 PLAN_CHANGED in the lease: zero patches, no run row, no claim; the new preview runs
 //   RD-03  the sequence nonce of a restore: a restore run that began and wrote nothing makes the next preview a new
 //          digest and its execute completes (the undo of a retire is never dead-ended)
+//   BK-01  (ruling R3-2) the backup is answered by no route: another writer's stamp on an old row is backed up as read
+//          and restored, and no preview, execute answer or STOPPED refusal of the retire or the restore carries it;
+//          each of those answers has exactly its own keys
 //   RP-05  the one-shot claim: a second run of an approved digest is 409 ALREADY_CONSUMED (prelude, and in the lease);
 //          a failed claim insert is read back and fails closed
 //   RP-06  an execute's refusals (installing, not applicable, digest differs) leave zero patches and zero ledger rows
@@ -962,6 +965,68 @@ test('RD-03 the sequence nonce of a RESTORE: a restore run that began and wrote 
   assert.deepEqual([done.status, done.planned, done.written, done.sourceRunId], ['completed', 4, 4, retired.runId])
   for (const id of m.sheet.ids.old) assert.equal(JSON.stringify(m.host.dataOf(id)), before[id], `${id}: byte-identical to before the retire`)
   assert.deepEqual(m.db.rows(kit.T.claim).map((claim) => claim.approval_ref).sort(), ['R-91:syn-1', 'R-91:syn-2', 'R-91:syn-restore-again'])
+})
+
+// ── BK-01 (ruling R3-2) ──────────────────────────────────────────────────────────────────────────────────
+
+test('BK-01 (ruling R3-2) the backup is answered by NO route: an old row carrying ANOTHER writer\'s stamp (the large lane\'s run id, an UPDATE\'s decision and summary) is backed up as read and put back by the restore — and no preview, execute answer or STOPPED refusal of the retire or of the restore carries either cell; each answer has exactly its own keys', async () => {
+  const LARGE_LANE_RUN_ID = `large-bom:large-bom-expansion-${crypto.randomUUID()}`
+  const UPDATE_SUMMARY = '{"type":"plm_system_refresh","changedFields":["totalQuantity","ext_componentSortNo"]}'
+  const m = mount({ sheet: kit.doubledSheet({ mutate: (spec) => (spec.id === 'rec_old_2' ? { ...spec, runId: LARGE_LANE_RUN_ID, decision: 'update', summary: UPDATE_SUMMARY } : spec) }) })
+  const rowBefore = JSON.stringify(m.host.dataOf('rec_old_2'))
+  /** Neither backed-up cell is in the answer, in any spelling it could carry them: as is, JSON-escaped, or by part. */
+  const clean = (label, text) => {
+    for (const needle of [LARGE_LANE_RUN_ID, 'large-bom-expansion', UPDATE_SUMMARY, JSON.stringify(UPDATE_SUMMARY).slice(1, -1), 'plm_system_refresh', 'ext_componentSortNo']) {
+      assert.equal(text.includes(needle), false, `${label} carries ${needle}`)
+    }
+  }
+  const answerText = (answer) => JSON.stringify(answer)
+  const refusalText = (error) => JSON.stringify({ code: error.code, message: error.message, details: error.details })
+  const hostDown = () => { throw Object.assign(new Error('host down'), { code: 'SYN_HOST_DOWN' }) }
+
+  // THE RETIRE: its preview; a STOPPED refusal (its first patch fails inside the host); the re-run's answer.
+  const plan = await m.preview()
+  clean('the retire preview', answerText(plan))
+  m.host.beforePatch = hostDown
+  const stopped = await rejects(m.execute(plan.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
+  m.host.beforePatch = null
+  clean('the retire\'s STOPPED refusal', refusalText(stopped))
+  // The positive control: both cells ARE in that run's backup, so their absence from every answer means something.
+  const stoppedRun = m.db.rows(kit.T.run).find((row) => row.id === stopped.details.runId)
+  assert.deepEqual(stoppedRun.backup.find((entry) => entry[0] === 'rec_old_2').slice(2), [true, LARGE_LANE_RUN_ID, 'update', UPDATE_SUMMARY])
+  const rerun = await m.preview()
+  clean('the retire preview after the stop', answerText(rerun))
+  const retired = await m.execute(rerun.planDigest, { approvalRef: 'R-91:syn-bk-retire' })
+  clean('the retire\'s execute answer', answerText(retired))
+
+  // THE RESTORE: its preview; a STOPPED refusal; the re-run's answer.
+  const restorePlan = await m.restorePreview(retired.runId)
+  clean('the restore preview', answerText(restorePlan))
+  m.host.beforePatch = hostDown
+  const restoreStopped = await rejects(m.restoreExecute(retired.runId, restorePlan.planDigest), { status: 409, code: CODES.STOPPED, reason: 'host_write_failed' })
+  m.host.beforePatch = null
+  clean('the restore\'s STOPPED refusal', refusalText(restoreStopped))
+  const restoreAgain = await m.restorePreview(retired.runId)
+  clean('the restore preview after the stop', answerText(restoreAgain))
+  const restored = await m.run({ mode: 'execute', recipe: RESTORE, confirmProjectNo: SCOPE.projectNo, runId: retired.runId, planDigest: restoreAgain.planDigest, approvalRef: 'R-91:syn-bk-restore' })
+  clean('the restore\'s execute answer', answerText(restored))
+  assert.deepEqual([restored.status, restored.written], ['completed', 4])
+  // The cells went back byte for byte: the backup held them all along. No audit detail carries them either.
+  assert.equal(JSON.stringify(m.host.dataOf('rec_old_2')), rowBefore)
+  clean('the audit details', JSON.stringify([m.state.auditsWithin, m.state.auditReads]))
+
+  // EACH ANSWER HAS EXACTLY ITS OWN KEYS (the ST-07 pattern): nothing else rides along, values-free or not.
+  const STOP_DETAILS = ['hostCode', 'partial', 'planned', 'reason', 'runId', 'written']
+  for (const [label, keys, expected] of [
+    ['the retire preview', Object.keys(plan), ['componentHandle', 'counts', 'eligible', 'mode', 'openRun', 'planDigest', 'recipe', 'refusals', 'requires', 'sequence', 'shape']],
+    ['the retire\'s STOPPED details', Object.keys(stopped.details), STOP_DETAILS],
+    ['the retire\'s execute answer', Object.keys(retired), ['componentHandle', 'generationBumped', 'mode', 'planDigest', 'planned', 'recipe', 'runId', 'status', 'written']],
+    ['the restore preview', Object.keys(restorePlan), ['counts', 'eligible', 'mode', 'openRun', 'planDigest', 'recipe', 'refusals', 'requires', 'sequence', 'sourceRunId']],
+    ['the restore preview\'s requirements', Object.keys(restorePlan.requires), ['approvalRef', 'planDigest']],
+    ['the restore\'s STOPPED details', Object.keys(restoreStopped.details), STOP_DETAILS],
+    ['the restore\'s execute answer', Object.keys(restored), ['generationBumped', 'mode', 'planDigest', 'planned', 'recipe', 'runId', 'sourceRunId', 'status', 'written']],
+  ]) assert.deepEqual(keys.slice().sort(), expected, label)
+  assert.deepEqual(Object.keys(restorePlan.counts), R.SHEET_REPAIR_RESTORE_COUNT_KEYS, 'the restore preview\'s counts')
 })
 
 // ── RP-05 ────────────────────────────────────────────────────────────────────────────────────────────────
