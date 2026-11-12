@@ -248,6 +248,16 @@
 //           shared census helpers) from this scope with no request projectId; the acknowledgement and the revoke are
 //           WRITES to that tenant's component ruling ledger (migration 107), each with its audit row on one transaction.
 //           A header-fillable tenant here would read another tenant's sheets or acknowledge a remnant on its project.
+//       43. POST …/projects/:projectNo/target/sheet-repair               `stockPreparationProjectSheetRepair`
+//       44. GET  …/projects/:projectNo/target/sheet-repair/fills-report  `stockPreparationProjectSheetRepairFillsReport`
+//       45. GET  …/projects/:projectNo/target/sheet-repair/runs          `stockPreparationProjectSheetRepairRuns`
+//           备料分批拉取第一期 step 6d-2a (step-6 design §6.6; register R-91), ADMIN. ONE resolution for the three, in the
+//           shared context builder `stockPreparationSheetRepairContext` (http-routes.cjs). The POST previews and — for
+//           `mode: execute` — WRITES the proven tenant's project sheet: four machine cells of the rows a retire or a
+//           restore plans, under the sheet write lease, with the run's backup and one-shot claim in that tenant's
+//           repair ledger rows; the two GETs read that sheet's fills (which human cells are filled — never their
+//           values) and that ledger's run list. Every real run is owner gate ② per sheet. A header-fillable tenant
+//           here would retire or restore rows of another tenant's sheet.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
