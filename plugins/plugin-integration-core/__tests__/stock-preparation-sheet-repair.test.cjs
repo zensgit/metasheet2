@@ -12,11 +12,13 @@
 //   CA-01  F-11 on both sides: every row of the nested copy a retire leaves live must hold `active` as the BOOLEAN
 //          true — a copy row whose cell is 'false', 0, null, absent, 'true' or 1 refuses the retire, counted, in the
 //          preview and (409) by the recompute inside the lease
-//   MS-01  what a backup may hold of the three RUN stamp cells: only a cell that is byte for byte one of the plugin's
-//          own writers' (the three run-id grammars, the closed decisions, the four summary texts with field ids);
-//          anything else refuses the retire, is counted and stores nothing
+//   MS-01  what a backup may hold of the three RUN stamp cells: only a cell that is byte for byte of a form one of the
+//          plugin's own writers produces (the small lane's run id, the large lane's and a repair run's in the uuid's
+//          8-4-4-4-12 shape — not any 36 hex-and-dash characters, ruling R3-3 —, the closed decisions, the four summary
+//          texts with field ids); anything else refuses the retire, is counted and stores nothing
 //   MS-02  those grammars are the writers' own: the real planner's ADD / UPDATE / INACTIVE stamps are stored as
-//          written, and each spelled grammar is pinned to the module that produces it
+//          written, and each spelled grammar is pinned to the module that produces it (the repair's run id to the
+//          route that mints it)
 //   RP-02  the write: `active` is the BOOLEAN false (F-11) with the three RUN stamps; deepest row first, the root last
 //   RP-03  the backup (run row + claim, one transaction) is committed BEFORE the first patch
 //   RP-04  restore against CURRENT versions: a row whose version moved under an intact stamp IS restored at its current
@@ -566,7 +568,13 @@ test('MS-01 what a BACKUP may hold of the three RUN stamp cells: only a cell tha
     ['the large lane\'s prefix with a tail that is not its job id', 'large-bom:SENTINEL-D100-01-03'],
     ['the large lane\'s APPLY job id (never a planner run id)', `large-bom:large-bom-apply-${crypto.randomUUID()}`],
     ['a bare job id', `large-bom-expansion-${crypto.randomUUID()}`],
-    ['a repair run id that is not a uuid', 'sheet-repair:SENTINEL'],
+    ['a repair run id whose tail is not hex and dashes at all', 'sheet-repair:SENTINEL'],
+    // Ruling R3-3: 36 lowercase hex-and-dash characters — what RUN_ID_PATTERN, the form a route takes as a run id,
+    // admits — that are not the uuid's 8-4-4-4-12 shape the repair's writer mints.
+    ['a repair run id of 36 hex digits and dashes that is not a uuid: a drawing number padded with dashes', `${R.SHEET_REPAIR_RUN_ID_PREFIX}${'d100-01-03'.padEnd(36, '-')}`],
+    ['a repair run id of 36 dashes', `${R.SHEET_REPAIR_RUN_ID_PREFIX}${'-'.repeat(36)}`],
+    ['a repair run id of 36 digits', `${R.SHEET_REPAIR_RUN_ID_PREFIX}${'0'.repeat(36)}`],
+    ['a repair run id in upper case', `${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID().toUpperCase()}`],
     ['a repair run id with a trailing newline', `${repairRunId}\n`],
     ['free text', 'SENTINEL a person typed'],
     ['a blank that is not empty', ' '],
@@ -629,6 +637,11 @@ test('MS-01 what a BACKUP may hold of the three RUN stamp cells: only a cell tha
   // The gate's parts, each on its own.
   assert.deepEqual([SMALL_LANE_RUN_ID, largeLaneRunId, repairRunId, ''].map(R.__internals.isMachineRunId), [true, true, true, true])
   assert.deepEqual(['S-001', 'table-action:other', 'run_scc_fixture', ' '].map(R.__internals.isMachineRunId), [false, false, false, false])
+  // The repair form is the writer's real shape, not the route's input pattern (ruling R3-3): each of these is a run id a
+  // route takes, and none is a stamp the gate admits.
+  const routeShapedRepairIds = [`${R.SHEET_REPAIR_RUN_ID_PREFIX}${'d100-01-03'.padEnd(36, '-')}`, `${R.SHEET_REPAIR_RUN_ID_PREFIX}${'-'.repeat(36)}`, `${R.SHEET_REPAIR_RUN_ID_PREFIX}${'0'.repeat(36)}`]
+  assert.deepEqual(routeShapedRepairIds.map((runId) => R.__internals.RUN_ID_PATTERN.test(runId)), [true, true, true], 'the route takes each as a run id')
+  assert.deepEqual(routeShapedRepairIds.map(R.__internals.isMachineRunId), [false, false, false], 'no stamp of that form is admitted')
   assert.deepEqual(['material', 'notes', 'lastPlmRefreshAt', 'ext_spec', 'ext_componentSortNo'].map(R.__internals.isStampFieldId), [true, true, true, true, true])
   assert.deepEqual(['S-001', 'Material', 'ext_', 'ext_Spec', 'ext_has_underscore', '', 7, null].map(R.__internals.isStampFieldId), [false, false, false, false, false, false, false, false])
   // THE STATED LIMIT: a test of FORM, not a proof of who wrote the cell. A value typed to imitate a writer's form — an
@@ -675,6 +688,13 @@ test('MS-02 the gate\'s grammars are the WRITERS\' own: every stamp the real pla
   const largeJobs = sourceOf('stock-preparation-large-bom-jobs.cjs')
   assert.equal(largeJobs.split('runId: input.runId || `large-bom:${job.jobId}`,').length, 2, 'the large lane hands the planner `large-bom:` + the expansion job\'s id')
   assert.ok(largeJobs.includes('function defaultJobId() {\n  return `large-bom-expansion-${crypto.randomUUID()}`\n}'), 'the expansion job id is `large-bom-expansion-<uuid>`')
+  // The repair's OWN run id (ruling R3-3): the route mints `sheet-repair:` + crypto.randomUUID() — read here, not run —
+  // and the stamp's repair pattern is exactly that shape: every id the minting expression yields is admitted.
+  const routes = sourceOf('http-routes.cjs')
+  assert.equal(routes.split('newRunId: () => `${stockPreparationSheetRepair.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`,').length, 2, 'the repair route mints its run id as the prefix + crypto.randomUUID()')
+  assert.equal(R.SHEET_REPAIR_RUN_ID_PREFIX, 'sheet-repair:')
+  assert.equal(String(R.__internals.STAMP_RUN_ID_REPAIR_PATTERN), '/^sheet-repair:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/')
+  for (let i = 0; i < 200; i += 1) assert.equal(R.__internals.isMachineRunId(`${R.SHEET_REPAIR_RUN_ID_PREFIX}${crypto.randomUUID()}`), true)
   const planner = sourceOf('stock-preparation-conflict-planner.cjs')
   // Every producer of a stamp cell is one of these four `runPatch` calls (and `runPatch` writes the cells as handed).
   assert.deepEqual(

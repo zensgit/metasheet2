@@ -39,20 +39,22 @@
 -- versions, the boolean `active` cell and the three RUN stamp cells AS READ from the sheet (a restore puts them back
 -- byte-identically): the run-id cell, the decision cell and the conflict-summary cell.
 --   WHAT CAN BE STORED. A row is planned — and so backed up — only when each of its three stamp cells is NULL or,
---   byte for byte, a cell one of the plugin's own writers produces (the library spells the writers out and its suite
+--   byte for byte, of a form one of the plugin's own writers produces (the library spells the forms out and its suite
 --   pins each grammar to its writer):
 --     run id    blank; `table-action:plm.stock-preparation.pull-bom.v1` (the small lane's only run id);
---               `large-bom:large-bom-expansion-<uuid>` (the large lane); `sheet-repair:<uuid>` (a repair run);
+--               `large-bom:large-bom-expansion-<uuid>` (the large lane); `sheet-repair:<uuid>` (a repair run) —
+--               `<uuid>` being exactly the 8-4-4-4-12 lowercase hex shape `crypto.randomUUID()` writes (its version
+--               and variant digits are not checked);
 --     decision  blank, or a token of the planner's closed vocabulary;
 --     summary   blank, or the JSON text — exactly as `JSON.stringify` writes it — of one of four objects:
 --               `plm_system_refresh` with `changedFields`; `change_plan_update` with `changePlanId` (`chp_` + 32 hex)
 --               and `changedFields`; `missing_from_plm`; `sheet_repair_retire`. `changedFields` lists field ids of
 --               the frozen main template or of the reserved `ext_` extension namespace.
---   Any other cell — free text, a part id or a drawing number sitting in a stamp column, an unknown summary type or
---   key, a JSON text with a duplicated key, padding or an escape — refuses the retire before any write
---   (`row_not_machine_shaped`; the preview counts the rows) and nothing of it is stored. It is a test of the cell's
---   FORM, not a proof of who wrote it: a value typed to imitate one of these forms cannot be told from a writer's
---   and would be stored.
+--   Any other cell — free text, a part id or a drawing number sitting in a stamp column (also one padded to the
+--   length of a run id), an unknown summary type or key, a JSON text with a duplicated key, padding or an escape —
+--   refuses the retire before any write (`row_not_machine_shaped`; the preview counts the rows) and nothing of it is
+--   stored. It is a test of the cell's FORM, not a proof of who wrote it: a value typed to imitate one of these forms
+--   cannot be told from a writer's and would be stored.
 --   WHERE, AND WHO READS IT. Only in `backup` of this table. No route answers it (the run list leaves it out); the
 --   ledger store reads it for a restore and for the verified close. Step-6 design §14.2 O6-9 and register R-91 speak of
 --   owner gate Q-B; whether a stamp cell stored as read falls under it is not decided by this file.

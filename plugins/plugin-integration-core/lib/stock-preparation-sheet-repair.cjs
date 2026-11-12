@@ -58,8 +58,8 @@
 // a person typed. The fills report says WHETHER a human cell is filled and whether two cells are equal, never what
 // they hold. THE LEDGER'S BACKUP is the one place where cells are stored AS READ from the sheet: the three RUN stamp
 // cells of every planned row (a restore puts them back byte-identically), in a table no route answers. A row is
-// planned — and so backed up — only when each of those cells is byte-for-byte a cell one of this plugin's OWN WRITERS
-// produces (`stampCellsOf` below spells the writers out); any other cell refuses the retire and nothing of it is
+// planned — and so backed up — only when each of those cells is, byte for byte, of a form one of this plugin's OWN
+// WRITERS produces (`stampCellsOf` below spells the forms out); any other cell refuses the retire and nothing of it is
 // stored. That is a test of the cell's FORM, never a proof of who wrote it.
 // ---------------------------------------------------------------------------------------------------
 
@@ -224,7 +224,10 @@ const RECORD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
 // that introduced this gate records the scan; commits between tags and writers outside the repository were not read):
 //   run id    `table-action:` + the ONE action id the table-action config accepts (the small lane's only run id);
 //             `large-bom:` + the expansion job's id, `large-bom-expansion-<uuid>` (the large lane);
-//             `sheet-repair:<uuid>` (a retire of this file — RUN_ID_PATTERN above);
+//             `sheet-repair:<uuid>` (a retire of this file; the route mints it as `sheet-repair:` + `crypto.randomUUID()`)
+//             — where `<uuid>` is EXACTLY the 8-4-4-4-12 lowercase hex shape `crypto.randomUUID()` writes (its version
+//             and variant digits are not checked). The repair form has a pattern of its own below: RUN_ID_PATTERN above
+//             (36 lowercase hex-and-dash characters, the form a route takes as a run id) is not the stamp's gate;
 //   decision  a token of the planner's closed vocabulary;
 //   summary   '' (an ADD), or `JSON.stringify` of exactly one of
 //               { type: 'plm_system_refresh', changedFields }                    an UPDATE
@@ -237,6 +240,7 @@ const RECORD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
 // pins every one of them to its writer (MS-02).
 const STAMP_RUN_ID_SMALL_LANE = 'table-action:plm.stock-preparation.pull-bom.v1'
 const STAMP_RUN_ID_LARGE_LANE_PATTERN = /^large-bom:large-bom-expansion-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const STAMP_RUN_ID_REPAIR_PATTERN = /^sheet-repair:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const STAMP_CHANGE_PLAN_ID_PATTERN = /^chp_[0-9a-f]{32}$/
 const STAMP_SUMMARY_KEYS_BY_TYPE = Object.freeze({
   plm_system_refresh: Object.freeze(['type', 'changedFields']),
@@ -475,9 +479,12 @@ function isStampFieldId(value) {
   return value.startsWith(TENANT_EXTENSION_FIELD_ID_PREFIX) && EXTENSION_SUFFIX_SHAPE_PATTERN.test(value.slice(TENANT_EXTENSION_FIELD_ID_PREFIX.length))
 }
 
-/** The run-id cell of a known writer: blank, the small lane's one run id, the large lane's, or a repair run's. */
+/**
+ * The run-id cell of a known writer: blank, the small lane's one run id, or the large lane's or a repair run's in the
+ * uuid's 8-4-4-4-12 lowercase hex shape (ruling R3-3: NOT RUN_ID_PATTERN, which admits any 36 hex-and-dash characters).
+ */
 function isMachineRunId(value) {
-  return value === '' || value === STAMP_RUN_ID_SMALL_LANE || STAMP_RUN_ID_LARGE_LANE_PATTERN.test(value) || RUN_ID_PATTERN.test(value)
+  return value === '' || value === STAMP_RUN_ID_SMALL_LANE || STAMP_RUN_ID_LARGE_LANE_PATTERN.test(value) || STAMP_RUN_ID_REPAIR_PATTERN.test(value)
 }
 
 /**
@@ -507,11 +514,12 @@ function isMachineSummary(text) {
 
 /**
  * The three RUN stamp cells of a row as a backup may hold them, or null when the row is not machine-shaped. Each cell
- * must be PRESENT (a patch cannot put an absent cell back) and be an explicit null or, BYTE FOR BYTE, a cell one of this
- * plugin's own writers produces (the list above the STAMP_ constants): a run id of the small lane, the large lane or a
- * repair run; a decision of the planner's closed vocabulary; one of the four summary texts. Anything else — free text,
- * a part id or a drawing number sitting in a stamp column, an unknown summary type or key, a list item that is not a
- * field id, a JSON text that is not exactly the writer's serialization — is null here: the retire refuses
+ * must be PRESENT (a patch cannot put an absent cell back) and be an explicit null or, BYTE FOR BYTE, of a form one of
+ * this plugin's own writers produces (the list above the STAMP_ constants): the small lane's run id, or the large lane's
+ * or a repair run's in the uuid's 8-4-4-4-12 lowercase hex shape; a decision of the planner's closed vocabulary; one of
+ * the four summary texts. Anything else — free text, a part id or a drawing number sitting in a stamp column (also one
+ * padded to the length of a run id), an unknown summary type or key, a list item that is not a field id, a JSON text
+ * that is not exactly the writer's serialization — is null here: the retire refuses
  * (`row_not_machine_shaped`), the preview counts the row, and nothing of the cell is stored.
  * This is a test of the cell's FORM, not a proof of who wrote it: a value typed to imitate one of these forms cannot be
  * told from a writer's and would be stored.
@@ -1607,6 +1615,7 @@ module.exports = {
     RECORD_ID_PATTERN,
     RUN_ID_PATTERN,
     SHEET_REPAIR_MAX_PLAN_ROWS,
+    STAMP_RUN_ID_REPAIR_PATTERN,
     STAMP_RUN_ID_SMALL_LANE,
     STAMP_SUMMARY_KEYS_BY_TYPE,
     alreadyConsumed,

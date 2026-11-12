@@ -146,6 +146,9 @@ test('ST-01 migration 108: the closed lists are the library\'s; the kit\'s CHECK
   for (const named of [R.__internals.STAMP_RUN_ID_SMALL_LANE, 'large-bom:large-bom-expansion-<uuid>', `${R.SHEET_REPAIR_RUN_ID_PREFIX}<uuid>`, '`chp_` + 32 hex', '`ext_` extension namespace'].concat(Object.keys(R.__internals.STAMP_SUMMARY_KEYS_BY_TYPE).map((type) => `\`${type}\``))) {
     assert.ok(sql.includes(named), `the header names the writer's form: ${named}`)
   }
+  // What `<uuid>` means there is what the gate checks (ruling R3-3): the 8-4-4-4-12 lowercase hex shape, not a version.
+  assert.ok(sql.includes('`<uuid>` being exactly the 8-4-4-4-12 lowercase hex shape `crypto.randomUUID()` writes'), 'the header says what `<uuid>` is')
+  assert.ok(sql.includes('of a form one of the plugin\'s own writers produces'), 'the header says the gate admits a writer\'s FORM')
   for (const overclaim of ['Both tables are values-free', 'no material value is ever stored here', 'Owner gate Q-B is not widened']) {
     assert.equal(sql.includes(overclaim), false, `the header no longer claims: ${overclaim}`)
   }
