@@ -450,6 +450,30 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
     control: null,
   }),
+  // 备料分批拉取第一期 step 6d-2a (S6-6; R-91) — byte-equal to the plugin manifest's three doubled-sheet repair rows
+  // (preview / execute, the values-free fills report, the run list). All ADMIN; all 404 while the repair switch is off.
+  // `control: null`: there is no web control for a repair (it runs under the owner's runbook), so F-04 does not pair them.
+  Object.freeze({
+    capability: 'projectTarget.sheetRepair',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairFillsReport',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairRuns',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」
