@@ -175,6 +175,24 @@ export function validateRunIntegrationJobTriggerCoupling(
   return null
 }
 
+/** The one fixed, values-free refusal for a run_integration_job rule that carries conditions. */
+export const RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE =
+  'run_integration_job rules cannot carry conditions (a schedule trigger has no record context)'
+
+/**
+ * A run_integration_job rule may not carry conditions. Its schedule.cron trigger fires with an EMPTY record, so a
+ * condition can only fail: the execution is skipped, the job never runs and no summary is published. The caller
+ * passes the rule's NEXT STORED conditions (create: the input; update: the input when sent, else the stored ones).
+ * Absent conditions and an empty group (no condition nodes) count as none, as for integration.run_finished rules.
+ * Pure.
+ */
+export function validateRunIntegrationJobConditions(conditions: unknown): string | null {
+  if (!conditions) return null
+  const nodes = isRecord(conditions) && Array.isArray(conditions.conditions) ? conditions.conditions : null
+  if (nodes && nodes.length === 0) return null
+  return RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE
+}
+
 /** Where the action appears in a rule: the legacy single-action pair and/or the top-level `actions` array. */
 export interface RunIntegrationJobOccurrence {
   path: string

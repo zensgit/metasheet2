@@ -156,6 +156,7 @@ import {
   collectRunIntegrationJobOccurrences,
   isIntegrationAutomationRunActionEnabled,
   stampRunIntegrationJobConfig,
+  validateRunIntegrationJobConditions,
   validateRunIntegrationJobConfig,
   validateRunIntegrationJobTriggerCoupling,
 } from './automation-run-integration-job'
@@ -1761,6 +1762,7 @@ export class AutomationService {
       actions,
       allActions: actionsForValidation,
       createdBy: input.createdBy ?? null,
+      conditions: input.conditions ?? null,
     })
     if (runIntegrationJobSave) {
       actionConfig = runIntegrationJobSave.actionConfig
@@ -2049,6 +2051,8 @@ export class AutomationService {
         actions: normalizedNextActions,
         allActions: actionsForValidation,
         createdBy: existing.created_by ?? null,
+        // the NEXT stored conditions: the incoming ones when sent, else the stored ones
+        conditions: input.conditions !== undefined ? input.conditions : existing.conditions ?? null,
       })
       const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
       const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
@@ -2188,6 +2192,30 @@ export class AutomationService {
       ) as Record<string, unknown> | null
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(nextTriggerType, nextTriggerConfig)
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+    }
+
+    // R-69 1b-ii: a run_integration_job rule cannot carry conditions, judged on the NEXT stored state. An
+    // action-shaped edit ran this inside assertRunIntegrationJobAtSave above; this covers the edits that skip that
+    // gate but still set the conditions or the trigger (conditions-only, trigger-only), with the STORED actions
+    // deciding whether the rule is a job rule. A rename or a pure on/off switch does not open it (setRuleEnabled
+    // routes through updateRule): an operator can always turn a rule off. Every shape that opens it is also a T1-2
+    // shape, so `existingRuleSnapshot` is already fetched (no extra getRule).
+    if (!shouldValidateActions && (input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined)) {
+      const existingForConditions = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForConditions
+      if (!existingForConditions || existingForConditions.sheet_id !== sheetId) return null
+      const storedJob = collectRunIntegrationJobOccurrences(
+        existingForConditions.action_type,
+        (existingForConditions.action_config ?? null) as Record<string, unknown> | null,
+        existingForConditions.actions ?? null,
+        existingForConditions.actions ?? null,
+      )
+      if (storedJob.occurrences.length > 0) {
+        const conditionsError = validateRunIntegrationJobConditions(
+          input.conditions !== undefined ? input.conditions : existingForConditions.conditions ?? null,
+        )
+        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+      }
     }
 
     // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
@@ -2975,6 +3003,8 @@ export class AutomationService {
     actions: AutomationAction[] | null
     allActions: AutomationAction[]
     createdBy: string | null
+    /** The rule's NEXT stored conditions (create: the input; update: the input when sent, else the stored ones). */
+    conditions: ConditionGroup | null
   }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
     const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
     if (error) throw new AutomationRuleValidationError(error)
@@ -2989,6 +3019,9 @@ export class AutomationService {
       const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
       if (configError) throw new AutomationRuleValidationError(configError)
     }
+    // No conditions on a job rule: its schedule trigger has no record, so a condition would skip every fire (400).
+    const conditionsError = validateRunIntegrationJobConditions(input.conditions)
+    if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
     const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
     if (couplingError) throw new AutomationRuleValidationError(couplingError)
     const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
