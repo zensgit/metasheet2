@@ -761,8 +761,13 @@ function ownBackendService() {
   const held = heldRuleStatements(kysely)
   const query = (text: string, params?: unknown[]) => pool.query(text, params)
   const service = new AutomationService(new EventBus(), held.handle as never, query as never)
+  // These cases are about saves, never about fires: the service's scheduler is destroyed before any save, so no rule
+  // saved here arms a timer. (A cron whose next occurrence is more than 2^31-1 ms away — the January-only seed below,
+  // from November on — is clamped by Node to a 1 ms timer that fires and re-arms at once; since #6871 every fire also
+  // reads the rule's stored `enabled` flag over this ONE-connection pool, which starved the held saves.)
+  const schedulerDestroyed = (service as unknown as { scheduler: { destroy(): Promise<void> } }).scheduler.destroy()
   const backendPid = async () => Number(((await pool.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
-  return { service, holdNext: held.holdNext, backendPid, close: () => kysely.destroy() }
+  return { service, holdNext: held.holdNext, backendPid, close: async () => { await schedulerDestroyed; await kysely.destroy() } }
 }
 
 describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed under it is re-validated, never written as it was (two backends, the first UPDATE held)', () => {
@@ -771,7 +776,7 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
   const sheet = `sheetf1_${RUN}`
   const serverBinding = { principalId, tenantId: TENANT }
   const forgedBinding = { principalId, tenantId: `${TENANT}_other` }
-  // 1 January only: the cron this file registers on its schedulers does not fire while the file runs.
+  // A valid schedule.cron (1 January only); no timer is armed for it — both services' schedulers are destroyed.
   const cron = { cron: '0 6 1 1 *', timezone: 'Asia/Shanghai' }
   const jobConfig = (projectNo: string = project, extra: Record<string, unknown> = {}) => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 60_000, ...extra })
   const jobPatch = { actionType: 'run_integration_job', actionConfig: jobConfig() }
