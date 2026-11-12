@@ -18,6 +18,9 @@
  *   S9D-CR     the store on real PG: record + the audit row on ONE transaction (both present); a second active
  *              acknowledgement 409 with no second audit row; an audit hook that fails AFTER its own insert rolls back
  *              BOTH rows; revoke + its audit row; a second revoke 409.
+ *   S9D-01f    (S6-5b) a real sheet that lost a census key column (each of the five in turn, its meta_fields row removed
+ *              and put back): the tenant census row incomplete / field_missing with no counts, the project census 409
+ *              STOCK_PREP_SHEET_CENSUS_FIELD_MISSING before its audit row; complete again with the column back.
  *   S9D-01r    (S9D-01 / S9D-04, the readiness and census legs) a real project sheet in the item-10 shape (D2): the
  *              tenant census counts it, the project census lists exactly its handle, readiness v5 refuses
  *              `no_unacknowledged_inactive_root_remnant`; an acknowledgement through the route (re-proved on the real
@@ -402,6 +405,115 @@ export function defineStockPreparationComponentRulingRealDbCases(): void {
         expect(revoked.statusCode, JSON.stringify(revoked.body)).toBe(200)
         expect(revoked.body.data.status).toBe('revoked')
         expect(await failing()).toContain('no_unacknowledged_inactive_root_remnant')
+      } finally {
+        if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+        else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
+        await q(`DELETE FROM ${lockLib.PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [lockLib.sheetWriteScopeKey(sheetId)]).catch(() => {})
+      }
+    }, 120000)
+
+    test('S9D-01f (S6-5b) a real sheet that lost a census KEY column: the tenant census row is incomplete / field_missing with no counts and the project census 409 FIELD_MISSING (before its audit row); with the column back both answer complete', async () => {
+      const projectNo = 'SYN-S65-FM'
+      const projectId = `${TENANT}:integration-core`
+      const objectId: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(TENANT, projectNo)
+      const pluginContext = createProductionPluginContext()
+      const multitable: any = pluginContext.api.multitable
+      const ensured = await ensureStockPreparationSandboxTarget({ context: { api: { multitable } }, projectId, permission: 'admin', objectId })
+      expect(ensured.ready).toBe(true)
+      const sheetId: string = ensured.target.sheetId
+      sheets.push(sheetId)
+      const db = createDb({ database: pluginContext.api.database })
+      const registry = projectTargetStoreLib.createStockPreparationProjectTargetStore({ db })
+      await registry.create({ tenantId: TENANT, projectNo, sheetId, objectId, createdBy: 'u_s65' })
+      const fields = ensured.target.fieldIdMap || {}
+      const seed = async (cells: Record<string, unknown>) => {
+        const created = await multitable.records.createRecord({ sheetId, data: { [fields.projectNo]: projectNo } })
+        const patch: Record<string, unknown> = {}
+        for (const [logical, value] of Object.entries(cells)) patch[fields[logical]] = value
+        await q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [created.id, JSON.stringify(patch)])
+      }
+      // D2 (one inactive-root remnant): the very shape a lost key column would hide (e.g. no parentSourceId: all roots).
+      await seed({ idempotencyKey: 's65f-P', componentSourceId: 'S65F-P', parentSourceId: '', active: true })
+      await seed({ idempotencyKey: 's65f-S', componentSourceId: 'S65F-S', parentSourceId: '', active: false })
+      await seed({ idempotencyKey: 's65f-P-S', componentSourceId: 'S65F-S', parentSourceId: 'S65F-P', active: true })
+      const routes = new Map<string, any>()
+      const lock = lockLib.createStockPreparationProjectWriteLock({ db })
+      const continuationStore = continuationStoreLib.createStockPreparationContinuationStore({ db })
+      const envTarget = { sheetId: `sheet_env_s65f_${TOKEN}`, objectId: 'plm_stock_preparation_sandbox_synthetic_env', fieldIdMap: {} }
+      const routeContext = {
+        api: {
+          http: { addRoute: (method: string, routePath: string, handler: any) => routes.set(`${method.toUpperCase()} ${routePath}`, handler) },
+          multitable,
+          database: pluginContext.api.database,
+        },
+        storage: pluginContext.storage,
+        config: {
+          stockPreparationTableActions: [{ actionId: tableActions.PLM_STOCK_PREPARATION_ACTION_ID, source: { externalSystemId: `s65f_source_${TOKEN}`, kind: 'data-source:sql-readonly' }, target: envTarget }],
+          stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [envTarget.objectId] },
+        },
+      }
+      const base = projectSheetHarness.baseServices({ async read() { return { records: [], done: true, nextCursor: null } } })
+      const services = {
+        ...base,
+        stockPreparationProjectWriteLock: lock,
+        stockPreparationProjectTargetStore: registry,
+        stockPreparationAuditStore: auditLib.createStockPreparationAuditStore({ db }),
+        stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db }),
+        stockPreparationContinuationStore: continuationStore,
+        stockPreparationRefreshGovernance: governanceLib.createStockPreparationRefreshGovernance({ continuationStore, projectTargetStore: registry, projectWriteLock: lock }),
+        stockPreparationComponentRulingStore: createStockPreparationComponentRulingStore({ db }),
+        tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+      }
+      const envBefore = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+      process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+      const admin = { id: `u_s65f_admin_${TOKEN}`, tenantId: TENANT, permissions: ['stock-prep:admin'] }
+      const call = async (method: string, routePath: string, req: Record<string, unknown>) => {
+        const handler = routes.get(`${method} ${routePath}`)
+        if (!handler) throw new Error(`route ${method} ${routePath} is not registered`)
+        const res: any = { statusCode: 200, body: null, headers: {} }
+        res.status = (code: number) => { res.statusCode = code; return res }
+        res.json = (payload: unknown) => { res.body = payload; return res }
+        res.setHeader = () => res
+        await handler({ user: admin, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+        return res
+      }
+      const listItem = async () => {
+        const list = await call('GET', '/api/integration/stock-preparation/project-targets/census', { query: {} })
+        expect(list.statusCode, JSON.stringify(list.body)).toBe(200)
+        return list.body.data.items.find((entry: any) => entry.objectId === objectId)
+      }
+      const project = () => call('GET', '/api/integration/stock-preparation/projects/:projectNo/target/census', { params: { projectNo }, query: {} })
+      const censusAudits = async () => Number((await q(`SELECT count(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_board_read' AND mode = 'sheet_census_read' AND (detail ->> 'operation') = 'sheet_census_project'`, [TENANT])).rows[0].n)
+      try {
+        httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
+        // Calibration: every key column present — complete, the remnant counted.
+        const complete = await listItem()
+        expect([complete.status, complete.inactiveRootRemnantComponents]).toEqual(['complete', 1])
+        expect(censusLib.SHEET_CENSUS_KEY_FIELD_IDS).toEqual(['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'active'])
+        for (const fieldId of censusLib.SHEET_CENSUS_KEY_FIELD_IDS as string[]) {
+          const physical = fields[fieldId]
+          expect(physical, fieldId).toBeTruthy()
+          // The column removed from the sheet (its meta_fields row), the cells left in the rows — then put back.
+          const saved = (await q('SELECT to_jsonb(f) AS row FROM meta_fields f WHERE id = $1 AND sheet_id = $2', [physical, sheetId])).rows[0].row
+          await q('DELETE FROM meta_fields WHERE id = $1 AND sheet_id = $2', [physical, sheetId])
+          try {
+            const item = await listItem()
+            expect([item.status, item.reason], `${fieldId}: ${JSON.stringify(item)}`).toEqual(['incomplete', 'field_missing'])
+            for (const key of censusLib.SHEET_CENSUS_COUNT_KEYS as string[]) expect(key in item, `${fieldId}: no ${key}`).toBe(false)
+            const auditsBefore = await censusAudits()
+            const refused = await project()
+            expect([refused.statusCode, refused.body.error && refused.body.error.code], JSON.stringify(refused.body)).toEqual([409, 'STOCK_PREP_SHEET_CENSUS_FIELD_MISSING'])
+            expect(JSON.parse(JSON.stringify(refused.body.error.details))).toEqual({ reason: 'field_missing', missing: 1, partial: false })
+            expect(JSON.stringify(refused.body).includes(projectNo) || JSON.stringify(refused.body).includes(physical)).toBe(false)
+            expect(await censusAudits(), `${fieldId}: no project census audit row`).toBe(auditsBefore)
+          } finally {
+            await q('INSERT INTO meta_fields SELECT * FROM jsonb_populate_record(NULL::meta_fields, $1::jsonb)', [JSON.stringify(saved)])
+          }
+        }
+        // The column back: both forms complete again.
+        expect((await listItem()).status).toBe('complete')
+        const again = await project()
+        expect([again.statusCode, again.body.data && again.body.data.status]).toEqual([200, 'complete'])
       } finally {
         if (envBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
