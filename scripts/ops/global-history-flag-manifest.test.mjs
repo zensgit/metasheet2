@@ -1049,7 +1049,12 @@ test('stock-prep sheet-repair switch (batch-refresh step 6d-2a, R-91): boolean, 
   assert.match(spec.purpose, /Default OFF; exact literal 'true' only/)
   assert.match(spec.purpose, /404 STOCK_PREP_SHEET_REPAIR_DISABLED after their gate and before any IO/)
   assert.match(spec.purpose, /preview, fills report and run list included/)
-  assert.match(spec.purpose, /migration 108's two tables are never read or written/)
+  // S6-5b (readiness v7): OFF keeps the repair ROUTES away from 108, but readiness and the enable's in-lease re-read read
+  // the run table whatever the switch says — the record must say so, never the old "never read" sentence.
+  assert.match(spec.purpose, /the repair routes never read or write migration 108's two tables/)
+  assert.match(spec.purpose, /Pilot readiness v7 \(no_open_sheet_repair_run, S6-5b\) and the pilot enable's in-lease re-read READ integration_stock_prep_sheet_repair_run whatever this switch says/)
+  assert.match(spec.purpose, /a run left open while the switch was on still refuses the enable after it is off, and without 108 readiness fails for every project/)
+  assert.doesNotMatch(spec.purpose, /migration 108's two tables are never read or written, and no existing route, answer or readiness check changes/)
   assert.match(spec.purpose, /409 STOCK_PREP_SHEET_REPAIR_ALREADY_CONSUMED/)
   assert.match(spec.purpose, /409 STOCK_PREP_SHEET_REPAIR_INSTALL_IN_PROGRESS/)
   // Round 2 (coordinator rulings C-2 / C-3): the install gate does not depend on the pull-batch switch, and the
@@ -1086,7 +1091,9 @@ test('stock-prep tenant-claim door (W4; owner ruling 2026-11-11, R-91 option A):
   // Readiness v6: the route hands the reader's answer in; the readiness module never parses the env itself.
   assert.match(routes, /tenantClaimRequired: stockPreparationTenantClaimRequired\(\),/)
   const readiness = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs'), 'utf8')
-  assert.match(readiness, /'tenant_claim_required',\s*'continuation_support_version',\s*\]\)/)
+  // Readiness v7 (S6-5b, R-91) inserted no_open_sheet_repair_run (with its comment line) between it and the D-22 marker,
+  // which stays last.
+  assert.match(readiness, /'tenant_claim_required',\s*(?:\/\/[^\n]*\n\s*)*'no_open_sheet_repair_run',\s*'continuation_support_version',\s*\]\)/)
   assert.match(readiness, /return deps\.tenantClaimRequired === true/)
   assert.doesNotMatch(readiness.replace(/\/\/[^\n]*/g, ''), /process\.env/)
   // The record states the ruling and the residual.
