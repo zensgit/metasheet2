@@ -10,10 +10,10 @@
  *   (1) the built context (authenticatedTenantId = the binding tenant) passes the access check — on the legacy
  *       `integration:read` branch (where the claim door sits) and on the stock-prep operator branch;
  *   (2) an EMPTY authenticatedTenantId is refused 403 OPERATOR_SCOPE_TENANT_REQUIRED; with the door off the same
- *       context passes that check (the door is what refuses it);
+ *       context passes the door and is refused further down by the tenant resolver (400 TENANT_REQUIRED);
  *   (3) how the chain RECORDS (2): the plugin port classifies the 403 as skipped(principal_unauthorized) with
  *       errorClass OPERATOR_SCOPE_TENANT_REQUIRED, and I5's run_integration_job step and its run_finished summary
- *       carry the same — status `skipped`, not `failed`.
+ *       carry the same — status `skipped`, not `failed`. (Door off, the 400 is recorded failed(TENANT_REQUIRED).)
  * Synthetic only; nothing is written, the source is the harness's fake adapter.
  */
 import { createRequire } from 'node:module'
@@ -101,7 +101,8 @@ describe('run_integration_job port context vs the tenant-claim door (MULTITABLE_
     if (!refused.ok) expect([refused.error.name, refused.error.status, refused.error.code]).toEqual(['HttpRouteError', 403, 'OPERATOR_SCOPE_TENANT_REQUIRED'])
     vi.stubEnv(CLAIM_FLAG, '')
     const open = await settle(m.governedEntries.runGovernedStockPrepPull(contextFor(tenantless), JOB))
-    expect(open.ok ? 'no refusal' : open.error.code).not.toBe('OPERATOR_SCOPE_TENANT_REQUIRED')
+    // door off: the claim door does not refuse; the tenant resolver further down does (400 TENANT_REQUIRED)
+    expect(open.ok ? 'no refusal' : [open.error.status, open.error.code]).toEqual([400, 'TENANT_REQUIRED'])
   })
 
   it('(3) door ON, empty claim: the plugin port records skipped(principal_unauthorized, errorClass OPERATOR_SCOPE_TENANT_REQUIRED); the I5 step and its run_finished summary say skipped, not failed', async () => {
@@ -112,6 +113,11 @@ describe('run_integration_job port context vs the tenant-claim door (MULTITABLE_
     // the plugin port alone
     const summary = await createIntegrationRunPort({ governedEntries: m.governedEntries }).run({ context: contextFor(tenantless), job: JOB, automation: AUTOMATION })
     expect(summary).toEqual({ status: 'skipped', reason: 'principal_unauthorized', errorClass: 'OPERATOR_SCOPE_TENANT_REQUIRED', durationMs: summary.durationMs })
+    // contrast, door OFF: the same context reaches the tenant resolver's 400, which the port records as failed
+    vi.stubEnv(CLAIM_FLAG, '')
+    const doorOff = await createIntegrationRunPort({ governedEntries: m.governedEntries }).run({ context: contextFor(tenantless), job: JOB, automation: AUTOMATION })
+    expect(doorOff).toEqual({ status: 'failed', errorClass: 'TENANT_REQUIRED', failureStage: 'authorize', durationMs: doorOff.durationMs })
+    vi.stubEnv(CLAIM_FLAG, 'true')
     // the real run_integration_job step (fake ledgers), its principal resolved to the empty-claim user, the real port
     const events: IntegrationRunFinishedEvent[] = []
     registerIntegrationRunFinishedSink('test-claim', async (event) => { events.push(event) })
