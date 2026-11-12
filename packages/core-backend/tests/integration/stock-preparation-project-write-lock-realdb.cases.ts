@@ -1679,10 +1679,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
       // 批次标识 BI-1b (readiness v3; register R-65; critic M3): the pull-batch switch for this case only, restored below.
       const pullBatchSwitchBefore = process.env.STOCK_PREP_PULL_BATCH_ENABLED
+      // Readiness v6 (owner ruling 2026-11-11, R-91 option A): the tenant-claim door for this case only, restored below.
+      const tenantClaimBefore = process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
       const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
       const createdStubs: string[] = []
       process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
       process.env.STOCK_PREP_PULL_BATCH_ENABLED = 'true'
+      process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = 'true'
       continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
       const pullBatchStore = pullBatchStoreModule.createStockPreparationPullBatchStore({ db })
       try {
@@ -1814,6 +1817,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
         if (pullBatchSwitchBefore === undefined) delete process.env.STOCK_PREP_PULL_BATCH_ENABLED
         else process.env.STOCK_PREP_PULL_BATCH_ENABLED = pullBatchSwitchBefore
+        if (tenantClaimBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+        else process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = tenantClaimBefore
         await q('DELETE FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [tenantId]).catch(() => {})
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
         for (const table of createdStubs) await q(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
