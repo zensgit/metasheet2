@@ -1732,6 +1732,7 @@ exec npx vitest run \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   DirectoryIntegrationIdentityPanel.spec.ts \
   directoryManagementView \
+  export-sheet-client.test.ts \
   featureFlagsApprovalMobile \
   formViewValidation \
   gateway-diagnostics.spec.ts \
@@ -1980,7 +1981,6 @@ exec npx vitest run \
   parallelBranchRunsView \
   permissionManagementView \
   personal-view-client \
-  export-sheet-client.test.ts \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \

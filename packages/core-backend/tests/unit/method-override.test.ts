@@ -535,7 +535,7 @@ describe('index.ts wiring', () => {
   })
 
   it('names the receipt header in the explicit CORS exposedHeaders list', () => {
-    expect(source).toContain("exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden']")
+    expect(source).toContain("exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden', 'X-Request-ID']")
     expect(METHOD_OVERRIDDEN_HEADER).toBe('X-Method-Overridden')
   })
 

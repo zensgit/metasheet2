@@ -108,6 +108,24 @@ const post = (path: string, body: unknown = { withData: true, permissionMode: 'i
 const writes = (pg: FakePg, from = 0) => pg.statements.slice(from).filter((s) => /^(INSERT|UPDATE|DELETE)\b/i.test(s.sql))
 
 describe('copy-sheet routes (ADR #6094 S1)', () => {
+  it('the fake dependency read returns only same-sheet edges and projects only dependency identifiers', async () => {
+    const pg = new FakePg()
+    pg.rows('formula_dependencies').push(
+      { sheet_id: SRC, field_id: 'formula-a', depends_on_field_id: 'field-a', extra: 'not-selected' },
+      { sheet_id: SRC, field_id: 'formula-b', depends_on_field_id: 'field-b', depends_on_sheet_id: SRC },
+      { sheet_id: SRC, field_id: 'formula-c', depends_on_field_id: 'field-c', depends_on_sheet_id: FOREIGN },
+      { sheet_id: FOREIGN, field_id: 'formula-d', depends_on_field_id: 'field-d', depends_on_sheet_id: null },
+    )
+    const result = await pg.query(
+      'SELECT field_id, depends_on_field_id FROM formula_dependencies WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)',
+      [SRC],
+    )
+    expect(result.rows).toEqual([
+      { field_id: 'formula-a', depends_on_field_id: 'field-a' },
+      { field_id: 'formula-b', depends_on_field_id: 'field-b' },
+    ])
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()

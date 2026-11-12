@@ -383,6 +383,11 @@ export class FakePg {
       fields.push({ id: s(0), sheet_id: s(1), name: s(2), type: s(3), property: JSON.parse(String(p(4))), order: Number(p(5)), updated_at: this.nowIso() })
       return ok([], 1)
     }
+    if (sql === 'SELECT field_id, depends_on_field_id FROM formula_dependencies WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)') {
+      return ok(this.rows('formula_dependencies')
+        .filter((row) => row.sheet_id === s(0) && (row.depends_on_sheet_id == null || row.depends_on_sheet_id === s(0)))
+        .map((row) => ({ field_id: row.field_id, depends_on_field_id: row.depends_on_field_id })))
+    }
     if (sql.startsWith('INSERT INTO formula_dependencies')) {
       this.rows('formula_dependencies').push({ sheet_id: s(0), field_id: s(1), depends_on_field_id: s(2) })
       return ok([], 1)

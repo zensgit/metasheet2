@@ -5,7 +5,9 @@ import express from 'express'
 import request from 'supertest'
 import ts from 'typescript'
 import { describe, expect, test, vi } from 'vitest'
+import { usePinnedServer } from '../utils/pinned-server'
 
+const pinned = usePinnedServer()
 const sourceText = readFileSync(resolve(__dirname, '../../src/index.ts'), 'utf8')
 const source = ts.createSourceFile('index.ts', sourceText, ts.ScriptTarget.Latest, true)
 const callbacks: ts.ArrowFunction[] = []
@@ -42,7 +44,8 @@ describe('actual request-context callback response correlation', () => {
     })
     app.use(callback)
     app.get('/api/synthetic', (_req, res) => res.status(400).json({ ok: false, error: { code: 'SYNTHETIC' } }))
-    const response = await request(app).get('/api/synthetic').set(supplied ? { 'X-Request-ID': supplied } : {}).expect(400)
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/synthetic').set(supplied ? { 'X-Request-ID': supplied } : {}).expect(400)
     expect(response.headers['x-request-id']).toBe(expected)
     expect(logContext).toHaveBeenCalledTimes(1)
     expect(logContext).toHaveBeenCalledWith({ requestId: ownerPath ? '55555555-5555-4555-8555-555555555555' : supplied ?? '44444444-4444-4444-8444-444444444444' })
