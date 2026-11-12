@@ -58,6 +58,7 @@ const ACTION_FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
 const EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
 const TENANT = 'tenant-r69-claim'
 const PROJECT = 'PRJ-R69-CLAIM'
+const SHEET = 'sheet_claim'
 const silent = Object.freeze({ info() {}, warn() {}, error() {} })
 /** The legacy branch (integration:read) is where the claim door sits; the operator branch is the stock-prep vocabulary. */
 const LEGACY = { id: 'u_r69_claim_legacy', permissions: ['integration:read', 'workflow:write'], roles: [] as string[], role: 'user', tenantId: TENANT }
@@ -157,7 +158,8 @@ async function runStepFor(governedEntries: GovernedEntries, user: typeof LEGACY)
   try {
     const pluginPort = createIntegrationRunPort({ governedEntries })
     const port: IntegrationRunPort = { run: (input) => pluginPort.run({ context: input.context, job: input.job, signal: input.signal, checkpoint: input.checkpoint, automation: input.automation }) }
-    const db = createFakeJobDb()
+    // R-69 I6a: the executor re-checks the rule sheet on every trigger, so the step's sheet is the tenant's registered one.
+    const db = createFakeJobDb({ projectTargets: { [SHEET]: { tenantId: TENANT, projectNo: PROJECT, status: 'active' } } })
     const tracked: Promise<void>[] = []
     const exec = new AutomationExecutor({
       eventBus: new EventBus(),
@@ -170,7 +172,7 @@ async function runStepFor(governedEntries: GovernedEntries, user: typeof LEGACY)
       integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300 },
     } as AutomationDeps)
     const config = { job: { kind: 'stock_prep_pull', projectNos: [PROJECT], applyMode: 'dry_run_only' }, timeoutMs: 5_000, binding: { principalId: user.id, tenantId: TENANT } }
-    const context: ExecutionContext = { executionId: 'exec_claim', ruleId: 'rule_claim', sheetId: 'sheet_claim', recordId: '', recordData: {}, ruleCreatedBy: user.id, triggerEvent: {}, rootExecutionId: 'exec_claim' }
+    const context: ExecutionContext = { executionId: 'exec_claim', ruleId: 'rule_claim', sheetId: SHEET, recordId: '', recordData: {}, ruleCreatedBy: user.id, triggerEvent: {}, rootExecutionId: 'exec_claim' }
     const identity: ClassAActionIdentity = { structuralPath: '0', rootExecutionId: 'exec_claim' }
     const step = await (exec as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i?: ClassAActionIdentity): Promise<AutomationStepResult> })
       .executeSingleAction({ type: 'run_integration_job', config }, context, identity)

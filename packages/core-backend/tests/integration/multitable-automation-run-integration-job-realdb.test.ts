@@ -666,10 +666,12 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
 // already carries conditions (planted with a direct UPDATE: a row saved before this check).
 describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions (real automation_rules rows)', () => {
   const savedFlag = process.env[FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
   const principalId = `svcc_${RUN}`
   const sheet = `sheetc_${RUN}`
+  const project = `PC-${RUN}`
   const conditions = { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }
-  const job = { job: { kind: 'stock_prep_pull', projectNos: [`PC-${RUN}`], applyMode: 'dry_run_only' } }
+  const job = { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } }
   const base = {
     name: `cond_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
     actionType: 'run_integration_job', actionConfig: job, createdBy: principalId,
@@ -685,12 +687,18 @@ describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions
 
   beforeAll(async () => {
     process.env[FLAG] = 'true'
+    // R-69 I6a: a job rule saves only on the binding tenant's registered project sheet (the switch on, the row active).
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await registerRuleSheet(sheet, TENANT, project)
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcc'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
   })
   afterAll(async () => {
     if (savedFlag === undefined) delete process.env[FLAG]
     else process.env[FLAG] = savedFlag
+    if (savedProjectSheets === undefined) delete process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+    else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
+    await unregisterRuleSheets()
     await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
     await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
     await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)

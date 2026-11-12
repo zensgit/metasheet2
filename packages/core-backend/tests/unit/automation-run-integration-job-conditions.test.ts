@@ -24,12 +24,16 @@ import {
   validateRunIntegrationJobConditions,
 } from '../../src/multitable/automation-run-integration-job'
 import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
 import { EventBus } from '../../src/integration/events/event-bus'
 
 const FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
 const SHEET_ID = 'sheet_rij_cond'
 const RULE_ID = 'atr_rij_cond'
 const ORGS = /FROM user_orgs/i
+// R-69 I6a: a job rule saves only on the binding tenant's ACTIVE registered project sheet (registry 087, the switch on).
+const REGISTRY = /FROM integration_stock_prep_project_target WHERE sheet_id = \$1/
+const REGISTERED = { sheet_id: SHEET_ID, project_no: 'P-1', status: 'active', object_id: 'obj_1', tenant_id: 'tenant_1' }
 const JOB = { job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'dry_run_only' } }
 const STAMPED = { ...JOB, timeoutMs: 30 * 60_000, binding: { principalId: 'svc_user', tenantId: 'tenant_1' } }
 const CRON = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }
@@ -43,7 +47,11 @@ function makeHarness() {
   const executeResults: unknown[] = []
   let stored: Record<string, unknown> | undefined
   let lastVerb = ''
-  const queryFn = vi.fn(async (sql: string) => (ORGS.test(sql) ? { rows: [{ org_id: 'tenant_1' }], rowCount: 1 } : { rows: [], rowCount: 0 }))
+  const queryFn = vi.fn(async (sql: string) => {
+    if (ORGS.test(sql)) return { rows: [{ org_id: 'tenant_1' }], rowCount: 1 }
+    if (REGISTRY.test(sql)) return { rows: [REGISTERED], rowCount: 1 }
+    return { rows: [], rowCount: 0 }
+  })
   const chain: Record<string, unknown> = {}
   const chainFn = (..._args: unknown[]) => chain
   for (const m of ['selectFrom', 'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy', 'onConflict', 'columns', 'doUpdateSet', 'returningAll', 'leftJoin']) chain[m] = vi.fn(chainFn)
@@ -115,7 +123,7 @@ describe('run_integration_job conditions — the validator (pure)', () => {
 
 describe('run_integration_job conditions — AutomationService save', () => {
   let h: ReturnType<typeof makeHarness>
-  beforeEach(() => { vi.stubEnv(FLAG, 'true'); h = makeHarness() })
+  beforeEach(() => { vi.stubEnv(FLAG, 'true'); vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true'); h = makeHarness() })
   afterEach(() => { h.service.unregisterSchedule(RULE_ID); vi.unstubAllEnvs() })
 
   const createInput = (overrides: Record<string, unknown> = {}) => ({
