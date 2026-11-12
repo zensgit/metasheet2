@@ -2487,7 +2487,8 @@ jobs:
             }
             window_outcome="$(window_value outcome)"
             window_raw_rc="$(window_value raw_rc)"
-            window_env_written="$(window_value env_written)"
+            # env_written only from the window's own state lines (a warning line also carries the key).
+            window_env_written="$(grep -E '^\[deploy-window\] state phase=' "$deploy_log" | tail -n 1 | grep -oE '(^| )env_written=[^ ]*' | sed 's/^ *env_written=//' || true)"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### Deploy Window" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -2608,7 +2609,10 @@ jobs:
               if [[ "${SYNC_RC:-}" == "0" ]]; then
                 case "${DEPLOY_RC:-}" in
                   73|74|76|255|"")
-                    echo "- If the host state has env_written=new (always for 73): do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up before confirming .env names the new image."
+                    echo "- The migration may have committed, whatever env_written says: do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up. This holds until the owner has read the ledger (see the runbook: fix forward, or a pre-commit case only when kysely_migration reads the run's ledger before count with no in-play name present)."
+                    if [[ -f "$deploy_log" ]] && grep -qF '[deploy-window] appdata copy files=' "$deploy_log"; then
+                      echo "- App data: this run copied the backend's local files to appdata.tar in its run directory on the host. Every newly created backend container gets it before its first start (see the runbook); keep that run directory."
+                    fi
                     ;;
                 esac
                 case "${DEPLOY_RC:-}" in

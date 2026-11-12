@@ -19,7 +19,9 @@ All host paths below are relative to the deploy user's home directory (`$HOME`).
 
 The env snapshots and `globals.sql` hold secrets and password hashes. Keep the run
 directories on the host and prune old dumps by hand; the workflow never deletes a
-verified dump and never prunes.
+verified dump and never prunes. Never prune the run directory of a 73, 74, 76 or 255 run
+while its `appdata.tar` may be the only copy of the backend's local files (see "Fix
+forward after a commit").
 
 ## Before dispatching
 
@@ -30,7 +32,9 @@ verified dump and never prunes.
   by a newline, **without** a trailing newline. From a rehearsal list file
   `inplay.txt` with one name per line: `printf '%s' "$(cat inplay.txt)" | sha256sum`.
   Derive it from the rehearsal, never from a refused run's log.
-- `restore_proof`: `ref:<id>` naming the restore proof, or `waived`.
+- `restore_proof`: `ref:<id>` naming the restore proof, or `waived`. The id is printed in
+  the public run log and step summary; use an opaque id that maps to the proof only in
+  private records.
 - `pre_commit_abort`: what the window does if it aborts after the stop and before the
   migration commits:
   - `restart-old` restarts the stopped old containers (never recreates them);
@@ -98,32 +102,52 @@ decides, not those lines.
 | 71 | `done-restored-old` | old containers restarted and verified | read why it aborted; the migration did not commit |
 | 72 | `needs-owner` | **down**; pre-commit (the ledger is unchanged) | the stopped old containers, if they still exist, may be started by the owner (`docker start metasheet-backend`, then `metasheet-web`) only after the owner decides whether restarting the previous version is allowed. Recreating containers from an older tag would be a fresh deployment outside this window's checks; stay stopped and let the owner decide |
 | 73 | `needs-owner` | migration committed; unverified containers stopped | fix forward (see below); never start the old containers |
-| 74 | `needs-owner` | stopped; `.env` names the new image if the ledger reads fully applied | check `env_written` in `state`; resolve the ledger by hand with the owner |
+| 74 | `needs-owner` | stopped; the ledger may be committed even when `state` says `env_written=old`; `.env` names the new image only when `state` says `env_written=new` | start nothing (see "Never" below); the owner reads the ledger, then fixes forward or resolves it by hand |
 | 75 | (state untouched) | untouched | another window holds the lock, the host state is unfinished, or flock is missing; read `state` |
 | 76 | read `state` | unknown | the bootstrap lost the window; it may still be running: read `state` and `window.log` |
 | 255 | read `state` | unknown | the runner lost ssh; the window may still be running: read `state` and `window.log` |
 
-### Never, when `state` has `env_written=new`
+### Never, after 73, 74, 76, 255 or a missing rc
 
-`env_written=new` is always the case for 73; check it for 74, 76 and 255 (72 is always
-before the commit). Then:
+These rules hold whatever `env_written` says (`env_written=old` does not prove the
+migration did not commit; 72 is always before the commit). They hold until the owner
+has read the ledger: either it reads fully applied (`ledger before` + the in-play count,
+every name of the run directory's `inplay.txt` present), and the owner fixes forward as
+below; or it reads the run's `ledger before` count with none of the names in `inplay.txt`
+present and no `metasheet-window-migrate-*` container or database session alive, and the
+case is a pre-commit one (the 72 row applies). Until then:
 
 - never `docker start` the old `metasheet-backend` / `metasheet-web` containers: the old
   image does not know the new migrations;
 - never run `scripts/ops/deploy-attendance-prod.sh` (it removes the postgres container);
 - never run the env-reconcile workflow (it recreates the backend from `.env`);
-- never run a bare `docker compose up -d` before confirming `.env` names the new image.
+- never run a bare `docker compose up -d`.
 
 ### Fix forward after a commit (73, 74)
 
-With the owner's word: start the same SHA (or a hotfix SHA) by hand,
-`docker compose -p <project> -f docker-compose.app.yml up -d --no-deps backend`, verify
-`/health` `build.commit`, then the same for `web`. Restoring the dump needs the owner's
-approval of the recovery point; follow `RESTORE-README.txt` in the run directory
-(restore into a new database, globals first, sequential restore).
+With the owner's word, and only when the ledger reads fully applied, start the same SHA
+(or a hotfix SHA) by hand. `<project>` is the value of the run's
+`compose_identity=match project=` log line, `<deploy dir>` the value of its
+`[deploy] repo_path=` line, `<sha>` the full 40-character commit.
+
+1. Set or confirm `IMAGE_OWNER=zensgit` and `IMAGE_TAG=<sha>` in `<deploy dir>/.env`.
+2. Create the backend without starting it:
+   `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f docker-compose.app.yml up --no-start --no-deps --force-recreate backend`.
+3. If the run directory has `appdata.tar`, copy it into that container before its first
+   start: `docker cp - metasheet-backend:/ < appdata.tar`. This applies to every newly
+   created backend container, a hotfix one included. Keep the run directory until the
+   files are confirmed in the running backend.
+4. `docker start metasheet-backend`, then verify `/health` `build.commit` equals `<sha>`.
+5. Web: `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f docker-compose.app.yml up -d --no-deps --force-recreate web`,
+   then verify `/build-info.json` `commit` equals `<sha>`.
+
+Restoring the dump needs the owner's approval of the recovery point; follow
+`RESTORE-README.txt` in the run directory (restore into a new database, globals first,
+sequential restore).
 
 ### Clearing the state
 
 Only the owner clears a `needs-owner` or unfinished state, after recovery, by editing
-`state` to a terminal phase or removing it. Until then every dispatch, and the host file
-sync, refuses with 75.
+`state` to a terminal phase or removing it. First confirm that no window is running:
+`flock -n "$HOME/metasheet2-deploy-window/lock" true` succeeds and the run's `rc` file
+exists. Until the state is cleared every dispatch, and the host file sync, refuses with 75.
