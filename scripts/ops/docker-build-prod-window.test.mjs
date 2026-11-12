@@ -836,48 +836,12 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
     checkSummaryTail(summary)
     assert.match(summary, ENV_WARNING, 'rc 73 always carries the env warning')
-    assert.match(summary, /^- Last env_written seen in the log: `new`$/m, 'env_written is read from the state lines, not from the warning line')
     const status = await runStatus(world, r.runId)
     assert.match(status, /^\[deploy-status\] state phase=needs-owner$/m)
     assert.match(status, /^\[deploy-status\] state env_written=new$/m)
     assert.match(status, /^\[deploy-status\] run rc=73$/m)
     assert.match(status, /^\[deploy-status\] marker === DEPLOY START ===$/m)
     assert.match(status, /^\[deploy-status\] outcome=needs-owner rc=73 raw_rc=\d*$/m)
-  })
-
-  // The summary step on synthetic deploy logs: every operator-action arm, including the
-  // outcomes after which the follower saw no window line (255, 76, a missing rc).
-  it('summary: operator actions for sync 75 / sync 1 / 72 / 73 / 74 / 76 / 255 / missing rc / 0', { timeout: 300_000 }, async (t) => {
-    const world = makeWorld(t)
-    const log = (...lines) => ['=== WINDOW PREFLIGHT START ===', ...lines, ''].join('\n')
-    const state = (phase, envWritten) => `[deploy-window] state phase=${phase} env_written=${envWritten} backend_verified=0 web_verified=0`
-    const outcome = (rc) => `[deploy-window] outcome=needs-owner rc=${rc} raw_rc=1`
-    const appdata = '[deploy-window] appdata copy files=2 bytes=16 sha256=' + '0'.repeat(64) + ' file=appdata.tar'
-    const cases = [
-      ['sync refused 75', { syncRc: '75', deployLog: null }, { syncRefused: true }],
-      ['sync failed 1', { syncRc: '1', deployLog: null }, {}],
-      ['72', { deployRc: '72', deployLog: log(state('stopped', 'old'), outcome(72)) }, { line72: true, envWritten: 'old' }],
-      ['73 with app data', { deployRc: '73', deployLog: log(appdata, state('starting-new', 'new'), outcome(73), '[deploy-window] warning env_written=new: never start the old containers; .env already names the new image') }, { env: true, appdata: true, envWritten: 'new' }],
-      ['74 with env_written=old', { deployRc: '74', deployLog: log(state('migrating', 'old'), outcome(74)) }, { env: true, envWritten: 'old' }],
-      ['74 with app data', { deployRc: '74', deployLog: log(appdata, state('committed', 'new'), outcome(74)) }, { env: true, appdata: true, envWritten: 'new' }],
-      ['76', { deployRc: '76', deployLog: log(state('stopping', 'old')) }, { env: true, readHost: true }],
-      ['255', { deployRc: '255', deployLog: log(appdata, state('backed-up', 'old')) }, { env: true, readHost: true, appdata: true }],
-      ['missing rc', { deployLog: log(state('preflight', 'old')) }, { env: true, readHost: true }],
-      ['missing rc and no deploy.log', { deployLog: null }, { env: true, readHost: true }],
-      ['0', { deployRc: '0', deployLog: log(appdata, state('done-new', 'new')) }, { envWritten: 'new' }],
-    ]
-    for (const [label, input, want] of cases) {
-      const summary = await runSummary(world, input)
-      checkSummaryTail(summary)
-      const check = (flag, pattern, what) => (flag ? assert.match : assert.doesNotMatch)(summary, pattern, `${label}: ${what}`)
-      check(want.env, ENV_WARNING, 'never start the old containers')
-      check(want.env, /The migration may have committed, whatever env_written says: do NOT start the old containers; do NOT run scripts\/ops\/deploy-attendance-prod\.sh or the env-reconcile workflow; do not run a bare docker compose up\./, 'unconditional recovery rule')
-      check(want.readHost, /^- Read the host state first \(metasheet2-deploy-window\/state/m, 'read-host-state line')
-      check(want.line72, /Pre-commit abort with production down/, '72 line')
-      check(want.syncRefused, /Sync refused \(75\)/, 'sync 75 line')
-      check(want.appdata, /App data: this run copied the backend's local files to appdata\.tar/, 'app-data line')
-      if (want.envWritten) assert.match(summary, new RegExp(`^- Last env_written seen in the log: \`${want.envWritten}\`$`, 'm'), label)
-    }
   })
 
   for (const phase of ['stopped', 'needs-owner']) {
@@ -914,6 +878,41 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.equal(r.stateText, state, 'state byte-identical')
     assert.match(r.windowLog, /host window state cannot be read/)
     assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)).map((call) => call.args), [])
+  })
+
+  // The summary step on synthetic deploy logs: every operator-action arm, including the
+  // outcomes after which the follower saw no window line (255, 76, a missing rc).
+  it('summary: operator actions for sync 75 / sync 1 / 72 / 73 / 74 / 76 / 255 / missing rc / 0', { timeout: 300_000 }, async (t) => {
+    const world = makeWorld(t)
+    const log = (...lines) => ['=== WINDOW PREFLIGHT START ===', ...lines, ''].join('\n')
+    const state = (phase, envWritten) => `[deploy-window] state phase=${phase} env_written=${envWritten} backend_verified=0 web_verified=0`
+    const outcome = (rc) => `[deploy-window] outcome=needs-owner rc=${rc} raw_rc=1`
+    const appdata = '[deploy-window] appdata copy files=2 bytes=16 sha256=' + '0'.repeat(64) + ' file=appdata.tar'
+    const cases = [
+      ['sync refused 75', { syncRc: '75', deployLog: null }, { syncRefused: true }],
+      ['sync failed 1', { syncRc: '1', deployLog: null }, {}],
+      ['72', { deployRc: '72', deployLog: log(state('stopped', 'old'), outcome(72)) }, { line72: true, envWritten: 'old' }],
+      ['73 with app data', { deployRc: '73', deployLog: log(appdata, state('starting-new', 'new'), outcome(73), '[deploy-window] warning env_written=new: never start the old containers; .env already names the new image') }, { env: true, appdata: true, envWritten: 'new' }],
+      ['74 with env_written=old', { deployRc: '74', deployLog: log(state('migrating', 'old'), outcome(74)) }, { env: true, envWritten: 'old' }],
+      ['74 with app data', { deployRc: '74', deployLog: log(appdata, state('committed', 'new'), outcome(74)) }, { env: true, appdata: true, envWritten: 'new' }],
+      ['76', { deployRc: '76', deployLog: log(state('stopping', 'old')) }, { env: true, readHost: true }],
+      ['255', { deployRc: '255', deployLog: log(appdata, state('backed-up', 'old')) }, { env: true, readHost: true, appdata: true }],
+      ['missing rc', { deployLog: log(state('preflight', 'old')) }, { env: true, readHost: true }],
+      ['missing rc and no deploy.log', { deployLog: null }, { env: true, readHost: true }],
+      ['0', { deployRc: '0', deployLog: log(appdata, state('done-new', 'new')) }, { envWritten: 'new' }],
+    ]
+    for (const [label, input, want] of cases) {
+      const summary = await runSummary(world, input)
+      checkSummaryTail(summary)
+      const check = (flag, pattern, what) => (flag ? assert.match : assert.doesNotMatch)(summary, pattern, `${label}: ${what}`)
+      check(want.env, ENV_WARNING, 'never start the old containers')
+      check(want.env, /The migration may have committed, whatever env_written says: do NOT start the old containers; do NOT run scripts\/ops\/deploy-attendance-prod\.sh or the env-reconcile workflow; do not run a bare docker compose up\./, 'unconditional recovery rule')
+      check(want.readHost, /^- Read the host state first \(metasheet2-deploy-window\/state/m, 'read-host-state line')
+      check(want.line72, /Pre-commit abort with production down/, '72 line')
+      check(want.syncRefused, /Sync refused \(75\)/, 'sync 75 line')
+      check(want.appdata, /App data: this run copied the backend's local files to appdata\.tar/, 'app-data line')
+      if (want.envWritten) assert.match(summary, new RegExp(`^- Last env_written seen in the log: \`${want.envWritten}\`$`, 'm'), label)
+    }
   })
 
   async function runSync(t, world, env = {}) {

@@ -115,6 +115,32 @@ test('PR and ordinary build paths execute publication safety tests', () => {
   assert.ok(build.steps.some((entry) => entry.run === 'node --test scripts/ops/docker-publish-preflight.test.mjs'))
 })
 
+test('validate_deploy_inputs reads each value from its dispatch input or repository variable', () => {
+  const tunables = {
+    DEPLOY_WINDOW_PULL_BUDGET_KB: '3145728',
+    DEPLOY_WINDOW_RESERVE_KB: '2097152',
+    DEPLOY_BACKUP_TIMEOUT_S: '1200',
+    DEPLOY_BACKUP_VERIFY_TIMEOUT_S: '900',
+    DEPLOY_WINDOW_EXPECTED_MIN: '90',
+    DEPLOY_WINDOW_DRAIN_S: '60',
+    DEPLOY_WINDOW_QUEUED_MAX_AGE_S: '86400',
+    DEPLOY_WINDOW_MIN_HOST_CHECKS: '1',
+    DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: 'false',
+  }
+  const expected = {
+    DRILL_FAIL_STAGE: '${{ inputs.drill_fail_stage }}',
+    EXPECTED_PENDING_SHA256: '${{ inputs.expected_pending_sha256 }}',
+    RESTORE_PROOF: '${{ inputs.restore_proof }}',
+    PRE_COMMIT_ABORT: '${{ inputs.pre_commit_abort }}',
+    PROD_HEALTH_PROBE_SILENCE: "${{ vars.PROD_HEALTH_PROBE_SILENCE || '' }}",
+  }
+  for (const [name, fallback] of Object.entries(tunables)) expected[name] = `\${{ vars.${name} || '${fallback}' }}`
+  assert.deepEqual(step('validate_deploy_inputs').env, expected, 'no value is hard-wired in the validation step')
+  // The window receives the same tunables with the same defaults.
+  const remote = workflow.jobs.deploy.steps.find((entry) => entry.id === 'remote_deploy')
+  for (const name of Object.keys(tunables)) assert.equal(remote.env[name], expected[name], `remote_deploy env ${name}`)
+})
+
 test('production deploy inputs, validation step, concurrency and timeouts of the deploy window', () => {
   const inputs = workflow.on.workflow_dispatch.inputs
   assert.equal(inputs.restore_proof.default, 'unselected')
@@ -150,32 +176,6 @@ test('production deploy inputs, validation step, concurrency and timeouts of the
   for (const entry of build.steps.filter((item) => /docker\/login-action|docker (push|login)|--push/.test((item.uses ?? '') + (item.run ?? '')))) {
     assert.ok(build.steps.indexOf(validate) < build.steps.indexOf(entry), 'validation runs before every registry write')
   }
-})
-
-test('validate_deploy_inputs reads each value from its dispatch input or repository variable', () => {
-  const tunables = {
-    DEPLOY_WINDOW_PULL_BUDGET_KB: '3145728',
-    DEPLOY_WINDOW_RESERVE_KB: '2097152',
-    DEPLOY_BACKUP_TIMEOUT_S: '1200',
-    DEPLOY_BACKUP_VERIFY_TIMEOUT_S: '900',
-    DEPLOY_WINDOW_EXPECTED_MIN: '90',
-    DEPLOY_WINDOW_DRAIN_S: '60',
-    DEPLOY_WINDOW_QUEUED_MAX_AGE_S: '86400',
-    DEPLOY_WINDOW_MIN_HOST_CHECKS: '1',
-    DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: 'false',
-  }
-  const expected = {
-    DRILL_FAIL_STAGE: '${{ inputs.drill_fail_stage }}',
-    EXPECTED_PENDING_SHA256: '${{ inputs.expected_pending_sha256 }}',
-    RESTORE_PROOF: '${{ inputs.restore_proof }}',
-    PRE_COMMIT_ABORT: '${{ inputs.pre_commit_abort }}',
-    PROD_HEALTH_PROBE_SILENCE: "${{ vars.PROD_HEALTH_PROBE_SILENCE || '' }}",
-  }
-  for (const [name, fallback] of Object.entries(tunables)) expected[name] = `\${{ vars.${name} || '${fallback}' }}`
-  assert.deepEqual(step('validate_deploy_inputs').env, expected, 'no value is hard-wired in the validation step')
-  // The window receives the same tunables with the same defaults.
-  const remote = workflow.jobs.deploy.steps.find((entry) => entry.id === 'remote_deploy')
-  for (const name of Object.keys(tunables)) assert.equal(remote.env[name], expected[name], `remote_deploy env ${name}`)
 })
 
 // The deploy window status step: one more ssh session that only reads host files. The checks
