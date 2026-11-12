@@ -436,6 +436,7 @@ const isDump = (call) => /^exec metasheet-postgres sh -c exec pg_dump -Fc /.test
 const isRestoreRead = (call) => /^exec -i metasheet-postgres pg_restore -f \/dev\/null$/.test(call.args)
 const isTarOut = (call) => /^exec metasheet-backend tar -C \/ --one-file-system -cf - /.test(call.args)
 const isCpIn = (call) => call.args === 'cp - metasheet-backend:/'
+const isReadBack = (call) => /^cp metasheet-backend:\/app\/\S+ -$/.test(call.args)
 const isLedgerRead = (call) => /^exec metasheet-postgres sh -c .*psql.* SELECT count\(\*\) FROM kysely_migration$/.test(call.args)
 const sqlOf = (call) => (/^exec metasheet-postgres sh -c .*exec psql/.test(call.args) ? call.args : '')
 
@@ -500,7 +501,7 @@ function checkHappy(r, { appdata }) {
     ['migrate --latest', latest.index],
     ['.env write', envWrite],
     ['up --no-start backend', upBackend],
-    ...(appdata ? [['app-data copy-in', firstIndex(r, isCpIn, upBackend)]] : []),
+    ...(appdata ? [['app-data copy-in', firstIndex(r, isCpIn, upBackend)], ['app-data read-back', firstIndex(r, isReadBack, upBackend)]] : []),
     ['start new backend', firstIndex(r, isStart('metasheet-backend'), upBackend)],
     ['up web', firstIndex(r, isUpWeb)],
   ]
@@ -508,6 +509,7 @@ function checkHappy(r, { appdata }) {
   if (!appdata) {
     assert.ok(!any(r, isTarOut), 'no app-data copy when there is none')
     assert.ok(!any(r, isCpIn))
+    assert.ok(!any(r, isReadBack))
   }
   // The new backend is started once, the old containers never.
   assert.deepEqual(r.docker.filter((call) => /^start /.test(call.args)).map((call) => call.args), ['start metasheet-backend'])
@@ -1018,6 +1020,26 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const up = firstIndex(r, isUpNoStartBackend)
     assertOrdered([['up --no-start backend', up], ['copy-in', firstIndex(r, isCpIn, up)], ['start new backend', firstIndex(r, isStart('metasheet-backend'), up)]])
     assert.ok(!any(r, isUpWeb))
+  })
+
+  scenario('app data present, the read-back from the created backend misses a file -> 73: the new backend is never started', async (t) => {
+    const world = makeWorld(t, { appdata: true })
+    const r = await runWindow(t, world, { env: { H_CP_IN_SHORT: '1' } })
+    assertCommon(r, 73)
+    assert.match(r.windowLog, /app data read back from the created backend does not match the copy-out record/)
+    const up = firstIndex(r, isUpNoStartBackend)
+    assertOrdered([['up --no-start backend', up], ['copy-in', firstIndex(r, isCpIn, up)], ['read-back', firstIndex(r, isReadBack, up)]])
+    assert.ok(!any(r, (call) => /^start /.test(call.args)), 'neither the new nor the old backend is started')
+    assert.ok(!any(r, isUpWeb))
+  })
+
+  scenario('app data present, the new backend deletes an expired draft at its first start -> accepted, done-new', async (t) => {
+    const world = makeWorld(t, { appdata: true })
+    const r = await runWindow(t, world, { env: { H_CLEANUP_ON_START: '1' } })
+    checkHappy(r, { appdata: true })
+    assert.match(r.windowLog, /appdata read_back files=2 bytes=16/)
+    assert.match(r.windowLog, /appdata after_start files=1 bytes=11/)
+    assert.match(r.windowLog, /appdata after_start has fewer files than the copy; accepted/)
   })
 
   scenario('19 post-backend host check fails -> 73: web never upped', async (t) => {

@@ -39,7 +39,9 @@ log_call() {
       if [[ -d "${C}/${t}" ]]; then target="$(cat "${C}/${t}/id")@$(cat "${C}/${t}/image_id")"; fi
       ;;
     cp)
+      # `cp - <ctr>:/` (copy-in) or `cp <ctr>:<path> -` (read-back)
       t="${3:-}"
+      if [[ "${2:-}" == *:* ]]; then t="${2}"; fi
       t="${t%%:*}"
       if [[ -d "${C}/${t}" ]]; then target="$(cat "${C}/${t}/id")@$(cat "${C}/${t}/image_id")"; fi
       ;;
@@ -579,6 +581,10 @@ do_start() {
   if ! has "$name"; then echo "Error: No such container: ${name}" >&2; exit 1; fi
   put "$name" running true
   if [[ "$(get "$name" image_id)" == sha256:old* ]]; then : > "${C}/${name}/restarted"; fi
+  # H_CLEANUP_ON_START=1: the new backend deletes an expired draft attachment as soon as it starts.
+  if [[ "${H_CLEANUP_ON_START:-0}" == "1" && "$name" == "metasheet-backend" && "$(get "$name" image_id)" == sha256:new* ]]; then
+    rm -f "${C}/${name}/fs/app/data/attachments/a.txt"
+  fi
   echo "$name"
 }
 
@@ -597,12 +603,23 @@ do_kill() {
 
 do_cp() {
   local target p
+  if [[ "${1:-}" == *:* && "${2:-}" == "-" && $# -eq 2 ]]; then
+    # Read-back: a tar of <path> from the container (created or running) to stdout.
+    target="${1%%:*}"
+    p="${1#*:}"
+    if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
+    if [[ ! -e "${C}/${target}/fs${p}" ]]; then echo "Error: Could not find the file ${p} in container ${target}" >&2; exit 1; fi
+    (cd "${C}/${target}/fs$(dirname "$p")" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "$(basename "$p")")
+    return
+  fi
   [[ "${1:-}" == "-" ]] || unmodeled cp "$@"
   target="${2%%:*}"
   p="${2#*:}"
   if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
   mkdir -p "${C}/${target}/fs${p}"
   "${H_REAL_TAR}" -xf - -C "${C}/${target}/fs${p}"
+  # H_CP_IN_SHORT=1: one copied file is missing in the container after the copy-in.
+  if [[ "${H_CP_IN_SHORT:-0}" == "1" ]]; then rm -f "${C}/${target}/fs/app/data/attachments/a.txt"; fi
 }
 
 case "${1:-}" in
