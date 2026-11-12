@@ -589,7 +589,14 @@ exec_backend() {
           *) rels+=("$1"); shift ;;
         esac
       done
-      if [[ "${H_TAR_OUT_RC:-0}" != "0" ]]; then echo "tar: harness read error" >&2; exit "${H_TAR_OUT_RC}"; fi
+      # H_TAR_OUT_RC: the copy-out fails after part of the archive was written.
+      if [[ "${H_TAR_OUT_RC:-0}" != "0" ]]; then
+        (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}") | head -c 1024
+        echo "tar: harness read error" >&2
+        exit "${H_TAR_OUT_RC}"
+      fi
+      # H_TAR_OUT_GARBAGE=1: the copy-out exits 0 but its output is no tar archive.
+      if [[ "${H_TAR_OUT_GARBAGE:-0}" == "1" ]]; then printf 'harness: not a tar archive\n'; exit 0; fi
       (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}")
       ;;
     *) unmodeled exec metasheet-backend "$@" ;;

@@ -14,7 +14,7 @@ All host paths below are relative to the deploy user's home directory (`$HOME`).
 | `$HOME/metasheet2-deploy-window/lock` | host lock, held by a running window for its whole life |
 | `$HOME/metasheet2-deploy-window/state` | the window's state (`phase=`, `env_written=`, `backend_verified=`, `web_verified=`, `rc=` ...). Only the lock holder writes it |
 | `$HOME/metasheet2-deploy-window/abort` | created by the operator to abort a window before the migration (see below) |
-| `$HOME/metasheet2-deploy-window/host-checks/` | owner-installed host checks: every executable here runs with one argument, the phase (`pre-stop`, `pre-restart-old`, `post-backend`); all must exit 0 and at least `DEPLOY_WINDOW_MIN_HOST_CHECKS` must be present |
+| `$HOME/metasheet2-deploy-window/host-checks/` | owner-installed host checks: every executable here runs with one argument, the phase (`pre-stop`, `pre-restart-old`, `post-backend`); all must exit 0 and at least `DEPLOY_WINDOW_MIN_HOST_CHECKS` must be present (see "Host checks") |
 | `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log`, `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, and raw tool outputs. Host only; never uploaded |
 
 The env snapshots and `globals.sql` hold secrets and password hashes. Keep the run
@@ -22,6 +22,17 @@ directories on the host and prune old dumps by hand; the workflow never deletes 
 verified dump and never prunes. Never prune the run directory of a 73, 74, 76 or 255 run
 while its `appdata.tar` may be the only copy of the backend's local files (see "Fix
 forward after a commit").
+
+### Host checks
+
+- Each check runs under `timeout 400`; a check that runs longer counts as failed.
+- Its output (stdout and stderr) goes to the run directory's `host-checks.out` on the host;
+  the log carries only the check's index, the phase and `result=pass|fail`.
+- A failing check, or fewer than `DEPLOY_WINDOW_MIN_HOST_CHECKS` installed, means:
+  - at `pre-stop`: the window refuses with nothing changed (70);
+  - at `pre-restart-old` (restarting the old version after an abort before the commit):
+    nothing is started and production stays **down** (72);
+  - at `post-backend`: the committed new backend is stopped, web is never started (73).
 
 ## Before dispatching
 
@@ -71,6 +82,19 @@ never any other backend).
   (70); after the stop it restarts the old version per `pre_commit_abort` (71 or 72).
   From the migration on, the abort file is ignored. Remove the file afterwards; a stale
   abort file makes the next dispatch refuse with 70.
+- The abort file is not read continuously. The window checks it at the start and at four
+  boundaries only: before the stop (after the preflight and the pull), right after the
+  stop and the session drain, after the backup, and right before the migration. A file
+  created during the dump takes effect only after the dump and both reads of the archive
+  (with the default timeouts up to about 50 minutes later).
+- To stop a hung or unwanted window at once, send TERM to the process in the run's
+  `window.pid`: `kill -TERM "$(cat "$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/window.pid")"`.
+  It takes the same branch as an abort for the phase it is in (before the stop: 70; after
+  the stop and before the commit: per `pre_commit_abort`; during the migration: the one-off
+  is killed and the ledger decides; after the commit: 73 or 74). It acts once the current
+  foreground step returns (every step is bounded by a timeout). Never send KILL: the window
+  then ends without its exit branch, `state` stays unfinished and production stays in
+  whatever phase it was.
 - Users see connection refused on the public port from the web stop to the web start
   (stop, drain, dump, dump verification, migration, backend start). There is no
   maintenance page; open tabs must be refreshed afterwards.
@@ -106,6 +130,11 @@ decides, not those lines.
 | 75 | (state untouched) | untouched | another window holds the lock, the host state is unfinished, or flock is missing; read `state` |
 | 76 | read `state` | unknown | the bootstrap lost the window; it may still be running: read `state` and `window.log` |
 | 255 | read `state` | unknown | the runner lost ssh; the window may still be running: read `state` and `window.log` |
+
+Old and new containers carry the same names (`metasheet-backend`, `metasheet-web`); after a
+73 the container of that name may already be the new one. A container is the old one when
+its image id (`docker inspect -f '{{.Image}}' <name>`) equals `old_backend_image_id` /
+`old_web_image_id` in `state`.
 
 ### Never, after 73, 74, 76, 255 or a missing rc
 
@@ -148,6 +177,8 @@ With the owner's word, and only when the ledger reads fully applied, start the s
   `com.docker.compose.project` label of `metasheet-postgres`).
 - `<run dir>`: `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>` of the run;
   `<sha>`: the full 40-character commit.
+
+Run the steps in order: the compose commands only after `.env` was confirmed in step 1.
 
 1. Set or confirm `IMAGE_OWNER=zensgit` and `IMAGE_TAG=<sha>` in `<deploy dir>/.env`.
 2. Create the backend without starting it:

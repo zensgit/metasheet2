@@ -1389,14 +1389,18 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!existsSync(path.join(r.runDir, 'db.dump.partial')))
   })
 
-  scenario('app-data copy-out fails -> 71', async (t) => {
-    const world = makeWorld(t, { appdata: true })
-    const r = await runWindow(t, world, { env: { H_TAR_OUT_RC: '1' } })
-    // Web was stopped, the backend not yet: only web is started again.
-    checkRestoredOld(r, ['metasheet-web'])
-    assert.ok(!any(r, isStop('metasheet-backend')))
-    assert.ok(!any(r, isDump))
-  })
+  for (const [label, env] of [['app-data copy-out fails after writing part of the archive', { H_TAR_OUT_RC: '1' }], ['app-data archive cannot be listed', { H_TAR_OUT_GARBAGE: '1' }]]) {
+    scenario(`${label} -> 71: the unverified appdata.tar is deleted`, async (t) => {
+      const world = makeWorld(t, { appdata: true })
+      const r = await runWindow(t, world, { env })
+      // Web was stopped, the backend not yet: only web is started again.
+      checkRestoredOld(r, ['metasheet-web'])
+      assert.ok(!any(r, isStop('metasheet-backend')))
+      assert.ok(!any(r, isDump))
+      assert.match(r.windowLog, env.H_TAR_OUT_RC ? /app data copy-out failed rc=1/ : /app data archive cannot be listed/)
+      assert.ok(!existsSync(path.join(r.runDir, 'appdata.tar')), 'no partial appdata.tar is left in the run directory')
+    })
+  }
 
   for (const [label, env] of [['ops-switch line is not off (normal delivery)', { H_OPS_SWITCH: 'on (subscription webhook sends paused)' }], ['/api/plugins does not answer', { H_PLUGINS_FAIL: '1' }]]) {
     scenario(`new backend check fails: ${label} -> 73, web never upped`, async (t) => {
@@ -1658,7 +1662,11 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { runText: mutate(REMOTE_RUN, WEB_STOP, 'true') })
     assert.throws(() => checkHappy(r, { appdata: false }), assert.AssertionError)
-    assert.ok(!any(r, isStop('metasheet-web')) || r.rcFile !== '0')
+    // The real stop verification catches the running web: refused in phase stopping, the old
+    // version restarted (71), and no migration.
+    assert.equal(r.rcFile, '71')
+    assert.ok(r.windowLog.includes('[deploy-window][error] metasheet-web is not stopped'), 'the stop verification reports the running web')
+    assert.ok(!any(r, isLatest), 'no migration while the web is running')
   })
 
   scenario('negative control: a window that skips the env restore fails the refusal and 4F checks', async (t) => {

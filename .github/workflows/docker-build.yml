@@ -1674,8 +1674,15 @@ jobs:
             timeout 600 docker exec metasheet-backend tar -C / --one-file-system -cf - "${appdata_rel[@]}" >"${RUN_DIR}/appdata.tar" 2>>"${RUN_DIR}/appdata.err" 9>&- &
             w_job_pid=$!
             watch_job appdata-copy "${RUN_DIR}/appdata.tar"
-            [[ "$w_job_rc" == "0" ]] || fail "app data copy-out failed rc=${w_job_rc}"
-            tar -tvf "${RUN_DIR}/appdata.tar" > "${RUN_DIR}/appdata.list" 2>>"${RUN_DIR}/appdata.err" || fail "app data archive cannot be listed"
+            # An unverified archive of this run is never left behind (it is not the app data).
+            if [[ "$w_job_rc" != "0" ]]; then
+              rm -f -- "${RUN_DIR}/appdata.tar"
+              fail "app data copy-out failed rc=${w_job_rc}"
+            fi
+            if ! tar -tvf "${RUN_DIR}/appdata.tar" > "${RUN_DIR}/appdata.list" 2>>"${RUN_DIR}/appdata.err"; then
+              rm -f -- "${RUN_DIR}/appdata.tar"
+              fail "app data archive cannot be listed"
+            fi
             read -r w_appdata_tar_files w_appdata_tar_bytes <<< "$(awk '/^-/ { n++; b += $3 } END { printf "%d %.0f\n", n, b }' "${RUN_DIR}/appdata.list")"
             appdata_sha256="$(sha256_file "${RUN_DIR}/appdata.tar")"
             w_appdata_copied=1
