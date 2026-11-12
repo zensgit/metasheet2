@@ -226,6 +226,18 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
   })
 
+  it('chainVersion: false sends the version given: a write made on the version before the first answer conflicts, one after it is stored', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1, { chainVersion: false })
+    const second = grid.patchCell('r1', 'f2', 'y', 1, { chainVersion: false })
+    await server.answerAll()
+    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    const third = grid.patchCell('r1', 'f2', 'y', 2, { chainVersion: false })
+    await server.answerAll()
+    expect(await third).toBeNull()
+  })
+
   it('a write made after the first answer reads the version it returned, and goes as given', async () => {
     const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f_qty', 6, row(grid).version)

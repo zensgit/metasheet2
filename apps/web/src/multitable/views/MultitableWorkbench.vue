@@ -3740,23 +3740,6 @@ function drawerRecordById(recordId: string): MetaRecord | null {
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-function pageRow(recordId: string): MetaRecord | null {
-  return grid.rows.value.find((row) => row.id === recordId) ?? null
-}
-
-function setCopyField(recordId: string, fieldId: string, value: unknown) {
-  const copy = deepLinkedRecord.value
-  if (copy?.id !== recordId) return
-  deepLinkedRecord.value = { ...copy, data: { ...copy.data, [fieldId]: value } }
-}
-
-function syncCopyFromRow(recordId: string) {
-  const copy = deepLinkedRecord.value
-  const row = pageRow(recordId)
-  if (copy?.id !== recordId || !row) return
-  deepLinkedRecord.value = { ...copy, version: row.version, data: { ...copy.data, ...row.data } }
-}
-
 // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`): the
 // drawer's saves of one record never race each other, on a manual row too (人工补充行 B3, ADR §3.4 「抽屉里一次保存分两步」:
 // a fillable column through PATCH …/manual-fields, every other column through /patch, which are not one transaction;
@@ -3770,24 +3753,17 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const write = grid.patchCell(record.id, fieldId, value, record.version)
+  // The drawer shows a copy of a record that is on the page too (`deepLinkedRecord`, kept after a realtime merge).
+  // That copy takes a save only once it is accepted, so a save made on it while an earlier one is out carries the
+  // version from before that one: it is sent as given, and conflicts (as on main), rather than being taken as made on
+  // the earlier save. (The grid never chains a record off the page.)
+  const write = deepLinkedRecord.value?.id === record.id && grid.rows.value.some((row) => row.id === record.id)
+    ? grid.patchCell(record.id, fieldId, value, record.version, { chainVersion: false })
+    : grid.patchCell(record.id, fieldId, value, record.version)
   // The composable's local row-action refusal sets its error before the call returns (an older write of the record
   // that fails while this one waits sets it later, and is not this one's).
   const refusedLocally = grid.error.value
-  // The drawer can show a copy of a record that is on the page too (a realtime merge keeps one for the record
-  // shown). Such a copy follows the grid's row: it shows the save at once (as the row does), and once the save is
-  // answered it takes the row as it is then, its data with its version (the newest save of each field still
-  // waiting, the stored value after a rejection, and a change from elsewhere the row has). Decided again at the
-  // answer: a merge can make the copy meanwhile, and the record can leave the page. A copy of a record off the page
-  // takes an accepted save (below), and goes back on a rejected one.
-  const copyAtCall = deepLinkedRecord.value?.id === record.id ? deepLinkedRecord.value : null
-  const valueBefore = copyAtCall?.data[fieldId]
-  if (copyAtCall && pageRow(record.id) && !refusedLocally) setCopyField(record.id, fieldId, value)
   const failure = await write
-  const followsRow = deepLinkedRecord.value?.id === record.id && pageRow(record.id) !== null
-  if (followsRow) syncCopyFromRow(record.id)
-  else if (copyAtCall && failure && failure !== CELL_WRITE_SUPERSEDED && deepLinkedRecord.value?.id === record.id
-    && deepLinkedRecord.value.data[fieldId] === value) setCopyField(record.id, fieldId, valueBefore)
   // Replaced before it was sent by a newer save of the same field, whose answer is the field's.
   if (failure === CELL_WRITE_SUPERSEDED) return
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
@@ -3839,7 +3815,7 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
   // panel's watch, its draft). Other fields' errors are untouched.
   if (latestRequest) clearInspectorFieldError(fieldId)
-  if (deepLinkedRecord.value?.id === record.id && !followsRow) {
+  if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
       // The server moves a record one version per accepted write.

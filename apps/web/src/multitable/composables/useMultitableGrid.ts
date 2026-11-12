@@ -1512,6 +1512,9 @@ export function useMultitableGrid(opts: {
       nextLinkSummaries?: LinkedRecordSummary[]
       /** Told the record's version the server returned for THIS write. */
       onCommitted?: (version: number) => void
+      /** false: send the version given, never one of this record's own accepted writes returned (the caller's
+       *  copy of the record takes a write only once it is accepted, as an off-page one does). */
+      chainVersion?: boolean
     },
   ): Promise<GridPatchFailure | typeof CELL_WRITE_SUPERSEDED | null> {
     if (rangePending) return {
@@ -1580,7 +1583,7 @@ export function useMultitableGrid(opts: {
     }
 
     let expectedVersion = version
-    if (write.inPage) {
+    if (write.inPage && options?.chainVersion !== false) {
       for (let next = turns.advanced.get(expectedVersion); next !== undefined; next = turns.advanced.get(expectedVersion)) {
         expectedVersion = next
       }

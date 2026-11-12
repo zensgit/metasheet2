@@ -5528,41 +5528,6 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
-    it('after a realtime merge of the open record (on the page) the drawer shows a copy of it, which follows the grid row: an older save answered while a newer one waits does not take it back, and a rejected one leaves the row\'s stored value', async () => {
-      await openRec1()
-      const realtime = useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as { mergeRemoteRecord: (recordId: string) => Promise<boolean> }
-      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
-      workbenchMock.client.getRecord.mockResolvedValue({
-        record: { id: 'rec_1', version: row.version, data: { ...row.data } },
-        linkSummaries: {}, attachmentSummaries: {}, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
-        commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
-      })
-      await realtime.mergeRemoteRecord('rec_1')
-      await flushUi()
-      expect(inspectorStubSeen.record?.id).toBe('rec_1')
-      expect(inspectorStubSeen.record).not.toBe(row)
-      // The grid (patchCell): the row shows each save at once; each answer comes when released.
-      const answers: Array<(failure: unknown) => void> = []
-      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown) => {
-        row.data[fieldId] = value
-        const failure = await new Promise((resolve) => { answers.push(resolve) })
-        gridMock.error.value = null
-        return failure
-      })
-      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
-      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
-      await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
-      answers[0](null)
-      await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
-      // The second is rejected: the grid rolls its row back to the value stored (the first save).
-      row.data.fld_title = ATTEMPTED
-      answers[1](failureFor('fld_title', 'Insufficient permissions', { status: 403, code: 'FORBIDDEN' }))
-      await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe(ATTEMPTED)
-    })
-
     // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`).
     function mergeAnswer(row: { version: number; data: Record<string, unknown> }, data?: Record<string, unknown>) {
       workbenchMock.client.getRecord.mockResolvedValue({
@@ -5588,29 +5553,26 @@ describe('MultitableWorkbench view wiring', () => {
       return { answers, calls }
     }
 
-    it('a merge that makes the copy while a save of the field is out, a newer save waiting: the older answer does not take the drawer back', async () => {
+    it('saves made on a copy of the record shown (kept after a realtime merge, the record on the page) are sent with the copy\'s version, not chained past it', async () => {
       await openRec1()
       const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
-      const { answers } = heldPatches(row)
-      expect(inspectorStubSeen.record).toBe(row)
-      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
-      await flushUi()
       mergeAnswer(row)
       await realtimeMerge()('rec_1')
       await flushUi()
       expect(inspectorStubSeen.record).not.toBe(row)
-      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
-      answers[0](null)
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', ATTEMPTED, row.version, { chainVersion: false })
+      // Without a copy (the drawer shows the grid row), the grid chains the version as usual.
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
       await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
-      answers[1](null)
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
+      expect(gridMock.patchCell.mock.calls.at(-1)).toHaveLength(4)
     })
 
-    it('the copy follows the row: after an accepted save the row moves on, and the next save carries its version', async () => {
+    it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
       await openRec1()
       const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row)
@@ -5633,24 +5595,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(versions).toEqual([start, start + 1])
     })
 
-    it('the copy takes the row\'s data with its version: a row reloaded with another user\'s change gives the copy that change too', async () => {
-      await openRec1()
-      const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
-      mergeAnswer(row0)
-      await realtimeMerge()('rec_1')
-      await flushUi()
-      // A reload brings another user's status change (version 5); a reload does not refresh the copy itself.
-      gridMock.rows.value = gridMock.rows.value.map((r: { id: string; version: number; data: Record<string, unknown> }) => (r.id === 'rec_1' ? { ...r, version: 5, data: { ...r.data, fld_status: 'theirs' } } : r))
-      await flushUi()
-      const { answers } = heldPatches(null)
-      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
-      await flushUi()
-      answers[0](failureFor('fld_title', 'Changed elsewhere', { status: 409, code: 'VERSION_CONFLICT' }))
-      await flushUi()
-      expect(inspectorStubSeen.record).toMatchObject({ version: 5, data: { fld_status: 'theirs' } })
-    })
-
-    it('a copy gone stale while another record was shown: after its first (conflicting) save the drawer shows the row, so the next save is made on the other user\'s value with its version', async () => {
+    it('a copy gone stale while another record was shown is never given a version past the data it shows: its saves keep conflicting', async () => {
       await openRec1()
       const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row0)
@@ -5681,9 +5626,11 @@ describe('MultitableWorkbench view wiring', () => {
       })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      // Never the row's version without its data.
-      expect(inspectorStubSeen.record).toMatchObject({ version: 2, data: { fld_status: 'theirs' } })
-      expect(sent).toEqual([['fld_title', 1]])
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
+      await flushUi()
+      // A status save made on the status the drawer shows (not 'theirs') is not stored over 'theirs'.
+      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
+      expect(sent).toEqual([['fld_title', 1], ['fld_status', 1]])
     })
 
     it.each([
