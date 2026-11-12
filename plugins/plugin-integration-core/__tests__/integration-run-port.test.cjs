@@ -176,7 +176,10 @@ const tests = [
     assert.deepEqual([stamping.status, stamping.reason], ['succeeded', 'ready'])
     const heldWithStanza = summarizeStockPrepDryRun({ status: 'manual_confirm_required', canApply: true, pullBatch: { preview: true, wouldStamp: false, reason: 'installing' }, counts: { add: 1 } }, t0)
     assert.equal(heldWithStanza.reason, 'manual_confirm_required', 'read on a ready preview only, as the script does')
-    assert.deepEqual(summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0), { status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', failureStage: 'read', durationMs: summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0).durationMs })
+    // Same race as P-04: call once and assert on the stored result.
+    const recoveryPending = summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0)
+    assert.equal(typeof recoveryPending.durationMs, 'number')
+    assert.deepEqual(recoveryPending, { status: 'failed', errorClass: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', failureStage: 'read', durationMs: recoveryPending.durationMs })
     assert.equal(summarizeStockPrepDryRun({ status: 'something_new' }, t0).errorClass, 'unexpected_dry_run_status')
     assert.equal(summarizeStockPrepDryRun(null, t0).status, 'failed')
     const partial = summarizePipelineRun({ runId: 'run_2', status: 'partial', metrics: { rowsRead: 3, rowsFailed: 1 } }, t0)
@@ -189,7 +192,10 @@ const tests = [
   ['P-04 refusals: 401/403 => skipped(principal_unauthorized); PROJECT_ABSENT / ARCHIVED => held; other HttpRouteError => failed(code); aborts and lease-lost rejections are rethrown', async () => {
     const { classifyRefusal } = __internals
     const t0 = Date.now()
-    assert.deepEqual(classifyRefusal(new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions'), t0), { status: 'skipped', reason: 'principal_unauthorized', errorClass: 'FORBIDDEN', durationMs: classifyRefusal(new HttpRouteError(403, 'FORBIDDEN', 'x'), t0).durationMs })
+    // One call, then assert on the stored result: a second call can land a millisecond later (durationMs 0 vs 1).
+    const forbidden = classifyRefusal(new HttpRouteError(403, 'FORBIDDEN', 'Insufficient integration permissions'), t0)
+    assert.equal(typeof forbidden.durationMs, 'number')
+    assert.deepEqual(forbidden, { status: 'skipped', reason: 'principal_unauthorized', errorClass: 'FORBIDDEN', durationMs: forbidden.durationMs })
     assert.equal(classifyRefusal(new HttpRouteError(401, 'UNAUTHENTICATED', 'x'), t0).reason, 'principal_unauthorized')
     assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'x'), t0).status, 'held')
     assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'x'), t0).reason, 'project_absent')

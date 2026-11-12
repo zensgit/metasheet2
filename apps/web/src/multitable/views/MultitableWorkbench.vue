@@ -878,7 +878,7 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '../utils/workbench-undo'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget } from '../utils/workbench-undo'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
@@ -3115,8 +3115,16 @@ async function searchCommentMentions(query: string): Promise<MetaCommentMentionS
 // the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
 // the cursor (see `onSelectRecord` below), never this branch.
 async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
-  if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
+  // Every move to another record (the drawer's previous / next, a duplicate, a new record, a deep link, the browser's
+  // back / forward) commits the drawer's focused control first, and gives it the focus back after the move, or after
+  // a declined discard prompt (the control still shows this record).
+  const restoreDrawerFocus = recordId !== selectedRecordId.value ? releaseDrawerFocus() : null
+  if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) {
+    void restoreDrawerFocus?.()
+    return
+  }
   selectedRecordId.value = recordId
+  void restoreDrawerFocus?.()
   // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
   // guard above has already passed (not before calling this function): setting it earlier let a
   // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
@@ -5780,36 +5788,39 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
-async function onDrawerNavigate(recordId: string) {
-  if (recordId === selectedRecordId.value) {
-    void selectRecord(recordId)
-    return
-  }
-  // The drawer's previous / next chord moves on with the caret still in a field, which commits on blur (the rich
-  // text editor keeps its draft while focused): blur the drawer's focused control first (as closing the drawer
-  // does, see flushActiveFieldEdit), so it commits to the record it was typed on. Then, once the drawer shows the
-  // next record, the focus goes back to that control (the drawer reuses it), or to the drawer's open tab when the
-  // control is gone (a field hidden there), so the chord, Esc and typing go on working, unless something else has
-  // the focus by then.
+function onDrawerNavigate(recordId: string) {
+  // The drawer's previous / next, and its chord, which works with the caret still in a field: selectRecord commits
+  // that field first and gives it the focus back after the move (releaseDrawerFocus).
+  void selectRecord(recordId)
+}
+
+/** Before the drawer moves to another record: blur its focused control, so the control commits while its own record
+ *  is still the one shown (the drawer's fields commit on blur, and the rich text editor keeps its draft while
+ *  focused), as closing the drawer does (see flushActiveFieldEdit). Returns what gives the focus back once the drawer
+ *  shows the next record: to that control (the drawer reuses it), with the caret at the end of a rich text editor, or
+ *  to the drawer's open tab when the control is gone (a field hidden there), so the chord, Esc and typing go on
+ *  working, unless something else has the focus by then. Null when the focus is not in the drawer. */
+function releaseDrawerFocus(): (() => Promise<void>) | null {
   const active = document.activeElement
   const drawer = active instanceof HTMLElement ? active.closest<HTMLElement>('.meta-record-drawer') : null
-  const focused = drawer ? (active as HTMLElement) : null
-  focused?.blur()
-  void selectRecord(recordId)
-  if (!focused || !drawer) return
-  await nextTick()
-  const now = document.activeElement
-  if (now && now !== document.body) return
-  if (focused.isConnected) {
-    focused.focus({ preventScroll: true })
-    // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
-    if (focused.isContentEditable) {
-      const selection = document.getSelection()
-      selection?.selectAllChildren(focused)
-      selection?.collapseToEnd()
+  if (!drawer) return null
+  const focused = active as HTMLElement
+  focused.blur()
+  return async () => {
+    await nextTick()
+    const now = document.activeElement
+    if (now && now !== document.body) return
+    if (focused.isConnected) {
+      focused.focus({ preventScroll: true })
+      // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
+      if (focused.isContentEditable) {
+        const selection = document.getSelection()
+        selection?.selectAllChildren(focused)
+        selection?.collapseToEnd()
+      }
+    } else if (drawer.isConnected) {
+      drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
     }
-  } else if (drawer.isConnected) {
-    drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
   }
 }
 
@@ -5835,6 +5846,7 @@ const workbenchRootRef = ref<HTMLElement | null>(null)
 const workbenchUndo = createWorkbenchUndo({
   isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),
   isGridSurface: isWorkbenchGridSurface,
+  isGridTarget: isWorkbenchGridTarget,
 })
 let removeWorkbenchUndo: (() => void) | null = null
 // The drawer's controls are reused when it shows another record (and the sheet's and view's controls
@@ -6133,6 +6145,9 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
       sheetId: workbench.activeSheetId.value || undefined,
       viewId: workbench.activeViewId.value || undefined,
     })
+    // When the record shown is itself deep-linked, the drawer shows another record from here on: commit its focused
+    // control first (selectRecord then finds none in the drawer, so the focus comes back from here).
+    const restoreDrawerFocus = recordId !== selectedRecordId.value ? releaseDrawerFocus() : null
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
     deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
@@ -6141,7 +6156,10 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, selectOpts)
+    // The focus comes back as soon as the drawer shows the record, not after its comments load.
+    const selected = selectRecord(recordId, selectOpts)
+    void restoreDrawerFocus?.()
+    await selected
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }
