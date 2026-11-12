@@ -44,6 +44,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
 const LIVENESS_ONE_SQL = /SELECT\s+deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*\$1/i
 const LIVENESS_BATCH_SQL = /SELECT\s+id,\s*deleted_at\s+FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*ANY/i
+/** The scheduled lane's fire-start read of the stored `enabled` flag (automation-disabled-schedule-rule.test.ts). */
+const RULE_ENABLED_SQL = /SELECT\s+enabled\s+FROM\s+automation_rules\s+WHERE\s+id\s*=\s*\$1/i
 
 type SheetState = 'live' | 'deleted' | 'absent' | 'throws'
 /** One entry per liveness ROUND TRIP: `one` = the per-sheet sibling form, `batch` = the loader form. */
@@ -82,6 +84,9 @@ function makeService(rows: Record<string, unknown>[], sheets: Record<string, She
     deleted_at: stateOf(sheetId) === 'deleted' ? new Date('2026-09-01T00:00:00Z') : null,
   })
   const queryFn = vi.fn(async (sqlText: string, params: unknown[]) => {
+    // Every rule in this file is stored ENABLED: the scheduled-lane parity case is about sheet liveness,
+    // so its fire-start `enabled` re-read must pass (the disabled / absent cases live in their own file).
+    if (RULE_ENABLED_SQL.test(sqlText)) return { rows: [{ enabled: true }], rowCount: 1 }
     if (LIVENESS_ONE_SQL.test(sqlText)) {
       const sheetId = String(params?.[0] ?? '')
       livenessCalls.push({ kind: 'one', ids: [sheetId] })

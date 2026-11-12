@@ -25,7 +25,8 @@
  *   what undo took back.
  * - A text-entry control never hands the chord on: with no step of its own left, the chord does
  *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
- *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
+ *   non-text target inside the workbench (the grid, a button, a date input, a select…; not one of the
+ *   drawer's tab panels itself: `isGridTarget`, the workbench's `isWorkbenchGridTarget`), or from the page
  *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
  *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid itself and its
  *   cells, and the drawer's title and fields, whose edits are cell patches). A button, link or file input
@@ -91,6 +92,15 @@ const CELL_EDIT_SURFACES = '.meta-grid__cell, .meta-record-drawer__titleblock, .
  *  or not yet one (a file input: its patch comes once the upload ends). One that disables or removes itself
  *  when pressed leaves focus on the page itself. */
 const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href], input[type="file"]'
+
+/** The workbench's `isGridTarget`: a chord with the focus on a non-text target inside the workbench is the
+ *  grid's, except on one of the drawer's tab panels itself. The drawer gives the focus to its open tab when
+ *  the field that had it is gone on the next record, and Safari leaves it on the panel after a press on a
+ *  button in it (Send, Resolve…): the grid's last step can then be a record no longer shown. A control
+ *  inside the panel is decided as before. */
+export function isWorkbenchGridTarget(node: Node): boolean {
+  return !(node instanceof Element && node.matches('[role="tabpanel"]') && !!node.closest('.meta-record-drawer'))
+}
 
 /** The workbench's `isGridSurface`: whether, after a press or focus on `node`, a chord on the page itself
  *  is the grid's. */
@@ -247,6 +257,9 @@ export interface WorkbenchUndoOptions {
   /** Whether `node` is on a surface whose edits are the grid's undo history (`isWorkbenchGridSurface`):
    *  only after a press or focus there is a chord on the page itself the grid's. */
   isGridSurface?: (node: Node) => boolean
+  /** Whether a chord with the focus on `node`, a non-text target inside the workbench, is the grid's
+   *  (`isWorkbenchGridTarget`); when not, it does nothing. */
+  isGridTarget?: (node: Node) => boolean
 }
 
 export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
@@ -254,6 +267,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   const now = options.now ?? (() => Date.now())
   const isInsideWorkbench = options.isInsideWorkbench ?? (() => true)
   const isGridSurface = options.isGridSurface ?? (() => true)
+  const isGridTarget = options.isGridTarget ?? (() => true)
   const histories = new WeakMap<HTMLElement, History>()
   let generation = 0
   /** Set while a restore runs, so the recorder does not take its own edit as one. */
@@ -372,7 +386,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
         return 'swallow'
       }
       const target = event.target as Node | null
-      const grids = isPageItself(target) ? lastPressOnGrid : !!target && isInsideWorkbench(target)
+      const grids = isPageItself(target) ? lastPressOnGrid : !!target && isInsideWorkbench(target) && isGridTarget(target)
       if (!grids) return 'swallow'
       return undo ? 'grid-undo' : 'grid-redo'
     },

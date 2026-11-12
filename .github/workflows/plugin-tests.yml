@@ -2723,6 +2723,7 @@ jobs:
             tests/integration/directory-departure-vouching.db.test.ts \
             tests/integration/feishu-mock-harness-smoke.db.test.ts \
             tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \
+            tests/integration/notification-endpoints-preferences.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
