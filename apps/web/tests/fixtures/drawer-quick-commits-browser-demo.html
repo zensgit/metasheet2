@@ -1,0 +1,83 @@
+<!doctype html>
+<!-- Synthetic browser verification only; this is not an application route or a backend persistence test. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>MetaSheet drawer quick commits verification</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif}.row{display:flex;height:100vh}.main{flex:1;padding:16px}</style>
+<div id="app"></div>
+<script type="module">
+// The REAL MetaRecordInspector (record drawer) on a record of the REAL useMultitableGrid, saved the way
+// MultitableWorkbench saves a drawer field (commitDrawerPatch): `patchCell(record, field, value, the version the drawer
+// shows)`. The stand-in server checks each write against the record's version when it arrives, as
+// record-write-service does, and answers 300 ms later: a date box saves every part typed and a number box every
+// arrow key, faster than that.
+import { computed, createApp, h, ref } from '/node_modules/vue/dist/vue.esm-bundler.js'
+import '/node_modules/element-plus/dist/index.css'
+import '/src/styles/tokens.css'
+import MetaRecordInspector from '/src/multitable/components/MetaRecordInspector.vue'
+import { useLocale } from '/src/composables/useLocale.ts'
+import { MultitableApiClient } from '/src/multitable/api/client.ts'
+import { useMultitableGrid } from '/src/multitable/composables/useMultitableGrid.ts'
+useLocale().setLocale('zh-CN')
+const FIELDS = [
+  { id: 'fld_title', name: '标题', type: 'string' },
+  { id: 'fld_name', name: '名称', type: 'string' },
+  { id: 'fld_note', name: '备注', type: 'string' },
+  { id: 'fld_due', name: '截止日期', type: 'date' },
+  { id: 'fld_qty', name: '数量', type: 'number' },
+]
+const stored = new Map([
+  ['rec_1', { version: 1, data: { fld_title: '巡检记录 A', fld_name: 'alpha', fld_note: 'beta', fld_due: '2031-01-02', fld_qty: 5 } }],
+  ['rec_2', { version: 1, data: { fld_title: '巡检记录 B', fld_name: 'gamma', fld_note: 'delta', fld_due: '2031-02-03', fld_qty: 3 } }],
+])
+const demo = window.quickDemo = { sent: [], rejected: 0, inFlight: 0 }
+const answer = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+const later = (response) => new Promise((resolve) => setTimeout(() => resolve(response), 300))
+const client = new MultitableApiClient({
+  fetchFn: async (input, init) => {
+    if (String(input).includes('/api/multitable/patch')) {
+      const { changes: [change] } = JSON.parse(String(init.body))
+      demo.sent.push(`${change.fieldId}=${change.value}@${change.expectedVersion}`)
+      const record = stored.get(change.recordId)
+      demo.inFlight += 1
+      let response
+      if (record.version !== change.expectedVersion) {
+        demo.rejected += 1
+        response = answer({ ok: false, error: { code: 'VERSION_CONFLICT', message: '记录已被修改', serverVersion: record.version } }, 409)
+      } else {
+        record.version += 1
+        record.data = { ...record.data, [change.fieldId]: change.value }
+        response = answer({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }], records: [{ recordId: change.recordId, data: { [change.fieldId]: change.value } }] } })
+      }
+      try { return await later(response) } finally { demo.inFlight -= 1 }
+    }
+    return answer({
+      fields: FIELDS,
+      rows: [...stored].map(([id, record]) => ({ id, version: record.version, data: { ...record.data } })),
+      page: { offset: 0, limit: 50, total: stored.size, hasMore: false },
+      meta: { permissions: { rowActions: { canEdit: true, canDelete: false, canComment: false } } },
+    })
+  },
+})
+const grid = useMultitableGrid({ sheetId: ref('sht_demo'), viewId: ref('view_demo'), client })
+await grid.loadViewData(0)
+const shownId = ref('rec_1')
+const record = computed(() => grid.rows.value.find((row) => row.id === shownId.value) ?? null)
+demo.stored = (id = 'rec_1') => ({ ...stored.get(id) })
+demo.row = (id = 'rec_1') => { const row = grid.rows.value.find((r) => r.id === id); return { version: row.version, data: { ...row.data } } }
+demo.conflict = () => grid.conflict.value
+createApp({
+  render: () => h('div', { class: 'row' }, [
+    h('div', { class: 'main', id: 'grid-area', tabindex: 0 }, '表格区域（合成）'),
+    record.value ? h(MetaRecordInspector, {
+      visible: true, record: record.value, fields: FIELDS, canEdit: true, canDelete: false, recordIds: ['rec_1', 'rec_2'], sheetId: 'sht_demo',
+      canComment: false, comments: [],
+      onPatch: (fieldId, value, recordId) => {
+        const target = grid.rows.value.find((row) => row.id === (recordId ?? shownId.value))
+        if (target) void grid.patchCell(target.id, fieldId, value, target.version)
+      },
+      onNavigate: (id) => { shownId.value = id },
+    }) : null,
+  ]),
+}).mount('#app')
+demo.ready = true
+</script>
+</html>

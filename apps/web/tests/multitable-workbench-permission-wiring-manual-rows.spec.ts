@@ -554,31 +554,28 @@ describe('W-10 the drawer on a manual row', () => {
     expect(plain[F.spec].readOnly).toBe(true)
   })
 
-  it('two saves go one at a time; the second carries the version the first returned (ADR §3.4)', async () => {
+  it('two saves both go to the grid at once, on the version shown; the grid sends them one at a time (ADR §3.4)', async () => {
+    // The grid's `patchCell` sends a record's writes one at a time, the second with the version the first returned
+    // (multitable-grid-manual-rows.spec.ts covers it on the real composable). The drawer no longer holds the second
+    // save back: its value is shown at once.
     await mount('grid', withBlock())
     await (captured.MetaGridTable!.onSelectRecord as (id: string) => Promise<void>)('rec_wb_manual')
     await flushUi()
     let releaseFirst: () => void = () => {}
     const calls: Array<{ fieldId: string; version: number }> = []
-    gridMock.patchCell.mockImplementation(async (recordId: string, fieldId: string, _value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
+    gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, _value: unknown, version: number) => {
       calls.push({ fieldId, version })
       if (calls.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve })
-      // The server answers a NEW version (not simply +1): the real composable writes it onto the grid row.
-      const row = gridMock.rows.value.find((r: { id: string }) => r.id === recordId)
-      const next = version + 10
-      row.version = next
-      options?.onCommitted?.(next)
       return null
     })
     const onPatch = captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown) => Promise<void>
     const first = onPatch(F.spec, 'SPEC-B')
     const second = onPatch(F.notes, 'note')
     await flushUi()
-    expect(calls).toEqual([{ fieldId: F.spec, version: 3 }]) // the second waits for the first
+    expect(calls).toEqual([{ fieldId: F.spec, version: 3 }, { fieldId: F.notes, version: 3 }])
     releaseFirst()
     await first
     await second
-    expect(calls).toEqual([{ fieldId: F.spec, version: 3 }, { fieldId: F.notes, version: 13 }])
   })
 
   it('an ordinary row\'s drawer saves are not chained (unchanged)', async () => {
@@ -603,11 +600,11 @@ describe('W-10 the drawer on a manual row', () => {
     return captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown, recordId?: string) => Promise<void>
   }
 
-  it('the manual row\'s named write after a move to the PLM row goes to the manual row, through the manual route (its version, onCommitted)', async () => {
+  it('the manual row\'s named write after a move to the PLM row goes to the manual row, at its version (the grid picks its route)', async () => {
     const onPatch = await selectThen('rec_wb_manual', 'rec_wb_plm')
     await onPatch(F.notes, 'late', 'rec_wb_manual')
     expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-    expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_manual', F.notes, 'late', 3, expect.objectContaining({ onCommitted: expect.any(Function) }))
+    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.notes, 'late', 3]])
   })
 
   it('the reverse: the PLM row\'s named write while the manual row is shown is a plain /patch call for the PLM row', async () => {

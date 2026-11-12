@@ -1308,6 +1308,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
+import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
 import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -5513,6 +5514,37 @@ describe('MultitableWorkbench view wiring', () => {
       expect(fieldErrorEl('fld_title')).toBeNull()
       expect(showSuccessSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a save the grid replaced unsent with a newer save of the field (CELL_WRITE_SUPERSEDED) shows nothing and leaves the field\'s inline error alone: the newer save answers for the field', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => CELL_WRITE_SUPERSEDED)
+      await patchTitle()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+    })
+
+    it('an older save of the record that fails while this one waits (the grid\'s shared error set after the call) does not make this one\'s success a local refusal', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        await Promise.resolve()
+        gridMock.error.value = 'Status is not allowed'
+        return null
+      })
+      await patchTitle()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(fieldErrorEl('fld_title')).toBeNull()
     })
 
     it.each([

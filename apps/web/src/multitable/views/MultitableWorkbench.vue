@@ -939,6 +939,7 @@ import {
 } from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { CELL_WRITE_SUPERSEDED } from '../utils/cell-write'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
 import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
 import { viewTypeLabel } from '../utils/meta-manager-labels'
@@ -3731,55 +3732,34 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
   const settleUndo = shown
     ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
     : undefined
-  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
-    return
-  }
-  await commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
+  await commitDrawerPatch(record, fieldId, patchValue, settleUndo)
 }
-
-// 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
-// fillable column through PATCH …/manual-fields, every other column through /patch (the grid routes each patch). The two
-// routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
-// a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
-// next one from trying with the version actually stored.
-const manualDrawerWriteTails = new Map<string, Promise<void>>()
 
 function drawerRecordById(recordId: string): MetaRecord | null {
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
-  const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
-  const step = previous.then(async () => {
-    // Re-read AFTER the previous step: its returned version is on the row by now.
-    const current = drawerRecordById(recordId)
-    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
-  })
-  const tail = step.then(() => undefined, () => undefined)
-  manualDrawerWriteTails.set(recordId, tail)
-  try {
-    await step
-  } finally {
-    if (manualDrawerWriteTails.get(recordId) === tail) manualDrawerWriteTails.delete(recordId)
-  }
-}
-
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
+// The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`): the
+// drawer's saves of one record never race each other, on a manual row too (人工补充行 B3, ADR §3.4 「抽屉里一次保存分两步」:
+// a fillable column through PATCH …/manual-fields, every other column through /patch, which are not one transaction;
+// a failed step does not stop the next one from trying with the version actually stored).
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, onCommitted?: () => void) {
   const patchOwner = {}
   // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
   // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
   if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
-  // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
-  const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const failure = manualRow
-    ? await grid.patchCell(record.id, fieldId, value, record.version, { onCommitted: (version) => { committed.version = version } })
-    : await grid.patchCell(record.id, fieldId, value, record.version)
+  const write = grid.patchCell(record.id, fieldId, value, record.version)
+  // The composable's local row-action refusal sets its error before the call returns (an older write of the record
+  // that fails while this one waits sets it later, and is not this one's).
+  const refusedLocally = grid.error.value
+  const failure = await write
+  // Replaced before it was sent by a newer save of the same field, whose answer is the field's.
+  if (failure === CELL_WRITE_SUPERSEDED) return
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
   if (failure) {
     // Route by the failure the composable returned for THIS patch — still guarded on record + field
@@ -3819,10 +3799,10 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
     showError(toastText(failure.message))
     return
   }
-  if (grid.error.value) {
+  if (refusedLocally) {
     // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
     // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
-    showError(grid.error.value)
+    showError(refusedLocally)
     return
   }
   onCommitted?.()
@@ -3832,7 +3812,8 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
-      version: committed.version ?? deepLinkedRecord.value.version + 1,
+      // The server moves a record one version per accepted write.
+      version: deepLinkedRecord.value.version + 1,
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
