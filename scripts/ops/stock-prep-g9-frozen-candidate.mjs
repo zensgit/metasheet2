@@ -16,7 +16,8 @@
 //                                           When refs/tags/<tag> ALREADY exists (a release tag cut from the frozen
 //                                           commit, S6-9) it is never re-created or moved: it must resolve to <sha> here
 //                                           AND on origin (else a refusal before anything is written), and only the two
-//                                           dispatches run.
+//                                           dispatches run. A NEW tag whose name deploy.yml's push filter v*.*.*
+//                                           matches is refused before anything is planned (a push would deploy).
 //   --collect --tag <name> [--out <dir>]    read the tag's runs (gh run list --branch <tag>); when plugin-tests.yml is
 //                                           complete, save its whole log and evaluate it as --parse-log does, expecting
 //                                           the TAG'S OWN COMMIT (`git rev-parse <tag>^{commit}`, never a run's headSha)
@@ -59,6 +60,9 @@ export const WORKFLOWS = Object.freeze(['plugin-tests.yml', 'stock-prep-powershe
 const MIGRATION_106 = 'packages/core-backend/migrations/106_extend_integration_stock_prep_refresh_execution_for_recovery.sql'
 const MIGRATION_108 = 'packages/core-backend/migrations/108_create_integration_stock_prep_sheet_repair.sql'
 const SHA_PATTERN = /^[0-9a-f]{40}$/
+// .github/workflows/deploy.yml runs "Deploy to Production" on `push: tags: 'v*.*.*'` (a GitHub filter `*` matches any
+// character but `/`). The runner never creates or pushes a tag this matches.
+const DEPLOY_TAG_PATTERN = /^v[^/]*\.[^/]*\.[^/]*$/
 
 /**
  * The repair ledger's rollback stop-condition query, parsed out of a migration 108 text (its header's ROLLBACK paragraph:
@@ -205,11 +209,36 @@ export function planCommands(sha, tag, existingTagCommit = null) {
   }
   const dispatch = WORKFLOWS.map((workflow) => ['gh', ['workflow', 'run', workflow, '--ref', `refs/tags/${tag}`]])
   if (existingTagCommit === sha) return dispatch
+  // A NEW tag is created AND PUSHED: a name deploy.yml's `push: tags: v*.*.*` matches would fire "Deploy to
+  // Production" on that push. Refused here, before any command is planned (the dispatch-only path pushes nothing).
+  if (DEPLOY_TAG_PATTERN.test(String(tag))) {
+    throw new Error(`refs/tags/${tag} would match deploy.yml's push tag filter v*.*.* (a production deploy on push): refusing to create or push it; use the default s6-9-g9-<sha12> or another name`)
+  }
   return [
     ['git', ['tag', '-a', tag, sha, '-m', `S6-9 G9 frozen candidate ${sha.slice(0, 12)} (R-91)`]],
     ['git', ['push', 'origin', `refs/tags/${tag}`]],
     ...dispatch,
   ]
+}
+
+/**
+ * The commit refs/tags/<tag> resolves to on the REMOTE, from a `git ls-remote --tags origin refs/tags/<tag>
+ * refs/tags/<tag>^{}` answer: an annotated tag's peeled `^{}` line, else a lightweight tag's own line; null when the
+ * answer names no such ref. The ref field must equal the name exactly. Pure.
+ */
+export function remoteTagCommitOf(lsRemoteOutput, tag) {
+  const entries = String(lsRemoteOutput).replace(/\r\n/g, '\n').split('\n').map((line) => line.trim().split('\t')).filter((parts) => parts.length === 2)
+  const peeled = entries.find(([, ref]) => ref === `refs/tags/${tag}^{}`)
+  const plain = entries.find(([, ref]) => ref === `refs/tags/${tag}`)
+  const commit = (peeled || plain || [null])[0]
+  return commit && SHA_PATTERN.test(commit) ? commit : null
+}
+
+/** --dispatch on an EXISTING tag: refuse (throw) unless origin has the tag at <sha>. Pure. */
+export function assertRemoteTagAt(lsRemoteOutput, tag, sha) {
+  const remote = remoteTagCommitOf(lsRemoteOutput, tag)
+  if (remote !== sha) throw new Error(`refs/tags/${tag} on origin resolves to ${remote || 'nothing'}, not ${sha}: push the tag (or fix --sha) first`)
+  return remote
 }
 
 /** What refs/tags/<tag> resolves to in this checkout (its commit), or null when no such tag exists here. */
@@ -301,6 +330,35 @@ function selfTest() {
     ['existing tag at another commit: refused', (() => {
       try { planCommands(sha, 'r-main-1', base); return false } catch (error) { return /refusing to move or reuse it/.test(error.message) }
     })()],
+    // Review of #6887 (must-fix): a NEW tag the runner would create and push may not match deploy.yml's v*.*.* filter.
+    ['a new v*.*.* tag is refused (v1.2.3)', (() => {
+      try { planCommands(sha, 'v1.2.3'); return false } catch (error) { return /deploy\.yml/.test(error.message) }
+    })()],
+    ['a new v*.*.* tag is refused (v2.5.0-onprem-x)', (() => {
+      try { planCommands(sha, 'v2.5.0-onprem-x'); return false } catch (error) { return /deploy\.yml/.test(error.message) }
+    })()],
+    ['a new non-deploy tag still plans tag + push (s6-9-g9-x, onprem-r85)', planCommands(sha, 's6-9-g9-x').length === 4 && planCommands(sha, 'onprem-r85').length === 4],
+    ['an EXISTING v*.*.* tag at the sha: dispatch only, nothing pushed', (() => {
+      const plan = planCommands(sha, 'v9.9.9', sha)
+      return plan.length === 2 && plan.every(([cmd]) => cmd === 'gh')
+    })()],
+    // --dispatch on an existing tag: origin must have it at the sha (the annotated tag's peeled line wins).
+    ['remote tag check: annotated at the sha passes, its tag-object line is not the commit', (() => {
+      const tagObject = 'd'.repeat(40)
+      const answer = `${tagObject}\trefs/tags/r-main-1\n${sha}\trefs/tags/r-main-1^{}\n`
+      return assertRemoteTagAt(answer, 'r-main-1', sha) === sha && remoteTagCommitOf(answer, 'r-main-1') === sha
+    })()],
+    ['remote tag check: lightweight at the sha passes (CRLF answer)', assertRemoteTagAt(`${sha}\trefs/tags/r-main-1\r\n`, 'r-main-1', sha) === sha],
+    ['remote tag check: annotated at another commit refused', (() => {
+      try { assertRemoteTagAt(`${sha}\trefs/tags/r-main-1\n${base}\trefs/tags/r-main-1^{}\n`, 'r-main-1', sha); return false } catch (error) { return /not a{40}/.test(error.message) }
+    })()],
+    ['remote tag check: absent, or only a longer name ending the same, refused', (() => {
+      let absent = false
+      let suffix = false
+      try { assertRemoteTagAt('', 'r-main-1', sha) } catch { absent = true }
+      try { assertRemoteTagAt(`${sha}\trefs/tags/x-r-main-1\n`, 'r-main-1', sha) } catch { suffix = true }
+      return absent && suffix
+    })()],
     ['the 108 stop query is parsed from the header, never copied', (() => {
       const header = '-- ROLLBACK. the two tables then stay, inert. Before rolling back, no run may be open:\r\n--   SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = \'running\';\r\n-- must answer 0.'
       let refused = false
@@ -389,9 +447,7 @@ export function main(argv = process.argv.slice(2)) {
   }
   if (existing) {
     // An existing tag is dispatched on the REMOTE: it must be there, at the same commit (an annotated tag's peeled line).
-    const remote = run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]).stdout
-    const peeled = (remote.split('\n').find((line) => line.endsWith(`refs/tags/${tag}^{}`)) || remote.split('\n').find((line) => line.endsWith(`refs/tags/${tag}`)) || '').split('\t')[0]
-    if (peeled !== sha) throw new Error(`refs/tags/${tag} on origin resolves to ${peeled || 'nothing'}, not ${sha}: push the tag (or fix --sha) first`)
+    assertRemoteTagAt(run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]).stdout, tag, sha)
   }
   for (const [cmd, args] of commands) {
     console.log(`> ${[cmd, ...args].join(' ')}`)

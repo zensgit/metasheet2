@@ -2256,13 +2256,39 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }
     const failingOf = (res: any) => (res && res.body && res.body.error && res.body.error.details ? JSON.parse(JSON.stringify(res.body.error.details)).failing : null)
 
-    g9Case('G9-S9D-01', '(S6-5 S9D-01, the governed pilot-pull leg; design §6.1 H1, §6.3) an item-10 sheet (D2: S-001\'s own root subtree swept INACTIVE by a pre-step-4 pull, its copies ACTIVE under P-001) whose source STILL orders S-001 (H1), the band installed and the tenant-claim flag ON on the shipped marker 1: the census lists exactly its one remnant, readiness refuses ONLY no_unacknowledged_inactive_root_remnant and the enable is 409 with nothing marked; the pilot then marked by the harness (the planner leg: the real enable cannot pass, which is the point), the governed pull SUSPENDS on dropped_order_head_unresolved naming S-001 — no token, no row written, the old rows untouched', async () => {
+    g9Case('G9-S9D-01', '(S6-5 S9D-01, the governed pilot-pull leg; design §6.1 H1, §6.3) an item-10 sheet (D2: S-001\'s own root subtree swept INACTIVE by a pre-step-4 pull, its copies ACTIVE under P-001) whose source STILL orders S-001 (H1), the band installed and the tenant-claim flag ON on the shipped marker 1: the census lists exactly its one remnant, readiness refuses ONLY no_unacknowledged_inactive_root_remnant and the enable is 409 with nothing marked; the pilot then marked by the harness (the planner leg: the real enable cannot pass, which is the point), the governed pull SUSPENDS on dropped_order_head_unresolved naming S-001 — no token, no row written, the old rows untouched; the hold has NO confirm control (§6.1 customer_rule_pending): the puller\'s confirm through the REAL route, with the page\'s own receipt and the hold\'s fingerprints, is 409 CONFIRM_NOT_ALLOWED (this kind has no confirm control) and writes nothing', async () => {
       const { st, read, enable, registry, shape, components, oldRoots } = await item10PilotSheet('g9_s9d01', true)
       const { failing, refused } = await withTenantClaim('true', async () => ({ failing: (await read()).body.data.readiness.failing, refused: await enable() }))
       const registryAfterRefusal = await registry()
       // The harness marks the pilot (as s3aStack's `pilot: true` does): the planner's governed leg on this shape.
       await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = $4 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_g9_s9d01_harness', readinessLib.PILOT_READINESS_VERSION])
       const pulled = await governedPilotPull(st)
+      // §6.1: the H1 hold is customer_rule_pending with NO confirm. Stored as such, shown as such on the puller's page,
+      // and the REAL confirm route refuses the puller's confirm of it (valid body, the page's receipt, the hold's own
+      // fingerprints) with nothing written: no step-4 row, no sheet row, the hold unchanged.
+      const holdRow = (await q(`SELECT id, fingerprint, comparison_fingerprint, evidence_fingerprint, confirmable, not_confirmable_reason FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open' AND kind = 'dropped_order_head_unresolved'`, [st.sheetId, st.projectNo])).rows[0]
+      const page = await both(true, () => callRoute(st.routes, 'GET', RP.holds, { user: st.users.puller, query: {}, params: { projectNo: st.projectNo } }))
+      expect(page.statusCode, JSON.stringify(page.body)).toBe(200)
+      const entry = (page.body.data.page.holds as any[]).find((item: any) => item.id === holdRow.id)
+      const stepFourBefore = await stepFour(st.tenantId)
+      const mainBefore = await st.main()
+      const confirmAttempt = await both(true, () => callRoute(st.routes, 'POST', RP.confirm, {
+        user: st.users.puller,
+        params: { projectNo: st.projectNo },
+        body: {
+          confirmProjectNo: st.projectNo,
+          holdId: holdRow.id,
+          holdFingerprint: holdRow.fingerprint,
+          // This kind carries no comparison / evidence fingerprint (NULL): any non-empty echo passes the parse, so the
+          // confirm reaches the route's own decision instead of a 400 on the body.
+          comparisonFingerprint: holdRow.comparison_fingerprint || 'g9_s9d01_none',
+          evidenceFingerprint: holdRow.evidence_fingerprint || 'g9_s9d01_none',
+          candidateId: entry ? (entry.candidateId ?? null) : null,
+          readReceipt: page.body.data.readReceipt.id,
+          basis: { kind: 'puller_confirmed_same_demand' },
+          acknowledge: { historyUnknown: true },
+        },
+      }))
       const observed = {
         shape,
         components,
@@ -2274,6 +2300,12 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         openHolds: pulled.openHolds,
         mainUnchanged: pulled.mainUnchanged,
         oldRootsUnchanged: await oldRootsUnchanged(st, oldRoots),
+        noConfirm: {
+          stored: [holdRow.confirmable, holdRow.not_confirmable_reason],
+          onPage: entry ? entry.confirmable : 'absent',
+          attempt: [confirmAttempt.statusCode, codeOf(confirmAttempt), reasonOf(confirmAttempt)],
+          wroteNothing: (await stepFour(st.tenantId)) === stepFourBefore && sameJson(await st.main(), mainBefore),
+        },
       }
       expect(observed).toEqual({
         shape: { inactiveRows: 4, s001Roots: [false], s001ActiveCopies: 1 },
@@ -2286,6 +2318,12 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         openHolds: [['dropped_order_head_unresolved', true]],
         mainUnchanged: true,
         oldRootsUnchanged: true,
+        noConfirm: {
+          stored: [false, 'customer_rule_pending'],
+          onPage: false,
+          attempt: [409, 'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED', 'kind'],
+          wroteNothing: true,
+        },
       })
       g9Pass('G9-S9D-01', { ...observed, components: components.length })
     })

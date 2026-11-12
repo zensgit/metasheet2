@@ -445,6 +445,38 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
   } finally { h.restore() }
 })
 
+test('P-20 (S6-9) the build marker through the routes: on a fully prepared mount with the marker set to 0 IN MEMORY (every build before S6-9) the GET lists exactly continuation_support_version and the POST is 409 with exactly that id and nothing done; back at the shipped 1 the enable lands', async () => {
+  const h = mountReady()
+  try {
+    assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 1, 'mountReady holds the marker at 1 (the shipped value since S6-9)')
+    const scope = swlLockLib.sheetWriteScopeKey(h.sheetId)
+    const lockBefore = await h.projectWriteLock.readState(scope)
+    continuationSupport.CONTINUATION_SUPPORT_VERSION = 0
+    let read
+    let refused
+    try {
+      read = await getPilot(h, WORKBENCH_ADMIN)
+      refused = await enablePilot(h, WORKBENCH_ADMIN)
+    } finally {
+      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+    }
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['continuation_support_version'])
+    assert.deepEqual(read.body.data.may, { enable: false })
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(refused.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+    assert.deepEqual(details(refused), { version: PILOT_READINESS_VERSION, failing: ['continuation_support_version'], partial: false })
+    assert.deepEqual(await h.projectWriteLock.readState(scope), lockBefore, 'the refusal bumped nothing and took no lease')
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+    assert.deepEqual(enabled.body.data.readiness.failing, [])
+  } finally { h.restore() }
+})
+
 test('P-18 (readiness v6, R-91 option A) tenant_claim_required: the door off refuses the enable with exactly that id and nothing done; the ONE reader admits a trimmed / folded literal; the check gates the enable only', async () => {
   const before = process.env[TENANT_CLAIM_FLAG]
   const h = mountReady()
