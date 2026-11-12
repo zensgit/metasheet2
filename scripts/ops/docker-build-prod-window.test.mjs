@@ -508,7 +508,18 @@ function checkHappy(r, { appdata }) {
     '=== BACKUP START ===', '=== BACKUP END ===', '=== MIGRATE START ===', '=== MIGRATE END ===', '=== DEPLOY START ===',
     '=== DEPLOY END ===', '=== VERSION VERIFY END ==='].map((marker) => [marker, r.deployLog.indexOf(marker)]))
   assert.match(r.deployLog, /\[deploy-window\] backup ok sha256=[0-9a-f]{64} bytes=\d+ toc_entries=\d+ file=db\.dump/)
-  assert.ok(existsSync(path.join(r.runDir, 'db.dump')))
+  // Backup set beside the dump, host only: run dir 700, files 600; env snapshot taken before the rewrite.
+  assert.equal(statSync(r.runDir).mode & 0o777, 0o700)
+  for (const file of ['db.dump', 'meta.txt', 'globals.sql', 'shim-candidates.txt', 'RESTORE-README.txt', 'migrate.out']) {
+    assert.ok(existsSync(path.join(r.runDir, file)), `${file} kept on the host`)
+    assert.equal(statSync(path.join(r.runDir, file)).mode & 0o077, 0, `${file} is private to the deploy user`)
+  }
+  assert.equal(readFileSync(path.join(r.runDir, 'env-snapshot.app.env'), 'utf8'), readFileSync(path.join(r.world.orig, 'app.env'), 'utf8'))
+  // Public-log rule: raw host-check, docker logs, dump and env values stay off the streamed log.
+  for (const raw of ['harness host check private output', 'server listening', 'outbound webhook ops switch: off', 'PGDMP', 'harness globals', 'harness-db-pass']) {
+    assert.ok(!r.deployLog.includes(raw), `deploy.log must not carry: ${raw}`)
+  }
+  assert.match(r.deployLog, /ops_switch=off/)
   // Main-session decision: no git auto-gc/maintenance during the prologue sync, and only there.
   const gitCalls = r.calls.filter((call) => call.kind === 'git')
   for (const sub of ['fetch origin main', 'merge --ff-only origin/main']) {
@@ -584,6 +595,10 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['directory sync with a fresh heartbeat', {}, { H_SYNC_LIVE: '1' }],
     ['young queued import job', {}, { H_IMPORT_BUSY: '1' }],
     ['host file drift from the dispatched commit', {}, { H_GIT_DRIFT: '1' }],
+    ['host re-validation: restore_proof unselected on a deploy', {}, { RESTORE_PROOF: 'unselected' }],
+    ['host re-validation: pre_commit_abort unselected on a deploy', {}, { PRE_COMMIT_ABORT: 'unselected' }],
+    ['host re-validation: drill_fail_stage=smoke', {}, { DRILL_FAIL_STAGE: 'smoke' }],
+    ['host re-validation: expected_pending_sha256 not hex', {}, { EXPECTED_PENDING_SHA256: 'not-a-hash' }],
   ]
   for (const [label, worldOptions, env] of REFUSALS) {
     scenario(`2 refusal before any stop: ${label} -> 70, env files byte-identical`, async (t) => {
@@ -694,15 +709,17 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.equal(r.state.env_written, 'new')
   })
 
-  scenario(`11 host state phase=stopped -> 75: state byte-identical, no docker or git call${REDUCED}`, async (t) => {
-    if (REDUCED) t.diagnostic(`reduced fidelity: ${STANDINS.join(', ')} are stand-ins on this machine`)
-    const state = 'phase=stopped\nrun=1-1\nsha=' + SHA_OLD + '\nenv_written=old\n'
-    const world = makeWorld(t, { state })
-    const r = await runWindow(t, world)
-    assertCommon(r, 75)
-    assert.equal(readFileSync(path.join(world.windowHome, 'state'), 'utf8'), state)
-    assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)).map((call) => call.args), [])
-  })
+  for (const phase of ['stopped', 'needs-owner']) {
+    scenario(`11 host state phase=${phase} -> 75: state byte-identical, no docker or git call${REDUCED}`, async (t) => {
+      if (REDUCED) t.diagnostic(`reduced fidelity: ${STANDINS.join(', ')} are stand-ins on this machine`)
+      const state = `phase=${phase}\nrun=1-1\nsha=${SHA_OLD}\nenv_written=old\n`
+      const world = makeWorld(t, { state })
+      const r = await runWindow(t, world)
+      assertCommon(r, 75)
+      assert.equal(readFileSync(path.join(world.windowHome, 'state'), 'utf8'), state)
+      assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)).map((call) => call.args), [])
+    })
+  }
 
   scenario(`11 lock held by another window -> 75: no state written, no docker or git call${REDUCED}`, async (t) => {
     if (REDUCED) t.diagnostic(`reduced fidelity: ${STANDINS.join(', ')} are stand-ins on this machine`)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Stand-in for an owner-installed host check: records the phase; fails for phases in H_HOSTCHECK_FAIL.
+# Its own output must stay on the host (the harness looks for this line in the public log).
 printf '%s\n' "${1:-}" >> "${H_ROOT}/hostchecks.log"
+echo "harness host check private output"
 case ",${H_HOSTCHECK_FAIL:-}," in
   *",${1:-},"*) exit 1 ;;
 esac
