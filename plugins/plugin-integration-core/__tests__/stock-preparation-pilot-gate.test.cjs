@@ -42,6 +42,7 @@
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -330,6 +331,8 @@ function readyDeps(overrides = {}) {
     pullBatchStore: { async readBatchLink() {}, async batchWithin() {} },
     // Version 5 (batch-refresh step 6d-1b, R-91): the component ruling ledger answers (nothing acknowledged; no remnant).
     componentRulingStore: { async listActiveRulings() { return [] } },
+    // Version 6 (owner ruling 2026-11-11, R-91 option A): the route's tenant-claim reader answered true.
+    tenantClaimRequired: true,
     ...overrides,
   }
 }
@@ -373,8 +376,9 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   // Version 4 (batch-refresh step 6a-2, R-91, rebaseline B-8): change_plan_store_readable + execution_recovery_ready, inserted
   // before the D-22 marker as BI did.
   // Version 5 (batch-refresh step 6d-1b, R-91, rebaseline B-8): ONLY no_unacknowledged_inactive_root_remnant, before the marker.
-  assert.equal(readiness.PILOT_READINESS_VERSION, 5)
-  assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS.slice(-3), ['execution_recovery_ready', 'no_unacknowledged_inactive_root_remnant', 'continuation_support_version'])
+  // Version 6 (owner ruling 2026-11-11, R-91 option A): ONLY tenant_claim_required, before the marker.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 6)
+  assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS.slice(-3), ['no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'continuation_support_version'])
   assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
@@ -383,6 +387,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
     'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved',
     'change_plan_store_readable', 'execution_recovery_ready',
     'no_unacknowledged_inactive_root_remnant',
+    'tenant_claim_required',
     'continuation_support_version',
   ])
   // The web clamps a failing id to /^[a-z][a-z0-9_]{0,63}$/ (projectTarget.ts): every id survives it.
@@ -391,7 +396,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 5)
+  assert.equal(answer.version, 6)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
@@ -483,6 +488,12 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['no_unacknowledged_inactive_root_remnant (a dropped_head_included ruling exempts nothing before S6-7)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, kind: 'dropped_head_included', basis: null }]) }), ['no_unacknowledged_inactive_root_remnant']],
     ['no_unacknowledged_inactive_root_remnant (an acknowledgement of ANOTHER component)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, componentDigest: componentHandle(TENANT, PROJECT, 'S9') }]) }), ['no_unacknowledged_inactive_root_remnant']],
     ['no_unacknowledged_inactive_root_remnant (the handle of another project)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, componentDigest: componentHandle(TENANT, OTHER_PROJECT, 'S1') }]) }), ['no_unacknowledged_inactive_root_remnant']],
+    // ── version 6 (owner ruling 2026-11-11, R-91 option A): the tenant-claim door must be ON — positive evidence only ──
+    ['tenant_claim_required (the door is off: the reader answered false)', () => ({ tenantClaimRequired: false }), ['tenant_claim_required']],
+    ['tenant_claim_required (not wired)', () => ({ tenantClaimRequired: undefined }), ['tenant_claim_required']],
+    ['tenant_claim_required (the raw env string, never parsed here)', () => ({ tenantClaimRequired: 'true' }), ['tenant_claim_required']],
+    ['tenant_claim_required (the reader handed in uncalled)', () => ({ tenantClaimRequired: () => true }), ['tenant_claim_required']],
+    ['tenant_claim_required (a truthy non-boolean)', () => ({ tenantClaimRequired: 1 }), ['tenant_claim_required']],
   ]
   for (const [label, mutate, expected] of table) {
     const deps = readyDeps()
@@ -502,6 +513,34 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     const answer = await withContinuationSupport(version, () => readiness.evaluatePilotReadiness(readyDeps()))
     assert.deepEqual([...answer.failing], failing, `marker ${JSON.stringify(version)}`)
   }
+})
+
+test('R-08 (readiness v6, owner ruling 2026-11-11, R-91 option A) tenant_claim_required: the door off refuses the enable with exactly this check failing; the module never reads the environment', async () => {
+  const FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+  const before = process.env[FLAG]
+  try {
+    // The module reads NO env: even with the flag exactly 'true' in this process, a dep of false is refused, and with the
+    // flag absent a dep of true passes — the route's ONE reader is the only source.
+    process.env[FLAG] = 'true'
+    const off = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false })))
+    assert.deepEqual([...off.failing], ['tenant_claim_required'])
+    assert.equal(off.ready, false)
+    assert.equal(off.checks.find((check) => check.id === 'tenant_claim_required').ok, false)
+    delete process.env[FLAG]
+    const on = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: true })))
+    assert.deepEqual([...on.failing], [])
+    assert.equal(on.ready, true)
+    // Marker 0 with the door off: both refuse, in list order (the door before the marker, which stays last).
+    const shipped = await readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false }))
+    assert.deepEqual([...shipped.failing], ['tenant_claim_required', 'continuation_support_version'])
+  } finally {
+    if (before === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = before
+  }
+  // Source pin: the module never touches process.env (one reader, in http-routes; a second parse here would drift).
+  const source = fs.readFileSync(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'), 'utf8')
+  assert.doesNotMatch(source.replace(/\/\/[^\n]*/g, ''), /process\.env/)
+  assert.doesNotMatch(source, /MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED['"`]/)
 })
 
 test('R-05 (O-6) no_two_copy_component: only an ACTIVE root and an ACTIVE nested row of ONE component refuse; the continuation core\'s readings of active and root', async () => {
