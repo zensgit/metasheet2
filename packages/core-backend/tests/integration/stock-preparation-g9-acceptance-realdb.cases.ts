@@ -410,7 +410,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
   afterAll(async () => {
     for (const sheetId of mvpSheets) await dropSheet(sheetId)
     for (const tenantId of tenants) {
-      for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_pack_install', 'integration_stock_prep_source_binding', RULING_TABLE]) {
+      for (const table of ['integration_stock_prep_pull_batch_execution', 'integration_stock_prep_pull_batch', 'integration_stock_prep_pull_batch_sheet', 'integration_stock_prep_pack_install', 'integration_stock_prep_source_binding', RULING_TABLE, sheetRepairStoreLib.SHEET_REPAIR_TABLES.claim, sheetRepairStoreLib.SHEET_REPAIR_TABLES.run]) {
         await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
       }
     }
