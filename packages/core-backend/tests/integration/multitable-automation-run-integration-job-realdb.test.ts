@@ -763,8 +763,9 @@ function ownBackendService() {
   const service = new AutomationService(new EventBus(), held.handle as never, query as never)
   // These cases are about saves, never about fires: the service's scheduler is destroyed before any save, so no rule
   // saved here arms a timer. (A cron whose next occurrence is more than 2^31-1 ms away — the January-only seed below,
-  // from November on — is clamped by Node to a 1 ms timer that fires and re-arms at once; since #6871 every fire also
-  // reads the rule's stored `enabled` flag over this ONE-connection pool, which starved the held saves.)
+  // on any date outside about 7 December to 1 January — is clamped by Node to a 1 ms timer that fires and re-arms at
+  // once. After the merge of main that adds a stored-`enabled` read to every fire (#6871), these cases timed out over
+  // their one-connection pools, while the head before that merge passed on the same day: a date-dependent red.)
   const schedulerDestroyed = (service as unknown as { scheduler: { destroy(): Promise<void> } }).scheduler.destroy()
   const backendPid = async () => Number(((await pool.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
   return { service, holdNext: held.holdNext, backendPid, close: async () => { await schedulerDestroyed; await kysely.destroy() } }
@@ -1012,9 +1013,15 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
     // held: the conditions PATCH (read while the rule is plain); other: the job PATCH
     const first = await seedPlainCronRule(`f1_cond_first_${RUN}`)
     try {
-      const { held, other } = await interleave(first.id, conditionsPatch, jobPatch)
-      expect(other.ok).toBe(true)
-      refusedAsConditions(held)
+      const hold = A.holdNext()
+      const held = settle(A.service.updateRule(first.id, sheet, conditionsPatch as never, principalId))
+      await Promise.race([hold.reached, held.then(() => { throw new Error('the held PATCH settled before it reached the statement to hold') })])
+      expect(await settle(B.service.updateRule(first.id, sheet, jobPatch as never, principalId))).toMatchObject({ ok: true })
+      const winner = await digest(first.id)
+      hold.release()
+      refusedAsConditions(await held)
+      // the loser wrote nothing: the row is byte-identical to the winner's
+      expect(await digest(first.id)).toBe(winner)
       expect(await stored(first.id)).toEqual({ action_type: 'run_integration_job', conditions: null })
     } finally {
       await dropRule(first.id)
