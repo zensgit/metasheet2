@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test double for `sleep`: sleeps 1/$H_CLOCK_SPEED of the requested time (at least 20 ms), so the
+# Test double for `sleep`: sleeps 1/$H_CLOCK_SPEED of the requested time (at least 100 ms), so the
 # window's bounded waits keep their length on the scaled clock of the date double.
 s="${1:-0}"
 [[ "$s" =~ ^[0-9]+(\.[0-9]+)?$ ]] || s=0
-exec /bin/sleep "$(awk -v s="$s" -v k="${H_CLOCK_SPEED:-20}" 'BEGIN { v = s / k; if (v < 0.02) v = 0.02; printf "%.3f", v }')"
+exec /bin/sleep "$(awk -v s="$s" -v k="${H_CLOCK_SPEED:-20}" 'BEGIN { v = s / k; if (v < 0.1) v = 0.1; printf "%.3f", v }')"

@@ -34,6 +34,7 @@ const deploySteps = workflow.jobs.deploy.steps
 const REMOTE_RUN = deploySteps.find((step) => step.id === 'remote_deploy').run
 const SYNC_RUN = deploySteps.find((step) => step.id === 'sync_deploy').run
 const VALIDATE = workflow.jobs.build.steps.find((step) => step.id === 'validate_deploy_inputs')
+const SUMMARY_RUN = deploySteps.find((step) => step.name === 'Write deploy summary (preflight + runbooks)').run
 
 const SHA_NEW = 'a'.repeat(40)
 const SHA_OLD = 'b'.repeat(40)
@@ -74,6 +75,7 @@ const STUBS = ['docker', 'ssh', 'curl', 'git', 'crontab', 'loginctl', 'busctl', 
 function run(cmd, args, options) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] })
+    options.onSpawn?.(child)
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk })
@@ -87,43 +89,58 @@ function run(cmd, args, options) {
 }
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-// Every process a scenario starts carries H_TAG=<unique>; a tagged process alive after the
-// scenario has ended is a leaked window, helper or follower.
-function taggedPids(tag) {
-  const needle = `H_TAG=${tag}`
-  const pids = []
+// Leaked processes of a scenario are found two ways. Every process it starts carries
+// H_TAG=<unique> in its environment (read from /proc on Linux; macOS no longer shows other
+// processes' environments). And the step runs as the leader of its own process group, while
+// the window leads its own session: every process left in one of those groups (`ps -o pgid`)
+// is a leaked window, helper or follower.
+function taggedPids(world) {
+  const needle = `H_TAG=${world.tag}`
+  const pids = new Set()
   if (process.platform === 'linux') {
     for (const entry of readdirSync('/proc')) {
       if (!/^\d+$/.test(entry)) continue
       try {
-        if (readFileSync(`/proc/${entry}/environ`, 'latin1').split('\0').includes(needle)) pids.push(Number(entry))
+        if (readFileSync(`/proc/${entry}/environ`, 'latin1').split('\0').includes(needle)) pids.add(Number(entry))
       } catch {}
     }
-  } else {
-    const listing = spawnSync('ps', ['-E', '-ww', '-A', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout ?? ''
+  }
+  const groups = new Set(world.pgids ?? [])
+  if (groups.size > 0) {
+    const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8' }).stdout ?? ''
     for (const line of listing.split('\n')) {
-      if (line.includes(` ${needle} `) || line.endsWith(` ${needle}`)) pids.push(Number(line.trim().split(/\s+/)[0]))
+      const [pid, pgid, stat] = line.trim().split(/\s+/)
+      // Zombies are dead and only wait for their parent to reap them.
+      if (groups.has(Number(pgid)) && !String(stat).startsWith('Z')) pids.add(Number(pid))
     }
   }
-  return pids.filter((pid) => pid !== process.pid)
+  pids.delete(process.pid)
+  return [...pids]
 }
-function killTagged(tag) {
-  for (const pid of taggedPids(tag)) {
+function killTagged(world) {
+  for (const pid of taggedPids(world)) {
     try { process.kill(pid, 'SIGKILL') } catch {}
   }
 }
-async function assertNoLeftovers(tag) {
+async function assertNoLeftovers(world) {
   let left = []
   for (let i = 0; i < 50; i += 1) {
-    left = taggedPids(tag)
+    left = taggedPids(world)
     if (left.length === 0) return
     await sleepMs(100)
   }
-  const detail = process.platform === 'linux'
-    ? left.map((pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'latin1').replace(/\0/g, ' ') } catch { return String(pid) } })
-    : left
-  killTagged(tag)
+  const detail = left.map((pid) => spawnSync('ps', ['-o', 'pid=,pgid=,command=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() || String(pid))
+  killTagged(world)
   assert.fail(`processes of this scenario were still running after it ended: ${JSON.stringify(detail)}`)
+}
+// Window pids of every run of this world become leak-scan process groups.
+function addWindowGroups(world) {
+  const runs = path.join(world.windowHome, 'runs')
+  if (!existsSync(runs)) return
+  for (const entry of readdirSync(runs)) {
+    const pid = Number((readIf(path.join(runs, entry, 'window.pid')) ?? '').trim())
+    if (pid > 1) world.pgids.add(pid)
+  }
 }
 
 // A lock holder independent of the window (flock(2) through perl, same lock family as util-linux).
@@ -143,10 +160,11 @@ function makeWorld(t, options = {}) {
   const tmpBase = realpathSync(os.tmpdir())
   const root = realpathSync(mkdtempSync(path.join(tmpBase, 'd5-window-')))
   const tag = `${path.basename(root)}-${process.pid}`
-  const world = { root, tag, holders: [] }
+  const world = { root, tag, holders: [], pgids: new Set() }
   t.after(() => {
     for (const holder of world.holders) { try { holder.kill('SIGKILL') } catch {} }
-    killTagged(tag)
+    if (world.windowHome) addWindowGroups(world)
+    killTagged(world)
     if (!process.env.HARNESS_KEEP) rmSync(root, { recursive: true, force: true })
   })
   const bin = path.join(root, 'bin')
@@ -365,13 +383,16 @@ async function runWindow(t, world, options = {}) {
   // Every stubbed tool must resolve to the double, never to a real binary on this machine.
   const resolved = spawnSync(BASH, ['-c', `for t in ${STUBS.join(' ')}; do command -v "$t" || echo "missing:$t"; done`], { env, encoding: 'utf8' }).stdout.trim().split('\n')
   for (const [i, name] of STUBS.entries()) assert.equal(resolved[i], path.join(world.bin, name), `${name} must resolve to the test double`)
-  const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], { cwd: world.work, env })
+  const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
+    cwd: world.work, env, detached: true, onSpawn: (child) => world.pgids.add(child.pid),
+  })
   if (options.waitForRc) {
     for (let i = 0; i < 1200 && !existsSync(path.join(runDir, 'rc')); i += 1) await sleepMs(100)
   }
   // The bootstrap returns only after the window exits (or the session dropped); give a detached
   // window a moment to finish its exit trap, then require that nothing of this scenario survives.
-  await assertNoLeftovers(world.tag)
+  addWindowGroups(world)
+  await assertNoLeftovers(world)
   const r = {
     world, runId, runDir, result,
     out: parseOutput(env.GITHUB_OUTPUT),
@@ -545,6 +566,9 @@ function checkRestoredOld(r, stopped = ['metasheet-backend', 'metasheet-web']) {
   assert.equal(r.state.phase, 'done-restored-old')
   const starts = r.docker.filter((call) => /^start /.test(call.args))
   assert.deepEqual(starts.map((call) => call.args).sort(), stopped.map((name) => `start ${name}`).sort())
+  const preRestart = r.calls.find((call) => call.kind === 'hostcheck' && call.args === 'pre-restart-old')
+  assert.ok(preRestart, 'host check pre-restart-old runs before the old version is restarted')
+  for (const start of starts) assert.ok(preRestart.index < start.index, 'pre-restart-old host check precedes every start')
   for (const start of starts) {
     assert.match(start.meta.target, /^ctr-(backend|web)-1@sha256:old/, 'the old, stopped containers are started, not new ones')
     assert.equal(start.meta.appenv_orig, '1', 'docker/app.env restored before the old start')
@@ -552,6 +576,35 @@ function checkRestoredOld(r, stopped = ['metasheet-backend', 'metasheet-web']) {
   }
   assert.ok(!any(r, isUp), 'never up / recreate on the way back')
   envUnchanged(r)
+}
+
+// Runs the deploy summary step on a deploy.log (none when null) with the given rc outputs.
+async function runSummary(world, { deployLog, syncRc = '0', deployRc, drill = 'none' }) {
+  const dir = mkdtempSync(path.join(world.root, 'summary-'))
+  symlinkSync(path.join(repoRoot, 'scripts'), path.join(dir, 'scripts'))
+  mkdirSync(path.join(dir, 'output/deploy'), { recursive: true })
+  if (deployLog !== null) writeFileSync(path.join(dir, 'output/deploy/deploy.log'), deployLog)
+  const summary = path.join(dir, 'step-summary.out')
+  const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', SUMMARY_RUN], {
+    cwd: dir,
+    env: {
+      PATH: process.env.PATH, HOME: world.runnerHome, LANG: 'C', GITHUB_STEP_SUMMARY: summary, GITHUB_SERVER_URL: 'https://github.com',
+      GITHUB_REPOSITORY: 'example/metasheet2', GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', SYNC_RC: syncRc, DEPLOY_RC: deployRc ?? '',
+      DRILL_FAIL_STAGE: drill, RESTORE_PROOF: 'ref:harness-restore-1', PRE_COMMIT_ABORT: 'restart-old', H_TAG: world.tag,
+    },
+  })
+  assert.equal(result.status, 0, `summary step exits 0: ${result.stderr.slice(-800)}`)
+  const text = readFileSync(summary, 'utf8')
+  assert.equal(readFileSync(path.join(dir, 'output/deploy/step-summary.md'), 'utf8'), text, 'the archived copy equals the summary')
+  return text
+}
+const REMINDER = /unset PROD_HEALTH_PROBE_SILENCE after verification/i
+const ENV_WARNING = /do not start the old containers/i
+// For every non-drill deploy outcome the summary's last line is the probe-silence reminder.
+function checkSummaryTail(text) {
+  const lines = text.split('\n').filter((line) => line.trim() !== '')
+  assert.match(lines.at(-1), REMINDER, `last summary line: ${lines.at(-1)}`)
+  assert.equal(text.split('\n').filter((line) => REMINDER.test(line)).length, 1, 'the reminder appears once')
 }
 
 // ---------- scenarios ----------
@@ -567,7 +620,11 @@ describe('production deploy window: remote_deploy step run against test doubles'
 
   scenario('1 happy path without app data: no copy-out, no copy-in', async (t) => {
     const world = makeWorld(t)
-    checkHappy(await runWindow(t, world), { appdata: false })
+    const r = await runWindow(t, world)
+    checkHappy(r, { appdata: false })
+    const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+    checkSummaryTail(summary)
+    assert.doesNotMatch(summary, ENV_WARNING)
   })
 
   const REFUSALS = [
@@ -643,6 +700,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(firstIndex(r, isStart('metasheet-backend')) > firstIndex(r, isLatest))
     assert.doesNotMatch(r.windowLog, /command not found/, 'fetch_json_with_retry is defined when the old version is verified')
     assert.equal(dotEnvTag(r), SHA_OLD)
+    const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+    checkSummaryTail(summary)
+    assert.doesNotMatch(summary, ENV_WARNING, 'no env warning when .env still names the old image')
   })
 
   scenario('6 as 5 but the old commit does not come back -> 72 needs-owner', async (t) => {
@@ -707,6 +767,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(stopNew >= 0, 'the unverified new backend is stopped')
     assert.ok(!any(r, isUpWeb), 'web never upped')
     assert.equal(r.state.env_written, 'new')
+    const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+    checkSummaryTail(summary)
+    assert.match(summary, ENV_WARNING, 'rc 73 always carries the env warning')
   })
 
   for (const phase of ['stopped', 'needs-owner']) {
@@ -737,6 +800,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
     writeFileSync(script, SYNC_RUN)
     const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
       cwd: world.work,
+      detached: true,
+      onSpawn: (child) => world.pgids.add(child.pid),
       env: {
         PATH: world.PATH, HOME: world.runnerHome, LANG: 'C', TMPDIR: path.join(world.root, 'tmp'), GITHUB_OUTPUT: output,
         DEPLOY_HOST: 'deploy-host', DEPLOY_USER: 'deploy', DEPLOY_SSH_KEY_B64: Buffer.from('k\n').toString('base64'),
@@ -746,7 +811,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
         ...env,
       },
     })
-    await assertNoLeftovers(world.tag)
+    await assertNoLeftovers(world)
     return { result, out: parseOutput(output), calls: parseCalls(path.join(world.root, 'calls.tsv')), target: path.join(world.hostHome, 'sync-target') }
   }
   const extracted = (target) => existsSync(path.join(target, 'docker-compose.app.yml')) || existsSync(path.join(target, 'docker/nginx.conf'))
@@ -858,6 +923,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const ledgerRead = firstIndex(r, isLedgerRead, latest)
     assert.ok(kill > latest, 'the one-off is killed')
     assert.ok(ledgerRead < 0 || kill < ledgerRead, 'kill before any ledger read')
+    if (r.rcFile === '71') assert.ok(ledgerRead > kill, 'a restart of the old version follows a ledger read after the kill')
     for (const call of r.docker.filter((entry) => /^start /.test(entry.args))) {
       assert.equal(call.meta.oneoff, '0', 'no start while a window migrate session lives')
     }
@@ -1054,6 +1120,39 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world, { runText: mutate(REMOTE_RUN, `'echo "$$" > window.pid'\n`, `'echo "$$" > window.pid; exit 0'\n`) })
     assert.equal(r.out.deploy_rc, '76')
     assert.equal(r.rcFile, '')
+  })
+
+  scenario('restart of the old version: pre-restart-old host check fails -> 72, nothing started', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_MIGRATE: 'fail-rollback', H_HOSTCHECK_FAIL: 'pre-restart-old' } })
+    assertCommon(r, 72)
+    assert.equal(r.state.phase, 'needs-owner')
+    assert.deepEqual(r.hostChecks, ['pre-stop', 'pre-restart-old'])
+    assert.ok(!any(r, (call) => /^start /.test(call.args)))
+    envUnchanged(r)
+  })
+
+  it('the leak detector finds a left-over process of a scenario (positive control)', async (t) => {
+    const world = makeWorld(t)
+    // A detached shell that leaves a grandchild in its group, as a leaked helper would.
+    const child = spawn(BASH, ['-c', '/bin/sleep 30 & echo $!; wait'], {
+      env: { PATH: process.env.PATH, H_TAG: world.tag }, detached: true, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    world.pgids.add(child.pid)
+    const grandchild = Number(await new Promise((resolve) => child.stdout.once('data', (chunk) => resolve(String(chunk).trim()))))
+    try {
+      assert.ok(taggedPids(world).includes(grandchild), 'the grandchild is found')
+      await assert.rejects(assertNoLeftovers(world), /still running/)
+      assert.deepEqual(taggedPids(world), [], 'the detector kills what it reports')
+    } finally {
+      try { process.kill(-child.pid, 'SIGKILL') } catch {}
+    }
+  })
+
+  scenario('negative control: a window that leaves its heartbeat helper running fails the leak check', async (t) => {
+    const world = makeWorld(t)
+    const mutated = mutate(REMOTE_RUN, 'stop_helpers() {\n', 'stop_helpers() {\n  return 0\n')
+    await assert.rejects(runWindow(t, world, { runText: mutated }), /still running/)
   })
 
   // ---------- recorded deviations and tool probes ----------
