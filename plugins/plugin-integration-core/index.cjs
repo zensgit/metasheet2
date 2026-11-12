@@ -405,7 +405,7 @@ module.exports = {
     stockPreparationComponentRulingStore = createStockPreparationComponentRulingStore({ db })
     // Batch-refresh step 6d-2a (migration 108; register R-91): the doubled-sheet repair ledger — run rows with their
     // backup and the one-shot claims. The repair routes reach it only while the repair switch is exactly 'true' (read per
-    // request); off, nothing ever touches it.
+    // request); pilot readiness v7 (S6-5b, no_open_sheet_repair_run) READS its open runs whatever the switch says.
     stockPreparationSheetRepairStore = createStockPreparationSheetRepairStore({ db })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
