@@ -35,8 +35,9 @@ const PINNED_WORKFLOWS = [
   'multitable-role-cascade-witness.yml',
 ]
 
-// docker-build.yml pins TWO SSH steps (sync + deploy); the rest pin exactly one.
-const EXPECTED_PINNED_BLOCKS = { 'docker-build.yml': 2 }
+// docker-build.yml pins THREE SSH steps (sync, deploy, and the read-only window status step);
+// the rest pin exactly one.
+const EXPECTED_PINNED_BLOCKS = { 'docker-build.yml': 3 }
 
 function read(name) {
   return readFileSync(path.join(workflowsDir, name), 'utf8')

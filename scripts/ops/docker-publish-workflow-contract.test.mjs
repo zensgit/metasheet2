@@ -151,3 +151,85 @@ test('production deploy inputs, validation step, concurrency and timeouts of the
     assert.ok(build.steps.indexOf(validate) < build.steps.indexOf(entry), 'validation runs before every registry write')
   }
 })
+
+// The deploy window status step: one more ssh session that only reads host files. The checks
+// run on the remote payload (the quoted WINDOW_STATUS heredoc); the runner side legitimately
+// writes its own ~/.ssh files and the step's log file.
+const STATUS_ALLOWED_LINE = [
+  /^set -u$/,
+  /^status_home="\$\{HOME\}\/metasheet2-deploy-window"$/,
+  /^status_run_dir="\$\{status_home\}\/runs\/\$\{WINDOW_RUN\}"$/,
+  /^echo "[^"`;|&<>]*"$/,
+  /^if \[ -r "[^"`;|&<>$]*(\$\{status_(home|run_dir)\}[^"`;|&<>$]*)"? \]; then$/,
+  // sed only as a print filter: -n, no -i, each program one s#…#…#p (no w/e command or flag).
+  /^sed -n -E (-e )?'s#[^#']*#[^#']*#p'( -e 's#[^#']*#[^#']*#p')* "\$\{status_(home|run_dir)\}\/(state|rc|window\.log)"$/,
+  /^else$/,
+  /^fi$/,
+  /^exit 0$/,
+]
+const STATUS_FORBIDDEN = /\b(docker|compose|rm|mv|cp|mkdir|touch|chmod|chown|ln|dd|truncate|install|tee|kill|pkill|flock|git|nohup|setsid|bash|sh|eval|source|exec|systemctl|crontab|psql)\b|>|\bsed\s+(-[a-zA-Z]*\s+)*-i/
+function windowStatusPayload(run) {
+  const match = String(run).match(/cat <<'WINDOW_STATUS'\n([\s\S]*?)\nWINDOW_STATUS\n/)
+  assert.ok(match, 'the status step carries its remote payload as the quoted WINDOW_STATUS heredoc')
+  return match[1]
+}
+function assertReadOnlyStatusPayload(payload) {
+  const lines = payload.split('\n').map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('#'))
+  for (const line of lines) {
+    // The one command substitution allowed is the read time.
+    const plain = line.replace('$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'DATE')
+    assert.ok(STATUS_ALLOWED_LINE.some((pattern) => pattern.test(plain)), `status payload line is not a plain read: ${line}`)
+    assert.doesNotMatch(plain.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""'), STATUS_FORBIDDEN, `status payload line may change the host: ${line}`)
+    assert.ok(!plain.includes('$('), `no other command substitution: ${line}`)
+  }
+  for (const file of ['"${status_home}/state"', '"${status_run_dir}/rc"', '"${status_run_dir}/window.log"']) {
+    assert.ok(lines.some((line) => line.startsWith('sed -n ') && line.endsWith(file)), `the payload reads ${file}`)
+  }
+  assert.equal(lines.at(-1), 'exit 0')
+}
+
+test('the deploy window status step is read-only: one pinned ssh session, reads only, no output', () => {
+  const steps = workflow.jobs.deploy.steps
+  const status = steps.find((entry) => entry.id === 'window_status')
+  assert.ok(status, 'deploy has a window_status step')
+  assert.equal(status.if, 'always()')
+  assert.equal(status['continue-on-error'], true)
+  assert.equal(typeof status['timeout-minutes'], 'number')
+  assert.ok(status['timeout-minutes'] > 0 && status['timeout-minutes'] <= 10)
+  const at = steps.indexOf(status)
+  assert.ok(at > steps.findIndex((entry) => entry.id === 'remote_deploy'), 'after remote_deploy')
+  assert.equal(steps[at + 1].name, 'Write deploy summary (preflight + runbooks)', 'directly before the summary step')
+  assert.deepEqual(Object.keys(status.env).sort(), ['DEPLOY_HOST', 'DEPLOY_KNOWN_HOSTS', 'DEPLOY_SSH_KEY_B64', 'DEPLOY_USER'])
+  const run = status.run
+  assert.doesNotMatch(run, /\bdocker\b/, 'no docker anywhere in the step')
+  assert.doesNotMatch(run, /GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|deploy\.log/, 'no step output, no step summary, no write to deploy.log')
+  assert.equal((run.match(/\bssh \$ssh_opts /g) ?? []).length, 1, 'exactly one ssh session')
+  assert.match(run, /ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$HOME\/\.ssh\/known_hosts -o GlobalKnownHostsFile=\/dev\/null /)
+  assert.match(run, /\| ssh \$ssh_opts "\$DEPLOY_USER@\$DEPLOY_HOST" bash -s 2>&1 \| tee "\$status_log"\n/)
+  const payload = windowStatusPayload(run)
+  assertReadOnlyStatusPayload(payload)
+  const syntax = spawnSync('bash', ['-n'], { input: `WINDOW_RUN=1-1\n${payload}\n`, encoding: 'utf8' })
+  assert.equal(syntax.status, 0, syntax.stderr)
+})
+
+test('the read-only check on the status payload is load-bearing (negative controls)', () => {
+  const payload = windowStatusPayload(workflow.jobs.deploy.steps.find((entry) => entry.id === 'window_status').run)
+  assertReadOnlyStatusPayload(payload)
+  const injected = [
+    'timeout 90 docker stop -t 60 metasheet-web',
+    'docker compose -p metasheet2 up -d web',
+    'touch "${status_home}/abort"',
+    'rm -f "${status_home}/state"',
+    'mv "${status_home}/state" "${status_home}/state.old"',
+    'echo "phase=done-new" > "${status_home}/state"',
+    'flock -n "${status_home}/lock" true',
+    'sed -i -e s/needs-owner/done-new/ "${status_home}/state"',
+    'echo "$(rm -rf "${status_home}")"',
+    'kill -0 "$(cat "${status_run_dir}/window.pid")"',
+    `sed -n -E 's#^(.*)$#\\1#w /tmp/status-copy' "\${status_home}/state"`,
+    `sed -n -E 's#^(.*)$#\\1#pe' "\${status_home}/state"`,
+  ]
+  for (const line of injected) {
+    assert.throws(() => assertReadOnlyStatusPayload(payload.replace('\nexit 0', `\n${line}\nexit 0`)), assert.AssertionError, line)
+  }
+})

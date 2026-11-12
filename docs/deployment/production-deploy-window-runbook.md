@@ -78,6 +78,14 @@ never any other backend).
 Read first: `$HOME/metasheet2-deploy-window/state`, then the run directory's `rc` and
 `window.log`.
 
+Every deploy run ends with the read-only step "Read deploy window host state (read-only)".
+It opens one more ssh session and prints the host `state`, this run's `rc` and the marker
+lines of this run's `window.log` (archived as `window-status.log` in the run's deploy
+artifact); it starts, stops and changes nothing. It matters after a runner timeout, 255,
+76 or a cancelled run, when the log follower stopped before the window did. It is one
+snapshot: if `rc` is absent and `state` is not terminal, the window may still be running;
+read `state` again on the host until it is terminal.
+
 A rolled-back batch still prints `migration "<name>" was executed successfully` lines
 for its earlier migrations before the `failed to execute migration` line; those
 migrations are not applied, and the ledger (the window's `ledger` lines and `state`)

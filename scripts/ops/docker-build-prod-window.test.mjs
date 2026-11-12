@@ -17,8 +17,8 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
-  realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
@@ -35,6 +35,7 @@ const REMOTE_RUN = deploySteps.find((step) => step.id === 'remote_deploy').run
 const SYNC_RUN = deploySteps.find((step) => step.id === 'sync_deploy').run
 const VALIDATE = workflow.jobs.build.steps.find((step) => step.id === 'validate_deploy_inputs')
 const SUMMARY_RUN = deploySteps.find((step) => step.name === 'Write deploy summary (preflight + runbooks)').run
+const STATUS_RUN = deploySteps.find((step) => step.id === 'window_status').run
 
 const SHA_NEW = 'a'.repeat(40)
 const SHA_OLD = 'b'.repeat(40)
@@ -598,6 +599,52 @@ async function runSummary(world, { deployLog, syncRc = '0', deployRc, drill = 'n
   assert.equal(readFileSync(path.join(dir, 'output/deploy/step-summary.md'), 'utf8'), text, 'the archived copy equals the summary')
   return text
 }
+// Every path under the host home with its type, mode, size, mtime and content hash (symlinks by
+// target): reading files changes none of these.
+function hostTree(dir, rel = '', out = {}) {
+  for (const entry of readdirSync(path.join(dir, rel)).sort()) {
+    const relPath = path.join(rel, entry)
+    const full = path.join(dir, relPath)
+    const st = lstatSync(full)
+    const base = `${st.mode.toString(8)} ${st.mtimeMs}`
+    if (st.isSymbolicLink()) out[relPath] = `link ${readlinkSync(full)}`
+    else if (st.isDirectory()) { out[relPath] = `dir ${base}`; hostTree(dir, relPath, out) }
+    else out[relPath] = `file ${base} ${st.size} ${sha256(readFileSync(full))}`
+  }
+  return out
+}
+
+// Runs the read-only window status step, unmodified, through the ssh double, and requires that
+// it changed nothing under the host home, made exactly one ssh call and no docker or git call.
+async function runStatus(world, runId, runText = STATUS_RUN) {
+  const dir = mkdtempSync(path.join(world.root, 'status-'))
+  const before = hostTree(world.hostHome)
+  const callsBefore = parseCalls(path.join(world.root, 'calls.tsv')).length
+  const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', runText], {
+    cwd: dir,
+    detached: true,
+    onSpawn: (child) => world.pgids.add(child.pid),
+    env: {
+      PATH: world.PATH, HOME: world.runnerHome, LANG: 'C', LC_ALL: 'C', TMPDIR: path.join(world.root, 'tmp'),
+      GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: '1',
+      DEPLOY_HOST: 'deploy-host', DEPLOY_USER: 'deploy', DEPLOY_SSH_KEY_B64: Buffer.from('harness private key\n').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: Buffer.from('deploy-host ssh-ed25519 AAAAC3NzaharnessKey\n').toString('base64'),
+      H_TAG: world.tag, H_ROOT: world.root, H_CALLS: path.join(world.root, 'calls.tsv'), H_HOST_HOME: world.hostHome,
+      H_CLOCK_START: String(Date.now() / 1000), H_EPOCH: String(QUIET_EPOCH),
+    },
+  })
+  await assertNoLeftovers(world)
+  assert.equal(result.status, 0, `the status step exits 0: ${result.stderr.slice(-800)}`)
+  assert.deepEqual(hostTree(world.hostHome), before, 'the status step changed nothing on the host')
+  const added = parseCalls(path.join(world.root, 'calls.tsv')).slice(callsBefore)
+  assert.deepEqual(added.map((call) => call.kind), ['ssh'], 'exactly one ssh session and nothing else')
+  const log = readFileSync(path.join(dir, 'output/deploy/window-status.log'), 'utf8')
+  assert.match(log, /^\[deploy-status\] ssh rc=0$/m)
+  assert.ok(!log.includes(FAKE_SECRET), 'no secret in the status log')
+  assert.ok(!existsSync(path.join(dir, 'output/deploy/deploy.log')), 'the status step does not write deploy.log')
+  return log
+}
+
 const REMINDER = /unset PROD_HEALTH_PROBE_SILENCE after verification/i
 const ENV_WARNING = /do not start the old containers/i
 // For every non-drill deploy outcome the summary's last line is the probe-silence reminder.
@@ -770,6 +817,12 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
     checkSummaryTail(summary)
     assert.match(summary, ENV_WARNING, 'rc 73 always carries the env warning')
+    const status = await runStatus(world, r.runId)
+    assert.match(status, /^\[deploy-status\] state phase=needs-owner$/m)
+    assert.match(status, /^\[deploy-status\] state env_written=new$/m)
+    assert.match(status, /^\[deploy-status\] run rc=73$/m)
+    assert.match(status, /^\[deploy-status\] marker === DEPLOY START ===$/m)
+    assert.match(status, /^\[deploy-status\] outcome=needs-owner rc=73 raw_rc=\d*$/m)
   })
 
   for (const phase of ['stopped', 'needs-owner']) {
@@ -895,6 +948,15 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assertCommon(r, 0, { runnerRc: 255 })
     assert.equal(r.state.phase, 'done-new')
     assert.ok(firstIndex(r, isUpWeb) > r.calls.find((call) => call.kind === 'ssh-drop').index, 'the window went on after the drop')
+    // The read-only status step shows what the follower missed.
+    const status = await runStatus(world, r.runId)
+    assert.match(status, new RegExp(`^\\[deploy-status\\] read-only host state for run=${r.runId}-1 `, 'm'))
+    assert.match(status, /^\[deploy-status\] state phase=done-new$/m)
+    assert.match(status, /^\[deploy-status\] run rc=0$/m)
+    for (const marker of ['WINDOW PREFLIGHT START', 'STOP WRITES START', 'BACKUP END', 'MIGRATE END', 'DEPLOY END', 'VERSION VERIFY END']) {
+      assert.match(status, new RegExp(`^\\[deploy-status\\] marker === ${marker} ===$`, 'm'))
+    }
+    assert.match(status, /^\[deploy-status\] outcome=done-new rc=0 raw_rc=\d*$/m)
   })
 
   for (const [label, env, rc] of [
@@ -1120,6 +1182,30 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world, { runText: mutate(REMOTE_RUN, `'echo "$$" > window.pid'\n`, `'echo "$$" > window.pid; exit 0'\n`) })
     assert.equal(r.out.deploy_rc, '76')
     assert.equal(r.rcFile, '')
+    const status = await runStatus(world, r.runId)
+    assert.match(status, /^\[deploy-status\] state absent$/m)
+    assert.match(status, /^\[deploy-status\] run rc absent: /m)
+    assert.doesNotMatch(status, /marker|outcome=/)
+  })
+
+  scenario('read-only status step on a host with no run directory: absent lines, only key=value state lines, exit 0', async (t) => {
+    const state = `phase=needs-owner\nnote=$(touch x) with spaces\nenv_written=new\nsha=${SHA_NEW}\n`
+    const world = makeWorld(t, { state })
+    const status = await runStatus(world, '424242')
+    assert.match(status, /^\[deploy-status\] state phase=needs-owner$/m)
+    assert.match(status, /^\[deploy-status\] state env_written=new$/m)
+    assert.match(status, new RegExp(`^\\[deploy-status\\] state sha=${SHA_NEW}$`, 'm'))
+    assert.doesNotMatch(status, /note=|touch/, 'a line that is not a plain key=value is not printed')
+    assert.match(status, /^\[deploy-status\] run rc absent: /m)
+    assert.match(status, /^\[deploy-status\] window\.log absent$/m)
+    assert.equal(readFileSync(path.join(world.windowHome, 'state'), 'utf8'), state)
+  })
+
+  scenario('negative control: a status step that writes on the host fails the read-only check', async (t) => {
+    const world = makeWorld(t, { state: 'phase=done-new\n' })
+    const mutated = mutate(STATUS_RUN, '\nexit 0\nWINDOW_STATUS\n', '\ntouch "${status_home}/abort"\nexit 0\nWINDOW_STATUS\n')
+    await assert.rejects(runStatus(world, '424243', mutated), /changed nothing on the host/)
+    assert.ok(existsSync(path.join(world.windowHome, 'abort')), 'the mutation really wrote on the host')
   })
 
   scenario('restart of the old version: pre-restart-old host check fails -> 72, nothing started', async (t) => {

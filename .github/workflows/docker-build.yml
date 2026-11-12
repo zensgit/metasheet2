@@ -2112,6 +2112,72 @@ jobs:
           echo "smoke_rc=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
 
+      # Read-only status step. The deploy window runs detached on the host, so after a lost
+      # ssh session (255), a bootstrap failure (76), a step timeout or a cancelled run the
+      # follower above may have stopped before the window did. This step opens one more ssh
+      # session and only reads: the host state file, this run's rc file and the marker lines
+      # of this run's window.log. It starts, stops and changes nothing on the host, writes no
+      # step summary and sets no output, so the summary and the final gate are unaffected.
+      - name: Read deploy window host state (read-only)
+        id: window_status
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=15 -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          status_run="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$status_run" =~ ^[0-9]+-[0-9]+$ ]] || { echo "unexpected run id: ${status_run}" >&2; exit 2; }
+          mkdir -p output/deploy
+          status_log="output/deploy/window-status.log"
+          set +e
+          {
+            printf 'WINDOW_RUN=%q\n' "${status_run}"
+            cat <<'WINDOW_STATUS'
+          set -u
+          status_home="${HOME}/metasheet2-deploy-window"
+          status_run_dir="${status_home}/runs/${WINDOW_RUN}"
+          echo "[deploy-status] read-only host state for run=${WINDOW_RUN} read_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -r "${status_home}/state" ]; then
+            sed -n -E 's#^([a-z_]+=[A-Za-z0-9@:._/+-]*)$#[deploy-status] state \1#p' "${status_home}/state"
+          else
+            echo "[deploy-status] state absent"
+          fi
+          if [ -r "${status_run_dir}/rc" ]; then
+            sed -n -E 's#^([0-9]+)$#[deploy-status] run rc=\1#p' "${status_run_dir}/rc"
+          else
+            echo "[deploy-status] run rc absent: the window may still be running, or never started"
+          fi
+          if [ -r "${status_run_dir}/window.log" ]; then
+            sed -n -E -e 's#^(=== [A-Z ]+ ===)$#[deploy-status] marker \1#p' -e 's#^\[deploy-window\] (outcome=[a-z-]+ rc=[0-9]+ raw_rc=[0-9]*)$#[deploy-status] \1#p' "${status_run_dir}/window.log"
+          else
+            echo "[deploy-status] window.log absent"
+          fi
+          exit 0
+          WINDOW_STATUS
+          } | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$status_log"
+          status_rc=${PIPESTATUS[1]}
+          set -e
+          echo "[deploy-status] ssh rc=${status_rc}" | tee -a "$status_log"
+          exit 0
+
       - name: Write deploy summary (preflight + runbooks)
         if: always()
         env:
