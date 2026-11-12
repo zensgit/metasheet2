@@ -106,8 +106,48 @@ test('PR and ordinary build paths execute publication safety tests', () => {
   assert.ok(guard.on.push.paths.includes('.github/workflows/docker-build.yml'))
   assert.ok(guard.on.push.paths.includes('scripts/ops/docker-publish-*.mjs'))
   const command = guard.jobs.guard.steps.find((entry) => entry.name === 'Test publication and deployment contracts').run
-  for (const file of ['docker-publish-preflight.test.mjs', 'docker-publish-workflow-contract.test.mjs', 'deploy-immutable-traceability-contract.test.mjs', 'integration-erp-plm-deploy-readiness.test.mjs']) {
+  for (const file of ['docker-publish-preflight.test.mjs', 'docker-publish-workflow-contract.test.mjs', 'deploy-immutable-traceability-contract.test.mjs', 'integration-erp-plm-deploy-readiness.test.mjs', 'docker-build-prod-window.test.mjs', 'remote-summary-pipefail-contract.test.mjs']) {
     assert.ok(command.includes('scripts/ops/' + file))
   }
+  for (const watched of ['scripts/ops/docker-build-prod-window.test.mjs', 'scripts/ops/fixtures/docker-build-prod-window/**', 'scripts/ops/remote-summary-pipefail-contract.test.mjs']) {
+    assert.ok(guard.on.push.paths.includes(watched), `guard push paths include ${watched}`)
+  }
   assert.ok(build.steps.some((entry) => entry.run === 'node --test scripts/ops/docker-publish-preflight.test.mjs'))
+})
+
+test('production deploy inputs, validation step, concurrency and timeouts of the deploy window', () => {
+  const inputs = workflow.on.workflow_dispatch.inputs
+  assert.equal(inputs.restore_proof.default, 'unselected')
+  assert.equal(inputs.pre_commit_abort.type, 'choice')
+  assert.deepEqual(inputs.pre_commit_abort.options, ['unselected', 'restart-old', 'stay-stopped'])
+  assert.equal(inputs.pre_commit_abort.default, 'unselected')
+  assert.equal(inputs.drill_fail_stage.type, 'choice')
+  assert.deepEqual(inputs.drill_fail_stage.options, ['none', 'deploy', 'migrate'])
+  assert.equal(inputs.expected_pending_sha256.type, 'string')
+  assert.ok(!Object.hasOwn(inputs, 'migration_exclude'), 'the exclusion set is a committed constant, never an input')
+  assert.ok(!Object.keys(inputs).some((name) => /exclude/i.test(name)))
+
+  const deploy = workflow.jobs.deploy
+  assert.deepEqual(deploy.concurrency, { group: 'metasheet2-production-deploy', 'cancel-in-progress': false })
+  assert.equal(typeof deploy['timeout-minutes'], 'number')
+  assert.ok(deploy['timeout-minutes'] > 0)
+  const remote = deploy.steps.find((entry) => entry.id === 'remote_deploy')
+  assert.ok(remote)
+  assert.equal(typeof remote['timeout-minutes'], 'number')
+  assert.ok(remote['timeout-minutes'] > 0 && remote['timeout-minutes'] < deploy['timeout-minutes'])
+
+  const validate = step('validate_deploy_inputs')
+  assert.ok(validate, 'build has a validate_deploy_inputs step')
+  assert.equal(validate.if, '${{ inputs.deploy_production == true }}')
+  assert.equal(validate['continue-on-error'], undefined)
+  assert.equal(validate.uses, undefined)
+  assert.doesNotMatch(validate.run, /docker build |docker push|docker login|--push/)
+  const builds = build.steps.filter((entry) => /docker build /.test(entry.run ?? ''))
+  assert.equal(builds.length, 2)
+  for (const entry of builds) {
+    assert.ok(build.steps.indexOf(validate) < build.steps.indexOf(entry), 'validation runs before both image builds')
+  }
+  for (const entry of build.steps.filter((item) => /docker\/login-action|docker (push|login)|--push/.test((item.uses ?? '') + (item.run ?? '')))) {
+    assert.ok(build.steps.indexOf(validate) < build.steps.indexOf(entry), 'validation runs before every registry write')
+  }
 })

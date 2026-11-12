@@ -161,3 +161,46 @@ test('backend health response exposes normalized build metadata', () => {
   assertContains(buildInfo, 'METASHEET_BUILD_IMAGE_DIGEST', 'build info helper')
   assertContains(buildInfo, "trimmed === 'unknown'", 'build info helper')
 })
+
+test('production deploy window never removes, prunes or recreates the data containers', () => {
+  const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
+  const lines = raw.split('\n').map((line) => line.trim()).filter((line) => !line.startsWith('#') && !line.startsWith("'#"))
+  const dockerLines = lines.filter((line) => /(^|[^A-Za-z0-9_-])docker\s+[a-z]/.test(line))
+  // The filter must see the window's real docker calls, or the negatives below prove nothing.
+  assert.ok(dockerLines.some((line) => line.includes('docker stop -t 60 metasheet-web')))
+  assert.ok(dockerLines.some((line) => line.includes('docker stop -t 60 metasheet-backend')))
+  assert.ok(dockerLines.some((line) => /docker compose .* run --rm --no-deps -T .*--latest/.test(line)))
+  assert.ok(dockerLines.some((line) => /docker compose .* up --no-start --no-deps --force-recreate backend/.test(line)))
+  // Inner `sh -c '...'` programs (psql flags and the like) are not docker's own arguments.
+  const ownArgs = dockerLines.map((line) => line.replace(/sh -c '[^']*'/g, 'sh -c PROGRAM'))
+  for (const [pattern, label] of [
+    [/\brm\s+-f\b/, 'rm -f'],
+    [/\bdocker\s+(container\s+)?rm\b/, 'docker rm'],
+    [/system\s+prune/, 'system prune'],
+    [/\bcompose\b.*\bdown\b/, 'compose down'],
+    [/\s-v(\s|$)|--volumes\b/, 'volume removal flag'],
+    [/\bup\b.*\b(postgres|redis)\b/, 'up of postgres or redis'],
+  ]) {
+    assert.deepEqual(ownArgs.filter((line) => pattern.test(line)), [], `no docker line may use ${label}`)
+  }
+
+  const excludeFlag = '-e "MIGRATION_EXCLUDE='
+  assert.equal(raw.split(excludeFlag).length - 1, 1, 'MIGRATION_EXCLUDE is passed exactly once')
+  const excludeLine = raw.split('\n').find((line) => line.includes(excludeFlag))
+  assert.match(excludeLine, /migrate\.js --latest/)
+  assert.match(excludeLine, /-e "MIGRATION_EXCLUDE=\$\{PROD_EXCLUDE_CSV\}"/)
+
+  // The production exclusion list is the staging owner-ruled list (A-3 only), with its tables.
+  const lib = readRepoFile('scripts', 'ops', 'attendance-window-runner-pipeline.lib.sh')
+  const arrayOf = (text, name) => {
+    const match = text.match(new RegExp(`^\\s*${name}=\\(\\n([\\s\\S]*?)\\n\\s*\\)`, 'm'))
+    assert.ok(match, `${name} array present`)
+    return match[1].split('\n').map((entry) => entry.trim()).filter(Boolean)
+  }
+  const stagingNames = arrayOf(lib, 'STAGING_OWNER_EXCLUDED_MIGRATIONS')
+  assert.deepEqual(stagingNames, ['zzzz20260919090000_create_approval_template_group_backfill_batches'])
+  assert.deepEqual(arrayOf(raw, 'PROD_OWNER_EXCLUDED_MIGRATIONS'), stagingNames)
+  assert.deepEqual(arrayOf(raw, 'PROD_OWNER_EXCLUDED_TABLES'), arrayOf(lib, 'STAGING_OWNER_EXCLUDED_TABLES'))
+  assert.equal(raw.split('PROD_OWNER_EXCLUDED_MIGRATIONS=(').length - 1, 1)
+  assert.equal(raw.split('PROD_OWNER_EXCLUDED_TABLES=(').length - 1, 1)
+})
