@@ -2115,6 +2115,8 @@ jobs:
           SYNC_RC: ${{ steps.sync_deploy.outputs.sync_rc }}
           DEPLOY_RC: ${{ steps.remote_deploy.outputs.deploy_rc }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
+          RESTORE_PROOF: ${{ github.event.inputs.restore_proof || 'unselected' }}
+          PRE_COMMIT_ABORT: ${{ github.event.inputs.pre_commit_abort || 'unselected' }}
         run: |
           set -euo pipefail
           deploy_log="output/deploy/deploy.log"
@@ -2147,6 +2149,30 @@ jobs:
             93)
               rc_meaning="drill: smoke stage (intentional)"
               ;;
+            70)
+              rc_meaning="window refused before anything was stopped; old version still serving; env files restored"
+              ;;
+            71)
+              rc_meaning="window aborted after the stop and before the migration committed; old containers restarted and verified"
+              ;;
+            72)
+              rc_meaning="NEEDS OWNER: aborted before the commit and the old version is not running (production DOWN)"
+              ;;
+            73)
+              rc_meaning="NEEDS OWNER: migration committed; the new backend or web failed to start or verify"
+              ;;
+            74)
+              rc_meaning="NEEDS OWNER: ledger or post-commit check unresolved; containers stopped"
+              ;;
+            75)
+              rc_meaning="refused: another window holds the host lock, the host window state is unfinished, or flock is missing; nothing touched"
+              ;;
+            76)
+              rc_meaning="bootstrap lost the window (no pid or rc file); the window may still be running; read the host state"
+              ;;
+            255)
+              rc_meaning="runner lost the ssh session; the detached window may still be running; read the host state"
+              ;;
             *)
               rc_meaning="remote failure (see stages/logs)"
               ;;
@@ -2156,6 +2182,9 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Overall: **${overall}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Host sync exit code: \`${SYNC_RC:-missing}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${SYNC_RC:-}" == "75" ]]; then
+            echo "  - Sync refused (75): a deploy window holds the host lock or the host window state is unfinished; nothing was extracted. Read the host state first." >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "- Remote exit code: \`${DEPLOY_RC:-missing}\` (meaning: ${rc_meaning})" >> "$GITHUB_STEP_SUMMARY"
           echo "- Drill fail stage: \`${DRILL_FAIL_STAGE:-none}\`" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${DRILL_FAIL_STAGE:-none}" != "none" ]]; then
@@ -2217,6 +2246,20 @@ jobs:
                 printing && count < max_lines { print; count++ }
               ' "$deploy_log"
             }
+
+            # stage_of <start marker> <end marker>: PASS / FAIL / UNKNOWN from exact marker lines.
+            stage_of() {
+              if ! has "$1"; then
+                echo "UNKNOWN start marker missing"
+              elif has "$2"; then
+                echo "PASS start+end markers present"
+              else
+                echo "FAIL start marker present; end marker missing"
+              fi
+            }
+            window_preflight_stage="$(stage_of "=== WINDOW PREFLIGHT START ===" "=== WINDOW PREFLIGHT END ===")"
+            stop_writes_stage="$(stage_of "=== STOP WRITES START ===" "=== STOP WRITES END ===")"
+            backup_stage="$(stage_of "=== BACKUP START ===" "=== BACKUP END ===")"
 
             deploy_stage="UNKNOWN"
             deploy_reason="start marker missing"
@@ -2283,6 +2326,9 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### Remote Stages" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Window preflight: **${window_preflight_stage%% *}** (${window_preflight_stage#* })" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Stop writes: **${stop_writes_stage%% *}** (${stop_writes_stage#* })" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Backup: **${backup_stage%% *}** (${backup_stage#* })" >> "$GITHUB_STEP_SUMMARY"
             echo "- Deploy: **${deploy_stage}** (${deploy_reason})" >> "$GITHUB_STEP_SUMMARY"
             echo "- Migrate: **${migrate_stage}** (${migrate_reason})" >> "$GITHUB_STEP_SUMMARY"
             echo "- Smoke: **${smoke_stage}** (${smoke_reason})" >> "$GITHUB_STEP_SUMMARY"
@@ -2307,6 +2353,53 @@ jobs:
             echo "- Web image: \`${web_image:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- Web repo digest: \`${web_repo_digest:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
 
+            # Deploy window key-value lines: last value of "[deploy-window] ... key=value".
+            window_value() {
+              grep -F '[deploy-window]' "$deploy_log" | grep -oE "(^| )$1=[^ ]*" | tail -n 1 | sed 's/^ *[^=]*=//' || true
+            }
+            window_line() {
+              grep -F "[deploy-window] $1" "$deploy_log" | tail -n 1 | sed 's/^\[deploy-window\] //' || true
+            }
+            window_outcome="$(window_value outcome)"
+            window_raw_rc="$(window_value raw_rc)"
+            window_env_written="$(window_value env_written)"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Deploy Window" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Outcome: \`${window_outcome:-unknown}\` (rc \`${DEPLOY_RC:-missing}\`, raw_rc \`${window_raw_rc:-unknown}\`)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- restore_proof: \`${RESTORE_PROOF:-unselected}\`; pre_commit_abort: \`${PRE_COMMIT_ABORT:-unselected}\`" >> "$GITHUB_STEP_SUMMARY"
+            for window_key in "ledger before=" "backup ok " "old_backend_image=" "old_web_image=" "disk gate=post-pull" "retained_dumps " "host_check phase=pre-stop" "MIGRATE COMMITTED"; do
+              window_found="$(window_line "$window_key")"
+              if [[ -n "${window_found}" ]]; then
+                echo "- \`${window_found}\`" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            echo "- Last env_written seen in the log: \`${window_env_written:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "${SYNC_RC:-}" == "0" && "${DRILL_FAIL_STAGE:-none}" == "none" ]]; then
+            {
+              echo ""
+              echo "#### Operator actions"
+              echo ""
+              case "${DEPLOY_RC:-}" in
+                73|74|76|255|"")
+                  echo "- If the host state has env_written=new (always for 73): do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up before confirming .env names the new image."
+                  ;;
+              esac
+              case "${DEPLOY_RC:-}" in
+                72)
+                  echo "- Pre-commit abort with production down: the stopped old containers may be started only after the owner decides whether restarting the previous version is allowed (see the runbook)."
+                  ;;
+                76|255|"")
+                  echo "- Read the host state first (metasheet2-deploy-window/state and the run's rc and window.log under the deploy user's home); the window may still be running."
+                  ;;
+              esac
+              echo "- Unset PROD_HEALTH_PROBE_SILENCE after verification."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ -f "$deploy_log" ]]; then
             if [[ "${deploy_stage}" != "PASS" && "${deploy_stage}" != "UNKNOWN" ]]; then
               # Deploy failures often contain the most actionable error message near the end.
               deploy_block="$(
@@ -2400,6 +2493,7 @@ jobs:
           echo "- Upload channel troubleshooting: ${repo_url}/blob/main/docs/attendance-production-import-upload-channel-20260212.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Immutable deploy traceability: ${repo_url}/blob/main/docs/operations/deploy-immutable-traceability-runbook.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production deploy window: ${repo_url}/blob/main/docs/deployment/production-deploy-window-runbook.md" >> "$GITHUB_STEP_SUMMARY"
 
           # Archive step summary alongside deploy.log for offline audit/review.
           mkdir -p output/deploy
