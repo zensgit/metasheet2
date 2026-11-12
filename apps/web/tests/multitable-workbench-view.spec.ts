@@ -5635,7 +5635,7 @@ describe('MultitableWorkbench view wiring', () => {
 
     it.each([
       ['accepted: the copy takes the save and moves one version on, so the next save carries it', null],
-      ['rejected: the copy goes back to the value before the save', 'reject'],
+      ['rejected: the copy never shows the save', 'reject'],
     ] as const)('the record leaves the page while a save on its copy is out; %s', async (_name, outcome) => {
       await openRec1()
       const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')

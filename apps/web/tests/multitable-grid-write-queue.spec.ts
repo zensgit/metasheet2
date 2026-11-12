@@ -546,4 +546,28 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
     expect(grid.conflict.value).toMatchObject({ recordId: 'r1', fieldId: 'f2', attemptedValue: 'y' })
   })
+
+  it('a waiting write rejected as a conflict after a move to another view whose page does not hold the record: no conflict is raised (its retry could not find the record)', async () => {
+    const server = strictServer([r1(), r2()], ['r1', 'r2'])
+    const fetchFn = vi.fn((input: string, init?: RequestInit) => {
+      if (String(input).includes('viewId=view_2')) {
+        const stored = server.stored.get('r2')!
+        return Promise.resolve(json({ ok: true, data: { fields: FIELDS, rows: [{ id: 'r2', version: stored.version, data: { ...stored.data } }], page: { offset: 0, limit: 50, total: 1, hasMore: false } } }))
+      }
+      return server.fetchFn(input, init)
+    })
+    const viewId = ref('view_1')
+    const grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId, client: new MultitableApiClient({ fetchFn }) })
+    await grid.loadViewData(0)
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f2', 'y', 1)
+    viewId.value = 'view_2'
+    await nextTick()
+    await server.answer()
+    server.stored.get('r1')!.version += 1
+    await server.answerAll()
+    expect(grid.rows.value.map((record) => record.id)).toEqual(['r2'])
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(grid.conflict.value).toBeNull()
+  })
 })

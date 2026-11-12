@@ -3732,34 +3732,69 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
   const settleUndo = shown
     ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
     : undefined
-  await commitDrawerPatch(record, fieldId, patchValue, settleUndo)
+  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
+    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
+    return
+  }
+  await commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
 }
+
+// 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
+// fillable column through PATCH …/manual-fields, every other column through /patch (the grid routes each patch). The two
+// routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
+// a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
+// next one from trying with the version actually stored.
+// (Main's rule, kept as it was: it holds also for a manual row the drawer shows as a copy, on the page or off it,
+// which the grid's own one-at-a-time sending does not chain; see `commitDrawerPatch`.)
+const manualDrawerWriteTails = new Map<string, Promise<void>>()
 
 function drawerRecordById(recordId: string): MetaRecord | null {
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-// The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`): the
-// drawer's saves of one record never race each other, on a manual row too (人工补充行 B3, ADR §3.4 「抽屉里一次保存分两步」:
-// a fillable column through PATCH …/manual-fields, every other column through /patch, which are not one transaction;
-// a failed step does not stop the next one from trying with the version actually stored).
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, onCommitted?: () => void) {
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
+  const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
+  const step = previous.then(async () => {
+    // Re-read AFTER the previous step: its returned version is on the row by now.
+    const current = drawerRecordById(recordId)
+    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
+  })
+  const tail = step.then(() => undefined, () => undefined)
+  manualDrawerWriteTails.set(recordId, tail)
+  try {
+    await step
+  } finally {
+    if (manualDrawerWriteTails.get(recordId) === tail) manualDrawerWriteTails.delete(recordId)
+  }
+}
+
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
   const patchOwner = {}
   // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
   // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
   if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
+  // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
+  const committed: { version: number | null } = { version: null }
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
+  // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`).
   // The drawer shows a copy of a record that is on the page too (`deepLinkedRecord`, kept after a realtime merge).
   // That copy takes a save only once it is accepted, so a save made on it while an earlier one is out carries the
   // version from before that one: it is sent as given, and conflicts (as on main), rather than being taken as made on
-  // the earlier save. (The grid never chains a record off the page.)
-  const write = deepLinkedRecord.value?.id === record.id && grid.rows.value.some((row) => row.id === record.id)
-    ? grid.patchCell(record.id, fieldId, value, record.version, { chainVersion: false })
-    : grid.patchCell(record.id, fieldId, value, record.version)
+  // the earlier save. (The grid never chains a record off the page.) A manual row's steps never overlap (above), and
+  // each carries the version the step before returned, so they need no chain.
+  const unchained = deepLinkedRecord.value?.id === record.id && grid.rows.value.some((row) => row.id === record.id)
+  const write = manualRow
+    ? grid.patchCell(record.id, fieldId, value, record.version, {
+      onCommitted: (version) => { committed.version = version },
+      ...(unchained ? { chainVersion: false } : {}),
+    })
+    : unchained
+      ? grid.patchCell(record.id, fieldId, value, record.version, { chainVersion: false })
+      : grid.patchCell(record.id, fieldId, value, record.version)
   // The composable's local row-action refusal sets its error before the call returns (an older write of the record
   // that fails while this one waits sets it later, and is not this one's).
   const refusedLocally = grid.error.value
@@ -3818,8 +3853,9 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
-      // The server moves a record one version per accepted write.
-      version: deepLinkedRecord.value.version + 1,
+      // A manual row's step takes the version the server returned; otherwise the server moves a record one version
+      // per accepted write.
+      version: committed.version ?? deepLinkedRecord.value.version + 1,
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }

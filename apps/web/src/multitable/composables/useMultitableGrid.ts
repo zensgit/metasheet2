@@ -1500,7 +1500,8 @@ export function useMultitableGrid(opts: {
    *   the row was reloaded from an older version is shown on it; one rejected is rolled back on it.
    * - It counts as in flight from the call on (undo, redo and range writes are refused until it is answered), and
    *   goes to the sheet and view it was made in; its answer after a move to another sheet or view does not enter
-   *   that one's undo history, nor its conflict unless the record is on its page.
+   *   that one's undo history, nor its conflict unless the record is in the rows shown (after a move to another
+   *   sheet these are the old sheet's rows until the new sheet's rows land).
    */
   async function patchCell(
     recordId: string,
@@ -1647,8 +1648,9 @@ export function useMultitableGrid(opts: {
       }
       showWaiting()
       lastBatchId.value = null
-      // Not after a move to another sheet: the record is not there (after a move to another view of the sheet it
-      // usually is, and the banner's retry works).
+      // After a move, only when the record is in the rows shown: after a move to another view of the sheet it usually
+      // is, and the banner's retry works. After a move to another sheet it is not, once that sheet's rows have landed
+      // (before that the old sheet's rows are still shown, and the conflict is raised there).
       if (e?.code === 'VERSION_CONFLICT' && (contextId === rangeContextId || rows.value.some((r) => r.id === recordId))) {
         conflict.value = {
           recordId,
