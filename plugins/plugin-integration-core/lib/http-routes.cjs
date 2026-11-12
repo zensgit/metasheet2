@@ -5570,8 +5570,8 @@ function requireStockPreparationAudit() {
   // THE ONE project-scoped read of the census (both forms) and the acknowledgement's re-proof: the sheet is proven the
   // caller's own first (the table-action wall, unconditionally — the readSheetRows posture), then the planner's own reader
   // with the server-held band (RS-1). `progress.stage` names what failed for the tenant-wide census row. `afterWall`
-  // (S6-5b, the two census forms only — never the acknowledgement's re-proof) runs between the wall and the rows read:
-  // the census key-column guard, which throws in its form's own closed way.
+  // (S6-5b: both census forms and the acknowledgement's re-proof) runs between the wall and the rows read: the census
+  // key-column guard, which throws in its caller's own closed way.
   async function readStockPreparationCensusRows(tenantId, action, projectNo, progress = {}, afterWall = null) {
     progress.stage = 'tenant_wall'
     await assertTableActionTargetBelongsToTenant({
@@ -5598,6 +5598,22 @@ function requireStockPreparationAudit() {
     const verdict = stockPrepCensusKeyFieldVerdict(existence)
     if (verdict.provable !== true || !Number.isSafeInteger(verdict.missing)) throw new Error('the census key columns could not be read from the database')
     return verdict
+  }
+  // The single-project census and the acknowledgement's re-proof refuse the same closed way (the afterWall hook): 409
+  // FIELD_MISSING (a key column is gone — a re-proof over it could find a "remnant" the correct read would not), 503
+  // FIELDS_UNREADABLE (the database could not say). Thrown before any record read, before any audit row or ledger write.
+  function stockPreparationCensusKeyFieldsGuard(tenantId, action) {
+    return async () => {
+      let keyFields
+      try {
+        keyFields = await readStockPreparationCensusKeyFields(tenantId, action)
+      } catch (error) {
+        throw new HttpRouteError(503, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELDS_UNREADABLE, 'the key columns of this sheet could not be read from the database; the census is not answered', { reason: 'fields_unreadable', partial: false })
+      }
+      if (keyFields.missing !== 0) {
+        throw new HttpRouteError(409, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, 'a key column the census reads is missing from this sheet; the census is not answered', { reason: 'field_missing', missing: keyFields.missing, partial: false })
+      }
+    }
   }
   // The human columns the census counts over (design §6.4): the template band plus every installed pack column the
   // planner would treat as human or could not classify, read STRICTLY — a ledger or host failure throws (the row is then
@@ -12464,17 +12480,7 @@ function requireStockPreparationAudit() {
       }))
       await assertResolvedProjectTargetTenancy(action, tenantId)
       // S6-5b: the key columns, after the wall and before the rows; refused BEFORE the audit row (no census answered).
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, async () => {
-        let keyFields
-        try {
-          keyFields = await readStockPreparationCensusKeyFields(tenantId, action)
-        } catch (error) {
-          throw new HttpRouteError(503, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELDS_UNREADABLE, 'the key columns of this sheet could not be read from the database; the census is not answered', { reason: 'fields_unreadable', partial: false })
-        }
-        if (keyFields.missing !== 0) {
-          throw new HttpRouteError(409, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, 'a key column the census reads is missing from this sheet; the census is not answered', { reason: 'field_missing', missing: keyFields.missing, partial: false })
-        }
-      })
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
       let humanFieldIds
       try {
         humanFieldIds = await readStockPreparationCensusHumanFieldIds(tenantId, action)
@@ -12532,7 +12538,9 @@ function requireStockPreparationAudit() {
         targetPurpose: 'write',
       }))
       await assertResolvedProjectTargetTenancy(action, tenantId)
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo)
+      // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
+      // refused before its rows are read and before anything is recorded.
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
       const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
       stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
       const row = await store.recordRemnantAcknowledgement({

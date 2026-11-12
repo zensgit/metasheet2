@@ -26,7 +26,8 @@
     "G9-PE",
     "G9-S65-V5",
     "G9-S65-U03",
-    "G9-S65B-V7"
+    "G9-S65B-V7",
+    "G9-S65B-LEASE"
   ],
   "pending": [
     { "id": "G9-S66-U03", "owner": "S6-6", "what": "U03 with the repair switch ON: the tenant gate and the scoped reads of the repair routes (preview / execute of retire, restore and verify_and_close_run; the fills report; the run list) against this tenant's real component handle and run ids and bogus ones. Since #6843 the three routes are in G9-U03's tier oracle with the switch OFF: 403 below stock-prep admin, the surface's own 404 for every admitted caller" },

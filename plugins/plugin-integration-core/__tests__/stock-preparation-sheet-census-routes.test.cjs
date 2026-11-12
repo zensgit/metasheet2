@@ -29,7 +29,8 @@
 //          list row answers incomplete / field_missing with NO counts (the list audit counts it incomplete), the project
 //          form 409 FIELD_MISSING before any record read and before its audit row; a host that cannot answer from the
 //          database (no db-backed existence read, or a throwing one) is the list row rows_unreadable and the project
-//          form 503 FIELDS_UNREADABLE — never "present", never "missing"; the acknowledgement re-proof is not gated
+//          form 503 FIELDS_UNREADABLE — never "present", never "missing"; the acknowledgement's re-proof runs behind the
+//          same guard (409 FIELD_MISSING before any record read, nothing recorded, no audit row)
 // Every value is synthetic.
 
 const assert = require('node:assert/strict')
@@ -489,16 +490,41 @@ test('SC-11 (S6-5b) a sheet without a census KEY column: the list row incomplete
       assert.deepEqual(h.auditAppends, [], `${name}: no audit row`)
     } finally { h.restore() }
   }
-  // The acknowledgement's re-proof is NOT gated by the key-column guard (it shares only the walled read): with a key
-  // column gone it still answers through its own re-proof (here: no remnant on the fresh read, 409 NOT_PRESENT).
-  const ack = mount()
+  // The acknowledgement's re-proof runs behind the SAME key-column guard (review of #6886): with any key column gone it is
+  // 409 FIELD_MISSING before any record read — nothing recorded, no audit row — even for the handle that IS a remnant
+  // with every column present; unprovable is 503 FIELDS_UNREADABLE.
+  for (const fieldId of SHEET_CENSUS_KEY_FIELD_IDS) {
+    const ack = mount()
+    try {
+      const one = ack.seedRegistryRow(PROJECT)
+      await seedSheetRows(ack, one, PROJECT, D2)
+      ack.provisioning.objects.get(`${ack.staging}/${one.objectId}`).fields.delete(fieldId)
+      ack.records.calls.length = 0
+      ack.auditAppends.length = 0
+      const res = await call(ack, 'POST', PATHS.acknowledge, { user: ADMIN, params: { projectNo: PROJECT }, body: ackBody() })
+      const error = expectRefusal(res, 409, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING)
+      assert.deepEqual(JSON.parse(JSON.stringify(error.details)), { reason: 'field_missing', missing: 1, partial: false }, fieldId)
+      assert.deepEqual(ack.records.calls, [], `${fieldId}: the re-proof read no record`)
+      assert.equal(ack.rulingFake.rows().length, 0, `${fieldId}: nothing recorded`)
+      assert.deepEqual(ack.auditAppends, [], `${fieldId}: no audit row`)
+    } finally { ack.restore() }
+  }
+  const ackUnprovable = mount()
   try {
-    const one = ack.seedRegistryRow(PROJECT)
-    await seedSheetRows(ack, one, PROJECT, D2)
-    ack.provisioning.objects.get(`${ack.staging}/${one.objectId}`).fields.delete('idempotencyKey')
-    const res = await call(ack, 'POST', PATHS.acknowledge, { user: ADMIN, params: { projectNo: PROJECT }, body: ackBody() })
-    assert.notEqual(res.body && res.body.error && res.body.error.code, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, JSON.stringify(res.body))
-  } finally { ack.restore() }
+    const one = ackUnprovable.seedRegistryRow(PROJECT)
+    await seedSheetRows(ackUnprovable, one, PROJECT, D2)
+    delete ackUnprovable.provisioning.resolveExistingObjectFieldIds
+    expectRefusal(await call(ackUnprovable, 'POST', PATHS.acknowledge, { user: ADMIN, params: { projectNo: PROJECT }, body: ackBody() }), 503, REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELDS_UNREADABLE)
+    assert.equal(ackUnprovable.rulingFake.rows().length, 0, 'unprovable: nothing recorded')
+  } finally { ackUnprovable.restore() }
+  // Calibration: with every key column present the same acknowledgement is recorded (the guard refuses only the gap).
+  const ackOk = mount()
+  try {
+    const one = ackOk.seedRegistryRow(PROJECT)
+    await seedSheetRows(ackOk, one, PROJECT, D2)
+    const res = await call(ackOk, 'POST', PATHS.acknowledge, { user: ADMIN, params: { projectNo: PROJECT }, body: ackBody() })
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body))
+  } finally { ackOk.restore() }
 })
 
 test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenant BEFORE the reader, and every census / acknowledgement handler reads rows only through it', () => {
@@ -515,6 +541,8 @@ test('SC-08 (source) the census\'s ONE project read walls the sheet to the tenan
   for (const handler of ['stockPreparationSheetCensusList', 'stockPreparationProjectSheetCensusGet']) assert.ok(source.includes(handler), handler)
   const rowOf = source.slice(source.indexOf('async function stockPreparationCensusRowOf('), source.indexOf('async function stockPreparationCensusRowOf(') + 3000)
   assert.match(rowOf, /readStockPreparationCensusRows\(tenantId, action, registryRow\.projectNo, progress, async \(\) => \{\n\s+const keyFields = await readStockPreparationCensusKeyFields\(tenantId, action\)/, 'the list row passes the guard')
+  // Review of #6886: the project form and the acknowledgement's re-proof both pass the shared guard.
+  assert.equal(source.split('readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))').length - 1, 2, 'the project form and the acknowledgement pass the guard')
   assert.match(body, /targetProjectId: resolveIntegrationStagingProjectId\(tenantId, undefined\)/, 'the staging project is the scope\'s, never a request one')
   for (const handler of ['stockPreparationSheetCensusList', 'stockPreparationProjectSheetCensusGet', 'stockPreparationProjectRemnantAcknowledge', 'stockPreparationProjectRemnantAcknowledgementRevoke']) {
     const at = source.indexOf(`    async ${handler}(req, res) {`)

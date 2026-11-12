@@ -73,6 +73,11 @@
  *            (the lease released — a run whose finish never ran) fails ONLY no_open_sheet_repair_run and the enable is 409
  *            with exactly that id and nothing done; the run closed by the ledger's own verified close under a NEW lease,
  *            the readiness is green and the enable 200 stamps PILOT_READINESS_VERSION (7).
+ *   G9-S65B-LEASE (S6-5b, review of #6886) THE WINDOW on real PG: a repair run begun right AFTER the enable POST's own
+ *            readiness read (under a REAL sheet_repair lease, then released) is refused by the POST's in-lease re-read —
+ *            409 with exactly no_open_sheet_repair_run, two ledger reads, no stamp, no mark, no audit row, the lease
+ *            released (the generation was bumped before the lease, as for F-3); while the enable holds the sheet lease a
+ *            sheet_repair lease cannot be taken (WRITE_LOCKED); closed, the enable 200 stamps version 7.
  *   G9-S65-U03 (S6-5, #6842) rides G9-U03 (`G9-U03 + G9-S65-U03`): the census and remnant routes join the drill, with a
  *            real component handle and acknowledgement id of this tenant.
  *
@@ -1738,9 +1743,11 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     // The fully prepared synthetic sheet (shared by G9-PE and G9-S65-V5): two switch-off pulls, the band installed by the
     // REAL install route with its history backfilled, the recovery store, the pack ledger and (readiness v5, S6-5) the
     // component ruling ledger wired.
-    async function preparedPilotSheet(label: string) {
+    async function preparedPilotSheet(label: string, wrapRepairStore?: (real: any) => any) {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
-      const repairStore = sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
+      const realRepairStore = sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
+      // G9-S65B-LEASE wraps the ledger the ROUTES are handed (a hook around listRunsOf); the case's own calls use the same.
+      const repairStore = wrapRepairStore ? wrapRepairStore(realRepairStore) : realRepairStore
       const st = await s3aStack(label, {
         pilot: false,
         serviceExtras: {
@@ -2004,6 +2011,141 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       })
       expect(readinessLib.PILOT_READINESS_VERSION).toBe(7)
       g9Pass('G9-S65B-V7', observed)
+    })
+
+    // ── G9-S65B-LEASE: the enable's in-lease re-read on real PG (S6-5b, review of #6886) ─────────────────────────────
+    g9Case('G9-S65B-LEASE', '(S6-5b readiness v7, the window) on a G9-PE prepared sheet, the marker 1 IN MEMORY and the tenant-claim flag ON: a repair run begun right after the enable POST\'s own readiness read (under a REAL sheet_repair lease, then released) is refused by the in-lease re-read — 409 with exactly no_open_sheet_repair_run, two ledger reads, no stamp, mark or audit row, the lease released; while the enable holds the sheet lease a sheet_repair lease is WRITE_LOCKED; closed, the enable 200 stamps PILOT_READINESS_VERSION', async () => {
+      const hook: any = { calls: 0, after: null, before: null }
+      const { st, read, enable, registry, repairStore } = await preparedPilotSheet('g9_lease', (real: any) => ({
+        ...real,
+        listRunsOf: async (scope: any) => {
+          hook.calls += 1
+          const n = hook.calls
+          if (typeof hook.before === 'function') await hook.before(n)
+          const answer = await real.listRunsOf(scope)
+          if (typeof hook.after === 'function') await hook.after(n)
+          return answer
+        },
+      }))
+      const RT_RUN: string = sheetRepairStoreLib.SHEET_REPAIR_TABLES.run
+      const openRuns = async () => Number((await q(`SELECT count(*)::int AS n FROM ${RT_RUN} WHERE sheet_id = $1 AND status = 'running'`, [st.sheetId])).rows[0].n)
+      const pilotAudits = async () => Number((await q(`SELECT count(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_pilot_enable'`, [st.tenantId])).rows[0].n)
+      const stamp = async () => ((await q('SELECT grid_export_closure FROM meta_sheets WHERE id = $1', [st.sheetId])).rows[0] || { grid_export_closure: 'NO_SHEET_ROW' }).grid_export_closure
+      const leaseRow = async () => (await q(`SELECT lease_id, lease_purpose FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [st.key])).rows[0] || null
+      const failingOf = (res: any) => (res && res.body && res.body.error && res.body.error.details ? JSON.parse(JSON.stringify(res.body.error.details)).failing : null)
+      const noAudit = async () => {}
+      const leaseFor = async (runId: string) => {
+        const grant = await st.lock.acquire(st.key, { purpose: 'sheet_repair', runId, tenantId: st.tenantId })
+        const guard = st.lock.createGuard(grant)
+        return {
+          guard,
+          lease: { leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch },
+          holderWithin: (trx: any) => st.lock.assertHolderWithin(trx, st.key, { leaseId: grant.leaseId, fencingEpoch: grant.fencingEpoch, reason: 'sheet_repair' }),
+        }
+      }
+      const runId = `sheet-repair:${nodeCrypto.randomUUID()}`
+      const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
+      expect(markerBefore).toBe(0)
+      let observed: any
+      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+      try {
+        observed = await withTenantClaim('true', async () => {
+          const prepared = (await read()).body.data.readiness.failing
+          // (1) THE WINDOW: right after the POST's own readiness read answered "no open run" (before the bump and the
+          // lease), a repair begins under a REAL sheet_repair lease, and that lease is released (its finish never ran).
+          const firstPostRead = hook.calls + 1
+          let windowState: any = null
+          hook.after = async (n: number) => {
+            if (n !== firstPostRead) return
+            const before = await leaseRow()
+            const first = await leaseFor(`syn-g9-lease-begin-${TOKEN}`)
+            try {
+              const begun = await repairStore.beginRun({
+                tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, runId, writeScopeKey: st.key,
+                recipe: sheetRepairLib.SHEET_REPAIR_RECIPES[0], planDigest: 'e'.repeat(64), approvalRef: 'R-91:g9-lease', componentHandle: 'f'.repeat(24),
+                backup: [['rec_g9_lease_syn_1', 1, true, null, null, null]], plannedCount: 1, expectSequence: 0,
+                lease: first.lease, startedBy: 'u_g9_lease', holderWithin: first.holderWithin, auditWithin: noAudit,
+              })
+              windowState = { leaseFreeAtReadinessRead: !(before && before.lease_id), begun: begun.runId === runId }
+            } finally {
+              await first.guard.release()
+            }
+            windowState.openAfterBegin = await openRuns()
+          }
+          const gen0 = await st.generation()
+          const raced = await enable()
+          hook.after = null
+          const readsInRacedPost = hook.calls - firstPostRead + 1
+          const generationMoved = !sameJson(await st.generation(), gen0)
+          const leaseAfterRace = await leaseRow()
+          const raceState = { registry: await registry(), stamp: await stamp(), pilotAudits: await pilotAudits(), openRuns: await openRuns() }
+          // (2) the run closed by the ledger's verified close under a new lease.
+          const second = await leaseFor(`syn-g9-lease-close-${TOKEN}`)
+          let closed: any
+          try {
+            closed = await repairStore.closeVerifiedRun({
+              tenantId: st.tenantId, sheetId: st.sheetId, projectNo: st.projectNo, runId, approvalRef: 'R-91:g9-lease-close', closeDigest: 'a'.repeat(64),
+              verifiedCount: 1, versionMoved: 0, governed: false, lease: second.lease, holderWithin: second.holderWithin, auditWithin: noAudit,
+            })
+          } finally {
+            await second.guard.release()
+          }
+          // (3) MUTUAL EXCLUSION: at the next POST's in-lease read (its second ledger read) a sheet_repair lease is tried
+          // while the enable holds the sheet lease.
+          const nextPostFirstRead = hook.calls + 1
+          let intrusion: any = null
+          hook.before = async (n: number) => {
+            if (n !== nextPostFirstRead + 1) return
+            const held = await leaseRow()
+            let outcome: string
+            try {
+              const grant = await st.lock.acquire(st.key, { purpose: 'sheet_repair', runId: `syn-g9-lease-intrude-${TOKEN}`, tenantId: st.tenantId })
+              outcome = 'ACQUIRED'
+              await st.lock.createGuard(grant).release()
+            } catch (error: any) {
+              outcome = String(error && error.code)
+            }
+            intrusion = { enableLeaseHeld: Boolean(held && held.lease_id), heldPurpose: held ? held.lease_purpose : null, outcome }
+          }
+          const enabled = await enable()
+          hook.before = null
+          return {
+            prepared,
+            window: windowState,
+            raced: [raced.statusCode, codeOf(raced), failingOf(raced)],
+            readsInRacedPost,
+            generationMoved,
+            leaseReleasedAfterRace: !(leaseAfterRace && leaseAfterRace.lease_id),
+            raceState,
+            closed: closed.status,
+            intrusion,
+            enabled: [enabled.statusCode, enabled.body && enabled.body.data ? enabled.body.data.enabled : null],
+            registryAfter: await registry(),
+            stampAfter: await stamp(),
+            pilotAuditsAfter: await pilotAudits(),
+          }
+        })
+      } finally {
+        continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
+      }
+      expect({ ...observed, markerRestored: continuationSupport.CONTINUATION_SUPPORT_VERSION, flagRestored: process.env[TENANT_CLAIM_FLAG] === TENANT_CLAIM_FLAG_AT_LOAD }).toEqual({
+        prepared: [],
+        window: { leaseFreeAtReadinessRead: true, begun: true, openAfterBegin: 1 },
+        raced: [409, 'STOCK_PREP_PILOT_NOT_READY', ['no_open_sheet_repair_run']],
+        readsInRacedPost: 2,
+        generationMoved: true,
+        leaseReleasedAfterRace: true,
+        raceState: { registry: { enabled: false, pilot_readiness_version: null }, stamp: null, pilotAudits: 0, openRuns: 1 },
+        closed: 'completed',
+        intrusion: { enableLeaseHeld: true, heldPurpose: 'pilot_enable', outcome: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+        enabled: [200, true],
+        registryAfter: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
+        stampAfter: 'stock_prep_pilot',
+        pilotAuditsAfter: 1,
+        markerRestored: 0,
+        flagRestored: true,
+      })
+      g9Pass('G9-S65B-LEASE', observed)
     })
 
     // ── extension points for the PRs still in flight (the matrix file's `pending` list) ─────────────────────────────

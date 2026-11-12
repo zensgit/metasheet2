@@ -473,7 +473,7 @@ const CHECKS = Object.freeze({
  *   customerPackDeclaration, collectGenericWriterTargets, readPullBatchStatus, pullBatchBand,
  *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2), componentRulingStore (step 6d-1b),
  *   tenantClaimRequired (v6: the boolean answer of http-routes' stockPreparationTenantClaimRequired, read per request),
-  sheetRepairStore (v7: the sheet-repair ledger, migration 108)
+ *   sheetRepairStore (v7: the sheet-repair ledger, migration 108)
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []

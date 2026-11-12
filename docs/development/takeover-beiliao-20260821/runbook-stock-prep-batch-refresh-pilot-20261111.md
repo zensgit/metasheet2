@@ -25,7 +25,7 @@
 
 **租户声明开关也是启用的前提（就绪 v6，R-91 ㉘）。** 开关关着时，`requireTableActionAccess` 的旧分支允许无租户的平台管理员指名一个租户、在它的表上试算并应用（`http-routes.cjs:1552-1578`）；开关打开后 `assertVerifiedTenantClaim`（`:1780`，读取器 `stockPreparationTenantClaimRequired`，`:1876-1878`）拒绝这种调用。所以就绪清单在 `continuation_support_version` 之前多了一项 `tenant_claim_required`，只在这个读取器答「真」时通过（`stock-preparation-pilot-readiness.cjs:431-434`；路由把读取结果交给它，`http-routes.cjs:5533`）。旧分支本身和非试点项目不变。
 
-**这张表不能有未结束的修复运行（就绪 v7，S6-5b）。** 就绪清单在 `continuation_support_version` 之前又多了一项 `no_open_sheet_repair_run`：修复台账自己的读取（`stock-preparation-sheet-repair-store.cjs:270-280`，按表读、不分项目，读不出就抛错）答「这张表没有 `running` 的运行」才通过；台账没接线、108 没跑、读取出错，一律不通过（`stock-preparation-pilot-readiness.cjs:298-303`、`:459-461`；路由把台账交给它，`http-routes.cjs:5545`；S6-5b）。它不看修复开关：开关打开时留下的运行，关掉开关以后照样挡住启用。启用 POST 拿到表租约之后还会再读一次（`http-routes.cjs:12897-12913`，S6-5b），挡住就绪读过之后、租约之前才停下的运行。为什么要挡：项目一旦受治理，retire / restore 都拒，续关又只认全部写完的运行，留着的运行可能再也关不掉（§6.5）。
+**这张表不能有未结束的修复运行（就绪 v7，S6-5b）。** 就绪清单在 `continuation_support_version` 之前又多了一项 `no_open_sheet_repair_run`：修复台账自己的读取（`stock-preparation-sheet-repair-store.cjs:270-280`，按表读、不分项目，读不出就抛错）答「这张表没有 `running` 的运行」才通过；台账没接线、108 没跑、读取出错，一律不通过（`stock-preparation-pilot-readiness.cjs:298-303`、`:459-461`；路由把台账交给它，`http-routes.cjs:5545`；S6-5b）。它不看修复开关：开关打开时留下的运行，关掉开关以后照样挡住启用。启用 POST 拿到表租约之后还会再读一次（`http-routes.cjs:12905-12921`，S6-5b），挡住就绪读过之后、租约之前才停下的运行。为什么要挡：项目一旦受治理，retire / restore 都拒，续关又只认全部写完的运行，留着的运行可能再也关不掉（§6.5）。
 
 **仍由 owner 另裁、本手册不替 owner 选的事：** 第 0 步的切包提交（S6-9 随包已裁，R-91 ㉚）；第 3a 步在客户机上打开开关的时间；O6-7（现场谁可以按手册结束，默认 `stock-prep:admin`）；试点项目（不是第 10 项那个项目，不是双份表，在上限以内，第 1 批已拉、下一批还没拉）；指定 1–2 名拉取人员（G-A2）；现场事实（`specField`、客户包声明、第 ④ 步开关）。
 
@@ -302,7 +302,7 @@ Remove-Variable token
 ### 5.2 怎么读
 
 - **`status: incomplete` 不是 0。** 这一行没有任何计数，原因是封闭词之一：`target_unresolved`、`sheet_mismatch`、`tenant_wall`、`rows_unreadable`、`rows_too_large`、`pack_unreadable`、`field_missing`（`stock-preparation-remnant-acknowledgement.cjs:66-75`，S6-5b）。把它当「没查到」，查明原因后重跑，不能当干净。一个项目的普查读不出客户包列时答 503 `STOCK_PREP_SHEET_CENSUS_PACK_UNREADABLE`（`:58`）。
-- **缺关键列（S6-5b，关掉 R-91 ㉕ 的残留）。** 普查要读的五个关键列是 `projectNo`、`idempotencyKey`、`componentSourceId`、`parentSourceId`、`active`（`stock-preparation-sheet-census.cjs:74`，和 R 线包 `01-sheet-census.sql` 的 `required` 列表一致，插件测试钉住两边相等）。路由在租户墙之后、读行之前，用宿主**从数据库**查列是否存在（`http-routes.cjs:5586-5601`，S6-5b）：缺了任何一列，全租户那一行答 `incomplete` / `field_missing`、没有计数（`:5669-5677`）；单项目答 409 `STOCK_PREP_SHEET_CENSUS_FIELD_MISSING`（`details.missing` 是缺了几列，不写列名），不记审计行（`:12466-12477`）。宿主答不出（不是数据库的回答，或读取出错）时不算「缺」也不算「在」：全租户那一行答 `rows_unreadable`，单项目答 503 `STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE`。所以现在**一行 `complete` 本身就可信**，不用再去对 `target_fields_present`。缺列的表按 owner 批准的手册步骤补回列之后再普查；补列不是本手册的步骤。
+- **缺关键列（S6-5b，关掉 R-91 ㉕ 的残留）。** 普查要读的五个关键列是 `projectNo`、`idempotencyKey`、`componentSourceId`、`parentSourceId`、`active`（`stock-preparation-sheet-census.cjs:74`，和 R 线包 `01-sheet-census.sql` 的 `required` 列表一致，插件测试钉住两边相等）。路由在租户墙之后、读行之前，用宿主**从数据库**查列是否存在（`http-routes.cjs:5586-5601`，S6-5b）：缺了任何一列，全租户那一行答 `incomplete` / `field_missing`、没有计数（`:5685-5693`）；单项目答 409 `STOCK_PREP_SHEET_CENSUS_FIELD_MISSING`（`details.missing` 是缺了几列，不写列名），不记审计行（`:12482-12483`，守卫在 `:5602-5617`）。残留确认的重新证明走同一个守卫（`:12541-12543`）：缺列时同样 409、什么都不记（S6-5b 复核第 1 轮）。宿主答不出（不是数据库的回答，或读取出错）时不算「缺」也不算「在」：全租户那一行答 `rows_unreadable`，单项目答 503 `STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE`。所以现在**一行 `complete` 本身就可信**，不用再去对 `target_fields_present`。缺列的表按 owner 批准的手册步骤补回列之后再普查；补列不是本手册的步骤。
 - 确认数读成 `null`（`rulingsReadable: false`）：裁定表读不出，先查 107 与授权（§1.4）。
 
 ### 5.3 残留确认（只在客户回答 Q1 之后）
@@ -358,7 +358,7 @@ Remove-Variable token
    - `history_status = 'pending'` 且 `plan_kept = t`：停。这是一次中止后留着计划的首装，再跑可能按旧计划续上（`stock-preparation-pull-batch-install.cjs:627-629`）。先把装机做完。
    - `history_status = 'pending'` 且 `plan_kept = f`：这张表还没装机。按 §3 先做批次标识装机，再开修复窗口。（和上一条不同：没有留着的计划，下一次装机按首装重新出计划（`stock-preparation-pull-batch-install.cjs:624-629`）。）
    - `born_empty` / `backfilled`，或者没有行（这张表从没开始装机）：可以开。§3 的顺序是先装机，所以正常应是前者。
-5. **这张表上没有未结束的修复运行。** 查运行列表，或者用只读语句（本手册所写，未在库上执行过）：
+5. **这张表上没有未结束的修复运行。** 用下面的只读语句（本手册所写，未在库上执行过）。它按表查、不分项目，和就绪 v7 的 `no_open_sheet_repair_run` 读的是同一件事（`stock-preparation-sheet-repair-store.cjs:274`，S6-5b）。运行列表（§6.1 的 `GET …/target/sheet-repair/runs`）只列**这个项目**的运行（`:283-293`），看不到同一张表上别的项目留下的运行，只能当补充，不能代替这条语句：
 
    ```sql
    SET default_transaction_read_only = on;
