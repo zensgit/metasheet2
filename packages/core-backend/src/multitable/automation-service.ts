@@ -83,6 +83,8 @@ import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
   AutomationScheduler,
+  MIN_SCHEDULE_INTERVAL_MS,
+  intervalMinutesToMs,
   type AutomationSchedulerLeaderOptions,
   type AutomationSchedulerRuntimeOptions,
 } from './automation-scheduler'
@@ -2127,6 +2129,22 @@ export class AutomationService {
         nextTriggerConfig as Record<string, unknown> | null,
       )
       if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
+
+      // schedule.interval: convert intervalMinutes to the stored intervalMs and refuse a period that would
+      // never be armed. Done here, not in parseUpdateRuleInput, because only this block knows the RESULTING
+      // type: a PATCH may omit triggerType (config-only edit of a stored interval rule) or switch to interval
+      // without a config. Overwrites the plain trigger_config set above, as the date_field branch does.
+      // Minutes win only in a config this request SENT. When the config falls back to the STORED one (no
+      // triggerConfig in the PATCH), the read precedence applies: a numeric stored intervalMs is what has been
+      // running, so it stays and a stale stored intervalMinutes is dropped; a minutes-only row still converts.
+      if (nextTriggerType === 'schedule.interval') {
+        let intervalConfig = nextTriggerConfig as Record<string, unknown> | null
+        if (input.triggerConfig === undefined && isRecord(intervalConfig) && typeof intervalConfig.intervalMs === 'number') {
+          const { intervalMinutes: _staleMinutes, ...storedWithoutMinutes } = intervalConfig
+          intervalConfig = storedWithoutMinutes
+        }
+        updates.trigger_config = JSON.stringify(normalizeIntervalTriggerConfigAtSave(nextTriggerType, intervalConfig))
+      }
 
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(
         nextTriggerType,
@@ -5536,6 +5554,51 @@ export function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
   return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
 }
 
+function describeIntervalValue(value: unknown): string {
+  return typeof value === 'string' ? JSON.stringify(value) : String(value)
+}
+
+/**
+ * schedule.interval SAVE-boundary normaliser. The stored, scheduler-facing field is `intervalMs`; the rule
+ * editor sends `intervalMinutes`. Returns the config to persist, or throws `AutomationRuleValidationError`.
+ * No-op (same object back) for every other trigger type, so cron / date_field / event rules are untouched.
+ *
+ * Write-side precedence: when `intervalMinutes` is present it WINS and any incoming `intervalMs` is
+ * discarded. The editor is its only producer, and an already-loaded older editor bundle sends the stale
+ * stored `intervalMs` next to the minutes the user just typed. A present but invalid `intervalMinutes`
+ * (for example `''` from a cleared input) is refused; it never falls back to that stale `intervalMs`.
+ * The result always carries `intervalMs` and never `intervalMinutes`, so a stored row cannot hold both.
+ * An `intervalMs`-only config (API clients) is returned unchanged when it is valid.
+ *
+ * Refused: a missing, non-number, non-finite, or below-floor period (MIN_SCHEDULE_INTERVAL_MS, the same
+ * floor `AutomationScheduler.register` applies). Before this, such a rule saved and showed as enabled,
+ * and the scheduler only logged "interval too small" and armed nothing.
+ */
+export function normalizeIntervalTriggerConfigAtSave(
+  triggerType: string,
+  triggerConfig: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (triggerType !== 'schedule.interval') return triggerConfig
+  const cfg = isRecord(triggerConfig) ? triggerConfig : {}
+  if (cfg.intervalMinutes !== undefined) {
+    const ms = intervalMinutesToMs(cfg.intervalMinutes)
+    if (ms === null) {
+      throw new AutomationRuleValidationError(
+        `schedule.interval intervalMinutes must be a finite number of minutes, at least ${MIN_SCHEDULE_INTERVAL_MS} ms (got ${describeIntervalValue(cfg.intervalMinutes)})`,
+      )
+    }
+    const { intervalMinutes: _minutes, ...rest } = cfg
+    return { ...rest, intervalMs: ms }
+  }
+  const ms = cfg.intervalMs
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < MIN_SCHEDULE_INTERVAL_MS) {
+    throw new AutomationRuleValidationError(
+      `schedule.interval requires intervalMinutes, or intervalMs as a finite number of at least ${MIN_SCHEDULE_INTERVAL_MS} (got ${describeIntervalValue(ms)})`,
+    )
+  }
+  return cfg
+}
+
 /**
  * Parse a `POST /sheets/:sheetId/automations` request body into a
  * `CreateRuleInput`. Throws `AutomationRuleValidationError` for invalid
@@ -5583,7 +5646,8 @@ export function parseCreateRuleInput(
   return {
     name,
     triggerType,
-    triggerConfig,
+    // schedule.interval: intervalMinutes -> intervalMs, invalid period refused (no-op for other types).
+    triggerConfig: normalizeIntervalTriggerConfigAtSave(triggerType, triggerConfig) ?? {},
     actionType,
     actionConfig,
     enabled,

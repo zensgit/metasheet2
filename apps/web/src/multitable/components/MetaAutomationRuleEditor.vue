@@ -3418,6 +3418,12 @@ function draftFromRule(rule: AutomationRule): Draft {
   // T1-2: the read API returns the inbound-webhook secret as the '<redacted>' placeholder — never let
   // the placeholder reach the input (or round-trip into a save, which would corrupt the real secret).
   if (triggerConfig.secret === '<redacted>') triggerConfig.secret = ''
+  // schedule.interval: the stored field is intervalMs (what the scheduler arms); the input edits minutes.
+  // Show the stored period in minutes (it wins over any stale stored intervalMinutes); buildPayload sends
+  // minutes only and the backend converts them back to intervalMs.
+  if (rule.triggerType === 'schedule.interval' && typeof triggerConfig.intervalMs === 'number') {
+    triggerConfig.intervalMinutes = triggerConfig.intervalMs / 60000
+  }
   return {
     name: rule.name,
     triggerType: rule.triggerType,
@@ -5652,6 +5658,9 @@ function buildPayload(): Partial<AutomationRule> {
   if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
     triggerConfig.cron = cronPreset.value
   }
+  // schedule.interval: the minutes input is the only period the editor edits — never send the stored
+  // intervalMs beside it (the backend converts intervalMinutes to intervalMs at save).
+  if (d.triggerType === 'schedule.interval') delete triggerConfig.intervalMs
   if (d.triggerType === 'schedule.date_field') {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'

@@ -1791,6 +1791,7 @@ exec npx vitest run \
   multitable-attachment-editor \
   multitable-attachment-list \
   multitable-automation-integration-preview \
+  multitable-automation-interval-minutes \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
   multitable-automation-rule-editor \
