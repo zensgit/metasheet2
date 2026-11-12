@@ -512,6 +512,8 @@ exec_pg() {
         if [[ "${H_ABORT_ON:-}" == "dump" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
         case "${H_DUMP_MODE:-ok}" in
           ok) printf 'PGDMP harness archive\n' ;;
+          # slow: the dump runs past one heartbeat interval of the window (30 s on the scaled clock).
+          slow) printf 'PGDMP harness archive\n'; /bin/sleep 3 ;;
           empty) : ;;
           fail) echo "pg_dump: error: harness" >&2; exit 1 ;;
           timeout) printf 'PGDMP partial'; exit 124 ;;

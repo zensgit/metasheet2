@@ -492,6 +492,10 @@ jobs:
           DEPLOY_REPO_PATH="${DEPLOY_REPO_PATH:-}"
 
           wlog() { printf '[deploy-window] %s\n' "$*"; }
+          # hlog: host-only detail (the running version, migration names, ledger counts, sizes).
+          # window-detail.log stays in the run directory (mode 600); the public log, the step
+          # summary, the uploaded artifact and the status step never read it.
+          hlog() { printf '%s\n' "$*" >> "${RUN_DIR}/window-detail.log" 2>/dev/null || true; }
           werr() { printf '[deploy-window][error] %s\n' "$*"; }
           fail() { werr "$*"; exit 1; }
 
@@ -659,13 +663,14 @@ jobs:
             if [[ "$root_mnt" == "$run_mnt" ]]; then
               need="$need_root"
               if (( need_run > need )); then need="$need_run"; fi
-              wlog "disk gate=${label} filesystems=1 free_kb=${run_free} need_kb=${need}"
-              if (( run_free < need )); then fail "disk gate ${label}: free_kb=${run_free} < need_kb=${need}"; fi
+              hlog "disk gate=${label} filesystems=1 free_kb=${run_free} need_kb=${need}"
+              if (( run_free < need )); then wlog "disk_gate=fail at=${label}"; fail "disk gate ${label}: not enough free space (sizes in the host detail log)"; fi
             else
-              wlog "disk gate=${label} filesystems=2 docker_root_free_kb=${root_free} docker_root_need_kb=${need_root} run_dir_free_kb=${run_free} run_dir_need_kb=${need_run}"
-              if (( root_free < need_root )); then fail "disk gate ${label}: Docker root free_kb=${root_free} < need_kb=${need_root}"; fi
-              if (( run_free < need_run )); then fail "disk gate ${label}: run directory free_kb=${run_free} < need_kb=${need_run}"; fi
+              hlog "disk gate=${label} filesystems=2 docker_root_free_kb=${root_free} docker_root_need_kb=${need_root} run_dir_free_kb=${run_free} run_dir_need_kb=${need_run}"
+              if (( root_free < need_root )); then wlog "disk_gate=fail at=${label}"; fail "disk gate ${label}: not enough free space on the Docker root (sizes in the host detail log)"; fi
+              if (( run_free < need_run )); then wlog "disk_gate=fail at=${label}"; fail "disk gate ${label}: not enough free space for the run directory (sizes in the host detail log)"; fi
             fi
+            wlog "disk_gate=ok at=${label}"
           }
 
           # Background helpers run with fd 9 (the window lock) closed, so an orphaned helper can
@@ -691,7 +696,8 @@ jobs:
               if [[ -n "$file" && -f "$file" ]]; then
                 bytes="$(wc -c < "$file" | tr -d '[:space:]')"
               fi
-              wlog "heartbeat phase=${label} elapsed_s=$(( $(date +%s) - start )) bytes=${bytes}"
+              wlog "heartbeat phase=${label} elapsed_s=$(( $(date +%s) - start ))"
+              hlog "heartbeat phase=${label} bytes=${bytes}"
             done
           }
           stop_helpers() {
@@ -796,7 +802,7 @@ jobs:
             for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
               if grep -qxF -- "$name" "$names"; then excluded_absent=0; fi
             done
-            wlog "ledger now=${count} before=${w_ledger_before} inplay=${w_inplay}" >&2
+            hlog "ledger now=${count} before=${w_ledger_before} inplay=${w_inplay}"
             if [[ "$excluded_absent" != "1" ]]; then
               printf 'other\n'
             elif (( w_inplay == 0 )) && (( count == w_ledger_before )); then
@@ -923,7 +929,8 @@ jobs:
               terminal needs-owner 72
               return 0
             fi
-            wlog "old version restarted backend_commit=${w_old_backend_rev} web_commit=${w_old_web_rev}"
+            hlog "old version restarted backend_commit=${w_old_backend_rev} web_commit=${w_old_web_rev}"
+            wlog "old version restarted revision=match"
             terminal done-restored-old 71
           }
 
@@ -1183,7 +1190,7 @@ jobs:
             dump_count=$((dump_count + 1))
             dump_bytes=$(( dump_bytes + $(wc -c < "$dump") ))
           done
-          wlog "retained_dumps count=${dump_count} bytes=${dump_bytes}"
+          hlog "retained_dumps count=${dump_count} bytes=${dump_bytes}"
           WINDOW_CORE
           remote_cmds+=(
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
@@ -1296,7 +1303,8 @@ jobs:
           if [[ -z "$running_backend_commit" || "$running_backend_commit" != "$w_old_backend_rev" ]]; then
             fail "running backend /health build.commit does not equal its image revision label"
           fi
-          wlog "running_backend_commit=${running_backend_commit}"
+          hlog "running_backend_commit=${running_backend_commit}"
+          wlog "running_backend_commit=match"
           if [[ -f docker/app.env ]] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(MIGRATION_EXCLUDE|MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL|ALLOW_DB_RESET)[[:space:]]*=' docker/app.env; then
             fail "docker/app.env sets MIGRATION_EXCLUDE, MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL or ALLOW_DB_RESET; remove the key first"
           fi
@@ -1460,8 +1468,9 @@ jobs:
           w_id_web="$(ctr_get metasheet-web '{{.Id}}')" || fail "cannot read the web container id"
           old_backend_digest="$(timeout 30 docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$w_old_backend_image_id" 2>>"${RUN_DIR}/docker.err" | awk 'NF && !seen { print; seen = 1 }' || true)"
           old_web_digest="$(timeout 30 docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$w_old_web_image_id" 2>>"${RUN_DIR}/docker.err" | awk 'NF && !seen { print; seen = 1 }' || true)"
-          wlog "old_backend_image=${w_old_backend_image}@${old_backend_digest##*@} revision=${w_old_backend_rev}"
-          wlog "old_web_image=${w_old_web_image}@${old_web_digest##*@} revision=${w_old_web_rev}"
+          hlog "old_backend_image=${w_old_backend_image}@${old_backend_digest##*@} revision=${w_old_backend_rev} image_id=${w_old_backend_image_id}"
+          hlog "old_web_image=${w_old_web_image}@${old_web_digest##*@} revision=${w_old_web_rev} image_id=${w_old_web_image_id}"
+          wlog "old_images recorded=ok"
           state_write
           # ---- phase 0.11: app data in the backend's writable layer (read-only probe) ----
           for key in ATTACHMENT_PATH STORAGE_PATH; do
@@ -1533,7 +1542,8 @@ jobs:
             w_appdata_kb="$(timeout 300 docker exec metasheet-backend du -skx "${appdata_paths[@]}" 2>>"${RUN_DIR}/docker.err" | awk '{ s += $1 } END { printf "%.0f\n", s }')" \
               || fail "app data probe: du failed"
           fi
-          wlog "appdata paths=${#appdata_paths[@]} files=${w_appdata_files} bytes=${appdata_bytes} kb=${w_appdata_kb}"
+          hlog "appdata paths=${#appdata_paths[@]} files=${w_appdata_files} bytes=${appdata_bytes} kb=${w_appdata_kb}"
+          if (( w_appdata_files > 0 )); then wlog "appdata probe=ok copy=needed"; else wlog "appdata probe=ok copy=none"; fi
           WINDOW_PHASE0B
           remote_cmds+=(
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
@@ -1585,7 +1595,7 @@ jobs:
           db_bytes="$(pg_sql 'SELECT pg_database_size(current_database())')" || fail "cannot read the database size"
           [[ "$db_bytes" =~ ^[0-9]+$ ]] || fail "database size is not an integer"
           db_kb=$(( (db_bytes + 1023) / 1024 ))
-          wlog "database_kb=${db_kb} appdata_kb=${w_appdata_kb} retained_dumps=${dump_count} retained_dump_bytes=${dump_bytes}"
+          hlog "database_kb=${db_kb} appdata_kb=${w_appdata_kb} retained_dumps=${dump_count} retained_dump_bytes=${dump_bytes}"
           disk_gate post-pull "$DEPLOY_WINDOW_RESERVE_KB" "$(( db_kb + w_appdata_kb + DEPLOY_WINDOW_RESERVE_KB ))"
           # ---- phase 1.5: ledger baseline ----
           L0="$(pg_sql 'SELECT count(*) FROM kysely_migration')" || fail "cannot read kysely_migration"
@@ -1593,11 +1603,17 @@ jobs:
           pg_sql 'SELECT name FROM kysely_migration ORDER BY name' > "${RUN_DIR}/ledger-before.txt" || fail "cannot read kysely_migration names"
           for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
             if grep -qxF -- "$name" "${RUN_DIR}/ledger-before.txt"; then
-              fail "excluded migration ${name} is already applied; the exclusion is stale"
+              hlog "exclusion_proof applied_already=${name}"
+              wlog "exclusion_proof=fail"
+              fail "an excluded migration is already applied; the exclusion is stale (name in the host detail log)"
             fi
           done
           excluded_present="$(excluded_tables_present)" || fail "cannot check the excluded tables"
-          [[ "$excluded_present" == "0" ]] || fail "excluded tables exist (count=${excluded_present})"
+          if [[ "$excluded_present" != "0" ]]; then
+            hlog "exclusion_proof excluded_tables_present=${excluded_present}"
+            wlog "exclusion_proof=fail"
+            fail "excluded tables already exist"
+          fi
           w_ledger_before="$L0"
           state_write
           # ---- phase 1.6: effective env and pending list from the NEW image (read-only one-off) ----
@@ -1605,11 +1621,19 @@ jobs:
           IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 120 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-list-${WINDOW_RUN}" -e "APP_NAME=metasheet-window-list-${WINDOW_RUN}" backend sh -c '[ -z "${MIGRATION_EXCLUDE+x}" ] && [ -z "${MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL+x}" ] && [ -z "${ALLOW_DB_RESET+x}" ] && exec node packages/core-backend/dist/src/db/migrate.js --list' </dev/null >"${RUN_DIR}/list-before.out" 2>&1 || list_rc=$?
           [[ "$list_rc" == "0" ]] || fail "migrate --list in the new image failed rc=${list_rc} (env guard or DB error; output kept on the host)"
           parse_list "${RUN_DIR}/list-before.out" "${RUN_DIR}/pending-all.txt" || fail "migrate --list output could not be parsed"
-          [[ "$list_applied" == "$L0" ]] || fail "migrate --list Applied=${list_applied} differs from the ledger count ${L0}"
+          if [[ "$list_applied" != "$L0" ]]; then
+            hlog "list applied=${list_applied} ledger=${L0}"
+            fail "migrate --list Applied differs from the ledger count (counts in the host detail log)"
+          fi
           # ---- phase 1.7: exclusion proof ----
           for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
-            grep -qxF -- "$name" "${RUN_DIR}/pending-all.txt" || fail "excluded migration ${name} is not pending in this image"
+            if ! grep -qxF -- "$name" "${RUN_DIR}/pending-all.txt"; then
+              hlog "exclusion_proof not_pending=${name}"
+              wlog "exclusion_proof=fail"
+              fail "an excluded migration is not pending in this image (name in the host detail log)"
+            fi
           done
+          wlog "exclusion_proof=ok"
           # ---- phase 1.8: approved in-play set ----
           : > "${RUN_DIR}/inplay.txt"
           while IFS= read -r name; do
@@ -1620,11 +1644,15 @@ jobs:
           # sha256 of the in-play names joined by "\n" in --list load order, without a trailing newline.
           inplay_sha256="$(printf '%s' "$(cat "${RUN_DIR}/inplay.txt")" | sha256_stdin)"
           while IFS= read -r name; do
-            wlog "inplay name=${name}"
+            hlog "inplay name=${name}"
           done < "${RUN_DIR}/inplay.txt"
-          wlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} inplay_sha256=${inplay_sha256}"
+          hlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} inplay_sha256=${inplay_sha256}"
           state_write
-          [[ "$inplay_sha256" == "$EXPECTED_PENDING_SHA256" ]] || fail "in-play pending set sha256 differs from expected_pending_sha256; the set was not rehearsed"
+          if [[ "$inplay_sha256" != "$EXPECTED_PENDING_SHA256" ]]; then
+            wlog "pending_set=mismatch"
+            fail "in-play pending set sha256 differs from expected_pending_sha256; the set was not rehearsed"
+          fi
+          wlog "pending_set=match"
           if [[ "${DRILL_FAIL_STAGE}" == "migrate" ]]; then
             w_drill_rc=92
             echo "[deploy][drill] intentional failure at migrate stage (before anything is stopped)"
@@ -1686,7 +1714,8 @@ jobs:
             read -r w_appdata_tar_files w_appdata_tar_bytes <<< "$(awk '/^-/ { n++; b += $3 } END { printf "%d %.0f\n", n, b }' "${RUN_DIR}/appdata.list")"
             appdata_sha256="$(sha256_file "${RUN_DIR}/appdata.tar")"
             w_appdata_copied=1
-            wlog "appdata copy files=${w_appdata_tar_files} bytes=${w_appdata_tar_bytes} sha256=${appdata_sha256} file=appdata.tar"
+            hlog "appdata copy files=${w_appdata_tar_files} bytes=${w_appdata_tar_bytes}"
+            wlog "appdata copy=ok sha256=${appdata_sha256} file=appdata.tar"
           fi
           timeout 90 docker stop -t 60 metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker stop metasheet-backend failed"
           wlog "backend stopped"
@@ -1742,6 +1771,7 @@ jobs:
           chmod 600 "${RUN_DIR}/db.dump"
           [[ "$(pg_sql 'SELECT count(*) FROM kysely_migration' || true)" == "$L0" ]] || fail "the ledger changed during the backup"
           backup_free="$(min_free_kb || true)"
+          hlog "after_backup free_kb=${backup_free:-unreadable}"
           [[ "$backup_free" =~ ^[0-9]+$ ]] && (( backup_free >= DEPLOY_WINDOW_RESERVE_KB )) || fail "free space after the backup is below DEPLOY_WINDOW_RESERVE_KB"
           pg_sql 'SELECT pg_catalog.quote_ident(n.nspname) || '\''.'\'' || pg_catalog.quote_ident(p.proname) || '\''('\'' || pg_catalog.pg_get_function_identity_arguments(p.oid) || '\'')'\'' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang WHERE n.nspname = '\''public'\'' AND p.prokind = '\''f'\'' AND l.lanname IN ('\''sql'\'', '\''plpgsql'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid OPERATOR(pg_catalog.=) '\''pg_catalog.pg_proc'\''::pg_catalog.regclass AND d.objid = p.oid AND d.deptype = '\''e'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE '\''search_path=%'\'') ORDER BY 1;' \
             > "${RUN_DIR}/shim-candidates.txt" || fail "cannot save the search_path shim candidate list"
@@ -1769,7 +1799,8 @@ jobs:
           - meta.txt holds the sha256, byte count, ledger count and image digests of this run.
           - appdata.tar (if present) holds the backend's local attachment/upload files from before the stop.
           RESTORE_README
-          wlog "backup ok sha256=${dump_sha256} bytes=${dump_size} toc_entries=${toc_entries} file=db.dump"
+          hlog "backup bytes=${dump_size} toc_entries=${toc_entries}"
+          wlog "backup ok sha256=${dump_sha256} file=db.dump"
           set_phase backed-up
           wait_sessions_zero 30 after-backup || fail "a database session is still connected after the backup"
           check_abort after-backup
@@ -1797,18 +1828,17 @@ jobs:
           wait "$w_job_pid" || migrate_rc=$?
           w_job_pid=""
           w_migrate_rc="$migrate_rc"
-          # Public log: only the two migrate.js result lines and SQLSTATEs; the raw output stays on the host.
-          grep -E '^(migration "[A-Za-z0-9_.-]+" was executed successfully|failed to execute migration "[A-Za-z0-9_.-]+")$' "${RUN_DIR}/migrate.out" || true
-          sqlstates="$(grep -oE "code: '[0-9A-Z]{5}'" "${RUN_DIR}/migrate.out" || true)"
-          while IFS= read -r sqlstate; do
-            if [[ -n "$sqlstate" ]]; then wlog "migrate sqlstate=${sqlstate:7:5}"; fi
-          done <<< "$sqlstates"
-          wlog "migrate rc=${w_migrate_rc}"
+          # Public log: the exit code and the first SQLSTATE only. The per-migration result lines of
+          # migrate.js go to the host detail log; the raw output stays in migrate.out on the host.
+          grep -E '^(migration "[A-Za-z0-9_.-]+" was executed successfully|failed to execute migration "[A-Za-z0-9_.-]+")$' "${RUN_DIR}/migrate.out" >> "${RUN_DIR}/window-detail.log" || true
+          sqlstate="$(grep -oE "code: '[0-9A-Z]{5}'" "${RUN_DIR}/migrate.out" | sed -n '1s/^code: .\([0-9A-Z]\{5\}\).$/\1/p' || true)"
+          wlog "migrate rc=${w_migrate_rc} sqlstate=${sqlstate:-none}"
           if [[ "$w_migrate_rc" == "0" ]]; then
             w_resolve_result="$(classify_ledger)"
             if [[ "$w_resolve_result" == "unchanged" ]]; then w_resolve_result="committed"; fi
             if [[ "$w_resolve_result" != "committed" ]]; then
               w_resolve_result="other"
+              wlog "ledger=other"
               fail "migrate exited 0 but the ledger is not L0 + n with the in-play names"
             fi
           else
@@ -1818,7 +1848,7 @@ jobs:
             fi
             wlog "migrate rc!=0 but ledger committed"
           fi
-          wlog "MIGRATE COMMITTED ledger=$(( L0 + w_inplay ))"
+          wlog "MIGRATE COMMITTED ledger=committed"
           set_phase committed
           ensure_env_new || fail ".env does not name the new image after the commit"
           # Post-commit checks: any mismatch ends with rc 74 and nothing started.
@@ -1826,19 +1856,24 @@ jobs:
           IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 120 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-postlist-${WINDOW_RUN}" -e "APP_NAME=metasheet-window-postlist-${WINDOW_RUN}" backend sh -c '[ -z "${MIGRATION_EXCLUDE+x}" ] && [ -z "${MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL+x}" ] && [ -z "${ALLOW_DB_RESET+x}" ] && exec node packages/core-backend/dist/src/db/migrate.js --list' </dev/null >"${RUN_DIR}/list-after.out" 2>&1 || post_list_rc=$?
           [[ "$post_list_rc" == "0" ]] || fail "post-commit migrate --list failed rc=${post_list_rc}"
           parse_list "${RUN_DIR}/list-after.out" "${RUN_DIR}/pending-after.txt" || fail "post-commit migrate --list output could not be parsed"
-          [[ "$list_pending" == "${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]}" ]] || fail "post-commit Pending=${list_pending} is not the excluded count"
-          while IFS= read -r name; do
-            if [[ -n "$name" ]] && ! is_excluded "$name"; then fail "post-commit: ${name} is still pending"; fi
-          done < "${RUN_DIR}/pending-after.txt"
           ledger_after="$(pg_sql 'SELECT count(*) FROM kysely_migration' || true)"
-          [[ "$list_applied" == "$(( L0 + w_inplay ))" && "$ledger_after" == "$(( L0 + w_inplay ))" ]] || fail "post-commit Applied=${list_applied} ledger=${ledger_after} differ from L0 + n"
+          hlog "post-commit list applied=${list_applied} pending=${list_pending} ledger=${ledger_after}"
+          [[ "$list_pending" == "${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]}" ]] || fail "post-commit Pending is not the excluded count (counts in the host detail log)"
+          while IFS= read -r name; do
+            if [[ -n "$name" ]] && ! is_excluded "$name"; then
+              hlog "post-commit still_pending=${name}"
+              fail "post-commit: a non-excluded migration is still pending (name in the host detail log)"
+            fi
+          done < "${RUN_DIR}/pending-after.txt"
+          [[ "$list_applied" == "$(( L0 + w_inplay ))" && "$ledger_after" == "$(( L0 + w_inplay ))" ]] || fail "post-commit Applied or the ledger count differs from L0 + n (counts in the host detail log)"
           pg_sql 'SELECT name FROM kysely_migration ORDER BY name' > "${RUN_DIR}/ledger-final.txt" || fail "cannot read kysely_migration names after the commit"
           for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
-            if grep -qxF -- "$name" "${RUN_DIR}/ledger-final.txt"; then fail "excluded migration ${name} was applied"; fi
+            if grep -qxF -- "$name" "${RUN_DIR}/ledger-final.txt"; then fail "an excluded migration was applied"; fi
           done
           excluded_present="$(excluded_tables_present || true)"
           [[ "$excluded_present" == "0" ]] || fail "excluded tables exist after the migration"
-          wlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} after=${ledger_after}"
+          hlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} after=${ledger_after}"
+          wlog "ledger=committed post_commit_checks=ok"
           echo "=== MIGRATE END ==="
 
           # ---- phase 5: start the new version (backend first, web only after it is verified) ----
@@ -1862,9 +1897,12 @@ jobs:
             timeout 600 docker cp - metasheet-backend:/ <"${RUN_DIR}/appdata.tar" >>"${RUN_DIR}/compose-up.out" 2>&1 || fail "docker cp of the app data into the new backend failed"
             wlog "appdata copied into the new backend before its first start"
             read -r readback_files readback_bytes <<< "$(appdata_read_back || true)"
-            wlog "appdata read_back files=${readback_files:-unreadable} bytes=${readback_bytes:-unreadable}"
-            [[ "$readback_files" == "$w_appdata_tar_files" && "$readback_bytes" == "$w_appdata_tar_bytes" ]] \
-              || fail "app data read back from the created backend does not match the copy-out record"
+            hlog "appdata read_back files=${readback_files:-unreadable} bytes=${readback_bytes:-unreadable}"
+            if [[ "$readback_files" != "$w_appdata_tar_files" || "$readback_bytes" != "$w_appdata_tar_bytes" ]]; then
+              wlog "appdata read_back=mismatch"
+              fail "app data read back from the created backend does not match the copy-out record"
+            fi
+            wlog "appdata read_back=match"
           fi
           backend_start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           timeout 60 docker start metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker start of the new backend failed"
@@ -1884,15 +1922,16 @@ jobs:
           done
           if [[ "$w_appdata_copied" == "1" ]]; then
             read -r new_appdata_files new_appdata_bytes <<< "$(appdata_measure || true)"
-            wlog "appdata after_start files=${new_appdata_files:-unreadable} bytes=${new_appdata_bytes:-unreadable}"
+            hlog "appdata after_start files=${new_appdata_files:-unreadable} bytes=${new_appdata_bytes:-unreadable}"
             # The copy was verified before the start. After it, fewer files are accepted: the new
             # backend's own attachment cleanup may delete expired drafts as soon as it listens.
             if [[ "$new_appdata_files" == "$w_appdata_tar_files" && "$new_appdata_bytes" == "$w_appdata_tar_bytes" ]]; then
-              :
+              wlog "appdata after_start=match"
             elif [[ "$new_appdata_files" =~ ^[0-9]+$ && "$new_appdata_bytes" =~ ^[0-9]+$ ]] \
               && (( new_appdata_files < w_appdata_tar_files && new_appdata_bytes <= w_appdata_tar_bytes )); then
               wlog "appdata after_start has fewer files than the copy; accepted (cleanup by the new backend)"
             else
+              wlog "appdata after_start=mismatch"
               fail "app data in the new backend does not match the copy-out record"
             fi
           fi
@@ -2233,7 +2272,8 @@ jobs:
           status_run_dir="${status_home}/runs/${WINDOW_RUN}"
           echo "[deploy-status] read-only host state for run=${WINDOW_RUN} read_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if [ -r "${status_home}/state" ]; then
-            sed -n -E 's#^([a-z_]+=[A-Za-z0-9@:._/+-]*)$#[deploy-status] state \1#p' "${status_home}/state"
+            # Only these keys: the rest of state (old image names and ids, ledger counts) stays on the host.
+            sed -n -E 's#^((phase|rc|raw_rc|env_written|backend_verified|web_verified|updated_utc)=[A-Za-z0-9@:._/+-]*)$#[deploy-status] state \1#p' "${status_home}/state"
           else
             echo "[deploy-status] state absent"
           fi
@@ -2512,12 +2552,13 @@ jobs:
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "- Outcome: \`${window_outcome:-unknown}\` (rc \`${DEPLOY_RC:-missing}\`, raw_rc \`${window_raw_rc:-unknown}\`)" >> "$GITHUB_STEP_SUMMARY"
             echo "- restore_proof: \`${RESTORE_PROOF:-unselected}\`; pre_commit_abort: \`${PRE_COMMIT_ABORT:-unselected}\`" >> "$GITHUB_STEP_SUMMARY"
-            for window_key in "ledger before=" "backup ok " "old_backend_image=" "old_web_image=" "disk gate=post-pull" "retained_dumps " "host_check phase=pre-stop" "MIGRATE COMMITTED"; do
+            for window_key in "running_backend_commit=" "pending_set=" "exclusion_proof=" "disk_gate=" "backup ok " "host_check phase=pre-stop" "MIGRATE COMMITTED" "ledger="; do
               window_found="$(window_line "$window_key")"
               if [[ -n "${window_found}" ]]; then
                 echo "- \`${window_found}\`" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
+            echo "- Versions, migration names, counts and sizes of this run are not printed here: they are in the run directory on the deploy host (window-detail.log, state, meta.txt and the raw tool outputs)." >> "$GITHUB_STEP_SUMMARY"
             echo "- Last env_written seen in the log: \`${window_env_written:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -2628,7 +2669,7 @@ jobs:
                 case "${DEPLOY_RC:-}" in
                   73|74|76|255|"")
                     echo "- The migration may have committed, whatever env_written says: do NOT start the old containers; do NOT run scripts/ops/deploy-attendance-prod.sh or the env-reconcile workflow; do not run a bare docker compose up. This holds until the owner has read the ledger (see the runbook: fix forward, or a pre-commit case only when kysely_migration reads the run's ledger before count with no in-play name present)."
-                    if [[ -f "$deploy_log" ]] && grep -qF '[deploy-window] appdata copy files=' "$deploy_log"; then
+                    if [[ -f "$deploy_log" ]] && grep -qF '[deploy-window] appdata copy=ok ' "$deploy_log"; then
                       echo "- App data: this run copied the backend's local files to appdata.tar in its run directory on the host. Every newly created backend container gets it before its first start (see the runbook); keep that run directory."
                     fi
                     ;;

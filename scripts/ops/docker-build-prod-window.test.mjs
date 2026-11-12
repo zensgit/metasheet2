@@ -46,6 +46,9 @@ const INPLAY = Array.from({ length: 5 }, (_, i) => `zzzz2026110${i + 1}120000_ha
 const IMAGE_MIGRATIONS = [...BASE_MIGRATIONS, EXCLUDED, ...INPLAY]
 const sha256 = (text) => createHash('sha256').update(text).digest('hex')
 const INPLAY_SHA = sha256(INPLAY.join('\n'))
+// A distinctive database size for the worlds that check what the public outputs carry.
+const DB_BYTES = '987654321'
+const DB_KB = String(Math.ceil(Number(DB_BYTES) / 1024))
 // Wednesday 2026-11-11 12:00 UTC: no blocking entry of the quiet schedule within 90 minutes.
 const QUIET_EPOCH = Date.UTC(2026, 10, 11, 12, 0, 0) / 1000
 // Wednesday 2026-11-11 01:40 UTC: the 02:05 entry falls inside [now, now + 90 min].
@@ -544,10 +547,11 @@ function checkHappy(r, { appdata }) {
   assertOrdered(['=== WINDOW PREFLIGHT START ===', '=== WINDOW PREFLIGHT END ===', '=== STOP WRITES START ===', '=== STOP WRITES END ===',
     '=== BACKUP START ===', '=== BACKUP END ===', '=== MIGRATE START ===', '=== MIGRATE END ===', '=== DEPLOY START ===',
     '=== DEPLOY END ===', '=== VERSION VERIFY END ==='].map((marker) => [marker, r.deployLog.indexOf(marker)]))
-  assert.match(r.deployLog, /\[deploy-window\] backup ok sha256=[0-9a-f]{64} bytes=\d+ toc_entries=\d+ file=db\.dump/)
+  assert.match(r.deployLog, /^\[deploy-window\] backup ok sha256=[0-9a-f]{64} file=db\.dump$/m)
+  assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^backup bytes=\d+ toc_entries=\d+$/m, 'dump size and TOC count stay in the host detail log')
   // Backup set beside the dump, host only: run dir 700, files 600; env snapshot taken before the rewrite.
   assert.equal(statSync(r.runDir).mode & 0o777, 0o700)
-  for (const file of ['db.dump', 'meta.txt', 'globals.sql', 'shim-candidates.txt', 'RESTORE-README.txt', 'migrate.out']) {
+  for (const file of ['db.dump', 'meta.txt', 'globals.sql', 'shim-candidates.txt', 'RESTORE-README.txt', 'migrate.out', 'window-detail.log']) {
     assert.ok(existsSync(path.join(r.runDir, file)), `${file} kept on the host`)
     assert.equal(statSync(path.join(r.runDir, file)).mode & 0o077, 0, `${file} is private to the deploy user`)
   }
@@ -672,6 +676,39 @@ function checkSummaryTail(text) {
   assert.equal(text.split('\n').filter((line) => REMINDER.test(line)).length, 1, 'the reminder appears once')
 }
 
+// Production state before the deploy stays in host files: deploy.log, the step summary and the
+// status output carry no old commit, image id or digest, no in-play or excluded migration name,
+// no database size and no ledger count (L0, L0 + n) in a key=value or migrate --list form.
+const OLD_STATE_VALUES = [SHA_OLD, '1'.repeat(64), '3'.repeat(64), 'sha256:oldbackendimage', 'sha256:oldwebimage', ...INPLAY, EXCLUDED, DB_BYTES, DB_KB]
+const LEDGER_COUNTS = new Set([String(BASE_MIGRATIONS.length), String(BASE_MIGRATIONS.length + INPLAY.length)])
+function assertNoPreDeployState(label, text) {
+  for (const value of OLD_STATE_VALUES) assert.ok(!text.includes(value), `${label} must not carry ${value}`)
+  assert.doesNotMatch(text, /\b(Applied|Pending): \d/, `${label}: no migrate --list counts`)
+  assert.doesNotMatch(text, /\b(ledger|before|after|now|inplay|L0)[=:] ?\d/i, `${label}: no ledger count`)
+  assert.doesNotMatch(text, /\b(bytes|[a-z_]*kb)=\d/, `${label}: no size measured on the host`)
+  for (const [, key, value] of text.matchAll(/([A-Za-z_]+)=(\d+)\b/g)) {
+    assert.ok(!LEDGER_COUNTS.has(value) || ['rc', 'raw_rc', 'elapsed_s'].includes(key), `${label}: ${key}=${value} looks like a ledger count`)
+  }
+}
+// Runs the summary and the status step on a finished window and checks all three public outputs;
+// control: the host detail log does hold the values.
+async function checkPublicOutputs(world, r, { drill = 'none', reachedInplay = true } = {}) {
+  const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc, drill })
+  const status = await runStatus(world, r.runId)
+  for (const [label, text] of [['deploy.log', r.deployLog], ['step summary', summary], ['status output', status]]) assertNoPreDeployState(label, text)
+  const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+  assert.ok(detail.includes(`running_backend_commit=${SHA_OLD}`), 'control: the detail log holds the running commit')
+  assert.ok(detail.includes('sha256:oldbackendimage'), 'control: the detail log holds the old image id')
+  if (reachedInplay) {
+    assert.ok(detail.includes(`inplay name=${INPLAY[0]}`), 'control: the detail log holds the in-play names')
+    assert.ok(detail.includes(`database_kb=${DB_KB}`), 'control: the detail log holds the database size')
+    assert.match(detail, new RegExp(`^ledger before=${BASE_MIGRATIONS.length} inplay=${INPLAY.length} `, 'm'), 'control: the detail log holds the ledger count')
+  }
+  assert.equal(statSync(path.join(r.runDir, 'window-detail.log')).mode & 0o077, 0, 'the detail log is private to the deploy user')
+  assert.match(status, /^\[deploy-status\] state phase=/m, 'the status step still prints the phase')
+  return { summary, status }
+}
+
 // ---------- scenarios ----------
 const CONCURRENCY = Number(process.env.HARNESS_CONCURRENCY) || Math.max(2, Math.min(6, os.availableParallelism?.() ?? os.cpus().length))
 
@@ -680,7 +717,21 @@ describe('production deploy window: remote_deploy step run against test doubles'
 
   scenario('1 happy path with app data: full order, IMAGE_TAG on every compose call, .env written at the commit', async (t) => {
     const world = makeWorld(t, { appdata: true })
-    checkHappy(await runWindow(t, world), { appdata: true })
+    const r = await runWindow(t, world, { env: { H_DB_BYTES: DB_BYTES, H_DUMP_MODE: 'slow' } })
+    checkHappy(r, { appdata: true })
+    const { summary } = await checkPublicOutputs(world, r)
+    // The slow dump outlasts a heartbeat interval: its progress line carries no size.
+    assert.match(r.deployLog, /^\[deploy-window\] heartbeat phase=backup elapsed_s=\d+$/m)
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^heartbeat phase=backup bytes=\d+$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] pending_set=match$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] exclusion_proof=ok$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] migrate rc=0 sqlstate=none$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] ledger=committed post_commit_checks=ok$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] appdata copy=ok sha256=[0-9a-f]{64} file=appdata\.tar$/m)
+    assert.match(summary, /^- `pending_set=match`$/m)
+    assert.match(summary, /window-detail\.log/)
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), new RegExp(`^migration "${INPLAY[0]}" was executed successfully$`, 'm'),
+      'the per-migration lines are in the host detail log')
   })
 
   scenario('1 happy path without app data: no copy-out, no copy-in', async (t) => {
@@ -771,8 +822,11 @@ describe('production deploy window: remote_deploy step run against test doubles'
 
   scenario('5 migrate rc 1 with the ledger at L0 -> 71: env restored before the old start, no up', async (t) => {
     const world = makeWorld(t)
-    const r = await runWindow(t, world, { env: { H_MIGRATE: 'fail-rollback' } })
+    const r = await runWindow(t, world, { env: { H_MIGRATE: 'fail-rollback', H_DB_BYTES: DB_BYTES } })
     checkRestoredOld(r)
+    await checkPublicOutputs(world, r)
+    assert.match(r.deployLog, /^\[deploy-window\] old version restarted revision=match$/m)
+    assert.ok(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8').includes(`old version restarted backend_commit=${SHA_OLD} web_commit=${SHA_OLD}`))
     assert.ok(first(r, isLatest) >= 0)
     assert.ok(firstIndex(r, isStart('metasheet-backend')) > firstIndex(r, isLatest))
     assert.doesNotMatch(r.windowLog, /command not found/, 'fetch_json_with_retry is defined when the old version is verified')
@@ -833,8 +887,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
   })
 
   scenario('10 new backend health fails -> 73: backend stopped not removed, web never upped, no old start', async (t) => {
-    const world = makeWorld(t)
-    const r = await runWindow(t, world, { env: { H_NEW_HEALTH_FAIL: '1' } })
+    const world = makeWorld(t, { appdata: true })
+    const r = await runWindow(t, world, { env: { H_NEW_HEALTH_FAIL: '1', H_DB_BYTES: DB_BYTES } })
+    await checkPublicOutputs(world, r)
     assertCommon(r, 73)
     assert.equal(r.state.phase, 'needs-owner')
     const starts = r.docker.filter((call) => /^start /.test(call.args))
@@ -898,7 +953,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const log = (...lines) => ['=== WINDOW PREFLIGHT START ===', ...lines, ''].join('\n')
     const state = (phase, envWritten) => `[deploy-window] state phase=${phase} env_written=${envWritten} backend_verified=0 web_verified=0`
     const outcome = (rc) => `[deploy-window] outcome=needs-owner rc=${rc} raw_rc=1`
-    const appdata = '[deploy-window] appdata copy files=2 bytes=16 sha256=' + '0'.repeat(64) + ' file=appdata.tar'
+    const appdata = '[deploy-window] appdata copy=ok sha256=' + '0'.repeat(64) + ' file=appdata.tar'
     const cases = [
       ['sync refused 75', { syncRc: '75', deployLog: null }, { syncRefused: true }],
       ['sync failed 1', { syncRc: '1', deployLog: null }, {}],
@@ -1014,8 +1069,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
   for (const [drill, rc] of [['deploy', 91], ['migrate', 92]]) {
     scenario(`13 drill ${drill} -> ${rc}: nothing stopped, env restored`, async (t) => {
       const world = makeWorld(t)
-      const r = await runWindow(t, world, { env: { DRILL_FAIL_STAGE: drill } })
+      const r = await runWindow(t, world, { env: { DRILL_FAIL_STAGE: drill, H_DB_BYTES: DB_BYTES } })
       checkRefused(r, rc)
+      await checkPublicOutputs(world, r, { drill })
       // The migrate drill fires right after the in-play check, the deploy drill after the drain probe.
       assert.deepEqual(r.hostChecks, drill === 'deploy' ? ['pre-stop'] : [])
       assert.ok(any(r, isList))
@@ -1090,8 +1146,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(readFileSync(path.join(r.runDir, 'migrate.out'), 'utf8').includes(detail), 'control: the raw output carried the value')
     assert.ok(!r.deployLog.includes(detail), 'absent from deploy.log')
     assert.ok(!r.windowLog.includes(detail), 'absent from window.log')
-    assert.match(r.deployLog, /migrate sqlstate=23505/)
-    assert.match(r.deployLog, /^failed to execute migration "[^"]+"$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] migrate rc=1 sqlstate=23505$/m)
+    assert.doesNotMatch(r.deployLog, /failed to execute migration|was executed successfully/, 'the per-migration lines stay on the host')
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^failed to execute migration "[^"]+"$/m)
   })
 
   scenario('18 app data present, post-start count mismatch -> 73: copy-in before the start, web never upped', async (t) => {
@@ -1118,9 +1175,12 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t, { appdata: true })
     const r = await runWindow(t, world, { env: { H_CLEANUP_ON_START: '1' } })
     checkHappy(r, { appdata: true })
-    assert.match(r.windowLog, /appdata read_back files=2 bytes=16/)
-    assert.match(r.windowLog, /appdata after_start files=1 bytes=11/)
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata read_back files=2 bytes=16$/m)
+    assert.match(detail, /^appdata after_start files=1 bytes=11$/m)
+    assert.match(r.windowLog, /^\[deploy-window\] appdata read_back=match$/m)
     assert.match(r.windowLog, /appdata after_start has fewer files than the copy; accepted/)
+    assert.doesNotMatch(r.windowLog, /files=\d/, 'app-data counts stay in the host detail log')
   })
 
   scenario('app data present and the attendance-import volume holds a file -> the read-back leaves the volume out, done-new', async (t) => {
@@ -1130,7 +1190,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(any(r, (call) => call.args === 'cp metasheet-backend:/app/uploads -'), 'the uploads path is read back too')
     assert.match(readFileSync(path.join(r.runDir, 'appdata.readback.list'), 'utf8'), /uploads\/attendance-import\/org1\/upload\.csv$/m,
       'control: the read-back stream did carry the volume file')
-    assert.match(r.windowLog, /appdata read_back files=2 bytes=16/)
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^appdata read_back files=2 bytes=16$/m)
   })
 
   scenario('app data present with the attendance-import volume, the read-back misses a file outside it -> 73: never started', async (t) => {
@@ -1472,12 +1532,14 @@ describe('production deploy window: remote_deploy step run against test doubles'
   })
 
   scenario('read-only status step on a host with no run directory: absent lines, only key=value state lines, exit 0', async (t) => {
-    const state = `phase=needs-owner\nnote=$(touch x) with spaces\nenv_written=new\nsha=${SHA_NEW}\n`
+    const state = `phase=needs-owner\nnote=$(touch x) with spaces\nenv_written=new\nsha=${SHA_NEW}\nold_backend_image=ghcr.io/zensgit/metasheet2-backend:${SHA_OLD}\nledger_before=9\nrc=73\n`
     const world = makeWorld(t, { state })
     const status = await runStatus(world, '424242')
     assert.match(status, /^\[deploy-status\] state phase=needs-owner$/m)
     assert.match(status, /^\[deploy-status\] state env_written=new$/m)
-    assert.match(status, new RegExp(`^\\[deploy-status\\] state sha=${SHA_NEW}$`, 'm'))
+    assert.match(status, /^\[deploy-status\] state rc=73$/m)
+    assert.doesNotMatch(status, /state (sha|old_backend_image|ledger_before)=/, 'only the allowed state keys are printed')
+    assertNoPreDeployState('status output', status)
     assert.doesNotMatch(status, /note=|touch/, 'a line that is not a plain key=value is not printed')
     assert.match(status, /^\[deploy-status\] run rc absent: /m)
     assert.match(status, /^\[deploy-status\] window\.log absent$/m)

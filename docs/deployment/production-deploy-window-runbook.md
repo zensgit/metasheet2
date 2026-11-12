@@ -15,13 +15,32 @@ All host paths below are relative to the deploy user's home directory (`$HOME`).
 | `$HOME/metasheet2-deploy-window/state` | the window's state (`phase=`, `env_written=`, `backend_verified=`, `web_verified=`, `rc=` ...). Only the lock holder writes it |
 | `$HOME/metasheet2-deploy-window/abort` | created by the operator to abort a window before the migration (see below) |
 | `$HOME/metasheet2-deploy-window/host-checks/` | owner-installed host checks: every executable here runs with one argument, the phase (`pre-stop`, `pre-restart-old`, `post-backend`); all must exit 0 and at least `DEPLOY_WINDOW_MIN_HOST_CHECKS` must be present (see "Host checks") |
-| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log`, `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, and raw tool outputs. Host only; never uploaded |
+| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log` (the same lines as the public run log), `window-detail.log` (host-only details, see "Public log and host details"), `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, and raw tool outputs. Host only; never uploaded |
 
 The env snapshots and `globals.sql` hold secrets and password hashes. Keep the run
 directories on the host and prune old dumps by hand; the workflow never deletes a
 verified dump and never prunes. Never prune the run directory of a 73, 74, 76 or 255 run
 while its `appdata.tar` may be the only copy of the backend's local files (see "Fix
 forward after a commit").
+
+### Public log and host details
+
+The run log, the step summary, the uploaded deploy artifact and the read-only status step
+show the dispatched commit, the phases and the outcome, but not the production state before
+the deploy. These details stay on the host, in the run directory's `window-detail.log`
+(mode 600), in `state` and in the raw tool outputs:
+
+- the running and old backend/web commit, image names, ids and digests (public:
+  `running_backend_commit=match`, `old_images recorded=ok`, `old version restarted revision=match`);
+- the in-play migration names, the exclusion-proof details and every ledger count
+  (public: `pending_set=match|mismatch`, `exclusion_proof=ok|fail`,
+  `ledger=committed|other`, `MIGRATE COMMITTED ledger=committed`);
+- the per-migration result lines of `migrate.js` (public: `migrate rc=<n> sqlstate=<code|none>`);
+- database, dump, app-data and free-space sizes (public: `disk_gate=ok|fail`,
+  `backup ok sha256=<hash>`, `appdata copy=ok sha256=<hash>`, `appdata read_back=match|mismatch`).
+
+The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_written`,
+`backend_verified`, `web_verified`, `updated_utc`.
 
 ### Host checks
 
@@ -42,7 +61,7 @@ forward after a commit").
   names minus the committed exclusion list) in `migrate.js --list` load order, joined
   by a newline, **without** a trailing newline. From a rehearsal list file
   `inplay.txt` with one name per line: `printf '%s' "$(cat inplay.txt)" | sha256sum`.
-  Derive it from the rehearsal, never from a refused run's log.
+  Derive it from the rehearsal, never from a refused run's host files.
 - `restore_proof`: `ref:<id>` naming the restore proof, or `waived`. The id is printed in
   the public run log and step summary; use an opaque id that maps to the proof only in
   private records.
@@ -103,8 +122,8 @@ never any other backend).
 
 ## Outcomes
 
-Read first: `$HOME/metasheet2-deploy-window/state`, then the run directory's `rc` and
-`window.log`.
+Read first: `$HOME/metasheet2-deploy-window/state`, then the run directory's `rc`,
+`window.log` and, for counts, names and versions, `window-detail.log`.
 
 Every deploy run ends with the read-only step "Read deploy window host state (read-only)".
 It opens one more ssh session and prints the host `state`, this run's `rc` and the marker
@@ -114,10 +133,11 @@ artifact); it starts, stops and changes nothing. It matters after a runner timeo
 snapshot: if `rc` is absent and `state` is not terminal, the window may still be running;
 read `state` again on the host until it is terminal.
 
-A rolled-back batch still prints `migration "<name>" was executed successfully` lines
-for its earlier migrations before the `failed to execute migration` line; those
-migrations are not applied, and the ledger (the window's `ledger` lines and `state`)
-decides, not those lines.
+The per-migration lines of `migrate.js` are in `window-detail.log` on the host. A
+rolled-back batch still has `migration "<name>" was executed successfully` lines for its
+earlier migrations before the `failed to execute migration` line; those migrations are not
+applied, and the ledger (the `ledger` lines of `window-detail.log` and `state`) decides,
+not those lines.
 
 | rc | Final phase | Production | What to do |
 |---|---|---|---|
@@ -146,6 +166,8 @@ has ended and the owner has read the ledger.
   in the run's `window.pid` is gone; and `flock -n "$HOME/metasheet2-deploy-window/lock" true`
   succeeds and the run's `rc` file exists. While the window may still run, a ledger at the
   `ledger before` count proves nothing: the window may be about to migrate.
+- `ledger before` and the in-play count are `ledger_before=` and `inplay=` in `state`
+  (also the `ledger before=` line of `window-detail.log`).
 - Then the ledger either reads fully applied (`ledger before` + the in-play count, every
   name of the run directory's `inplay.txt` present), and the owner fixes forward as below;
   or it reads the run's `ledger before` count with none of the names in `inplay.txt`
