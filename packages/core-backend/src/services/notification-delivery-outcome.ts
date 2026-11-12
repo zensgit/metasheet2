@@ -8,7 +8,8 @@
  *   - `sent` is the ONLY status that proves a transport / provider accepted the message. It is matched
  *     positively; "not failed" is never treated as success.
  *   - `simulated` (development mock) and `cancelled` (nothing attempted: no recipient of the channel's
- *     type, transport disabled, or preference-filtered) are DEFINITE non-delivery: nothing left the
+ *     type, transport disabled, preference-filtered, no usable endpoint for any addressed recipient, or an
+ *     empty allow-set) are DEFINITE non-delivery: nothing left the
  *     client, so the ledger may record `failed` (retryable) under its existing status set.
  *   - `failed`, `pending`, `scheduled` and any unrecognised literal are NOT provable as pre-dispatch
  *     non-delivery and fail closed to `outcome_unknown` (never auto-resent).
@@ -20,6 +21,10 @@ export const NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON = 'no_channel_recipients'
 export const NOTIFICATION_TRANSPORT_DISABLED_REASON = 'transport_disabled' as const
 export const NOTIFICATION_TRANSPORT_SIMULATED_REASON = 'transport_simulated' as const
 export const NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON = 'transport_not_configured' as const
+/** A channel that addresses recipients through a bound endpoint: no addressed recipient had a usable endpoint. */
+export const NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON = 'recipients_not_bound' as const
+/** The same channel: the allow-set for the event and its recipients was empty. */
+export const NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON = 'recipients_not_allowed' as const
 
 /** The closed set of send_email outcome reasons (step output `reason` and ledger `last_error`). */
 export const SEND_EMAIL_OUTCOME_REASONS = Object.freeze({
