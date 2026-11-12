@@ -713,6 +713,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['host re-validation: pre_commit_abort unselected on a deploy', {}, { PRE_COMMIT_ABORT: 'unselected' }],
     ['host re-validation: drill_fail_stage=smoke', {}, { DRILL_FAIL_STAGE: 'smoke' }],
     ['host re-validation: expected_pending_sha256 not hex', {}, { EXPECTED_PENDING_SHA256: 'not-a-hash' }],
+    ['host re-validation: restore_proof free text', {}, { RESTORE_PROOF: 'yes' }],
+    ['host re-validation: a tunable that is not a positive integer', {}, { DEPLOY_WINDOW_DRAIN_S: '0' }],
   ]
   for (const [label, worldOptions, env] of REFUSALS) {
     scenario(`2 refusal before any stop: ${label} -> 70, env files byte-identical`, async (t) => {
@@ -980,6 +982,10 @@ describe('production deploy window: remote_deploy step run against test doubles'
       ['drill_fail_stage=smoke', { DRILL_FAIL_STAGE: 'smoke' }, false],
       ['probe silence unset', { PROD_HEALTH_PROBE_SILENCE: '' }, false],
       ['probe silence false', { PROD_HEALTH_PROBE_SILENCE: 'false' }, false],
+      ['tunable zero', { DEPLOY_WINDOW_DRAIN_S: '0' }, false],
+      ['tunable with a unit', { DEPLOY_BACKUP_TIMEOUT_S: '20m' }, false],
+      ['expected window longer than a day', { DEPLOY_WINDOW_EXPECTED_MIN: '1441' }, false],
+      ['own-session cancel not a boolean', { DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: 'yes' }, false],
     ]
     for (const [label, env, ok] of cases) {
       const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', VALIDATE.run], {
@@ -1574,6 +1580,28 @@ describe('production deploy window: remote_deploy step run against test doubles'
       .filter((line) => !/\btimeout\s+\S+\s+docker\b/.test(line))
       .filter((line) => !/^(backend|web)_repo_digest="\$\(docker image inspect /.test(line.trim()))
     assert.deepEqual(unbounded, [])
+    // Every compose pull/run/up and the owner host-check call carry the time bound of the design's
+    // timeout table (pull 900, list 120, migrate 900, post-commit list 120, backend up 300, web up 300,
+    // host check 400): with production stopped and the lock held, nothing may wait forever.
+    const plain = code.map((line) => line.replace(/\b(werr|wlog|fail|echo)\s+"[^"]*"/g, '$1 MESSAGE'))
+    const composeCalls = plain.filter((line) => /\bdocker compose\b.*\s(pull|run|up)\s/.test(line))
+    const bounds = [
+      [/ pull backend web /, '900'],
+      [/ run .*--name "metasheet-window-list-/, '120'],
+      [/ run .*--name "metasheet-window-migrate-/, '900'],
+      [/ run .*--name "metasheet-window-postlist-/, '120'],
+      [/ up --no-start --no-deps --force-recreate backend /, '300'],
+      [/ up -d --no-deps --force-recreate web /, '300'],
+    ]
+    assert.equal(composeCalls.length, bounds.length, `compose pull/run/up lines: ${JSON.stringify(composeCalls)}`)
+    for (const [pattern, seconds] of bounds) {
+      const lines = composeCalls.filter((line) => pattern.test(line))
+      assert.equal(lines.length, 1, `one compose line matches ${pattern}`)
+      assert.equal(lines[0].match(/\btimeout\s+(\S+)\s+docker compose\b/)?.[1], seconds, `${pattern} is bounded by timeout ${seconds}`)
+    }
+    const hostCheckCalls = plain.filter((line) => /"\$check" "\$phase"/.test(line))
+    assert.equal(hostCheckCalls.length, 1)
+    assert.match(hostCheckCalls[0], /^\s*timeout 400 "\$check" "\$phase" /, 'the host check is bounded by timeout 400')
     // A second TERM cannot cut the exit mapping short: both handlers ignore TERM first.
     const body = (name) => text.match(new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}$`, 'm'))?.[1].split('\n').map((line) => line.trim())
     assert.equal(body('on_term')?.[0], "trap '' TERM", 'on_term ignores TERM first')

@@ -162,6 +162,42 @@ test('backend health response exposes normalized build metadata', () => {
   assertContains(buildInfo, "trimmed === 'unknown'", 'build info helper')
 })
 
+const DESTRUCTIVE_DOCKER = [
+  [/\bvolume\s+(rm|prune)\b/, 'volume removal'],
+  [/\b(image|container|builder|network)\s+prune\b/, 'prune'],
+  [/\bnetwork\s+rm\b/, 'network removal'],
+  [/\bcompose\b.*\srm(\s|$)/, 'compose rm'],
+  [/\bdocker\s+(container\s+)?(stop|restart|kill|rm|start|pause|update)\b.*\bmetasheet-(postgres|redis)\b/, 'a direct action on postgres or redis'],
+]
+function destructiveDockerUses(line) {
+  return DESTRUCTIVE_DOCKER.filter(([pattern]) => pattern.test(line)).map(([, label]) => label)
+}
+// `docker compose [-p X] [--project-directory X] [-f X] up|run <flags> <services>`; null for other lines.
+// Quoted operator messages are not docker calls.
+function composeUpRunCall(line) {
+  const plain = line.replace(/\b(echo|wlog|werr|fail)\s+"[^"]*"/g, '$1 MESSAGE')
+  const match = plain.match(/\bdocker compose\b(.*)$/)
+  if (!match) return null
+  const tokens = match[1].trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+  let i = 0
+  while (i < tokens.length && ['-p', '--project-directory', '-f'].includes(tokens[i])) i += 2
+  const sub = tokens[i++]
+  if (sub !== 'up' && sub !== 'run') return null
+  const flags = []
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const flag = tokens[i++]
+    flags.push(flag)
+    if (flag === '--name' || flag === '-e') i += 1
+  }
+  const services = []
+  if (sub === 'up') {
+    while (i < tokens.length && /^[a-z][a-z0-9_-]*$/.test(tokens[i])) services.push(tokens[i++])
+  } else if (i < tokens.length && /^[a-z][a-z0-9_-]*$/.test(tokens[i])) {
+    services.push(tokens[i])
+  }
+  return { sub, flags, services, line }
+}
+
 test('production deploy window never removes, prunes or recreates the data containers', () => {
   const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
   const lines = raw.split('\n').map((line) => line.trim()).filter((line) => !line.startsWith('#') && !line.startsWith("'#"))
@@ -182,6 +218,40 @@ test('production deploy window never removes, prunes or recreates the data conta
     [/\bup\b.*\b(postgres|redis)\b/, 'up of postgres or redis'],
   ]) {
     assert.deepEqual(ownArgs.filter((line) => pattern.test(line)), [], `no docker line may use ${label}`)
+  }
+  // Further destructive forms, and every compose up/run names its services and passes --no-deps.
+  // Static only: a line in an error branch that no scenario reaches is visible to nothing else.
+  for (const line of ownArgs) {
+    assert.deepEqual(destructiveDockerUses(line), [], `docker line: ${line}`)
+  }
+  const composeUpRun = dockerLines.map(composeUpRunCall).filter(Boolean)
+  assert.ok(composeUpRun.length >= 5, 'the rule sees the window\'s compose run and up lines')
+  for (const call of composeUpRun) {
+    assert.ok(call.flags.includes('--no-deps'), `compose ${call.sub} without --no-deps: ${call.line}`)
+    assert.ok(call.services.length > 0, `compose ${call.sub} without an explicit service list: ${call.line}`)
+    for (const service of call.services) assert.ok(['backend', 'web'].includes(service), `compose ${call.sub} of ${service}: ${call.line}`)
+  }
+  // Positive controls: each of these lines must be flagged by the checks above.
+  const P = 'docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F"'
+  for (const probe of [
+    `timeout 60 ${P} rm -sfv postgres`,
+    'timeout 60 docker image prune -af',
+    'timeout 60 docker container prune -f',
+    'timeout 60 docker builder prune -af',
+    'timeout 60 docker network prune -f',
+    'timeout 60 docker network rm metasheet2_default',
+    'timeout 60 docker volume rm "${P}_metasheet-postgres-data"',
+    'timeout 60 docker volume prune -f',
+    'timeout 60 docker restart metasheet-postgres',
+    'timeout 90 docker stop -t 60 metasheet-postgres',
+    'timeout 60 docker kill metasheet-redis',
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d --force-recreate backend web`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 120 ${P} run --rm -T backend node migrate.js --list`,
+  ]) {
+    const call = composeUpRunCall(probe)
+    const composeBad = call && (!call.flags.includes('--no-deps') || call.services.length === 0)
+    assert.ok(destructiveDockerUses(probe).length > 0 || composeBad, `the checks flag: ${probe}`)
   }
 
   const excludeFlag = '-e "MIGRATION_EXCLUDE='
