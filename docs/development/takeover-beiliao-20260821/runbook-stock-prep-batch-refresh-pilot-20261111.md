@@ -12,7 +12,7 @@
 
 | 顺序 | 动作 | 谁批 | 写不写生产 |
 |---|---|---|---|
-| 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**已裁（2026-11-11，R-91 ㉙ ㉚）：试点随基于 main 的客户包发布，这个库的 R 线到此为止；第一个 main 包带 S6-9。** 切包提交本身仍未定 | 否 |
+| 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**已裁（2026-11-11，R-91 ㉙ ㉚；2026-11-12 由 ㉝ 修订）：试点随基于 main 的客户包发布，分两步：先出 R 线维护版 R84（不带试点、没有迁移、没有新开关），再出第一个 main 包，即试点包，它带 S6-9。** 切包提交本身仍未定 | 否 |
 | 1 | Q-B：同意在 102 / 103 / 104 的私有列里存业务值，并定保留期（102 头注释 `102_create_integration_stock_prep_continuation.sql:41-43`：**部署 102 之前**要批） | owner。**已裁（2026-11-11，R-91 ㉛）：批准，只存在客户自己的库里，随记录保留（按设计行从不删除）** | 否 |
 | 2 | 接受对所有项目生效的行为变化（§2） | owner（G-B9） | 否 |
 | 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、换定时拉取脚本（§1） | owner（gate 4） | 是（迁移，只加表 / 加列） |
@@ -27,7 +27,9 @@
 
 **仍由 owner 另裁、本手册不替 owner 选的事：** 第 0 步的切包提交（S6-9 随包已裁，R-91 ㉚）；第 3a 步在客户机上打开开关的时间；O6-7（现场谁可以按手册结束，默认 `stock-prep:admin`）；试点项目（不是第 10 项那个项目，不是双份表，在上限以内，第 1 批已拉、下一批还没拉）；指定 1–2 名拉取人员（G-A2）；现场事实（`specField`、客户包声明、第 ④ 步开关）。
 
-## 1. 装机顺序（main 基线包，客户机现跑 R83）
+## 1. 装机顺序（main 基线包，装在 R83 或 R84 上）
+
+试点包可能装在 R83 上，也可能装在 R84 上（R-91 ㉝：R84 先出，是 R 线维护版）。R84 是 `onprem-r83` 加几处修复，没有迁移，也没有新开关：在 R84 的切包分支（0d9e0a526）上核过，它和 `onprem-r83` 之间两个迁移目录都没有改动。所以本节写「R83」的地方，现场装的是 R84 时照样成立，把 R83 读成 R84 即可：§1.1 的迁移清单不变；§1.2 用现场已装那个包的 `migrate.js --list`；§1.5 照样要换脚本（见那里）。
 
 ### 1.1 这个包比 R83 多跑哪些迁移
 
@@ -151,7 +153,7 @@ SELECT (SELECT count(*) FROM integration_stock_prep_continuation)      AS contin
 
 ### 1.5 换定时拉取脚本（窗口内，恢复定时任务之前）
 
-R83 包里的 `scripts/ops/stock-preparation-scheduled-pull.mjs` 不认识 `suspended`、`review_pending`、`recovery_pending`（`git show onprem-r83:scripts/ops/stock-preparation-scheduled-pull.mjs` 里这三个词的计数为 0）。main 包里带着新版（`scripts/ops/multitable-onprem-package-build.sh:117`）：受治理项目整次挂起记 `skipped_suspended`（`scripts/ops/stock-preparation-scheduled-pull.mjs:642-643`），变更待复核记 `skipped_review_pending`（`:658-659`），二者都不改退出码；上次写入未完成记 `error` / `STOCK_PREP_REFRESH_RECOVERY_PENDING`、`failed: true`（`:651-652`），**这是失败**，要有人去恢复（§4）。脚本只用 Node 内置模块（`:120`），环境变量和参数没变，原样替换任务执行的那份拷贝即可：
+R83 包里的 `scripts/ops/stock-preparation-scheduled-pull.mjs` 不认识 `suspended`、`review_pending`、`recovery_pending`（`git show onprem-r83:scripts/ops/stock-preparation-scheduled-pull.mjs` 里这三个词的计数为 0）。R84 包也带这个脚本（#6831），但它同样不认识这三个状态（R84 切包分支 0d9e0a526 上同一文件里三个词的计数也都是 0），所以装在 R84 上时这一步照样要做。main 包里带着新版（`scripts/ops/multitable-onprem-package-build.sh:117`）：受治理项目整次挂起记 `skipped_suspended`（`scripts/ops/stock-preparation-scheduled-pull.mjs:642-643`），变更待复核记 `skipped_review_pending`（`:658-659`），二者都不改退出码；上次写入未完成记 `error` / `STOCK_PREP_REFRESH_RECOVERY_PENDING`、`failed: true`（`:651-652`），**这是失败**，要有人去恢复（§4）。脚本只用 Node 内置模块（`:120`），环境变量和参数没变，原样替换任务执行的那份拷贝即可：
 
 ```powershell
 Get-FileHash -Algorithm SHA256 -LiteralPath '<安装根目录>\scripts\ops\stock-preparation-scheduled-pull.mjs'
