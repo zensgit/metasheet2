@@ -302,6 +302,7 @@ jobs:
         id: remote_deploy
         if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}
         continue-on-error: true
+        timeout-minutes: 150
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -318,6 +319,18 @@ jobs:
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
           ENABLE_YJS_COLLAB: ${{ vars.ENABLE_YJS_COLLAB || 'false' }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
+          EXPECTED_PENDING_SHA256: ${{ github.event.inputs.expected_pending_sha256 || '' }}
+          RESTORE_PROOF: ${{ github.event.inputs.restore_proof || 'unselected' }}
+          PRE_COMMIT_ABORT: ${{ github.event.inputs.pre_commit_abort || 'unselected' }}
+          DEPLOY_WINDOW_PULL_BUDGET_KB: ${{ vars.DEPLOY_WINDOW_PULL_BUDGET_KB || '3145728' }}
+          DEPLOY_WINDOW_RESERVE_KB: ${{ vars.DEPLOY_WINDOW_RESERVE_KB || '2097152' }}
+          DEPLOY_BACKUP_TIMEOUT_S: ${{ vars.DEPLOY_BACKUP_TIMEOUT_S || '1200' }}
+          DEPLOY_BACKUP_VERIFY_TIMEOUT_S: ${{ vars.DEPLOY_BACKUP_VERIFY_TIMEOUT_S || '900' }}
+          DEPLOY_WINDOW_EXPECTED_MIN: ${{ vars.DEPLOY_WINDOW_EXPECTED_MIN || '90' }}
+          DEPLOY_WINDOW_DRAIN_S: ${{ vars.DEPLOY_WINDOW_DRAIN_S || '60' }}
+          DEPLOY_WINDOW_QUEUED_MAX_AGE_S: ${{ vars.DEPLOY_WINDOW_QUEUED_MAX_AGE_S || '86400' }}
+          DEPLOY_WINDOW_MIN_HOST_CHECKS: ${{ vars.DEPLOY_WINDOW_MIN_HOST_CHECKS || '1' }}
+          DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: ${{ vars.DEPLOY_WINDOW_CANCEL_OWN_SESSIONS || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -341,9 +354,19 @@ jobs:
           DEPLOY_BACKEND_HEALTH_URL="${DEPLOY_BACKEND_HEALTH_URL:-http://127.0.0.1:8900/health}"
           DEPLOY_WEB_BUILD_INFO_URL="${DEPLOY_WEB_BUILD_INFO_URL:-http://127.0.0.1:8081/build-info.json}"
           DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
+          WINDOW_RUN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
+          # The production deploy window. remote_cmds is the whole window script; it is not piped
+          # into an ssh shell any more. A short bootstrap (below) writes it to a new per-run
+          # directory on the host and starts it detached, so a dropped ssh session or a cancelled
+          # run no longer stops a half-done window. Cancelling this run only ends the log follower;
+          # to stop a window before the migration, create the abort file on the host (see
+          # docs/deployment/production-deploy-window-runbook.md).
+          # Each block is appended to remote_cmds verbatim; window_block reads a quoted heredoc.
+          window_block() { remote_cmds+=("$(cat)"); }
           remote_cmds=(
+            'echo "$$" > window.pid'
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
@@ -352,10 +375,801 @@ jobs:
             "DEPLOY_EXPECTED_COMMIT=\"${DEPLOY_EXPECTED_COMMIT:-${GITHUB_SHA}}\""
             "DEPLOY_BACKEND_HEALTH_URL=\"${DEPLOY_BACKEND_HEALTH_URL}\""
             "DEPLOY_WEB_BUILD_INFO_URL=\"${DEPLOY_WEB_BUILD_INFO_URL}\""
-            "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
             "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
             "ENABLE_YJS_COLLAB=\"${ENABLE_YJS_COLLAB:-false}\""
             "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
+            "WINDOW_RUN=$(printf '%q' "${WINDOW_RUN}")"
+            "EXPECTED_PENDING_SHA256=$(printf '%q' "${EXPECTED_PENDING_SHA256:-}")"
+            "RESTORE_PROOF=$(printf '%q' "${RESTORE_PROOF:-unselected}")"
+            "PRE_COMMIT_ABORT=$(printf '%q' "${PRE_COMMIT_ABORT:-unselected}")"
+            "DEPLOY_WINDOW_PULL_BUDGET_KB=$(printf '%q' "${DEPLOY_WINDOW_PULL_BUDGET_KB:-3145728}")"
+            "DEPLOY_WINDOW_RESERVE_KB=$(printf '%q' "${DEPLOY_WINDOW_RESERVE_KB:-2097152}")"
+            "DEPLOY_BACKUP_TIMEOUT_S=$(printf '%q' "${DEPLOY_BACKUP_TIMEOUT_S:-1200}")"
+            "DEPLOY_BACKUP_VERIFY_TIMEOUT_S=$(printf '%q' "${DEPLOY_BACKUP_VERIFY_TIMEOUT_S:-900}")"
+            "DEPLOY_WINDOW_EXPECTED_MIN=$(printf '%q' "${DEPLOY_WINDOW_EXPECTED_MIN:-90}")"
+            "DEPLOY_WINDOW_DRAIN_S=$(printf '%q' "${DEPLOY_WINDOW_DRAIN_S:-60}")"
+            "DEPLOY_WINDOW_QUEUED_MAX_AGE_S=$(printf '%q' "${DEPLOY_WINDOW_QUEUED_MAX_AGE_S:-86400}")"
+            "DEPLOY_WINDOW_MIN_HOST_CHECKS=$(printf '%q' "${DEPLOY_WINDOW_MIN_HOST_CHECKS:-1}")"
+            "DEPLOY_WINDOW_CANCEL_OWN_SESSIONS=$(printf '%q' "${DEPLOY_WINDOW_CANCEL_OWN_SESSIONS:-false}")"
+          )
+          window_block <<'WINDOW_CORE'
+          # ---- production deploy window: stop writes, back up, migrate, start the new version ----
+          # Final exit codes (the rc comes from the window phase, never from the failing command):
+          #   0  done-new           new version serving
+          #   70 refused-unchanged  refused before anything was stopped; env files restored
+          #   71 done-restored-old  aborted after the stop, before the migration committed; old containers restarted
+          #   72 needs-owner        as 71, but the old version could not be restarted (or pre_commit_abort=stay-stopped): DOWN
+          #   73 needs-owner        migration committed; new backend/web start or checks failed
+          #   74 needs-owner        ledger neither unchanged nor fully applied, a post-commit check failed,
+          #                         sessions of the migration did not end, or the trap found a commit
+          #   75 refused            lock held, unfinished host state, or flock missing; host state untouched
+          #   76 bootstrap          no pid file or no rc file (written by the bootstrap, not here)
+          #   91 / 92               drills (deploy / migrate), refused before anything was stopped
+          DEPLOY_JWT_SECRET="${DEPLOY_JWT_SECRET:-}"
+          export -n DEPLOY_JWT_SECRET
+          umask 077
+          RUN_DIR="$(pwd -P)"
+          WINDOW_HOME="${HOME}/metasheet2-deploy-window"
+          WINDOW_STATE="${WINDOW_HOME}/state"
+          WINDOW_LOCK="${WINDOW_HOME}/lock"
+          WINDOW_ABORT="${WINDOW_HOME}/abort"
+          WINDOW_HOST_CHECKS="${WINDOW_HOME}/host-checks"
+          # Production migration exclusions. Changing this list is a separate reviewed change that
+          # also applies the migration; no dispatch input can change it. It reaches migrate.js only
+          # as -e MIGRATION_EXCLUDE on the one --latest run below, never through docker/app.env.
+          PROD_OWNER_EXCLUDED_MIGRATIONS=(
+            zzzz20260919090000_create_approval_template_group_backfill_batches
+          )
+          PROD_OWNER_EXCLUDED_TABLES=(
+            approval_template_group_backfill_batches
+            approval_template_group_backfill_batch_groups
+            approval_template_group_backfill_batch_links
+          )
+          # Quiet schedule (UTC). A dispatch is refused when [now, now + DEPLOY_WINDOW_EXPECTED_MIN]
+          # overlaps [t - 5 min, t + 30 min] of a blocking entry (30 min covers scheduler lag).
+          #   blocking  01:00 daily  host scheduled read-only job; may hold locks a migration needs under its 5 s lock_timeout
+          #   blocking  02:05, 02:10, 02:12 daily  attendance-remote-preflight-prod, -metrics-prod, -storage-prod (git pull in the deploy dir)
+          #   blocking  02:15, 02:18 daily  attendance-strict-gates-prod, attendance-locale-zh-smoke-prod (API writes)
+          #   blocking  02:20 Sunday  attendance-remote-upload-cleanup-prod (host sync and file cleanup)
+          #   blocking  03:20 daily  attendance-import-perf-baseline (import writes; attendance-post-merge-verify-nightly also runs then)
+          #   blocking  05:10 daily  attendance-import-perf-longrun (import writes)
+          #   blocking  06:00 Sunday  attendance-import-perf-highscale (import writes)
+          #   not blocking  02:00 daily phase5-nightly (read-only metrics); :15 every 2 h dingtalk-oauth-stability-recording-lite
+          #     (ssh read, fails while stopped); every 5 min prod-health-probe-monitor (silenced); 04:22, 04:25, 04:30 daily
+          #     branch policy/protection and gate dashboard (GitHub API only)
+          QUIET_BLOCKING=(
+            "daily 01:00"
+            "daily 02:05"
+            "daily 02:10"
+            "daily 02:12"
+            "daily 02:15"
+            "daily 02:18"
+            "sunday 02:20"
+            "daily 03:20"
+            "daily 05:10"
+            "sunday 06:00"
+          )
+
+          w_phase=""
+          w_lock_held=0
+          w_state_frozen=0
+          w_final_rc=""
+          w_drill_rc=""
+          w_term=0
+          w_in_exit=0
+          w_raw_rc=""
+          w_env_written="old"
+          w_backend_verified=0
+          w_web_verified=0
+          w_snapshots_taken=0
+          w_resolve_result=""
+          w_migrate_rc=""
+          w_job_pid=""
+          w_job_rc=0
+          w_watchdog_pid=""
+          w_heartbeat_pid=""
+          w_docker_root=""
+          w_ledger_before=""
+          w_inplay=""
+          w_old_backend_image=""
+          w_old_backend_image_id=""
+          w_old_backend_rev=""
+          w_old_web_image=""
+          w_old_web_image_id=""
+          w_old_web_rev=""
+          w_id_postgres=""
+          w_id_redis=""
+          w_id_backend=""
+          w_id_web=""
+          w_appdata_files=0
+          w_appdata_kb=0
+          w_appdata_copied=0
+          w_appdata_tar_files=0
+          w_appdata_tar_bytes=0
+          P=""
+          F=""
+          PROJECT_DIR=""
+          DEPLOY_REPO_PATH="${DEPLOY_REPO_PATH:-}"
+
+          wlog() { printf '[deploy-window] %s\n' "$*"; }
+          werr() { printf '[deploy-window][error] %s\n' "$*"; }
+          fail() { werr "$*"; exit 1; }
+
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{ print $1 }'
+            else
+              shasum -a 256 "$1" | awk '{ print $1 }'
+            fi
+          }
+          sha256_stdin() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum | awk '{ print $1 }'
+            else
+              shasum -a 256 | awk '{ print $1 }'
+            fi
+          }
+          count_lines() { awk 'NF { n++ } END { printf "%d\n", n }' "$1"; }
+
+          # Host state file: only the lock holder writes it, and never after finding an unfinished state.
+          state_write() {
+            if [[ "$w_lock_held" != "1" || "$w_state_frozen" != "0" ]]; then
+              return 0
+            fi
+            local tmp="${WINDOW_STATE}.tmp.$$"
+            {
+              printf 'phase=%s\n' "$w_phase"
+              printf 'run=%s\n' "$WINDOW_RUN"
+              printf 'sha=%s\n' "$DEPLOY_IMAGE_TAG"
+              printf 'old_backend_image=%s\n' "$w_old_backend_image"
+              printf 'old_backend_image_id=%s\n' "$w_old_backend_image_id"
+              printf 'old_web_image=%s\n' "$w_old_web_image"
+              printf 'old_web_image_id=%s\n' "$w_old_web_image_id"
+              printf 'ledger_before=%s\n' "$w_ledger_before"
+              printf 'inplay=%s\n' "$w_inplay"
+              printf 'env_written=%s\n' "$w_env_written"
+              printf 'backend_verified=%s\n' "$w_backend_verified"
+              printf 'web_verified=%s\n' "$w_web_verified"
+              printf 'raw_rc=%s\n' "$w_raw_rc"
+              printf 'rc=%s\n' "$w_final_rc"
+              printf 'updated_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > "$tmp" && mv -f "$tmp" "$WINDOW_STATE"
+            wlog "state phase=${w_phase} env_written=${w_env_written} backend_verified=${w_backend_verified} web_verified=${w_web_verified}"
+          }
+          set_phase() { w_phase="$1"; state_write; }
+          terminal() { w_phase="$1"; w_final_rc="$2"; state_write; }
+
+          check_abort() {
+            if [[ -e "$WINDOW_ABORT" ]]; then
+              fail "abort file present at boundary=$1"
+            fi
+          }
+
+          # The pre-existing version check helper, defined early because the restart of the old
+          # version and the trap need it long before the VERSION VERIFY stage.
+          fetch_json_with_retry() {
+            local label="$1"
+            local url="$2"
+            local attempts="${3:-15}"
+            local delay_seconds="${4:-2}"
+            local i
+            for ((i = 1; i <= attempts; i += 1)); do
+              if curl -fsS "${url}" 2>/dev/null; then
+                return 0
+              fi
+              echo "[deploy-version] waiting for ${label} at ${url} (attempt ${i}/${attempts})" >&2
+              sleep "${delay_seconds}"
+            done
+            echo "[deploy-version][error] ${label} check timed out at ${url}" >&2
+            return 1
+          }
+
+          # json_commit backend|web: reads a /health or /build-info.json body on stdin, prints its commit.
+          json_commit() {
+            python3 -c '
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          if not isinstance(data, dict):
+              sys.exit(0)
+          if sys.argv[1] == "backend":
+              data = data.get("build") or {}
+              if not isinstance(data, dict):
+                  sys.exit(0)
+          print(str(data.get("commit") or "").strip())
+          ' "$1"
+          }
+
+          # Docker helpers. Every inspect/exec/stop/start/kill/cp is bounded by timeout; stderr of
+          # docker and psql goes to host-only files in the run directory, never to the public log.
+          ctr_get() { timeout 30 docker inspect -f "$2" "$1" 2>>"${RUN_DIR}/docker.err"; }
+          label_of() { ctr_get "$1" "{{index .Config.Labels \"$2\"}}"; }
+          image_label() { timeout 30 docker image inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>>"${RUN_DIR}/docker.err"; }
+          recorded_id() {
+            case "$1" in
+              metasheet-postgres) printf '%s' "$w_id_postgres" ;;
+              metasheet-redis) printf '%s' "$w_id_redis" ;;
+              metasheet-backend) printf '%s' "$w_id_backend" ;;
+              metasheet-web) printf '%s' "$w_id_web" ;;
+            esac
+          }
+          # pg_sql <sql>: one statement inside metasheet-postgres with that container's own credentials
+          # (POSTGRES_DB falls back to POSTGRES_USER). Values are never printed by this helper.
+          pg_sql() {
+            timeout 60 docker exec metasheet-postgres sh -c 'exec psql -X -q -tA -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${POSTGRES_DB:-$POSTGRES_USER}" -c "$1"' sh "$1" 2>>"${RUN_DIR}/psql.err"
+          }
+          client_sessions() {
+            pg_sql "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+          }
+          session_detail() {
+            local by_state xact_age autovacuum
+            by_state="$(pg_sql "SELECT coalesce(string_agg(s || '=' || c, ',' ORDER BY s), 'none') FROM (SELECT replace(coalesce(state, 'unknown'), ' ', '_') AS s, count(*) AS c FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' GROUP BY 1) t" || true)"
+            xact_age="$(pg_sql "SELECT coalesce(max(extract(epoch FROM now() - xact_start))::bigint, 0) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'" || true)"
+            autovacuum="$(pg_sql "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'autovacuum worker'" || true)"
+            wlog "sessions at=$1 by_state=${by_state:-unreadable} max_xact_age_s=${xact_age:-unreadable} autovacuum_workers=${autovacuum:-unreadable}"
+          }
+          # wait_sessions_zero <seconds> <label>: polls every 2 s until no other client backend is connected.
+          # Never terminates or cancels another backend.
+          wait_sessions_zero() {
+            local limit="$1" label="$2" start n
+            start="$(date +%s)"
+            while :; do
+              n="$(client_sessions || true)"
+              n="${n//[[:space:]]/}"
+              if [[ "$n" == "0" ]]; then
+                wlog "sessions at=${label} client_backends=0"
+                return 0
+              fi
+              if (( $(date +%s) - start >= limit )); then
+                wlog "sessions at=${label} client_backends=${n:-unreadable} waited_s=${limit}"
+                session_detail "$label"
+                return 1
+              fi
+              sleep 2
+            done
+          }
+
+          fs_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
+          fs_mount() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'; }
+          min_free_kb() {
+            local a b
+            a="$(fs_free_kb "$RUN_DIR" || true)"
+            b="$a"
+            if [[ -n "$w_docker_root" ]]; then
+              b="$(fs_free_kb "$w_docker_root" || true)"
+            fi
+            if [[ ! "$a" =~ ^[0-9]+$ || ! "$b" =~ ^[0-9]+$ ]]; then
+              return 0
+            fi
+            if (( a < b )); then printf '%s\n' "$a"; else printf '%s\n' "$b"; fi
+          }
+          # disk_gate <label> <need on the Docker root kb> <need on the run directory kb>
+          # Each filesystem is counted once: when both paths share one, the larger need applies to it.
+          disk_gate() {
+            local label="$1" need_root="$2" need_run="$3" root_free run_free root_mnt run_mnt need
+            root_free="$(fs_free_kb "$w_docker_root" || true)"
+            run_free="$(fs_free_kb "$RUN_DIR" || true)"
+            root_mnt="$(fs_mount "$w_docker_root" || true)"
+            run_mnt="$(fs_mount "$RUN_DIR" || true)"
+            if [[ ! "$root_free" =~ ^[0-9]+$ || ! "$run_free" =~ ^[0-9]+$ || -z "$root_mnt" || -z "$run_mnt" ]]; then
+              fail "disk gate ${label}: df did not return integer free space"
+            fi
+            if [[ "$root_mnt" == "$run_mnt" ]]; then
+              need="$need_root"
+              if (( need_run > need )); then need="$need_run"; fi
+              wlog "disk gate=${label} filesystems=1 free_kb=${run_free} need_kb=${need}"
+              if (( run_free < need )); then fail "disk gate ${label}: free_kb=${run_free} < need_kb=${need}"; fi
+            else
+              wlog "disk gate=${label} filesystems=2 docker_root_free_kb=${root_free} docker_root_need_kb=${need_root} run_dir_free_kb=${run_free} run_dir_need_kb=${need_run}"
+              if (( root_free < need_root )); then fail "disk gate ${label}: Docker root free_kb=${root_free} < need_kb=${need_root}"; fi
+              if (( run_free < need_run )); then fail "disk gate ${label}: run directory free_kb=${run_free} < need_kb=${need_run}"; fi
+            fi
+          }
+
+          # Background helpers run with fd 9 (the window lock) closed, so an orphaned helper can
+          # never keep the lock and refuse every later run.
+          disk_watchdog() {
+            local pid="$1" file="$2" free
+            while kill -0 "$pid" 2>/dev/null; do
+              free="$(min_free_kb || true)"
+              if [[ "$free" =~ ^[0-9]+$ ]] && (( free < DEPLOY_WINDOW_RESERVE_KB )); then
+                : > "${RUN_DIR}/watchdog.fired"
+                kill "$pid" 2>/dev/null || true
+                if [[ -n "$file" ]]; then rm -f -- "$file"; fi
+                return 0
+              fi
+              sleep 3 || return 0
+            done
+          }
+          heartbeat() {
+            local label="$1" file="$2" start bytes
+            start="$(date +%s)"
+            while sleep 30; do
+              bytes=0
+              if [[ -n "$file" && -f "$file" ]]; then
+                bytes="$(wc -c < "$file" | tr -d '[:space:]')"
+              fi
+              wlog "heartbeat phase=${label} elapsed_s=$(( $(date +%s) - start )) bytes=${bytes}"
+            done
+          }
+          stop_helpers() {
+            local p
+            for p in "$w_watchdog_pid" "$w_heartbeat_pid"; do
+              if [[ -n "$p" ]]; then
+                pkill -P "$p" 2>/dev/null || true
+                kill "$p" 2>/dev/null || true
+                wait "$p" 2>/dev/null || true
+              fi
+            done
+            w_watchdog_pid=""
+            w_heartbeat_pid=""
+          }
+          # watch_job <label> <file to report and to delete on low disk, or empty>: waits for the
+          # background job in w_job_pid with the df watchdog and the heartbeat; sets w_job_rc.
+          watch_job() {
+            local label="$1" file="$2" rc=0
+            rm -f "${RUN_DIR}/watchdog.fired"
+            disk_watchdog "$w_job_pid" "$file" 9>&- 2>/dev/null &
+            w_watchdog_pid=$!
+            heartbeat "$label" "$file" 9>&- 2>/dev/null &
+            w_heartbeat_pid=$!
+            wait "$w_job_pid" || rc=$?
+            w_job_pid=""
+            stop_helpers
+            if [[ -e "${RUN_DIR}/watchdog.fired" ]]; then
+              werr "disk watchdog stopped ${label}: free space fell below DEPLOY_WINDOW_RESERVE_KB"
+              if [[ -n "$file" ]]; then rm -f -- "$file"; fi
+              if [[ "$rc" == "0" ]]; then rc=1; fi
+            fi
+            w_job_rc="$rc"
+          }
+
+          # Owner-installed host checks: every executable in $WINDOW_HOST_CHECKS runs with the phase
+          # name as its only argument. Only index, phase and result are logged; output stays on the host.
+          run_host_checks() {
+            local phase="$1" i=0 failed=0 check rc
+            if [[ -d "$WINDOW_HOST_CHECKS" ]]; then
+              for check in "$WINDOW_HOST_CHECKS"/*; do
+                if [[ ! -f "$check" || ! -x "$check" ]]; then continue; fi
+                i=$((i + 1))
+                rc=0
+                timeout 400 "$check" "$phase" </dev/null >>"${RUN_DIR}/host-checks.out" 2>&1 9>&- || rc=$?
+                if [[ "$rc" == "0" ]]; then
+                  wlog "host_check index=${i} phase=${phase} result=pass"
+                else
+                  failed=$((failed + 1))
+                  wlog "host_check index=${i} phase=${phase} result=fail"
+                fi
+              done
+            fi
+            wlog "host_check phase=${phase} present=${i} failed=${failed} required=${DEPLOY_WINDOW_MIN_HOST_CHECKS}"
+            if (( i < DEPLOY_WINDOW_MIN_HOST_CHECKS || failed > 0 )); then
+              return 1
+            fi
+            return 0
+          }
+
+          is_excluded() {
+            local name
+            for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+              if [[ "$name" == "$1" ]]; then return 0; fi
+            done
+            return 1
+          }
+          excluded_tables_present() {
+            local table values=""
+            for table in "${PROD_OWNER_EXCLUDED_TABLES[@]}"; do
+              values="${values}${values:+, }('public.${table}')"
+            done
+            pg_sql "SELECT count(*) FROM (VALUES ${values}) AS t(n) WHERE pg_catalog.to_regclass(t.n) IS NOT NULL"
+          }
+          # parse_list <migrate --list output> <names file>: sets list_applied / list_pending, writes the pending names.
+          parse_list() {
+            list_applied="$(sed -n 's/^Applied: \([0-9][0-9]*\)$/\1/p' "$1" | tail -n 1)"
+            list_pending="$(sed -n 's/^Pending: \([0-9][0-9]*\)$/\1/p' "$1" | tail -n 1)"
+            sed -n 's/^  - \(.*\)$/\1/p' "$1" > "$2"
+            if [[ ! "$list_applied" =~ ^[0-9]+$ || ! "$list_pending" =~ ^[0-9]+$ ]]; then
+              return 1
+            fi
+            if [[ "$(count_lines "$2")" != "$list_pending" ]]; then
+              return 1
+            fi
+            return 0
+          }
+
+          # Ledger after a migrate attempt: rolled-back (L0, every in-play name absent), committed
+          # (L0 + n, every in-play name present, every excluded name absent), unchanged (n = 0 and
+          # the ledger reads L0 with no excluded name), or other.
+          classify_ledger() {
+            local count names="${RUN_DIR}/ledger-after.txt" name all_absent=1 all_present=1 excluded_absent=1
+            count="$(pg_sql 'SELECT count(*) FROM kysely_migration' || true)"
+            if [[ ! "$count" =~ ^[0-9]+$ ]] || ! pg_sql 'SELECT name FROM kysely_migration ORDER BY name' > "$names"; then
+              printf 'unreadable\n'
+              return 0
+            fi
+            while IFS= read -r name; do
+              if [[ -z "$name" ]]; then continue; fi
+              if grep -qxF -- "$name" "$names"; then all_absent=0; else all_present=0; fi
+            done < "${RUN_DIR}/inplay.txt"
+            for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+              if grep -qxF -- "$name" "$names"; then excluded_absent=0; fi
+            done
+            wlog "ledger now=${count} before=${w_ledger_before} inplay=${w_inplay}" >&2
+            if [[ "$excluded_absent" != "1" ]]; then
+              printf 'other\n'
+            elif (( w_inplay == 0 )) && (( count == w_ledger_before )); then
+              printf 'unchanged\n'
+            elif (( count == w_ledger_before )) && [[ "$all_absent" == "1" ]]; then
+              printf 'rolled-back\n'
+            elif (( count == w_ledger_before + w_inplay )) && [[ "$all_present" == "1" ]]; then
+              printf 'committed\n'
+            else
+              printf 'other\n'
+            fi
+          }
+
+          # Kill-and-resolve after a failed, timed-out or interrupted migrate run (never 4F while a
+          # window session is alive). Sets w_resolve_result: committed | rolled-back | sessions | other.
+          resolve_migrate() {
+            local name="metasheet-window-migrate-${WINDOW_RUN}" ids result
+            ids="$(timeout 30 docker ps -a -q --filter "name=^/${name}\$" 2>>"${RUN_DIR}/docker.err" || true)"
+            if [[ -n "$ids" ]]; then
+              wlog "migrate container present; killing it"
+              timeout 30 docker kill "$name" >/dev/null 2>>"${RUN_DIR}/docker.err" || true
+            fi
+            if [[ -n "$w_job_pid" ]]; then
+              kill "$w_job_pid" 2>/dev/null || true
+              wait "$w_job_pid" 2>/dev/null || true
+              w_job_pid=""
+            fi
+            if [[ "${DEPLOY_WINDOW_CANCEL_OWN_SESSIONS}" == "true" ]]; then
+              wlog "cancelling this window's own migrate sessions (opt-in)"
+              pg_sql "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE application_name = '${name}'" >/dev/null || true
+            fi
+            if ! wait_sessions_zero 330 migrate-resolve; then
+              w_resolve_result="sessions"
+              return 0
+            fi
+            result="$(classify_ledger)"
+            if [[ "$result" == "unchanged" ]]; then
+              if [[ "$w_migrate_rc" == "0" ]]; then result="committed"; else result="rolled-back"; fi
+            fi
+            w_resolve_result="$result"
+            wlog "migrate resolve result=${w_resolve_result}"
+          }
+
+          # Env snapshots of docker/app.env and .env, taken before the app.env rewrite.
+          snapshot_one() {
+            local src="$1" snap="${RUN_DIR}/env-snapshot.$2"
+            if [[ -f "$src" ]]; then
+              cp -p "$src" "$snap"
+              sha256_file "$snap" > "${snap}.sha256"
+            else
+              : > "${snap}.absent"
+            fi
+          }
+          restore_one() {
+            local target="$1" snap="${RUN_DIR}/env-snapshot.$2"
+            if [[ -f "${snap}.absent" ]]; then
+              rm -f -- "$target"
+              return 0
+            fi
+            cp -p "$snap" "$target" || return 1
+            [[ "$(sha256_file "$target")" == "$(cat "${snap}.sha256")" ]]
+          }
+          restore_env_snapshots() {
+            if [[ "$w_snapshots_taken" != "1" ]]; then
+              return 0
+            fi
+            if restore_one "${DEPLOY_REPO_PATH}/docker/app.env" app.env && restore_one "${DEPLOY_REPO_PATH}/.env" dotenv; then
+              wlog "env_restore=ok"
+              return 0
+            fi
+            werr "env_restore=failed: docker/app.env or .env does not match its snapshot"
+            return 1
+          }
+
+          # 4F: restart the old version after an abort between the stop and the migration commit.
+          # Never recreates: recreating containers from an older tag would be a fresh deployment
+          # outside this window's checks; stay stopped and let the owner decide.
+          restart_old() {
+            local c id running backend_json web_json got
+            if [[ "${PRE_COMMIT_ABORT}" == "stay-stopped" ]]; then
+              restore_env_snapshots || true
+              wlog "pre_commit_abort=stay-stopped: starting nothing"
+              terminal needs-owner 72
+              return 0
+            fi
+            if ! restore_env_snapshots; then
+              terminal needs-owner 72
+              return 0
+            fi
+            if ! run_host_checks pre-restart-old; then
+              werr "host checks failed before restarting the old version; starting nothing"
+              terminal needs-owner 72
+              return 0
+            fi
+            for c in metasheet-backend metasheet-web; do
+              id="$(ctr_get "$c" '{{.Id}}' || true)"
+              if [[ -z "$id" || "$id" != "$(recorded_id "$c")" ]]; then
+                werr "${c} is gone or was replaced; not recreating it"
+                terminal needs-owner 72
+                return 0
+              fi
+            done
+            for c in metasheet-backend metasheet-web; do
+              running="$(ctr_get "$c" '{{.State.Running}}' || true)"
+              if [[ "$running" != "true" ]]; then
+                if ! timeout 120 docker start "$c" >/dev/null 2>>"${RUN_DIR}/docker.err"; then
+                  werr "docker start ${c} failed"
+                  terminal needs-owner 72
+                  return 0
+                fi
+              fi
+            done
+            backend_json="$(fetch_json_with_retry "old backend health" "${DEPLOY_BACKEND_HEALTH_URL}" 60 2 || true)"
+            got="$(printf '%s' "$backend_json" | json_commit backend || true)"
+            if [[ -z "$got" || "$got" != "$w_old_backend_rev" ]]; then
+              werr "old backend did not come back with its old revision"
+              terminal needs-owner 72
+              return 0
+            fi
+            web_json="$(fetch_json_with_retry "old web build-info" "${DEPLOY_WEB_BUILD_INFO_URL}" 30 2 || true)"
+            got="$(printf '%s' "$web_json" | json_commit web || true)"
+            if [[ -z "$got" || "$got" != "$w_old_web_rev" ]]; then
+              werr "old web did not come back with its old revision"
+              terminal needs-owner 72
+              return 0
+            fi
+            wlog "old version restarted backend_commit=${w_old_backend_rev} web_commit=${w_old_web_rev}"
+            terminal done-restored-old 71
+          }
+
+          ensure_env_new() {
+            if [[ "$w_env_written" == "new" ]]; then
+              return 0
+            fi
+            if ( cd "$DEPLOY_REPO_PATH" && write_compose_env_new ); then
+              w_env_written="new"
+              state_write
+              return 0
+            fi
+            werr "could not write the new IMAGE_TAG to .env"
+            return 1
+          }
+          stop_unverified() {
+            if [[ "$w_web_verified" != "1" ]]; then
+              timeout 90 docker stop -t 60 metasheet-web >/dev/null 2>>"${RUN_DIR}/docker.err" || true
+              wlog "web stopped (not verified)"
+            fi
+            if [[ "$w_backend_verified" != "1" ]]; then
+              timeout 90 docker stop -t 60 metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || true
+              wlog "backend stopped (not verified)"
+            fi
+          }
+
+          on_term() {
+            w_term=1
+            exit 143
+          }
+          on_exit() {
+            local raw=$? final
+            if [[ "$w_in_exit" == "1" ]]; then
+              return 0
+            fi
+            w_in_exit=1
+            trap '' TERM
+            set +e
+            if [[ "$w_term" == "1" ]]; then raw=143; fi
+            w_raw_rc="$raw"
+            stop_helpers
+            rm -f -- "${RUN_DIR}/window.sh"
+            wlog "raw_rc=${raw}"
+            if [[ -n "$w_job_pid" && "$w_phase" != "migrating" ]]; then
+              kill "$w_job_pid" 2>/dev/null
+              wait "$w_job_pid" 2>/dev/null
+              w_job_pid=""
+            fi
+            if [[ -n "$w_final_rc" ]]; then
+              state_write
+            elif [[ "$w_lock_held" != "1" || "$w_state_frozen" == "1" ]]; then
+              w_final_rc=75
+              w_phase="refused"
+            else
+              case "$w_phase" in
+                ""|preflight)
+                  restore_env_snapshots
+                  terminal refused-unchanged "${w_drill_rc:-70}"
+                  ;;
+                stopping|stopped|backed-up)
+                  rm -f -- "${RUN_DIR}/db.dump.partial"
+                  restart_old
+                  ;;
+                migrating)
+                  if [[ -z "$w_resolve_result" ]]; then
+                    resolve_migrate
+                  fi
+                  case "$w_resolve_result" in
+                    rolled-back)
+                      restart_old
+                      ;;
+                    committed)
+                      ensure_env_new
+                      terminal needs-owner 74
+                      ;;
+                    *)
+                      terminal needs-owner 74
+                      ;;
+                  esac
+                  ;;
+                committed)
+                  if [[ "$(classify_ledger)" == "committed" ]]; then
+                    ensure_env_new
+                  fi
+                  terminal needs-owner 74
+                  ;;
+                starting-new)
+                  stop_unverified
+                  terminal needs-owner 73
+                  ;;
+                done-new)
+                  terminal done-new 0
+                  ;;
+                *)
+                  terminal needs-owner 74
+                  ;;
+              esac
+            fi
+            final="${w_final_rc:-74}"
+            wlog "outcome=${w_phase} rc=${final} raw_rc=${raw}"
+            if [[ "$final" != "0" && "$final" != "75" && "$w_env_written" == "new" ]]; then
+              wlog "warning env_written=new: never start the old containers; .env already names the new image"
+            fi
+            printf '%s\n' "$final" > "${RUN_DIR}/rc.tmp" && mv -f "${RUN_DIR}/rc.tmp" "${RUN_DIR}/rc"
+            exit "$final"
+          }
+          trap on_exit EXIT
+          trap on_term TERM
+
+          # ---- phase 0: lock, host state, abort file ----
+          if ! command -v flock >/dev/null 2>&1; then
+            fail "flock is not installed on the deploy host"
+          fi
+          mkdir -p "$WINDOW_HOME"
+          exec 9>"$WINDOW_LOCK"
+          if ! flock -n 9; then
+            fail "another deploy window holds the host lock"
+          fi
+          w_lock_held=1
+          if [[ -f "$WINDOW_STATE" ]]; then
+            prev_phase="$(sed -n 's/^phase=//p' "$WINDOW_STATE" | tail -n 1)"
+            case "$prev_phase" in
+              done-new|done-restored-old|refused-unchanged) ;;
+              *)
+                w_state_frozen=1
+                fail "host window state phase=${prev_phase:-<empty>} is unfinished or needs the owner; the owner clears it per the runbook"
+                ;;
+            esac
+          fi
+          if [[ -e "$WINDOW_ABORT" ]]; then
+            fail "abort file present at start; the owner removes it"
+          fi
+          echo "=== WINDOW PREFLIGHT START ==="
+          wlog "run=${WINDOW_RUN} sha=${DEPLOY_IMAGE_TAG}"
+          wlog "restore_proof=${RESTORE_PROOF}"
+          wlog "pre_commit_abort=${PRE_COMMIT_ABORT}"
+          wlog "drill_fail_stage=${DRILL_FAIL_STAGE}"
+
+          # ---- phase 0.2: re-validate the dispatch inputs embedded above ----
+          [[ "$WINDOW_RUN" =~ ^[0-9]+-[0-9]+$ ]] || fail "invalid run id"
+          [[ "$EXPECTED_PENDING_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "expected_pending_sha256 is not 64 lower-case hex characters"
+          case "$DRILL_FAIL_STAGE" in
+            none|deploy|migrate) ;;
+            *) fail "drill_fail_stage must be none, deploy or migrate" ;;
+          esac
+          if [[ "$RESTORE_PROOF" != "unselected" && "$RESTORE_PROOF" != "waived" && ! "$RESTORE_PROOF" =~ ^ref:[A-Za-z0-9._-]{1,64}$ ]]; then
+            fail "restore_proof has an invalid value"
+          fi
+          case "$PRE_COMMIT_ABORT" in
+            unselected|restart-old|stay-stopped) ;;
+            *) fail "pre_commit_abort has an invalid value" ;;
+          esac
+          if [[ "$DRILL_FAIL_STAGE" == "none" ]]; then
+            [[ "$RESTORE_PROOF" != "unselected" ]] || fail "restore_proof is required for a production deploy"
+            [[ "$PRE_COMMIT_ABORT" != "unselected" ]] || fail "pre_commit_abort is required for a production deploy"
+          fi
+          for tunable in DEPLOY_WINDOW_PULL_BUDGET_KB DEPLOY_WINDOW_RESERVE_KB DEPLOY_BACKUP_TIMEOUT_S \
+            DEPLOY_BACKUP_VERIFY_TIMEOUT_S DEPLOY_WINDOW_EXPECTED_MIN DEPLOY_WINDOW_DRAIN_S \
+            DEPLOY_WINDOW_QUEUED_MAX_AGE_S DEPLOY_WINDOW_MIN_HOST_CHECKS; do
+            [[ "${!tunable}" =~ ^[1-9][0-9]{0,9}$ ]] || fail "${tunable} must be a positive integer"
+          done
+          (( DEPLOY_WINDOW_EXPECTED_MIN <= 1440 )) || fail "DEPLOY_WINDOW_EXPECTED_MIN must be at most 1440"
+          case "$DEPLOY_WINDOW_CANCEL_OWN_SESSIONS" in
+            true|false) ;;
+            *) fail "DEPLOY_WINDOW_CANCEL_OWN_SESSIONS must be true or false" ;;
+          esac
+          for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+            [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] || fail "excluded migration name failed validation"
+          done
+          for name in "${PROD_OWNER_EXCLUDED_TABLES[@]}"; do
+            [[ "$name" =~ ^[a-z_][a-z0-9_]*$ ]] || fail "excluded table name failed validation"
+          done
+          PROD_EXCLUDE_CSV="$(IFS=,; printf '%s' "${PROD_OWNER_EXCLUDED_MIGRATIONS[*]}")"
+          [[ -n "$PROD_EXCLUDE_CSV" ]] || fail "the production exclusion list is empty"
+          set_phase preflight
+
+          # ---- phase 0.3-0.5: read-only host probes ----
+          for tool in setsid timeout; do
+            command -v "$tool" >/dev/null 2>&1 || fail "required tool missing on the deploy host: ${tool}"
+          done
+          wlog "tools flock=present setsid=present timeout=present"
+          compose_version="$(timeout 30 docker compose version --short 2>>"${RUN_DIR}/docker.err" || true)"
+          wlog "compose_version=${compose_version:-unknown}"
+          if command -v loginctl >/dev/null 2>&1; then
+            kill_user_processes="unknown"
+            if command -v busctl >/dev/null 2>&1; then
+              case "$(timeout 10 busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null || true)" in
+                "b true") kill_user_processes="yes" ;;
+                "b false") kill_user_processes="no" ;;
+              esac
+            fi
+            if [[ "$kill_user_processes" == "unknown" ]]; then
+              logind_conf="$(cat /etc/systemd/logind.conf /etc/systemd/logind.conf.d/*.conf 2>/dev/null || true)"
+              kup_value="$(printf '%s\n' "$logind_conf" | sed -n 's/^[[:space:]]*KillUserProcesses[[:space:]]*=[[:space:]]*\([A-Za-z0-9]*\).*/\1/p' | tail -n 1)"
+              case "$kup_value" in
+                yes|true|on|1) kill_user_processes="yes" ;;
+                no|false|off|0) kill_user_processes="no" ;;
+                "") kill_user_processes="default" ;;
+              esac
+            fi
+            linger="$(timeout 10 loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)"
+            wlog "logind kill_user_processes=${kill_user_processes} linger=${linger:-unknown}"
+            if [[ "$kill_user_processes" == "yes" && "$linger" != "yes" ]]; then
+              fail "logind kills user processes at logout and linger is off for the deploy user; the window would not survive the ssh logout"
+            fi
+          else
+            wlog "logind=absent (loginctl not installed); proceeding"
+          fi
+          if command -v crontab >/dev/null 2>&1; then
+            cron_text="$(crontab -l 2>/dev/null || true)"
+            cron_entries="$(printf '%s\n' "$cron_text" | grep -cvE '^[[:space:]]*(#|$)' || true)"
+            cron_gc="$(printf '%s\n' "$cron_text" | grep -vE '^[[:space:]]*#' | grep -cE 'docker-gc|system prune' || true)"
+            wlog "crontab entries=${cron_entries:-0} docker_gc_entries=${cron_gc:-0}"
+            if [[ "${cron_gc:-0}" != "0" ]]; then
+              fail "the deploy user's crontab has a docker GC / prune entry; disable it for the window"
+            fi
+          else
+            wlog "crontab=absent"
+          fi
+          now_s="$(date -u +%s)"
+          window_end_s=$(( now_s + DEPLOY_WINDOW_EXPECTED_MIN * 60 ))
+          day0_s=$(( now_s - now_s % 86400 ))
+          for day in -1 0 1 2; do
+            day_start_s=$(( day0_s + day * 86400 ))
+            weekday=$(( (day_start_s / 86400 + 4) % 7 ))
+            for entry in "${QUIET_BLOCKING[@]}"; do
+              kind="${entry%% *}"
+              hhmm="${entry#* }"
+              if [[ "$kind" == "sunday" && "$weekday" != "0" ]]; then continue; fi
+              entry_s=$(( day_start_s + 10#${hhmm%%:*} * 3600 + 10#${hhmm#*:} * 60 ))
+              if (( entry_s - 300 < window_end_s && entry_s + 1800 > now_s )); then
+                fail "quiet schedule: the expected window (${DEPLOY_WINDOW_EXPECTED_MIN} min) overlaps the blocking ${kind} ${hhmm} UTC entry"
+              fi
+            done
+          done
+          wlog "quiet_schedule=clear expected_min=${DEPLOY_WINDOW_EXPECTED_MIN}"
+          dump_count=0
+          dump_bytes=0
+          for dump in "${WINDOW_HOME}"/runs/*/db.dump; do
+            if [[ ! -f "$dump" ]]; then continue; fi
+            dump_count=$((dump_count + 1))
+            dump_bytes=$(( dump_bytes + $(wc -c < "$dump") ))
+          done
+          wlog "retained_dumps count=${dump_count} bytes=${dump_bytes}"
+          WINDOW_CORE
+          remote_cmds+=(
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
             '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
             'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
@@ -390,7 +1204,7 @@ jobs:
             'if docker compose version >/dev/null 2>&1; then'
             '  COMPOSE_CMD="docker compose"'
             'elif command -v docker-compose >/dev/null 2>&1; then'
-            '  echo "[deploy][error] legacy '\''docker-compose'\'' detected: $(docker-compose --version | head -n 1)" >&2'
+            '  echo "[deploy][error] legacy '\''docker-compose'\'' detected: $(docker-compose --version 2>&1 | sed -n 1p)" >&2'
             '  echo "[deploy][error] install Docker Compose v2 plugin so '\''docker compose'\'' is available" >&2'
             '  exit 125'
             'else'
@@ -409,6 +1223,80 @@ jobs:
             '  echo "[deploy][error] DEPLOY_EXPECTED_COMMIT must match DEPLOY_IMAGE_TAG, expected=${DEPLOY_EXPECTED_COMMIT}, tag=${DEPLOY_IMAGE_TAG}" >&2'
             '  exit 78'
             'fi'
+          )
+          window_block <<'WINDOW_PHASE0'
+          # ---- phase 0.7: refusals with nothing changed (rc 70) ----
+          F="${DEPLOY_COMPOSE_FILE}"
+          git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "the deploy directory is not a git work tree; refusing"
+          git ls-files --error-unmatch "$F" >/dev/null 2>>"${RUN_DIR}/git.err" || fail "the compose file is not tracked in the deploy directory"
+          if ! git diff --quiet "${DEPLOY_EXPECTED_COMMIT}" -- "$F" docker/nginx.conf scripts/ops/attendance-preflight.sh 2>>"${RUN_DIR}/git.err"; then
+            fail "host compose/nginx/preflight files differ from the dispatched commit (main may have advanced); refusing"
+          fi
+          wlog "host_files=match_dispatched_commit"
+          for c in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do
+            running="$(ctr_get "$c" '{{.State.Running}}' || true)"
+            health="$(ctr_get "$c" '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' || true)"
+            wlog "container name=${c} running=${running:-missing} health=${health:-missing}"
+            [[ "$running" == "true" ]] || fail "${c} is not running; this window deploys only over a running, healthy production"
+            case "$c" in
+              metasheet-postgres|metasheet-redis)
+                [[ "$health" == "healthy" ]] || fail "${c} is not healthy"
+                ;;
+            esac
+          done
+          P="$(label_of metasheet-postgres com.docker.compose.project || true)"
+          [[ "$P" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail "metasheet-postgres has no usable compose project label"
+          PROJECT_DIR="$(label_of metasheet-postgres com.docker.compose.project.working_dir || true)"
+          if [[ -z "$PROJECT_DIR" || ( "$PROJECT_DIR" != "$DEPLOY_REPO_PATH" && "$PROJECT_DIR" != "$(pwd -P)" ) ]]; then
+            fail "metasheet-postgres: compose working_dir label does not match the deploy directory"
+          fi
+          case "$F" in
+            /*) F_ABS="$F" ;;
+            *) F_ABS="${PROJECT_DIR}/${F}" ;;
+          esac
+          for pair in metasheet-postgres:postgres metasheet-redis:redis metasheet-backend:backend metasheet-web:web; do
+            c="${pair%%:*}"
+            service="${pair#*:}"
+            [[ "$(label_of "$c" com.docker.compose.project || true)" == "$P" ]] || fail "${c}: compose project label differs from the other containers"
+            [[ "$(label_of "$c" com.docker.compose.service || true)" == "$service" ]] || fail "${c}: compose service label is not ${service}"
+            [[ "$(label_of "$c" com.docker.compose.oneoff || true)" == "False" ]] || fail "${c}: compose oneoff label is not False"
+            [[ "$(label_of "$c" com.docker.compose.project.working_dir || true)" == "$PROJECT_DIR" ]] || fail "${c}: compose working_dir label does not match the deploy directory"
+            [[ "$(label_of "$c" com.docker.compose.project.config_files || true)" == "$F_ABS" ]] || fail "${c}: compose config_files label does not match the compose file"
+          done
+          wlog "compose_identity=match project=${P}"
+          all_names="$(timeout 30 docker ps -a --format '{{.Names}}' 2>>"${RUN_DIR}/docker.err")" || fail "docker ps failed"
+          hashed_count="$(printf '%s\n' "$all_names" | grep -cE '^[a-f0-9]+_metasheet-(postgres|redis|backend|web)$' || true)"
+          [[ "${hashed_count:-0}" == "0" ]] || fail "hashed legacy metasheet containers exist (count=${hashed_count}); remove them by hand first"
+          pg_volume="$(ctr_get metasheet-postgres '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' || true)"
+          [[ "$pg_volume" == "${P}_metasheet-postgres-data" ]] || fail "metasheet-postgres data mount is not the named volume ${P}_metasheet-postgres-data"
+          w_old_backend_image_id="$(ctr_get metasheet-backend '{{.Image}}')" || fail "cannot read the running backend image"
+          w_old_web_image_id="$(ctr_get metasheet-web '{{.Image}}')" || fail "cannot read the running web image"
+          w_old_backend_rev="$(image_label "$w_old_backend_image_id" org.opencontainers.image.revision || true)"
+          w_old_web_rev="$(image_label "$w_old_web_image_id" org.opencontainers.image.revision || true)"
+          running_backend_commit="$(curl -fsS --max-time 10 "${DEPLOY_BACKEND_HEALTH_URL}" 2>>"${RUN_DIR}/curl.err" | json_commit backend || true)"
+          if [[ -z "$running_backend_commit" || "$running_backend_commit" != "$w_old_backend_rev" ]]; then
+            fail "running backend /health build.commit does not equal its image revision label"
+          fi
+          wlog "running_backend_commit=${running_backend_commit}"
+          if [[ -f docker/app.env ]] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(MIGRATION_EXCLUDE|MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL|ALLOW_DB_RESET)[[:space:]]*=' docker/app.env; then
+            fail "docker/app.env sets MIGRATION_EXCLUDE, MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL or ALLOW_DB_RESET; remove the key first"
+          fi
+          # ---- phase 0.8: .env tag versus the running backend (logged only) ----
+          w_old_backend_image="$(ctr_get metasheet-backend '{{.Config.Image}}')" || fail "cannot read the running backend image name"
+          w_old_web_image="$(ctr_get metasheet-web '{{.Config.Image}}')" || fail "cannot read the running web image name"
+          env_tag="$(sed -n 's/^IMAGE_TAG=//p' .env 2>/dev/null | tail -n 1 || true)"
+          if [[ -n "$env_tag" && "$env_tag" == "${w_old_backend_image##*:}" ]]; then
+            wlog "env_image_tag_matches_running=yes"
+          else
+            wlog "env_image_tag_matches_running=no"
+          fi
+          # ---- phase 0.9: snapshot .env and docker/app.env, then the existing app.env rewrite ----
+          snapshot_one "docker/app.env" app.env
+          snapshot_one ".env" dotenv
+          w_snapshots_taken=1
+          wlog "env_snapshots=taken"
+          WINDOW_PHASE0
+          remote_cmds+=(
             'ENV_FILE_PATH="docker/app.env"'
             'if [[ -f "${ENV_FILE_PATH}" ]]; then'
             '  database_url_line="$(grep -E "^DATABASE_URL=" "${ENV_FILE_PATH}" | tail -n 1 || true)"'
@@ -494,6 +1382,10 @@ jobs:
             '    echo "[deploy] ENABLE_YJS_COLLAB=false in ${ENV_FILE_PATH}"'
             '  fi'
             'fi'
+          )
+          remote_cmds+=(
+            '# Moved: .env now names the new image only once the migration has committed (phase 4).'
+            'write_compose_env_new() {'
             'COMPOSE_ENV_FILE=".env"'
             'python3 - "${COMPOSE_ENV_FILE}" "${DEPLOY_IMAGE_OWNER}" "${DEPLOY_IMAGE_TAG}" <<'\''PY'\'''
             'from pathlib import Path'
@@ -533,6 +1425,67 @@ jobs:
             'path.write_text("\n".join(updated) + "\n")'
             'PY'
             'echo "[deploy] persisted IMAGE_OWNER and IMAGE_TAG in ${COMPOSE_ENV_FILE}"'
+            '}'
+          )
+          window_block <<'WINDOW_PHASE0B'
+          # ---- phase 0.10: record the old state (tags and digests only in the log) ----
+          w_id_postgres="$(ctr_get metasheet-postgres '{{.Id}}')" || fail "cannot read the postgres container id"
+          w_id_redis="$(ctr_get metasheet-redis '{{.Id}}')" || fail "cannot read the redis container id"
+          w_id_backend="$(ctr_get metasheet-backend '{{.Id}}')" || fail "cannot read the backend container id"
+          w_id_web="$(ctr_get metasheet-web '{{.Id}}')" || fail "cannot read the web container id"
+          old_backend_digest="$(timeout 30 docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$w_old_backend_image_id" 2>>"${RUN_DIR}/docker.err" | awk 'NF && !seen { print; seen = 1 }' || true)"
+          old_web_digest="$(timeout 30 docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$w_old_web_image_id" 2>>"${RUN_DIR}/docker.err" | awk 'NF && !seen { print; seen = 1 }' || true)"
+          wlog "old_backend_image=${w_old_backend_image}@${old_backend_digest##*@} revision=${w_old_backend_rev}"
+          wlog "old_web_image=${w_old_web_image}@${old_web_digest##*@} revision=${w_old_web_rev}"
+          state_write
+          # ---- phase 0.11: app data in the backend's writable layer (read-only probe) ----
+          for key in ATTACHMENT_PATH STORAGE_PATH; do
+            if [[ -f docker/app.env ]] && grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" docker/app.env; then
+              wlog "app_env_key ${key}=set"
+            else
+              wlog "app_env_key ${key}=unset"
+            fi
+          done
+          # Container-resolved paths (cwd /app): multitable attachments, generic uploads, /app/storage.
+          # The resolved values stay in a host-only file and are never logged.
+          timeout 30 docker exec metasheet-backend sh -c 'cd /app || exit 1; for p in "${ATTACHMENT_PATH:-/app/data/attachments}" "${STORAGE_PATH:-/app/uploads}" /app/storage; do case "$p" in /*) ;; *) p="/app/$p" ;; esac; if [ -d "$p" ]; then printf "%s\n" "$p"; fi; done' \
+            > "${RUN_DIR}/appdata.candidates" 2>>"${RUN_DIR}/docker.err" || fail "app data probe: could not resolve the backend's data paths"
+          : > "${RUN_DIR}/appdata.paths"
+          while IFS= read -r candidate; do
+            candidate="${candidate%/}"
+            if [[ -z "$candidate" || "$candidate" == "/" ]]; then continue; fi
+            nested=0
+            while IFS= read -r other; do
+              other="${other%/}"
+              if [[ -n "$other" && "$other" != "$candidate" && "$candidate" == "$other"/* ]]; then nested=1; fi
+            done < "${RUN_DIR}/appdata.candidates"
+            if [[ "$nested" == "0" ]] && ! grep -qxF -- "$candidate" "${RUN_DIR}/appdata.paths"; then
+              printf '%s\n' "$candidate" >> "${RUN_DIR}/appdata.paths"
+            fi
+          done < "${RUN_DIR}/appdata.candidates"
+          appdata_paths=()
+          while IFS= read -r candidate; do
+            if [[ -n "$candidate" ]]; then appdata_paths+=("$candidate"); fi
+          done < "${RUN_DIR}/appdata.paths"
+          # appdata_measure: "<files> <bytes>" of regular files under the paths, on the backend's own filesystem.
+          appdata_measure() {
+            if (( ${#appdata_paths[@]} == 0 )); then
+              printf '0 0\n'
+              return 0
+            fi
+            timeout 300 docker exec metasheet-backend find "${appdata_paths[@]}" -xdev -type f -printf '%s\n' \
+              > "${RUN_DIR}/appdata.sizes" 2>>"${RUN_DIR}/docker.err" || return 1
+            awk '{ n++; b += $1 } END { printf "%d %.0f\n", n, b }' "${RUN_DIR}/appdata.sizes"
+          }
+          read -r w_appdata_files appdata_bytes <<< "$(appdata_measure || true)"
+          [[ "$w_appdata_files" =~ ^[0-9]+$ && "$appdata_bytes" =~ ^[0-9]+$ ]] || fail "app data probe: could not count files"
+          if (( ${#appdata_paths[@]} > 0 )); then
+            w_appdata_kb="$(timeout 300 docker exec metasheet-backend du -skx "${appdata_paths[@]}" 2>>"${RUN_DIR}/docker.err" | awk '{ s += $1 } END { printf "%.0f\n", s }')" \
+              || fail "app data probe: du failed"
+          fi
+          wlog "appdata paths=${#appdata_paths[@]} files=${w_appdata_files} bytes=${appdata_bytes} kb=${w_appdata_kb}"
+          WINDOW_PHASE0B
+          remote_cmds+=(
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
@@ -541,45 +1494,356 @@ jobs:
             'preflight_rc=$?'
             "set -e"
             "echo \"=== ATTENDANCE PREFLIGHT END ===\""
-            'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
-            'for CONTAINER_NAME in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do'
-            '  if docker ps -a --format "{{.Names}}" | grep -Fxq "${CONTAINER_NAME}"; then'
-            '    echo "[deploy][warn] removing existing container ${CONTAINER_NAME} before recreate"'
-            '    docker rm -f "${CONTAINER_NAME}"'
-            '  fi'
-            'done'
-            'orphan_names="$(docker ps -a --format "{{.Names}}" | grep -E "^[a-f0-9]+_metasheet-(postgres|redis|backend|web)$" || true)"'
-            'if [[ -n "${orphan_names}" ]]; then'
-            '  echo "[deploy][warn] removing hashed legacy metasheet containers before recreate"'
-            '  while IFS= read -r orphan_name; do'
-            '    [[ -n "${orphan_name}" ]] || continue'
-            '    echo "[deploy][warn] removing orphan container ${orphan_name}"'
-            '    docker rm -f "${orphan_name}"'
-            '  done <<< "${orphan_names}"'
-            'fi'
-            "echo \"=== DEPLOY START ===\""
-            'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
-            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d postgres redis"'
-            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
+            'if [[ "$preflight_rc" != "0" ]]; then echo "[deploy-window] preflight_rc=${preflight_rc}"; exit 70; fi'
+          )
+          window_block <<'WINDOW_PHASE1A'
+          # ---- phase 1.2: pre-pull disk gate ----
+          w_docker_root="$(timeout 30 docker info -f '{{.DockerRootDir}}' 2>>"${RUN_DIR}/docker.err")" || fail "docker info failed"
+          [[ -n "$w_docker_root" ]] || fail "docker info returned no DockerRootDir"
+          disk_gate pre-pull "$(( DEPLOY_WINDOW_PULL_BUDGET_KB + DEPLOY_WINDOW_RESERVE_KB ))" "$DEPLOY_WINDOW_RESERVE_KB"
+          # ---- phase 1.3: pull the new images while the old stack serves ----
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 900 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" pull backend web </dev/null >"${RUN_DIR}/pull.out" 2>&1 9>&- &
+          w_job_pid=$!
+          watch_job pull ""
+          [[ "$w_job_rc" == "0" ]] || fail "image pull failed rc=${w_job_rc} (output kept on the host)"
+          WINDOW_PHASE1A
+          remote_cmds+=(
             'backend_image="ghcr.io/${DEPLOY_IMAGE_OWNER}/metasheet2-backend:${DEPLOY_IMAGE_TAG}"'
             'web_image="ghcr.io/${DEPLOY_IMAGE_OWNER}/metasheet2-web:${DEPLOY_IMAGE_TAG}"'
-            'backend_repo_digest="$(docker image inspect "${backend_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | grep "/metasheet2-backend@" | head -n 1 || true)"'
-            'web_repo_digest="$(docker image inspect "${web_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | grep "/metasheet2-web@" | head -n 1 || true)"'
+            'backend_repo_digest="$(docker image inspect "${backend_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | awk '\''/\/metasheet2-backend@/ && !seen { print; seen = 1 }'\'' || true)"'
+            'web_repo_digest="$(docker image inspect "${web_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | awk '\''/\/metasheet2-web@/ && !seen { print; seen = 1 }'\'' || true)"'
             'echo "[deploy-trace] backend_image=${backend_image}"'
             'echo "[deploy-trace] backend_repo_digest=${backend_repo_digest:-missing}"'
             'echo "[deploy-trace] web_image=${web_image}"'
             'echo "[deploy-trace] web_repo_digest=${web_repo_digest:-missing}"'
-            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
-            "echo \"=== DEPLOY END ===\""
-            "# Ensure DB schema is up to date before smoke checks."
-            "echo \"=== MIGRATE START ===\""
-            'if [[ "${DRILL_FAIL_STAGE:-none}" == "migrate" ]]; then echo "[deploy][drill] intentional failure at migrate stage"; exit 92; fi'
-            "# Important: redirect stdin so docker compose exec can't consume the rest of this bash -s script."
-            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"'
-            "echo \"=== MIGRATE END ===\""
+          )
+          window_block <<'WINDOW_MAIN'
+          for kind in backend web; do
+            if [[ "$kind" == "backend" ]]; then
+              image="$backend_image"
+              digest="$backend_repo_digest"
+            else
+              image="$web_image"
+              digest="$web_repo_digest"
+            fi
+            revision="$(image_label "$image" org.opencontainers.image.revision || true)"
+            [[ "$revision" == "$DEPLOY_IMAGE_TAG" ]] || fail "pulled ${kind} image revision label does not equal the dispatched commit"
+            [[ -n "$digest" ]] || fail "pulled ${kind} image has no repo digest"
+          done
+          wlog "pulled images revision=match digests=present"
+          # ---- phase 1.4: post-pull disk gate ----
+          db_bytes="$(pg_sql 'SELECT pg_database_size(current_database())')" || fail "cannot read the database size"
+          [[ "$db_bytes" =~ ^[0-9]+$ ]] || fail "database size is not an integer"
+          db_kb=$(( (db_bytes + 1023) / 1024 ))
+          wlog "database_kb=${db_kb} appdata_kb=${w_appdata_kb} retained_dumps=${dump_count} retained_dump_bytes=${dump_bytes}"
+          disk_gate post-pull "$DEPLOY_WINDOW_RESERVE_KB" "$(( db_kb + w_appdata_kb + DEPLOY_WINDOW_RESERVE_KB ))"
+          # ---- phase 1.5: ledger baseline ----
+          L0="$(pg_sql 'SELECT count(*) FROM kysely_migration')" || fail "cannot read kysely_migration"
+          [[ "$L0" =~ ^[1-9][0-9]*$ ]] || fail "kysely_migration count is not a positive integer"
+          pg_sql 'SELECT name FROM kysely_migration ORDER BY name' > "${RUN_DIR}/ledger-before.txt" || fail "cannot read kysely_migration names"
+          for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+            if grep -qxF -- "$name" "${RUN_DIR}/ledger-before.txt"; then
+              fail "excluded migration ${name} is already applied; the exclusion is stale"
+            fi
+          done
+          excluded_present="$(excluded_tables_present)" || fail "cannot check the excluded tables"
+          [[ "$excluded_present" == "0" ]] || fail "excluded tables exist (count=${excluded_present})"
+          w_ledger_before="$L0"
+          state_write
+          # ---- phase 1.6: effective env and pending list from the NEW image (read-only one-off) ----
+          list_rc=0
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 120 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-list-${WINDOW_RUN}" -e "APP_NAME=metasheet-window-list-${WINDOW_RUN}" backend sh -c '[ -z "${MIGRATION_EXCLUDE+x}" ] && [ -z "${MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL+x}" ] && [ -z "${ALLOW_DB_RESET+x}" ] && exec node packages/core-backend/dist/src/db/migrate.js --list' </dev/null >"${RUN_DIR}/list-before.out" 2>&1 || list_rc=$?
+          [[ "$list_rc" == "0" ]] || fail "migrate --list in the new image failed rc=${list_rc} (env guard or DB error; output kept on the host)"
+          parse_list "${RUN_DIR}/list-before.out" "${RUN_DIR}/pending-all.txt" || fail "migrate --list output could not be parsed"
+          [[ "$list_applied" == "$L0" ]] || fail "migrate --list Applied=${list_applied} differs from the ledger count ${L0}"
+          # ---- phase 1.7: exclusion proof ----
+          for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+            grep -qxF -- "$name" "${RUN_DIR}/pending-all.txt" || fail "excluded migration ${name} is not pending in this image"
+          done
+          # ---- phase 1.8: approved in-play set ----
+          : > "${RUN_DIR}/inplay.txt"
+          while IFS= read -r name; do
+            if [[ -z "$name" ]] || is_excluded "$name"; then continue; fi
+            printf '%s\n' "$name" >> "${RUN_DIR}/inplay.txt"
+          done < "${RUN_DIR}/pending-all.txt"
+          w_inplay="$(count_lines "${RUN_DIR}/inplay.txt")"
+          # sha256 of the in-play names joined by "\n" in --list load order, without a trailing newline.
+          inplay_sha256="$(printf '%s' "$(cat "${RUN_DIR}/inplay.txt")" | sha256_stdin)"
+          while IFS= read -r name; do
+            wlog "inplay name=${name}"
+          done < "${RUN_DIR}/inplay.txt"
+          wlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} inplay_sha256=${inplay_sha256}"
+          state_write
+          [[ "$inplay_sha256" == "$EXPECTED_PENDING_SHA256" ]] || fail "in-play pending set sha256 differs from expected_pending_sha256; the set was not rehearsed"
+          if [[ "${DRILL_FAIL_STAGE}" == "migrate" ]]; then
+            w_drill_rc=92
+            echo "[deploy][drill] intentional failure at migrate stage (before anything is stopped)"
+            exit 92
+          fi
+          # ---- phase 1.9: owner-installed host checks ----
+          run_host_checks pre-stop || fail "host checks failed or fewer than DEPLOY_WINDOW_MIN_HOST_CHECKS are installed"
+          # ---- phase 1.10: drain probe (read-only) ----
+          if [[ -n "$(pg_sql "SELECT coalesce(to_regclass('public.attendance_import_jobs')::text, '')")" ]]; then
+            busy_imports="$(pg_sql "SELECT count(*) FROM attendance_import_jobs WHERE status = 'running' OR (status = 'queued' AND created_at > now() - make_interval(secs => ${DEPLOY_WINDOW_QUEUED_MAX_AGE_S}))")" || fail "cannot read attendance_import_jobs"
+            old_queued="$(pg_sql "SELECT count(*) FROM attendance_import_jobs WHERE status = 'queued' AND created_at <= now() - make_interval(secs => ${DEPLOY_WINDOW_QUEUED_MAX_AGE_S})")" || fail "cannot read attendance_import_jobs"
+            wlog "drain import_jobs_busy=${busy_imports} import_jobs_old_queued=${old_queued}"
+            [[ "$busy_imports" == "0" ]] || fail "attendance import jobs are running or recently queued; wait for them to finish"
+          else
+            wlog "drain import_jobs=absent"
+          fi
+          if [[ -n "$(pg_sql "SELECT coalesce(to_regclass('public.directory_sync_runs')::text, '')")" ]]; then
+            live_syncs="$(pg_sql "SELECT count(*) FROM directory_sync_runs WHERE status = 'running' AND COALESCE(last_heartbeat_at, started_at) >= now() - interval '10 minutes'")" || fail "cannot read directory_sync_runs"
+            stale_syncs="$(pg_sql "SELECT count(*) FROM directory_sync_runs WHERE status = 'running' AND COALESCE(last_heartbeat_at, started_at) < now() - interval '10 minutes'")" || fail "cannot read directory_sync_runs"
+            wlog "drain directory_sync_live=${live_syncs} directory_sync_stale=${stale_syncs}"
+            [[ "$live_syncs" == "0" ]] || fail "a directory sync is running with a fresh heartbeat; wait for it to finish"
+          else
+            wlog "drain directory_sync_runs=absent"
+          fi
+          idle_in_xact="$(pg_sql "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction'" || true)"
+          oldest_xact="$(pg_sql "SELECT coalesce(max(extract(epoch FROM now() - xact_start))::bigint, 0) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()" || true)"
+          autovacuum_now="$(pg_sql "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'autovacuum worker'" || true)"
+          wlog "drain idle_in_transaction=${idle_in_xact:-unreadable} oldest_xact_s=${oldest_xact:-unreadable} autovacuum_workers=${autovacuum_now:-unreadable}"
+          if [[ "${DRILL_FAIL_STAGE}" == "deploy" ]]; then
+            w_drill_rc=91
+            echo "[deploy][drill] intentional failure at deploy stage (after the full preflight, before anything is stopped)"
+            exit 91
+          fi
+          check_abort before-stop
+          echo "=== WINDOW PREFLIGHT END ==="
+
+          # ---- phase 2: stop writes (first change to production) ----
+          echo "=== STOP WRITES START ==="
+          set_phase stopping
+          timeout 90 docker stop -t 60 metasheet-web >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker stop metasheet-web failed"
+          wlog "web stopped"
+          if (( w_appdata_files > 0 )); then
+            appdata_rel=()
+            for candidate in "${appdata_paths[@]}"; do
+              appdata_rel+=("${candidate#/}")
+            done
+            timeout 600 docker exec metasheet-backend tar -C / --one-file-system -cf - "${appdata_rel[@]}" >"${RUN_DIR}/appdata.tar" 2>>"${RUN_DIR}/appdata.err" 9>&- &
+            w_job_pid=$!
+            watch_job appdata-copy "${RUN_DIR}/appdata.tar"
+            [[ "$w_job_rc" == "0" ]] || fail "app data copy-out failed rc=${w_job_rc}"
+            tar -tvf "${RUN_DIR}/appdata.tar" > "${RUN_DIR}/appdata.list" 2>>"${RUN_DIR}/appdata.err" || fail "app data archive cannot be listed"
+            read -r w_appdata_tar_files w_appdata_tar_bytes <<< "$(awk '/^-/ { n++; b += $3 } END { printf "%d %.0f\n", n, b }' "${RUN_DIR}/appdata.list")"
+            appdata_sha256="$(sha256_file "${RUN_DIR}/appdata.tar")"
+            w_appdata_copied=1
+            wlog "appdata copy files=${w_appdata_tar_files} bytes=${w_appdata_tar_bytes} sha256=${appdata_sha256} file=appdata.tar"
+          fi
+          timeout 90 docker stop -t 60 metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker stop metasheet-backend failed"
+          wlog "backend stopped"
+          # verify_app_stopped: backend and web stopped, all four container ids unchanged.
+          verify_app_stopped() {
+            local c
+            for c in metasheet-backend metasheet-web; do
+              if [[ "$(ctr_get "$c" '{{.State.Running}}' || true)" != "false" ]]; then
+                werr "${c} is not stopped"
+                return 1
+              fi
+            done
+            for c in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do
+              if [[ "$(ctr_get "$c" '{{.Id}}' || true)" != "$(recorded_id "$c")" ]]; then
+                werr "${c} container id changed"
+                return 1
+              fi
+            done
+            return 0
+          }
+          verify_app_stopped || fail "stop verification failed"
+          set_phase stopped
+          wait_sessions_zero "$DEPLOY_WINDOW_DRAIN_S" stop-writes || fail "database sessions did not drain within ${DEPLOY_WINDOW_DRAIN_S} s"
+          check_abort after-stop
+          echo "=== STOP WRITES END ==="
+
+          # ---- phase 3: backup (never uploaded; host-only, mode 600) ----
+          echo "=== BACKUP START ==="
+          timeout "$DEPLOY_BACKUP_TIMEOUT_S" docker exec metasheet-postgres sh -c 'exec pg_dump -Fc -U "$POSTGRES_USER" -d "${POSTGRES_DB:-$POSTGRES_USER}"' >"${RUN_DIR}/db.dump.partial" 2>"${RUN_DIR}/pg_dump.err" 9>&- &
+          w_job_pid=$!
+          watch_job backup "${RUN_DIR}/db.dump.partial"
+          if [[ "$w_job_rc" != "0" ]]; then
+            if [[ "$w_job_rc" == "124" && "${DEPLOY_WINDOW_CANCEL_OWN_SESSIONS}" == "true" ]]; then
+              wlog "cancelling this window's own pg_dump session (opt-in)"
+              pg_sql "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE application_name = 'pg_dump' AND pid <> pg_backend_pid()" >/dev/null || true
+            fi
+            fail "pg_dump failed rc=${w_job_rc}"
+          fi
+          [[ -s "${RUN_DIR}/db.dump.partial" ]] || fail "pg_dump wrote an empty file"
+          timeout "$DEPLOY_BACKUP_VERIFY_TIMEOUT_S" docker exec -i metasheet-postgres pg_restore -f /dev/null <"${RUN_DIR}/db.dump.partial" >/dev/null 2>"${RUN_DIR}/pg_restore.err" 9>&- &
+          w_job_pid=$!
+          watch_job backup-verify ""
+          [[ "$w_job_rc" == "0" ]] || fail "the dump does not read end to end (pg_restore -f /dev/null rc=${w_job_rc})"
+          timeout "$DEPLOY_BACKUP_VERIFY_TIMEOUT_S" docker exec -i metasheet-postgres pg_restore --list <"${RUN_DIR}/db.dump.partial" >"${RUN_DIR}/db.toc" 2>>"${RUN_DIR}/pg_restore.err" 9>&- &
+          w_job_pid=$!
+          watch_job backup-toc ""
+          [[ "$w_job_rc" == "0" ]] || fail "pg_restore --list failed rc=${w_job_rc}"
+          grep -qF 'TABLE DATA public kysely_migration' "${RUN_DIR}/db.toc" || fail "the dump has no kysely_migration data"
+          toc_entries="$(grep -cvE '^(;|$)' "${RUN_DIR}/db.toc" || true)"
+          dump_sha256="$(sha256_file "${RUN_DIR}/db.dump.partial")"
+          dump_size="$(wc -c < "${RUN_DIR}/db.dump.partial" | tr -d '[:space:]')"
+          mv -f "${RUN_DIR}/db.dump.partial" "${RUN_DIR}/db.dump"
+          chmod 600 "${RUN_DIR}/db.dump"
+          [[ "$(pg_sql 'SELECT count(*) FROM kysely_migration' || true)" == "$L0" ]] || fail "the ledger changed during the backup"
+          backup_free="$(min_free_kb || true)"
+          [[ "$backup_free" =~ ^[0-9]+$ ]] && (( backup_free >= DEPLOY_WINDOW_RESERVE_KB )) || fail "free space after the backup is below DEPLOY_WINDOW_RESERVE_KB"
+          pg_sql 'SELECT pg_catalog.quote_ident(n.nspname) || '\''.'\'' || pg_catalog.quote_ident(p.proname) || '\''('\'' || pg_catalog.pg_get_function_identity_arguments(p.oid) || '\'')'\'' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang WHERE n.nspname = '\''public'\'' AND p.prokind = '\''f'\'' AND l.lanname IN ('\''sql'\'', '\''plpgsql'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid OPERATOR(pg_catalog.=) '\''pg_catalog.pg_proc'\''::pg_catalog.regclass AND d.objid = p.oid AND d.deptype = '\''e'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE '\''search_path=%'\'') ORDER BY 1;' \
+            > "${RUN_DIR}/shim-candidates.txt" || fail "cannot save the search_path shim candidate list"
+          timeout 300 docker exec metasheet-postgres sh -c 'exec pg_dumpall --globals-only -U "$POSTGRES_USER" -l "${POSTGRES_DB:-$POSTGRES_USER}"' >"${RUN_DIR}/globals.sql" 2>>"${RUN_DIR}/pg_dump.err" || fail "pg_dumpall --globals-only failed"
+          server_version="$(pg_sql 'SHOW server_version' || true)"
+          {
+            printf 'file=db.dump\nsha256=%s\nbytes=%s\ntoc_entries=%s\nledger_before=%s\nserver_version=%s\n' \
+              "$dump_sha256" "$dump_size" "$toc_entries" "$L0" "$server_version"
+            printf 'old_backend_image=%s\nold_web_image=%s\nnew_sha=%s\nnew_backend_digest=%s\nnew_web_digest=%s\n' \
+              "$w_old_backend_image" "$w_old_web_image" "$DEPLOY_IMAGE_TAG" "$backend_repo_digest" "$web_repo_digest"
+            printf 'appdata_tar=%s\ncreated_utc=%s\n' "$w_appdata_copied" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${RUN_DIR}/meta.txt"
+          cat > "${RUN_DIR}/RESTORE-README.txt" <<'RESTORE_README'
+          Restore notes for db.dump in this directory (host only; never upload these files).
+          - A restore needs the owner's approval of the recovery point first.
+          - Restore into a NEW database, never over the live volume. Check free space first: a
+            second copy of the database may not fit beside the live one on this disk; dropping
+            the live database to make room is a separate owner decision.
+          - Apply globals.sql first (roles; it holds password hashes).
+          - Functions listed in shim-candidates.txt need SET search_path = pg_catalog, public
+            during the restore, and session_replication_role handling for triggers; follow the
+            staging rehearsal procedure.
+          - The dump was written through a pipe: it has no data offsets, so pg_restore -j will not
+            work. Plan a sequential restore.
+          - meta.txt holds the sha256, byte count, ledger count and image digests of this run.
+          - appdata.tar (if present) holds the backend's local attachment/upload files from before the stop.
+          RESTORE_README
+          wlog "backup ok sha256=${dump_sha256} bytes=${dump_size} toc_entries=${toc_entries} file=db.dump"
+          set_phase backed-up
+          wait_sessions_zero 30 after-backup || fail "a database session is still connected after the backup"
+          check_abort after-backup
+          echo "=== BACKUP END ==="
+
+          # ---- phase 4: migrate in a one-off container of the new image ----
+          echo "=== MIGRATE START ==="
+          pg_ready=0
+          for _ in $(seq 1 30); do
+            if timeout 10 docker exec metasheet-postgres sh -c 'exec pg_isready -U "$POSTGRES_USER"' >/dev/null 2>&1; then
+              pg_ready=1
+              break
+            fi
+            sleep 1
+          done
+          [[ "$pg_ready" == "1" ]] || fail "postgres is not ready"
+          verify_app_stopped || fail "re-verification before the migration failed"
+          [[ "$(client_sessions || true)" == "0" ]] || fail "a database session connected before the migration"
+          check_abort before-migrate
+          set_phase migrating
+          w_migrate_rc=""
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 900 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-migrate-${WINDOW_RUN}" -e "MIGRATION_EXCLUDE=${PROD_EXCLUDE_CSV}" -e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false -e ALLOW_DB_RESET=false -e DB_QUERY_TIMEOUT=30000 -e DB_STATEMENT_TIMEOUT=30000 -e "APP_NAME=metasheet-window-migrate-${WINDOW_RUN}" backend node packages/core-backend/dist/src/db/migrate.js --latest </dev/null >"${RUN_DIR}/migrate.out" 2>&1 9>&- &
+          w_job_pid=$!
+          migrate_rc=0
+          wait "$w_job_pid" || migrate_rc=$?
+          w_job_pid=""
+          w_migrate_rc="$migrate_rc"
+          # Public log: only the two migrate.js result lines and SQLSTATEs; the raw output stays on the host.
+          grep -E '^(migration "[A-Za-z0-9_.-]+" was executed successfully|failed to execute migration "[A-Za-z0-9_.-]+")$' "${RUN_DIR}/migrate.out" || true
+          sqlstates="$(grep -oE "code: '[0-9A-Z]{5}'" "${RUN_DIR}/migrate.out" || true)"
+          while IFS= read -r sqlstate; do
+            if [[ -n "$sqlstate" ]]; then wlog "migrate sqlstate=${sqlstate:7:5}"; fi
+          done <<< "$sqlstates"
+          wlog "migrate rc=${w_migrate_rc}"
+          if [[ "$w_migrate_rc" == "0" ]]; then
+            w_resolve_result="$(classify_ledger)"
+            if [[ "$w_resolve_result" == "unchanged" ]]; then w_resolve_result="committed"; fi
+            if [[ "$w_resolve_result" != "committed" ]]; then
+              w_resolve_result="other"
+              fail "migrate exited 0 but the ledger is not L0 + n with the in-play names"
+            fi
+          else
+            resolve_migrate
+            if [[ "$w_resolve_result" != "committed" ]]; then
+              fail "migrate failed rc=${w_migrate_rc}; resolve result=${w_resolve_result}"
+            fi
+            wlog "migrate rc!=0 but ledger committed"
+          fi
+          wlog "MIGRATE COMMITTED ledger=$(( L0 + w_inplay ))"
+          set_phase committed
+          write_compose_env_new
+          w_env_written="new"
+          state_write
+          # Post-commit checks: any mismatch ends with rc 74 and nothing started.
+          post_list_rc=0
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 120 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" run --rm --no-deps -T --name "metasheet-window-postlist-${WINDOW_RUN}" -e "APP_NAME=metasheet-window-postlist-${WINDOW_RUN}" backend sh -c '[ -z "${MIGRATION_EXCLUDE+x}" ] && [ -z "${MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL+x}" ] && [ -z "${ALLOW_DB_RESET+x}" ] && exec node packages/core-backend/dist/src/db/migrate.js --list' </dev/null >"${RUN_DIR}/list-after.out" 2>&1 || post_list_rc=$?
+          [[ "$post_list_rc" == "0" ]] || fail "post-commit migrate --list failed rc=${post_list_rc}"
+          parse_list "${RUN_DIR}/list-after.out" "${RUN_DIR}/pending-after.txt" || fail "post-commit migrate --list output could not be parsed"
+          [[ "$list_pending" == "${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]}" ]] || fail "post-commit Pending=${list_pending} is not the excluded count"
+          while IFS= read -r name; do
+            if [[ -n "$name" ]] && ! is_excluded "$name"; then fail "post-commit: ${name} is still pending"; fi
+          done < "${RUN_DIR}/pending-after.txt"
+          ledger_after="$(pg_sql 'SELECT count(*) FROM kysely_migration' || true)"
+          [[ "$list_applied" == "$(( L0 + w_inplay ))" && "$ledger_after" == "$(( L0 + w_inplay ))" ]] || fail "post-commit Applied=${list_applied} ledger=${ledger_after} differ from L0 + n"
+          pg_sql 'SELECT name FROM kysely_migration ORDER BY name' > "${RUN_DIR}/ledger-final.txt" || fail "cannot read kysely_migration names after the commit"
+          for name in "${PROD_OWNER_EXCLUDED_MIGRATIONS[@]}"; do
+            if grep -qxF -- "$name" "${RUN_DIR}/ledger-final.txt"; then fail "excluded migration ${name} was applied"; fi
+          done
+          excluded_present="$(excluded_tables_present || true)"
+          [[ "$excluded_present" == "0" ]] || fail "excluded tables exist after the migration"
+          wlog "ledger before=${L0} inplay=${w_inplay} excluded=${#PROD_OWNER_EXCLUDED_MIGRATIONS[@]} after=${ledger_after}"
+          echo "=== MIGRATE END ==="
+
+          # ---- phase 5: start the new version (backend first, web only after it is verified) ----
+          set_phase starting-new
+          echo "=== DEPLOY START ==="
+          for c in metasheet-backend metasheet-web; do
+            if [[ "$(ctr_get "$c" '{{.State.Running}}' || true)" != "false" ]]; then
+              timeout 90 docker stop -t 60 "$c" >/dev/null 2>>"${RUN_DIR}/docker.err" || true
+              fail "${c} was running again after the commit; stopped it"
+            fi
+            [[ "$(ctr_get "$c" '{{.Id}}' || true)" == "$(recorded_id "$c")" ]] || fail "${c} was replaced after the commit"
+          done
+          for c in metasheet-postgres metasheet-redis; do
+            [[ "$(ctr_get "$c" '{{.Id}}' || true)" == "$(recorded_id "$c")" ]] || fail "${c} container id changed"
+          done
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 300 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" up --no-start --no-deps --force-recreate backend </dev/null >>"${RUN_DIR}/compose-up.out" 2>&1 \
+            || fail "compose up --no-start backend failed"
+          if [[ "$w_appdata_copied" == "1" ]]; then
+            timeout 600 docker cp - metasheet-backend:/ <"${RUN_DIR}/appdata.tar" >>"${RUN_DIR}/compose-up.out" 2>&1 || fail "docker cp of the app data into the new backend failed"
+            wlog "appdata copied into the new backend before its first start"
+          fi
+          backend_start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          timeout 60 docker start metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker start of the new backend failed"
+          new_backend_json="$(fetch_json_with_retry "backend health" "${DEPLOY_BACKEND_HEALTH_URL}" 60 2)" || fail "new backend /health did not answer"
+          [[ "$(printf '%s' "$new_backend_json" | json_commit backend || true)" == "$DEPLOY_IMAGE_TAG" ]] || fail "new backend /health build.commit is not the dispatched commit"
+          plugins_ok=0
+          for _ in $(seq 1 20); do
+            if curl -fsS --max-time 10 http://127.0.0.1:8900/api/plugins >/dev/null 2>>"${RUN_DIR}/curl.err"; then
+              plugins_ok=1
+              break
+            fi
+            sleep 3
+          done
+          [[ "$plugins_ok" == "1" ]] || fail "new backend /api/plugins did not answer"
+          for c in metasheet-postgres metasheet-redis; do
+            [[ "$(ctr_get "$c" '{{.Id}}' || true)" == "$(recorded_id "$c")" ]] || fail "${c} container id changed"
+          done
+          if [[ "$w_appdata_copied" == "1" ]]; then
+            read -r new_appdata_files new_appdata_bytes <<< "$(appdata_measure || true)"
+            wlog "appdata after_start files=${new_appdata_files:-unreadable} bytes=${new_appdata_bytes:-unreadable}"
+            [[ "$new_appdata_files" == "$w_appdata_tar_files" && "$new_appdata_bytes" == "$w_appdata_tar_bytes" ]] \
+              || fail "app data in the new backend does not match the copy-out record"
+          fi
+          backend_logs="$(timeout 60 docker logs --since "$backend_start_utc" metasheet-backend 2>&1 || true)"
+          ops_switch_line="$(printf '%s\n' "$backend_logs" | grep -F 'outbound webhook ops switch:' | tail -n 1 || true)"
+          unset backend_logs
+          if [[ "$ops_switch_line" != *"off (normal delivery)"* ]]; then
+            fail "new backend did not log the outbound webhook ops switch as off (normal delivery)"
+          fi
+          wlog "ops_switch=off"
+          run_host_checks post-backend || fail "post-backend host checks failed"
+          w_backend_verified=1
+          state_write
+          IMAGE_OWNER="${DEPLOY_IMAGE_OWNER}" IMAGE_TAG="${DEPLOY_IMAGE_TAG}" timeout 300 docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F" up -d --no-deps --force-recreate web </dev/null >>"${RUN_DIR}/compose-up.out" 2>&1 \
+            || fail "compose up web failed"
+          echo "=== DEPLOY END ==="
+          WINDOW_MAIN
+          remote_cmds+=(
             "# Post-deploy smoke checks"
             "echo \"=== SMOKE START ===\""
-            'if [[ "${DRILL_FAIL_STAGE:-none}" == "smoke" ]]; then echo "[deploy][drill] intentional failure at smoke stage"; exit 93; fi'
             "for i in {1..10}; do"
               "  if curl -fsS http://127.0.0.1:8900/api/plugins >/dev/null; then"
             "    break"
@@ -592,22 +1856,6 @@ jobs:
             "echo \"Smoke: api/plugins=ok health=ok web=ok\""
             "echo \"=== SMOKE END ===\""
             "echo \"=== VERSION VERIFY START ===\""
-            'fetch_json_with_retry() {'
-            '  local label="$1"'
-            '  local url="$2"'
-            '  local attempts="${3:-15}"'
-            '  local delay_seconds="${4:-2}"'
-            '  local i'
-            '  for ((i = 1; i <= attempts; i += 1)); do'
-            '    if curl -fsS "${url}" 2>/dev/null; then'
-            '      return 0'
-            '    fi'
-            '    echo "[deploy-version] waiting for ${label} at ${url} (attempt ${i}/${attempts})" >&2'
-            '    sleep "${delay_seconds}"'
-            '  done'
-            '  echo "[deploy-version][error] ${label} check timed out at ${url}" >&2'
-            '  return 1'
-            '}'
             'backend_health_json="$(fetch_json_with_retry "backend health" "${DEPLOY_BACKEND_HEALTH_URL}")"'
             'web_build_json="$(fetch_json_with_retry "web build-info" "${DEPLOY_WEB_BUILD_INFO_URL}")"'
             'python3 - "${DEPLOY_EXPECTED_COMMIT}" "${backend_health_json}" "${web_build_json}" <<'\''PY'\'''
@@ -656,8 +1904,92 @@ jobs:
             'echo "Deploy version: expected=${DEPLOY_EXPECTED_COMMIT} backend=ok web=ok"'
             "echo \"=== VERSION VERIFY END ===\""
           )
+          window_block <<'WINDOW_DONE'
+          w_web_verified=1
+          state_write
+          terminal done-new 0
+          exit 0
+          WINDOW_DONE
+          # Bootstrap: the window script goes to the host base64-encoded inside this short script
+          # (stdin of ssh, never argv). The JWT secret is not part of window.sh; it reaches the
+          # window only through its environment.
+          window_b64="$(printf '%s\n' "${remote_cmds[@]}" | base64 | tr -d '\n')"
+          jwt_b64="$(printf '%s' "${DEPLOY_JWT_SECRET:-}" | base64 | tr -d '\n')"
           set +e
-          printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$deploy_log"
+          {
+            printf 'WINDOW_RUN=%q\n' "${WINDOW_RUN}"
+            printf "window_b64='%s'\n" "${window_b64}"
+            printf "jwt_b64='%s'\n" "${jwt_b64}"
+            cat <<'WINDOW_BOOTSTRAP'
+          set -u
+          umask 077
+          window_home="${HOME}/metasheet2-deploy-window"
+          run_dir="${window_home}/runs/${WINDOW_RUN}"
+          if ! mkdir -p "${window_home}/runs"; then
+            echo "[deploy-window][error] cannot create the deploy window directory"
+            exit 76
+          fi
+          chmod 700 "${window_home}" "${window_home}/runs" 2>/dev/null || true
+          if ! mkdir -m 700 "${run_dir}" 2>/dev/null; then
+            echo "[deploy-window][error] the run directory for ${WINDOW_RUN} already exists or cannot be created"
+            exit 76
+          fi
+          cd "${run_dir}" || exit 76
+          if ! printf '%s' "${window_b64}" | base64 -d > window.sh; then
+            echo "[deploy-window][error] cannot write window.sh"
+            exit 76
+          fi
+          unset window_b64
+          chmod 600 window.sh
+          launch_window() {
+            DEPLOY_JWT_SECRET="$(printf '%s' "${jwt_b64}" | base64 -d)"
+            export DEPLOY_JWT_SECRET
+            if command -v setsid >/dev/null 2>&1; then
+              setsid nohup bash window.sh </dev/null >window.log 2>&1 &
+            else
+              nohup bash window.sh </dev/null >window.log 2>&1 &
+            fi
+          }
+          ( launch_window )
+          unset jwt_b64
+          echo "[deploy-window] bootstrap run=${WINDOW_RUN} started; following window.log"
+          waited=0
+          while [ ! -s window.pid ]; do
+            if [ "${waited}" -ge 30 ]; then
+              echo "[deploy-window][error] the window did not write window.pid within 30 s; read the host state"
+              exit 76
+            fi
+            sleep 1
+            waited=$((waited + 1))
+          done
+          window_pid="$(cat window.pid)"
+          offset=0
+          follow_log() {
+            local size chunk
+            [ -f window.log ] || return 0
+            size="$(wc -c < window.log | tr -d '[:space:]')"
+            [ "${size:-0}" -gt "${offset}" ] || return 0
+            tail -c +"$((offset + 1))" window.log > .follow.chunk || return 0
+            chunk="$(wc -c < .follow.chunk | tr -d '[:space:]')"
+            cat .follow.chunk
+            offset=$((offset + chunk))
+          }
+          while kill -0 "${window_pid}" 2>/dev/null; do
+            follow_log
+            sleep 2
+          done
+          follow_log
+          rm -f .follow.chunk
+          window_rc="$(cat rc 2>/dev/null || true)"
+          case "${window_rc}" in
+            ''|*[!0-9]*)
+              echo "[deploy-window][error] the window ended without an rc file; read the host state"
+              exit 76
+              ;;
+          esac
+          exit "${window_rc}"
+          WINDOW_BOOTSTRAP
+          } | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$deploy_log"
           rc=${PIPESTATUS[1]}
           set -e
           echo "deploy_rc=$rc" >> "$GITHUB_OUTPUT"
