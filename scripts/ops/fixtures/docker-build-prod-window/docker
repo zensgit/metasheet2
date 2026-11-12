@@ -91,8 +91,13 @@ applied_count() {
   printf '%s\n' "$c"
 }
 # Client backends other than the asking session: the running backend holds two, every live
-# one-off migrate container one. H_SESSIONS=never keeps two forever; migrate-stuck keeps one
-# from the first migrate start on, even after the container is killed.
+# one-off migrate container one, plus one per line of late_sessions (a client that connects
+# after the drain: H_LATE_SESSION). H_SESSIONS=never keeps two forever; migrate-stuck keeps
+# one from the first migrate start on, even after the container is killed.
+SESSION_COUNT_SQL="SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+late_session() {
+  if [[ "${H_LATE_SESSION:-}" == "$1" ]]; then echo late >> "${DS}/late_sessions"; fi
+}
 sessions() {
   case "${H_SESSIONS:-model}" in
     never) echo 2; return 0 ;;
@@ -103,6 +108,7 @@ sessions() {
   local n=0
   if [[ "$(get metasheet-backend running)" == "true" ]]; then n=$((n + 2)); fi
   n=$((n + $(oneoff_alive)))
+  if [[ -f "${DS}/late_sessions" ]]; then n=$((n + $(awk 'NF { c++ } END { printf "%d", c }' "${DS}/late_sessions"))); fi
   echo "$n"
 }
 
@@ -117,6 +123,11 @@ psql_answer() {
       if grep -qxF -- "zzzz20260919090000_create_approval_template_group_backfill_batches" "${DS}/ledger"; then echo 3; else echo 0; fi
       ;;
     *kysely_migration*)
+      # H_PSQL_FAIL_AFTER_MIGRATE=1: every ledger read fails once the migration has started.
+      if [[ "${H_PSQL_FAIL_AFTER_MIGRATE:-0}" == "1" && -e "${DS}/migrate_started" ]]; then
+        echo 'psql: error: connection to server failed' >&2
+        exit 2
+      fi
       case "$sql" in
         *"count(*)"*) ledger_count ;;
         *"SELECT name"*) sort "${DS}/ledger" ;;
@@ -149,7 +160,12 @@ psql_answer() {
     *"autovacuum worker"*) echo 0 ;;
     *"idle in transaction"*) echo 0 ;;
     *"extract(epoch"*) echo 0 ;;
-    *"client backend"*) sessions ;;
+    *"client backend"*)
+      # Only the exact drain query is modelled; any other client-backend count is a change of the window.
+      [[ "$sql" == "$SESSION_COUNT_SQL" ]] || unmodeled psql "$sql"
+      if [[ "${H_SESSION_COUNT_FAIL:-0}" == "1" ]]; then echo 'psql: error: FATAL:  sorry, too many clients already' >&2; exit 2; fi
+      sessions
+      ;;
     *quote_ident*) : ;;
     *server_version*) echo 15.8 ;;
     *) unmodeled psql "$sql" ;;
@@ -343,8 +359,15 @@ run_migrate() {
       # As if `timeout` had ended the compose client: the one-off container is left running.
       exit 124
       ;;
-    term)
+    term|term-after-commit)
       # The window receives TERM while this one-off is still running; it stays alive until killed.
+      # term-after-commit: the batch has committed (ledger rows written) before the TERM.
+      if [[ "${H_MIGRATE}" == "term-after-commit" ]]; then
+        for n in "${todo[@]}"; do
+          printf '%s\n' "$n" >> "${DS}/ledger"
+          echo "migration \"${n}\" was executed successfully"
+        done
+      fi
       kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"
       for ((i = 0; i < 1200; i++)); do
         if [[ ! -f "${DS}/oneoff/${name}" ]]; then exit 137; fi
@@ -425,18 +448,24 @@ compose_up() {
 compose_pull() {
   local owner="${IMAGE_OWNER:-zensgit}" tag="${IMAGE_TAG:-latest}" svc ref id rev k d
   if [[ "${H_PULL_RC:-0}" != "0" ]]; then echo "Error: pull failed" >&2; exit "${H_PULL_RC}"; fi
+  if [[ "${H_ABORT_ON:-}" == "pull" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
   for svc in "$@"; do
     case "$svc" in backend|web) ;; *) unmodeled compose pull service "$svc" ;; esac
     ref="ghcr.io/${owner}/metasheet2-${svc}:${tag}"
     id="sha256:new${svc}image"
     rev="$tag"
     if [[ "$svc" == "backend" && -n "${H_NEW_REV_BACKEND:-}" ]]; then rev="${H_NEW_REV_BACKEND}"; fi
+    if [[ "$svc" == "web" && -n "${H_NEW_REV_WEB:-}" ]]; then rev="${H_NEW_REV_WEB}"; fi
     for k in "$ref" "$id"; do
       d="$(img_dir "$k")"
       mkdir -p "$d"
       printf '%s' "$rev" > "${d}/rev"
       printf '%s' "$id" > "${d}/id"
-      printf 'ghcr.io/%s/metasheet2-%s@sha256:%s\n' "$owner" "$svc" "$(printf 'd%.0s' {1..64})" > "${d}/digests"
+      if [[ "${H_NO_DIGEST:-}" == "$svc" ]]; then
+        : > "${d}/digests"
+      else
+        printf 'ghcr.io/%s/metasheet2-%s@sha256:%s\n' "$owner" "$svc" "$(printf 'd%.0s' {1..64})" > "${d}/digests"
+      fi
     done
   done
 }
@@ -468,6 +497,7 @@ exec_pg() {
     case "$3" in
       *'exec psql'*) psql_answer "${5:-}" ;;
       *'exec pg_dump -Fc'*)
+        if [[ "${H_ABORT_ON:-}" == "dump" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
         case "${H_DUMP_MODE:-ok}" in
           ok) printf 'PGDMP harness archive\n' ;;
           empty) : ;;
@@ -475,15 +505,25 @@ exec_pg() {
           timeout) printf 'PGDMP partial'; exit 124 ;;
         esac
         ;;
-      *pg_dumpall*) printf -- '-- harness globals\n' ;;
-      *pg_isready*) echo "accepting connections" ;;
+      *pg_dumpall*)
+        late_session after-backup
+        printf -- '-- harness globals\n'
+        ;;
+      *pg_isready*)
+        late_session before-migrate
+        if [[ "${H_ABORT_ON:-}" == "pg-isready" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+        echo "accepting connections"
+        ;;
       *) unmodeled exec metasheet-postgres "$@" ;;
     esac
     return 0
   fi
   if [[ "${1:-}" == "pg_restore" ]]; then
     cat > /dev/null
-    if [[ " $* " == *" -f /dev/null "* ]]; then exit "${H_RESTORE_RC:-0}"; fi
+    if [[ " $* " == *" -f /dev/null "* ]]; then
+      if [[ "${H_ABORT_ON:-}" == "restore" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+      exit "${H_RESTORE_RC:-0}"
+    fi
     if [[ " $* " == *" --list "* && "${H_TOC_NO_LEDGER:-0}" == "1" ]]; then
       printf ';\n; Archive created by the harness\n;\n1; 2615 2200 SCHEMA - public app\n'
       return 0

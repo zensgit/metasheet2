@@ -70,7 +70,7 @@ const STANDINS = ['flock', 'setsid', 'timeout'].filter((name) => !REAL[name])
 const REDUCED = STANDINS.length > 0
   ? ` [reduced fidelity: ${STANDINS.join('/')} stand-ins, not the real binaries]`
   : ''
-const STUBS = ['docker', 'ssh', 'curl', 'git', 'crontab', 'loginctl', 'busctl', 'date', 'sleep', 'df', 'tar']
+const STUBS = ['docker', 'docker-compose', 'ssh', 'curl', 'git', 'crontab', 'loginctl', 'busctl', 'date', 'sleep', 'df', 'tar']
 
 // ---------- processes ----------
 function run(cmd, args, options) {
@@ -438,6 +438,7 @@ const isRestoreRead = (call) => /^exec -i metasheet-postgres pg_restore -f \/dev
 const isTarOut = (call) => /^exec metasheet-backend tar -C \/ --one-file-system -cf - /.test(call.args)
 const isCpIn = (call) => call.args === 'cp - metasheet-backend:/'
 const isReadBack = (call) => /^cp metasheet-backend:\/app\/\S+ -$/.test(call.args)
+const isPgIsready = (call) => /^exec metasheet-postgres sh -c exec pg_isready /.test(call.args)
 const isLedgerRead = (call) => /^exec metasheet-postgres sh -c .*psql.* SELECT count\(\*\) FROM kysely_migration$/.test(call.args)
 const sqlOf = (call) => (/^exec metasheet-postgres sh -c .*exec psql/.test(call.args) ? call.args : '')
 
@@ -683,6 +684,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
   const REFUSALS = [
     ['pull fails', {}, { H_PULL_RC: '1' }],
     ['pulled revision label differs', {}, { H_NEW_REV_BACKEND: 'f'.repeat(40) }],
+    ['pulled web revision label differs', {}, { H_NEW_REV_WEB: 'f'.repeat(40) }],
+    ['pulled web image has no repo digest', {}, { H_NO_DIGEST: 'web' }],
+    ['pulled backend image has no repo digest', {}, { H_NO_DIGEST: 'backend' }],
     ['pre-pull disk gate', {}, { H_DF_FREE_KB: String(1024 * 1024) }],
     ['post-pull disk gate (database larger than the free space)', {}, { H_DB_BYTES: String(200 * 1024 ** 3) }],
     ['in-play sha mismatch', {}, { EXPECTED_PENDING_SHA256: 'f'.repeat(64) }],
@@ -716,7 +720,14 @@ describe('production deploy window: remote_deploy step run against test doubles'
       const r = await runWindow(t, world, { env })
       checkRefused(r)
       if (env.H_HOSTCHECK_FAIL) assert.deepEqual(r.hostChecks, ['pre-stop'])
-      if (env.H_PULL_RC || env.H_NEW_REV_BACKEND || env.H_DB_BYTES) assert.ok(any(r, isPull), 'reached the pull')
+      if (env.H_PULL_RC || env.H_NEW_REV_BACKEND || env.H_NEW_REV_WEB || env.H_NO_DIGEST || env.H_DB_BYTES) assert.ok(any(r, isPull), 'reached the pull')
+      if (env.H_NEW_REV_WEB) assert.match(r.windowLog, /pulled web image revision label does not equal the dispatched commit/)
+      if (env.H_NO_DIGEST) assert.match(r.windowLog, new RegExp(`pulled ${env.H_NO_DIGEST} image has no repo digest`))
+      // The abort file present at the start is refused there, before the pull.
+      if (worldOptions.abort) {
+        assert.match(r.windowLog, /abort file present at start/)
+        assert.ok(!any(r, isPull), 'refused before the pull')
+      }
       if (env.H_DF_FREE_KB) assert.ok(!any(r, isPull), 'refused before the pull')
     })
   }
@@ -1179,7 +1190,97 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world, { env: { H_ABORT_ON: 'backend-stop' } })
     checkRestoredOld(r)
     assert.ok(!any(r, isLatest), 'no migration after the abort')
+    assert.match(r.windowLog, /abort file present at boundary=after-stop/)
+    assert.ok(!any(r, isDump), 'stopped at the boundary right after the stop, before the dump')
   })
+
+  scenario('abort file created during the pull -> 70 at the boundary before the stop', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_ABORT_ON: 'pull' } })
+    checkRefused(r)
+    assert.ok(any(r, isPull))
+    assert.match(r.windowLog, /abort file present at boundary=before-stop/)
+  })
+
+  for (const [point, label] of [['dump', 'pg_dump'], ['restore', 'the dump verification']]) {
+    scenario(`abort file created during ${label} -> 71 at the boundary after the backup, no migration`, async (t) => {
+      const world = makeWorld(t)
+      const r = await runWindow(t, world, { env: { H_ABORT_ON: point } })
+      checkRestoredOld(r)
+      assert.match(r.windowLog, /abort file present at boundary=after-backup/)
+      assert.ok(any(r, isDump))
+      assert.ok(!any(r, isPgIsready), 'stopped before the readiness probe of the migration')
+      assert.ok(!any(r, isLatest), 'no migration after the abort')
+    })
+  }
+
+  scenario('abort file created at the readiness probe before the migration -> 71 at the boundary before the migration', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_ABORT_ON: 'pg-isready' } })
+    checkRestoredOld(r)
+    assert.match(r.windowLog, /abort file present at boundary=before-migrate/)
+    assert.ok(!any(r, isLatest), 'no migration after the abort')
+  })
+
+  scenario('a client connects during the backup and stays -> 71 at the check after the backup, no migration', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_LATE_SESSION: 'after-backup' } })
+    checkRestoredOld(r)
+    assert.match(r.windowLog, /a database session is still connected after the backup/)
+    assert.ok(!any(r, isPgIsready), 'stopped before the readiness probe of the migration')
+    assert.ok(!any(r, isLatest))
+  })
+
+  scenario('a client connects right before the migration -> 71 at the pre-migration check, no migration', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_LATE_SESSION: 'before-migrate' } })
+    checkRestoredOld(r)
+    assert.match(r.windowLog, /a database session connected before the migration/)
+    assert.ok(!any(r, isLatest))
+  })
+
+  scenario('the session count cannot be read -> not zero: 71 at the drain, no pg_dump', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_SESSION_COUNT_FAIL: '1' } })
+    checkRestoredOld(r)
+    assert.match(r.windowLog, /sessions at=stop-writes client_backends=unreadable/)
+    assert.ok(!any(r, isDump), 'no backup after an unreadable count')
+    assert.ok(!any(r, isLatest))
+  })
+
+  scenario('TERM at migrating after the batch committed -> 74: .env new, nothing started', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_MIGRATE: 'term-after-commit' } })
+    assertCommon(r, 74)
+    assert.equal(r.state.phase, 'needs-owner')
+    assert.equal(r.state.env_written, 'new')
+    assert.equal(dotEnvTag(r), SHA_NEW)
+    const latest = firstIndex(r, isLatest)
+    const kill = firstIndex(r, (call) => call.args === `kill metasheet-window-migrate-${r.runId}-1`, latest)
+    assert.ok(kill > latest, 'the one-off is killed')
+    assert.match(r.windowLog, /migrate resolve result=committed/)
+    assert.ok(!any(r, (call) => /^start /.test(call.args)), 'the old version is never started on the migrated schema')
+    assert.ok(!any(r, isUp))
+  })
+
+  for (const [label, migrate, rcLine] of [['migrate rc 1', 'fail-committed', /resolve result=unreadable/], ['migrate rc 0', 'ok', /migrate exited 0 but the ledger is not L0 \+ n/]]) {
+    scenario(`${label}, then the ledger cannot be read -> 74: nothing started, env_written old, the outcome warns`, async (t) => {
+      const world = makeWorld(t)
+      const r = await runWindow(t, world, { env: { H_MIGRATE: migrate, H_PSQL_FAIL_AFTER_MIGRATE: '1' } })
+      assertCommon(r, 74)
+      assert.equal(r.state.phase, 'needs-owner')
+      assert.equal(r.state.env_written, 'old')
+      assert.match(r.windowLog, rcLine)
+      const ledger = readFileSync(path.join(world.ds, 'ledger'), 'utf8').split('\n').filter(Boolean)
+      assert.deepEqual(ledger, [...BASE_MIGRATIONS, ...INPLAY], 'the batch did commit')
+      assert.ok(!any(r, (call) => /^start /.test(call.args)), 'an unreadable ledger is never treated as rolled back')
+      assert.ok(!any(r, isUp))
+      assert.match(r.windowLog, /warning env_written=old: /)
+      const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+      checkSummaryTail(summary)
+      assert.match(summary, ENV_WARNING)
+    })
+  }
 
   scenario('abort file created while migrating is ignored -> done-new', async (t) => {
     const world = makeWorld(t)
@@ -1372,7 +1473,13 @@ describe('production deploy window: remote_deploy step run against test doubles'
     try {
       assert.ok(taggedPids(world).includes(grandchild), 'the grandchild is found')
       await assert.rejects(assertNoLeftovers(world), /still running/)
-      assert.deepEqual(taggedPids(world), [], 'the detector kills what it reports')
+      // SIGKILL is asynchronous: give the killed processes up to 2 s to disappear.
+      let left = taggedPids(world)
+      for (let i = 0; i < 20 && left.length > 0; i += 1) {
+        await sleepMs(100)
+        left = taggedPids(world)
+      }
+      assert.deepEqual(left, [], 'the detector kills what it reports')
     } finally {
       try { process.kill(-child.pid, 'SIGKILL') } catch {}
     }
@@ -1394,7 +1501,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
 
   scenario('compose v2 missing in the prologue ends as 70 refused-unchanged (recorded deviation 5)', async (t) => {
     const world = makeWorld(t)
-    checkRefused(await runWindow(t, world, { env: { H_COMPOSE_MISSING: '1' } }))
+    const r = await runWindow(t, world, { env: { H_COMPOSE_MISSING: '1' } })
+    checkRefused(r)
+    assert.deepEqual(r.calls.filter((call) => call.kind === 'docker-compose').map((call) => call.args), ['--version'], 'only the docker-compose double ran')
   })
 
   scenario('bootstrap: the run directory already exists -> 76, nothing runs (recorded deviation 7)', async (t) => {
