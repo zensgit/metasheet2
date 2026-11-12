@@ -299,7 +299,7 @@
           ref="titleInputRef"
           class="meta-record-drawer__title-input"
           type="text"
-          :value="primaryFieldTextValue"
+          v-field-value="[primaryFieldTextValue, record?.id]"
           :aria-label="l('record.titleFieldAria')"
           @change="onTitleChange"
           @keydown.enter="onTitleEnter"
@@ -693,6 +693,7 @@ import { workbenchLabel } from '../utils/workbench-labels'
 import { manualRowLabel } from '../utils/manual-row-labels'
 import { bomRelationsLabel, type BomRelationKind } from '../utils/bom-relations'
 import { isImeKeyEvent } from '../utils/ime-keys'
+import { revertFieldValue, vFieldValue } from '../utils/field-value-directive'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -1708,8 +1709,7 @@ function onTitleEscape(event: KeyboardEvent) {
   // also reaching `onInspectorKeydown` as a close (its own Escape branch returns early on
   // `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
   event.preventDefault()
-  const input = event.target as HTMLInputElement
-  input.value = primaryFieldTextValue.value
+  revertFieldValue(event.target as HTMLInputElement)
 }
 
 function navigatePrev() {
