@@ -404,6 +404,224 @@ components:
             directory: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
             login: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
             notification: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
+    NotificationError:
+      type: object
+      required: [error]
+      description: >-
+        Values-free error body of the user notification routes. Details are field names, a fixed reason
+        code or a revision number; never an identifier, a digest or provider text.
+      properties:
+        error:
+          type: object
+          required: [code]
+          properties:
+            code: { type: string }
+            fields:
+              type: array
+              description: Names of the request fields that failed validation (422 INVALID_REQUEST)
+              items: { type: string }
+            reason:
+              type: string
+              description: Fixed reason code (409 ENDPOINT_NOT_USABLE)
+            currentRevision:
+              type: integer
+              minimum: 0
+              description: Stored revision of the preference (409 PREFERENCE_STALE); 0 when there is no row
+    NotificationConnectionRef:
+      type: object
+      required: [id, provider, label]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string, example: dingtalk }
+        label: { type: string, description: Provider name and integration name; never an identifier }
+    NotificationResolveFailureCode:
+      type: string
+      enum:
+        - connection_not_found
+        - connection_inactive
+        - provider_not_registered
+        - proof_kind_unavailable
+        - proof_missing
+        - proof_not_linked
+        - proof_wrong_user
+        - proof_ambiguous
+        - proof_account_inactive
+        - proof_changed
+        - proof_assurance_insufficient
+        - address_missing
+        - address_unusable
+        - address_kind_not_derivable
+        - address_bound_on_other_connection
+        - scope_unproven
+        - scope_changed
+        - user_not_active_member
+        - endpoint_not_found
+    NotificationEndpoint:
+      type: object
+      required: [id, connection, addressKind, proofKind, status, revision, usable, unusableReason, capability, verified, lastVerifiedAt]
+      properties:
+        id: { type: string, format: uuid }
+        connection: { $ref: '#/components/schemas/NotificationConnectionRef' }
+        addressKind: { type: string, example: dingtalk_userid }
+        proofKind: { type: string, enum: [directory_link, external_identity] }
+        status: { type: string, enum: [active, stale] }
+        revision: { type: integer, minimum: 1 }
+        usable:
+          type: boolean
+          description: The proof was derived again now and the endpoint is active
+        unusableReason:
+          nullable: true
+          description: Why the endpoint is not usable; endpoint_stale when it is stale although its proof holds again
+          oneOf:
+            - { $ref: '#/components/schemas/NotificationResolveFailureCode' }
+            - { type: string, enum: [endpoint_stale] }
+        capability:
+          type: object
+          required: [effective, reason]
+          description: Display state of the connection notification capability; not an authorization input
+          properties:
+            effective: { type: boolean }
+            reason: { type: string, nullable: true }
+        verified:
+          type: boolean
+          description: Connection verification evidence; always false until evidence is stored
+        lastVerifiedAt: { type: string, format: date-time }
+    NotificationEndpointCandidate:
+      type: object
+      required: [connection, proofKind, addressable, reasonCode, endpointId]
+      properties:
+        connection: { $ref: '#/components/schemas/NotificationConnectionRef' }
+        proofKind: { type: string, enum: [directory_link, external_identity] }
+        addressable: { type: boolean }
+        reasonCode:
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/NotificationResolveFailureCode' }
+        endpointId: { type: string, format: uuid, nullable: true, description: The caller own endpoint that is not revoked, if any }
+    NotificationEndpointListing:
+      type: object
+      required: [delivery, endpoints, candidates]
+      properties:
+        delivery:
+          type: object
+          required: [enabled, testSendAvailable, reason]
+          description: Nothing is sent in this version; delivery is always reported disabled
+          properties:
+            enabled: { type: boolean, enum: [false] }
+            testSendAvailable: { type: boolean, enum: [false] }
+            reason: { type: string, enum: [delivery_disabled] }
+        endpoints:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationEndpoint' }
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationEndpointCandidate' }
+    NotificationEndpointResult:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint: { $ref: '#/components/schemas/NotificationEndpoint' }
+    NotificationEndpointRevoked:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint:
+          type: object
+          required: [id, status, revision]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [revoked] }
+            revision: { type: integer, minimum: 2 }
+    NotificationEndpointCreate:
+      type: object
+      additionalProperties: false
+      required: [connectionId, proofKind]
+      properties:
+        connectionId: { type: string, format: uuid }
+        proofKind: { type: string, enum: [directory_link, external_identity] }
+    NotificationQuietHours:
+      type: object
+      additionalProperties: false
+      required: [start, end, timeZone]
+      description: A daily window; a reminder that falls due inside it is skipped, not delayed
+      properties:
+        start: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: Local time, inclusive }
+        end: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: Local time, exclusive; earlier than start means the window crosses midnight }
+        timeZone: { type: string, description: IANA zone name }
+    NotificationPreference:
+      type: object
+      required: [enabled, primaryEndpointId, fallbackEndpointId, quietHours, revision]
+      properties:
+        enabled: { type: boolean }
+        primaryEndpointId: { type: string, format: uuid, nullable: true }
+        fallbackEndpointId: { type: string, format: uuid, nullable: true }
+        quietHours:
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/NotificationQuietHours' }
+        revision: { type: integer, minimum: 1 }
+    NotificationTopicView:
+      type: object
+      required: [topic, integrated, applies, preference, effective]
+      properties:
+        topic: { type: string, enum: [task_reminder] }
+        integrated: { type: boolean }
+        applies:
+          type: object
+          required: [now, reason]
+          properties:
+            now: { type: boolean }
+            reason:
+              type: string
+              nullable: true
+              enum: [topic_not_integrated, org_not_taken_over, org_paused, delivery_disabled, capability_off]
+        preference:
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/NotificationPreference' }
+        effective:
+          type: object
+          required: [source, connection, usable, fallback]
+          properties:
+            source: { type: string, enum: [user_primary, org_default, none] }
+            connection:
+              nullable: true
+              allOf:
+                - { $ref: '#/components/schemas/NotificationConnectionRef' }
+            usable: { type: boolean }
+            fallback:
+              type: object
+              nullable: true
+              required: [connection, usable]
+              description: The stored backup; never usable when it is of the primary's provider
+              properties:
+                connection: { $ref: '#/components/schemas/NotificationConnectionRef' }
+                usable: { type: boolean }
+    NotificationPreferenceList:
+      type: object
+      required: [topics]
+      properties:
+        topics:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationTopicView' }
+    NotificationPreferencePatch:
+      type: object
+      additionalProperties: false
+      required: [topic, expectedRevision]
+      description: >-
+        Keys that are present are set, null clears a nullable key, absent keys are unchanged.
+        expectedRevision 0 means no row is expected yet. A body that changes nothing answers 200 and
+        changes no revision.
+      properties:
+        topic: { type: string, enum: [task_reminder] }
+        expectedRevision: { type: integer, minimum: 0 }
+        enabled: { type: boolean }
+        primaryEndpointId: { type: string, format: uuid, nullable: true }
+        fallbackEndpointId: { type: string, format: uuid, nullable: true }
+        quietHours:
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/NotificationQuietHours' }
     DirectErrorResponse:
       type: object
       properties:

@@ -705,6 +705,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
   },
   {
+    key: 'USER_NOTIFICATION_PREFERENCES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "User notification endpoints and preferences: GET/POST/DELETE /api/me/notification-endpoints and GET/PATCH /api/me/notification-preferences, and the reads and writes of user_notification_endpoints and user_notification_preferences. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: every route answers 404 after authentication and the two tables are not queried. On: a user can make an endpoint from a proof they already hold (a directory link on a named connection; a request carries no recipient identifier, and the address is derived again whenever it is needed and never stored), revoke it, and set a preference per topic (on or off, a primary and a backup endpoint, quiet hours). Nothing is sent: no message is produced for any endpoint or preference and no business reads them, so turning the switch on changes what a person can set and see and nothing else. Apply the migration before turning it on; every replica must carry the same value. danger=medium: the routes write rows that belong to the caller and widen no authorization.",
+    source: 'packages/core-backend/src/notifications/notification-flags.ts#isUserNotificationPreferencesEnabled',
+  },
+  {
     key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
     type: 'boolean',
     activationValue: 'true',

@@ -419,6 +419,8 @@ import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
+import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
+import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
@@ -2297,6 +2299,9 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
     this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
+    // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
+    this.app.use(meNotificationEndpointsRouter())
+    this.app.use(meNotificationPreferencesRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'
