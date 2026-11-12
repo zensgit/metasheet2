@@ -141,6 +141,11 @@ const FEISHU_IMPORT_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['routes/admin-directory-feishu.ts', '../integrations/feishu/redaction'],
   ['routes/admin-directory-feishu.ts', '../integrations/feishu/token'],
   ['routes/admin-directory-feishu.ts', '../integrations/feishu/verify'],
+  ['services/feishu-message-sender.ts', '../integrations/feishu/config'],
+  ['services/feishu-message-sender.ts', '../integrations/feishu/errors'],
+  ['services/feishu-message-sender.ts', '../integrations/feishu/message-client'],
+  ['services/feishu-message-sender.ts', '../integrations/feishu/redaction'],
+  ['services/feishu-message-sender.ts', '../integrations/feishu/token'],
 ]
 
 /** Importers of the Feishu admin route: none until the entry point mounts it. */
@@ -329,11 +334,11 @@ describe('G-S5: importers of the Feishu modules are exactly the allowlist', () =
     const edge = (text: string, file = 'x/new.ts'): ImportEdge[] => feishuImportEdges(new Map([[file, text]]))
     const violations = (found: ImportEdge[]): string[] => importEdgeViolations(found, FEISHU_IMPORT_ALLOWLIST)
     expect(violations(edge("import { a } from '../integrations/feishu/token'"))).toContain('unexpected: x/new.ts -> ../integrations/feishu/token')
-    expect(violations(edge("import('../integrations/feishu/token')"))).toHaveLength(4)
-    expect(violations(edge('import(`../integrations/feishu/token`)'))).toHaveLength(4)
-    expect(violations(edge("const t = require('../integrations/feishu/token.js')"))).toHaveLength(4)
-    expect(violations(edge("export * from '../integrations/feishu/token'"))).toHaveLength(4)
-    expect(violations(edge("const n = 'integrations/feishu'; import(n)"))).toHaveLength(4)
+    expect(violations(edge("import('../integrations/feishu/token')"))).toHaveLength(FEISHU_IMPORT_ALLOWLIST.length + 1)
+    expect(violations(edge('import(`../integrations/feishu/token`)'))).toHaveLength(FEISHU_IMPORT_ALLOWLIST.length + 1)
+    expect(violations(edge("const t = require('../integrations/feishu/token.js')"))).toHaveLength(FEISHU_IMPORT_ALLOWLIST.length + 1)
+    expect(violations(edge("export * from '../integrations/feishu/token'"))).toHaveLength(FEISHU_IMPORT_ALLOWLIST.length + 1)
+    expect(violations(edge("const n = 'integrations/feishu'; import(n)"))).toHaveLength(FEISHU_IMPORT_ALLOWLIST.length + 1)
     // a second load from an allowed file is a violation
     const twice = edge(
       "import { a } from '../integrations/feishu/verify'\nimport { b } from '../integrations/feishu/verify'",

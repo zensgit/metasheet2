@@ -271,6 +271,7 @@ export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[
   { file: ATT, key1: 'hashtext($1::text)', window: '[orgId, sourceId]', count: 2, kind: 'variable', binding: 'org id' },
   { file: ATT, key1: 'hashtext($1::text)', window: 'attendance-schedule-dispatch:', kind: 'variable', binding: '`attendance-schedule-dispatch:${orgId}`' },
   { file: ATT, key1: 'hashtext($1::text)', window: 'attendance:otbank-cap:', kind: 'variable', binding: '`attendance:otbank-cap:${orgId}:${userId}`' },
+  { file: `${CORE}/notifications/notification-tx.ts`, key1: "hashtext('notif-user:' || $1::text)", window: "hashtext('notif-user:' || $1::text), hashtext($2::text)", kind: 'variable', binding: 'org id behind a fixed prefix; user id as key2' },
   // Calls written inside documentation comments.
   { file: `${CORE}/multitable/canonical-sheet-fence.ts`, key1: 'PIT_RECOVERY_LOCK_NS::int', window: '', count: 2, kind: 'doc-comment', registry: ['multitable-pit-recovery'], boundConstants: [{ name: 'PIT_RECOVERY_LOCK_NS', registry: 'multitable-pit-recovery' }], binding: 'doc comments describing the PIT recovery namespace int' },
 ])
