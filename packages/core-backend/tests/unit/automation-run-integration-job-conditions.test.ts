@@ -5,9 +5,10 @@
  * execution is skipped, the job never runs and no summary is published. The save refuses it with one fixed,
  * values-free message (AutomationRuleValidationError, VALIDATION_ERROR → the route answers 400), judged on the
  * NEXT STORED STATE, not on the request alone:
- *   - create with conditions (job as the legacy actionType/actionConfig pair) is refused. A NEW actions[] placement
- *     does not reach this check on this slice: the save gate's nested-occurrence test is by object identity and
- *     refuses it first; a STORED job rule with actions[] is covered by the conditions-only and switch cases below;
+ *   - create with conditions (job as the legacy actionType/actionConfig pair) is refused. Before R-69 I6d a NEW
+ *     actions[] placement did not reach this check (the save gate's nested-occurrence test was by object identity
+ *     and refused it first); I6d decides nesting by position, so the editor's wire shape (actions[] + its mirrored
+ *     pair) is covered by the I6d describe at the end, with the row-version binding of the update check;
  *   - (a) a stored plain rule that already has conditions, edited into a job rule WITHOUT touching conditions, is
  *     refused; (b) a conditions-only edit that adds conditions to a stored job rule is refused; a trigger-only edit
  *     of a stored job rule that already carries conditions is refused too (the stored conditions are the next ones);
@@ -61,7 +62,9 @@ function makeHarness() {
   chain.values = vi.fn((row: unknown) => { inserted.push(row as Record<string, unknown>); return chain })
   chain.set = vi.fn((row: unknown) => { sets.push(row as Record<string, unknown>); return chain })
   chain.execute = vi.fn(async () => (lastVerb === 'insert' ? [] : executeResults.shift() ?? []))
-  chain.executeTakeFirst = vi.fn(async () => stored)
+  // R-69 I6d: getRule answers queued rows first (one per read, in order), then the stored row.
+  const storedReads: Array<Record<string, unknown> | undefined> = []
+  chain.executeTakeFirst = vi.fn(async () => (storedReads.length > 0 ? storedReads.shift() : stored))
   const service = new AutomationService(new EventBus(), chain as never, queryFn as never)
   return {
     service,
@@ -69,6 +72,7 @@ function makeHarness() {
     sets,
     deletes,
     setStored: (row: Record<string, unknown> | undefined) => { stored = row },
+    queueStoredReads: (...rows: Array<Record<string, unknown> | undefined>) => { storedReads.push(...rows) },
     pushExecute: (rows: unknown) => { executeResults.push(rows) },
   }
 }
@@ -210,5 +214,59 @@ describe('run_integration_job conditions — AutomationService save', () => {
     h.pushExecute([{ numDeletedRows: BigInt(1) }])
     expect(await h.service.deleteRule(RULE_ID, SHEET_ID)).toBe(true)
     expect(h.deletes).toHaveLength(1)
+  })
+})
+
+// R-69 I6d: the update check sits inside the version-bound save path (F1). It judges the next stored state from the
+// attempt's FIRST stored read — the row version the UPDATE is bound to — and it covers the editor's wire shape (the
+// action list with its first action mirrored into the pair), which reaches the save gate on this slice.
+describe('run_integration_job conditions — I6d: the editor wire shape, and the row the write is bound to', () => {
+  let h: ReturnType<typeof makeHarness>
+  beforeEach(() => { vi.stubEnv(FLAG, 'true'); vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true'); h = makeHarness() })
+  afterEach(() => { h.service.unregisterSchedule(RULE_ID); vi.unstubAllEnvs() })
+
+  const WIRE = { actionType: 'run_integration_job', actionConfig: JOB, actions: [{ type: 'run_integration_job', config: JOB }] }
+
+  it('create: the editor wire shape (actions[] + its mirrored pair) with conditions is refused, nothing inserted; without them it saves', async () => {
+    const createInput = { name: 'nightly pull', triggerType: 'schedule.cron', triggerConfig: CRON, createdBy: 'svc_user', ...WIRE }
+    expectConditionsRefusal(await refusal(h.service.createRule(SHEET_ID, { ...createInput, conditions: CONDITIONS } as never)))
+    expect(h.inserted).toHaveLength(0)
+    const rule = await h.service.createRule(SHEET_ID, createInput as never)
+    expect(h.inserted).toHaveLength(1)
+    h.service.unregisterSchedule(rule.id)
+  })
+
+  it('update (a), the editor wire shape: a stored plain rule WITH conditions turned into a job rule is refused unless the same edit clears them', async () => {
+    h.setStored(storedPlainRule({ conditions: CONDITIONS }))
+    expectConditionsRefusal(await refusal(h.service.updateRule(RULE_ID, SHEET_ID, WIRE as never)))
+    expect(h.sets).toHaveLength(0)
+    h.pushExecute([storedJobRule({ conditions: null })])
+    expect(await h.service.updateRule(RULE_ID, SHEET_ID, { ...WIRE, conditions: null } as never)).not.toBeNull()
+    expect(h.sets).toHaveLength(1)
+    expect(h.sets[0].conditions).toBeNull()
+  })
+
+  it('bound row: an action + trigger edit whose FIRST read has conditions is refused even when a LATER read of the same save no longer shows them', async () => {
+    // read 1 (the action block) = the row the write is bound to; read 2 (the trigger block) = a newer row
+    h.queueStoredReads(storedPlainRule({ conditions: CONDITIONS }), storedPlainRule({ conditions: null }))
+    h.setStored(storedPlainRule({ conditions: null }))
+    const patch = { ...WIRE, triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } }
+    expectConditionsRefusal(await refusal(h.service.updateRule(RULE_ID, SHEET_ID, patch as never)))
+    expect(h.sets).toHaveLength(0)
+    // control: the same edit whose bound row has no conditions saves (the mocked UPDATE answers the row)
+    const local = makeHarness()
+    local.queueStoredReads(storedPlainRule({ conditions: null }), storedPlainRule({ conditions: null }))
+    local.setStored(storedPlainRule({ conditions: null }))
+    local.pushExecute([storedJobRule()])
+    expect(await local.service.updateRule(RULE_ID, SHEET_ID, patch as never)).not.toBeNull()
+    expect(local.sets).toHaveLength(1)
+    local.service.unregisterSchedule(RULE_ID)
+  })
+
+  it('allowed on a stored job rule that DOES carry conditions: a rename together with the switch, only those columns written', async () => {
+    h.setStored(storedJobRule({ conditions: CONDITIONS }))
+    h.pushExecute([storedJobRule({ conditions: CONDITIONS, name: 'renamed', enabled: false })])
+    expect((await h.service.updateRule(RULE_ID, SHEET_ID, { name: 'renamed', enabled: false }))?.enabled).toBe(false)
+    expect(h.sets.map((set) => Object.keys(set).sort())).toEqual([['enabled', 'name', 'updated_at']])
   })
 })

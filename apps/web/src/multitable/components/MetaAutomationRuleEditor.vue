@@ -2042,6 +2042,7 @@ import {
   RUN_INTEGRATION_JOB_KINDS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES,
   buildRunIntegrationJobConfig,
+  checkRunIntegrationJobConditions,
   checkRunIntegrationJobConfig,
   checkRunIntegrationJobRuleSheetProjects,
   checkRunIntegrationJobSoleAction,
@@ -4387,6 +4388,21 @@ const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
       anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
     })
   }
+  // R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — its schedule trigger fires with an
+  // empty record, so a condition would skip every run (checkRunIntegrationJobConditions, the mirror of the server's
+  // validateRunIntegrationJobConditions), given what buildPayload sends: the group only when it has a node.
+  const conditionsCheck = checkRunIntegrationJobConditions(
+    draft.value.conditions.conditions.length > 0 ? { conjunction: draft.value.conditions.conjunction, conditions: draft.value.conditions.conditions } : null,
+  )
+  if (conditionsCheck) {
+    reasons.push({
+      key: 'runIntegrationJobConditions',
+      message: isZh.value
+        ? '带「运行集成任务」的规则不能设置触发条件（定时触发没有记录可判断，条件会让每次运行都被跳过）：请移除所有条件。'
+        : 'A rule with run integration job cannot have conditions (a schedule trigger has no record to test, so every run would be skipped): remove all conditions.',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
   return reasons
 })
 
@@ -6171,6 +6187,12 @@ function buildPayload(): Partial<AutomationRule> {
   ) {
     delete payload.triggerConfig
     delete payload.trigger
+  }
+  // R-69 1b-ii (owner-approved 2026-11-11): a job rule cannot carry conditions, and the server judges the NEXT stored
+  // conditions (incoming ?? stored). An omitted key keeps the stored ones, so a job rule whose conditions the author
+  // removed sends an explicit `null` — the clearing the server allows. Other rules keep the omit-when-empty payload.
+  if (payload.conditions === undefined && actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE)) {
+    (payload as Record<string, unknown>).conditions = null
   }
   return payload
 }

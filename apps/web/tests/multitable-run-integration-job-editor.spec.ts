@@ -16,6 +16,8 @@
  *      R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — the editor adds nothing beside it, offers it
  *      for a new selection only on a one-action rule, and a loaded rule that has others is shown whole and cannot be
  *      saved until they are removed.
+ *      R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — a loaded one that does is shown
+ *      whole and cannot be saved until they are removed (the mirror of the server's refusal).
  * The server/client save-validator byte parity itself lives in core-backend
  * (tests/unit/automation-run-integration-job-web-parity.test.ts), where both validators are imported live.
  */
@@ -29,11 +31,13 @@ import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomatio
 import MetaAutomationLogViewer from '../src/multitable/components/MetaAutomationLogViewer.vue'
 import type { AutomationExecution, AutomationRule } from '../src/multitable/types'
 import {
+  RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE,
   RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE,
   RUN_INTEGRATION_JOB_REASON_LABELS,
   RUN_INTEGRATION_JOB_STEP_OUTCOMES,
+  checkRunIntegrationJobConditions,
   checkRunIntegrationJobRuleSheetProjects,
   checkRunIntegrationJobSoleAction,
   isRunIntegrationJobSelectable,
@@ -601,5 +605,79 @@ describe('rule editor: run_integration_job item', () => {
     await flushPromises()
     expect(blockTextOf(container, 'runIntegrationJobSole')).toBe('「运行集成任务」必须是规则里唯一的动作：请移除其他动作（其他动作请另建一条规则）。')
     expect(container.querySelector('[data-field="rij-sole-action-hint"]')?.textContent).toContain('必须是规则里唯一的动作')
+  })
+})
+
+// ── R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — the client mirror ──────────────────
+describe('rule editor: run_integration_job and trigger conditions (mirror of the server refusal)', () => {
+  const CONDITIONS = { conjunction: 'AND' as const, conditions: [{ fieldId: 'fld_name', operator: 'equals' as const, value: 'x' }] }
+  const CONDITIONS_LINE = 'A rule with run integration job cannot have conditions (a schedule trigger has no record to test, so every run would be skipped): remove all conditions.'
+  const removeFirstCondition = (container: HTMLElement) =>
+    (container.querySelector('[data-condition-path] .meta-rule-editor__btn--icon') as HTMLButtonElement).click()
+
+  beforeEach(() => {
+    runActionFlag = true
+    useLocale().setLocale('en')
+  })
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('the pure mirror: absent conditions and an empty group are none; any node (or a malformed group) is refused with the server\'s text', () => {
+    expect(RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE).toBe('run_integration_job rules cannot carry conditions (a schedule trigger has no record context)')
+    for (const none of [null, undefined, { conjunction: 'AND', conditions: [] }]) expect(checkRunIntegrationJobConditions(none), JSON.stringify(none)).toBeNull()
+    for (const some of [CONDITIONS, { conjunction: 'OR', conditions: [{ conjunction: 'AND', conditions: [] }] }, { conjunction: 'AND' }]) {
+      expect(checkRunIntegrationJobConditions(some), JSON.stringify(some)).toEqual({ code: 'conditions_present', message: RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE })
+    }
+  })
+
+  it('a LOADED job rule that carries conditions cannot be saved until they are removed; then it saves without them', async () => {
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG, { conditions: CONDITIONS }), onSave })
+    await flushPromises()
+    expect(blockKeys(container)).toEqual(['runIntegrationJobConditions'])
+    expect(blockTextOf(container, 'runIntegrationJobConditions')).toBe(CONDITIONS_LINE)
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flushPromises()
+    expect(onSave).not.toHaveBeenCalled()
+    removeFirstCondition(container)
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
+    save.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect(payload.actionType).toBe('run_integration_job')
+    // an omitted key would keep the STORED conditions on the server (incoming ?? stored): a job rule sends null
+    expect(payload.conditions).toBeNull()
+    expect(JSON.parse(JSON.stringify(payload))).toHaveProperty('conditions', null)
+  })
+
+  it('a plain rule whose conditions were removed keeps the omit-when-empty payload (only a job rule sends null)', async () => {
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: cronRule({ conditions: CONDITIONS }), onSave })
+    await flushPromises()
+    removeFirstCondition(container)
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect(payload.actionType).toBe('send_notification')
+    expect('conditions' in JSON.parse(JSON.stringify(payload))).toBe(false)
+  })
+
+  it('a plain schedule rule with conditions is untouched by this mirror (control of the same draft)', async () => {
+    const { container } = mountEditor({ rule: cronRule({ conditions: CONDITIONS }) })
+    await flushPromises()
+    expect(container.querySelector('[data-condition-path]')).not.toBeNull()
+    expect(blockKeys(container)).not.toContain('runIntegrationJobConditions')
+  })
+
+  it('the conditions save block is localized', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG, { conditions: CONDITIONS }) })
+    await flushPromises()
+    expect(blockTextOf(container, 'runIntegrationJobConditions')).toBe('带「运行集成任务」的规则不能设置触发条件（定时触发没有记录可判断，条件会让每次运行都被跳过）：请移除所有条件。')
   })
 })

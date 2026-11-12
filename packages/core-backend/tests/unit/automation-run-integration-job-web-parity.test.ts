@@ -18,6 +18,10 @@
  * R-69 I6d fix round 2 (F2): the job is its rule's ONLY action (server validateRunIntegrationJobSoleAction, called
  * from collectRunIntegrationJobOccurrences). The editor's mirror gives the byte-identical answer on a shape table.
  *
+ * R-69 1b-ii (owner-approved 2026-11-11): a rule that carries the job carries no conditions (server
+ * validateRunIntegrationJobConditions, called by createRule and by updateRule on the version-bound row). The editor's
+ * mirror gives the byte-identical answer on a conditions table.
+ *
  * Runs in the default core-backend unit job (tests/unit/**, not DB-gated) — no CI wiring needed.
  */
 import { describe, expect, it } from 'vitest'
@@ -25,11 +29,13 @@ import { describe, expect, it } from 'vitest'
 import {
   RUN_INTEGRATION_JOB_ACTION_TYPE as SERVER_ACTION_TYPE,
   RUN_INTEGRATION_JOB_APPLY_MODES as SERVER_APPLY_MODES,
+  RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE as SERVER_CONDITIONS_MESSAGE,
   RUN_INTEGRATION_JOB_KINDS as SERVER_KINDS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS as SERVER_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_NOT_SOLE_ERROR as SERVER_NOT_SOLE_ERROR,
   RUN_INTEGRATION_JOB_TIMEOUT_MIN_MS as SERVER_TIMEOUT_MIN_MS,
   collectRunIntegrationJobOccurrences as occurrencesServer,
+  validateRunIntegrationJobConditions as conditionsServer,
   validateRunIntegrationJobConfig as validateServer,
   validateRunIntegrationJobSoleAction as soleActionServer,
   validateRunIntegrationJobTriggerCoupling as couplingServer,
@@ -48,6 +54,7 @@ import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stoc
 import {
   RUN_INTEGRATION_JOB_ACTION_TYPE as WEB_ACTION_TYPE,
   RUN_INTEGRATION_JOB_APPLY_MODES as WEB_APPLY_MODES,
+  RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE as WEB_CONDITIONS_MESSAGE,
   RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS as WEB_EDITOR_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_KINDS as WEB_KINDS,
   RUN_INTEGRATION_JOB_MAX_PROJECTS as WEB_MAX_PROJECTS,
@@ -59,6 +66,7 @@ import {
   buildRunIntegrationJobConfig,
   checkRunIntegrationJobRuleSheetProjects as ruleSheetProjectsWeb,
   isRunIntegrationJobSelectable as selectableWeb,
+  validateRunIntegrationJobConditions as conditionsWeb,
   validateRunIntegrationJobConfig as validateWeb,
   validateRunIntegrationJobSoleAction as soleActionWeb,
   validateRunIntegrationJobTriggerCoupling as couplingWeb,
@@ -288,6 +296,35 @@ describe('run_integration_job save gate — server/web byte parity (R-69 1b-iii)
       for (const count of [2, 3]) expect(selectableWeb(true, 'schedule.cron', 'send_notification', count)).toBe(false)
       // a loaded job stays listed whatever the count (never silently dropped); the save block is what stops the save
       expect(selectableWeb(false, 'record.created', SERVER_ACTION_TYPE, 3)).toBe(true)
+    })
+  })
+
+  describe('conditions: a rule that carries the job carries no conditions, on both sides (R-69 1b-ii, owner-approved 2026-11-11)', () => {
+    /** [label, the rule's conditions, accepted?] — `accepted` pins the verdict independently. */
+    const CONDITIONS_CASES: Array<[string, unknown, boolean]> = [
+      ['absent (undefined)', undefined, true],
+      ['absent (null)', null, true],
+      ['an empty group', { conjunction: 'AND', conditions: [] }, true],
+      ['one condition', { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }, false],
+      ['a group holding only an empty group (a node is a node)', { conjunction: 'OR', conditions: [{ conjunction: 'AND', conditions: [] }] }, false],
+      ['a malformed group (no list)', { conjunction: 'AND' }, false],
+      ['a group whose list is not a list', { conjunction: 'AND', conditions: 'x' }, false],
+    ]
+
+    it('the web message is the server\'s, byte for byte', () => {
+      expect(WEB_CONDITIONS_MESSAGE).toBe(SERVER_CONDITIONS_MESSAGE)
+    })
+
+    it.each(CONDITIONS_CASES)('%s: the same answer on both sides', (_label, conditions, accepted) => {
+      const server = conditionsServer(conditions)
+      expect(conditionsWeb(conditions)).toBe(server)
+      expect(server === null).toBe(accepted)
+      if (!accepted) expect(server).toBe(SERVER_CONDITIONS_MESSAGE)
+    })
+
+    it('anti-vacuous: the table refuses and accepts', () => {
+      expect(CONDITIONS_CASES.filter(([, , accepted]) => accepted).length).toBeGreaterThanOrEqual(3)
+      expect(CONDITIONS_CASES.filter(([, , accepted]) => !accepted).length).toBeGreaterThanOrEqual(4)
     })
   })
 })

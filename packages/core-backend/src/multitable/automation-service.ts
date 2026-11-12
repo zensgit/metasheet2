@@ -1814,9 +1814,12 @@ export class AutomationService {
       actions,
       allActions: actionsForValidation,
       createdBy: input.createdBy ?? null,
-      conditions: input.conditions ?? null,
     })
     if (runIntegrationJobSave) {
+      // R-69 1b-ii: a job rule cannot carry conditions (its schedule trigger has no record, so a condition would skip
+      // every fire); a create's next stored conditions are its input. updateRule judges its own next state below.
+      const conditionsError = validateRunIntegrationJobConditions(input.conditions ?? null)
+      if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
       actionConfig = runIntegrationJobSave.actionConfig
       actions = runIntegrationJobSave.actions
     }
@@ -2071,11 +2074,24 @@ export class AutomationService {
     // attempt may see a newer row; the write below still matches the first version only, so it is then refused.
     // (Same number of getRule calls as before: the unit suites queue its answers.)
     let validatedVersion: string | undefined
+    // R-69 1b-ii (I6d): that first snapshot itself — the row the UPDATE below is bound to. The conditions check before
+    // the write judges the next stored state from THIS row, never from a later read.
+    let boundRule: AutomationRule | undefined
     const readStoredRule = async (): Promise<AutomationRule | null> => {
       const stored = await this.getRule(ruleId)
-      if (stored && validatedVersion === undefined) validatedVersion = stored.updated_at
+      if (stored && validatedVersion === undefined) {
+        validatedVersion = stored.updated_at
+        boundRule = stored
+      }
       return stored
     }
+    // R-69 1b-ii (I6d): set by an action-shaped edit to the action shape it will persist; else the stored one is next.
+    let nextActionShapeForConditions: {
+      actionType: string
+      actionConfig: Record<string, unknown> | null
+      actions: AutomationAction[] | null
+      allActions: AutomationAction[] | null
+    } | undefined
     const updates: Record<string, unknown> = {}
     const shouldValidateActions = input.actionType !== undefined
       || input.actionConfig !== undefined
@@ -2165,11 +2181,11 @@ export class AutomationService {
         actions: normalizedNextActions,
         allActions: actionsForValidation,
         createdBy: existing.created_by ?? null,
-        // the NEXT stored conditions: the incoming ones when sent, else the stored ones
-        conditions: input.conditions !== undefined ? input.conditions : existing.conditions ?? null,
       })
       const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
       const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
+      // The NEXT stored action shape, for the conditions check before the write (`existing` is this attempt's first read).
+      nextActionShapeForConditions = { actionType: nextActionType, actionConfig: persistedNextActionConfig, actions: persistedNextActions, allActions: actionsForValidation }
       if (runIntegrationJobUpdate?.stampedTopLevel) runIntegrationJobConfigRewrite = persistedNextActionConfig
       if (runIntegrationJobUpdate?.stampedActions) runIntegrationJobActionsRewrite = persistedNextActions
       // S3 fix round 2 (F2): the same overview refusal as createRule, on every action-shaped edit.
@@ -2306,30 +2322,6 @@ export class AutomationService {
       ) as Record<string, unknown> | null
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(nextTriggerType, nextTriggerConfig)
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
-    }
-
-    // R-69 1b-ii: a run_integration_job rule cannot carry conditions, judged on the NEXT stored state. An
-    // action-shaped edit ran this inside assertRunIntegrationJobAtSave above; this covers the edits that skip that
-    // gate but still set the conditions or the trigger (conditions-only, trigger-only), with the STORED actions
-    // deciding whether the rule is a job rule. A rename or a pure on/off switch does not open it (setRuleEnabled
-    // routes through updateRule): an operator can always turn a rule off. Every shape that opens it is also a T1-2
-    // shape, so `existingRuleSnapshot` is already fetched (no extra getRule).
-    if (!shouldValidateActions && (input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined)) {
-      const existingForConditions = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
-      existingRuleSnapshot = existingForConditions
-      if (!existingForConditions || existingForConditions.sheet_id !== sheetId) return null
-      const storedJob = collectRunIntegrationJobOccurrences(
-        existingForConditions.action_type,
-        (existingForConditions.action_config ?? null) as Record<string, unknown> | null,
-        existingForConditions.actions ?? null,
-        existingForConditions.actions ?? null,
-      )
-      if (storedJob.occurrences.length > 0) {
-        const conditionsError = validateRunIntegrationJobConditions(
-          input.conditions !== undefined ? input.conditions : existingForConditions.conditions ?? null,
-        )
-        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
-      }
     }
 
     // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
@@ -2505,6 +2497,33 @@ export class AutomationService {
       )
       if (deletedTriggerSameBaseTargetError) {
         throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+    }
+
+    // R-69 1b-ii (owner-approved 2026-11-11), inside the version-bound save path (I6d): a run_integration_job rule
+    // cannot carry conditions — its schedule.cron trigger fires with an EMPTY record, so a condition would skip every
+    // fire and no summary would ever be published. ONE check for every update shape that sets the conditions, the
+    // trigger or the action; a rename and the on/off switch (setRuleEnabled routes through here) never open it, nor
+    // does delete, so an operator can always turn such a rule off; clearing the conditions (null, or an empty group)
+    // is allowed. It judges the NEXT stored state: conditions = incoming ?? stored, actions = the shape an
+    // action-shaped edit persists, else the stored ones — the stored side always from `boundRule`, this attempt's
+    // FIRST read, the very row version the UPDATE below is bound to (F1). A save that changed the row in between
+    // makes that UPDATE match nothing, and the next attempt checks the row as it now is: no interleaving of two
+    // saves, each legal alone, stores a job rule with conditions.
+    if (shouldValidateActions || input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined) {
+      // Every shape that opens this check also opened the T1-2 block above, which read the stored row.
+      if (!boundRule || boundRule.sheet_id !== sheetId) return null
+      const nextShape = nextActionShapeForConditions ?? {
+        actionType: boundRule.action_type,
+        actionConfig: (boundRule.action_config ?? null) as Record<string, unknown> | null,
+        actions: boundRule.actions ?? null,
+        allActions: null,
+      }
+      const { occurrences } = collectRunIntegrationJobOccurrences(nextShape.actionType, nextShape.actionConfig, nextShape.actions, nextShape.allActions)
+      if (occurrences.length > 0) {
+        const nextConditions = input.conditions !== undefined ? input.conditions : boundRule.conditions ?? null
+        const conditionsError = validateRunIntegrationJobConditions(nextConditions)
+        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
       }
     }
 
@@ -3154,8 +3173,6 @@ export class AutomationService {
     actions: AutomationAction[] | null
     allActions: AutomationAction[]
     createdBy: string | null
-    /** The rule's NEXT stored conditions (create: the input; update: the input when sent, else the stored ones). */
-    conditions: ConditionGroup | null
   }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
     const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
     if (error) throw new AutomationRuleValidationError(error)
@@ -3170,9 +3187,8 @@ export class AutomationService {
       const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
       if (configError) throw new AutomationRuleValidationError(configError)
     }
-    // No conditions on a job rule: its schedule trigger has no record, so a condition would skip every fire (400).
-    const conditionsError = validateRunIntegrationJobConditions(input.conditions)
-    if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+    // (No conditions on a job rule: checked by the callers on the rule's next stored state — createRule after this
+    // gate, updateRule against the row its write is bound to.)
     const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
     if (couplingError) throw new AutomationRuleValidationError(couplingError)
     const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)

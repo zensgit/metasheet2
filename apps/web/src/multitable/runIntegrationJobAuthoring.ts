@@ -17,6 +17,8 @@
  *      (RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS) — the editor's project limit; the mirror's 20 is not.
  *      1c (R-69 I6d fix round 2, F2) mirrors the server's validateRunIntegrationJobSoleAction: the job is its rule's
  *      ONLY action.
+ *      1d (R-69 1b-ii, owner-approved 2026-11-11) mirrors the server's validateRunIntegrationJobConditions: a rule
+ *      that carries the job carries no conditions.
  *   2. Draft <-> config helpers for the editor (project list text, timeout in minutes).
  *   3. The VALUES-FREE step-result view: the executor's `output.outcome` / `output.reason` vocabulary
  *      (automation-executor.ts runIntegrationJobStep / runIntegrationJobUnit, plugin lib/integration-run-port.cjs)
@@ -246,6 +248,33 @@ export function checkRunIntegrationJobSoleAction(
 /** Same signature and answers as the server's validateRunIntegrationJobSoleAction. */
 export function validateRunIntegrationJobSoleAction(actionType: string, actions: readonly unknown[] | null | undefined): string | null {
   return checkRunIntegrationJobSoleAction(actionType, actions)?.message ?? null
+}
+
+// ── 1d. A job rule carries no conditions (server: automation-run-integration-job.ts) ──────────────────────────
+
+/** Byte-identical to the server's RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE. */
+export const RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE =
+  'run_integration_job rules cannot carry conditions (a schedule trigger has no record context)'
+
+export type RunIntegrationJobConditionsErrorCode = 'conditions_present'
+
+/**
+ * R-69 1b-ii (owner-approved 2026-11-11) — structured mirror of the server's validateRunIntegrationJobConditions: a
+ * rule that carries the job may not carry conditions (its schedule.cron trigger fires with an empty record, so a
+ * condition would skip every fire). Absent conditions and an empty group (no condition nodes) count as none; anything
+ * else — any node, or a malformed group — is refused. Same branch order as the server; byte parity pinned by the
+ * core-backend web-parity test.
+ */
+export function checkRunIntegrationJobConditions(conditions: unknown): RunIntegrationJobCheck<RunIntegrationJobConditionsErrorCode> | null {
+  if (!conditions) return null
+  const nodes = isRecord(conditions) && Array.isArray(conditions.conditions) ? conditions.conditions : null
+  if (nodes && nodes.length === 0) return null
+  return { code: 'conditions_present', message: RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE }
+}
+
+/** Same signature and answers as the server's validateRunIntegrationJobConditions. */
+export function validateRunIntegrationJobConditions(conditions: unknown): string | null {
+  return checkRunIntegrationJobConditions(conditions)?.message ?? null
 }
 
 // ── 2. Editor draft <-> config ───────────────────────────────────────────────────────────────────────────────

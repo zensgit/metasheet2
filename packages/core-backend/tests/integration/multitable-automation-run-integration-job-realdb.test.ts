@@ -979,6 +979,64 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
     }
   }, 30_000)
 
+  // R-69 1b-ii (owner-approved 2026-11-11) under F1: "a job rule cannot carry conditions" is also a rule about TWO
+  // columns (the conditions and the action), so a conditions PATCH and a job PATCH, each legal alone on a plain
+  // schedule.cron rule, are exactly the pair a check that does not judge the row the write is bound to lets through.
+  test('conditions × job (no conditions on a job rule): whichever PATCH lost is re-validated against the winner\'s row and refused with nothing written; the stored row is never a job rule with conditions', async () => {
+    const conditions = { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }
+    const conditionsPatch = { conditions }
+    const digest = async (ruleId: string) =>
+      ((await q(`SELECT md5(row_to_json(r)::text) AS d FROM automation_rules r WHERE id = $1`, [ruleId])).rows[0] as { d: string }).d
+    const stored = async (ruleId: string) =>
+      (await q(`SELECT action_type, conditions FROM automation_rules WHERE id = $1`, [ruleId])).rows[0] as { action_type: string; conditions: unknown }
+    const refusedAsConditions = (settled: Settled) => {
+      expect(settled.ok).toBe(false)
+      const refusal = (settled as { error: Error }).error
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect((refusal as AutomationRuleValidationError).code).toBe('VALIDATION_ERROR')
+      expect(refusal.message).toBe(RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE)
+    }
+    // each PATCH alone is legal on the plain rule (control of the pair)
+    const control = await seedPlainCronRule(`f1_cond_control_${RUN}`)
+    try {
+      expect(await B.service.updateRule(control.id, sheet, conditionsPatch as never, principalId)).not.toBeNull()
+      const other = await seedPlainCronRule(`f1_cond_control_job_${RUN}`)
+      try {
+        expect((await B.service.updateRule(other.id, sheet, jobPatch as never, principalId))?.action_type).toBe('run_integration_job')
+      } finally {
+        await dropRule(other.id)
+      }
+    } finally {
+      await dropRule(control.id)
+    }
+    // held: the conditions PATCH (read while the rule is plain); other: the job PATCH
+    const first = await seedPlainCronRule(`f1_cond_first_${RUN}`)
+    try {
+      const { held, other } = await interleave(first.id, conditionsPatch, jobPatch)
+      expect(other.ok).toBe(true)
+      refusedAsConditions(held)
+      expect(await stored(first.id)).toEqual({ action_type: 'run_integration_job', conditions: null })
+    } finally {
+      await dropRule(first.id)
+    }
+    // held: the job PATCH (read while the rule has no conditions); other: the conditions PATCH
+    const second = await seedPlainCronRule(`f1_cond_second_${RUN}`)
+    try {
+      const hold = A.holdNext()
+      const held = settle(A.service.updateRule(second.id, sheet, jobPatch as never, principalId))
+      await Promise.race([hold.reached, held.then(() => { throw new Error('the held PATCH settled before it reached the statement to hold') })])
+      expect(await settle(B.service.updateRule(second.id, sheet, conditionsPatch as never, principalId))).toMatchObject({ ok: true })
+      const winner = await digest(second.id)
+      hold.release()
+      refusedAsConditions(await held)
+      // the loser wrote nothing: the row is byte-identical to the winner's
+      expect(await digest(second.id)).toBe(winner)
+      expect(await stored(second.id)).toEqual({ action_type: 'record_click', conditions })
+    } finally {
+      await dropRule(second.id)
+    }
+  }, 30_000)
+
   test('a rule DELETED under a held save answers "not found" (null), as it did before: the second validation reads no row', async () => {
     const rule = await seedPlainCronRule(`f1_deleted_${RUN}`)
     try {
