@@ -1037,6 +1037,19 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '请稍后重试;仍失败请平台管理员检查扩展列安装记录。',
     enNext: 'Retry shortly; if it keeps failing, ask the platform admin to check the pack install ledger.',
   }),
+  // S6-5b (R-91): the census refuses a sheet that lost a key column (项目号 / 唯一键 / PLM 物料ID / 父件源ID / 有效).
+  STOCK_PREP_SHEET_CENSUS_FIELD_MISSING: Object.freeze({
+    zh: '这张表缺少普查要读的关键列,普查没有给出结果。',
+    en: 'This sheet is missing a key column the census reads, so the census gave no result.',
+    zhNext: '请平台管理员按手册检查并补回这张表的关键列后再普查。',
+    enNext: 'Ask the platform admin to check and restore the sheet\'s key columns per the runbook, then run the census again.',
+  }),
+  STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE: Object.freeze({
+    zh: '这张表的关键列暂时无法从数据库确认,普查没有给出结果。',
+    en: 'The key columns of this sheet could not be confirmed from the database, so the census gave no result.',
+    zhNext: '请稍后重试;仍失败请平台管理员检查数据库连接。',
+    enNext: 'Retry shortly; if it keeps failing, ask the platform admin to check the database connection.',
+  }),
   STOCK_PREP_REMNANT_NOT_PRESENT: Object.freeze({
     zh: '重新读取后,这个组件已经不是旧根行残留,这次没有记录确认。',
     en: 'On a fresh read this component is no longer an inactive-root remnant, so no acknowledgement was recorded.',
