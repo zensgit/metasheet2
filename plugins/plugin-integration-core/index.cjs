@@ -32,6 +32,7 @@ const { createStockPreparationRefreshGovernance } = require('./lib/stock-prepara
 const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createStockPreparationPullBatchStore } = require('./lib/stock-preparation-pull-batch-store.cjs')
 const { createStockPreparationComponentRulingStore } = require('./lib/stock-preparation-component-ruling-store.cjs')
+const { createStockPreparationSheetRepairStore } = require('./lib/stock-preparation-sheet-repair-store.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -102,6 +103,7 @@ let stockPreparationRefreshGovernance = null
 let stockPreparationGovernedSheetProbe = null
 let stockPreparationPullBatchStore = null
 let stockPreparationComponentRulingStore = null
+let stockPreparationSheetRepairStore = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -404,6 +406,10 @@ module.exports = {
     // acknowledgement that a doubled-sheet remnant is no longer separately ordered. The census / acknowledgement routes
     // and readiness v5's remnant check read it; absent (no SQL db) the acknowledgement routes answer 501 by name.
     stockPreparationComponentRulingStore = createStockPreparationComponentRulingStore({ db })
+    // Batch-refresh step 6d-2a (migration 108; register R-91): the doubled-sheet repair ledger — run rows with their
+    // backup and the one-shot claims. The repair routes reach it only while the repair switch is exactly 'true' (read per
+    // request); off, nothing ever touches it.
+    stockPreparationSheetRepairStore = createStockPreparationSheetRepairStore({ db })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -599,6 +605,7 @@ module.exports = {
         stockPreparationGovernedSheetProbe,
         stockPreparationPullBatchStore,
         stockPreparationComponentRulingStore,
+        stockPreparationSheetRepairStore,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -768,6 +775,7 @@ module.exports = {
     stockPreparationGovernedSheetProbe = null
     stockPreparationPullBatchStore = null
     stockPreparationComponentRulingStore = null
+    stockPreparationSheetRepairStore = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

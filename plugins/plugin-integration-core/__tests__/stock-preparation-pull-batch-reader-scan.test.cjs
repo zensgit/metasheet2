@@ -143,7 +143,9 @@ test('RS-1 every occurrence of the reader is reviewed; every CALL passes the ser
     // each read the project's rows with the band (two more calls).
     // Batch-refresh step 6d-1b (S6-5, R-91; rebaseline B-12): the census's ONE walled project read (both census forms and
     // the acknowledgement's re-proof go through readStockPreparationCensusRows) — the sixth call, with the band.
-    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
+    // Batch-refresh step 6d-2a (S6-6, R-91): the doubled-sheet repair's rows reader (ONE call: the restore's read, the
+    // continuation's verification and the fills report share it; the retire's read is computeDryRun's) — the seventh.
+    'lib/http-routes.cjs': sorted(['call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'call:band', 'ref:deps', 'ref:deps', 'ref:deps', 'ref:deps']),
     // readiness's ONE project read (R3), shared since v5 by O-6 and the remnant check (projectRowsOnce).
     'lib/stock-preparation-pilot-readiness.cjs': sorted(['call:band', 'ref:typeof']),
     // the status / board / readiness v3 rows read (R6).
@@ -164,7 +166,8 @@ test('RS-2 every computeDryRun( call in table-actions passes the lane (the strip
     calls.push(callArgsAt(code, at))
   }
   // Batch-refresh step 6a-2 (S6-2, rebaseline (f)): the recovery's in-lease recompute is the fifth.
-  assert.equal(calls.length, 5, 'dry-run, reconcile, mvp-persist, apply, recovery')
+  // Batch-refresh step 6d-2a (S6-6, rebaseline B-12): the doubled-sheet repair's source read is the sixth.
+  assert.equal(calls.length, 6, 'dry-run, reconcile, mvp-persist, apply, recovery, sheet repair')
   for (const args of calls) assert.match(args, /pullBatchLane/)
 })
 
@@ -182,7 +185,9 @@ test('RS-3 every route call of the small-lane entries passes pullBatch:, the lar
     return out
   }
   // Batch-refresh step 6a-2 (S6-2, rebaseline (f)): the recovery entry is the fifth small-lane route call.
-  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction', 'recoverStockPreparationExecution']) {
+  // Batch-refresh step 6d-2a (S6-6): the doubled-sheet repair's source read is the sixth (one route call: its preview and
+  // its in-lease recompute share the deps builder).
+  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction', 'recoverStockPreparationExecution', 'readStockPreparationSheetRepairSource']) {
     const calls = callsOf(name)
     assert.equal(calls.length, 1, `${name}: one route call`)
     assert.match(calls[0], /pullBatch:/, `${name} passes the lane input`)
