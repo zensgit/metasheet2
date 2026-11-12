@@ -73,6 +73,11 @@
  *   S6-6 (migration 108): G9-S66-U03, G9-S66-U07, G9-S66-INSTALLING. Whoever lands them replaces the todo with the case
  *   and moves the id to `realDb`. G9-U03's scope is the whole capability manifest minus a named pre-step-4 list, so a
  *   route S6-6 adds fails its manifest equality until it is drilled.
+ *   S6-6's three routes (#6843: the repair POST, its fills report, its run list) ARE in G9-U03's tier oracle since
+ *   that PR, drilled with the repair switch OFF — the deployment default: 403 below stock-prep admin with nothing
+ *   written and no audit row, and the surface's own 404 for every caller at or above the tier (this tenant's admin,
+ *   the tenantless platform admin, a cross-tenant admin; real id or bogus; every steering carrier). That is NOT
+ *   G9-S66-U03: the drill with the switch ON (the tenant gate and the scoped reads behind it) stays pending.
  */
 import { createRequire } from 'module'
 import path from 'node:path'
@@ -134,6 +139,10 @@ const pullBatchPureLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-b
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const PULL_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+// S6-6 (#6843): the doubled-sheet repair's switch (default OFF; exact 'true') and its refusal code, spelled by the
+// repair library — the switch's one reader.
+const sheetRepairLib = require(path.join(PLUGIN_LIB, 'stock-preparation-sheet-repair.cjs')) as any
+const SHEET_REPAIR_SWITCH: string = sheetRepairLib.STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV
 const REFRESH_BASE = '/api/integration/stock-preparation/projects/:projectNo/refresh'
 const RP = {
   holds: `${REFRESH_BASE}/holds`,
@@ -1170,6 +1179,11 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         'projectTarget.censusRead': 'admin',
         'projectTarget.remnantAcknowledge': 'admin',
         'projectTarget.remnantRevoke': 'admin',
+        // S6-6 (#6843): the doubled-sheet repair (preview / execute of a recipe and of the continuation), its fills
+        // report and its run list. Drilled with the repair switch OFF (see `send` below and the block after the drill).
+        'projectTarget.sheetRepair': 'admin',
+        'projectTarget.sheetRepairFillsReport': 'admin',
+        'projectTarget.sheetRepairRuns': 'admin',
         // EVERY pull step of the operator split (STOCK_PREP_OPERATOR_PULL_STEPS): the pull tier for stock-prep callers.
         'pull.dry-run': 'pull',
         'pull.dry-run-job-start': 'pull',
@@ -1199,7 +1213,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const inScope = (entry: any) => !PRE_STEP_FOUR.has(entry.capability)
       const manifestTiers = Object.fromEntries(access.STOCK_PREP_WORKBENCH_CAPABILITIES.filter(inScope).map((entry: any) => [entry.capability, String(entry.code).replace(/^stock-prep:/, '')]))
       for (const step of access.STOCK_PREP_OPERATOR_PULL_STEPS) manifestTiers[`pull.${step.step}`] = 'pull'
-      // S6-5 / S6-6 (pending G9-S65-U03 / G9-S66-U03): their new capabilities fail THIS equality until they are added above.
+      // A capability a later PR adds fails THIS equality until it is added above (S6-5's four and S6-6's three are).
       expect(manifestTiers).toEqual(EXPECTED_TIERS)
       const routeOf = (id: string) => {
         if (id.startsWith('pull.')) return access.STOCK_PREP_OPERATOR_PULL_STEPS.find((entry: any) => `pull.${entry.step}` === id)
@@ -1251,13 +1265,25 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           'pull.reconcile': { parameters: { projectNo: st.projectNo } },
           'projectTarget.remnantAcknowledge': { confirmProjectNo, componentHandle: ids.componentHandle, basis: 'head_not_ordered', runbookRef: 'R-91.g9-u03', acknowledge: { customerAnswered: true } },
           'projectTarget.remnantRevoke': { confirmProjectNo, runbookRef: 'R-91.g9-u03' },
+          'projectTarget.sheetRepair': { mode: 'preview', recipe: sheetRepairLib.SHEET_REPAIR_RECIPES[0], confirmProjectNo, componentHandle: ids.componentHandle },
         }
         const body = entry.method === 'GET' ? {} : (bodies[entry.id] || (entry.id.startsWith('refresh.') || entry.id === 'projectTarget.pilotEnable' ? { confirmProjectNo } : {}))
         const query = entry.id === 'confirmationQueue.export' ? { projectNo: st.projectNo } : {}
         return { params: paramsFor(ids), body, query }
       }
       const answerOf = (res: any) => `${res.statusCode}:${codeOf(res) || '-'}`
-      const send = (entry: any, user: any, request: { params: any; body: any; query: any }) => both(true, () => callRoute(st.routes, entry.method, entry.path, { user, ...request }))
+      // S6-6: EVERY call of this drill runs with the repair switch OFF (the deployment default), whatever the process was
+      // started with — the three repair routes then answer their own 404, after the gate and before any IO.
+      const repairSwitchOff = async <T>(fn: () => Promise<T>): Promise<T> => {
+        const before = process.env[SHEET_REPAIR_SWITCH]
+        delete process.env[SHEET_REPAIR_SWITCH]
+        try {
+          return await fn()
+        } finally {
+          if (before !== undefined) process.env[SHEET_REPAIR_SWITCH] = before
+        }
+      }
+      const send = (entry: any, user: any, request: { params: any; body: any; query: any }) => repairSwitchOff(() => both(true, () => callRoute(st.routes, entry.method, entry.path, { user, ...request })))
       // The inert request (the admitted phase): made-up ids and an empty body — no admitted call changes anything.
       const inert = () => ({ params: paramsFor(BOGUS), query: {}, body: {} })
       const stTokens = async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'integration:table-action:dry-run-token:%' AND value->>'writeScope' = $1`, [st.key])).rows[0].n)
@@ -1542,6 +1568,34 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const s65 = ['projectTarget.census', 'projectTarget.censusRead', 'projectTarget.remnantAcknowledge', 'projectTarget.remnantRevoke']
       expect(s65.every((id) => drilled.some((route: any) => route.id === id))).toBe(true)
       g9Pass('G9-S65-U03', { drilled: s65.length, foreign: Object.fromEntries(Object.entries(foreignAnswers).map(([name, answers]) => [name, s65.map((id) => answers[id])])) })
+      // S6-6 (#6843): the three repair routes rode this drill with the repair switch OFF. Their tier legs are in the
+      // equalities above (below stock-prep admin: 403, nothing written, no audit row; at the tier: admitted). Pinned
+      // here: every caller at or above the tier — this tenant's own admin, the tenantless platform admin, the
+      // cross-tenant admin; this tenant's real component handle or a bogus one; every steering carrier — is answered
+      // the surface's own 404, and the cross-tenant puller 403. NOT the pending id G9-S66-U03 (the switch ON: the
+      // tenant gate and the scoped reads behind it), which stays a todo below.
+      const s66 = ['projectTarget.sheetRepair', 'projectTarget.sheetRepairFillsReport', 'projectTarget.sheetRepairRuns']
+      const repairDisabled = `404:${sheetRepairLib.SHEET_REPAIR_ERROR_CODES.DISABLED}`
+      const s66Routes = s66.map((id) => drilled.find((route: any) => route.id === id))
+      expect(s66Routes.map((route: any) => (route ? route.rank : null))).toEqual([RANK.admin, RANK.admin, RANK.admin])
+      const ownRepair: string[] = []
+      for (const route of s66Routes) ownRepair.push(answerOf(await send(route, callers.spAdmin, validRequest(route, REAL))))
+      const admittedForeign = ['tenantless', 'crossAdmin']
+      const steeredOf = (names: string[]) => Object.entries(steering).filter(([key]) => names.includes(key.split(':')[0])).flatMap(([, answers]) => s66.map((id) => answers[id]).filter((answer) => answer !== undefined))
+      expect({
+        belowTier: ['reader', 'operator', 'puller'].map((name) => s66.map((id) => refusedAnswers[name][id])),
+        ownAdmin: ownRepair,
+        foreign: admittedForeign.map((name) => s66.map((id) => foreignAnswers[name][id])),
+        // Per admitted foreign caller: the POST on three carriers (query, params, body), each GET on two.
+        steered: [steeredOf(admittedForeign).length, Array.from(new Set(steeredOf(admittedForeign)))],
+        crossPuller: Array.from(new Set([...s66.map((id) => foreignAnswers.crossPuller[id]), ...steeredOf(['crossPuller'])].map((answer) => answer.split(':')[0]))),
+      }).toEqual({
+        belowTier: [['403', '403', '403'], ['403', '403', '403'], ['403', '403', '403']],
+        ownAdmin: [repairDisabled, repairDisabled, repairDisabled],
+        foreign: [[repairDisabled, repairDisabled, repairDisabled], [repairDisabled, repairDisabled, repairDisabled]],
+        steered: [14, [repairDisabled]],
+        crossPuller: ['403'],
+      })
     }, 900000)
 
     // ── G9-S9X-01: the MVP archive identity across the 批次标识 install + backfill ──────────────────────────────────────
