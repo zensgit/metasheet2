@@ -4886,6 +4886,121 @@ describe('admin-users routes', () => {
     }))
   })
 
+  function resendLedgerRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'invite-1',
+      user_id: 'user-1',
+      email: 'alpha@example.com',
+      preset_id: 'attendance-employee',
+      product_mode: 'attendance',
+      role_id: 'attendance_employee',
+      invited_by: 'admin-1',
+      invite_token: 'invite-token-old',
+      status: 'pending',
+      accepted_at: null,
+      consumed_by: null,
+      last_sent_at: '2026-03-12T00:00:00.000Z',
+      created_at: '2026-03-12T00:00:00.000Z',
+      updated_at: '2026-03-12T00:10:00.000Z',
+      user_name: 'Alpha',
+      invited_by_email: 'admin@example.com',
+      invited_by_name: 'Admin',
+      ...overrides,
+    }
+  }
+
+  // An account that has completed its first sign-in is not sent another invite.
+  it.each([
+    ['pending'],
+    ['revoked'],
+  ])('refuses to resend a %s invite for an account that has completed its first sign-in, and writes nothing', async (status) => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [resendLedgerRow({ status, account_onboarded: true })] })
+
+    const response = await invokeRoute('post', '/api/admin/invites/:inviteId/resend', {
+      params: { inviteId: 'invite-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('INVITE_ACCOUNT_ALREADY_ONBOARDED')
+    // The read that decides is the only statement; no token is issued and nothing is audited.
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('UPDATE user_invites'))).toBe(false)
+    expect(inviteMocks.issueInviteToken).not.toHaveBeenCalled()
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['pending', 'pending', 'invite-token-old'],
+    ['revoked', 'revoked', 'invite-token-old'],
+    // A pending row whose token is past its expiry reads as expired.
+    ['expired', 'pending', 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig'],
+  ])('still resends a %s invite for an account that has never signed in', async (_label, status, storedToken) => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [resendLedgerRow({ status, invite_token: storedToken, account_onboarded: false })] })
+      .mockResolvedValueOnce({
+        rows: [resendLedgerRow({
+          status: 'pending',
+          invite_token: 'invite-token-fixed',
+          user_name: null,
+          invited_by_email: null,
+          invited_by_name: null,
+        })],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/invites/:inviteId/resend', {
+      params: { inviteId: 'invite-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.inviteToken).toBe('invite-token-fixed')
+    expect(inviteMocks.issueInviteToken).toHaveBeenCalledTimes(1)
+    expect(pgMocks.query).toHaveBeenCalledTimes(2)
+  })
+
+  it('decides a resend from the row status, the account sign-in record and its accepted invites, in the read and in the write', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [resendLedgerRow({ account_onboarded: false })] })
+      .mockResolvedValueOnce({ rows: [resendLedgerRow({ invite_token: 'invite-token-fixed' })] })
+
+    await invokeRoute('post', '/api/admin/invites/:inviteId/resend', { params: { inviteId: 'invite-1' } })
+
+    const squash = (sql: unknown) => String(sql).replace(/\s+/g, ' ')
+    const readSql = squash(pgMocks.query.mock.calls[0]?.[0])
+    const writeSql = squash(pgMocks.query.mock.calls[1]?.[0])
+    const signedIn = (row: string) =>
+      `EXISTS ( SELECT 1 FROM users onboarded_user WHERE onboarded_user.id = ${row}.user_id AND onboarded_user.last_login_at IS NOT NULL )`
+    const acceptedBefore = (row: string) =>
+      `EXISTS ( SELECT 1 FROM user_invites accepted_invite WHERE accepted_invite.user_id = ${row}.user_id AND accepted_invite.status = 'accepted' )`
+    expect(readSql).toContain(`( ${signedIn('inv')} OR ${acceptedBefore('inv')} ) AS account_onboarded`)
+    expect(writeSql).toContain('UPDATE user_invites')
+    expect(writeSql).toContain(
+      `WHERE id = $1 AND status <> 'accepted' AND NOT ( ${signedIn('user_invites')} OR ${acceptedBefore('user_invites')} ) RETURNING`,
+    )
+    expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['invite-1', 'invite-token-fixed', 'admin-1'])
+  })
+
+  it('answers a conflict and audits nothing when the resend write matches no row', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [resendLedgerRow({ account_onboarded: false })] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/invites/:inviteId/resend', {
+      params: { inviteId: 'invite-1' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('INVITE_RESEND_CONFLICT')
+    expect((response.body as Record<string, any>).data).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toContain('invite-token-fixed')
+    expect(pgMocks.query).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
   it('revokes a pending invite and writes an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query.mockResolvedValueOnce({

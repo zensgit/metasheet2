@@ -29,6 +29,7 @@ import {
   INVITE_TARGET_UPDATE_MISMATCH,
   inviteAcceptWriteErrorCode,
 } from '../auth/invite-accept-writes'
+import { INVITE_NOT_PENDING, isInviteTokenPending } from '../auth/invite-ledger'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
@@ -881,6 +882,16 @@ authRouter.get('/invite/preview', async (req: Request, res: Response) => {
       })
     }
 
+    // An invite token is usable only while the ledger holds it on a pending row. A revoked invite and
+    // a token replaced by a later one answer here, before anything about the invited account is read.
+    if (!(await isInviteTokenPending(token))) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite is no longer valid',
+        code: INVITE_NOT_PENDING,
+      })
+    }
+
     const target = await getInviteTarget(payload.userId, payload.email)
     if (!target) {
       return res.status(404).json({
@@ -945,6 +956,17 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: 'Invite token is invalid or expired',
+      })
+    }
+
+    // Same rule as the preview: a token the ledger does not hold on a pending row gets this one
+    // answer, before the password is looked at and before anything about the invited account is
+    // read. The ledger consume inside the acceptance transaction below remains the authority.
+    if (!(await isInviteTokenPending(token))) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite is no longer valid',
+        code: INVITE_NOT_PENDING,
       })
     }
 

@@ -18,11 +18,12 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 5 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// THE LIST (PILOT_READINESS_VERSION 6 — version 1 was the first fifteen; the pre-enable hardening of step-4
 // design §23.4 F-3 / F-5 added the three marked ★; 批次标识 BI-1b (design §8.7, S6 C-9; register R-65) added the six
 // marked ◆ in version 3; batch-refresh step 6a-2 (S6-2, step-6 design §8 as rebaselined B-8; register R-91) added the
 // two marked ▲ in version 4; batch-refresh step 6d-1b (S6-5, rebaseline B-8: ONLY the remnant check) added the one
-// marked ● in version 5 — each only ever refuses more):
+// marked ● in version 5; the owner ruling of 2026-11-11 (register R-91, option A) added the one marked ■ in version 6
+// — each only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -80,7 +81,18 @@
 //                                  ok:false, never "nothing acknowledged"). `dropped_head_included` exempts nothing
 //                                  until S6-7. It does not read the source: the first governed computation is the
 //                                  authoritative observation of the order head, and it fails closed (design §6.3)
-//   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
+// ■ tenant_claim_required          the staged tenant-claim door is ON for this request: the ONE reader
+//                                  (http-routes.cjs stockPreparationTenantClaimRequired, MULTITABLE_STOCK_PREP_TENANT_
+//                                  CLAIM_REQUIRED exactly 'true' after trim / case fold) answered true and the route
+//                                  handed that boolean in as `deps.tenantClaimRequired`; this module never reads the
+//                                  environment. Owner ruling 2026-11-11 (R-91, option A): while the door is off,
+//                                  requireTableActionAccess's legacy integration:* branch lets a tenantless platform
+//                                  admin name a tenant and preview AND apply into it, so the door being on is a
+//                                  PILOT-ENABLE PRECONDITION. It gates the enable only: after an enable nothing refuses
+//                                  at run time (only the pilot GET re-lists this id), so removing the flag afterwards
+//                                  reopens that path on the pilot sheet (the runbook forbids it). The legacy branch and
+//                                  every non-pilot project are unchanged.
+//   continuation_support_version  the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
 
@@ -110,7 +122,7 @@ const { PROJECT_WRITE_PURPOSES } = require('./stock-preparation-project-write-lo
 const { censusOfRows } = require('./stock-preparation-sheet-census.cjs')
 const { unacknowledgedRemnantHandles } = require('./stock-preparation-remnant-acknowledgement.cjs')
 
-const PILOT_READINESS_VERSION = 5
+const PILOT_READINESS_VERSION = 6
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -161,6 +173,8 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'execution_recovery_ready',
   // Step 6d-1b (v5, rebaseline B-8): inserted before the D-22 marker as BI did.
   'no_unacknowledged_inactive_root_remnant',
+  // Owner ruling 2026-11-11 (v6, R-91 option A): inserted before the D-22 marker as BI did.
+  'tenant_claim_required',
   'continuation_support_version',
 ])
 
@@ -414,6 +428,10 @@ const CHECKS = Object.freeze({
     if (!Array.isArray(rulings)) return false
     return unacknowledgedRemnantHandles(handles, rulings).length === 0
   },
+  tenant_claim_required(deps) {
+    // Positive evidence only: the route's own reader answered exactly true. Absent, a function, a string — all false.
+    return deps.tenantClaimRequired === true
+  },
   continuation_support_version() {
     const version = continuationSupport.CONTINUATION_SUPPORT_VERSION
     return Number.isInteger(version) && version >= REQUIRED_CONTINUATION_SUPPORT_VERSION
@@ -426,7 +444,8 @@ const CHECKS = Object.freeze({
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
  *   customerPackDeclaration, collectGenericWriterTargets, readPullBatchStatus, pullBatchBand,
- *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2), componentRulingStore (step 6d-1b)
+ *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2), componentRulingStore (step 6d-1b),
+ *   tenantClaimRequired (v6: the boolean answer of http-routes' stockPreparationTenantClaimRequired, read per request)
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
