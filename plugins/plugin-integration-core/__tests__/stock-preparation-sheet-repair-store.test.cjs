@@ -17,6 +17,8 @@
 //          row rides the transaction; a finished run cannot be finished again
 //   ST-07  the reads: sequence / retire run ids / open run, the values-free run list, a run by id in scope only, the
 //          claim; every failure is 503 with its SQLSTATE — never "nothing there"
+//   ST-07x (S6-5b, readiness v7; review of #6886) the open-run read is SHEET-wide: a running run of ANOTHER project on
+//          the same sheet answers openRun true for this project (its sequence and retire ids untouched); finished, false
 //   ST-08  audit details pass the audit store's own values-free gate and never carry the project number
 //   ST-09  the verified close (coordinator ruling C-3): holder first; the run must be open, of this scope and begun under
 //          ANOTHER lease; `completed` with the planned count and its own close approval; the audit rides the
@@ -579,6 +581,18 @@ test('ST-09 the verified close: holder first; the run must be open, of this scop
   assert.deepEqual(restored.audits.map((entry) => [entry.mode, entry.detail.recipe, entry.detail.planned, entry.detail.governed]), [['sheet_repair_verified_closed', RESTORE, 1, true]])
   assert.deepEqual(restored.db.rows(kit.T.run).sort((left, right) => left.sequence_no - right.sequence_no).map((entry) => [entry.status, entry.close_approval_ref]), [['completed', null], ['completed', 'R-91:syn-close']])
   for (const planted of [SCOPE.projectNo, SCOPE.tenantId, SCOPE.sheetId, 'u_syn_admin', 'rec_old', LEASE_A.leaseId, LEASE_B.leaseId]) assert.equal(JSON.stringify(restored.audits).includes(planted), false, `${planted} leaked`)
+})
+
+test('ST-07x (S6-5b) the open-run read is SHEET-wide: a running run of ANOTHER project on the same sheet answers openRun true for this project (its sequence and retire ids untouched); finished, false', async () => {
+  const m = mount()
+  // Readiness v7 (no_open_sheet_repair_run) relies on this: the sheet's open run refuses the enable whichever project it
+  // was begun for.
+  assert.deepEqual({ ...(await m.store.listRunsOf(SCOPE)) }, { sequence: 0, retireRunIds: [], openRun: false })
+  const other = m.beginInput({ projectNo: 'SYN-OTHER', planDigest: digestOf('plan-x'), expectSequence: 0 })
+  await m.store.beginRun(other)
+  assert.deepEqual({ ...(await m.store.listRunsOf(SCOPE)) }, { sequence: 0, retireRunIds: [], openRun: true })
+  await m.store.finishRun(m.finishInput(other.runId, { projectNo: 'SYN-OTHER' }))
+  assert.deepEqual({ ...(await m.store.listRunsOf(SCOPE)) }, { sequence: 0, retireRunIds: [], openRun: false })
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-repair-store.test.cjs', tests)

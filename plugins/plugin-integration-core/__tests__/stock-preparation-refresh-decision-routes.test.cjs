@@ -41,8 +41,8 @@
 //   RT-EV   the evidence: the demand facts of the computation that opened the hold; history_unknown, then the
 //           relationship snapshot once a relationship claims the old root; the continuation detail
 //   RT-NG   a registered, NOT-governed project: not_governed, no holds, no receipt, no step-4 row written by a read
-// Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
-// readiness marker CONTINUATION_SUPPORT_VERSION is 0).
+// Synthetic values only; the pilot column is seeded directly (these cases never run the enable route; since S6-9 the
+// readiness marker CONTINUATION_SUPPORT_VERSION is 1, so the enable is gated by the other readiness checks only).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -1403,8 +1403,8 @@ test('RT-DIR (8c) the directory\'s REGISTRY rows carry the open hold count, the 
 
 // ── RT-NG ────────────────────────────────────────────────────────────────────────────────────────
 
-test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker stays 0 (pilot enable impossible — the pilot column is seeded directly by these cases)', async () => {
-  assert.equal(CONTINUATION_SUPPORT_VERSION, 0)
+test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker is 1 since S6-9 (the pilot column is still seeded directly by these cases, never through the enable route)', async () => {
+  assert.equal(CONTINUATION_SUPPORT_VERSION, 1)
   const st = mount({ pilot: false })
   try {
     const page = dataOf(await listHolds(st))

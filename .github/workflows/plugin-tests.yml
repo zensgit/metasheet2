@@ -317,6 +317,13 @@ jobs:
             scripts/ops/directory-access-graph-mutex-ci-wiring.test.mjs \
             scripts/ops/directory-deprovision-provider-scope-ci-wiring.test.mjs
 
+      # Approval routing real-DB suites: each file is excluded from the no-DB job, runs as a
+      # whole-file argument of the approval real-DB step, exists on disk and carries the EXPECT_DB
+      # sentinel. Runs before install, so a de-listed suite fails this required lane fast. The step
+      # is pinned (presence, position, command) by plugin-tests-parallel-contract.test.mjs.
+      - name: Approval routing real-DB suites CI-wiring contract (required lane)
+        run: node --test scripts/ops/approval-routing-prerequisite-ci-wiring.test.mjs
+
       # Integration Guard required-wiring contract (governance slice, standalone from #4603/#4604/
       # #4610 by owner instruction; hardened 2026-07-25 after a P1x2/P2 review — see the workflow's own
       # header for the corrected rationale). Mixed YAML-shape + BEHAVIOURAL contract that makes
@@ -2727,6 +2734,8 @@ jobs:
             tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \
             tests/integration/notification-endpoints-preferences.db.test.ts \
             tests/integration/session-token-invite-lifecycle.db.test.ts \
+            tests/integration/approval-routing-policy-required.db.test.ts \
+            tests/integration/approval-routing-policy-required.api.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
