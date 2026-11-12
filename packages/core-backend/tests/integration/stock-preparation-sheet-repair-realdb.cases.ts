@@ -81,9 +81,11 @@
  *            summary whose text carries a duplicated key — refuses the retire before any write (`row_not_machine_shaped`,
  *            counted; 409 inside the lease), so no run row and no backup exist; another WRITER's stamp (the large lane's
  *            run id, an UPDATE's decision and summary) is stored as read, nothing planted is anywhere in the ledger, the
- *            audit details or the answers, and the restore puts every stamp back byte for byte. And (ruling R3-2) no
- *            answer of that retire or of its restore — the previews, a STOPPED refusal of each (the first patch fails in
- *            the host), the execute answers — carries either cell of that backup; each answer has exactly its own keys.
+ *            audit details or the answers, and the restore puts every stamp back byte for byte. And (ruling R3-2) the
+ *            answers searched for either cell of that backup are the restore's (its previews and its execute answer),
+ *            both STOPPED refusals (the retire's and the restore's: the first patch fails in the host) and the retire's
+ *            execute answer — none carries either cell, and each has exactly its own keys. The retire's previews are not
+ *            searched here: BK-01 and RP-13 cover them hermetically.
  *   S9D-25   (ruling R3-6) the close's holder assert on real row locks: a takeover between the continuation's in-lease
  *            verification and its close transaction is refused by that transaction's holder assert (409 LEASE_LOST, the
  *            run still open, no close audit row, no bump, no row written); the same approved close digest then runs.
@@ -1319,7 +1321,7 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect(await activeOf(st.oldIds), 'the retired old subtree: the boolean false on every row').toEqual(st.oldIds.map(() => ['boolean', false]))
     }, 180_000)
 
-    test('S9D-24 what a backup may hold, on real rows: an old row whose STORED stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose text carries a duplicated key — refuses the retire before any write, so nothing of it is stored; another WRITER\'s stamp (the large lane\'s run id, an UPDATE\'s summary) is stored as read and put back byte for byte by the restore — and no answer of the retire or of its restore (the previews, a STOPPED refusal of each, the execute answers) carries either cell', async () => {
+    test('S9D-24 what a backup may hold, on real rows: an old row whose STORED stamp cell is no known writer\'s — a part id or an unknown writer\'s run id in the run-id cell, a summary of an unknown type, a summary whose text carries a duplicated key — refuses the retire before any write, so nothing of it is stored; another WRITER\'s stamp (the large lane\'s run id, an UPDATE\'s summary) is stored as read and put back byte for byte by the restore — and none of the answers searched carries either cell: the restore\'s (its previews and its execute answer), both STOPPED refusals and the retire\'s execute answer (the retire\'s previews are covered hermetically by BK-01 and RP-13)', async () => {
       const st = await world('d24')
       const F = st.fields
       const cellOf = async (id: string, field: string) => (await q('SELECT data ->> $2 AS v FROM meta_records WHERE id = $1', [id, field])).rows[0].v as string | null
