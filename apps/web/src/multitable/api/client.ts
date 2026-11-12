@@ -186,7 +186,7 @@ export function parseRetryAfterMs(headerValue: string | null): number | undefine
 }
 
 function defaultFetchFn(): FetchFn {
-  return (input, init) => apiFetch(input, { ...init, expectJson: true })
+  return apiFetch
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -2283,12 +2283,16 @@ export class MultitableApiClient implements CommentsApiClient {
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.rawFetch = opts?.fetchFn ?? defaultFetchFn()
-    // Arguments are passed on exactly as given (a call with no init stays a call with no init).
     this.fetch = async (...args: Parameters<FetchFn>) => {
-      notifyMultitableBeforeSend()
       const [input, init] = args
-      const request = opts?.fetchFn ? gatewayRequest(input, init) : undefined
+      if (this.rawFetch === apiFetch) {
+        const options = { ...init, expectJson: true }
+        notifyMultitableBeforeSend()
+        return apiFetch(input, options)
+      }
+      const request = gatewayRequest(input, init)
       try {
+        notifyMultitableBeforeSend()
         const response = await this.rawFetch(...args)
         rememberGatewayResponse(response, request)
         return response

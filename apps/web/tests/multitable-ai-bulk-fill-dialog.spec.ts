@@ -16,6 +16,7 @@
  * the DOM to document.body.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setImmediate } from 'node:timers'
 import { createApp, h, nextTick, type App } from 'vue'
 import MetaAiBulkFillDialog from '../src/multitable/components/MetaAiBulkFillDialog.vue'
 import { useAiBulkFill } from '../src/multitable/composables/useAiBulkFill'
@@ -90,10 +91,8 @@ function qa(sel: string): HTMLElement[] {
 
 /** Flush the fetch → parseJson (await res.text()) microtask chain + Vue render. */
 async function flush(): Promise<void> {
-  for (let i = 0; i < 6; i += 1) {
-    await Promise.resolve()
-    await nextTick()
-  }
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  await nextTick()
 }
 
 describe('MetaAiBulkFillDialog — truthful-status rendering', () => {

@@ -23,6 +23,12 @@ const inventoryStep = {
   name: 'Parallel test inventory and required-gate contract',
   run: 'node --test scripts/ops/plugin-tests-parallel-contract.test.mjs',
 }
+const onpremSelfcheckLine = '  scripts/ops/multitable-onprem-network-selfcheck.test.mjs \\\n'
+const onpremPackageStep = {
+  name: 'Run on-prem package apply and archive contract tests',
+  run: 'node --test \\\n  scripts/ops/onprem-windows-system-hardening.test.mjs \\\n' + onpremSelfcheckLine
+    + '  scripts/ops/multitable-onprem-package-no-node-modules.test.mjs\n',
+}
 // Explicit additive contracts steps: suites promoted from the non-required k3wise-offline-poc job.
 const closeoutContractsStep = {
   name: 'DingTalk closeout env and OAuth-stability contracts (required lane)',
@@ -110,7 +116,14 @@ function assertParallelWorkflow(doc) {
   assert.equal(digest(metadata), baseline.workflowMetadataSha256, 'Triggers, concurrency and workflow environment stay unchanged')
   assert.deepEqual(Object.keys(doc.jobs).sort(), [...REQUIRED_SUITES, 'test', ...Object.keys(baseline.otherJobs)].sort())
   for (const [id, hash] of Object.entries(baseline.otherJobs)) {
-    assert.equal(digest(doc.jobs[id]), hash, `${id} remains unchanged`)
+    const job = structuredClone(doc.jobs[id])
+    if (id === 'k3wise-offline-poc') {
+      const steps = job.steps.filter(step => step.name === onpremPackageStep.name)
+      assert.equal(steps.length, 1, 'Keep exactly one on-prem package contract step')
+      assert.deepEqual(steps[0], onpremPackageStep, 'Run the additive selfcheck between the unchanged package tests')
+      steps[0].run = steps[0].run.replace(onpremSelfcheckLine, '')
+    }
+    assert.equal(digest(job), hash, `${id} retains all baseline behavior`)
   }
   for (const suite of REQUIRED_SUITES) {
     const job = requiredSuiteJob(doc, suite)
@@ -238,6 +251,16 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(lockProtocolJsonReporter, '').replace(lockProtocolZeroSkipLine, '')
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
+        const feedbackRead = '  tests/integration/multitable-feedback-read-export-realdb.test.ts \\\n'
+        const feedbackValidation = '  tests/integration/multitable-date-nul-validation-realdb.test.ts \\\n'
+        const predecessor = '  tests/integration/multitable-export-allrows-maskroute-realdb.test.ts \\\n'
+        const successor = '  tests/integration/multitable-person-directory-route.test.ts \\\n'
+        for (const addition of [feedbackRead, feedbackValidation]) {
+          assert.equal(step.run.split(addition).length - 1, 1, 'Each feedback real-DB suite must run exactly once')
+        }
+        assert.ok(step.run.includes(predecessor + feedbackRead + feedbackValidation + successor),
+          'Keep both feedback whole-file suites at their reviewed position')
+        step.run = step.run.replace(feedbackRead, '').replace(feedbackValidation, '')
         // Explicit additive suite: preserve the frozen original command byte-for-byte.
         const deliveryAddition = '  tests/integration/notification-delivery-result.db.test.ts \\\n'
         const deliveryPredecessor = '  tests/integration/multitable-automation-outbound-intent-realdb.test.ts \\\n'
@@ -264,6 +287,51 @@ function assertParallelWorkflow(doc) {
     run: 'node scripts/ops/plugin-tests-required-gate.mjs',
   })
 }
+
+test('on-prem selfcheck addition and original package commands cannot be removed, moved, duplicated or altered', () => {
+  assertParallelWorkflow(parseYamlDocument(workflow))
+  const hardeningLine = '  scripts/ops/onprem-windows-system-hardening.test.mjs \\\n'
+  const packageLine = '  scripts/ops/multitable-onprem-package-no-node-modules.test.mjs\n'
+  const mutations = [
+    run => run.replace(onpremSelfcheckLine, ''),
+    run => run.replace(onpremSelfcheckLine, onpremSelfcheckLine.repeat(2)),
+    run => run.replace(onpremSelfcheckLine, '').replace(hardeningLine, onpremSelfcheckLine + hardeningLine),
+    run => run.replace('network-selfcheck.test.mjs', 'network-selfcheck.mjs'),
+    run => run.replace(hardeningLine, ''),
+    run => run.replace(packageLine, ''),
+    run => run.replace('onprem-windows-system-hardening.test.mjs', 'onprem-windows-system-hardening.mjs'),
+    run => run.replace('multitable-onprem-package-no-node-modules.test.mjs', 'multitable-onprem-package-no-node-modules.mjs'),
+  ]
+  for (const mutate of mutations) {
+    const doc = structuredClone(parseYamlDocument(workflow))
+    const step = doc.jobs['k3wise-offline-poc'].steps.find(step => step.name === onpremPackageStep.name)
+    step.run = mutate(step.run)
+    assert.throws(() => assertParallelWorkflow(doc))
+  }
+})
+
+test('both feedback real-DB suites must run exactly once in their reviewed order', () => {
+  assertParallelWorkflow(parseYamlDocument(workflow))
+  const additions = [
+    '  tests/integration/multitable-feedback-read-export-realdb.test.ts \\\n',
+    '  tests/integration/multitable-date-nul-validation-realdb.test.ts \\\n',
+  ]
+  for (const addition of additions) {
+    const mutations = [
+      run => run.replace(addition, ''),
+      run => run.replace(addition, addition.repeat(2)),
+      run => run.replace(addition, '').replace('  tests/integration/multitable-person-directory-route.test.ts \\\n',
+        '  tests/integration/multitable-person-directory-route.test.ts \\\n' + addition),
+      run => run.replace(addition, addition.replace('.test.ts', '.ts')),
+    ]
+    for (const mutate of mutations) {
+      const doc = structuredClone(parseYamlDocument(workflow))
+      const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration')
+      step.run = mutate(step.run)
+      assert.throws(() => assertParallelWorkflow(doc))
+    }
+  }
+})
 
 test('all 129 original steps retain their commands, conditions and required-gate coverage', () => {
   assert.equal(baseline.sourceCommit, '2006826d772b9f693d878bff7d18bf275dead299')

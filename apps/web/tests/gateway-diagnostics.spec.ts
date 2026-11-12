@@ -46,6 +46,52 @@ afterEach(() => {
 })
 
 describe('gateway diagnosis at API JSON consumers', () => {
+  it('uses the shared secure random fallback on non-secure browser origins', async () => {
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(7) })
+    const { apiGet } = await modules()
+    fetchMock.mockResolvedValue(jsonResponse({ healthy: true }))
+    await expect(apiGet('/api/health')).resolves.toEqual({ healthy: true })
+    expect(fetchMock.mock.calls[0][1].headers.get('x-request-id')).toBe('07070707-0707-4707-8707-070707070707')
+  })
+
+  it.each(['context', 'submit'] as const)('preserves the public-form %s session on a JSON 401', async (operation) => {
+    const { MultitableApiClient } = await modules()
+    localStorage.setItem('auth_token', 'synthetic-token')
+    fetchMock.mockResolvedValue(jsonResponse({ error: { code: 'UNAUTHENTICATED' } }, 401))
+    const client = new MultitableApiClient()
+    const request = operation === 'context'
+      ? client.loadFormContext({ viewId: 'view-synthetic', publicToken: 'public-synthetic' })
+      : client.submitForm('view-synthetic', { data: {}, publicToken: 'public-synthetic' })
+    await expect(request).rejects.toMatchObject({ status: 401, code: 'UNAUTHENTICATED' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(replace).not.toHaveBeenCalled()
+    expect(localStorage.getItem('auth_token')).toBe('synthetic-token')
+  })
+
+  it.each(['context', 'submit'] as const)('keeps an injected public-form %s transport and its before-send signal', async (operation) => {
+    const { MultitableApiClient } = await modules()
+    const { onMultitableBeforeSend } = await import('../src/multitable/api/beforeSend')
+    const order: string[] = []
+    const injectedFetch = vi.fn(async () => {
+      order.push('transport')
+      return jsonResponse({ data: {} })
+    })
+    const stop = onMultitableBeforeSend(() => { order.push('listener') })
+    try {
+      const client = new MultitableApiClient({ fetchFn: injectedFetch })
+      if (operation === 'context') {
+        await client.loadFormContext({ viewId: 'view-synthetic', publicToken: 'public-synthetic' })
+      } else {
+        await client.submitForm('view-synthetic', { data: {}, publicToken: 'public-synthetic' })
+      }
+      expect(order).toEqual(['listener', 'transport'])
+      expect(injectedFetch).toHaveBeenCalledTimes(1)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      stop()
+    }
+  })
+
   it.each(['en', 'zh-CN'])('diagnoses HTML errors with safe ID and time in %s without exposing request data', async (locale) => {
     localStorage.setItem('metasheet_locale', locale)
     localStorage.setItem('auth_token', 'synthetic-private-token')

@@ -1,4 +1,5 @@
 import { createGatewayInterferenceError, hasHttpResponse, isNetworkUnavailableError, isZhLocale, safeGatewayRequestId } from './networkErrors'
+import { randomUuid } from './uuid'
 
 export const GATEWAY_HEALTH_WINDOW_MS = 60_000
 
@@ -16,7 +17,6 @@ type GatewayResponse = {
 
 const healthyOrigins = new Map<string, number>()
 const responses = new WeakMap<Response, GatewayResponse>()
-let requestSequence = 0
 
 export function gatewayRequest(input: string, init?: RequestInit, headers?: Headers): GatewayRequest | undefined {
   let url: URL
@@ -27,8 +27,7 @@ export function gatewayRequest(input: string, init?: RequestInit, headers?: Head
   }
   if (!/^https?:$/.test(url.protocol) || !url.pathname.startsWith('/api/')) return undefined
   const suppliedId = safeGatewayRequestId(headers?.get('x-request-id'))
-  const requestId = suppliedId ?? globalThis.crypto?.randomUUID?.()
-    ?? `web-${Date.now().toString(36)}-${(++requestSequence).toString(36)}`
+  const requestId = suppliedId ?? randomUuid()
   if (headers && url.origin === window.location.origin) headers.set('x-request-id', requestId)
   return {
     origin: url.origin,

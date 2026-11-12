@@ -179,7 +179,7 @@ describe('MultitableCommentInboxView — MtButton migration (UI-P2-1c batch-1)',
     markReadBtn(root).click()
     await flushUi()
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST', expectJson: true })
     await flushUi(12) // let the busy state (Saving...) clear after the post-mark refresh
     expect(markReadBtn(root).textContent).toContain('Read')
     expect(markReadBtn(root).disabled).toBe(true) // !item.unread → disabled expression preserved

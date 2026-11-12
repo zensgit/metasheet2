@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getTodoCount, getTodoItems, isTodoResponseDegraded } from '../src/todo/api'
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
 // B-2 phase 2, todo-center-design-lock §3/§4 — the todo center's own API client. These wrappers
 // are the ONLY thing the center page and the nav badge are allowed to call; pinning their request
 // shape and response pass-through here means neither call site can silently start re-deriving the
@@ -16,16 +20,12 @@ describe('todo center api client', () => {
   })
 
   it('getTodoItems calls GET /api/todo/items and returns the items + sources verbatim', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        items: [
-          { source: 'approval', id: 'inst-1', title: '请假申请', href: '/approvals/inst-1', updatedAt: '2026-09-18T00:00:00.000Z' },
-        ],
-        sources: { approval: 'ok' },
-      }),
-    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      items: [
+        { source: 'approval', id: 'inst-1', title: '请假申请', href: '/approvals/inst-1', updatedAt: '2026-09-18T00:00:00.000Z' },
+      ],
+      sources: { approval: 'ok' },
+    }))
 
     const result = await getTodoItems()
 
@@ -43,11 +43,7 @@ describe('todo center api client', () => {
   })
 
   it('getTodoCount calls GET /api/todo/count and returns the count + sources verbatim', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ count: 3, sources: { approval: 'ok' } }),
-    })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ count: 3, sources: { approval: 'ok' } }))
 
     const result = await getTodoCount()
 
@@ -58,7 +54,7 @@ describe('todo center api client', () => {
   })
 
   it('with named sources the read carries one comma-joined sources key', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+    fetchMock.mockImplementation(async () => jsonResponse({ count: 0, items: [], sources: {} }))
 
     await getTodoCount({ sources: ['approval'] })
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/todo\/count\?sources=approval$/)
@@ -68,7 +64,7 @@ describe('todo center api client', () => {
   })
 
   it('without named sources the URL has no query', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+    fetchMock.mockImplementation(async () => jsonResponse({ count: 0, items: [], sources: {} }))
 
     await getTodoCount()
     await getTodoItems()
@@ -78,7 +74,7 @@ describe('todo center api client', () => {
   })
 
   it('both reads send the viewer time zone', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ count: 0, items: [], sources: {} }) })
+    fetchMock.mockImplementation(async () => jsonResponse({ count: 0, items: [], sources: {} }))
     const zone = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({
       ...new Intl.DateTimeFormat().resolvedOptions(),
       timeZone: 'Asia/Shanghai',
@@ -95,7 +91,7 @@ describe('todo center api client', () => {
   })
 
   it('getTodoItems rejects on a non-ok response rather than inventing an empty list', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' })
+    fetchMock.mockResolvedValueOnce(new Response('', { status: 500, statusText: 'Internal Server Error' }))
 
     await expect(getTodoItems()).rejects.toThrow()
   })
