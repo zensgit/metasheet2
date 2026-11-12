@@ -36,6 +36,24 @@ export type ScheduleCallback = (rule: AutomationRule) => void | Promise<void>
  */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
+/** The smallest `schedule.interval` period `register` arms; below it the rule is logged and skipped. */
+export const MIN_SCHEDULE_INTERVAL_MS = 1000
+
+/**
+ * The ONE minutes-to-milliseconds conversion for `schedule.interval`. The rule editor's field is
+ * `intervalMinutes`; the stored, scheduler-facing field is `intervalMs`. Used by the save path
+ * (`normalizeIntervalTriggerConfigAtSave` in automation-service.ts) and by `register`'s read-time
+ * fallback for rows saved before the save path converted. Returns `null` for anything that is not a
+ * finite positive number of minutes, or that rounds below MIN_SCHEDULE_INTERVAL_MS. Rounded to whole
+ * milliseconds, so a value derived from a stored `intervalMs` (intervalMs / 60000) converts back exactly.
+ */
+export function intervalMinutesToMs(minutes: unknown): number | null {
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0) return null
+  const ms = Math.round(minutes * 60_000)
+  if (!Number.isFinite(ms) || ms < MIN_SCHEDULE_INTERVAL_MS) return null
+  return ms
+}
+
 /**
  * Minimal Prometheus gauge shape used via dependency injection so the
  * scheduler module stays import-light and unit tests don't need a real
@@ -638,7 +656,12 @@ export class AutomationScheduler {
     let cronExpression: string | null = null
     let cronTimezone: string | undefined
     if (trigger.type === 'schedule.interval') {
-      intervalMs = typeof trigger.config.intervalMs === 'number' ? trigger.config.intervalMs : null
+      // A numeric `intervalMs` (the stored field) wins, exactly as before. A row that has only
+      // `intervalMinutes` (saved from the rule editor before the save path converted it) is armed from
+      // the minutes instead of being skipped as "interval too small (nullms)".
+      intervalMs = typeof trigger.config.intervalMs === 'number'
+        ? trigger.config.intervalMs
+        : intervalMinutesToMs(trigger.config.intervalMinutes)
       if (!intervalMs || intervalMs < 1000) {
         logger.warn(`Rule ${rule.id}: interval too small (${intervalMs}ms), minimum 1000ms`)
         return
