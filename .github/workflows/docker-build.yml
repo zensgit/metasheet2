@@ -32,9 +32,32 @@ on:
         type: boolean
         default: false
       drill_fail_stage:
-        description: 'Optional: intentionally fail deploy at a stage for summary drill (none|deploy|migrate|smoke)'
+        description: 'Optional: stop a production deploy before anything is stopped (deploy = after the full preflight, migrate = after the pending-set check)'
         required: false
-        default: 'none'
+        type: choice
+        default: none
+        options:
+          - none
+          - deploy
+          - migrate
+      expected_pending_sha256:
+        description: 'Production deploy: sha256 of the in-play pending migration names (newline-joined, load order) from a rehearsal of this exact commit'
+        required: false
+        type: string
+      restore_proof:
+        description: 'Production deploy: reference of the restore proof (ref:<id>) or waived'
+        required: false
+        type: string
+        default: unselected
+      pre_commit_abort:
+        description: 'Production deploy: what to do if the window aborts after the stop and before the migration commits'
+        required: false
+        type: choice
+        default: unselected
+        options:
+          - unselected
+          - restart-old
+          - stay-stopped
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -61,7 +84,71 @@ jobs:
       - name: Validate publication authorization
         id: publish_authorization
         run: node scripts/ops/docker-publish-preflight.mjs authorize
-      
+
+      # Runs before any image is built, so a refused production dispatch publishes nothing
+      # and the deploy job is skipped. The deploy window re-checks the same patterns on the host.
+      - name: Validate production deploy inputs
+        id: validate_deploy_inputs
+        if: ${{ inputs.deploy_production == true }}
+        env:
+          DRILL_FAIL_STAGE: ${{ inputs.drill_fail_stage }}
+          EXPECTED_PENDING_SHA256: ${{ inputs.expected_pending_sha256 }}
+          RESTORE_PROOF: ${{ inputs.restore_proof }}
+          PRE_COMMIT_ABORT: ${{ inputs.pre_commit_abort }}
+          PROD_HEALTH_PROBE_SILENCE: ${{ vars.PROD_HEALTH_PROBE_SILENCE || '' }}
+          DEPLOY_WINDOW_PULL_BUDGET_KB: ${{ vars.DEPLOY_WINDOW_PULL_BUDGET_KB || '3145728' }}
+          DEPLOY_WINDOW_RESERVE_KB: ${{ vars.DEPLOY_WINDOW_RESERVE_KB || '2097152' }}
+          DEPLOY_BACKUP_TIMEOUT_S: ${{ vars.DEPLOY_BACKUP_TIMEOUT_S || '1200' }}
+          DEPLOY_BACKUP_VERIFY_TIMEOUT_S: ${{ vars.DEPLOY_BACKUP_VERIFY_TIMEOUT_S || '900' }}
+          DEPLOY_WINDOW_EXPECTED_MIN: ${{ vars.DEPLOY_WINDOW_EXPECTED_MIN || '90' }}
+          DEPLOY_WINDOW_DRAIN_S: ${{ vars.DEPLOY_WINDOW_DRAIN_S || '60' }}
+          DEPLOY_WINDOW_QUEUED_MAX_AGE_S: ${{ vars.DEPLOY_WINDOW_QUEUED_MAX_AGE_S || '86400' }}
+          DEPLOY_WINDOW_MIN_HOST_CHECKS: ${{ vars.DEPLOY_WINDOW_MIN_HOST_CHECKS || '1' }}
+          DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: ${{ vars.DEPLOY_WINDOW_CANCEL_OWN_SESSIONS || 'false' }}
+        run: |
+          set -euo pipefail
+          refuse() { echo "[validate-deploy-inputs][error] $*" >&2; exit 78; }
+          drill="${DRILL_FAIL_STAGE:-none}"
+          case "${drill}" in
+            none|deploy|migrate) ;;
+            *) refuse "drill_fail_stage must be none, deploy or migrate" ;;
+          esac
+          [[ "${EXPECTED_PENDING_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+            || refuse "expected_pending_sha256 must be 64 lower-case hex characters (required on every production dispatch, drills included)"
+          restore_proof="${RESTORE_PROOF:-unselected}"
+          pre_commit_abort="${PRE_COMMIT_ABORT:-unselected}"
+          restore_proof_ok=false
+          if [[ "${restore_proof}" == "waived" || "${restore_proof}" =~ ^ref:[A-Za-z0-9._-]{1,64}$ ]]; then
+            restore_proof_ok=true
+          fi
+          if [[ "${drill}" == "none" ]]; then
+            [[ "${restore_proof_ok}" == "true" ]] || refuse "restore_proof must be waived or ref:<id> for a production deploy"
+            case "${pre_commit_abort}" in
+              restart-old|stay-stopped) ;;
+              *) refuse "pre_commit_abort must be restart-old or stay-stopped for a production deploy" ;;
+            esac
+            [[ "${PROD_HEALTH_PROBE_SILENCE:-}" == "true" ]] \
+              || refuse "vars.PROD_HEALTH_PROBE_SILENCE must be true before a production deploy (unset it after verification)"
+          else
+            [[ "${restore_proof_ok}" == "true" || "${restore_proof}" == "unselected" ]] \
+              || refuse "restore_proof must be unselected, waived or ref:<id>"
+            case "${pre_commit_abort}" in
+              unselected|restart-old|stay-stopped) ;;
+              *) refuse "pre_commit_abort must be unselected, restart-old or stay-stopped" ;;
+            esac
+          fi
+          for name in DEPLOY_WINDOW_PULL_BUDGET_KB DEPLOY_WINDOW_RESERVE_KB DEPLOY_BACKUP_TIMEOUT_S \
+            DEPLOY_BACKUP_VERIFY_TIMEOUT_S DEPLOY_WINDOW_EXPECTED_MIN DEPLOY_WINDOW_DRAIN_S \
+            DEPLOY_WINDOW_QUEUED_MAX_AGE_S DEPLOY_WINDOW_MIN_HOST_CHECKS; do
+            [[ "${!name}" =~ ^[1-9][0-9]{0,9}$ ]] || refuse "${name} must be a positive integer"
+          done
+          (( DEPLOY_WINDOW_EXPECTED_MIN <= 1440 )) || refuse "DEPLOY_WINDOW_EXPECTED_MIN must be at most 1440"
+          case "${DEPLOY_WINDOW_CANCEL_OWN_SESSIONS}" in
+            true|false) ;;
+            *) refuse "DEPLOY_WINDOW_CANCEL_OWN_SESSIONS must be true or false" ;;
+          esac
+          echo "[validate-deploy-inputs] ok drill_fail_stage=${drill} restore_proof=${restore_proof} pre_commit_abort=${pre_commit_abort}"
+
       - name: Build backend
         run: |
           BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -121,6 +208,10 @@ jobs:
     needs: build
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main' && needs.build.outputs.published == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: metasheet2-production-deploy
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -151,7 +242,7 @@ jobs:
           grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
             || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
-          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=15 -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_SYNC_MIN_FREE_KB="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"
 
@@ -241,7 +332,7 @@ jobs:
           grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
             || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
-          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ConnectTimeout=15 -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
           DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
