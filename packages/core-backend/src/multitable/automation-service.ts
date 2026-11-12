@@ -1503,6 +1503,34 @@ export class AutomationService {
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
+        // STORED `enabled` — the SCHEDULED lane, checked at fire start.
+        //
+        // A timer is a per-process snapshot taken at register time, and nothing invalidates it across
+        // processes: with the leader lock off (the default) every process arms its own timers, and with it
+        // on a PATCH / DELETE handled by a non-leader only touches that non-leader's (empty) timer map. So a
+        // rule disabled or deleted through ANOTHER instance kept firing here until this process restarted.
+        // One indexed primary-key read per fire closes that; a missing row (deleted elsewhere) skips too.
+        // Kept a separate read from the liveness check below so `loadSheetLiveness` stays the one definition
+        // of "live" (sheet-liveness.ts). A failed read skips that tick (FAIL-CLOSED: an unconfirmed rule
+        // does not send) and is logged values-free — the error class / SQLSTATE, never the driver text.
+        // The executor is not touched: `simulate` stays DB-free and the other lanes keep their own gates.
+        let storedState: 'enabled' | 'disabled' | 'absent' | 'lookup_failed'
+        let lookupError: ReturnType<typeof describeLookupError> | undefined
+        try {
+          storedState = await this.loadScheduledRuleEnabledState(rule.id)
+        } catch (err) {
+          storedState = 'lookup_failed'
+          lookupError = describeLookupError(err)
+        }
+        if (storedState !== 'enabled') {
+          console.warn('[automation] skipping a scheduled rule that is not enabled in the database', {
+            ruleId: rule.id,
+            sheetId: rule.sheetId,
+            reason: storedState,
+            ...(lookupError ?? {}),
+          })
+          return
+        }
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
         //
         // The record-triggered lanes are gated by `loadEnabledRules` below, but a scheduled rule
@@ -1800,7 +1828,10 @@ export class AutomationService {
       execution_mode: executionMode,
     }
 
-    this.registerSchedule(rule)
+    // Same rule as updateRule and the boot loader: only an ENABLED rule gets a timer. Neither
+    // registerSchedule nor AutomationScheduler.register looks at `enabled`, so registering unconditionally
+    // here let a schedule rule CREATED with `enabled: false` fire until the next save or restart.
+    if (rule.enabled) this.registerSchedule(rule)
     return rule
   }
 
@@ -2616,8 +2647,10 @@ export class AutomationService {
   async runDateReminderScanNow(ruleId: string): Promise<void> {
     const rule = await this.getRule(ruleId)
     if (!rule) return
-    // A DISABLED rule never fires via the scheduler (registerSchedule gates on enabled); the deterministic
-    // ops/test seam honors the same gate so a disabled rule can't be made to fire through this path.
+    // A DISABLED rule does not fire via the scheduler: createRule / updateRule / the boot loader register only
+    // enabled rules (registerSchedule itself does NOT look at `enabled`), and the scheduled lane re-reads the
+    // stored flag at fire start. This deterministic ops/test seam honors the same gate so a disabled rule
+    // can't be made to fire through this path.
     if (!rule.enabled) return
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
@@ -2801,6 +2834,17 @@ export class AutomationService {
       }
     }
     return null
+  }
+
+  /**
+   * The scheduled lane's fire-start read of the STORED `enabled` flag (see the scheduler callback in the
+   * constructor). `absent` = the row is gone (deleted, possibly through another instance).
+   */
+  private async loadScheduledRuleEnabledState(ruleId: string): Promise<'enabled' | 'disabled' | 'absent'> {
+    const res = await this.queryFn('SELECT enabled FROM automation_rules WHERE id = $1', [ruleId])
+    const row = (res.rows as Array<{ enabled?: unknown } | undefined>)[0]
+    if (!row) return 'absent'
+    return row.enabled === true ? 'enabled' : 'disabled'
   }
 
   /**
