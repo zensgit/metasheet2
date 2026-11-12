@@ -16,15 +16,19 @@
 // the transaction holds the lock row — the N6 rule) and refuses a guard that has none.
 //
 // HOW AN OPEN RUN IS CLOSED. A run is `running` from its begin to its own finish. When its finish never ran (its lease
-// was taken over, or the finish transaction failed), exactly three things close it — never a preview, never a clock:
-//   * the BEGIN of the next repair EXECUTE on that sheet (step 2 below) — a retire of the rows that are left, or a
-//     restore of that very run: `stopped / abandoned`;
+// was taken over, or the finish transaction failed), one of two things closes it — never a preview, never a clock:
+//   * the BEGIN of the next repair EXECUTE on that sheet, of either recipe (step 2 below): `stopped / abandoned`. A
+//     restore of the open run itself is such an execute only for a retire run that wrote at least one row. A run that
+//     wrote NOTHING is not restored (a retire run: `nothing_to_restore`; a restore run: `run_not_retire`) and the
+//     continuation refuses it (its rows are `notWritten`), so it is closed by the begin of its own recipe run again (a
+//     new digest over the same rows) or of any other execute on that sheet;
 //   * `closeVerifiedRun` — the continuation `verify_and_close_run`: `completed`, with `close_approval_ref`, after the
 //     library verified under the lease that every planned row is in its target state. This is the way out when every
-//     row WAS written, so that no further retire of the component can begin and a restore would undo the repair;
-//   * nothing else. On a project that has since become governed no recipe can begin, so only the verified close is
-//     left there; if a governed pull has moved a planned row since, it refuses and no tool path closes the run (an
-//     owner-approved runbook step). A repair window therefore ends — no open run — before a pilot enable.
+//     row WAS written, so that no further retire of the component can begin and a restore would undo the repair.
+// Nothing else closes it. On a project that has since become governed no recipe can begin, so only the verified close
+// is left there; if any planned row is not in its target state there — never written, written in part, or moved since
+// by a governed pull — it refuses and no tool path closes the run (an owner-approved runbook step). A repair window
+// therefore ends — no open run — before a pilot enable.
 //
 // THE BEGIN (one transaction, in this order):
 //   1. the holder assert;

@@ -80,17 +80,22 @@
 -- HOW AN OPEN RUN IS CLOSED. A run is `running` from its begin to its own finish. A run whose finish never ran (its
 -- sheet lease was taken over, or the finish transaction failed) stays `running`; a PREVIEW never closes it and no
 -- clock does. It is closed by exactly one of:
---   1. the BEGIN of the next repair EXECUTE on that sheet — a retire of the rows that are left, or a restore of that
---      very run (which puts its rows back): the open run becomes `stopped / abandoned`. Decided by lease identity
---      inside the holder-asserted transaction;
+--   1. the BEGIN of the next repair EXECUTE on that sheet, of either recipe: the open run becomes `stopped /
+--      abandoned`. Decided by lease identity inside the holder-asserted transaction. A restore of the open run itself
+--      is such an execute only for a RETIRE run that wrote at least one row. A run that wrote NOTHING is not restored
+--      (a retire run then has nothing to restore, `nothing_to_restore`; a restore run is never itself restored,
+--      `run_not_retire`) and 2 refuses it (its rows are `notWritten`): it is closed by the begin of its own recipe run
+--      again — a new preview and digest over the same rows (the same component's retire; a restore of the same source
+--      retire run) — or of any other execute on that sheet;
 --   2. the continuation `verify_and_close_run` (its own preview digest, its own approvalRef): `completed`, with
 --      `close_approval_ref`. This is the way out when EVERY planned row was written before the finish was lost — the
 --      component then has no further retire to begin, and a restore would undo the repair. It refuses, with counts,
 --      while any planned row is not in its target state.
 -- On a project that has become GOVERNED since the run, no recipe can begin (1 is not available) and only 2 is left. So
--- a repair window must END — no open run — before its project is pilot-enabled. If it did not, and 2 refuses there
--- because a governed pull has since moved a planned row, no tool path closes the run: it is then an owner-approved
--- runbook step (nothing in this tool writes a governed project's rows or closes a run it could not verify).
+-- a repair window must END — no open run — before its project is pilot-enabled. If it did not, and 2 refuses there —
+-- any planned row not in its target state: never written, written in part, or moved since by a governed pull — no
+-- tool path closes the run: it is then an owner-approved runbook step (nothing in this tool writes a governed
+-- project's rows or closes a run it could not verify).
 
 CREATE TABLE IF NOT EXISTS integration_stock_prep_sheet_repair_run (
   id                TEXT PRIMARY KEY,
