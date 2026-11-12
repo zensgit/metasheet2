@@ -154,3 +154,42 @@ describe('date-only text surfaces beyond the cell', () => {
     }
   })
 })
+
+describe('system actor names stay localized without exposing the stored id', () => {
+  const createdBy: MetaField = { id: 'fld_created_by', name: 'Created by', type: 'createdBy' }
+  const modifiedBy: MetaField = { id: 'fld_modified_by', name: 'Modified by', type: 'modifiedBy' }
+  const alice = [{ id: 'user_a', display: 'Alice' }]
+  const bob = [{ id: 'user_b', display: 'Bob' }]
+
+  it('uses the exact summary name in both locales', () => {
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_a', personSummaries: alice })).toBe('Alice')
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_a', personSummaries: alice, isZh: true })).toBe('Alice')
+    expect(formatFieldDisplay({ field: modifiedBy, value: 'user_b', personSummaries: bob })).toBe('Bob')
+    expect(formatFieldDisplay({ field: modifiedBy, value: 'user_b', personSummaries: bob, isZh: true })).toBe('Bob')
+    expect(alice[0]).toEqual({ id: 'user_a', display: 'Alice' })
+    expect(bob[0]).toEqual({ id: 'user_b', display: 'Bob' })
+  })
+
+  it('localizes an unknown, deleted, blank, or mismatched actor and keeps an empty value as a dash', () => {
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_deleted' })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_deleted', isZh: true })).toBe('未知用户')
+    expect(formatFieldDisplay({ field: modifiedBy, value: 'user_b', personSummaries: [{ id: 'user_b', display: '' }] })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: modifiedBy, value: 'user_b', personSummaries: [{ id: 'user_b', display: '' }], isZh: true })).toBe('未知用户')
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_a', personSummaries: bob })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_a', personSummaries: bob, isZh: true })).toBe('未知用户')
+    expect(formatFieldDisplay({ field: modifiedBy, value: 'user_b', personSummaries: [{ id: 'user_b', display: '   ' }], isZh: true })).toBe('未知用户')
+    expect(formatFieldDisplay({ field: createdBy, value: null, personSummaries: alice, isZh: true })).toBe('—')
+    expect(formatFieldDisplay({ field: modifiedBy, value: '', personSummaries: bob })).toBe('—')
+    expect(formatFieldDisplay({
+      field: { id: 'owner', name: 'Owner', type: 'person' },
+      value: ['user_a', 'user_missing'],
+      personSummaries: alice,
+      isZh: true,
+    })).toBe('Alice, user_missing')
+    expect(formatFieldDisplay({
+      field: { id: 'task', name: 'Task', type: 'link' },
+      value: ['r1'],
+      isZh: true,
+    })).toBe('1 条关联记录')
+  })
+})

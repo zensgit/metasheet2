@@ -193,6 +193,21 @@ export function locationValueFromAddress(address: string): { address: string } |
   return trimmed ? { address: trimmed } : null
 }
 
+function formatSystemActorDisplay(
+  value: unknown,
+  personSummaries: PersonSummary[] | null | undefined,
+  isZh: boolean,
+): string {
+  const unknownLabel = isZh ? '未知用户' : 'Unknown user'
+  if (typeof value !== 'string') return unknownLabel
+  for (const summary of personSummaries ?? []) {
+    if (summary?.id !== value) continue
+    const display = typeof summary.display === 'string' ? summary.display : ''
+    return display.trim().length > 0 ? display : unknownLabel
+  }
+  return unknownLabel
+}
+
 export function formatFieldDisplay(params: {
   field: MetaField
   value: unknown
@@ -232,6 +247,9 @@ export function formatFieldDisplay(params: {
   // System timestamps carry no field zone: the business timezone, same format as a dateTime cell.
   if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value, getBusinessTimezone())
   if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
+  if (field.type === 'createdBy' || field.type === 'modifiedBy') {
+    return formatSystemActorDisplay(value, personSummaries, isZh)
+  }
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return isZh ? (value ? '是' : '否') : (value ? 'Yes' : 'No')
 

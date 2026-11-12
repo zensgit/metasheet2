@@ -6593,20 +6593,20 @@ async function buildPersonSummaries(
   const result = new Map<string, Map<string, PersonSummary[]>>()
   if (personFields.length === 0 || rows.length === 0) return result
 
-  const personFieldIds = personFields.map((f) => f.id)
   const userIds = new Set<string>()
   for (const row of rows) {
-    for (const fieldId of personFieldIds) {
-      const value = row.data[fieldId]
-      if (!Array.isArray(value)) continue
-      for (const item of value) {
-        if (typeof item === 'string' && item.trim()) userIds.add(item.trim())
+    for (const field of personFields) {
+      const value = row.data[field.id]
+      const values = field.type === 'person' ? (Array.isArray(value) ? value : []) : (typeof value === 'string' ? [value] : [])
+      for (const item of values) {
+        if (typeof item === 'string' && item.trim()) userIds.add(field.type === 'person' ? item.trim() : item)
       }
     }
   }
   if (userIds.size === 0) return result
 
   const displayByUserId = new Map<string, string>()
+  const nameByUserId = new Map<string, string>()
   const inactiveUserIds = new Set<string>()
   try {
     const usersRes = await query(
@@ -6619,6 +6619,7 @@ async function buildPersonSummaries(
       const name = typeof u.name === 'string' ? u.name.trim() : ''
       const email = typeof u.email === 'string' ? u.email.trim() : ''
       displayByUserId.set(id, name || email || id)
+      nameByUserId.set(id, name)
       if (u.is_active === false) inactiveUserIds.add(id) // 2c-S4: mark deactivated stored assignees (read-only, not re-assignable)
     }
   } catch (err) {
@@ -6628,16 +6629,17 @@ async function buildPersonSummaries(
 
   for (const row of rows) {
     const fieldMap = new Map<string, PersonSummary[]>()
-    for (const fieldId of personFieldIds) {
-      const value = row.data[fieldId]
-      if (!Array.isArray(value)) continue
+    for (const field of personFields) {
+      const value = row.data[field.id]
+      const values = field.type === 'person' ? (Array.isArray(value) ? value : []) : (typeof value === 'string' ? [value] : [])
       const summaries: PersonSummary[] = []
-      for (const item of value) {
+      for (const item of values) {
         if (typeof item !== 'string' || !item.trim()) continue
-        const userId = item.trim()
-        summaries.push({ id: userId, display: displayByUserId.get(userId) ?? userId, ...(inactiveUserIds.has(userId) ? { inactive: true } : {}) })
+        const userId = field.type === 'person' ? item.trim() : item
+        const display = field.type === 'person' ? (displayByUserId.get(userId) ?? userId) : (nameByUserId.get(userId) ?? '')
+        summaries.push({ id: userId, display, ...(inactiveUserIds.has(userId) ? { inactive: true } : {}) })
       }
-      if (summaries.length > 0) fieldMap.set(fieldId, summaries)
+      if (summaries.length > 0) fieldMap.set(field.id, summaries)
     }
     if (fieldMap.size > 0) result.set(row.id, fieldMap)
   }
@@ -17316,7 +17318,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
         .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
       const exportLinkFields = exportRelationalFields.filter((field) => fieldIds.has(field.fieldId))
-      const exportPersonFields = fields.filter((field) => field.type === 'person')
+      const exportPersonFields = fields.filter((field) => field.type === 'person' || field.type === 'createdBy' || field.type === 'modifiedBy')
       const exportAttachmentFields = fields.filter((field) => field.type === 'attachment')
       const hydrateExportRecords = async (records: UniverMetaRecord[]) => {
         const linkValues = await loadLinkValuesByRecord(pool.query.bind(pool), records.map((record) => record.id), exportRelationalFields)
@@ -17330,7 +17332,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             record.data[field.fieldId] = (links.get(record.id)?.get(field.fieldId) ?? []).map((item) => item.display)
           }
           for (const field of exportPersonFields) {
-            record.data[field.id] = (people.get(record.id)?.get(field.id) ?? []).map((item) => item.display === item.id ? '' : item.display)
+            const summaries = people.get(record.id)?.get(field.id) ?? []
+            if (field.type === 'person') record.data[field.id] = summaries.map((item) => item.display === item.id ? '' : item.display)
+            else record.data[field.id] = summaries.length > 0 ? (summaries[0].display || 'Unknown user') : ''
           }
           for (const field of exportAttachmentFields) {
             record.data[field.id] = (attachments.get(record.id)?.get(field.id) ?? []).map((item) => item.filename)
@@ -18097,7 +18101,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // Native person (人员) fields — distinct from link fields (legacy link-backed person is
       // `type='link'` and renders via linkSummaries; native person is `type='person'` and needs
       // personSummaries). Coexistence: a sheet may have both.
-      const personFields = visiblePropertyFields.filter((field) => field.type === 'person')
+      const personFields = visiblePropertyFields.filter((field) => field.type === 'person' || field.type === 'createdBy' || field.type === 'modifiedBy')
       const computedFieldIdSet = new Set(
         visiblePropertyFields.filter((f) => f.type === 'lookup' || f.type === 'rollup').map((f) => f.id),
       )
@@ -19950,7 +19954,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         : undefined
       // Native person (人员) display for the single-record drawer/form — same users-table join as the
       // grid view, masked through the SAME single-record layer-2∧3 composite as linkSummaries.
-      const personFieldsSingle = visiblePropertyFields.filter((field) => field.type === 'person')
+      const personFieldsSingle = visiblePropertyFields.filter((field) => field.type === 'person' || field.type === 'createdBy' || field.type === 'modifiedBy')
       const personSummaries = personFieldsSingle.length > 0
         ? filterSingleRecordFieldSummaryMap(
             serializePersonSummaryMap(

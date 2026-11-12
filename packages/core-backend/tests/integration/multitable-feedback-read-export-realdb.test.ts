@@ -3,7 +3,7 @@ import request from 'supertest'
 import * as XLSX from 'xlsx'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { createRecoveryComputedHelpers, univerMetaRouter } from '../../src/routes/univer-meta'
+import { createRecoveryComputedHelpers, invalidateSheetDisplayNameCaches, univerMetaRouter } from '../../src/routes/univer-meta'
 import { queryRecordsWithCursor } from '../../src/multitable/query-service'
 
 if (process.env.EXPECT_DB === '1' && !process.env.DATABASE_URL) {
@@ -18,6 +18,10 @@ const privateBase = `${prefix}_private_base`
 const secretSheet = `${prefix}_secret_sheet`
 const secretRecord = `${prefix}_secret_record`
 const actor = `${prefix}_user`
+const systemCreator = `${prefix}_creator`
+const systemModifier = `${prefix}_modifier`
+const namelessActor = `${prefix}_nameless`
+const systemRole = `${prefix}_system_role`
 const attachment = `${prefix}_att`
 const first = `${prefix}_000001`
 const target = `${prefix}_target`
@@ -54,6 +58,10 @@ describe.skipIf(!process.env.DATABASE_URL)('feedback read/export regressions on 
       await query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, base, 'Synthetic'])
     }
     await query("INSERT INTO users (id, name, password_hash) VALUES ($1,'Synthetic Member','x')", [actor])
+    await query('INSERT INTO users (id, name, email, password_hash) VALUES ($1,$2,$3,$4),($5,$6,$7,$4),($8,$9,$10,$4)',
+      [systemCreator, 'System Creator Canary', `${prefix}_creator@example.invalid`, 'x', systemModifier, 'System Modifier Canary', `${prefix}_modifier@example.invalid`, namelessActor, ' ', `${prefix}_nameless@example.invalid`])
+    await query('INSERT INTO roles(id,name) VALUES($1,$2)', [systemRole, 'Synthetic system-field role'])
+    await query('INSERT INTO user_roles(user_id,role_id) VALUES($1,$2)', [actor, systemRole])
     const fields: Array<[string, string, Record<string, unknown>]> = [
       ['name', 'string', {}], ['person', 'person', {}], ['attachment', 'attachment', {}],
       ['createdTime', 'createdTime', {}], ['modifiedTime', 'modifiedTime', {}],
@@ -110,7 +118,9 @@ describe.skipIf(!process.env.DATABASE_URL)('feedback read/export regressions on 
     await query('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[sheet, foreign, secretSheet]])
     await query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[sheet, foreign, seedSheet, secretSheet]])
     await query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[base, privateBase]])
-    await query('DELETE FROM users WHERE id = $1', [actor])
+    await query('DELETE FROM user_roles WHERE role_id = $1', [systemRole])
+    await query('DELETE FROM roles WHERE id = $1', [systemRole])
+    await query('DELETE FROM users WHERE id = ANY($1::text[])', [[actor, systemCreator, systemModifier, namelessActor]])
   })
 
   test('old unsorted SQL fails 42P18; real second pages succeed in both directions', async () => {
@@ -156,6 +166,86 @@ describe.skipIf(!process.env.DATABASE_URL)('feedback read/export regressions on 
       expect((await exportRows(filtered))[0]).not.toContain('createdTime')
     } finally {
       await query('DELETE FROM field_permissions WHERE sheet_id = $1', [sheet])
+    }
+  })
+
+  test('system actor names use separate summaries while scalar identities remain unchanged', async () => {
+    await query('UPDATE meta_records SET created_by=$2,modified_by=$3 WHERE id=$1', [first, systemCreator, systemModifier])
+    try {
+      const original = (await query('SELECT created_by,modified_by,data,version FROM meta_records WHERE id=$1', [first])).rows
+      const view = await request(app).get('/api/multitable/view').query({ sheetId: sheet, limit: 10 }).expect(200)
+      const detail = await request(app).get(`/api/multitable/records/${first}`).query({ sheetId: sheet }).expect(200)
+      for (const [data, summaries] of [[view.body.data.rows[0].data, view.body.data.personSummaries?.[first]], [detail.body.data.record.data, detail.body.data.personSummaries]]) {
+        expect(data[field('createdBy')]).toBe(systemCreator)
+        expect(data[field('modifiedBy')]).toBe(systemModifier)
+        expect(summaries?.[field('createdBy')]).toEqual([{ id: systemCreator, display: 'System Creator Canary' }])
+        expect(summaries?.[field('modifiedBy')]).toEqual([{ id: systemModifier, display: 'System Modifier Canary' }])
+        expect(JSON.stringify(summaries)).not.toContain('@example.invalid')
+      }
+      for (const viewId of [undefined, filtered]) {
+        const rows = await exportRows(viewId)
+        expect(rows[1][rows[0].indexOf('createdBy')]).toBe('System Creator Canary')
+        expect(rows[1][rows[0].indexOf('modifiedBy')]).toBe('System Modifier Canary')
+        const csv = await request(app).get(`/api/multitable/sheets/${sheet}/export-xlsx`).query({ format: 'csv', ...(viewId ? { viewId } : {}) }).expect(200)
+        expect(csv.text).toContain('System Creator Canary')
+        expect(csv.text).toContain('System Modifier Canary')
+        expect(csv.text).not.toContain(systemCreator)
+        expect(csv.text).not.toContain(systemModifier)
+      }
+      expect((await query('SELECT created_by,modified_by,data,version FROM meta_records WHERE id=$1', [first])).rows).toEqual(original)
+    } finally {
+      await query('UPDATE meta_records SET created_by=$2,modified_by=$2 WHERE id=$1', [first, actor])
+    }
+  })
+
+  test.each(['missing', 'nameless', 'inactive', 'empty'])('system actor fallback is name-only and preserves identity: %s', async (state) => {
+    const userId = state === 'missing' ? `${prefix}_deleted_user` : state === 'nameless' ? namelessActor : state === 'empty' ? null : systemModifier
+    if (state === 'inactive') await query('UPDATE users SET is_active=false WHERE id=$1', [systemModifier])
+    await query('UPDATE meta_records SET modified_by=$2 WHERE id=$1', [first, userId])
+    try {
+      const detail = await request(app).get(`/api/multitable/records/${first}`).query({ sheetId: sheet }).expect(200)
+      expect(detail.body.data.record.data[field('modifiedBy')]).toBe(userId)
+      const summary = detail.body.data.personSummaries?.[field('modifiedBy')]
+      if (state === 'empty') expect(summary).toBeUndefined()
+      else expect(summary).toEqual([{ id: userId, display: state === 'inactive' ? 'System Modifier Canary' : '', ...(state === 'inactive' ? { inactive: true } : {}) }])
+      expect(JSON.stringify(summary ?? [])).not.toContain('@example.invalid')
+      const rows = await exportRows(filtered)
+      expect(rows[1][rows[0].indexOf('modifiedBy')]).toBe(state === 'inactive' ? 'System Modifier Canary' : state === 'empty' ? '' : 'Unknown user')
+      expect((await query('SELECT modified_by FROM meta_records WHERE id=$1', [first])).rows[0].modified_by).toBe(userId)
+    } finally {
+      await query('UPDATE meta_records SET modified_by=$2 WHERE id=$1', [first, actor])
+      if (state === 'inactive') await query('UPDATE users SET is_active=true WHERE id=$1', [systemModifier])
+    }
+  })
+
+  test.each(['user', 'role', 'property'])('system actor summaries respect existing %s field masks', async (mode) => {
+    await query('UPDATE meta_records SET created_by=$2,modified_by=$3 WHERE id=$1', [first, systemCreator, systemModifier])
+    try {
+      for (const name of ['createdBy', 'modifiedBy']) {
+        if (mode === 'property') await query('UPDATE meta_fields SET property=$2::jsonb WHERE id=$1', [field(name), '{"hidden":true}'])
+        else await query('INSERT INTO field_permissions(sheet_id,field_id,subject_type,subject_id,visible,read_only) VALUES($1,$2,$3,$4,false,false)', [sheet, field(name), mode, mode === 'role' ? systemRole : actor])
+      }
+      if (mode === 'property') invalidateSheetDisplayNameCaches(sheet)
+      const view = await request(app).get('/api/multitable/view').query({ sheetId: sheet, limit: 10 }).expect(200)
+      const detail = await request(app).get(`/api/multitable/records/${first}`).query({ sheetId: sheet }).expect(200)
+      for (const [data, summaries] of [[view.body.data.rows[0].data, view.body.data.personSummaries?.[first]], [detail.body.data.record.data, detail.body.data.personSummaries]]) {
+        for (const name of ['createdBy', 'modifiedBy']) {
+          expect(data).not.toHaveProperty(field(name))
+          expect(summaries).not.toHaveProperty(field(name))
+        }
+        expect(JSON.stringify(summaries)).not.toMatch(/System Creator Canary|System Modifier Canary/)
+      }
+      for (const viewId of [undefined, filtered]) {
+        const rows = await exportRows(viewId)
+        expect(rows[0]).not.toContain('createdBy')
+        expect(rows[0]).not.toContain('modifiedBy')
+        expect(JSON.stringify(rows)).not.toMatch(/System Creator Canary|System Modifier Canary/)
+      }
+    } finally {
+      await query('DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=ANY($2::text[])', [sheet, [field('createdBy'), field('modifiedBy')]])
+      for (const name of ['createdBy', 'modifiedBy']) await query("UPDATE meta_fields SET property='{}' WHERE id=$1", [field(name)])
+      if (mode === 'property') invalidateSheetDisplayNameCaches(sheet)
+      await query('UPDATE meta_records SET created_by=$2,modified_by=$2 WHERE id=$1', [first, actor])
     }
   })
 

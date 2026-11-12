@@ -4,6 +4,7 @@ import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vu
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
+import { useLocale } from '../src/composables/useLocale'
 import { formatFieldDisplay } from '../src/multitable/utils/field-display'
 
 async function flushUi(cycles = 4) {
@@ -31,7 +32,124 @@ describe('multitable system fields', () => {
 
     expect(createdTime).toContain('2026')
     expect(createdTime).not.toBe('2026-04-30T08:15:00.000Z')
-    expect(createdBy).toBe('user_1')
+    expect(createdBy).toBe('Unknown user')
+  })
+
+  it('formats createdBy and modifiedBy from the exact person summary and leaves the scalar id unchanged', () => {
+    const createdBy = { id: 'fld_created_by', name: 'Created by', type: 'createdBy' as const }
+    const modifiedBy = { id: 'fld_modified_by', name: 'Modified by', type: 'modifiedBy' as const }
+    const createdId = 'user_a'
+    const modifiedId = 'user_b'
+    const alice = Object.freeze({ id: 'user_a', display: 'Alice' })
+    const bob = Object.freeze({ id: 'user_b', display: 'Bob' })
+    const aliceSummaries = [alice]
+    const bobSummaries = [bob]
+    Object.freeze(aliceSummaries)
+    Object.freeze(bobSummaries)
+    const blankWithEmail = { id: 'user_a', display: '', email: 'alice@example.com' }
+
+    expect(formatFieldDisplay({ field: createdBy, value: createdId, personSummaries: aliceSummaries })).toBe('Alice')
+    expect(formatFieldDisplay({ field: modifiedBy, value: modifiedId, personSummaries: bobSummaries })).toBe('Bob')
+    expect(formatFieldDisplay({ field: createdBy, value: createdId, personSummaries: bobSummaries })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: modifiedBy, value: modifiedId, personSummaries: aliceSummaries })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: 'user_deleted' })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: modifiedBy, value: modifiedId, personSummaries: [{ id: 'user_b', display: '   ' }] })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: createdId, personSummaries: [blankWithEmail] })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: ['user_a'], personSummaries: aliceSummaries })).toBe('Unknown user')
+    expect(formatFieldDisplay({ field: createdBy, value: null, personSummaries: aliceSummaries })).toBe('—')
+    expect(formatFieldDisplay({ field: modifiedBy, value: '', personSummaries: bobSummaries })).toBe('—')
+    expect(formatFieldDisplay({ field: createdBy, value: '   ', personSummaries: aliceSummaries })).toBe('—')
+
+    expect(createdId).toBe('user_a')
+    expect(modifiedId).toBe('user_b')
+    expect(aliceSummaries[0]).toBe(alice)
+    expect(bobSummaries[0]).toBe(bob)
+    expect(alice).toEqual({ id: 'user_a', display: 'Alice' })
+    expect(bob).toEqual({ id: 'user_b', display: 'Bob' })
+    expect(blankWithEmail).toEqual({ id: 'user_a', display: '', email: 'alice@example.com' })
+
+    expect(formatFieldDisplay({
+      field: { id: 'fld_person', name: 'Owner', type: 'person' },
+      value: ['user_a', 'user_missing'],
+      personSummaries: aliceSummaries,
+    })).toBe('Alice, user_missing')
+    expect(formatFieldDisplay({
+      field: { id: 'fld_link', name: 'Task', type: 'link' },
+      value: ['r1'],
+    })).toBe('1 linked record')
+    expect(formatFieldDisplay({
+      field: { id: 'fld_due', name: 'Due', type: 'date' },
+      value: '2026-09-18',
+    })).toBe('2026-09-18')
+    expect(formatFieldDisplay({
+      field: { id: 'fld_auto', name: 'No.', type: 'autoNumber', property: { prefix: 'INV-', digits: 4 } },
+      value: 42,
+    })).toBe('INV-0042')
+  })
+
+  it('renders system actor names in MetaCellRenderer and the grid without writing the stored id', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('en')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const stored = { fld_created_by: 'user_a', fld_modified_by: 'user_b' }
+    const summaries = {
+      rec_1: {
+        fld_created_by: [{ id: 'user_a', display: 'Alice' }],
+        fld_modified_by: [{ id: 'user_other', display: 'Not Bob' }],
+      },
+    }
+    const grid = createApp({
+      render() {
+        return h(MetaGridTable, {
+          rows: [{ id: 'rec_1', version: 1, data: stored }],
+          visibleFields: [
+            { id: 'fld_created_by', name: 'Created by', type: 'createdBy' },
+            { id: 'fld_modified_by', name: 'Modified by', type: 'modifiedBy' },
+          ],
+          personSummaries: summaries,
+          sortRules: [],
+          loading: false,
+          currentPage: 1,
+          totalPages: 1,
+          startIndex: 0,
+          canEdit: true,
+        })
+      },
+    })
+    const zhRenderer = createApp({
+      render() {
+        return h(MetaCellRenderer, {
+          field: { id: 'fld_modified_by', name: 'Modified by', type: 'modifiedBy' },
+          value: 'user_b',
+          personSummaries: [{ id: 'user_a', display: 'Alice' }],
+        })
+      },
+    })
+    try {
+      grid.mount(container)
+      await flushUi()
+      expect(container.querySelector('td[aria-label="Created by"] .meta-cell-renderer__system')?.textContent).toBe('Alice')
+      expect(container.querySelector('td[aria-label="Modified by"] .meta-cell-renderer__system')?.textContent).toBe('Unknown user')
+      expect(stored.fld_created_by).toBe('user_a')
+      expect(stored.fld_modified_by).toBe('user_b')
+      expect(summaries.rec_1.fld_created_by[0]).toEqual({ id: 'user_a', display: 'Alice' })
+      expect(summaries.rec_1.fld_modified_by[0]).toEqual({ id: 'user_other', display: 'Not Bob' })
+      grid.unmount()
+      container.innerHTML = ''
+
+      setLocale('zh-CN')
+      zhRenderer.mount(container)
+      await flushUi()
+      expect(container.querySelector('.meta-cell-renderer__system')?.textContent).toBe('未知用户')
+      expect(container.querySelector('.meta-cell-renderer__system')?.textContent).not.toContain('user_b')
+      expect(container.querySelector('.meta-cell-renderer__system')?.textContent).not.toContain('Alice')
+      zhRenderer.unmount()
+    } finally {
+      setLocale(previousLocale)
+      container.remove()
+    }
   })
 
   it('formats autoNumber fields with prefix and zero padding', () => {
