@@ -418,6 +418,12 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'refresh.executions': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
   'refresh.recover': () => ({ params: { projectNo: PROJECT_NO, executionId: 'exec_synthetic' }, body: { confirmProjectNo: PROJECT_NO, mode: 'verify' } }),
   'refresh.closeUnverified': () => ({ params: { projectNo: PROJECT_NO, executionId: 'exec_synthetic' }, body: { confirmProjectNo: PROJECT_NO, mode: 'inspect' } }),
+  // Step 6d-1b (S6-5; R-91): the census and the remnant acknowledgement (ADMIN). Well-formed shapes, so a 'pass' cell
+  // reaches the route's own answer on this bare mount (the switch-off 404 / an unconfigured action), never a 400.
+  'projectTarget.census': () => ({ query: {} }),
+  'projectTarget.censusRead': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectTarget.remnantAcknowledge': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO, componentHandle: 'a'.repeat(24), basis: 'head_not_ordered', runbookRef: 'R-91', acknowledge: { customerAnswered: true } } }),
+  'projectTarget.remnantRevoke': () => ({ params: { projectNo: PROJECT_NO, acknowledgementId: 'cr_synthetic' }, body: { confirmProjectNo: PROJECT_NO, runbookRef: 'R-91' } }),
   // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
   // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
   // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
@@ -497,6 +503,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -544,6 +554,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -591,6 +605,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -638,6 +656,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -685,6 +707,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -732,6 +758,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -779,6 +809,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'pass',
     'refresh.recover': 'pass',
     'refresh.closeUnverified': 'pass',
+    'projectTarget.census': 'pass',
+    'projectTarget.censusRead': 'pass',
+    'projectTarget.remnantAcknowledge': 'pass',
+    'projectTarget.remnantRevoke': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -826,6 +860,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'pass',
     'refresh.recover': 'pass',
     'refresh.closeUnverified': 'pass',
+    'projectTarget.census': 'pass',
+    'projectTarget.censusRead': 'pass',
+    'projectTarget.remnantAcknowledge': 'pass',
+    'projectTarget.remnantRevoke': 'pass',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -877,6 +915,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'pass',
     'refresh.recover': 'pass',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'pass',
     'projectFields.update': 'pass',
     'projectOverview.refresh': 'pass',
@@ -924,6 +966,10 @@ const MATRIX = Object.freeze({
     'refresh.executions': 'gate',
     'refresh.recover': 'gate',
     'refresh.closeUnverified': 'gate',
+    'projectTarget.census': 'gate',
+    'projectTarget.censusRead': 'gate',
+    'projectTarget.remnantAcknowledge': 'gate',
+    'projectTarget.remnantRevoke': 'gate',
     'projectFields.read': 'gate',
     'projectFields.update': 'gate',
     'projectOverview.refresh': 'gate',
@@ -1551,14 +1597,24 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
       // projectTarget.pullBatchSettingsSet / pullBatch.settingsRead / pullBatch.settingsSet, their controls on the
       // settings panel of 数据来源与体检: the values decide what every future batch label of the tenant means.
       'stockPreparationProjectPullBatchSettingsSet',
+      // Batch-refresh step 6d-1b (R-91, design §6.5): the remnant acknowledgement / revoke (typed project, re-proof on a
+      // fresh read, runbookRef; recorded on site only on the customer's Q1 answer relayed by the owner) and the one-project
+      // census (it answers the PRIVATE component handles) — manifest members projectTarget.remnantAcknowledge /
+      // remnantRevoke / censusRead (control: null; no web page in S6-5).
+      'stockPreparationProjectRemnantAcknowledge',
+      'stockPreparationProjectRemnantAcknowledgementRevoke',
+      'stockPreparationProjectSheetCensusGet',
       'stockPreparationPullBatchSettingsGet',
       'stockPreparationPullBatchSettingsSet',
       // Batch-refresh step 6a-2 (R-91, design §3.8): close-unverified — the runbook escape that closes an unfinished
       // execution with result `unknown` (inspect / close; typed project, inspect digest echo, ticket handle, the
       // resultUnknown acknowledgement) — manifest member refresh.closeUnverified (control: null until S6-3's card).
       'stockPreparationRefreshExecutionCloseUnverified',
+      // Batch-refresh step 6d-1b (R-91, design §6.5): the tenant-wide doubled-sheet census — manifest member
+      // projectTarget.census (control: null; no web page in S6-5). Its three project siblings are listed above.
+      'stockPreparationSheetCensusList',
     ],
-    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install, the three pull-batch settings handlers and close-unverified',
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler, the four members handlers, the manual-rows switch SET, the two pilot handlers, the pull-batch status read, the pull-batch install, the three pull-batch settings handlers, close-unverified, the two census reads and the remnant acknowledgement / revoke',
   )
   // STOCK_PREP_PULL joined the set with the S1 project-sheet CREATE, the named R-11 exception (R-35),
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
@@ -1987,6 +2043,12 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   'refresh.executions',
   'refresh.recover',
   'refresh.closeUnverified',
+  // Batch-refresh step 6d-1b (R-91): the census reads and the acknowledgement / revoke resolve the host-vouched operator
+  // scope at the ADMIN tier (never a header-fillable tenant).
+  'projectTarget.census',
+  'projectTarget.censusRead',
+  'projectTarget.remnantAcknowledge',
+  'projectTarget.remnantRevoke',
   // PR-4 (R-59): the six refresh routes resolve the host-vouched operator scope at the PULL tier, before any
   // host work; a carried tenant is already refused with the door open.
   'refresh.holds',

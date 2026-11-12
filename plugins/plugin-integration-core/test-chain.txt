@@ -82,6 +82,9 @@ node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
 node __tests__/stock-preparation-project-sheet-repair-columns.test.cjs
 node __tests__/stock-preparation-sheet-census.test.cjs
+node __tests__/stock-preparation-component-ruling-store.test.cjs
+node __tests__/stock-preparation-remnant-acknowledgement.test.cjs
+node __tests__/stock-preparation-sheet-census-routes.test.cjs
 node __tests__/stock-preparation-pull-batch-site-probe.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs

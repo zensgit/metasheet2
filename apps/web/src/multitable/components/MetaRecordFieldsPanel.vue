@@ -122,7 +122,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="text"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -150,7 +150,7 @@
             v-else-if="canEditField(field.id) && field.type === 'longText'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__textarea"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             rows="6"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
@@ -163,7 +163,7 @@
             type="text"
             inputmode="text"
             :placeholder="lc('cell.barcodePlaceholder')"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -175,7 +175,7 @@
             type="text"
             inputmode="text"
             :placeholder="lc('cell.qrcodePlaceholder')"
-            :value="textControlValue(controlValue(field.id))"
+            v-field-value="[textControlValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -186,7 +186,7 @@
             class="meta-record-drawer__input"
             type="text"
             :placeholder="lc('cell.locationPlaceholder')"
-            :value="locationAddressValue(controlValue(field.id))"
+            v-field-value="[locationAddressValue(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
@@ -196,17 +196,17 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="number"
-            :value="controlValue(field.id) ?? ''"
+            v-field-value="[numberControlText(controlValue(field.id)), record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
-            @change="emitPatch(field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
+            @change="onNumberChange(field.id, $event)"
           />
           <input
             v-else-if="canEditField(field.id) && field.type === 'date'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="date"
-            :value="formatDateOnlyValue(controlValue(field.id)) ?? ''"
+            v-field-value="[formatDateOnlyValue(controlValue(field.id)) ?? '', record?.id]"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -458,6 +458,7 @@ import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
 import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
 import { qrSvgFromText } from '../utils/qr-code'
 import { isImeKeyEvent } from '../utils/ime-keys'
+import { vFieldValue } from '../utils/field-value-directive'
 import {
   canEditField as canEditFieldShared,
   formatRecordFieldValue,
@@ -560,6 +561,19 @@ watch(() => props.record, () => {
 // OTHER fields are never touched by either edge. Not a data path (HI-1): a draft only ever holds what
 // the user just entered in this panel — nothing is fetched or derived.
 const rejectedDrafts = ref<Record<string, unknown>>({})
+
+/** A number box holding a draft it cannot read ("-", "1e": `validity.badInput`, whose value then reads "") commits
+ *  nothing, where "" would clear the stored number. The box shows the stored number again when it is next drawn
+ *  (v-field-value: the value after a commit, or another record's). */
+function numberControlText(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
+}
+
+function onNumberChange(fieldId: string, event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.validity.badInput) return
+  emitPatch(fieldId, input.value === '' ? null : Number(input.value))
+}
 
 function emitPatch(fieldId: string, value: unknown) {
   rejectedDrafts.value = { ...rejectedDrafts.value, [fieldId]: value }

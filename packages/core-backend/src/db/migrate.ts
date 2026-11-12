@@ -154,7 +154,10 @@ Notes:
   security_action_challenges holds any row, and
   zzzz20261106130000_create_directory_integration_capabilities.ts refuses
   while directory_integration_capabilities or
-  directory_integration_capability_history holds any row.`)
+  directory_integration_capability_history holds any row, and
+  zzzz20261111093417_create_user_notification_endpoints_preferences.ts
+  refuses while user_notification_endpoints or
+  user_notification_preferences holds any row.`)
 }
 
 async function main(): Promise<void> {
