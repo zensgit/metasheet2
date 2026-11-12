@@ -2311,6 +2311,9 @@ export default defineConfig({
       // `approval-template-groups-backfill-down-guard-ci-wiring.test.mjs` guard (same convention
       // as the five sibling backfill suites' own guards).
       'tests/integration/approval-template-groups-backfill-down-guard.db.test.ts',
+      // Session tokens and the invite lifecycle against real PostgreSQL. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it. Runs whole-file in the approval real-DB step.
+      'tests/integration/session-token-invite-lifecycle.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
