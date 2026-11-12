@@ -332,7 +332,7 @@ Remove-Variable token
 - 三条路由都只认 `stock-prep:admin`（`http-routes.cjs:325-343`、`:12735-12768`）：
   - `POST …/projects/<项目号>/target/sheet-repair`：预览、执行和续关。请求体是封闭的 `{ mode, recipe, confirmProjectNo, componentHandle?, runId?, planDigest?, approvalRef? }`，多一个键就 400（`stock-preparation-sheet-repair.cjs:99`、`:398`）。`mode` 是 `preview` 或 `execute`。`recipe` 是 `retire_superseded_root_subtree`（停用旧根子树）、`restore_retired_rows`（按一次 retire 运行的备份恢复）或 `verify_and_close_run`（核对并关闭一次停住的运行），见 `:88-95`。
   - `GET …/target/sheet-repair/fills-report`：哪些旧行和副本行填了人工格、两边是否相同。只有句柄、布尔和计数，给客户回答 Q3 用。
-  - `GET …/target/sheet-repair/runs`：这张表最近 50 次运行，无值，不含备份（`stock-preparation-sheet-repair-store.cjs:75`）。restore 和续关要用的运行 id 从这里取。
+  - `GET …/target/sheet-repair/runs`：这张表最近 50 次运行（更多时回答带 `truncated: true`），无值，不含备份（`stock-preparation-sheet-repair-store.cjs:75`、`:287-292`）。restore 和续关要用的运行 id 从这里取。
 - 开关 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED` 只认精确的 `true`：不去空格，也不认大写（`stock-preparation-sheet-repair.cjs:83-85`）。它或项目表开关不是 `true` 时，三条路由（预览、补填报告、运行列表都算）一律 404、零 IO（`http-routes.cjs:6854-6859`）。所以给客户准备 Q3 的补填报告，也要先开开关。
 - **开关按部署生效。** 开着时，这个部署上**每一个**项目的表都能被修复。窗口开始时在 `app.env` 里加这一行、重启；窗口结束时删掉、重启。
 - 开关开着而 108 没跑：修复路由答 503 `STOCK_PREP_SHEET_REPAIR_STORE_FAILED`，什么都不写（`108_…:67-70`）。
@@ -397,7 +397,7 @@ Remove-Variable token
    - 执行在表租约内、先断言持有者，按运行自己的备份核对每个计划行；**不写任何表行**，把运行记为 `completed` 并记下 `close_approval_ref`，然后推进代次（`stock-preparation-sheet-repair.cjs:13-17`、`:1288-1330`）。
    - 被拒：`rows_not_in_target_state`（带 `notWritten` / `moved` / `missing` 计数，运行仍然开着）、`run_not_open`、`run_not_found`、`backup_unreadable`；`STOCK_PREP_SHEET_REPAIR_PLAN_CHANGED`；`STOCK_PREP_PROJECT_WRITE_LOCKED`。
 2. **一行都没写**：照原配方再做一次——同一个部件的 retire，或同一个源 retire 运行的 restore——新的预览、新的摘要、新的批复。它开始时会把那次未结束的运行记为 `stopped / abandoned`。
-3. **retire 写了一部分**：restore 这次运行（等于撤销），它开始时同样把未结束的运行关成 `stopped / abandoned`。别的做法先问 owner。
+3. **retire 写了一部分**：先重新预览这个部件的 retire。工具的 STOPPED 提示就是「重新预览，剩下的要新摘要、新批复」（`stock-preparation-sheet-repair.cjs:1500`）；预览 `eligible` 时，照 §6.3 批复、执行，它开始时把那次运行关成 `stopped / abandoned`。本手册没有在真实库上核过这种情况下预览一定 `eligible`。预览不 `eligible` 时，restore 这次运行（等于撤销），它开始时同样把未结束的运行关掉。别的做法先问 owner。
 
 **先关掉，再开始别的修复。** 这张表上下一次执行开始时，会把任何未结束的运行（包括已经全部写完的）记为 `stopped / abandoned`（`stock-preparation-sheet-repair.cjs:45-46`）。全部写完的运行应该走第 1 条正常关闭。
 
@@ -406,6 +406,8 @@ Remove-Variable token
 ### 6.6 执行或续关答 `generationBumped: false` 时
 
 **这次执行或续关本身已经做完。** 回答是成功的（`status: completed`），运行台账里也记下了。`false` 只说明放开租约之后的**代次推进没落地**：推进是尽力而为，失败不会让这次操作失败（`stock-preparation-sheet-repair.cjs:1318-1330`、`:1511-1524`）。推进落不了地，按代码有两种情况：放开租约之后马上有别的写入方拿到了这张表（有活着的租约时推进一律拒绝，`stock-preparation-project-write-lock.cjs:693-694`），或者锁表一时读写失败。回答里不说是哪一种；只有后端日志里那一行警告带着码（`stock-preparation-sheet-repair.cjs:1326`、`:1520`）。
+
+**STOPPED 也按这一节处理。** 一次执行在尝试过写入之后被拒——`STOCK_PREP_SHEET_REPAIR_STOPPED`，或收尾时的租约 / 栅栏拒绝——推进照样在放开租约之后尝试，但拒绝的回答里**没有** `generationBumped` 这个键（拒绝在返回之前抛出，`stock-preparation-sheet-repair.cjs:1466-1524`）。所以这时推进有没有落地是未知的：除第 1 条外（STOPPED 之后按 §6.3 重新预览是正常的），下面几步照做。
 
 **后果（按代码）。** 写入之前的令牌检查只比对代次令牌（`stock-preparation-project-write-lock.cjs:386-408`，两条车道写入之前都调用）；拿租约、接管租约都不换代次令牌。所以代次没推进时，**修复之前出的试算令牌和大 BOM 批准，在这一道检查上仍然有效**，而修复本来要靠这次推进作废它们。它们之后会不会被别的检查拒掉，本手册没有从代码里核到，不要指望。
 
@@ -421,7 +423,7 @@ Remove-Variable token
 1. 重跑这个项目的普查（§5），按 §5.4 第 3 条处理确认。
 2. 看就绪（§3 第 4 步）。
 3. §6.2 第 5 条为 0（没有未结束的运行）。
-4. 删掉修复开关的那一行、重启。窗口里如果有哪一次回答 `generationBumped: false`，恢复定时任务和自动化之前，先按 §6.6 第 4 条做一次能应用的试算。
+4. 删掉修复开关的那一行、重启。窗口里如果有哪一次回答 `generationBumped: false`，或者有过 STOPPED 这类写过之后的拒绝（§6.6），恢复定时任务和自动化之前，先按 §6.6 第 4 条做一次能应用的试算。
 
 ## 7. 停止条件与回退
 
