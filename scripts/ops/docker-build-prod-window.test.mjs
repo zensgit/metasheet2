@@ -695,7 +695,10 @@ function assertNoPreDeployState(label, text) {
 async function checkPublicOutputs(world, r, { drill = 'none', reachedInplay = true } = {}) {
   const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc, drill })
   const status = await runStatus(world, r.runId)
-  for (const [label, text] of [['deploy.log', r.deployLog], ['step summary', summary], ['status output', status]]) assertNoPreDeployState(label, text)
+  for (const [label, text] of [['deploy.log', r.deployLog], ['step summary', summary], ['status output', status]]) {
+    assertNoPreDeployState(label, text)
+    assert.ok(!text.includes(INPLAY_SHA), `${label} must not carry the expected pending-set hash (a repository secret)`)
+  }
   const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
   assert.ok(detail.includes(`running_backend_commit=${SHA_OLD}`), 'control: the detail log holds the running commit')
   assert.ok(detail.includes('sha256:oldbackendimage'), 'control: the detail log holds the old image id')
@@ -774,7 +777,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['host re-validation: restore_proof unselected on a deploy', {}, { RESTORE_PROOF: 'unselected' }],
     ['host re-validation: pre_commit_abort unselected on a deploy', {}, { PRE_COMMIT_ABORT: 'unselected' }],
     ['host re-validation: drill_fail_stage=smoke', {}, { DRILL_FAIL_STAGE: 'smoke' }],
-    ['host re-validation: expected_pending_sha256 not hex', {}, { EXPECTED_PENDING_SHA256: 'not-a-hash' }],
+    ['host re-validation: the expected pending-set hash from the secret is not hex', {}, { EXPECTED_PENDING_SHA256: 'not-a-hash' }],
     ['host re-validation: restore_proof free text', {}, { RESTORE_PROOF: 'yes' }],
     ['host re-validation: a tunable that is not a positive integer', {}, { DEPLOY_WINDOW_DRAIN_S: '0' }],
   ]

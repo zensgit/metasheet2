@@ -40,10 +40,6 @@ on:
           - none
           - deploy
           - migrate
-      expected_pending_sha256:
-        description: 'Production deploy: sha256 of the in-play pending migration names (newline-joined, load order) from a rehearsal of this exact commit'
-        required: false
-        type: string
       restore_proof:
         description: 'Production deploy: reference of the restore proof (ref:<id>) or waived'
         required: false
@@ -92,7 +88,9 @@ jobs:
         if: ${{ inputs.deploy_production == true }}
         env:
           DRILL_FAIL_STAGE: ${{ inputs.drill_fail_stage }}
-          EXPECTED_PENDING_SHA256: ${{ inputs.expected_pending_sha256 }}
+          # The expected in-play pending-set hash is a repository secret, never a dispatch input:
+          # it is compared on the host and never printed.
+          EXPECTED_PENDING_SHA256: ${{ secrets.DEPLOY_EXPECTED_PENDING_SHA256 }}
           RESTORE_PROOF: ${{ inputs.restore_proof }}
           PRE_COMMIT_ABORT: ${{ inputs.pre_commit_abort }}
           PROD_HEALTH_PROBE_SILENCE: ${{ vars.PROD_HEALTH_PROBE_SILENCE || '' }}
@@ -114,7 +112,7 @@ jobs:
             *) refuse "drill_fail_stage must be none, deploy or migrate" ;;
           esac
           [[ "${EXPECTED_PENDING_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
-            || refuse "expected_pending_sha256 must be 64 lower-case hex characters (required on every production dispatch, drills included)"
+            || refuse "the repository secret DEPLOY_EXPECTED_PENDING_SHA256 must be 64 lower-case hex characters (required on every production dispatch, drills included)"
           restore_proof="${RESTORE_PROOF:-unselected}"
           pre_commit_abort="${PRE_COMMIT_ABORT:-unselected}"
           restore_proof_ok=false
@@ -319,7 +317,7 @@ jobs:
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
           ENABLE_YJS_COLLAB: ${{ vars.ENABLE_YJS_COLLAB || 'false' }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
-          EXPECTED_PENDING_SHA256: ${{ github.event.inputs.expected_pending_sha256 || '' }}
+          EXPECTED_PENDING_SHA256: ${{ secrets.DEPLOY_EXPECTED_PENDING_SHA256 }}
           RESTORE_PROOF: ${{ github.event.inputs.restore_proof || 'unselected' }}
           PRE_COMMIT_ABORT: ${{ github.event.inputs.pre_commit_abort || 'unselected' }}
           DEPLOY_WINDOW_PULL_BUDGET_KB: ${{ vars.DEPLOY_WINDOW_PULL_BUDGET_KB || '3145728' }}
@@ -1088,7 +1086,7 @@ jobs:
 
           # ---- phase 0.2: re-validate the dispatch inputs embedded above ----
           [[ "$WINDOW_RUN" =~ ^[0-9]+-[0-9]+$ ]] || fail "invalid run id"
-          [[ "$EXPECTED_PENDING_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "expected_pending_sha256 is not 64 lower-case hex characters"
+          [[ "$EXPECTED_PENDING_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "the expected pending-set hash (secret DEPLOY_EXPECTED_PENDING_SHA256) is not 64 lower-case hex characters"
           case "$DRILL_FAIL_STAGE" in
             none|deploy|migrate) ;;
             *) fail "drill_fail_stage must be none, deploy or migrate" ;;
@@ -1650,7 +1648,7 @@ jobs:
           state_write
           if [[ "$inplay_sha256" != "$EXPECTED_PENDING_SHA256" ]]; then
             wlog "pending_set=mismatch"
-            fail "in-play pending set sha256 differs from expected_pending_sha256; the set was not rehearsed"
+            fail "in-play pending set sha256 differs from the secret DEPLOY_EXPECTED_PENDING_SHA256; the set was not rehearsed"
           fi
           wlog "pending_set=match"
           if [[ "${DRILL_FAIL_STAGE}" == "migrate" ]]; then

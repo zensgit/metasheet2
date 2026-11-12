@@ -129,7 +129,7 @@ test('validate_deploy_inputs reads each value from its dispatch input or reposit
   }
   const expected = {
     DRILL_FAIL_STAGE: '${{ inputs.drill_fail_stage }}',
-    EXPECTED_PENDING_SHA256: '${{ inputs.expected_pending_sha256 }}',
+    EXPECTED_PENDING_SHA256: '${{ secrets.DEPLOY_EXPECTED_PENDING_SHA256 }}',
     RESTORE_PROOF: '${{ inputs.restore_proof }}',
     PRE_COMMIT_ABORT: '${{ inputs.pre_commit_abort }}',
     PROD_HEALTH_PROBE_SILENCE: "${{ vars.PROD_HEALTH_PROBE_SILENCE || '' }}",
@@ -139,6 +139,8 @@ test('validate_deploy_inputs reads each value from its dispatch input or reposit
   // The window receives the same tunables with the same defaults.
   const remote = workflow.jobs.deploy.steps.find((entry) => entry.id === 'remote_deploy')
   for (const name of Object.keys(tunables)) assert.equal(remote.env[name], expected[name], `remote_deploy env ${name}`)
+  // The expected pending-set hash reaches both steps from the repository secret only.
+  assert.equal(remote.env.EXPECTED_PENDING_SHA256, '${{ secrets.DEPLOY_EXPECTED_PENDING_SHA256 }}')
 })
 
 test('production deploy inputs, validation step, concurrency and timeouts of the deploy window', () => {
@@ -149,7 +151,8 @@ test('production deploy inputs, validation step, concurrency and timeouts of the
   assert.equal(inputs.pre_commit_abort.default, 'unselected')
   assert.equal(inputs.drill_fail_stage.type, 'choice')
   assert.deepEqual(inputs.drill_fail_stage.options, ['none', 'deploy', 'migrate'])
-  assert.equal(inputs.expected_pending_sha256.type, 'string')
+  assert.ok(!Object.hasOwn(inputs, 'expected_pending_sha256'), 'the expected pending-set hash is a repository secret, not an input')
+  assert.ok(!Object.keys(inputs).some((name) => /pending/i.test(name)))
   assert.ok(!Object.hasOwn(inputs, 'migration_exclude'), 'the exclusion set is a committed constant, never an input')
   assert.ok(!Object.keys(inputs).some((name) => /exclude/i.test(name)))
 

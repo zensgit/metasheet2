@@ -57,11 +57,15 @@ The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_wr
 
 - The deploy commit is main HEAD at dispatch time, and the whole pending migration set
   at that commit was rehearsed on a production-schema copy.
-- `expected_pending_sha256` = sha256 of the in-play pending migration names (pending
-  names minus the committed exclusion list) in `migrate.js --list` load order, joined
-  by a newline, **without** a trailing newline. From a rehearsal list file
-  `inplay.txt` with one name per line: `printf '%s' "$(cat inplay.txt)" | sha256sum`.
-  Derive it from the rehearsal, never from a refused run's host files.
+- The repository secret `DEPLOY_EXPECTED_PENDING_SHA256` = sha256 of the in-play pending
+  migration names (pending names minus the committed exclusion list) in `migrate.js --list`
+  load order, joined by a newline, **without** a trailing newline. From a rehearsal list
+  file `inplay.txt` with one name per line: `printf '%s' "$(cat inplay.txt)" | sha256sum`.
+  Derive it from the rehearsal, never from a refused run's host files. Set the secret with
+  `gh secret set DEPLOY_EXPECTED_PENDING_SHA256` before the dispatch; it is compared on the
+  host and never printed. It is required on every production dispatch, drills included
+  (the build job refuses otherwise). Each job reads the secret when it starts, so do not
+  change it while a dispatch is queued or running.
 - `restore_proof`: `ref:<id>` naming the restore proof, or `waived`. The id is printed in
   the public run log and step summary; use an opaque id that maps to the proof only in
   private records.
