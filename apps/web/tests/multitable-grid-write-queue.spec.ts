@@ -6,8 +6,10 @@ import { MultitableApiClient } from '../src/multitable/api/client'
 import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
 import type { MetaRecord } from '../src/multitable/types'
 
-// `patchCell` sends a record's writes one at a time. The stand-in server checks every write against the record's
-// version, as record-write-service does, and answers only when the test says so (a slow server).
+// `patchCell` sends a record's writes one at a time. The stand-in answers the way the real `/patch` does
+// (record-write-service): it checks every write against the record's version and moves it one version on; its answer
+// carries the new version and the link summaries of every link field of the record, never the field just written;
+// a view load returns what it stores. It answers only when the test says so (a slow server).
 
 type Change = { recordId: string; fieldId: string; value: unknown; expectedVersion: number }
 
@@ -15,11 +17,19 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-type ServerOptions = { reject?: (change: Change) => boolean; linkSummaries?: (change: Change) => Array<{ id: string; display: string }> }
+const summary = (id: string) => ({ id, display: id.toUpperCase() })
 
-function strictServer(records: MetaRecord[], page: MetaRecord[], options: ServerOptions = {}) {
+type ServerOptions = {
+  reject?: (change: Change) => boolean
+  /** The version an accepted write moves the record to (the real server: one on). */
+  nextVersion?: (version: number) => number
+}
+
+function strictServer(records: MetaRecord[], pageIds: string[], options: ServerOptions = {}) {
   const stored = new Map(records.map((record) => [record.id, { version: record.version, data: { ...record.data } }]))
-  const waiting: Array<() => void> = []
+  const waiting: Array<() => Response> = []
+  const resolvers: Array<(response: Response) => void> = []
+  const held: Array<() => void> = []
   const sent: Array<Change & { sheetId?: string }> = []
   const fetchFn = vi.fn((input: string, init?: RequestInit) => {
     const method = String(init?.method ?? 'GET')
@@ -28,23 +38,22 @@ function strictServer(records: MetaRecord[], page: MetaRecord[], options: Server
       const change = body.changes[0] as Change
       sent.push({ ...change, sheetId: body.sheetId })
       return new Promise<Response>((resolve) => {
+        resolvers.push(resolve)
         waiting.push(() => {
           const record = stored.get(change.recordId)!
-          if (options.reject?.(change)) {
-            resolve(json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Rejected' } }, 400))
-          } else if (record.version !== change.expectedVersion) {
-            resolve(json({ ok: false, error: { code: 'VERSION_CONFLICT', message: 'Changed elsewhere', serverVersion: record.version } }, 409))
-          } else {
-            record.version += 1
-            record.data[change.fieldId] = change.value
-            const linkSummaries = options.linkSummaries ? { [change.recordId]: { [change.fieldId]: options.linkSummaries(change) } } : undefined
-            resolve(json({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }], records: [{ recordId: change.recordId, data: { [change.fieldId]: change.value } }], linkSummaries } }))
+          if (options.reject?.(change)) return json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Rejected' } }, 400)
+          if (record.version !== change.expectedVersion) {
+            return json({ ok: false, error: { code: 'VERSION_CONFLICT', message: 'Changed elsewhere', serverVersion: record.version } }, 409)
           }
+          record.version = options.nextVersion ? options.nextVersion(record.version) : record.version + 1
+          for (const each of body.changes as Change[]) record.data[each.fieldId] = each.value
+          const links = Array.isArray(record.data.f_link) ? { [change.recordId]: { f_link: (record.data.f_link as string[]).map(summary) } } : undefined
+          return json({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }], ...(links ? { linkSummaries: links } : {}) } })
         })
       })
     }
-    // The view's load: the page's records.
-    const rows = page.map((record) => ({ ...record, data: { ...record.data } }))
+    // A view load: what the server stores for the page's records.
+    const rows = pageIds.map((id) => ({ id, version: stored.get(id)!.version, data: { ...stored.get(id)!.data } }))
     return Promise.resolve(json({ ok: true, data: { fields: FIELDS, rows, page: { offset: 0, limit: 50, total: rows.length, hasMore: false } } }))
   })
   async function tick() {
@@ -54,35 +63,47 @@ function strictServer(records: MetaRecord[], page: MetaRecord[], options: Server
     stored,
     sent,
     fetchFn,
-    pending: () => waiting.length,
+    tick,
     /** Answer the oldest request. */
     async answer() {
       expect(waiting.length).toBeGreaterThan(0)
-      waiting.shift()!()
+      const response = waiting.shift()!()
+      resolvers.shift()!(response)
       await tick()
     },
     /** Answer every request, also those sent meanwhile. */
     async answerAll() {
       await tick()
       while (waiting.length) {
-        waiting.shift()!()
+        const response = waiting.shift()!()
+        resolvers.shift()!(response)
         await tick()
       }
     },
-    tick,
+    /** Store the oldest request now; its answer is on the way until `release`. */
+    store() {
+      const response = waiting.shift()!()
+      const resolve = resolvers.shift()!
+      held.push(() => resolve(response))
+    },
+    async release() {
+      held.shift()!()
+      await tick()
+    },
   }
 }
 
 const FIELDS = [
   { id: 'f1', name: 'Title', type: 'string' as const },
   { id: 'f2', name: 'Notes', type: 'string' as const },
+  { id: 'f3', name: 'Code', type: 'string' as const },
   { id: 'f_due', name: 'Due', type: 'date' as const },
   { id: 'f_qty', name: 'Qty', type: 'number' as const },
   { id: 'f_link', name: 'Parts', type: 'link' as const },
 ]
 
 async function setup(records: MetaRecord[], options: ServerOptions & { server?: MetaRecord[] } = {}) {
-  const server = strictServer(options.server ?? records, records, options)
+  const server = strictServer(options.server ?? records, records.map((record) => record.id), options)
   const sheetId = ref('sheet_1')
   const viewId = ref('view_1')
   const grid = useMultitableGrid({ sheetId, viewId, client: new MultitableApiClient({ fetchFn: server.fetchFn }) })
@@ -91,7 +112,7 @@ async function setup(records: MetaRecord[], options: ServerOptions & { server?: 
   return { grid, server, sheetId }
 }
 
-const r1 = (): MetaRecord => ({ id: 'r1', version: 1, data: { f1: 'a', f2: 'x', f_due: '2031-01-02', f_qty: 5, f_link: ['p_a'] } })
+const r1 = (): MetaRecord => ({ id: 'r1', version: 1, data: { f1: 'a', f2: 'x', f3: 'k', f_due: '2031-01-02', f_qty: 5, f_link: ['p_a'] } })
 const r2 = (): MetaRecord => ({ id: 'r2', version: 7, data: { f1: 'other', f2: '' } })
 const row = (grid: ReturnType<typeof useMultitableGrid>, id = 'r1') => grid.rows.value.find((record) => record.id === id)!
 
@@ -138,6 +159,61 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(outcomes.filter((outcome) => outcome === null)).toHaveLength(Math.min(2, commits.length))
   })
 
+  it('three fields of one record left within one answer, all on the version shown: each goes with the version the one before returned, and all are stored', async () => {
+    const { grid, server } = await setup([r1()])
+    const writes = [grid.patchCell('r1', 'f1', 'b', 1), grid.patchCell('r1', 'f2', 'y', 1), grid.patchCell('r1', 'f3', 'z', 1)]
+    await server.answerAll()
+    expect(await Promise.all(writes)).toEqual([null, null, null])
+    expect(server.sent.map((change) => [change.fieldId, change.expectedVersion])).toEqual([['f1', 1], ['f2', 2], ['f3', 3]])
+    expect(server.stored.get('r1')!.data).toMatchObject({ f1: 'b', f2: 'y', f3: 'z' })
+    expect(grid.conflict.value).toBeNull()
+  })
+
+  it('a write made on the version the first answer returned, while the second is out: it goes with the version the second returns', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    await server.answer()
+    expect(row(grid).version).toBe(2)
+    const third = grid.patchCell('r1', 'f3', 'z', row(grid).version)
+    await server.answerAll()
+    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 2, 3])
+    expect(await third).toBeNull()
+  })
+
+  it('writes waiting behind the one out go in the order they were made', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    void grid.patchCell('r1', 'f3', 'z', 1)
+    await server.answerAll()
+    expect(server.sent.map((change) => change.fieldId)).toEqual(['f1', 'f2', 'f3'])
+  })
+
+  it('a replaced write leaves nothing counted as in flight: a range write is refused while writes are out, and goes once they are answered', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const replaced = grid.patchCell('r1', 'f2', 'y', 1)
+    void grid.patchCell('r1', 'f2', 'z', 1)
+    expect(await replaced).toBe(CELL_WRITE_SUPERSEDED)
+    await expect(grid.patchRange([{ recordId: 'r1', fieldId: 'f3', value: 'q', expectedVersion: 1 }])).rejects.toThrow('RANGE_BUSY')
+    await server.answerAll()
+    let refusal: unknown = null
+    const range = grid.patchRange([{ recordId: 'r1', fieldId: 'f3', value: 'q', expectedVersion: row(grid).version }]).catch((error) => { refusal = error })
+    await server.answerAll()
+    await range
+    expect((refusal as Error | null)?.message ?? null).not.toBe('RANGE_BUSY')
+  })
+
+  it('an answer that does not move the version on (a malformed one) is not chained: the next write goes with the version given', async () => {
+    const { grid, server } = await setup([r1()], { nextVersion: (version) => version })
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f2', 'y', 1)
+    await server.answerAll()
+    expect(await second).toBeNull()
+    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
+  })
+
   it('a write made after the first answer reads the version it returned, and goes as given', async () => {
     const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f_qty', 6, row(grid).version)
@@ -176,21 +252,113 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(row(grid).data).toMatchObject({ f1: 'b', f2: 'x' })
   })
 
-  it('the answer to an older write of a cell written again meanwhile does not take the cell back to the older value', async () => {
+  it('the row reloaded while a newer write of the cell waits: the older answer puts the newer value back on it, which then stays once accepted', async () => {
     const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f1', 'b', 1)
     void grid.patchCell('r1', 'f1', 'c', 1)
+    server.store()
+    // A reload (a sort or filter applied, another user's new record, ...) replaces the row: it shows what is stored.
+    await grid.loadViewData(0)
+    expect(row(grid).data.f1).toBe('b')
+    await server.release()
+    expect(row(grid).data.f1).toBe('c')
+    await server.answerAll()
+    expect(server.stored.get('r1')!.data.f1).toBe('c')
+    expect(row(grid).data.f1).toBe('c')
+  })
+
+  it.each([
+    ['a reload', async (grid: ReturnType<typeof useMultitableGrid>) => { await grid.loadViewData(0) }],
+    ['a realtime merge of the record', async (grid: ReturnType<typeof useMultitableGrid>, server: ReturnType<typeof strictServer>) => {
+      const stored = server.stored.get('r1')!
+      grid.mergeRemoteRecord({ id: 'r1', version: stored.version, data: { ...stored.data } })
+    }],
+  ] as const)('the row replaced by %s while a newer write of the cell waits, and that write rejected: the row goes back to the value stored', async (_name, replace) => {
+    const { grid, server } = await setup([r1()], { reject: (change) => change.value === 'c' })
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f1', 'c', 1)
+    server.store()
+    await replace(grid, server)
+    expect(row(grid).data.f1).toBe('b')
+    await server.release()
+    await server.answerAll()
+    expect(await second).toMatchObject({ code: 'VALIDATION_ERROR' })
+    expect(server.stored.get('r1')!.data.f1).toBe('b')
+    expect(row(grid).data.f1).toBe('b')
+  })
+
+  it('the row reloaded while a write of another field waits: once accepted, the row shows it', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    server.store()
+    await grid.loadViewData(0)
+    await server.release()
+    await server.answerAll()
+    expect(server.stored.get('r1')!.data.f2).toBe('y')
+    expect(row(grid).data).toMatchObject({ f1: 'b', f2: 'y' })
+  })
+
+  it('the row reloaded before the server stores the one write in flight: once accepted, the row shows it', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    await grid.loadViewData(0)
+    expect(row(grid).data.f2).toBe('x')
+    await server.answerAll()
+    expect(row(grid).data.f2).toBe('y')
+  })
+
+  it('the row reloaded before the first write is stored, while a newer write of the cell waits: the first answer shows the newer value, not its own', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f1', 'c', 1)
+    await grid.loadViewData(0)
+    expect(row(grid).data.f1).toBe('a')
     await server.answer()
-    // The first answer brought f1 = 'b' back; the cell still shows 'c', which is now on its way.
-    expect(server.sent).toHaveLength(2)
     expect(row(grid).data.f1).toBe('c')
     await server.answerAll()
     expect(row(grid).data.f1).toBe('c')
   })
 
-  it('the same for link summaries: the older answer\'s summaries do not replace the newer write\'s', async () => {
-    const summary = (id: string) => ({ id, display: id.toUpperCase() })
-    const { grid, server } = await setup([r1()], { linkSummaries: (change) => (change.value as string[]).map(summary) })
+  it('a write rejected after the row was reloaded: the row shows the write of another field still waiting', async () => {
+    const { grid, server } = await setup([r1()], { reject: (change) => change.value === 'bad' })
+    void grid.patchCell('r1', 'f1', 'bad', 1)
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    await grid.loadViewData(0)
+    expect(row(grid).data.f2).toBe('x')
+    await server.answer()
+    expect(row(grid).data).toMatchObject({ f1: 'a', f2: 'y' })
+    await server.answerAll()
+    expect(row(grid).data.f2).toBe('y')
+  })
+
+  it('the row reloaded after another user moved the record on: an accepted write does not overwrite what the reload showed', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f2', 'y', 1)
+    server.store()
+    const stored = server.stored.get('r1')!
+    stored.version += 1
+    stored.data.f2 = 'theirs'
+    await grid.loadViewData(0)
+    await server.release()
+    expect(row(grid).data.f2).toBe('theirs')
+  })
+
+  it('an older answer brings every link field\'s summaries: a waiting link write keeps its own', async () => {
+    const { grid, server } = await setup([r1()])
+    grid.linkSummaries.value = { r1: { f_link: [summary('p_a')] } }
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f_link', ['p_c'], 1, { nextLinkSummaries: [summary('p_c')] })
+    await server.answer()
+    // The answer to the f1 write carried the stored f_link chips ([P_A]); the waiting write's stay.
+    expect(row(grid).data.f_link).toEqual(['p_c'])
+    expect(grid.linkSummaries.value.r1.f_link).toEqual([summary('p_c')])
+    await server.answerAll()
+    expect(grid.linkSummaries.value.r1.f_link).toEqual([summary('p_c')])
+  })
+
+  it('the same when the older write is of the link field itself', async () => {
+    const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f_link', ['p_a', 'p_b'], 1, { nextLinkSummaries: [summary('p_a'), summary('p_b')] })
     void grid.patchCell('r1', 'f_link', ['p_c'], 1, { nextLinkSummaries: [summary('p_c')] })
     await server.answer()
@@ -227,18 +395,17 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
 
   it('link summaries follow the same rule: replaced and rejected, they go back to the ones before the first write', async () => {
     const { grid, server } = await setup([r1()], { reject: () => true })
-    grid.linkSummaries.value = { r1: { f_link: [{ id: 'p_a', display: 'A' }] } }
-    void grid.patchCell('r1', 'f_link', ['p_a', 'p_b'], 1, { nextLinkSummaries: [{ id: 'p_a', display: 'A' }, { id: 'p_b', display: 'B' }] })
-    void grid.patchCell('r1', 'f_link', ['p_b'], 1, { nextLinkSummaries: [{ id: 'p_b', display: 'B' }] })
-    void grid.patchCell('r1', 'f_link', ['p_c'], 1, { nextLinkSummaries: [{ id: 'p_c', display: 'C' }] })
-    expect(grid.linkSummaries.value.r1.f_link).toEqual([{ id: 'p_c', display: 'C' }])
+    grid.linkSummaries.value = { r1: { f_link: [summary('p_a')] } }
+    void grid.patchCell('r1', 'f_link', ['p_a', 'p_b'], 1, { nextLinkSummaries: [summary('p_a'), summary('p_b')] })
+    void grid.patchCell('r1', 'f_link', ['p_b'], 1, { nextLinkSummaries: [summary('p_b')] })
+    void grid.patchCell('r1', 'f_link', ['p_c'], 1, { nextLinkSummaries: [summary('p_c')] })
+    expect(grid.linkSummaries.value.r1.f_link).toEqual([summary('p_c')])
     await server.answerAll()
     expect(row(grid).data.f_link).toEqual(['p_a'])
-    expect(grid.linkSummaries.value.r1.f_link).toEqual([{ id: 'p_a', display: 'A' }])
+    expect(grid.linkSummaries.value.r1.f_link).toEqual([summary('p_a')])
   })
 
   it('link summaries of a replaced write: the newer one, rejected after the first is stored, goes back to the summaries stored by the first', async () => {
-    const summary = (id: string) => ({ id, display: id.toUpperCase() })
     const { grid, server } = await setup([r1()], { reject: (change) => (change.value as string[]).includes('p_c') })
     void grid.patchCell('r1', 'f_link', ['p_a', 'p_b'], 1, { nextLinkSummaries: [summary('p_a'), summary('p_b')] })
     void grid.patchCell('r1', 'f_link', ['p_b'], 1, { nextLinkSummaries: [summary('p_b')] })
@@ -310,5 +477,18 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     await server.answerAll()
     expect(server.sent.map((change) => change.sheetId)).toEqual(['sheet_1', 'sheet_1'])
     expect(grid.editHistory.value).toEqual([])
+  })
+
+  it('a waiting write rejected as a conflict after a move to another sheet: the caller gets the failure; the new sheet shows no conflict', async () => {
+    const { grid, server, sheetId } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f2', 'y', 1)
+    sheetId.value = 'sheet_2'
+    await nextTick()
+    await server.answer()
+    server.stored.get('r1')!.version += 1
+    await server.answerAll()
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(grid.conflict.value).toBeNull()
   })
 })

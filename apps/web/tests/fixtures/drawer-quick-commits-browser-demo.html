@@ -7,8 +7,8 @@
 // The REAL MetaRecordInspector (record drawer) on a record of the REAL useMultitableGrid, saved the way
 // MultitableWorkbench saves a drawer field (commitDrawerPatch): `patchCell(record, field, value, the version the drawer
 // shows)`. The stand-in server checks each write against the record's version when it arrives, as
-// record-write-service does, and answers 300 ms later: a date box saves every part typed and a number box every
-// arrow key, faster than that.
+// record-write-service does, and answers 300 ms later with the new version (as /patch does, without the field just
+// written): a date box saves every part typed and a number box every arrow key, faster than that.
 import { computed, createApp, h, ref } from '/node_modules/vue/dist/vue.esm-bundler.js'
 import '/node_modules/element-plus/dist/index.css'
 import '/src/styles/tokens.css'
@@ -45,7 +45,7 @@ const client = new MultitableApiClient({
       } else {
         record.version += 1
         record.data = { ...record.data, [change.fieldId]: change.value }
-        response = answer({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }], records: [{ recordId: change.recordId, data: { [change.fieldId]: change.value } }] } })
+        response = answer({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }] } })
       }
       try { return await later(response) } finally { demo.inFlight -= 1 }
     }

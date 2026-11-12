@@ -40,6 +40,8 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     // The attachment upload / delete the workbench hands the inspector (they hold the grid's undo).
     uploadFn: undefined as ((file: File, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
     deleteAttachmentFn: undefined as ((attachmentId: string, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
+    // The record the drawer shows (the grid's row, or the workbench's copy of it).
+    record: null as { id: string; version: number; data: Record<string, unknown> } | null,
   },
   gridStubSeen: {
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
@@ -646,6 +648,7 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
       inspectorStubSeen.uploadFn = this.$props.uploadFn as typeof inspectorStubSeen.uploadFn
       inspectorStubSeen.deleteAttachmentFn = this.$props.deleteAttachmentFn as typeof inspectorStubSeen.deleteAttachmentFn
+      inspectorStubSeen.record = (this.$props.record as typeof inspectorStubSeen.record) ?? null
       if (inspectorStubRealComments.realInspector) {
         // #5813: stays mounted while hidden, like the real shell at the workbench call site.
         const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
@@ -764,6 +767,15 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             onClick: () => this.$emit('patch', 'fld_title', 'Patched title'),
           },
           'patch-record',
+        ),
+        // A second save of the same field (two saves of one field, the second made while the first is out).
+        h(
+          'button',
+          {
+            'data-patch-record-again': 'fld_title',
+            onClick: () => this.$emit('patch', 'fld_title', 'Second title'),
+          },
+          'patch-record-again',
         ),
         // PR-B2 round 2: a second patchable field so two drawer patches can be in flight at once.
         h(
@@ -5514,6 +5526,41 @@ describe('MultitableWorkbench view wiring', () => {
       expect(fieldErrorEl('fld_title')).toBeNull()
       expect(showSuccessSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('after a realtime merge of the open record (on the page) the drawer shows a copy of it, which follows the grid row: an older save answered while a newer one waits does not take it back, and a rejected one leaves the row\'s stored value', async () => {
+      await openRec1()
+      const realtime = useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as { mergeRemoteRecord: (recordId: string) => Promise<boolean> }
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      workbenchMock.client.getRecord.mockResolvedValue({
+        record: { id: 'rec_1', version: row.version, data: { ...row.data } },
+        linkSummaries: {}, attachmentSummaries: {}, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
+        commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
+      })
+      await realtime.mergeRemoteRecord('rec_1')
+      await flushUi()
+      expect(inspectorStubSeen.record?.id).toBe('rec_1')
+      expect(inspectorStubSeen.record).not.toBe(row)
+      // The grid (patchCell): the row shows each save at once; each answer comes when released.
+      const answers: Array<(failure: unknown) => void> = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown) => {
+        row.data[fieldId] = value
+        const failure = await new Promise((resolve) => { answers.push(resolve) })
+        gridMock.error.value = null
+        return failure
+      })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      await flushUi()
+      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
+      answers[0](null)
+      await flushUi()
+      expect(inspectorStubSeen.record?.data.fld_title).toBe('Second title')
+      // The second is rejected: the grid rolls its row back to the value stored (the first save).
+      row.data.fld_title = ATTEMPTED
+      answers[1](failureFor('fld_title', 'Insufficient permissions', { status: 403, code: 'FORBIDDEN' }))
+      await flushUi()
+      expect(inspectorStubSeen.record?.data.fld_title).toBe(ATTEMPTED)
     })
 
     it('a save the grid replaced unsent with a newer save of the field (CELL_WRITE_SUPERSEDED) shows nothing and leaves the field\'s inline error alone: the newer save answers for the field', async () => {

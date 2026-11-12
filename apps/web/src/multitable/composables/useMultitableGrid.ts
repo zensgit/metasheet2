@@ -149,10 +149,8 @@ interface QueuedCellWrite {
 }
 
 interface RecordWriteQueue {
-  /** The writes waiting their turn, in order (not the one in flight). */
+  /** The writes waiting their turn, in order (not the one in flight): at most one per cell. */
   waiting: QueuedCellWrite[]
-  /** The newest write of each cell made since the queue started (it goes when the record's last write is answered). */
-  latest: Map<string, QueuedCellWrite>
   /** For each version an accepted write was sent with, the version it returned. */
   advanced: Map<number, number>
 }
@@ -1495,11 +1493,14 @@ export function useMultitableGrid(opts: {
    *   write at once, so the value was made on them). Any other version is sent as given: a change from elsewhere
    *   is still a conflict. A record off the page (a deep-linked one) keeps its version: its copy takes a write only
    *   once it is accepted.
-   * - The answer to an older write of a cell written again meanwhile does not take the cell back to the older value.
    * - A write still waiting when the same cell is written again is not sent (it returns `CELL_WRITE_SUPERSEDED`):
    *   only the cell's newest value goes out, rolled back and undone to what the cell held before the older one.
-   * - It counts as in flight from the call on (undo, redo and range writes wait), and goes to the sheet and view it
-   *   was made in.
+   * - The record's row keeps showing the writes still waiting, also when it was reloaded or merged meanwhile (the
+   *   server's answer to an older write brings its own link summaries for every link field). A write accepted after
+   *   the row was reloaded from an older version is shown on it; one rejected is rolled back on it.
+   * - It counts as in flight from the call on (undo, redo and range writes are refused until it is answered), and
+   *   goes to the sheet and view it was made in; its answer after a move to another sheet or view enters neither
+   *   that one's undo history nor its conflict.
    */
   async function patchCell(
     recordId: string,
@@ -1549,13 +1550,12 @@ export function useMultitableGrid(opts: {
 
     let queue = recordWriteQueues.get(recordId)
     if (!queue) {
-      queue = { waiting: [], latest: new Map(), advanced: new Map() }
+      queue = { waiting: [], advanced: new Map() }
       recordWriteQueues.set(recordId, queue)
-      queue.latest.set(fieldId, write)
     } else {
-      const older = queue.latest.get(fieldId)
-      const at = older ? queue.waiting.indexOf(older) : -1
-      if (older && at >= 0) {
+      const at = queue.waiting.findIndex((queued) => queued.fieldId === fieldId)
+      if (at >= 0) {
+        const older = queue.waiting[at]
         write.oldValue = older.oldValue
         write.oldLinkSummaries = older.oldLinkSummaries
         queue.waiting[at] = write
@@ -1563,7 +1563,6 @@ export function useMultitableGrid(opts: {
       } else {
         queue.waiting.push(write)
       }
-      queue.latest.set(fieldId, write)
       const turn = await new Promise<'send' | typeof CELL_WRITE_SUPERSEDED>((resolve) => { write.wake = resolve })
       if (turn === CELL_WRITE_SUPERSEDED) {
         activeGridWrites--
@@ -1572,6 +1571,14 @@ export function useMultitableGrid(opts: {
       }
     }
     const turns = queue
+    // The row as it is now (a reload or a merge replaces it) shows the writes still waiting.
+    const showWaiting = () => {
+      const live = rows.value.find((r) => r.id === recordId)
+      for (const queued of turns.waiting) {
+        if (live) live.data[queued.fieldId] = queued.value
+        if (queued.nextLinkSummaries) setLinkSummaries(recordId, queued.fieldId, queued.nextLinkSummaries)
+      }
+    }
 
     let expectedVersion = version
     if (write.inPage) {
@@ -1592,19 +1599,23 @@ export function useMultitableGrid(opts: {
           viewId,
           changes: [{ recordId, fieldId, value, expectedVersion }],
         })
+      const live = rows.value.find((r) => r.id === recordId)
+      const liveVersion = live?.version
       applyPatchResult(result)
-      const newer = turns.latest.get(fieldId)
-      if (newer && newer !== write) {
-        const current = rows.value.find((r) => r.id === recordId)
-        if (current) current.data[fieldId] = newer.value
-        if (newer.nextLinkSummaries) setLinkSummaries(recordId, fieldId, newer.nextLinkSummaries)
-      }
+      showWaiting()
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null
       const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
       if (typeof committedVersion === 'number') {
         if (committedVersion > expectedVersion) turns.advanced.set(expectedVersion, committedVersion)
+        // The row was reloaded or merged from a version before this write: it shows the value now stored (unless a
+        // newer write of the cell waits, which it shows).
+        if (live && live !== row && typeof liveVersion === 'number' && liveVersion < committedVersion
+          && !turns.waiting.some((queued) => queued.fieldId === fieldId)) {
+          live.data[fieldId] = value
+          if (write.nextLinkSummaries && !result.linkSummaries?.[recordId]?.[fieldId]) setLinkSummaries(recordId, fieldId, write.nextLinkSummaries)
+        }
         options?.onCommitted?.(committedVersion)
       }
       // Push to undo history — 人工补充行 B3 (N12): except a manual cell whose undo would CLEAR a column that must not be
@@ -1621,17 +1632,21 @@ export function useMultitableGrid(opts: {
       }
     } catch (e: any) {
       // Revert optimistic update — unless the cell was written again meanwhile: it shows that newer write, which
-      // now rolls back (and is undone) to what this one would have.
-      const newer = turns.latest.get(fieldId)
-      if (newer && newer !== write) {
+      // now rolls back (and is undone) to what this one would have. The row as it is now is rolled back too when it
+      // still shows this write (it was reloaded or merged meanwhile, and a waiting write put the value back).
+      const newer = turns.waiting.find((queued) => queued.fieldId === fieldId)
+      if (newer) {
         newer.oldValue = write.oldValue
         newer.oldLinkSummaries = write.oldLinkSummaries
       } else {
         if (row) row.data[fieldId] = write.oldValue
+        const live = rows.value.find((r) => r.id === recordId)
+        if (live && live !== row && live.data[fieldId] === value) live.data[fieldId] = write.oldValue
         setLinkSummaries(recordId, fieldId, write.oldLinkSummaries)
       }
+      showWaiting()
       lastBatchId.value = null
-      if (e?.code === 'VERSION_CONFLICT') {
+      if (e?.code === 'VERSION_CONFLICT' && contextId === rangeContextId) {
         conflict.value = {
           recordId,
           fieldId,
