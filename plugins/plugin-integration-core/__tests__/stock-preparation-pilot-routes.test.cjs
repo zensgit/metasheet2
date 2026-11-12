@@ -401,11 +401,11 @@ test('P-04 GET: absent → 200 absent; active (plain mount) → the readiness li
     assert.deepEqual(data.readiness.checks.map((check) => check.id), [...PILOT_READINESS_CHECK_IDS])
     // On a plain mount these cannot pass: no field read port (PLM lock / option lists unprovable), no closure port,
     // no 规格 declaration, no customer-pack declaration (pack_columns_installed, readiness version 2), inert
-    // registries, and the shipped build marker.
+    // registries. The build marker is NOT among them since S6-9 (it ships at 1; P-06 is the ready enable).
     // Readiness version 3: the pull-batch switch is off on a plain mount, so the six v3 checks fail too (with no IO).
     // Readiness version 6: the tenant-claim door is off (the default) on a plain mount, so tenant_claim_required fails too.
     // Readiness version 7: a plain mount wires no sheet-repair ledger, so no_open_sheet_repair_run fails too (never "no run").
-    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run', 'continuation_support_version'])
+    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run'])
     const text = JSON.stringify(active.body)
     assert.ok(!text.includes(sheetId) && !text.includes(objectId) && !text.includes(TENANT), 'values-free: no sheet id, objectId or tenant in the answer')
     assert.ok(!h.provisioning.calls.some(([verb]) => /^(ensure|patch|grant|close)/.test(verb)), 'GET writes nothing on the host')
@@ -424,7 +424,7 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
     const res = await enablePilot(h, WORKBENCH_ADMIN)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, PILOT_ERROR_CODES.NOT_READY)
-    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run', 'continuation_support_version'], partial: false })
+    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run'], partial: false })
     assert.deepEqual(await h.projectWriteLock.readState(scope), before, 'the generation did not move and no lease was taken')
     assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
     assert.ok(!h.db.calls.some((call) => /^(updateRow|transaction)/.test(call)), 'no registry write')

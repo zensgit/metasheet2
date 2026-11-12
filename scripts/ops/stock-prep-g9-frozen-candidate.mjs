@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Batch-refresh step 6 S6-9a (register rows R-91; 批次标识 R-65) — THE G9 FROZEN-CANDIDATE RUNNER (step-6 design §9.5).
 //
-// S6-9 flips CONTINUATION_SUPPORT_VERSION 0 -> 1 and re-pins the tests pinned to 0. Its acceptance is the G9 matrix run on
+// S6-9 flipped CONTINUATION_SUPPORT_VERSION 0 -> 1 and re-pinned the tests pinned to 0. Its acceptance is the G9 matrix run on
 // a FROZEN candidate: one sha, tagged, with the full CI dispatched on the TAG (the repo's ci-on-fixed-commit-via-tag
 // pattern: a run on refs/tags/<tag> is not cancelled by later pushes to main, and tests exactly the tagged commit). The
 // real-DB half of the matrix is the cases module packages/core-backend/tests/integration/stock-preparation-g9-acceptance-
@@ -13,6 +13,10 @@
 //   --plan --sha <sha> [--tag <name>]       print the exact freeze + dispatch commands, run nothing (the default mode)
 //   --dispatch --sha <sha> [--tag <name>]   WRITES: create the annotated tag at <sha>, push it, dispatch plugin-tests.yml
 //                                           and stock-prep-powershell51.yml on refs/tags/<tag>. Owner/coordinator only.
+//                                           When refs/tags/<tag> ALREADY exists (a release tag cut from the frozen
+//                                           commit, S6-9) it is never re-created or moved: it must resolve to <sha> here
+//                                           AND on origin (else a refusal before anything is written), and only the two
+//                                           dispatches run.
 //   --collect --tag <name> [--out <dir>]    read the tag's runs (gh run list --branch <tag>); when plugin-tests.yml is
 //                                           complete, save its whole log and evaluate it as --parse-log does, expecting
 //                                           the TAG'S OWN COMMIT (`git rev-parse <tag>^{commit}`, never a run's headSha)
@@ -53,7 +57,21 @@ const REPO_ROOT = join(HERE, '..', '..')
 export const MATRIX_PATH = join(REPO_ROOT, 'packages/core-backend/tests/integration/stock-preparation-g9-matrix.json')
 export const WORKFLOWS = Object.freeze(['plugin-tests.yml', 'stock-prep-powershell51.yml'])
 const MIGRATION_106 = 'packages/core-backend/migrations/106_extend_integration_stock_prep_refresh_execution_for_recovery.sql'
+const MIGRATION_108 = 'packages/core-backend/migrations/108_create_integration_stock_prep_sheet_repair.sql'
 const SHA_PATTERN = /^[0-9a-f]{40}$/
+
+/**
+ * The repair ledger's rollback stop-condition query, parsed out of a migration 108 text (its header's ROLLBACK paragraph:
+ * the comment line right after "Before rolling back, no run may be open:"), without its `;`. Throws when the header no
+ * longer carries it in that shape — the drill never prints a copied query. Pure.
+ */
+export function repairStopQueryOf(migrationText) {
+  const lines = String(migrationText).replace(/\r\n/g, '\n').split('\n')
+  const at = lines.findIndex((line) => /^--\s+.*Before rolling back, no run may be open:\s*$/.test(line))
+  const query = at >= 0 && at + 1 < lines.length ? /^--\s+(SELECT count\(\*\) FROM integration_stock_prep_sheet_repair_run WHERE status = 'running');\s*$/.exec(lines[at + 1]) : null
+  if (!query) throw new Error('migration 108 header: the rollback stop-condition query is not where the drill reads it')
+  return query[1]
+}
 
 export function loadMatrix(path = MATRIX_PATH) {
   const matrix = JSON.parse(readFileSync(path, 'utf8'))
@@ -174,12 +192,31 @@ function run(cmd, args, { allowFail = false } = {}) {
   return result
 }
 
-function planCommands(sha, tag) {
+/**
+ * The freeze + dispatch commands for <sha> on <tag>. `existingTagCommit` is what refs/tags/<tag> resolves to here (null
+ * when the tag does not exist). A NEW tag is created at <sha> and pushed; an EXISTING tag (a release tag cut from the
+ * frozen commit, S6-9) is never re-created or moved: it must already resolve to <sha> (else a refusal), and only the two
+ * workflow dispatches are planned (the tag must be on the remote already: `git ls-remote --tags origin <tag>`). Pure.
+ */
+export function planCommands(sha, tag, existingTagCommit = null) {
+  if (!SHA_PATTERN.test(String(sha))) throw new Error('planCommands needs a 40-hex sha')
+  if (existingTagCommit !== null && existingTagCommit !== sha) {
+    throw new Error(`refs/tags/${tag} already exists and resolves to ${existingTagCommit}, not ${sha}: refusing to move or reuse it`)
+  }
+  const dispatch = WORKFLOWS.map((workflow) => ['gh', ['workflow', 'run', workflow, '--ref', `refs/tags/${tag}`]])
+  if (existingTagCommit === sha) return dispatch
   return [
     ['git', ['tag', '-a', tag, sha, '-m', `S6-9 G9 frozen candidate ${sha.slice(0, 12)} (R-91)`]],
     ['git', ['push', 'origin', `refs/tags/${tag}`]],
-    ...WORKFLOWS.map((workflow) => ['gh', ['workflow', 'run', workflow, '--ref', `refs/tags/${tag}`]]),
+    ...dispatch,
   ]
+}
+
+/** What refs/tags/<tag> resolves to in this checkout (its commit), or null when no such tag exists here. */
+function existingTagCommitOf(tag) {
+  const resolved = run('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}^{commit}`], { allowFail: true })
+  const commit = resolved.status === 0 ? resolved.stdout.trim() : ''
+  return SHA_PATTERN.test(commit) ? commit : null
 }
 
 function printVerdict(verdict) {
@@ -251,6 +288,25 @@ function selfTest() {
     ['R-3: a green host line and a green summary still pass', verdictOf(dotGreen, sha).ok === true && verdictOf(dotGreen, sha).hostFileFailures.length === 0 && verdictOf(dotGreen, sha).failedSummaries.length === 0],
     ['owner-gated item listed on a PASS and on a refusal', verdictOf(green, sha).ownerGated.join() === `G9-U03-LEGACY-TENANTLESS-ADMIN: ${owner}` && verdictOf(censusRed, sha).ownerGated.length === 1],
     ['a red case carrying a riding id flags both', evaluateLog(`${checkout(sha)}[G9] S3A-02 ok {}\n FAIL  tests/integration/x.test.ts > a > S3A-02 + G9-U08 (U08) the run`, matrix, { expectSha: sha }).failedCases.join() === 'S3A-02,G9-U08'],
+    // S6-9: a frozen candidate may already carry a release tag. A NEW tag is created and pushed; an EXISTING tag at the
+    // same commit is dispatched only; an existing tag at ANOTHER commit is refused (never moved, never reused).
+    ['new tag: tag, push, then both dispatches', (() => {
+      const plan = planCommands(sha, 's6-9-g9-x')
+      return plan.length === 4 && plan[0][1][0] === 'tag' && plan[1][1][0] === 'push' && plan.slice(2).every(([cmd, args]) => cmd === 'gh' && args.includes('refs/tags/s6-9-g9-x'))
+    })()],
+    ['existing tag at the sha: the two dispatches only', (() => {
+      const plan = planCommands(sha, 'r-main-1', sha)
+      return plan.length === 2 && plan.every(([cmd, args]) => cmd === 'gh' && args[0] === 'workflow' && args.includes('refs/tags/r-main-1'))
+    })()],
+    ['existing tag at another commit: refused', (() => {
+      try { planCommands(sha, 'r-main-1', base); return false } catch (error) { return /refusing to move or reuse it/.test(error.message) }
+    })()],
+    ['the 108 stop query is parsed from the header, never copied', (() => {
+      const header = '-- ROLLBACK. the two tables then stay, inert. Before rolling back, no run may be open:\r\n--   SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = \'running\';\r\n-- must answer 0.'
+      let refused = false
+      try { repairStopQueryOf(header.replace('Before rolling back', 'Before rollback')) } catch { refused = true }
+      return repairStopQueryOf(header) === 'SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = \'running\'' && refused
+    })()],
   ]
   for (const [name, passed] of checks) console.log(`${passed ? 'ok' : 'NOT OK'} ${name}`)
   return checks.every(([, passed]) => passed)
@@ -275,18 +331,22 @@ export function main(argv = process.argv.slice(2)) {
   if (argv.includes('--old-build-drill')) {
     if (!sha || !SHA_PATTERN.test(sha)) throw new Error('--old-build-drill needs --sha <40-hex>')
     const added = run('git', ['log', '--diff-filter=A', '--format=%H', sha, '--', MIGRATION_106]).stdout.trim().split('\n').filter(Boolean).pop()
+    const stop108 = repairStopQueryOf(run('git', ['show', `${sha}:${MIGRATION_108}`]).stdout)
     console.log([
       'U07 old-build half (design §7.5 + B-22) — a dev database only, never a customer host:',
       `  1. candidate tree: git -c core.autocrlf=false archive ${sha}   (LF; check blob sha256)`,
       `  2. old tree:       git -c core.autocrlf=false archive ${added}^   (the parent of migration 106's first commit)`,
       '  3. a throwaway database: migrate it with the CANDIDATE tree, then produce the G9-U07 artifacts on it (an unfinished',
-      '     execution; a puller close not yet settled; a change plan left confirmed; a recovery-written plan).',
-      '  4. run the stop-condition queries (the 106 header query, parsed from the candidate\'s migration 106, and the 102-104',
-      '     ones): each non-zero.',
+      '     execution; a puller close not yet settled; a change plan left confirmed; a recovery-written plan) and the',
+      '     G9-S66-U07 one (a repair retire whose finish never ran: its run row left `running`).',
+      '  4. run the stop-condition queries (the 106 header query, parsed from the candidate\'s migration 106; the 102-104',
+      '     ones; and the 108 header query, parsed from the candidate\'s migration 108):',
+      `       ${stop108};`,
+      '     each non-zero. While the 108 query is non-zero the rollback is REFUSED: close the run first (the owner-approved',
+      '     verify_and_close_run, runbook §6), then re-run it (0).',
       '  5. start the OLD tree against that database with RunMigrations 0: preview / apply / export of each artifact\'s project',
       '     are refused where the queries say so; no ADD or INACTIVE row is written (meta_records count and revisions equal).',
       '  6. evidence values-free (counts and codes); DROP the database.',
-      '  Pending (S6-6, G9-S66-U07): a repair run left running joins step 3.',
     ].join('\n'))
     return 0
   }
@@ -319,11 +379,19 @@ export function main(argv = process.argv.slice(2)) {
   }
   if (!sha || !SHA_PATTERN.test(sha)) throw new Error('--plan / --dispatch need --sha <40-hex>')
   const tag = argValue(argv, '--tag') || defaultTag(sha)
-  const commands = planCommands(sha, tag)
+  const existing = existingTagCommitOf(tag)
+  const commands = planCommands(sha, tag, existing)
   if (!argv.includes('--dispatch')) {
+    if (existing) console.log(`refs/tags/${tag} exists here at ${existing} (= --sha): no tag is created or pushed; dispatch only`)
     for (const [cmd, args] of commands) console.log([cmd, ...args].join(' '))
     console.log(`then: node scripts/ops/stock-prep-g9-frozen-candidate.mjs --collect --tag ${tag}`)
     return 0
+  }
+  if (existing) {
+    // An existing tag is dispatched on the REMOTE: it must be there, at the same commit (an annotated tag's peeled line).
+    const remote = run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]).stdout
+    const peeled = (remote.split('\n').find((line) => line.endsWith(`refs/tags/${tag}^{}`)) || remote.split('\n').find((line) => line.endsWith(`refs/tags/${tag}`)) || '').split('\t')[0]
+    if (peeled !== sha) throw new Error(`refs/tags/${tag} on origin resolves to ${peeled || 'nothing'}, not ${sha}: push the tag (or fix --sha) first`)
   }
   for (const [cmd, args] of commands) {
     console.log(`> ${[cmd, ...args].join(' ')}`)
