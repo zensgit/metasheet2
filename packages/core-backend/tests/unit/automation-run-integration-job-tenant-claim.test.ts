@@ -14,6 +14,10 @@
  *   (3) how the chain RECORDS (2): the plugin port classifies the 403 as skipped(principal_unauthorized) with
  *       errorClass OPERATOR_SCOPE_TENANT_REQUIRED, and I5's run_integration_job step and its run_finished summary
  *       carry the same — status `skipped`, not `failed`. (Door off, the 400 is recorded failed(TENANT_REQUIRED).)
+ *       Cases (2) and (3) are the legacy `integration:read` branch, where the door sits;
+ *   (4) on the stock-prep OPERATOR branch an empty claim is refused by the operator scope itself (its own error
+ *       class, 403 OPERATOR_SCOPE_TENANT_REQUIRED) whatever the door says, and the port records it `failed`: the
+ *       port maps only an HttpRouteError 401/403 to skipped. So the record of an empty claim depends on the branch.
  * Synthetic only; nothing is written, the source is the harness's fake adapter.
  */
 import { createRequire } from 'node:module'
@@ -90,7 +94,7 @@ describe('run_integration_job port context vs the tenant-claim door (MULTITABLE_
       const summary = await createIntegrationRunPort({ governedEntries: m.governedEntries }).run({ context: contextFor(user), job: JOB, automation: AUTOMATION })
       expect(['succeeded', 'held'], `${user.id}: ${summary.status}`).toContain(summary.status)
     }
-  })
+  }, 20_000)
 
   it('(2) door ON: an EMPTY authenticatedTenantId is refused 403 OPERATOR_SCOPE_TENANT_REQUIRED; door OFF: the same context passes the check (the door is what refuses it)', async () => {
     const tenantless = { ...LEGACY, tenantId: '' }
@@ -103,7 +107,7 @@ describe('run_integration_job port context vs the tenant-claim door (MULTITABLE_
     const open = await settle(m.governedEntries.runGovernedStockPrepPull(contextFor(tenantless), JOB))
     // door off: the claim door does not refuse; the tenant resolver further down does (400 TENANT_REQUIRED)
     expect(open.ok ? 'no refusal' : [open.error.status, open.error.code]).toEqual([400, 'TENANT_REQUIRED'])
-  })
+  }, 20_000)
 
   it('(3) door ON, empty claim: the plugin port records skipped(principal_unauthorized, errorClass OPERATOR_SCOPE_TENANT_REQUIRED); the I5 step and its run_finished summary say skipped, not failed', async () => {
     vi.stubEnv(CLAIM_FLAG, 'true')
@@ -119,36 +123,60 @@ describe('run_integration_job port context vs the tenant-claim door (MULTITABLE_
     expect(doorOff).toEqual({ status: 'failed', errorClass: 'TENANT_REQUIRED', failureStage: 'authorize', durationMs: doorOff.durationMs })
     vi.stubEnv(CLAIM_FLAG, 'true')
     // the real run_integration_job step (fake ledgers), its principal resolved to the empty-claim user, the real port
-    const events: IntegrationRunFinishedEvent[] = []
-    registerIntegrationRunFinishedSink('test-claim', async (event) => { events.push(event) })
-    try {
-      const pluginPort = createIntegrationRunPort({ governedEntries: m.governedEntries })
-      const port: IntegrationRunPort = { run: (input) => pluginPort.run({ context: input.context, job: input.job, signal: input.signal, checkpoint: input.checkpoint, automation: input.automation }) }
-      const db = createFakeJobDb()
-      const tracked: Promise<void>[] = []
-      const exec = new AutomationExecutor({
-        eventBus: new EventBus(),
-        queryFn: db.query,
-        transaction: db.transaction,
-        integrationRunPort: () => port,
-        shutdownSignal: new AbortController().signal,
-        trackIntegrationJobTask: (task) => { tracked.push(task) },
-        resolveIntegrationRunPrincipal: async () => ({ ok: true, user: tenantless }),
-        integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300 },
-      } as AutomationDeps)
-      const config = { job: { kind: 'stock_prep_pull', projectNos: [PROJECT], applyMode: 'dry_run_only' }, timeoutMs: 5_000, binding: { principalId: LEGACY.id, tenantId: TENANT } }
-      const context: ExecutionContext = { executionId: 'exec_claim', ruleId: 'rule_claim', sheetId: 'sheet_claim', recordId: '', recordData: {}, ruleCreatedBy: LEGACY.id, triggerEvent: {}, rootExecutionId: 'exec_claim' }
-      const identity: ClassAActionIdentity = { structuralPath: '0', rootExecutionId: 'exec_claim' }
-      const step = await (exec as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i?: ClassAActionIdentity): Promise<AutomationStepResult> })
-        .executeSingleAction({ type: 'run_integration_job', config }, context, identity)
-      await Promise.all(tracked)
-      const unit = (step.output as { units: Array<Record<string, unknown>> }).units[0]
-      expect([step.status, (step.output as { outcome?: unknown }).outcome]).toEqual(['skipped', 'skipped'])
-      expect(unit).toMatchObject({ projectNo: PROJECT, outcome: 'skipped', reason: 'principal_unauthorized' })
-      expect(events).toHaveLength(1)
-      expect(events[0]).toMatchObject({ status: 'skipped', reason: 'principal_unauthorized', errorClass: 'OPERATOR_SCOPE_TENANT_REQUIRED', job: { kind: 'stock_prep_pull', projectNo: PROJECT } })
-    } finally {
-      clearIntegrationRunFinishedSinkForTest()
+    const { step, events } = await runStepFor(m.governedEntries, tenantless)
+    const unit = (step.output as { units: Array<Record<string, unknown>> }).units[0]
+    expect([step.status, (step.output as { outcome?: unknown }).outcome]).toEqual(['skipped', 'skipped'])
+    expect(unit).toMatchObject({ projectNo: PROJECT, outcome: 'skipped', reason: 'principal_unauthorized' })
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ status: 'skipped', reason: 'principal_unauthorized', errorClass: 'OPERATOR_SCOPE_TENANT_REQUIRED', job: { kind: 'stock_prep_pull', projectNo: PROJECT } })
+  }, 20_000)
+
+  it('(4) the OPERATOR branch (stock-prep codes, no integration:read) is different: an empty claim is refused by the operator scope itself (its own error class, 403 OPERATOR_SCOPE_TENANT_REQUIRED) whatever the door says, and the port records it FAILED (only an HttpRouteError 401/403 maps to skipped)', async () => {
+    vi.stubEnv(ACTION_FLAG, 'true')
+    vi.stubEnv(EVENT_FLAG, 'true')
+    const tenantless = { ...OPERATOR, tenantId: '' }
+    for (const door of ['true', '']) {
+      vi.stubEnv(CLAIM_FLAG, door)
+      const refused = await settle(m.governedEntries.runGovernedStockPrepPull(contextFor(tenantless), JOB))
+      expect(refused.ok ? 'passed' : [refused.error.name, refused.error.status, refused.error.code], 'door=' + door).toEqual(['StockPreparationOperatorScopeError', 403, 'OPERATOR_SCOPE_TENANT_REQUIRED'])
+      const summary = await createIntegrationRunPort({ governedEntries: m.governedEntries }).run({ context: contextFor(tenantless), job: JOB, automation: AUTOMATION })
+      expect(summary, 'door=' + door).toEqual({ status: 'failed', errorClass: 'OPERATOR_SCOPE_TENANT_REQUIRED', failureStage: 'read', durationMs: summary.durationMs })
     }
-  })
+    vi.stubEnv(CLAIM_FLAG, 'true')
+    const { step, events } = await runStepFor(m.governedEntries, tenantless)
+    expect((step.output as { units: Array<Record<string, unknown>> }).units[0]).toMatchObject({ projectNo: PROJECT, outcome: 'failed' })
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ status: 'failed', errorClass: 'OPERATOR_SCOPE_TENANT_REQUIRED' })
+  }, 20_000)
 })
+
+/** One run_integration_job step on the real executor (fake ledgers), its principal resolved to the given user, the real plugin port. */
+async function runStepFor(governedEntries: GovernedEntries, user: typeof LEGACY): Promise<{ step: AutomationStepResult; events: IntegrationRunFinishedEvent[] }> {
+  const events: IntegrationRunFinishedEvent[] = []
+  registerIntegrationRunFinishedSink('test-claim', async (event) => { events.push(event) })
+  try {
+    const pluginPort = createIntegrationRunPort({ governedEntries })
+    const port: IntegrationRunPort = { run: (input) => pluginPort.run({ context: input.context, job: input.job, signal: input.signal, checkpoint: input.checkpoint, automation: input.automation }) }
+    const db = createFakeJobDb()
+    const tracked: Promise<void>[] = []
+    const exec = new AutomationExecutor({
+      eventBus: new EventBus(),
+      queryFn: db.query,
+      transaction: db.transaction,
+      integrationRunPort: () => port,
+      shutdownSignal: new AbortController().signal,
+      trackIntegrationJobTask: (task) => { tracked.push(task) },
+      resolveIntegrationRunPrincipal: async () => ({ ok: true, user }),
+      integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300 },
+    } as AutomationDeps)
+    const config = { job: { kind: 'stock_prep_pull', projectNos: [PROJECT], applyMode: 'dry_run_only' }, timeoutMs: 5_000, binding: { principalId: user.id, tenantId: TENANT } }
+    const context: ExecutionContext = { executionId: 'exec_claim', ruleId: 'rule_claim', sheetId: 'sheet_claim', recordId: '', recordData: {}, ruleCreatedBy: user.id, triggerEvent: {}, rootExecutionId: 'exec_claim' }
+    const identity: ClassAActionIdentity = { structuralPath: '0', rootExecutionId: 'exec_claim' }
+    const step = await (exec as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i?: ClassAActionIdentity): Promise<AutomationStepResult> })
+      .executeSingleAction({ type: 'run_integration_job', config }, context, identity)
+    await Promise.all(tracked)
+    return { step, events }
+  } finally {
+    clearIntegrationRunFinishedSinkForTest()
+  }
+}
