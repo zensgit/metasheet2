@@ -36,6 +36,11 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['index.ts', './routes/admin-directory-capabilities'],
   ['integrations/feishu/config.ts', '../provider-capability-registry'],
   ['routes/admin-directory-feishu.ts', '../integrations/directory-integration-capabilities-flag'],
+  ['notifications/recipient-resolver.ts', '../integrations/provider-capability-registry'],
+  ['notifications/endpoints-service.ts', '../integrations/integration-capability-evaluate'],
+  ['notifications/endpoints-service.ts', '../integrations/directory-integration-capabilities-flag'],
+  ['notifications/endpoints-service.ts', '../integrations/integration-capability-implementations'],
+  ['notifications/endpoints-service.ts', '../integrations/provider-capability-registry'],
 ]
 
 const read = (file: string): string => readFileSync(file, 'utf8')
