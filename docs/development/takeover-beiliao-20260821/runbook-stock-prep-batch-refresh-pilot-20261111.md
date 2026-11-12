@@ -313,6 +313,8 @@ Remove-Variable token
 { "confirmProjectNo": "<项目号>", "componentHandle": "<一个项目普查里列出的句柄>", "basis": "head_not_ordered", "runbookRef": "<工单号>", "acknowledge": { "customerAnswered": true } }
 ```
 
+重新证明之前，先过和普查一样的关键列守卫（同 §5.2，S6-5b）：表上缺了五个关键列中的任何一个，答 409 `STOCK_PREP_SHEET_CENSUS_FIELD_MISSING`、什么都不记（不写确认行，也不写审计行）；宿主从数据库答不出时答 503 `STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE`，同样什么都不记（`http-routes.cjs:12541-12543`，守卫在 `:5602-5617`）。按 owner 批准的步骤补回列（不是本手册的步骤）、重跑这个项目的普查之后，再记确认。
+
 服务端在一次新的读取上重新证明这个句柄**现在**是 D2 残留，不是就 409 `STOCK_PREP_REMNANT_NOT_PRESENT`、什么都不写（`stock-preparation-remnant-acknowledgement.cjs:207-212`）；是就在一个事务里写确认行（迁移 107）和审计 `exception_resolve` / `remnant_acknowledged`。确认**不是**计划的输入：确认错了也是安全一侧——第一次受治理计算若仍读到这个部件的订单头，项目会挂起 `dropped_order_head_unresolved`，直到有裁定或退出试点（设计 §6.3）。
 
 ### 5.4 撤销
