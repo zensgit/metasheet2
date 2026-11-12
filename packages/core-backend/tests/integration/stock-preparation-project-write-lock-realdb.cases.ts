@@ -5794,8 +5794,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         // The six refresh routes (lib/http-routes.cjs stockPreparationRefresh*, lib/stock-preparation-refresh-decisions.cjs)
         // over the production host, lock, registry, audit store and refresh services, and the lock's in-transaction bump
         // (`bumpGenerationWithin`) inside the store's REAL transaction on PostgreSQL. Nested in S3A for its stack and
-        // helpers. The pilot column is SEEDED DIRECTLY (pilot enable is impossible on this build: the readiness marker
-        // CONTINUATION_SUPPORT_VERSION is 0). Synthetic values only.
+        // helpers. The pilot column is SEEDED DIRECTLY (these cases never run the enable route; the readiness marker
+        // CONTINUATION_SUPPORT_VERSION was 0 when they were written and is 1 since S6-9). Synthetic values only.
         //   S4-01 bumpGenerationWithin interleavings: (a) an ABANDONED carry_confirm lease with no execution row is cleared
         //         by the confirm's own transaction (epoch + 1, interruption recorded, the stalled holder LEASE_LOST); (b) a
         //         crashed apply (a `running` execution of a dead lease) refuses the ROUTE confirm RECOVERY_PENDING with the

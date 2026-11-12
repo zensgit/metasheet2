@@ -396,7 +396,7 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   // no_open_sheet_repair_run, before the marker.
   assert.equal(readiness.PILOT_READINESS_VERSION, 7)
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS.slice(-4), ['no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run', 'continuation_support_version'])
-  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
+  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 1, 'the build marker ships at 1 since S6-9, the last PR of the D-22 set (PR-3a / PR-3b kept it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
@@ -419,10 +419,14 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
   assert.ok(!text.includes(SHEET) && !text.includes(OBJECT) && !text.includes(PROJECT) && !text.includes(TENANT), 'values-free')
-  // The default build (marker 0) refuses exactly the marker, nothing else.
+  // A build at marker 0 (every build before S6-9) refuses exactly the marker, nothing else.
+  const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps()))
+  assert.deepEqual([...atZero.failing], ['continuation_support_version'])
+  assert.equal(atZero.ready, false)
+  // The shipped build (marker 1 since S6-9), with no in-memory override: the same satisfied fake is ready.
   const shipped = await readiness.evaluatePilotReadiness(readyDeps())
-  assert.deepEqual([...shipped.failing], ['continuation_support_version'])
-  assert.equal(shipped.ready, false)
+  assert.deepEqual([...shipped.failing], [])
+  assert.equal(shipped.ready, true)
 })
 
 test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly the expected failing set', async () => {
@@ -558,8 +562,11 @@ test('R-08 (readiness v6, owner ruling 2026-11-11, R-91 option A) tenant_claim_r
     assert.deepEqual([...on.failing], [])
     assert.equal(on.ready, true)
     // Marker 0 with the door off: both refuse, in list order (the door before the marker, which stays last).
+    const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false })))
+    assert.deepEqual([...atZero.failing], ['tenant_claim_required', 'continuation_support_version'])
+    // The shipped build (marker 1 since S6-9) with the door off: the door alone refuses.
     const shipped = await readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false }))
-    assert.deepEqual([...shipped.failing], ['tenant_claim_required', 'continuation_support_version'])
+    assert.deepEqual([...shipped.failing], ['tenant_claim_required'])
   } finally {
     if (before === undefined) delete process.env[FLAG]
     else process.env[FLAG] = before
@@ -673,8 +680,11 @@ test('R-09 (readiness v7, batch-refresh S6-5b, R-91) no_open_sheet_repair_run: O
     else process.env[SWITCH] = before
   }
   // Marker 0 with an open run: both refuse, in list order (the new check before the marker, which stays last).
+  const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) })))
+  assert.deepEqual([...atZero.failing], ['no_open_sheet_repair_run', 'continuation_support_version'])
+  // The shipped build (marker 1 since S6-9) with an open run: the open run alone refuses.
   const shipped = await readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) }))
-  assert.deepEqual([...shipped.failing], ['no_open_sheet_repair_run', 'continuation_support_version'])
+  assert.deepEqual([...shipped.failing], ['no_open_sheet_repair_run'])
   // The shared reader the enable route re-asks under its lease: the same answers, and a throw passes through.
   const read = readiness.readNoOpenSheetRepairRun
   const scope = { tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }
@@ -708,9 +718,14 @@ test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator
   assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'change_plan_store_readable', 'execution_recovery_ready', 'no_unacknowledged_inactive_root_remnant', 'no_open_sheet_repair_run'])
   assert.equal(pullBatchStatusCalls, 1, 'the six v3 checks share ONE status read per evaluation')
   assert.ok(!JSON.stringify(answer).includes(SHEET), 'a thrown message never travels into the answer')
-  const empty = await readiness.evaluatePilotReadiness({})
+  // With no inputs nothing is ready: at marker 0 every check fails; on the shipped build (marker 1 since S6-9) every
+  // check but the build marker itself, which reads no input.
+  const empty = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness({}))
   assert.equal(empty.ready, false)
   assert.equal(empty.failing.length, readiness.PILOT_READINESS_CHECK_IDS.length, 'nothing is ready with no inputs')
+  const emptyShipped = await readiness.evaluatePilotReadiness({})
+  assert.equal(emptyShipped.ready, false)
+  assert.deepEqual([...emptyShipped.failing], readiness.PILOT_READINESS_CHECK_IDS.filter((id) => id !== 'continuation_support_version'), 'nothing but the marker is ready with no inputs')
 })
 
 test('R-04 collectGenericWriterTargets: both registries must answer; object configs and erp-feedback options are collected', async () => {

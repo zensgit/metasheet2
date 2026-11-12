@@ -1,10 +1,10 @@
 /**
  * Batch-refresh step 6 S6-9a (register rows R-91 and, for 批次标识, R-65) — THE G9 FROZEN-CANDIDATE ACCEPTANCE HARNESS for
  * the continuation marker flip (step-6 design §9.5; the 2026-11-09 rebaseline B-21). Tests only: no product behaviour
- * changes here and `CONTINUATION_SUPPORT_VERSION` STAYS 0 — the positive pilot-enable leg flips it IN MEMORY for one call
- * (the unfrozen export the readiness suite already uses) and the module's afterAll asserts it is back at 0. S6-9 proper
- * flips the literal, re-pins the tests pinned to 0 and runs THIS matrix on a tag-dispatched frozen sha
- * (scripts/ops/stock-prep-g9-frozen-candidate.mjs).
+ * changes here. S6-9 FLIPPED `CONTINUATION_SUPPORT_VERSION` to 1 (stock-preparation-continuation-support.cjs): the cases
+ * read the SHIPPED 1, the marker-0 refusal leg of G9-PE sets 0 IN MEMORY for two calls (the unfrozen export the readiness
+ * suite already uses) and the module's afterAll asserts it is back at 1. THIS matrix is S6-9's acceptance on a
+ * tag-dispatched frozen sha (scripts/ops/stock-prep-g9-frozen-candidate.mjs).
  *
  * This is a CASES MODULE, not a test file. `defineStockPreparationG9AcceptanceRealDbCases(kit)` registers its describe
  * block from INSIDE the S8 describe of stock-preparation-project-write-lock-realdb.cases.ts — the deepest scope that sees
@@ -53,22 +53,22 @@
  *            stop-condition queries non-zero — the 106 one is PARSED OUT OF THE MIGRATION 106 HEADER, never copied —
  *            the current build refuses where they say so, and every query is zero once settled. The old-build half (a
  *            pre-step-6 build against a step-6 database) cannot run in a one-build host: the runner prints it
- *            (`--old-build-drill`); the repair-run artifact is S6-6's (pending id G9-S66-U07).
+ *            (`--old-build-drill`); the repair-run artifact is G9-S66-U07 below.
  *   G9-PE    the positive pilot-enable leg (§9.2) on a fully prepared synthetic sheet — the band installed by the REAL
  *            install route with its history RESOLVED (backfilled, not born empty), views live, the switch ON: with the
- *            marker at 0 `continuation_support_version` is the ONLY failing id and the enable is 409 with nothing done;
- *            with the marker 1 IN MEMORY the readiness is green and the enable 200 stamps the registry with the current
+ *            marker set to 0 IN MEMORY `continuation_support_version` is the ONLY failing id and the enable is 409 with
+ *            nothing done; with the SHIPPED marker 1 the readiness is green and the enable 200 stamps the registry with the current
  *            PILOT_READINESS_VERSION (read from the module, never a literal). Readiness v5's component ruling ledger
  *            (S6-5, migration 107) is wired, so its no_unacknowledged_inactive_root_remnant passes on the prepared sheet.
  *            Readiness v6 (owner ruling 2026-11-11, R-91 option A): the leg HOLDS the tenant-claim flag exactly 'true'
  *            (this process's env, restored in finally; every call carries the verified claim) to pass, and its negative
- *            leg — marker 1, flag OFF — is 409 with `tenant_claim_required` the ONLY failing id and nothing done.
+ *            leg — the shipped marker 1, flag OFF — is 409 with `tenant_claim_required` the ONLY failing id and nothing done.
  *            Readiness v7 (S6-5b): the prepared sheet wires the REAL sheet-repair ledger (migration 108), so
  *            no_open_sheet_repair_run passes; the leg pins version 7 with that id just before the marker.
  *   G9-S65-V5  (S6-5, #6842) on the same prepared sheet: an inactive-root remnant fails ONLY that v5 id beyond the
- *            marker; the project census lists exactly its handle; the acknowledgement through the REAL route lifts
+ *            tenant-claim flag's; the project census lists exactly its handle; the acknowledgement through the REAL route lifts
  *            exactly that check and the revoke restores it; the enable stays 409.
- *   G9-S65B-V7 (S6-5b, readiness v7) on a G9-PE prepared sheet with the marker 1 IN MEMORY and the tenant-claim flag ON: a
+ *   G9-S65B-V7 (S6-5b, readiness v7) on a G9-PE prepared sheet with the SHIPPED marker 1 and the tenant-claim flag ON: a
  *            repair run of the sheet begun by the REAL repair ledger under a REAL sheet_repair lease and left `running`
  *            (the lease released — a run whose finish never ran) fails ONLY no_open_sheet_repair_run and the enable is 409
  *            with exactly that id and nothing done; the run closed by the ledger's own verified close under a NEW lease,
@@ -81,15 +81,29 @@
  *   G9-S65-U03 (S6-5, #6842) rides G9-U03 (`G9-U03 + G9-S65-U03`): the census and remnant routes join the drill, with a
  *            real component handle and acknowledgement id of this tenant.
  *
- * EXTENSION POINTS (the matrix file's `pending` list; each is a `test.todo` below so the gap is visible in every run):
- *   S6-6 (migration 108): G9-S66-U03, G9-S66-U07, G9-S66-INSTALLING. Whoever lands them replaces the todo with the case
- *   and moves the id to `realDb`. G9-U03's scope is the whole capability manifest minus a named pre-step-4 list, so a
- *   route S6-6 adds fails its manifest equality until it is drilled.
- *   S6-6's three routes (#6843: the repair POST, its fills report, its run list) ARE in G9-U03's tier oracle since
- *   that PR, drilled with the repair switch OFF — the deployment default: 403 below stock-prep admin with nothing
- *   written and no audit row, and the surface's own 404 for every caller at or above the tier (this tenant's admin,
- *   the tenantless platform admin, a cross-tenant admin; real id or bogus; every steering carrier). That is NOT
- *   G9-S66-U03: the drill with the switch ON (the tenant gate and the scoped reads behind it) stays pending.
+ *   G9-S9D-01 / -04 / -05 (S6-9; S6-5's S9D-01 / -04 / -05, whose governed pilot-pull legs #6842 left to G9) an item-10
+ *            sheet (design §6.1 D2) made by a pre-step-4 pull, the band installed: H1 (S-001 still ordered) — readiness
+ *            refuses only the remnant, the enable is 409, and a governed pull (the pilot marked by the harness) SUSPENDS on
+ *            dropped_order_head_unresolved; H0 with the acknowledgement — readiness green, the REAL enable 200, the governed
+ *            pull CLEAN, settled complete, the export 200; H1 with a WRONG acknowledgement — the REAL enable 200, the
+ *            governed pull still SUSPENDS (fail closed). Expected outcomes are the design's (§6.1, §6.3, §10 S6-5).
+ *   G9-S66-U03 (S6-9; S6-6 #6843) U03 with the repair switch ON on a D1 sheet whose retire RAN: every repair route and
+ *            mode below stock-prep admin 403; a tenantless admin and a cross-tenant puller / admin sent THIS tenant's
+ *            real handle, run id and plan digests answer byte-for-byte what they answer for ids that exist nowhere, are
+ *            refused at the tenant gate (or by the closed input) on every steering carrier, never echo this tenant's ids
+ *            and write nothing in it; this tenant's own admin is answered with the data.
+ *   G9-S66-U07 (S6-9) U07's repair-run artifact: a retire through the REAL route whose finish never ran leaves its run
+ *            `running`; the 108 stop-condition query, PARSED OUT OF THE MIGRATION 108 HEADER, answers 1 and the enable is
+ *            refused; the REAL verify_and_close_run closes it with no row written and the query answers 0.
+ *   G9-S66-INSTALLING (S6-9; rebaseline B-9) the REAL install route stopped mid-flight with the batch switch ON leaves
+ *            the sheet `installing`: the repair previews not eligible and its execute is 409 INSTALL_IN_PROGRESS with
+ *            nothing written; the install finished by the same route, the repair runs.
+ *
+ * EXTENSION POINTS: the matrix file's `pending` list (each a `test.todo` below, so a gap is visible in every run) is
+ * EMPTY since S6-9 — the census test asserts it. G9-U03's scope is the whole capability manifest minus a named
+ * pre-step-4 list, so a route a later PR adds fails its manifest equality until it is drilled (or listed in the matrix
+ * with a reason). S6-6's three routes are in G9-U03's tier oracle with the repair switch OFF (the deployment default:
+ * 403 below stock-prep admin, the surface's own 404 at or above it) and in G9-S66-U03 with it ON.
  */
 import { createRequire } from 'module'
 import path from 'node:path'
@@ -103,6 +117,8 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const PLUGIN_LIB = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
 const MATRIX_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'stock-preparation-g9-matrix.json')
 const MIGRATION_106 = path.join(REPO_ROOT, 'packages/core-backend/migrations/106_extend_integration_stock_prep_refresh_execution_for_recovery.sql')
+// S6-9 (G9-S66-U07): migration 108's header carries the repair ledger's rollback stop-condition query; the case parses it.
+const MIGRATION_108 = path.join(REPO_ROOT, 'packages/core-backend/migrations/108_create_integration_stock_prep_sheet_repair.sql')
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const fs = require('node:fs') as typeof import('node:fs')
 const nodeCrypto = require('node:crypto') as typeof import('node:crypto')
@@ -419,18 +435,20 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         await q(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]).catch(() => {})
       }
     }
-    // The marker is process-global for the whole p4 file: G9-PE must have restored it.
-    expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(0)
+    // The marker is process-global for the whole p4 file: G9-PE's marker-0 leg must have restored the shipped 1 (S6-9).
+    expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(1)
     // So is the tenant-claim flag (G9-U03's claim leg, G9-PE's flag-on legs): restored to what the host had.
     expect(process.env[TENANT_CLAIM_FLAG]).toBe(TENANT_CLAIM_FLAG_AT_LOAD)
   })
 
   describe(`${G9_MATRIX.describe} (S6-9a, R-91 / R-65): the step-6 §9.5 matrix on real Postgres, the real routes, lock, stores and host`, () => {
-    test('G9 census: every real-DB id of the matrix has exactly one case; the marker ships at 0 (S6-9 flips the literal, this harness never does)', () => {
+    test('G9 census: every real-DB id of the matrix has exactly one case, none is pending; the marker ships at 1 (S6-9 flipped the literal; the harness sets 0 in memory only for its refusal legs)', () => {
       // Runs after the describe body registered every case (collection is synchronous).
       expect([...registered].sort()).toEqual([...G9_MATRIX.realDb].sort())
       expect(new Set(registered).size).toBe(registered.length)
-      expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(0)
+      expect(continuationSupport.CONTINUATION_SUPPORT_VERSION).toBe(1)
+      // S6-9: every extension id of S6-5 / S6-6 is a real case now (the runner and the todo loop still read the list).
+      expect(G9_MATRIX.pending).toEqual([])
       for (const entry of G9_MATRIX.pending) expect(G9_MATRIX.realDb.includes(entry.id)).toBe(false)
       // The owner-gated exception G9-U03 pins is a MANUAL item with its exact sentence (the runner prints it in every
       // verdict), never a real-DB id: no `[G9] ... ok` line certifies it.
@@ -1405,6 +1423,30 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           }
         }
       }
+      // S6-9 (the #6844 follow-up): THE STEERING OF THE TWO SETTINGS-SET ROUTES, asserted. The drill above sends a stale
+      // version, so a version conflict could hide a carrier that is not refused; here every tenant-holding foreign caller
+      // and the tenantless admin name THIS tenant on the query / params carrier with THIS tenant's REAL current version
+      // (its tenant row's, or 0 when it has none; its sheet row's): refused at the gate (403), and the no-write proof below
+      // covers these calls too.
+      const tenantSettingsVersion = Number(((await q('SELECT version FROM integration_stock_prep_pull_batch_settings WHERE tenant_id = $1', [st.tenantId])).rows[0] || { version: 0 }).version)
+      const sheetSettingsVersion = Number((await q('SELECT version FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1 AND sheet_id = $2', [st.tenantId, st.sheetId])).rows[0].version)
+      const settingsSteering: Record<string, string> = {}
+      for (const id of ['pullBatch.settingsSet', 'projectTarget.pullBatchSettingsSet']) {
+        const entry = drilled.find((route: any) => route.id === id)
+        const request = validRequest(entry, REAL)
+        const realVersion = id === 'pullBatch.settingsSet' ? tenantSettingsVersion : sheetSettingsVersion
+        for (const [name, user] of Object.entries(foreign)) {
+          for (const carrier of ['query', 'params']) {
+            const steered = carrier === 'query'
+              ? { ...request, query: { ...request.query, tenantId: st.tenantId }, body: { ...request.body, expectedVersion: realVersion } }
+              : { ...request, params: { ...request.params, tenantId: st.tenantId }, body: { ...request.body, expectedVersion: realVersion } }
+            const res = await send(entry, user, steered)
+            settingsSteering[`${name}:${id}:${carrier}`] = answerOf(res)
+            leakCheck(`${name}:${id}:steer-real-version-${carrier}`, res, realSent)
+          }
+        }
+      }
+      const settingsSteeredStale = Object.fromEntries(['pullBatch.settingsSet', 'projectTarget.pullBatchSettingsSet'].flatMap((id) => Object.keys(foreign).flatMap((name) => ['query', 'params'].map((carrier) => [`${name}:${id}:${carrier}`, steering[`${name}:${carrier}`][id]]))))
       const afterRefusals = await tenantRows()
       // ── THE OWNER-GATED LEG G9-U03-LEGACY-TENANTLESS-ADMIN (PRE-EXISTING product behaviour; ruled 2026-11-11, option A) ──
       const dryRunEntry = drilled.find((route: any) => route.id === 'pull.dry-run')
@@ -1515,6 +1557,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         listedBodyStopsNotSeen: listedBodyStops.filter((stop) => !bodyStops.includes(stop)).sort(),
         // The four decision routes that carry a real id: a cross-tenant caller's VALID body reaches the scoped read.
         decisionForeign: Object.fromEntries(['crossPuller', 'crossAdmin'].map((name) => [name, decisionIds.map((id) => foreignAnswers[name][id])])),
+        // The two settings-set routes, steered (stale version from the drill, then this tenant's REAL version): every
+        // carrier naming this tenant is refused at the gate, whatever the version says.
+        settingsSteering: { stale: settingsSteeredStale, realVersion: settingsSteering },
         leaks,
         refusalsWroteNothing: afterRefusals.fingerprint === before.fingerprint,
         refusalsAudited: afterRefusals.audits - before.audits,
@@ -1546,6 +1591,14 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
           crossPuller: ['404:STOCK_PREP_REFRESH_HOLD_NOT_FOUND', '404:STOCK_PREP_CONTINUATION_NOT_FOUND', '409:STOCK_PREP_CHANGE_PLAN_STALE', '404:STOCK_PREP_CHANGE_PLAN_NOT_FOUND'],
           crossAdmin: ['404:STOCK_PREP_REFRESH_HOLD_NOT_FOUND', '404:STOCK_PREP_CONTINUATION_NOT_FOUND', '409:STOCK_PREP_CHANGE_PLAN_STALE', '404:STOCK_PREP_CHANGE_PLAN_NOT_FOUND'],
         },
+        settingsSteering: (() => {
+          // The tenantless admin is refused for naming a tenant it holds no claim to, the cross-tenant puller below the
+          // admin tier, the cross-tenant admin for naming another tenant than its own — on every carrier and version.
+          const expected = Object.fromEntries(['pullBatch.settingsSet', 'projectTarget.pullBatchSettingsSet'].flatMap((id) => [
+            ['tenantless', '403:OPERATOR_SCOPE_TENANT_REQUIRED'], ['crossPuller', '403:FORBIDDEN'], ['crossAdmin', '403:OPERATOR_SCOPE_TENANT_MISMATCH'],
+          ].flatMap(([name, answer]) => ['query', 'params'].map((carrier) => [`${name}:${id}:${carrier}`, answer]))))
+          return { stale: expected, realVersion: expected }
+        })(),
         leaks: [],
         refusalsWroteNothing: true,
         refusalsAudited: 0,
@@ -1743,7 +1796,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     // The fully prepared synthetic sheet (shared by G9-PE and G9-S65-V5): two switch-off pulls, the band installed by the
     // REAL install route with its history backfilled, the recovery store, the pack ledger and (readiness v5, S6-5) the
     // component ruling ledger wired.
-    async function preparedPilotSheet(label: string, wrapRepairStore?: (real: any) => any) {
+    // S6-9 (G9-S9D-*): `options.secondSource` replaces the second (switch-off, NOT governed) pull's source — the item-10
+    // sheet's pre-step-4 pull. Every earlier caller passes none and gets the unchanged two-root second pull.
+    async function preparedPilotSheet(label: string, wrapRepairStore?: (real: any) => any, options: { secondSource?: any } = {}) {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
       const realRepairStore = sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
       // G9-S65B-LEASE wraps the ledger the ROUTES are handed (a hook around listRunsOf); the case's own calls use the same.
@@ -1764,7 +1819,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       await both(false, async () => {
         st.state.data = CF.firstPullSource()
         await firstPullApplied(st)
-        st.state.data = CF.project({ orders: [{ part: 'S-001', qty: 10 }, { part: 'N-001', qty: 1 }], parts: CF.PARTS.slice(), boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: 4 }] } })
+        st.state.data = options.secondSource || CF.project({ orders: [{ part: 'S-001', qty: 10 }, { part: 'N-001', qty: 1 }], parts: CF.PARTS.slice(), boms: { 'S-001': [{ part: 'PART-A', usage: 2 }, { part: 'PART-B', usage: 3 }], 'PART-A': [{ part: 'PART-C', usage: 4 }] } })
         const dry = await st.dryRun()
         expect((await st.apply(st.users.puller, dry.body.data.dryRunToken)).statusCode).toBe(200)
       })
@@ -1805,30 +1860,27 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       }
     }
 
-    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store and the component ruling ledger wired, the tenant-claim flag HELD ON (readiness v6, owner ruling 2026-11-11 option A): with the marker at 0 `continuation_support_version` is the ONLY failing id (readiness v5\'s no_unacknowledged_inactive_root_remnant passes) and the enable is 409 with nothing done; NEGATIVE LEG — the marker 1 IN MEMORY and the flag OFF: `tenant_claim_required` is the ONLY failing id and the enable is 409 with nothing done; with the marker 1 and the flag ON (both restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
+    g9Case('G9-PE', '(§9.2, B-21) a FULLY prepared synthetic sheet — the band installed by the REAL install route with its history backfilled (resolved), views live, the 批次标识 switch ON, the recovery store and the component ruling ledger wired, the tenant-claim flag HELD ON (readiness v6, owner ruling 2026-11-11 option A): with the marker set to 0 IN MEMORY (every build before S6-9; restored in finally) `continuation_support_version` is the ONLY failing id (readiness v5\'s no_unacknowledged_inactive_root_remnant passes) and the enable is 409 with nothing done; NEGATIVE LEG — the SHIPPED marker 1 and the flag OFF: `tenant_claim_required` is the ONLY failing id and the enable is 409 with nothing done; with the shipped marker 1 and the flag ON (restored in finally) the readiness is green and the enable 200 stamps the current PILOT_READINESS_VERSION', async () => {
       const { st, read, enable, registry } = await preparedPilotSheet('g9_pe')
       const gen0 = await st.generation()
-      const { atZero, refused } = await withTenantClaim('true', async () => ({ atZero: await read(), refused: await enable() }))
-      const genAfterRefusal = await st.generation()
-      const registryAfterRefusal = await registry()
+      // S6-9: the shipped literal is 1. The marker-0 refusal leg sets 0 IN MEMORY for its two calls only (the enable is
+      // set-once, so every refusal leg runs before the positive enable lands).
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
-      expect(markerBefore).toBe(0)
-      let flagOffAtOne: any
-      let flagOffRefused: any
-      let genAfterFlagOffRefusal: any
-      let registryAfterFlagOffRefusal: any
-      let atOne: any
-      let enabled: any
-      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+      expect(markerBefore).toBe(1)
+      let atZero: any
+      let refused: any
+      continuationSupport.CONTINUATION_SUPPORT_VERSION = 0
       try {
-        // The NEGATIVE leg FIRST: the enable is set-once, so it must be refused before the positive enable lands.
-        ;({ flagOffAtOne, flagOffRefused } = await withTenantClaim(null, async () => ({ flagOffAtOne: await read(), flagOffRefused: await enable() })))
-        genAfterFlagOffRefusal = await st.generation()
-        registryAfterFlagOffRefusal = await registry()
-        ;({ atOne, enabled } = await withTenantClaim('true', async () => ({ atOne: await read(), enabled: await enable() })))
+        ;({ atZero, refused } = await withTenantClaim('true', async () => ({ atZero: await read(), refused: await enable() })))
       } finally {
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
       }
+      const genAfterRefusal = await st.generation()
+      const registryAfterRefusal = await registry()
+      const { flagOffAtOne, flagOffRefused } = await withTenantClaim(null, async () => ({ flagOffAtOne: await read(), flagOffRefused: await enable() }))
+      const genAfterFlagOffRefusal = await st.generation()
+      const registryAfterFlagOffRefusal = await registry()
+      const { atOne, enabled } = await withTenantClaim('true', async () => ({ atOne: await read(), enabled: await enable() }))
       const observed = {
         version: atZero.body.data.readiness.version,
         checkIds: atZero.body.data.readiness.checks.map((check: any) => check.id),
@@ -1858,7 +1910,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         failingAtOne: [],
         enabled: [200, true],
         registry: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
-        markerRestored: 0,
+        markerRestored: 1,
         flagRestored: true,
       })
       // Readiness v7 (S6-5b, R-91): the version and the new id, just before the marker; the prepared sheet's real repair
@@ -1868,7 +1920,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     })
 
     // ── G9-S65-V5: readiness v5's remnant check on the prepared sheet (S6-5, #6842) ─────────────────────────────────────
-    g9Case('G9-S65-V5', '(S6-5 readiness v5, §9.5) on the G9-PE prepared sheet, the tenant-claim flag at its default OFF (so readiness v6\'s tenant_claim_required fails beside the marker throughout): the v5 check no_unacknowledged_inactive_root_remnant is in the readiness and passes; an inactive-root remnant (PART-A\'s old ROOT row inactive while PART-A stays active under S-001) fails ONLY that id beyond the marker, the project census lists exactly its handle, the acknowledgement through the REAL route lifts exactly that check (back to G9-PE\'s marker-0 answer) and the revoke restores it; the enable stays 409 and the registry unmarked throughout', async () => {
+    g9Case('G9-S65-V5', '(S6-5 readiness v5, §9.5) on the G9-PE prepared sheet, the tenant-claim flag at its default OFF (so readiness v6\'s tenant_claim_required fails throughout; the shipped marker 1 passes): the v5 check no_unacknowledged_inactive_root_remnant is in the readiness and passes; an inactive-root remnant (PART-A\'s old ROOT row inactive while PART-A stays active under S-001) fails ONLY that id beyond the flag\'s, the project census lists exactly its handle, the acknowledgement through the REAL route lifts exactly that check (back to the flag\'s id alone) and the revoke restores it; the enable stays 409 and the registry unmarked throughout', async () => {
       const { st, spAdmin, read, enable, registry } = await preparedPilotSheet('g9_v5')
       const failing = async () => {
         const res = await read()
@@ -1910,14 +1962,14 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       expect(observed).toEqual({
         v5CheckPresent: true,
         version: readinessLib.PILOT_READINESS_VERSION,
-        prepared: inOrder('tenant_claim_required', 'continuation_support_version'),
-        withRemnant: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'continuation_support_version'),
+        prepared: inOrder('tenant_claim_required'),
+        withRemnant: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required'),
         censusComponents: [[true, true]],
         refusedWithRemnant: [409, 'STOCK_PREP_PILOT_NOT_READY'],
-        afterAcknowledge: inOrder('tenant_claim_required', 'continuation_support_version'),
+        afterAcknowledge: inOrder('tenant_claim_required'),
         ledger: [{ kind: 'remnant_acknowledged', status: 'active', same_handle: true }],
         revoke: [200, 'revoked'],
-        afterRevoke: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'continuation_support_version'),
+        afterRevoke: inOrder('no_unacknowledged_inactive_root_remnant', 'tenant_claim_required'),
         refusedAfterRevoke: [409, 'STOCK_PREP_PILOT_NOT_READY'],
         rowsAdded: 1,
         registry: { enabled: false, pilot_readiness_version: null },
@@ -1927,7 +1979,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     })
 
     // ── G9-S65B-V7: readiness v7's open-run check on the prepared sheet (S6-5b) ─────────────────────────────────────────
-    g9Case('G9-S65B-V7', '(S6-5b readiness v7) on a G9-PE prepared sheet, the marker 1 IN MEMORY and the tenant-claim flag ON (both restored in finally): a repair run begun by the REAL ledger under a REAL sheet_repair lease and left running (its lease released) fails ONLY no_open_sheet_repair_run and the enable is 409 with exactly that id and nothing done; closed by the ledger\'s verified close under a NEW lease, the readiness is green and the enable 200 stamps PILOT_READINESS_VERSION', async () => {
+    g9Case('G9-S65B-V7', '(S6-5b readiness v7) on a G9-PE prepared sheet, the SHIPPED marker 1 and the tenant-claim flag ON (restored in finally): a repair run begun by the REAL ledger under a REAL sheet_repair lease and left running (its lease released) fails ONLY no_open_sheet_repair_run and the enable is 409 with exactly that id and nothing done; closed by the ledger\'s verified close under a NEW lease, the readiness is green and the enable 200 stamps PILOT_READINESS_VERSION', async () => {
       const { st, read, enable, registry, repairStore } = await preparedPilotSheet('g9_v7')
       const RT_RUN: string = sheetRepairStoreLib.SHEET_REPAIR_TABLES.run
       const openRuns = async () => Number((await q(`SELECT count(*)::int AS n FROM ${RT_RUN} WHERE sheet_id = $1 AND status = 'running'`, [st.sheetId])).rows[0].n)
@@ -1944,10 +1996,10 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         }
       }
       const runId = `sheet-repair:${nodeCrypto.randomUUID()}`
+      // S6-9: the SHIPPED marker is 1 (no in-memory flip); the finally still puts back what it read.
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
-      expect(markerBefore).toBe(0)
+      expect(markerBefore).toBe(1)
       let observed: any
-      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
       try {
         observed = await withTenantClaim('true', async () => {
           const prepared = (await read()).body.data.readiness.failing
@@ -2006,7 +2058,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         failingAfterClose: [],
         enabled: [200, true],
         registry: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
-        markerRestored: 0,
+        markerRestored: 1,
         flagRestored: true,
       })
       expect(readinessLib.PILOT_READINESS_VERSION).toBe(7)
@@ -2014,7 +2066,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     })
 
     // ── G9-S65B-LEASE: the enable's in-lease re-read on real PG (S6-5b, review of #6886) ─────────────────────────────
-    g9Case('G9-S65B-LEASE', '(S6-5b readiness v7, the window) on a G9-PE prepared sheet, the marker 1 IN MEMORY and the tenant-claim flag ON: a repair run begun right after the enable POST\'s own readiness read (under a REAL sheet_repair lease, then released) is refused by the in-lease re-read — 409 with exactly no_open_sheet_repair_run, two ledger reads, no stamp, mark or audit row, the lease released; while the enable holds the sheet lease a sheet_repair lease is WRITE_LOCKED; closed, the enable 200 stamps PILOT_READINESS_VERSION', async () => {
+    g9Case('G9-S65B-LEASE', '(S6-5b readiness v7, the window) on a G9-PE prepared sheet, the SHIPPED marker 1 and the tenant-claim flag ON: a repair run begun right after the enable POST\'s own readiness read (under a REAL sheet_repair lease, then released) is refused by the in-lease re-read — 409 with exactly no_open_sheet_repair_run, two ledger reads, no stamp, mark or audit row, the lease released; while the enable holds the sheet lease a sheet_repair lease is WRITE_LOCKED; closed, the enable 200 stamps PILOT_READINESS_VERSION', async () => {
       const hook: any = { calls: 0, after: null, before: null }
       const { st, read, enable, registry, repairStore } = await preparedPilotSheet('g9_lease', (real: any) => ({
         ...real,
@@ -2044,10 +2096,10 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         }
       }
       const runId = `sheet-repair:${nodeCrypto.randomUUID()}`
+      // S6-9: the SHIPPED marker is 1 (no in-memory flip); the finally still puts back what it read.
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
-      expect(markerBefore).toBe(0)
+      expect(markerBefore).toBe(1)
       let observed: any
-      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
       try {
         observed = await withTenantClaim('true', async () => {
           const prepared = (await read()).body.data.readiness.failing
@@ -2142,10 +2194,575 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         registryAfter: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
         stampAfter: 'stock_prep_pilot',
         pilotAuditsAfter: 1,
-        markerRestored: 0,
+        markerRestored: 1,
         flagRestored: true,
       })
       g9Pass('G9-S65B-LEASE', observed)
+    })
+
+    // ── G9-S9D-01 / -04 / -05: the governed pilot-pull legs of S6-5's S9D cases on an item-10 (D2) sheet (S6-9) ─────
+    // The item-10 shape (design §6.1 D2) made the way the customer's sheet was made: a pre-step-4 (NOT governed) second
+    // pull whose source orders P-001 with S-001 inside it — the old planner ADDs the P-001 subtree with the S-001 copies
+    // and sweeps S-001's own root subtree INACTIVE. H1: S-001's own order line is still read (CF.secondPullSource());
+    // H0: it is no longer read (`sLine: false`). The expected outcomes are the design's (§6.1 「The head condition」,
+    // §6.3, §10 S6-5), never a measured answer pinned after the fact. The readiness and census halves of S9D-01 / -04
+    // are S9D-01r (#6842); these cases add the governed pilot pull (#6842's 「Not covered」).
+    async function item10PilotSheet(label: string, headStillOrdered: boolean) {
+      const sheet = await preparedPilotSheet(label, undefined, { secondSource: CF.secondPullSource({ sLine: headStillOrdered }) })
+      const { st, spAdmin } = sheet
+      const handle: string = sheetCensusLib.__internals.componentHandle(st.tenantId, st.projectNo, 'S-001')
+      const p = physicalOf(st)
+      // The shape, read back from PostgreSQL: the first pull's four rows (S-001's own root subtree) swept inactive; S-001's
+      // root row inactive and exactly one active S-001 copy nested under P-001.
+      const rows = await st.rows()
+      const s001 = rows.filter((row: any) => row.data[p('componentSourceId')] === 'S-001')
+      const shape = {
+        inactiveRows: rows.filter((row: any) => row.data[p('active')] === false).length,
+        s001Roots: s001.filter((row: any) => !row.data[p('parentSourceId')]).map((row: any) => row.data[p('active')]),
+        s001ActiveCopies: s001.filter((row: any) => row.data[p('parentSourceId')] && row.data[p('active')] !== false).length,
+      }
+      const census = await censusRead(st, spAdmin)
+      expect(census.statusCode, JSON.stringify(census.body)).toBe(200)
+      // Exactly ONE inactive-root remnant, and it is S-001's (the handle is compared, never printed).
+      const components = (census.body.data.components as Array<{ componentHandle: string; acknowledgement: unknown }>).map((entry) => [entry.componentHandle === handle, entry.acknowledgement === null])
+      // The swept old rows' versions before any governed computation (an inactive old row SKIPs already_inactive, F6-18).
+      const oldRoots = new Map<string, number>(rows.filter((row: any) => row.data[p('active')] === false).map((row: any) => [String(row.id), Number(row.version)]))
+      return { ...sheet, handle, shape, components, oldRoots }
+    }
+    // One governed pilot pull through the REAL routes (the 批次标识 switch ON): the preview, and the apply of its token
+    // when it is ready. The open holds afterwards (their kind and whether the hold names S-001; values-free).
+    async function governedPilotPull(st: any) {
+      const main0 = await st.main()
+      const dry = await both(true, () => st.dryRun())
+      expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+      const ready = status(dry) === 'ready'
+      const applied = ready ? await both(true, () => st.apply(st.users.puller, dry.body.data.dryRunToken)) : null
+      const holds = (await q(`SELECT kind, detail->>'componentSourceId' = 'S-001' AS names_s001 FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open' ORDER BY opened_at, id`, [st.sheetId, st.projectNo])).rows
+      const exported = await both(true, () => st.exportLines())
+      return {
+        preview: [dry.statusCode, status(dry), tokenOf(dry) === null || tokenOf(dry) === undefined ? 'no_token' : typeof tokenOf(dry)],
+        apply: applied ? [applied.statusCode, status(applied)] : null,
+        openHolds: holds.map((row: any) => [row.kind, row.names_s001]),
+        rowsAdded: (await st.main()).count - main0.count,
+        mainUnchanged: sameJson(await st.main(), main0),
+        derived: await derivedStatus(st),
+        export: exported.statusCode === 200 ? 'exported' : `${exported.statusCode}`,
+      }
+    }
+    const oldRootsUnchanged = async (st: any, oldRoots: Map<string, number>) => {
+      const p = physicalOf(st)
+      const now = (await st.rows()).filter((row: any) => oldRoots.has(String(row.id)))
+      return now.length === oldRoots.size && now.every((row: any) => Number(row.version) === oldRoots.get(String(row.id)) && row.data[p('active')] === false)
+    }
+    const failingOf = (res: any) => (res && res.body && res.body.error && res.body.error.details ? JSON.parse(JSON.stringify(res.body.error.details)).failing : null)
+
+    g9Case('G9-S9D-01', '(S6-5 S9D-01, the governed pilot-pull leg; design §6.1 H1, §6.3) an item-10 sheet (D2: S-001\'s own root subtree swept INACTIVE by a pre-step-4 pull, its copies ACTIVE under P-001) whose source STILL orders S-001 (H1), the band installed and the tenant-claim flag ON on the shipped marker 1: the census lists exactly its one remnant, readiness refuses ONLY no_unacknowledged_inactive_root_remnant and the enable is 409 with nothing marked; the pilot then marked by the harness (the planner leg: the real enable cannot pass, which is the point), the governed pull SUSPENDS on dropped_order_head_unresolved naming S-001 — no token, no row written, the old rows untouched; the hold has NO confirm control (§6.1 customer_rule_pending): the puller\'s confirm through the REAL route, with the page\'s own receipt and the hold\'s fingerprints, is 409 CONFIRM_NOT_ALLOWED (this kind has no confirm control) and writes nothing', async () => {
+      const { st, read, enable, registry, shape, components, oldRoots } = await item10PilotSheet('g9_s9d01', true)
+      const { failing, refused } = await withTenantClaim('true', async () => ({ failing: (await read()).body.data.readiness.failing, refused: await enable() }))
+      const registryAfterRefusal = await registry()
+      // The harness marks the pilot (as s3aStack's `pilot: true` does): the planner's governed leg on this shape.
+      await q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = now(), pilot_enabled_by = $3, pilot_readiness_version = $4 WHERE tenant_id = $1 AND project_no = $2', [st.tenantId, st.projectNo, 'u_g9_s9d01_harness', readinessLib.PILOT_READINESS_VERSION])
+      const pulled = await governedPilotPull(st)
+      // §6.1: the H1 hold is customer_rule_pending with NO confirm. Stored as such, shown as such on the puller's page,
+      // and the REAL confirm route refuses the puller's confirm of it (valid body, the page's receipt, the hold's own
+      // fingerprints) with nothing written: no step-4 row, no sheet row, the hold unchanged.
+      const holdRow = (await q(`SELECT id, fingerprint, comparison_fingerprint, evidence_fingerprint, confirmable, not_confirmable_reason FROM ${RT.hold} WHERE sheet_id = $1 AND project_no = $2 AND status = 'open' AND kind = 'dropped_order_head_unresolved'`, [st.sheetId, st.projectNo])).rows[0]
+      const page = await both(true, () => callRoute(st.routes, 'GET', RP.holds, { user: st.users.puller, query: {}, params: { projectNo: st.projectNo } }))
+      expect(page.statusCode, JSON.stringify(page.body)).toBe(200)
+      const entry = (page.body.data.page.holds as any[]).find((item: any) => item.id === holdRow.id)
+      const stepFourBefore = await stepFour(st.tenantId)
+      const mainBefore = await st.main()
+      const confirmAttempt = await both(true, () => callRoute(st.routes, 'POST', RP.confirm, {
+        user: st.users.puller,
+        params: { projectNo: st.projectNo },
+        body: {
+          confirmProjectNo: st.projectNo,
+          holdId: holdRow.id,
+          holdFingerprint: holdRow.fingerprint,
+          // This kind carries no comparison / evidence fingerprint (NULL): any non-empty echo passes the parse, so the
+          // confirm reaches the route's own decision instead of a 400 on the body.
+          comparisonFingerprint: holdRow.comparison_fingerprint || 'g9_s9d01_none',
+          evidenceFingerprint: holdRow.evidence_fingerprint || 'g9_s9d01_none',
+          candidateId: entry ? (entry.candidateId ?? null) : null,
+          readReceipt: page.body.data.readReceipt.id,
+          basis: { kind: 'puller_confirmed_same_demand' },
+          acknowledge: { historyUnknown: true },
+        },
+      }))
+      const observed = {
+        shape,
+        components,
+        failing,
+        refused: [refused.statusCode, codeOf(refused), failingOf(refused)],
+        registryAfterRefusal,
+        preview: pulled.preview,
+        apply: pulled.apply,
+        openHolds: pulled.openHolds,
+        mainUnchanged: pulled.mainUnchanged,
+        oldRootsUnchanged: await oldRootsUnchanged(st, oldRoots),
+        noConfirm: {
+          stored: [holdRow.confirmable, holdRow.not_confirmable_reason],
+          onPage: entry ? entry.confirmable : 'absent',
+          attempt: [confirmAttempt.statusCode, codeOf(confirmAttempt), reasonOf(confirmAttempt)],
+          wroteNothing: (await stepFour(st.tenantId)) === stepFourBefore && sameJson(await st.main(), mainBefore),
+        },
+      }
+      expect(observed).toEqual({
+        shape: { inactiveRows: 4, s001Roots: [false], s001ActiveCopies: 1 },
+        components: [[true, true]],
+        failing: ['no_unacknowledged_inactive_root_remnant'],
+        refused: [409, 'STOCK_PREP_PILOT_NOT_READY', ['no_unacknowledged_inactive_root_remnant']],
+        registryAfterRefusal: { enabled: false, pilot_readiness_version: null },
+        preview: [200, 'suspended', 'no_token'],
+        apply: null,
+        openHolds: [['dropped_order_head_unresolved', true]],
+        mainUnchanged: true,
+        oldRootsUnchanged: true,
+        noConfirm: {
+          stored: [false, 'customer_rule_pending'],
+          onPage: false,
+          attempt: [409, 'STOCK_PREP_CONTINUATION_CONFIRM_NOT_ALLOWED', 'kind'],
+          wroteNothing: true,
+        },
+      })
+      g9Pass('G9-S9D-01', { ...observed, components: components.length })
+    })
+
+    g9Case('G9-S9D-04', '(S6-5 S9D-04, the governed pilot-pull leg; design §6.1 H0, §6.3) the same item-10 sheet whose source NO LONGER orders S-001 (H0): readiness refuses ONLY the remnant; the admin\'s acknowledgement through the REAL route (the customer\'s Q1 answer: head_not_ordered) lifts it, readiness is green and the REAL enable 200 stamps PILOT_READINESS_VERSION on the shipped marker 1; the first governed pilot pull is CLEAN — ready, the apply succeeded, no hold, no row added, the inactive old rows untouched (SKIP already_inactive) — the project settles complete and the formal export is 200', async () => {
+      const { st, spAdmin, read, enable, registry, handle, shape, components, oldRoots } = await item10PilotSheet('g9_s9d04', false)
+      const observed = await withTenantClaim('true', async () => {
+        const before = (await read()).body.data.readiness.failing
+        const acknowledged = await acknowledgeRemnant(st, spAdmin, handle)
+        const after = (await read()).body.data.readiness.failing
+        const enabled = await enable()
+        return {
+          shape,
+          components,
+          failingBefore: before,
+          acknowledged: acknowledged.statusCode,
+          failingAfterAcknowledge: after,
+          enabled: [enabled.statusCode, enabled.body.data && enabled.body.data.enabled],
+          registry: await registry(),
+        }
+      })
+      const pulled = await governedPilotPull(st)
+      const full = { ...observed, pull: { preview: pulled.preview, apply: pulled.apply, openHolds: pulled.openHolds, rowsAdded: pulled.rowsAdded, derived: pulled.derived, export: pulled.export }, oldRootsUnchanged: await oldRootsUnchanged(st, oldRoots) }
+      expect(full).toEqual({
+        shape: { inactiveRows: 4, s001Roots: [false], s001ActiveCopies: 1 },
+        components: [[true, true]],
+        failingBefore: ['no_unacknowledged_inactive_root_remnant'],
+        acknowledged: 201,
+        failingAfterAcknowledge: [],
+        enabled: [200, true],
+        registry: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
+        pull: { preview: [200, 'ready', 'string'], apply: [200, 'succeeded'], openHolds: [], rowsAdded: 0, derived: 'complete', export: 'exported' },
+        oldRootsUnchanged: true,
+      })
+      g9Pass('G9-S9D-04', { ...full, components: components.length })
+    })
+
+    g9Case('G9-S9D-05', '(S6-5 S9D-05, the governed pilot-pull leg; design §6.3 「A wrong acknowledgement fails closed」) the item-10 sheet whose source STILL orders S-001 (H1) with a WRONG acknowledgement recorded through the REAL route: readiness is green and the REAL enable 200 on the shipped marker 1 (an acknowledgement is not a planner input, RA-09), yet the first governed pilot pull SUSPENDS on dropped_order_head_unresolved naming S-001 — no token, no row written, the old rows untouched, the export refused', async () => {
+      const { st, spAdmin, read, enable, registry, handle, shape, components, oldRoots } = await item10PilotSheet('g9_s9d05', true)
+      const observed = await withTenantClaim('true', async () => {
+        const acknowledged = await acknowledgeRemnant(st, spAdmin, handle)
+        const after = (await read()).body.data.readiness.failing
+        const enabled = await enable()
+        return {
+          shape,
+          components,
+          acknowledged: acknowledged.statusCode,
+          failingAfterAcknowledge: after,
+          enabled: [enabled.statusCode, enabled.body.data && enabled.body.data.enabled],
+          registry: await registry(),
+        }
+      })
+      const pulled = await governedPilotPull(st)
+      const full = { ...observed, pull: { preview: pulled.preview, apply: pulled.apply, openHolds: pulled.openHolds, mainUnchanged: pulled.mainUnchanged, exported: pulled.export === 'exported' }, oldRootsUnchanged: await oldRootsUnchanged(st, oldRoots) }
+      expect(full).toEqual({
+        shape: { inactiveRows: 4, s001Roots: [false], s001ActiveCopies: 1 },
+        components: [[true, true]],
+        acknowledged: 201,
+        failingAfterAcknowledge: [],
+        enabled: [200, true],
+        registry: { enabled: true, pilot_readiness_version: readinessLib.PILOT_READINESS_VERSION },
+        pull: { preview: [200, 'suspended', 'no_token'], apply: null, openHolds: [['dropped_order_head_unresolved', true]], mainUnchanged: true, exported: false },
+        oldRootsUnchanged: true,
+      })
+      g9Pass('G9-S9D-05', { ...full, components: components.length })
+    })
+
+    // ── G9-S66-*: S6-6's G9 ids (#6843, migration 108) on a DOUBLED (D1) sheet through the REAL repair routes (S6-9) ──
+    // The sheet of design §6.1 D1, seeded row by row as the repair cases' world seeds it (two pulls' rows, both subtrees
+    // active; a person's note on S-001's root) on the S3A stack with the REAL sheet-repair ledger (108), the REAL batch
+    // ledger (105) and the source answering H0 (S-001 no longer ordered on its own — the retire's precondition). Every
+    // repair call runs with the repair switch exactly 'true' and the batch switch at `pull` (restored in finally).
+    const SMALL_LANE_RUN_ID = `table-action:${tableActions.PLM_STOCK_PREPARATION_ACTION_ID}`
+    const REPAIR_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair'
+    const REPAIR_FILLS_PATH = `${REPAIR_PATH}/fills-report`
+    const REPAIR_RUNS_PATH = `${REPAIR_PATH}/runs`
+    // The library's own spellings: the two recipes and the one continuation.
+    const [RETIRE, RESTORE] = sheetRepairLib.SHEET_REPAIR_RECIPES as [string, string]
+    const CLOSE: string = sheetRepairLib.SHEET_REPAIR_CONTINUATIONS[0]
+    const RT_REPAIR_RUN: string = sheetRepairStoreLib.SHEET_REPAIR_TABLES.run
+    const RT_REPAIR_CLAIM: string = sheetRepairStoreLib.SHEET_REPAIR_TABLES.claim
+    const withRepairSwitch = async <T>(pull: boolean, fn: () => Promise<T>): Promise<T> => {
+      const before = process.env[SHEET_REPAIR_SWITCH]
+      process.env[SHEET_REPAIR_SWITCH] = 'true'
+      try {
+        return await both(pull, fn)
+      } finally {
+        if (before === undefined) delete process.env[SHEET_REPAIR_SWITCH]
+        else process.env[SHEET_REPAIR_SWITCH] = before
+      }
+    }
+    async function doubledSheet(label: string, opts: { repairStore?: (real: any) => any; routeMultitable?: (multitable: any) => any; pull?: boolean } = {}) {
+      const pull = opts.pull === true
+      const realRepairStore = sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
+      const repairStore = opts.repairStore ? opts.repairStore(realRepairStore) : realRepairStore
+      const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
+      const st = await s3aStack(label, {
+        pilot: false,
+        data: CF.secondPullSource({ sLine: false }),
+        routeMultitable: opts.routeMultitable,
+        serviceExtras: {
+          stockPreparationSheetRepairStore: repairStore,
+          stockPreparationPullBatchStore: ledgerStore,
+          stockPreparationPackInstallStore: packInstallStoreLib.createStockPreparationPackInstallStore({ db: createDb({ database: createProductionPluginContext().api.database }) }),
+          stockPreparationComponentRulingStore: rulingStore(),
+        },
+        routeConfigExtras: { stockPreparationPilot: { specReadPlanSlot: 'not_applicable', customerPack: 'not_applicable' } },
+      })
+      tenants.push(st.tenantId)
+      const fields: Record<string, string> = { ...st.target.fieldIdMap }
+      const first = CF.applyToSheet(CF.plan(await CF.expand(CF.firstPullSource()), [], { runId: SMALL_LANE_RUN_ID }), [], { idPrefix: 'g9_s66_s', human: { 'S-001': { notes: 'synthetic note' } } })
+      const second = CF.applyToSheet(CF.plan(await CF.expand(CF.secondPullSource({ sLine: false })), [], { runId: SMALL_LANE_RUN_ID }), [], { idPrefix: 'g9_s66_p' })
+      const oldIds: string[] = []
+      const copyIds: string[] = []
+      for (const [index, row] of first.concat(second).entries()) {
+        const created = await st.multitable.records.createRecord({ sheetId: st.sheetId, data: { [fields.projectNo]: st.projectNo } })
+        const patch: Record<string, unknown> = {}
+        for (const [logical, value] of Object.entries(row)) {
+          if (!fields[logical]) throw new Error(`fixture field ${logical} is not on the sheet`)
+          patch[fields[logical]] = value
+        }
+        await q('UPDATE meta_records SET data = data || $2::jsonb WHERE id = $1', [created.id, JSON.stringify(patch)])
+        ;(index < first.length ? oldIds : copyIds).push(String(created.id))
+      }
+      expect([oldIds.length, copyIds.length]).toEqual([4, 6])
+      const handle: string = sheetCensusLib.__internals.componentHandle(st.tenantId, st.projectNo, 'S-001')
+      const spAdmin = { id: `u_g9_s66_${label}_${TOKEN}`, tenantId: st.tenantId, permissions: [access.STOCK_PREP_ADMIN] }
+      const repair = (user: any, body: Record<string, unknown>, request: { params?: any; query?: any } = {}) => withRepairSwitch(pull, () => callRoute(st.routes, 'POST', REPAIR_PATH, { user, params: { projectNo: st.projectNo, ...(request.params || {}) }, query: request.query || {}, body }))
+      const repairGet = (user: any, routePath: string, query: Record<string, unknown> = {}, params: Record<string, unknown> = {}) => withRepairSwitch(pull, () => callRoute(st.routes, 'GET', routePath, { user, params: { projectNo: st.projectNo, ...params }, query, body: {} }))
+      const runs = async () => (await q(`SELECT id, recipe, status, sequence_no FROM ${RT_REPAIR_RUN} WHERE tenant_id = $1 ORDER BY sequence_no`, [st.tenantId])).rows
+      const stored = async () => (await q('SELECT id, version, data::text AS data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows.map((row: any) => `${row.id}@${row.version}:${nodeCrypto.createHash('sha256').update(String(row.data)).digest('hex').slice(0, 16)}`)
+      return { st, fields, oldIds, copyIds, handle, spAdmin, repair, repairGet, runs, stored, repairStore, ledgerStore }
+    }
+    const dataOrFail = (res: any) => {
+      expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+      return res.body.data
+    }
+    const pilotFailing = async (st: any, user: any) => {
+      const res = await both(true, () => callRoute(st.routes, 'GET', PILOT_PATH, { user, params: { projectNo: st.projectNo }, query: {} }))
+      expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+      return res.body.data.readiness.failing as string[]
+    }
+
+    g9Case('G9-S66-U03', '(U03 with the repair switch ON; S6-6 #6843) the three repair routes — the POST\'s preview / execute of retire, restore and verify_and_close_run, the fills report, the run list — on a D1 sheet whose retire RAN (a real run id, the spent retire digest, an unspent restore digest, the real component handle): below stock-prep admin 403; a TENANTLESS platform admin and a cross-tenant puller / admin sent THIS tenant\'s real ids answer exactly what they answer for ids that exist nowhere, are refused at the tenant gate (403) or by the closed input (400) when a carrier names this tenant, never answer 2xx with this tenant\'s data, never echo its ids, and write nothing in it; this tenant\'s own admin is answered with the data (the ids are real)', async () => {
+      const d = await doubledSheet('g9_s66u03')
+      const confirmProjectNo = d.st.projectNo
+      // THE FIXTURE: the retire ran (one completed run), and the restore of that run previews eligible (its digest unspent).
+      const retirePreview = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle }))
+      const retired = dataOrFail(await d.repair(d.spAdmin, { mode: 'execute', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle, planDigest: retirePreview.planDigest, approvalRef: 'R-91:g9-s66-u03' }))
+      expect(retired.status).toBe('completed')
+      const restorePreview = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RESTORE, confirmProjectNo, runId: retired.runId }))
+      expect(restorePreview.eligible).toBe(true)
+      const REAL = { handle: d.handle, runId: String(retired.runId), retireDigest: String(retirePreview.planDigest), restoreDigest: String(restorePreview.planDigest), closeDigest: 'd'.repeat(64) }
+      const BOGUS = { handle: sheetCensusLib.__internals.componentHandle(d.st.tenantId, d.st.projectNo, 'G9-NO-SUCH-PART'), runId: 'sheet-repair:00000000-0000-4000-8000-000000000000', retireDigest: 'e'.repeat(64), restoreDigest: 'f'.repeat(64), closeDigest: 'd'.repeat(64) }
+      // The cross-tenant callers' OWN tenant registers the same project number on its own (empty) sheet.
+      const other = await s3aStack('g9_s66u03x', { pilot: false, serviceExtras: { stockPreparationSheetRepairStore: sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db: createDb({ database: createProductionPluginContext().api.database }) }), stockPreparationPullBatchStore: pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) }) } })
+      tenants.push(other.tenantId)
+      const callers: Record<string, any> = {
+        reader: { id: `u_g9_s66_r_${TOKEN}`, tenantId: d.st.tenantId, permissions: [access.STOCK_PREP_READ] },
+        operator: { id: `u_g9_s66_o_${TOKEN}`, tenantId: d.st.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE] },
+        puller: { id: `u_g9_s66_p_${TOKEN}`, tenantId: d.st.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] },
+      }
+      const foreign: Record<string, any> = {
+        tenantless: { id: `u_g9_s66_t_${TOKEN}`, roles: ['admin'], permissions: ['integration:admin'] },
+        crossPuller: { id: `u_g9_s66_xp_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_READ, access.STOCK_PREP_OPERATE, access.STOCK_PREP_PULL] },
+        crossAdmin: { id: `u_g9_s66_xa_${TOKEN}`, tenantId: other.tenantId, permissions: [access.STOCK_PREP_ADMIN] },
+      }
+      type RepairRequest = { method: 'GET' | 'POST'; path: string; body: Record<string, unknown>; query: Record<string, unknown> }
+      const requests: Record<string, (ids: typeof REAL) => RepairRequest> = {
+        'retire.preview': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: ids.handle } }),
+        'retire.execute': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'execute', recipe: RETIRE, confirmProjectNo, componentHandle: ids.handle, planDigest: ids.retireDigest, approvalRef: 'R-91:g9-s66-u03-x' } }),
+        'restore.preview': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'preview', recipe: RESTORE, confirmProjectNo, runId: ids.runId } }),
+        'restore.execute': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'execute', recipe: RESTORE, confirmProjectNo, runId: ids.runId, planDigest: ids.restoreDigest, approvalRef: 'R-91:g9-s66-u03-x' } }),
+        'close.preview': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'preview', recipe: CLOSE, confirmProjectNo, runId: ids.runId } }),
+        'close.execute': (ids) => ({ method: 'POST', path: REPAIR_PATH, query: {}, body: { mode: 'execute', recipe: CLOSE, confirmProjectNo, runId: ids.runId, planDigest: ids.closeDigest, approvalRef: 'R-91:g9-s66-u03-x' } }),
+        'fills.read': (ids) => ({ method: 'GET', path: REPAIR_FILLS_PATH, query: { componentHandle: ids.handle }, body: {} }),
+        'runs.read': () => ({ method: 'GET', path: REPAIR_RUNS_PATH, query: {}, body: {} }),
+      }
+      const send = (user: any, request: RepairRequest, extra: { params?: any; query?: any; body?: any } = {}) => withRepairSwitch(false, () => callRoute(d.st.routes, request.method, request.path, {
+        user,
+        params: { projectNo: d.st.projectNo, ...(extra.params || {}) },
+        query: { ...request.query, ...(extra.query || {}) },
+        body: request.method === 'GET' ? {} : { ...request.body, ...(extra.body || {}) },
+      }))
+      const answerOf = (res: any) => `${res.statusCode}:${codeOf(res) || '-'}`
+      const bodyOf = (res: any, ids: Record<string, string>) => {
+        let text = `${res.statusCode}:${JSON.stringify(res.body || {})}`
+        for (const value of Object.values(ids)) text = text.split(value).join('<sent>')
+        return text
+      }
+      // THIS tenant's rows: the repair ledger, the claims, every stored sheet row, its audit rows, the lock row.
+      const tenantRows = async () => JSON.stringify({
+        runs: (await q(`SELECT id, status, sequence_no FROM ${RT_REPAIR_RUN} WHERE tenant_id = $1 ORDER BY sequence_no`, [d.st.tenantId])).rows,
+        claims: Number((await q(`SELECT count(*)::int AS n FROM ${RT_REPAIR_CLAIM} WHERE tenant_id = $1`, [d.st.tenantId])).rows[0].n),
+        stored: await d.stored(),
+        audits: Number((await q('SELECT count(*)::int AS n FROM integration_stock_prep_audit WHERE tenant_id = $1', [d.st.tenantId])).rows[0].n),
+        lock: (await q(`SELECT generation, generation_token, lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [d.st.key])).rows,
+      })
+      // THIS tenant's ids (and its plan digests) — none may appear in a foreign answer of ANY status, except what it sent.
+      const tenantIds = [d.st.sheetId, d.st.objectId, ...(await d.st.rows()).map((row: any) => String(row.id)), REAL.handle, REAL.runId, REAL.retireDigest, REAL.restoreDigest]
+      const leaks: string[] = []
+      const leakCheck = (label: string, res: any, sent: string[]) => {
+        const text = JSON.stringify(res.body || {})
+        const found = tenantIds.filter((id) => !sent.includes(id) && text.includes(id))
+        if (found.length) leaks.push(`${label}:${found.length}`)
+      }
+      // The control: THIS tenant's own admin, on the same real ids, is answered with the data; the bogus ids are not found.
+      const ownControl: Record<string, unknown> = {}
+      const ownRestoreReal = await send(d.spAdmin, requests['restore.preview'](REAL))
+      const ownRestoreBogus = await send(d.spAdmin, requests['restore.preview'](BOGUS))
+      const ownRuns = await send(d.spAdmin, requests['runs.read'](REAL))
+      const ownFills = await send(d.spAdmin, requests['fills.read'](REAL))
+      ownControl.restoreReal = [answerOf(ownRestoreReal), ownRestoreReal.body.data && ownRestoreReal.body.data.eligible]
+      ownControl.restoreBogus = [answerOf(ownRestoreBogus), ownRestoreBogus.body.data ? ownRestoreBogus.body.data.refusals : reasonOf(ownRestoreBogus)]
+      ownControl.runsListsTheRun = [answerOf(ownRuns), Array.isArray(ownRuns.body.data && ownRuns.body.data.runs) && ownRuns.body.data.runs.some((run: any) => run.runId === REAL.runId || run.id === REAL.runId)]
+      ownControl.fills = [answerOf(ownFills), ownFills.body.data && ownFills.body.data.found]
+      // Phase 1 — below the tier, then every foreign caller on the real and bogus ids and every steering carrier.
+      const before = await tenantRows()
+      const belowTier: string[] = []
+      for (const [name, user] of Object.entries(callers)) {
+        for (const [id, build] of Object.entries(requests)) {
+          const res = await send(user, build(REAL))
+          if (res.statusCode !== 403) belowTier.push(`${name}:${id}:${answerOf(res)}`)
+        }
+      }
+      const realSent = Object.values(REAL)
+      const foreignAnswers: Record<string, Record<string, string>> = {}
+      const realVsBogus: string[] = []
+      const steering: Record<string, Record<string, string>> = {}
+      const foreign2xxWithData: string[] = []
+      for (const [name, user] of Object.entries(foreign)) {
+        for (const [id, build] of Object.entries(requests)) {
+          const real = await send(user, build(REAL))
+          const bogus = await send(user, build(BOGUS))
+          ;(foreignAnswers[name] ||= {})[id] = answerOf(real)
+          // NO EXISTENCE ORACLE, on the WHOLE answer: the real and the bogus answer are the same once each echoes its own
+          // sent ids (a 200 preview's refusals and counts included, not only the status and the code).
+          if (bodyOf(real, REAL) !== bodyOf(bogus, BOGUS)) realVsBogus.push(`${name}:${id}:${answerOf(real)}!=${answerOf(bogus)}`)
+          leakCheck(`${name}:${id}`, real, realSent)
+          leakCheck(`${name}:${id}:bogus`, bogus, [])
+          const carriers: Record<string, any> = { query: { query: { tenantId: d.st.tenantId } }, params: { params: { tenantId: d.st.tenantId } } }
+          if (build(REAL).method === 'POST') carriers.body = { body: { tenantId: d.st.tenantId } }
+          for (const [carrier, extra] of Object.entries(carriers)) {
+            const res = await send(user, build(REAL), extra)
+            ;(steering[`${name}:${carrier}`] ||= {})[id] = answerOf(res)
+            if (res.statusCode < 300) foreign2xxWithData.push(`${name}:${id}:steer-${carrier}`)
+            leakCheck(`${name}:${id}:steer-${carrier}`, res, realSent)
+          }
+        }
+      }
+      const after = await tenantRows()
+      console.log(`[G9-S66-U03] own ${JSON.stringify(ownControl)}`)
+      console.log(`[G9-S66-U03] foreign ${JSON.stringify(foreignAnswers)}`)
+      console.log(`[G9-S66-U03] steering ${JSON.stringify(steering)}`)
+      // A steered call naming THIS tenant is refused before any scoped read: at the tenant gate (403) — or, on the
+      // closed inputs (the POST body, the two GETs' query), by the input itself (400 REQUEST_INVALID), never reaching it.
+      const steeredNotRefused = Object.entries(steering).flatMap(([key, answers]) => Object.entries(answers)
+        .filter(([, answer]) => !(answer.startsWith('403:') || answer === `400:${sheetRepairLib.SHEET_REPAIR_ERROR_CODES.REQUEST_INVALID}`))
+        .map(([id, answer]) => `${key}:${id}:${answer}`))
+      // Which steered calls stopped at the closed input (exact, both ways): the POST's body carrier and the GETs' query.
+      const closedInputStops = Object.entries(steering).flatMap(([key, answers]) => Object.entries(answers)
+        .filter(([, answer]) => answer.startsWith('400:'))
+        .map(([id]) => `${key.split(':')[1]}:${id}`))
+      const expectedClosedInputStops = ['tenantless', 'crossAdmin'].flatMap(() => [
+        ...['retire.preview', 'retire.execute', 'restore.preview', 'restore.execute', 'close.preview', 'close.execute'].map((id) => `body:${id}`),
+        ...['fills.read', 'runs.read'].map((id) => `query:${id}`),
+      ])
+      const observed = {
+        ownControl,
+        belowTier,
+        tenantless: Array.from(new Set(Object.values(foreignAnswers.tenantless))),
+        crossPuller: Array.from(new Set(Object.values(foreignAnswers.crossPuller))),
+        crossAdmin2xx: Object.entries(foreignAnswers.crossAdmin).filter(([, answer]) => answer.startsWith('2')).map(([id]) => id).sort(),
+        realVsBogus,
+        steeredNotRefused,
+        foreign2xxWithData,
+        closedInputStops: closedInputStops.sort(),
+        leaks,
+        wroteNothing: after === before,
+      }
+      expect(observed).toEqual({
+        ownControl: {
+          restoreReal: ['200:-', true],
+          restoreBogus: ['200:-', ['run_not_found']],
+          runsListsTheRun: ['200:-', true],
+          fills: ['200:-', true],
+        },
+        belowTier: [],
+        tenantless: ['403:OPERATOR_SCOPE_TENANT_REQUIRED'],
+        crossPuller: ['403:FORBIDDEN'],
+        // The cross-tenant admin reads ITS OWN tenant's empty sheet: its previews and reads answer 200 about that sheet
+        // (no run, no component of this tenant) — the leak and real-vs-bogus checks above prove no answer is about THIS one.
+        crossAdmin2xx: ['close.preview', 'fills.read', 'restore.preview', 'retire.preview', 'runs.read'],
+        realVsBogus: [],
+        steeredNotRefused: [],
+        foreign2xxWithData: [],
+        closedInputStops: expectedClosedInputStops.sort(),
+        leaks: [],
+        wroteNothing: true,
+      })
+      g9Pass('G9-S66-U03', { ...observed, ownControl: Object.keys(ownControl).length, calls: Object.values(foreignAnswers).reduce((n, answers) => n + Object.keys(answers).length * 2, 0) + Object.values(steering).reduce((n, answers) => n + Object.keys(answers).length, 0) })
+    }, 600000)
+
+    g9Case('G9-S66-U07','(U07, design §7.5; S6-6 migration 108) a retire through the REAL route whose finish never ran (the process died after its last patch: the run stays `running`) makes the 108 rollback stop-condition query — PARSED OUT OF THE MIGRATION 108 HEADER, never copied — answer 1, so the rollback drill\'s precondition (every stop query 0) fails, and while it does the current build refuses the pilot enable (readiness v7 no_open_sheet_repair_run); the owner-approved continuation verify_and_close_run through the REAL route (its own preview digest and approvalRef) closes it WITHOUT writing a sheet row, and the query answers 0 again', async () => {
+      const header = fs.readFileSync(MIGRATION_108, 'utf8').replace(/\r\n/g, '\n').split('\n')
+      const at = header.findIndex((line) => /^--\s+.*Before rolling back, no run may be open:\s*$/.test(line))
+      const stopLine = at >= 0 && at + 1 < header.length ? header[at + 1] : ''
+      expect([at > 0, /^--\s+SELECT count\(\*\) FROM integration_stock_prep_sheet_repair_run WHERE status = 'running';\s*$/.test(stopLine)]).toEqual([true, true])
+      const stop108 = stopLine.replace(/^--\s+/, '').replace(/;\s*$/, '')
+      // The process dies after the run's last patch: its own finish never lands (the E07 shape for the repair ledger).
+      const crash = { armed: false, fired: false }
+      const d = await doubledSheet('g9_s66u07', {
+        repairStore: (real: any) => ({
+          ...real,
+          finishRun: async (input: any, ...rest: any[]) => {
+            if (crash.armed) {
+              crash.armed = false
+              crash.fired = true
+              throw Object.assign(new Error('synthetic process exit after the last patch'), { code: '57P01' })
+            }
+            return real.finishRun(input, ...rest)
+          },
+        }),
+      })
+      const stopCount = async () => Number((await q(`${stop108} AND tenant_id = $1 AND sheet_id = $2`, [d.st.tenantId, d.st.sheetId])).rows[0].count)
+      const confirmProjectNo = d.st.projectNo
+      const stopBefore = await stopCount()
+      const preview = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle }))
+      crash.armed = true
+      const executed = await d.repair(d.spAdmin, { mode: 'execute', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle, planDigest: preview.planDigest, approvalRef: 'R-91:g9-s66-u07' })
+      const runsOpen = await d.runs()
+      const stopOpen = await stopCount()
+      const failingOpen = await pilotFailing(d.st, d.spAdmin)
+      const storedOpen = await d.stored()
+      // The continuation: preview (its own digest), then execute with its own approvalRef.
+      const runId = String(runsOpen[0] && runsOpen[0].id)
+      const closePreview = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: CLOSE, confirmProjectNo, runId }))
+      const closed = await d.repair(d.spAdmin, { mode: 'execute', recipe: CLOSE, confirmProjectNo, runId, planDigest: closePreview.planDigest, approvalRef: 'R-91:g9-s66-u07-close' })
+      const observed = {
+        stopBefore,
+        crashed: [crash.fired, executed.statusCode >= 500],
+        runsOpen: runsOpen.map((run: any) => [run.recipe, run.status]),
+        stopOpen,
+        rollbackPrecondition: stopOpen === 0 ? 'met' : 'refused',
+        enableRefusedOpen: failingOpen.includes('no_open_sheet_repair_run'),
+        closeEligible: closePreview.eligible,
+        closed: [closed.statusCode, closed.body && closed.body.data ? closed.body.data.status : codeOf(closed)],
+        closeWroteNoRow: sameJson(await d.stored(), storedOpen),
+        runsAfter: (await d.runs()).map((run: any) => [run.recipe, run.status]),
+        stopAfter: await stopCount(),
+        enableRefusedAfter: (await pilotFailing(d.st, d.spAdmin)).includes('no_open_sheet_repair_run'),
+      }
+      console.log(`[G9-S66-U07] ${JSON.stringify({ executed: [executed.statusCode, codeOf(executed)], closePreviewKeys: Object.keys(closePreview).sort() })}`)
+      expect(observed).toEqual({
+        stopBefore: 0,
+        crashed: [true, true],
+        runsOpen: [[RETIRE, 'running']],
+        stopOpen: 1,
+        rollbackPrecondition: 'refused',
+        enableRefusedOpen: true,
+        closeEligible: true,
+        closed: [200, 'completed'],
+        closeWroteNoRow: true,
+        runsAfter: [[RETIRE, 'completed']],
+        stopAfter: 0,
+        enableRefusedAfter: false,
+      })
+      g9Pass('G9-S66-U07', observed)
+    })
+
+    g9Case('G9-S66-INSTALLING', '(rebaseline B-9; S6-6) the 批次标识 switch ON and the band\'s REAL install route stopped mid-flight (the host refuses one of its band patches after it persisted its plan: the sheet\'s ledger row stays `installing`, the lease released): the repair\'s preview through the REAL route is not eligible (install_in_progress) and its execute of the digest approved before the install is 409 INSTALL_IN_PROGRESS inside the lease with nothing written — no run, no claim, every stored row byte-identical; once the same install route finishes the persisted plan (its continue run) the repair previews eligible and its execute completes', async () => {
+      // The host refuses the install's N-th band patch once (a host failure after the plan was persisted).
+      const midInstall = { failOnPatch: 0, patches: 0, failed: false }
+      const wrap = (multitable: any) => ({
+        ...multitable,
+        records: {
+          ...multitable.records,
+          async patchRecord(input: any) {
+            if (midInstall.failOnPatch > 0) {
+              midInstall.patches += 1
+              if (midInstall.patches === midInstall.failOnPatch) {
+                midInstall.failOnPatch = 0
+                midInstall.failed = true
+                throw Object.assign(new Error('synthetic host failure mid-install'), { code: 'SYN_PATCH_FAILED' })
+              }
+            }
+            return multitable.records.patchRecord(input)
+          },
+        },
+      })
+      const d = await doubledSheet('g9_s66inst', { routeMultitable: wrap, pull: true })
+      const confirmProjectNo = d.st.projectNo
+      const approved = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle }))
+      const install = (body: any) => both(true, () => callRoute(d.st.routes, 'POST', INSTALL_PATH, { user: d.st.users.admin, params: { projectNo: d.st.projectNo }, query: {}, body: { confirmProjectNo, ...body } }))
+      const installOnce = async () => {
+        const dry = dataOrFail(await install({ mode: 'dry_run' }))
+        const count = dry.requires && dry.requires.confirmHistoricalBatchCount ? { confirmHistoricalBatchCount: dry.requires.confirmHistoricalBatchCount.inferred } : {}
+        return { run: dry.run, answer: await install({ mode: 'install', approvalRef: 'R-65', planDigest: dry.planDigest, ...count }) }
+      }
+      const sheetRow = async () => ((await q('SELECT history_status FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1 AND sheet_id = $2', [d.st.tenantId, d.st.sheetId])).rows[0] || { history_status: null }).history_status
+      const leaseHeld = async () => Boolean(((await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [d.st.key])).rows[0] || {}).lease_id)
+      midInstall.failOnPatch = 3
+      const first = await installOnce()
+      const statusMid = await sheetRow()
+      const leaseMid = await leaseHeld()
+      const storedMid = await d.stored()
+      const claimsOf = async () => Number((await q(`SELECT count(*)::int AS n FROM ${RT_REPAIR_CLAIM} WHERE tenant_id = $1`, [d.st.tenantId])).rows[0].n)
+      const blocked = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle }))
+      const refused = await d.repair(d.spAdmin, { mode: 'execute', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle, planDigest: approved.planDigest, approvalRef: 'R-91:g9-s66-inst' })
+      const nothingWritten = { runs: (await d.runs()).length, claims: await claimsOf(), stored: sameJson(await d.stored(), storedMid), leaseFree: !(await leaseHeld()) }
+      // The install finished by the same route: its dry-run continues the PERSISTED plan.
+      const second = await installOnce()
+      const statusAfter = await sheetRow()
+      const fresh = dataOrFail(await d.repair(d.spAdmin, { mode: 'preview', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle }))
+      const executed = fresh.eligible ? await d.repair(d.spAdmin, { mode: 'execute', recipe: RETIRE, confirmProjectNo, componentHandle: d.handle, planDigest: fresh.planDigest, approvalRef: 'R-91:g9-s66-inst-2' }) : null
+      const observed = {
+        approvedEligible: approved.eligible,
+        midInstall: [first.run, first.answer.statusCode >= 500, midInstall.failed, statusMid, leaseMid],
+        blockedPreview: [blocked.eligible, blocked.refusals, blocked.planDigest],
+        refused: [refused.statusCode, codeOf(refused), reasonOf(refused)],
+        nothingWritten,
+        installFinished: [second.run, second.answer.statusCode, second.answer.body.data && second.answer.body.data.resolved, statusAfter],
+        freshEligible: fresh.eligible,
+        executed: executed ? [executed.statusCode, executed.body.data && executed.body.data.status, executed.body.data && executed.body.data.written] : null,
+        runsAfter: (await d.runs()).map((run: any) => [run.recipe, run.status]),
+      }
+      console.log(`[G9-S66-INSTALLING] ${JSON.stringify({ firstAnswer: [first.answer.statusCode, codeOf(first.answer)] })}`)
+      expect(observed).toEqual({
+        approvedEligible: true,
+        midInstall: ['first_install', true, true, 'installing', false],
+        blockedPreview: [false, ['install_in_progress'], null],
+        refused: [409, sheetRepairLib.SHEET_REPAIR_ERROR_CODES.INSTALL_IN_PROGRESS, 'install_in_progress'],
+        nothingWritten: { runs: 0, claims: 0, stored: true, leaseFree: true },
+        installFinished: ['continue', 200, true, 'backfilled'],
+        freshEligible: true,
+        executed: [200, 'completed', 4],
+        runsAfter: [[RETIRE, 'completed']],
+      })
+      g9Pass('G9-S66-INSTALLING', observed)
     })
 
     // ── extension points for the PRs still in flight (the matrix file's `pending` list) ─────────────────────────────
