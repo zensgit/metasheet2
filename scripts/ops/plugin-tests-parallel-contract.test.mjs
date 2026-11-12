@@ -234,6 +234,9 @@ function assertParallelWorkflow(doc) {
         const notificationEndpointsAddition = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'
         assert.equal(step.run.split(notificationEndpointsAddition).length - 1, 1, 'User notification endpoints and preferences DB suite must run exactly once')
         assert.ok(step.run.includes(lifecycleHistoryAddition + notificationEndpointsAddition), 'Keep the user notification endpoints and preferences suite right after the directory integration lifecycle history suite')
+        const sessionTokenInviteAddition = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'
+        assert.equal(step.run.split(sessionTokenInviteAddition).length - 1, 1, 'Session token and invite lifecycle DB suite must run exactly once')
+        assert.ok(step.run.includes(notificationEndpointsAddition + sessionTokenInviteAddition), 'Keep the session token and invite lifecycle suite right after the user notification endpoints and preferences suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -249,6 +252,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(departureVouchingAddition, '')
         step.run = step.run.replace(lifecycleHistoryAddition, '')
         step.run = step.run.replace(notificationEndpointsAddition, '')
+        step.run = step.run.replace(sessionTokenInviteAddition, '')
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
         // R-69 1b-ii (job lease): explicit additive suite — preserve the frozen original command byte-for-byte.
@@ -362,6 +366,9 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/session-token-invite-lifecycle.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },

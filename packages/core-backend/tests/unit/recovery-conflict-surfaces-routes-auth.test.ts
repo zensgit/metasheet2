@@ -258,6 +258,8 @@ describe('POST /invite/accept — recovery conflict from the durable write surfa
       presetId: 'attendance-employee',
       iat: Math.floor(Date.now() / 1000) - 60,
     })
+    // the ledger holds the token on a pending row
+    pgMocks.query.mockResolvedValueOnce({ rows: [{ pending: true }] })
     // getInviteTarget
     pgMocks.query.mockResolvedValueOnce({
       rows: [{

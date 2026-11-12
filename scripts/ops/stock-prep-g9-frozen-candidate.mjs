@@ -30,8 +30,8 @@
 //   --self-test                             the parser against synthetic logs (green, missing id, red case, caret ANSI)
 //
 // OWNER-GATED ITEMS: every verdict (PASS or not) prints the matrix's `manual` entries marked `ownerGated` with their
-// sentence - today G9-U03-LEGACY-TENANTLESS-ADMIN, a PRE-EXISTING product path G9-U03 pins and never certifies - so no
-// G9 PASS hides them.
+// sentence - today G9-U03-LEGACY-TENANTLESS-ADMIN, a PRE-EXISTING product path G9-U03 pins and never certifies (ruled
+// 2026-11-11, option A: the tenant-claim flag is a pilot-enable precondition, pilot readiness v6) - so no G9 PASS hides them.
 //
 // WHY BOTH WORKFLOWS: since #6187 the required `stock-prep PowerShell 5.1 acceptance` context comes from
 // stock-prep-powershell51.yml, not plugin-tests.yml. Both carry workflow_dispatch, so no workflow file is edited here.
@@ -196,7 +196,7 @@ function printVerdict(verdict) {
 }
 
 function selfTest() {
-  const owner = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — owner ruling pending'
+  const owner = 'tenantless platform admin can preview and apply into a named tenant while the tenant-claim flag is off — ruled 2026-11-11: option A — the flag is a pilot-enable precondition; the legacy path stays for non-pilot use while the flag is off'
   const matrix = {
     realDb: ['S3A-02', 'G9-U08'],
     pending: [{ id: 'G9-S65-V5', owner: 'S6-5' }],
