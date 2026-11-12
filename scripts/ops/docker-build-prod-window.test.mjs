@@ -161,7 +161,7 @@ function makeWorld(t, options = {}) {
   const tmpBase = realpathSync(os.tmpdir())
   const root = realpathSync(mkdtempSync(path.join(tmpBase, 'deploy-window-')))
   const tag = `${path.basename(root)}-${process.pid}`
-  const world = { root, tag, holders: [], pgids: new Set() }
+  const world = { root, tag, holders: [], pgids: new Set(), absent: new Set(options.absentTools ?? []) }
   t.after(() => {
     for (const holder of world.holders) { try { holder.kill('SIGKILL') } catch {} }
     if (world.windowHome) addWindowGroups(world)
@@ -391,7 +391,10 @@ async function runWindow(t, world, options = {}) {
   writeFileSync(script, options.runText ?? REMOTE_RUN)
   // Every stubbed tool must resolve to the double, never to a real binary on this machine.
   const resolved = spawnSync(BASH, ['-c', `for t in ${STUBS.join(' ')}; do command -v "$t" || echo "missing:$t"; done`], { env, encoding: 'utf8' }).stdout.trim().split('\n')
-  for (const [i, name] of STUBS.entries()) assert.equal(resolved[i], path.join(world.bin, name), `${name} must resolve to the test double`)
+  for (const [i, name] of STUBS.entries()) {
+    if (world.absent.has(name)) assert.equal(resolved[i], `missing:${name}`, `${name} is absent from PATH`)
+    else assert.equal(resolved[i], path.join(world.bin, name), `${name} must resolve to the test double`)
+  }
   const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
     cwd: world.work, env, detached: true, onSpawn: (child) => world.pgids.add(child.pid),
   })
@@ -1536,6 +1539,14 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world, { env: { H_COMPOSE_MISSING: '1' } })
     checkRefused(r)
     assert.deepEqual(r.calls.filter((call) => call.kind === 'docker-compose').map((call) => call.args), ['--version'], 'only the docker-compose double ran')
+  })
+
+  scenario('neither compose v2 nor docker-compose in the prologue ends as 70 refused-unchanged', async (t) => {
+    const world = makeWorld(t, { absentTools: ['docker-compose'] })
+    const r = await runWindow(t, world, { env: { H_COMPOSE_MISSING: '1' } })
+    checkRefused(r)
+    assert.match(r.deployLog, /neither 'docker compose' nor 'docker-compose' is available/)
+    assert.deepEqual(r.calls.filter((call) => call.kind === 'docker-compose'), [], 'no docker-compose call')
   })
 
   scenario('bootstrap: the run directory already exists -> 76, nothing runs (a run directory is never reused)', async (t) => {

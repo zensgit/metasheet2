@@ -110,12 +110,20 @@ decides, not those lines.
 ### Never, after 73, 74, 76, 255 or a missing rc
 
 These rules hold whatever `env_written` says (`env_written=old` does not prove the
-migration did not commit; 72 is always before the commit). They hold until the owner
-has read the ledger: either it reads fully applied (`ledger before` + the in-play count,
-every name of the run directory's `inplay.txt` present), and the owner fixes forward as
-below; or it reads the run's `ledger before` count with none of the names in `inplay.txt`
-present and no `metasheet-window-migrate-*` container or database session alive, and the
-case is a pre-commit one (the 72 row applies). Until then:
+migration did not commit; 72 is always before the commit). They hold until the window
+has ended and the owner has read the ledger.
+
+- The window has ended when `state` shows a terminal phase with `rc=` set, or the process
+  in the run's `window.pid` is gone; and `flock -n "$HOME/metasheet2-deploy-window/lock" true`
+  succeeds and the run's `rc` file exists. While the window may still run, a ledger at the
+  `ledger before` count proves nothing: the window may be about to migrate.
+- Then the ledger either reads fully applied (`ledger before` + the in-play count, every
+  name of the run directory's `inplay.txt` present), and the owner fixes forward as below;
+  or it reads the run's `ledger before` count with none of the names in `inplay.txt`
+  present and no `metasheet-window-migrate-*` container or database session alive, and the
+  case is a pre-commit one (the 72 row applies).
+
+Until then:
 
 - never `docker start` the old `metasheet-backend` / `metasheet-web` containers: the old
   image does not know the new migrations;
@@ -126,19 +134,30 @@ case is a pre-commit one (the 72 row applies). Until then:
 ### Fix forward after a commit (73, 74)
 
 With the owner's word, and only when the ledger reads fully applied, start the same SHA
-(or a hotfix SHA) by hand. `<project>` is the value of the run's
-`compose_identity=match project=` log line, `<deploy dir>` the value of its
-`[deploy] repo_path=` line, `<sha>` the full 40-character commit.
+(or a hotfix SHA) by hand, with the compose file and from the directory the deploy used:
+
+- `<deploy dir>`: the `com.docker.compose.project.working_dir` label of `metasheet-postgres`
+  (`docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' metasheet-postgres`);
+  the run's `[deploy] repo_path=` line names the same directory. Run every step below
+  from it (`cd <deploy dir>`).
+- `<compose file>`: `<deploy dir>/<DEPLOY_COMPOSE_FILE>`, the compose file the deploy used
+  (the `DEPLOY_COMPOSE_FILE` secret, default `docker-compose.app.yml`). It equals the
+  `com.docker.compose.project.config_files` label of `metasheet-postgres`; a different
+  file would create backend and web from another compose definition.
+- `<project>`: the value of the run's `compose_identity=match project=` log line (the
+  `com.docker.compose.project` label of `metasheet-postgres`).
+- `<run dir>`: `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>` of the run;
+  `<sha>`: the full 40-character commit.
 
 1. Set or confirm `IMAGE_OWNER=zensgit` and `IMAGE_TAG=<sha>` in `<deploy dir>/.env`.
 2. Create the backend without starting it:
-   `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f docker-compose.app.yml up --no-start --no-deps --force-recreate backend`.
+   `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f <compose file> up --no-start --no-deps --force-recreate backend`.
 3. If the run directory has `appdata.tar`, copy it into that container before its first
-   start: `docker cp - metasheet-backend:/ < appdata.tar`. This applies to every newly
-   created backend container, a hotfix one included. Keep the run directory until the
-   files are confirmed in the running backend.
+   start: `docker cp - metasheet-backend:/ < <run dir>/appdata.tar`. This applies to every
+   newly created backend container, a hotfix one included. Keep the run directory until
+   the files are confirmed in the running backend.
 4. `docker start metasheet-backend`, then verify `/health` `build.commit` equals `<sha>`.
-5. Web: `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f docker-compose.app.yml up -d --no-deps --force-recreate web`,
+5. Web: `IMAGE_OWNER=zensgit IMAGE_TAG=<sha> docker compose -p <project> --project-directory <deploy dir> -f <compose file> up -d --no-deps --force-recreate web`,
    then verify `/build-info.json` `commit` equals `<sha>`.
 
 Restoring the dump needs the owner's approval of the recovery point; follow

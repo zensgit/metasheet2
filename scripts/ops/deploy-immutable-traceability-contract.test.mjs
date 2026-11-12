@@ -172,15 +172,26 @@ const DESTRUCTIVE_DOCKER = [
 function destructiveDockerUses(line) {
   return DESTRUCTIVE_DOCKER.filter(([pattern]) => pattern.test(line)).map(([, label]) => label)
 }
-// `docker compose [-p X] [--project-directory X] [-f X] up|run <flags> <services>`; null for other lines.
+// `docker compose <global options> up|run <flags> <services>`; null for other lines. Every leading
+// global option is skipped with its value; an option this list does not know is reported as
+// `unknownGlobal`, so a new spelling fails the rule instead of hiding the line from it.
 // Quoted operator messages are not docker calls.
+const COMPOSE_GLOBAL_WITH_VALUE = ['-p', '--project-name', '-f', '--file', '--project-directory', '--env-file', '--profile', '--ansi', '--parallel', '--progress']
+const COMPOSE_GLOBAL_FLAGS = ['--compatibility', '--dry-run', '--all-resources']
 function composeUpRunCall(line) {
   const plain = line.replace(/\b(echo|wlog|werr|fail)\s+"[^"]*"/g, '$1 MESSAGE')
   const match = plain.match(/\bdocker compose\b(.*)$/)
   if (!match) return null
   const tokens = match[1].trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []
   let i = 0
-  while (i < tokens.length && ['-p', '--project-directory', '-f'].includes(tokens[i])) i += 2
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const option = tokens[i]
+    const name = option.split('=')[0]
+    if (option.includes('=') && COMPOSE_GLOBAL_WITH_VALUE.includes(name)) i += 1
+    else if (COMPOSE_GLOBAL_WITH_VALUE.includes(option)) i += 2
+    else if (COMPOSE_GLOBAL_FLAGS.includes(option)) i += 1
+    else return { sub: null, unknownGlobal: option, flags: [], services: [], line }
+  }
   const sub = tokens[i++]
   if (sub !== 'up' && sub !== 'run') return null
   const flags = []
@@ -227,6 +238,7 @@ test('production deploy window never removes, prunes or recreates the data conta
   const composeUpRun = dockerLines.map(composeUpRunCall).filter(Boolean)
   assert.ok(composeUpRun.length >= 5, 'the rule sees the window\'s compose run and up lines')
   for (const call of composeUpRun) {
+    assert.equal(call.unknownGlobal, undefined, `docker compose with an unknown global option: ${call.line}`)
     assert.ok(call.flags.includes('--no-deps'), `compose ${call.sub} without --no-deps: ${call.line}`)
     assert.ok(call.services.length > 0, `compose ${call.sub} without an explicit service list: ${call.line}`)
     for (const service of call.services) assert.ok(['backend', 'web'].includes(service), `compose ${call.sub} of ${service}: ${call.line}`)
@@ -248,9 +260,14 @@ test('production deploy window never removes, prunes or recreates the data conta
     `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d`,
     `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d --force-recreate backend web`,
     `IMAGE_OWNER=o IMAGE_TAG=t timeout 120 ${P} run --rm -T backend node migrate.js --list`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} --env-file .env up -d`,
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --project-name "$P" -f "$F" up -d --force-recreate',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --file "$F" -p "$P" up -d',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --project-name="$P" --file="$F" up -d --no-deps',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --verbose up -d --no-deps backend',
   ]) {
     const call = composeUpRunCall(probe)
-    const composeBad = call && (!call.flags.includes('--no-deps') || call.services.length === 0)
+    const composeBad = call && (call.unknownGlobal !== undefined || !call.flags.includes('--no-deps') || call.services.length === 0)
     assert.ok(destructiveDockerUses(probe).length > 0 || composeBad, `the checks flag: ${probe}`)
   }
 
