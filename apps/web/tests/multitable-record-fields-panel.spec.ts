@@ -789,3 +789,278 @@ describe('MetaRecordFieldsPanel — a control reused for the next record shows t
     expect(input.value).toBe('')
   })
 })
+
+describe('MetaRecordFieldsPanel — a text box keeps its typing across its own commit', () => {
+  // The box's commit (an earlier blur) is still in flight; the user is back in the box and typing; the server then
+  // accepts it, and the record comes back with the committed value.
+  const F_TEXT = { id: 'fld_text', name: 'Text', type: 'string' } as unknown as MetaField
+  const F_NOTES = { id: 'fld_notes', name: 'Notes', type: 'longText' } as unknown as MetaField
+  const F_NUM = { id: 'fld_num', name: 'Amount', type: 'number' } as unknown as MetaField
+  const textRecord = (id: string, value: string, version = 1) =>
+    ({ id, version, data: { fld_text: value, fld_notes: value, fld_num: 5 } }) as unknown as MetaRecord
+
+  afterEach(() => {
+    while (boundApps.length) boundApps.pop()!.unmount()
+    document.body.innerHTML = ''
+  })
+
+  // Every box the drawer edits by typing: [field, stored, typed since, the value that lands meanwhile, committed]
+  const BOXES = [
+    ['a text input', F_TEXT, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a textarea', F_NOTES, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a barcode box', { id: 'fld_bar', name: 'Barcode', type: 'barcode' }, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a QR code box', { id: 'fld_qr', name: 'QR', type: 'qrcode' }, 'n2', 'n2XQQ', 'n2X', 'n2XQQ'],
+    ['a location box', { id: 'fld_loc', name: 'Place', type: 'location' }, 'n2', 'n2XQQ', 'n2X', { address: 'n2XQQ' }],
+    ['a number box', F_NUM, 12, '123', 1, 123],
+    ['a date box', { id: 'fld_day', name: 'Day', type: 'date' }, '2031-01-02', '2031-01-09', '2031-01-05', '2031-01-09'],
+  ] as const
+  const boxRecord = (field: { id: string; type: string }, id: string, stored: unknown, version = 1) =>
+    ({ id, version, data: { [field.id]: field.type === 'location' ? { address: stored } : stored } }) as unknown as MetaRecord
+
+  it.each(BOXES)('%s: a value that lands while it is focused and typed in leaves the typing, which the next blur commits', async (_label, field, stored, typed, landing, committed) => {
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [field as unknown as MetaField], record: boxRecord(field, 'rec_A', stored), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#drawer_field_${field.id}`)!
+    box.focus()
+    box.value = typed
+    set({ record: boxRecord(field, 'rec_A', landing, 2) })
+    await flushUi()
+    expect(box.value).toBe(typed)
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([[field.id, committed]])
+    // The commit supersedes the value that landed: leaving does not bring it back.
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe(typed)
+  })
+
+  it.each(BOXES)('%s: a move to another record writes that record\'s value, also over typing', async (_label, field, stored, typed, landing) => {
+    const { container, set } = mountBoundPanel({ fields: [field as unknown as MetaField], record: boxRecord(field, 'rec_A', stored), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#drawer_field_${field.id}`)!
+    box.focus()
+    box.value = typed
+    set({ record: boxRecord(field, 'rec_B', landing) })
+    await flushUi()
+    expect(box.value).toBe(String(landing))
+  })
+
+  // Counts what is written into the box from now on.
+  function countWrites(box: HTMLInputElement) {
+    const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!
+    let writes = 0
+    Object.defineProperty(box, 'value', {
+      configurable: true,
+      get() { return native.get!.call(this) },
+      set(next: string) { writes += 1; native.set!.call(this, next) },
+    })
+    return () => writes
+  }
+
+  it('after a commit, a redraw that brings the same value leaves the box alone (a date box commits while it is still being typed in)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    const writes = countWrites(box)
+    set({ record: textRecord('rec_A', 'n2X', 2) })
+    await flushUi()
+    expect(writes()).toBe(0)
+    // one that differs (a rollback) is written
+    set({ record: textRecord('rec_A', 'n2', 3) })
+    await flushUi()
+    expect(writes()).toBe(1)
+    expect(box.value).toBe('n2')
+  })
+
+  it('a draft the box cannot read (a half-typed date, a number box\'s "-") is typing: a value that lands, or the redraw after its own commit, does not clear it', async () => {
+    const F_DAY = { id: 'fld_day', name: 'Day', type: 'date' } as unknown as MetaField
+    const dayRecord = (day: string | null, version: number) => ({ id: 'rec_A', version, data: { fld_day: day } }) as unknown as MetaRecord
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_DAY], record: dayRecord('2031-01-02', 1), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_day')!
+    const validity = { badInput: false }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.focus()
+    // the day half-typed: the box reads "" and fires its change (the drawer saves "", as before)
+    validity.badInput = true
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_day', '']])
+    const writes = countWrites(box)
+    // the server's answer (the date it took), then a value from elsewhere
+    set({ record: dayRecord(null, 2) })
+    await flushUi()
+    set({ record: dayRecord('2031-03-04', 3) })
+    await flushUi()
+    expect(writes()).toBe(0)
+    // typed in full: committed
+    validity.badInput = false
+    box.value = '2031-01-09'
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_day', ''], ['fld_day', '2031-01-09']])
+  })
+
+  it('a box left holding a draft it cannot read is written on the next redraw, also when the stored value is empty (the draft goes, the stored value shows)', async () => {
+    const F_NUM_EMPTY = { id: 'fld_num', name: 'Amount', type: 'number' } as unknown as MetaField
+    const numRecord = (version: number) => ({ id: 'rec_A', version, data: { fld_num: null } }) as unknown as MetaRecord
+    const onPatch = vi.fn()
+    const { container, set } = mountBoundPanel({ fields: [F_NUM_EMPTY], record: numRecord(1), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_num')!
+    const validity = { badInput: false }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.focus()
+    validity.badInput = true
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    box.blur()
+    await flushUi()
+    expect(onPatch).not.toHaveBeenCalled()
+    const writes = countWrites(box)
+    set({ record: numRecord(2) })
+    await flushUi()
+    expect(writes()).toBe(1)
+  })
+
+  it('a date box cleared in full (not half-typed) commits the empty date', async () => {
+    const onPatch = vi.fn()
+    const F_DAY = { id: 'fld_day', name: 'Day', type: 'date' } as unknown as MetaField
+    const { container } = mountBoundPanel({ fields: [F_DAY], record: { id: 'rec_A', version: 1, data: { fld_day: '2031-01-02' } } as unknown as MetaRecord, onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_day')!
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_day', '']])
+  })
+
+  it('a value that landed while the box held typing is dropped once another value is written (typing undone, then a newer one lands)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'C', 2) })
+    await flushUi()
+    box.value = 'alpha'
+    set({ record: textRecord('rec_A', 'D', 3) })
+    await flushUi()
+    expect(box.value).toBe('D')
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('D')
+  })
+
+  it('focus that leaves with the typing still there and no commit (a window switch) keeps the typing, and the value waits: undone and left later, the box shows it', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'C', 2) })
+    await flushUi()
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('alphaB')
+    box.focus()
+    box.value = 'alpha'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('C')
+  })
+
+  it('a redraw that brings the same value while the box holds typing is not a value that landed (it can be the value from before the box\'s own commit)', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    // typing again; the record is redrawn with the value from before the commit (not taken yet)
+    box.value = 'n2XY'
+    set({ record: textRecord('rec_A', 'n2', 1) })
+    await flushUi()
+    // the typing undone and the box left: it shows what it committed, not the older value
+    box.value = 'n2X'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('n2X')
+  })
+
+  it('typed, then undone, while a value landed: left with no net typing, the box shows that value', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'alpha'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'alphaB'
+    set({ record: textRecord('rec_A', 'zzz', 2) })
+    await flushUi()
+    expect(box.value).toBe('alphaB')
+    box.value = 'alpha'
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('zzz')
+  })
+
+  it('a stored value the box holds differently (a line break in a single-line box) is not typing: a value that lands is shown', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'line1\nline2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    set({ record: textRecord('rec_A', 'fresh', 2) })
+    await flushUi()
+    expect(box.value).toBe('fresh')
+  })
+
+  it('a box that committed what it holds shows the next value, also a rejected commit\'s rollback while it is still focused', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    box.value = 'n2X'
+    box.dispatchEvent(new Event('change'))
+    // the optimistic value, then the rollback
+    set({ record: textRecord('rec_A', 'n2X', 2) })
+    await flushUi()
+    set({ record: textRecord('rec_A', 'n2', 3) })
+    await flushUi()
+    expect(document.activeElement).toBe(box)
+    expect(box.value).toBe('n2')
+  })
+
+  it.each([
+    ['focused but not typed in', true, false, 'rec_A', 'other'],
+    ['typed in but not focused', false, true, 'rec_A', 'other'],
+    ['focused and typed in, but another record', true, true, 'rec_B', 'b'],
+  ] as const)('the new value is shown when the box is %s', async (_label, focus, typed, recordId, value) => {
+    const { container, set } = mountBoundPanel({ fields: [F_NOTES], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    if (focus) box.focus()
+    if (typed) box.value = 'n2 typed'
+    set({ record: textRecord(recordId, value, 2) })
+    await flushUi()
+    expect(box.value).toBe(value)
+  })
+
+  it('a number box holding a draft it cannot read commits nothing (the stored number stays); an empty box or a number still commits', async () => {
+    const onPatch = vi.fn()
+    const { container } = mountBoundPanel({ fields: [F_NUM], record: textRecord('rec_A', 'n2'), onPatch })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_num')!
+    const validity = { badInput: true }
+    Object.defineProperty(box, 'validity', { get: () => validity, configurable: true })
+    box.value = ''
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch).not.toHaveBeenCalled()
+    validity.badInput = false
+    box.dispatchEvent(new Event('change'))
+    box.value = '7'
+    box.dispatchEvent(new Event('change'))
+    expect(onPatch.mock.calls).toEqual([['fld_num', null], ['fld_num', 7]])
+  })
+})
