@@ -18,6 +18,7 @@ import {
   parseAttendanceSelfServiceAdmissionRows,
 } from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
+import { isSessionTokenPayload } from './session-token-kind'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
   assertAliasCutoverAllowed,
@@ -67,6 +68,9 @@ export interface TokenPayload {
   iat: number
   exp: number
 }
+
+/** Claims of a verified session token. Older session tokens name the user in `id` or `sub`. */
+type SessionTokenClaims = TokenPayload & { id?: string; sub?: string }
 
 export interface AuthConfig {
   jwtSecret: string
@@ -255,7 +259,11 @@ export class AuthService {
   async verifyToken(token: string): Promise<User | null> {
     try {
       // 验证token格式和签名
-      const payload = jwt.verify(token, this.config.jwtSecret) as TokenPayload & { id?: string; sub?: string }
+      const payload = this.verifySessionTokenPayload(token)
+      if (!payload) {
+        this.logger.warn('Token verification failed: not a session token')
+        return null
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token verification failed: missing user identity claim')
@@ -967,7 +975,11 @@ export class AuthService {
   async refreshToken(oldToken: string): Promise<string | null> {
     try {
       // 验证旧token（忽略过期）
-      const payload = jwt.verify(oldToken, this.config.jwtSecret, { ignoreExpiration: true }) as TokenPayload & { id?: string; sub?: string }
+      const payload = this.verifySessionTokenPayload(oldToken, { ignoreExpiration: true })
+      if (!payload) {
+        this.logger.warn('Token refresh failed: not a session token')
+        return null
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token refresh failed: missing user identity claim')
@@ -1021,18 +1033,33 @@ export class AuthService {
     }
   }
 
-  readTokenPayload(token: string, options: { ignoreExpiration?: boolean } = {}): (TokenPayload & { id?: string; sub?: string }) | null {
+  /** Claims of a session token, or null for anything that does not verify as one. */
+  readTokenPayload(token: string, options: { ignoreExpiration?: boolean } = {}): SessionTokenClaims | null {
     try {
-      return jwt.verify(token, this.config.jwtSecret, {
-        ignoreExpiration: options.ignoreExpiration === true,
-      }) as TokenPayload & { id?: string; sub?: string }
+      return this.verifySessionTokenPayload(token, options)
     } catch (error) {
       this.logger.warn('Token payload read failed', error instanceof Error ? error : undefined)
       return null
     }
   }
 
-  private resolveTokenUserId(payload: TokenPayload & { id?: string; sub?: string }): string | null {
+  /**
+   * The one place a token is verified against the session secret. Session verification accepts only
+   * session tokens: a correctly signed claim set that is not a session token yields null, the same
+   * answer every caller gives for an invalid token. Signature and expiry failures throw, as
+   * `jwt.verify` does.
+   */
+  private verifySessionTokenPayload(
+    token: string,
+    options: { ignoreExpiration?: boolean } = {},
+  ): SessionTokenClaims | null {
+    const payload: unknown = jwt.verify(token, this.config.jwtSecret, {
+      ignoreExpiration: options.ignoreExpiration === true,
+    })
+    return isSessionTokenPayload(payload) ? (payload as unknown as SessionTokenClaims) : null
+  }
+
+  private resolveTokenUserId(payload: SessionTokenClaims): string | null {
     const value = payload.userId || payload.id || payload.sub
     if (typeof value !== 'string') return null
     const trimmed = value.trim()

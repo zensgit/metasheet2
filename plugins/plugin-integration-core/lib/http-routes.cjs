@@ -5554,6 +5554,9 @@ function requireStockPreparationAudit() {
       readPullBatchStatus: () => pullBatchStatus.readPullBatchReadinessStatus(pullBatchStatusDepsFor({ tenantId, projectNo, target: action.target })),
       // Batch-refresh step 6d-1b (readiness v5): the component ruling ledger the remnant check reads (migration 107).
       componentRulingStore: stockPreparationComponentRulingStore,
+      // Owner ruling 2026-11-11 (readiness v6, R-91 option A): the staged tenant-claim door's ONE reader, asked per
+      // request — a pilot cannot be enabled while a tenantless admin can still pull into a named tenant.
+      tenantClaimRequired: stockPreparationTenantClaimRequired(),
       lock: stockPreparationProjectWriteLock,
       writeScope,
       countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
