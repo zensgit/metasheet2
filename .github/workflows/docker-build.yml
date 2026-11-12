@@ -958,17 +958,19 @@ jobs:
             fi
           }
 
+          # A second TERM must not interrupt the mapping: both handlers ignore TERM first.
           on_term() {
+            trap '' TERM
             w_term=1
             exit 143
           }
           on_exit() {
             local raw=$? final
+            trap '' TERM
             if [[ "$w_in_exit" == "1" ]]; then
               return 0
             fi
             w_in_exit=1
-            trap '' TERM
             set +e
             if [[ "$w_term" == "1" ]]; then raw=143; fi
             w_raw_rc="$raw"
@@ -1055,11 +1057,15 @@ jobs:
           fi
           w_lock_held=1
           if [[ -f "$WINDOW_STATE" ]]; then
-            prev_phase="$(sed -n 's/^phase=//p' "$WINDOW_STATE" | tail -n 1)"
+            # Frozen until a terminal phase was read: an unreadable state is never overwritten.
+            w_state_frozen=1
+            prev_phase="$(sed -n 's/^phase=//p' "$WINDOW_STATE" | tail -n 1)" \
+              || fail "host window state cannot be read; the owner checks it per the runbook"
             case "$prev_phase" in
-              done-new|done-restored-old|refused-unchanged) ;;
+              done-new|done-restored-old|refused-unchanged)
+                w_state_frozen=0
+                ;;
               *)
-                w_state_frozen=1
                 fail "host window state phase=${prev_phase:-<empty>} is unfinished or needs the owner; the owner clears it per the runbook"
                 ;;
             esac
@@ -1145,9 +1151,8 @@ jobs:
           fi
           if command -v crontab >/dev/null 2>&1; then
             cron_text="$(crontab -l 2>/dev/null || true)"
-            cron_entries="$(printf '%s\n' "$cron_text" | grep -cvE '^[[:space:]]*(#|$)' || true)"
             cron_gc="$(printf '%s\n' "$cron_text" | grep -vE '^[[:space:]]*#' | grep -cE 'docker-gc|system prune' || true)"
-            wlog "crontab entries=${cron_entries:-0} docker_gc_entries=${cron_gc:-0}"
+            wlog "crontab docker_gc_entries=${cron_gc:-0}"
             if [[ "${cron_gc:-0}" != "0" ]]; then
               fail "the deploy user's crontab has a docker GC / prune entry; disable it for the window"
             fi
@@ -1711,7 +1716,7 @@ jobs:
           w_job_pid=$!
           watch_job backup-toc ""
           [[ "$w_job_rc" == "0" ]] || fail "pg_restore --list failed rc=${w_job_rc}"
-          grep -qF 'TABLE DATA public kysely_migration' "${RUN_DIR}/db.toc" || fail "the dump has no kysely_migration data"
+          grep -qF 'TABLE DATA public kysely_migration ' "${RUN_DIR}/db.toc" || fail "the dump has no kysely_migration data"
           toc_entries="$(grep -cvE '^(;|$)' "${RUN_DIR}/db.toc" || true)"
           dump_sha256="$(sha256_file "${RUN_DIR}/db.dump.partial")"
           dump_size="$(wc -c < "${RUN_DIR}/db.dump.partial" | tr -d '[:space:]')"
@@ -1822,10 +1827,12 @@ jobs:
           set_phase starting-new
           echo "=== DEPLOY START ==="
           for c in metasheet-backend metasheet-web; do
-            if [[ "$(ctr_get "$c" '{{.State.Running}}' || true)" != "false" ]]; then
+            c_running="$(ctr_get "$c" '{{.State.Running}}' || true)"
+            if [[ "$c_running" == "true" ]]; then
               timeout 90 docker stop -t 60 "$c" >/dev/null 2>>"${RUN_DIR}/docker.err" || true
               fail "${c} was running again after the commit; stopped it"
             fi
+            [[ "$c_running" == "false" ]] || fail "${c} is gone or its state cannot be read after the commit"
             [[ "$(ctr_get "$c" '{{.Id}}' || true)" == "$(recorded_id "$c")" ]] || fail "${c} was replaced after the commit"
           done
           for c in metasheet-postgres metasheet-redis; do
@@ -2266,9 +2273,6 @@ jobs:
               ;;
             92)
               rc_meaning="drill: migrate stage (intentional)"
-              ;;
-            93)
-              rc_meaning="drill: smoke stage (intentional)"
               ;;
             70)
               rc_meaning="window refused before anything was stopped; old version still serving; env files restored"

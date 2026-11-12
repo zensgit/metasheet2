@@ -394,6 +394,7 @@ async function runWindow(t, world, options = {}) {
   // window a moment to finish its exit trap, then require that nothing of this scenario survives.
   addWindowGroups(world)
   await assertNoLeftovers(world)
+  options.afterRun?.()
   const r = {
     world, runId, runDir, result,
     out: parseOutput(env.GITHUB_OUTPUT),
@@ -544,6 +545,9 @@ function checkHappy(r, { appdata }) {
     assert.ok(!r.deployLog.includes(raw), `deploy.log must not carry: ${raw}`)
   }
   assert.match(r.deployLog, /ops_switch=off/)
+  // Of the deploy user's crontab only the docker GC / prune count is logged.
+  assert.match(r.deployLog, /^\[deploy-window\] crontab docker_gc_entries=0$/m)
+  assert.doesNotMatch(r.deployLog, /crontab entries=/)
   // Main-session decision: no git auto-gc/maintenance during the prologue sync, and only there.
   const gitCalls = r.calls.filter((call) => call.kind === 'git')
   for (const sub of ['fetch origin main', 'merge --ff-only origin/main']) {
@@ -846,6 +850,20 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world)
     assertCommon(r, 75)
     assert.equal(r.stateText, null, 'a refused run writes no state')
+    assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)).map((call) => call.args), [])
+  })
+
+  it(`11 host state the window cannot read -> 75: the state file is neither read nor replaced${REDUCED}`, { timeout: 300_000, skip: process.getuid?.() === 0 ? 'root reads any file' : false }, async (t) => {
+    const state = `phase=needs-owner\nrun=1-1\nsha=${SHA_OLD}\nenv_written=new\n`
+    const world = makeWorld(t, { state })
+    const statePath = path.join(world.windowHome, 'state')
+    chmodSync(statePath, 0o000)
+    let modeAfter = null
+    const r = await runWindow(t, world, { afterRun: () => { modeAfter = statSync(statePath).mode & 0o777; chmodSync(statePath, 0o600) } })
+    assertCommon(r, 75)
+    assert.equal(modeAfter, 0, 'the unreadable state file was not replaced by a new one')
+    assert.equal(r.stateText, state, 'state byte-identical')
+    assert.match(r.windowLog, /host window state cannot be read/)
     assert.deepEqual(r.calls.filter((call) => ['docker', 'git'].includes(call.kind)).map((call) => call.args), [])
   })
 
@@ -1163,6 +1181,32 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!existsSync(path.join(r.runDir, 'db.dump')))
   })
 
+  scenario('dump TOC has data only for kysely_migration_lock, not for the ledger table -> 71', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_TOC_LOCK_ONLY: '1' } })
+    checkRestoredOld(r)
+    assert.match(r.windowLog, /the dump has no kysely_migration data/)
+    assert.ok(!existsSync(path.join(r.runDir, 'db.dump')))
+    assert.ok(!any(r, isLatest))
+  })
+
+  scenario('an old container gone after the commit -> 73 with a message that does not claim it ran again', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_WEB_GONE_AFTER_COMMIT: '1' } })
+    assertCommon(r, 73)
+    assert.match(r.windowLog, /metasheet-web is gone or its state cannot be read after the commit/)
+    assert.doesNotMatch(r.windowLog, /was running again/)
+    assert.ok(!any(r, (call) => /^start /.test(call.args)), 'nothing started')
+    assert.ok(!any(r, isUp), 'nothing created')
+  })
+
+  it('summary: rc 93 is no drill (only deploy and migrate drills exist)', { timeout: 300_000 }, async (t) => {
+    const world = makeWorld(t)
+    const summary = await runSummary(world, { deployLog: '', deployRc: '93' })
+    assert.match(summary, /Remote exit code: `93` \(meaning: remote failure \(see stages\/logs\)\)/)
+    assert.doesNotMatch(summary, /smoke stage/)
+  })
+
   scenario('dump timeout with the own-session opt-in -> 71; the cancel names only pg_dump', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_DUMP_MODE: 'timeout', DEPLOY_WINDOW_CANCEL_OWN_SESSIONS: 'true' } })
@@ -1385,6 +1429,10 @@ describe('production deploy window: remote_deploy step run against test doubles'
       .filter((line) => !/\btimeout\s+\S+\s+docker\b/.test(line))
       .filter((line) => !/^(backend|web)_repo_digest="\$\(docker image inspect /.test(line.trim()))
     assert.deepEqual(unbounded, [])
+    // A second TERM cannot cut the exit mapping short: both handlers ignore TERM first.
+    const body = (name) => text.match(new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}$`, 'm'))?.[1].split('\n').map((line) => line.trim())
+    assert.equal(body('on_term')?.[0], "trap '' TERM", 'on_term ignores TERM first')
+    assert.deepEqual(body('on_exit')?.slice(0, 2), ['local raw=$? final', "trap '' TERM"], 'on_exit ignores TERM right after reading $?')
   })
 
   // ---------- negative controls: the harness goes red when the window skips a safety step ----------
