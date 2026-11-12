@@ -1589,6 +1589,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
     // Readiness v5 (batch-refresh step 6d-1b): the component ruling ledger store D20's readiness reads.
     const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
+    // Readiness v7 (batch-refresh S6-5b, R-91): the sheet-repair ledger (migration 108) the open-run check reads.
+    const sheetRepairStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-sheet-repair-store.cjs')) as any
 
     function routeResponse() {
       const res: any = { statusCode: 200, body: null, headers: {} }
@@ -1750,6 +1752,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
           // Readiness v5 (batch-refresh step 6d-1b, R-91): the real component ruling ledger (migration 107; nothing acknowledged).
           stockPreparationComponentRulingStore: componentRulingStoreLib.createStockPreparationComponentRulingStore({ db }),
+          // Readiness v7 (batch-refresh S6-5b, R-91): the real sheet-repair ledger (migration 108; no run of this sheet).
+          stockPreparationSheetRepairStore: sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.

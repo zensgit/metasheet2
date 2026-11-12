@@ -743,6 +743,7 @@ const {
   SPEC_READ_PLAN_SLOT_NOT_APPLICABLE: STOCK_PREP_PILOT_SPEC_SLOT_NOT_APPLICABLE,
   collectGenericWriterTargets: collectStockPrepGenericWriterTargets,
   evaluatePilotReadiness: evaluateStockPrepPilotReadiness,
+  readNoOpenSheetRepairRun: readStockPrepNoOpenSheetRepairRun,
 } = require('./stock-preparation-pilot-readiness.cjs')
 // 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3): the per-sheet switch (read, and set read-back
 // confirmed, through the host's provisioning port) and the reader of B1's persisted last-pull reminder.
@@ -851,6 +852,8 @@ const {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationSandboxTarget,
   sandboxStockPreparationTemplate,
+  // S6-5b: the census key-column probe asks the same DATABASE-backed field existence readiness asks.
+  resolveFieldExistence: resolveStockPrepFieldExistence,
   // The ONE carry-ownership verdict, shared with the deploy-time preflight so the wall and the
   // warning cannot drift apart.
   CARRY_TARGET_OWNERSHIP_STATES,
@@ -903,6 +906,11 @@ const stockPreparationExecutionRecovery = require('./stock-preparation-execution
 // Batch-refresh step 6d-1b (S6-5; R-91): the census answers, the acknowledgement bodies / audit entries, and the ruling
 // store's typed codes (migration 107).
 const stockPreparationRemnantAcknowledgement = require('./stock-preparation-remnant-acknowledgement.cjs')
+// S6-5b (R-91): the census key columns and the verdict over the host's field existence read (both census forms).
+const {
+  SHEET_CENSUS_KEY_FIELD_IDS: STOCK_PREP_SHEET_CENSUS_KEY_FIELD_IDS,
+  censusKeyFieldVerdict: stockPrepCensusKeyFieldVerdict,
+} = require('./stock-preparation-sheet-census.cjs')
 const { COMPONENT_RULING_ERROR_CODES: STOCK_PREP_COMPONENT_RULING_ERROR_CODES } = require('./stock-preparation-component-ruling-store.cjs')
 const { UNFINISHED_EXECUTION_STATUSES: STOCK_PREP_UNFINISHED_EXECUTION_STATUSES, REFRESH_STORE_ERROR_CODES: STOCK_PREP_REFRESH_STORE_ERROR_CODES } = require('./stock-preparation-continuation-store.cjs')
 // Batch-refresh step 4 PR-5: the formal-export gate (G0 -> C1 -> rows + file -> C2 -> G1), the ONE machine digest
@@ -4996,7 +5004,9 @@ function requireStockPreparationAudit() {
   // readiness v5's remnant check is ok:false (no enable).
   const stockPreparationComponentRulingStore = services.stockPreparationComponentRulingStore || null
   // Batch-refresh step 6d-2a (migration 108; register R-91): the sheet-repair ledger (run rows with their backup, the
-  // one-shot claims), touched only while the repair switch is on.
+  // one-shot claims). The repair routes touch it only while the repair switch is on; pilot readiness v7 (S6-5b,
+  // no_open_sheet_repair_run) and the enable's re-read under its lease READ it whatever the switch says (unwired or
+  // unreadable => no enable).
   const stockPreparationSheetRepairStore = services.stockPreparationSheetRepairStore || null
   // Batch-refresh step 4 PR-6: the governed-sheet probe the C6 multitable write-source is built with (index.cjs
   // builds it from the same stores). Absent => the write-source applies its not-wired rule (namespace objects 501).
@@ -5531,6 +5541,8 @@ function requireStockPreparationAudit() {
       // Owner ruling 2026-11-11 (readiness v6, R-91 option A): the staged tenant-claim door's ONE reader, asked per
       // request — a pilot cannot be enabled while a tenantless admin can still pull into a named tenant.
       tenantClaimRequired: stockPreparationTenantClaimRequired(),
+      // Batch-refresh S6-5b (readiness v7, R-91): the sheet-repair ledger whose open-run read the check asks (108).
+      sheetRepairStore: stockPreparationSheetRepairStore,
       lock: stockPreparationProjectWriteLock,
       writeScope,
       countOpenLargeJobs: () => countOpenLargeBomCheckpointApplyJobsForSheet({ storage: context.storage, sheetId: action.target.sheetId }),
@@ -5557,8 +5569,10 @@ function requireStockPreparationAudit() {
   }
   // THE ONE project-scoped read of the census (both forms) and the acknowledgement's re-proof: the sheet is proven the
   // caller's own first (the table-action wall, unconditionally — the readSheetRows posture), then the planner's own reader
-  // with the server-held band (RS-1). `progress.stage` names what failed for the tenant-wide census row.
-  async function readStockPreparationCensusRows(tenantId, action, projectNo, progress = {}) {
+  // with the server-held band (RS-1). `progress.stage` names what failed for the tenant-wide census row. `afterWall`
+  // (S6-5b: both census forms and the acknowledgement's re-proof) runs between the wall and the rows read: the census
+  // key-column guard, which throws in its caller's own closed way.
+  async function readStockPreparationCensusRows(tenantId, action, projectNo, progress = {}, afterWall = null) {
     progress.stage = 'tenant_wall'
     await assertTableActionTargetBelongsToTenant({
       provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
@@ -5566,7 +5580,40 @@ function requireStockPreparationAudit() {
       target: action.target,
     })
     progress.stage = 'rows_unreadable'
+    if (typeof afterWall === 'function') await afterWall()
     return tableActionInternals.readExistingStockPreparationRows(getMultitableRecordsApi(), action.target, projectNo, { pullBatchBand: pullBatchBandFor(tenantId, action.target) })
+  }
+  // S6-5b (R-91, closing the accepted residual ㉕): are the census key columns (SHEET_CENSUS_KEY_FIELD_IDS — the pack's
+  // `required` list) on THIS sheet? Asked of the host's DATABASE-backed field existence read; only a `db` answer is
+  // evidence. Answers `{ provable: true, missing }`; THROWS when the read fails or cannot speak from the database (the
+  // caller reads that as unreadable, never as "present" and never as "missing").
+  async function readStockPreparationCensusKeyFields(tenantId, action) {
+    const provisioning = getMultitableProvisioning()
+    const existence = await resolveStockPrepFieldExistence({
+      provisioning,
+      projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      objectId: action.target.objectId,
+      fieldIds: [...STOCK_PREP_SHEET_CENSUS_KEY_FIELD_IDS],
+    })
+    const verdict = stockPrepCensusKeyFieldVerdict(existence)
+    if (verdict.provable !== true || !Number.isSafeInteger(verdict.missing)) throw new Error('the census key columns could not be read from the database')
+    return verdict
+  }
+  // The single-project census and the acknowledgement's re-proof refuse the same closed way (the afterWall hook): 409
+  // FIELD_MISSING (a key column is gone — a re-proof over it could find a "remnant" the correct read would not), 503
+  // FIELDS_UNREADABLE (the database could not say). Thrown before any record read, before any audit row or ledger write.
+  function stockPreparationCensusKeyFieldsGuard(tenantId, action) {
+    return async () => {
+      let keyFields
+      try {
+        keyFields = await readStockPreparationCensusKeyFields(tenantId, action)
+      } catch (error) {
+        throw new HttpRouteError(503, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELDS_UNREADABLE, 'the key columns of this sheet could not be read from the database; the census is not answered', { reason: 'fields_unreadable', partial: false })
+      }
+      if (keyFields.missing !== 0) {
+        throw new HttpRouteError(409, stockPreparationRemnantAcknowledgement.REMNANT_ACKNOWLEDGEMENT_ERROR_CODES.FIELD_MISSING, 'a key column the census reads is missing from this sheet; the census is not answered', { reason: 'field_missing', missing: keyFields.missing, partial: false })
+      }
+    }
   }
   // The human columns the census counts over (design §6.4): the template band plus every installed pack column the
   // planner would treat as human or could not classify, read STRICTLY — a ledger or host failure throws (the row is then
@@ -5635,7 +5682,15 @@ function requireStockPreparationAudit() {
         progress.stage = 'sheet_mismatch'
         throw new Error('the resolved sheet is not the registry row\'s')
       }
-      const rows = await readStockPreparationCensusRows(tenantId, action, registryRow.projectNo, progress)
+      // S6-5b: a sheet that lost a key column answers incomplete / field_missing with NO counts (a read that cannot say
+      // stays rows_unreadable).
+      const rows = await readStockPreparationCensusRows(tenantId, action, registryRow.projectNo, progress, async () => {
+        const keyFields = await readStockPreparationCensusKeyFields(tenantId, action)
+        if (keyFields.missing !== 0) {
+          progress.stage = 'field_missing'
+          throw new Error('a census key column is missing from the sheet')
+        }
+      })
       progress.stage = 'pack_unreadable'
       const humanFieldIds = await readStockPreparationCensusHumanFieldIds(tenantId, action)
       progress.stage = 'rows_unreadable'
@@ -12424,7 +12479,8 @@ function requireStockPreparationAudit() {
         targetPurpose: 'read',
       }))
       await assertResolvedProjectTargetTenancy(action, tenantId)
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo)
+      // S6-5b: the key columns, after the wall and before the rows; refused BEFORE the audit row (no census answered).
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
       let humanFieldIds
       try {
         humanFieldIds = await readStockPreparationCensusHumanFieldIds(tenantId, action)
@@ -12482,7 +12538,9 @@ function requireStockPreparationAudit() {
         targetPurpose: 'write',
       }))
       await assertResolvedProjectTargetTenancy(action, tenantId)
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo)
+      // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
+      // refused before its rows are read and before anything is recorded.
+      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
       const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
       stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
       const row = await store.recordRemnantAcknowledgement({
@@ -12842,6 +12900,23 @@ function requireStockPreparationAudit() {
             STOCK_PREP_PILOT_ERROR_CODES.NOT_READY,
             'this project is not ready for the batch-refresh pilot; every listed check must pass before it can be enabled',
             { version: readiness.version, failing: ['no_open_large_job'], partial: false },
+          )
+        }
+        // S6-5b (readiness v7), closed under the lease the same way: a repair run begins only inside this sheet's
+        // lease, so one that began (and was left open) between the readiness read and this lease is seen HERE; while
+        // the lease is held none can begin. A store failure refuses too.
+        let noOpenRepairRun = false
+        try {
+          noOpenRepairRun = (await readStockPrepNoOpenSheetRepairRun({ sheetRepairStore: stockPreparationSheetRepairStore, tenantId, sheetId: action.target.sheetId, projectNo })) === true
+        } catch (error) {
+          noOpenRepairRun = false
+        }
+        if (!noOpenRepairRun) {
+          throw new StockPreparationPilotError(
+            409,
+            STOCK_PREP_PILOT_ERROR_CODES.NOT_READY,
+            'this project is not ready for the batch-refresh pilot; every listed check must pass before it can be enabled',
+            { version: readiness.version, failing: ['no_open_sheet_repair_run'], partial: false },
           )
         }
         const stamp = await provisioning.closeSheetGridExport({ projectId, sheetId: action.target.sheetId, objectId: action.target.objectId, actorId: actor })
