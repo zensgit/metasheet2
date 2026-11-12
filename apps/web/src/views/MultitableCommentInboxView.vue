@@ -2,49 +2,49 @@
   <section class="mt-comment-inbox">
     <header class="mt-comment-inbox__header">
       <div>
-        <h1>Multitable Comment Inbox</h1>
-        <p>Mentions and unread comments from other collaborators, pulled from <code>/api/comments/inbox</code>.</p>
+        <h1>{{ label('inbox.title') }}</h1>
+        <p>{{ label('inbox.subtitle') }}</p>
       </div>
       <MtButton class="mt-comment-inbox__refresh" variant="primary" :disabled="loading" @click="() => void refreshInbox()">
-        {{ loading ? 'Refreshing...' : 'Refresh' }}
+        {{ loading ? label('inbox.refreshing') : label('inbox.refresh') }}
       </MtButton>
     </header>
 
     <div class="mt-comment-inbox__stats">
       <article class="mt-comment-inbox__stat">
         <strong>{{ unreadCount }}</strong>
-        <span>Unread</span>
+        <span>{{ label('comment.unread') }}</span>
       </article>
       <article class="mt-comment-inbox__stat">
         <strong>{{ total }}</strong>
-        <span>Total</span>
+        <span>{{ label('inbox.total') }}</span>
       </article>
       <article class="mt-comment-inbox__stat">
         <strong>{{ inbox.length }}</strong>
-        <span>Loaded</span>
+        <span>{{ label('inbox.loaded') }}</span>
       </article>
     </div>
 
     <p v-if="error" class="mt-comment-inbox__error">{{ error }}</p>
-    <div v-else-if="loading" class="mt-comment-inbox__empty">Loading comment inbox...</div>
-    <div v-else-if="!inbox.length" class="mt-comment-inbox__empty">No comments in inbox yet.</div>
+    <div v-else-if="loading" class="mt-comment-inbox__empty">{{ label('inbox.loading') }}</div>
+    <div v-else-if="!inbox.length" class="mt-comment-inbox__empty">{{ label('inbox.empty') }}</div>
     <div v-else class="mt-comment-inbox__list">
       <article v-for="item in inbox" :key="item.id" class="mt-comment-inbox__card" :class="{ 'mt-comment-inbox__card--unread': item.unread }">
         <div class="mt-comment-inbox__card-head">
           <div>
-            <strong>{{ item.authorName ?? item.authorId }}</strong>
+            <strong>{{ commentAuthorLabel(item.authorName, isZh) }}</strong>
             <p class="mt-comment-inbox__meta">
-              <span v-if="item.baseId" :title="item.baseId">Base {{ item.baseName ?? item.baseId }}</span>
-              <span :title="resolveItemSheetId(item)">Sheet {{ item.sheetName ?? resolveItemSheetId(item) }}</span>
-              <span>Row {{ resolveItemRecordId(item) }}</span>
-              <span v-if="item.viewId" :title="item.viewId">View {{ item.viewName ?? item.viewId }}</span>
-              <span v-if="resolveItemFieldId(item)" :title="resolveItemFieldId(item) ?? undefined">Field {{ item.fieldName ?? resolveItemFieldId(item) }}</span>
+              <span v-if="item.baseId" :title="item.baseId">{{ label('inbox.base') }} {{ item.baseName ?? item.baseId }}</span>
+              <span :title="resolveItemSheetId(item)">{{ label('inbox.sheet') }} {{ item.sheetName ?? resolveItemSheetId(item) }}</span>
+              <span>{{ label('inbox.row') }} {{ resolveItemRecordId(item) }}</span>
+              <span v-if="item.viewId" :title="item.viewId">{{ label('inbox.view') }} {{ item.viewName ?? item.viewId }}</span>
+              <span v-if="resolveItemFieldId(item)" :title="resolveItemFieldId(item) ?? undefined">{{ label('inbox.field') }} {{ item.fieldName ?? resolveItemFieldId(item) }}</span>
             </p>
           </div>
           <div class="mt-comment-inbox__flags">
-            <span v-if="item.mentioned" class="mt-comment-inbox__badge mt-comment-inbox__badge--mention">Mention</span>
-            <span v-if="item.unread" class="mt-comment-inbox__badge mt-comment-inbox__badge--unread">Unread</span>
-            <span v-if="item.resolved" class="mt-comment-inbox__badge">Resolved</span>
+            <span v-if="item.mentioned" class="mt-comment-inbox__badge mt-comment-inbox__badge--mention">{{ label('inbox.mention') }}</span>
+            <span v-if="item.unread" class="mt-comment-inbox__badge mt-comment-inbox__badge--unread">{{ label('comment.unread') }}</span>
+            <span v-if="item.resolved" class="mt-comment-inbox__badge">{{ label('comment.resolved') }}</span>
           </div>
         </div>
 
@@ -53,10 +53,10 @@
           <span>{{ formatTime(item.createdAt) }}</span>
           <div class="mt-comment-inbox__actions">
             <MtButton class="mt-comment-inbox__button" variant="primary" :disabled="openingId === item.id" @click="onOpen(item.id)">
-              {{ openingId === item.id ? 'Opening...' : 'Open' }}
+              {{ openingId === item.id ? label('inbox.opening') : label('inbox.open') }}
             </MtButton>
             <MtButton class="mt-comment-inbox__button" variant="primary" :disabled="!item.unread || busyIds.includes(item.id) || openingId === item.id" @click="onMarkRead(item.id)">
-              {{ busyIds.includes(item.id) ? 'Saving...' : item.unread ? 'Mark read' : 'Read' }}
+              {{ busyIds.includes(item.id) ? label('comment.submitSaving') : item.unread ? label('inbox.markRead') : label('inbox.read') }}
             </MtButton>
           </div>
         </div>
@@ -68,6 +68,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useLocale } from '../composables/useLocale'
+import { commentAuthorLabel, commentLabel, type MetaCommentLabelKey } from '../multitable/utils/meta-comment-labels'
 import { useMultitableCommentInbox } from '../multitable/composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxRealtime } from '../multitable/composables/useMultitableCommentInboxRealtime'
 import { multitableClient } from '../multitable/api/client'
@@ -80,6 +82,8 @@ const inboxState = useMultitableCommentInbox(multitableClient)
 const busyIds = ref<string[]>([])
 const openingId = ref<string | null>(null)
 const router = useRouter()
+const { isZh } = useLocale()
+const label = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
 
 const {
   inbox,
@@ -136,7 +140,7 @@ async function onOpen(commentId: string) {
     }
 
     if (!resolvedViewId) {
-      throw new Error('No multitable view is available for this sheet yet.')
+      throw new Error(label('inbox.noView'))
     }
     await router.push({
       name: AppRouteNames.MULTITABLE,
@@ -155,8 +159,11 @@ async function onOpen(commentId: string) {
     if (item.unread) {
       applyLocalReadState(item.id)
     }
-  } catch (error: any) {
-    const message = error?.message ?? 'Failed to open comment'
+  } catch (error: unknown) {
+    const message = error && typeof error === 'object' && 'message' in error
+      && typeof error.message === 'string' && error.message.trim()
+      ? error.message
+      : label('inbox.errorOpen')
     console.warn('[multitable-comment-inbox] open failed', error)
     inboxState.error.value = message
   } finally {

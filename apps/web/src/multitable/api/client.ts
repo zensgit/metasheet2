@@ -5,6 +5,7 @@
 import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
   type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 import { setBusinessTimezone } from '../utils/business-timezone'
+import { gatewayRequest, gatewayTransportError, readGatewayJson, rememberGatewayResponse } from '../../utils/gatewayDiagnostics'
 export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 
 import type {
@@ -185,7 +186,7 @@ export function parseRetryAfterMs(headerValue: string | null): number | undefine
 }
 
 function defaultFetchFn(): FetchFn {
-  return apiFetch
+  return (input, init) => apiFetch(input, { ...init, expectJson: true })
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -224,8 +225,7 @@ function toChartUpdateWire(input: Partial<ChartCreateInput>): ChartUpdateInputWi
 }
 
 async function parseJson<T>(res: Response, isZh = false): Promise<T> {
-  const raw = await res.text()
-  const body = raw ? safeParseJson(raw) : null
+  const { raw, body } = await readGatewayJson(res, isZh)
   if (!res.ok) {
     const payload = normalizeApiErrorPayload(body, isZh)
     // A code the client owns the copy for (today: FIELD_SCHEMA_CHANGED) is shown in the user's language even when
@@ -247,14 +247,6 @@ async function parseJson<T>(res: Response, isZh = false): Promise<T> {
   }
   if (res.status === 204 || !raw.trim()) return undefined as T
   return (unwrapDataBody(body) ?? body) as T
-}
-
-function safeParseJson(raw: string): unknown {
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
 }
 
 function normalizeApiErrorPayload(body: unknown, isZh = false): ApiErrorPayload {
@@ -2292,9 +2284,17 @@ export class MultitableApiClient implements CommentsApiClient {
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.rawFetch = opts?.fetchFn ?? defaultFetchFn()
     // Arguments are passed on exactly as given (a call with no init stays a call with no init).
-    this.fetch = (...args: Parameters<FetchFn>) => {
+    this.fetch = async (...args: Parameters<FetchFn>) => {
       notifyMultitableBeforeSend()
-      return this.rawFetch(...args)
+      const [input, init] = args
+      const request = opts?.fetchFn ? gatewayRequest(input, init) : undefined
+      try {
+        const response = await this.rawFetch(...args)
+        rememberGatewayResponse(response, request)
+        return response
+      } catch (error) {
+        throw gatewayTransportError(error, request, init?.signal, this.resolveIsZh())
+      }
     }
     this.isZhOption = opts?.isZh
   }
@@ -2302,7 +2302,7 @@ export class MultitableApiClient implements CommentsApiClient {
   /** The public-form path: `apiFetch` without the sign-in redirect, told to the listeners as well. */
   private fetchPublic(path: string, init: RequestInit = {}): Promise<Response> {
     notifyMultitableBeforeSend()
-    return apiFetch(path, { ...init, suppressUnauthorizedRedirect: true })
+    return apiFetch(path, { ...init, suppressUnauthorizedRedirect: true, expectJson: true })
   }
 
   private resolveIsZh(): boolean {
@@ -2507,8 +2507,7 @@ export class MultitableApiClient implements CommentsApiClient {
       },
     )
     if (res.status === 409) {
-      const raw = await res.text()
-      const parsed = raw ? safeParseJson(raw) : null
+      const { body: parsed } = await readGatewayJson(res, this.resolveIsZh())
       const fields = recordApprovalConflictFields(parsed)
       const payload = normalizeApiErrorPayload(parsed, this.resolveIsZh())
       const error = new Error(
@@ -2825,8 +2824,7 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   private async readCopySheetBody(res: Response): Promise<unknown> {
-    const raw = await res.text()
-    const body = raw ? safeParseJson(raw) : null
+    const { body } = await readGatewayJson(res, this.resolveIsZh())
     if (!res.ok) throw buildCopySheetError(res.status, body, this.resolveIsZh())
     return unwrapDataBody(body) ?? body
   }
@@ -3185,8 +3183,8 @@ export class MultitableApiClient implements CommentsApiClient {
       // Reuse the shared error normalization (same shape parseJson throws) so the caller sees the
       // server's VALIDATION_ERROR / FORBIDDEN message + code, not a generic "failed to fetch".
       const isZh = this.resolveIsZh()
-      const raw = await res.text()
-      const payload = normalizeApiErrorPayload(raw ? safeParseJson(raw) : null, isZh)
+      const { body } = await readGatewayJson(res, isZh)
+      const payload = normalizeApiErrorPayload(body, isZh)
       const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
         status?: number
         code?: string

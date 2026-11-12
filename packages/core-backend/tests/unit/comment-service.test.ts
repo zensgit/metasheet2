@@ -183,6 +183,19 @@ describe('CommentService', () => {
   // ── parseMentions (tested via createComment / updateComment) ──────────
 
   describe('mention parsing via createComment', () => {
+    it('returns the scoped author name in the creation response and broadcast', async () => {
+      pushExec([], [])
+      pushTakeFirst(makeCommentRow({ author_name: '  Ada Demo  ' }))
+      const comment = await service.createComment({
+        spreadsheetId: 'sheet-1', rowId: 'row-1', content: 'Synthetic comment', authorId: 'user-author',
+      })
+      expect(comment.authorName).toBe('Ada Demo')
+      expect(mockCollabService.broadcastTo).toHaveBeenCalledWith(
+        expect.any(String), 'comment:created',
+        expect.objectContaining({ comment: expect.objectContaining({ authorName: 'Ada Demo', authorId: 'user-author' }) }),
+      )
+    })
+
     it('parses @[Name](userId) format from content', async () => {
       // createComment flow:
       // 1. insertInto -> execute (insert)

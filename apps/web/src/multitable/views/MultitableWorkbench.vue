@@ -1224,7 +1224,7 @@ const grid = useMultitableGrid({
   // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
   // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
   // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
-  onSortFilterWriteFailed: () => showError(wb('toast.sortFilterSaveFailed', isZh.value)),
+  onSortFilterWriteFailed: (_viewId, diagnosticMessage) => showError(diagnosticMessage ?? wb('toast.sortFilterSaveFailed', isZh.value)),
   // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
   // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
   resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
@@ -2108,8 +2108,8 @@ const capabilityOriginNotice = computed(() => {
   if (origin.source === 'sheet-grant') {
     return {
       source: origin.source,
-      title: 'Shared sheet access',
-      message: 'This sheet is available through a direct sheet share, not just your workspace role.',
+      title: isZh.value ? '共享数据表访问' : 'Shared sheet access',
+      message: isZh.value ? '你通过数据表直接共享获得访问权限，不仅限于工作区角色。' : 'This sheet is available through a direct sheet share, not just your workspace role.',
     }
   }
 
@@ -4535,7 +4535,7 @@ async function onCreateSheet(name: string) {
   }
   if (!confirmDiscardContextChanges()) return
   try {
-    const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
+    const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: false })
     const ok = await workbench.syncExternalContext({
       baseId: (res.sheet.baseId ?? workbench.activeBaseId.value) || undefined,
       sheetId: res.sheet.id,

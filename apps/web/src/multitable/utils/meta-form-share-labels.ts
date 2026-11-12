@@ -4,6 +4,28 @@
 // values, backend error messages, and persisted access-mode values stay raw.
 
 export type MetaFormShareLabelKey =
+  | 'public.title'
+  | 'public.loading'
+  | 'public.loadingAccess'
+  | 'public.subtitle'
+  | 'public.bind'
+  | 'public.recordId'
+  | 'public.another'
+  | 'public.saved'
+  | 'public.updated'
+  | 'public.submitted'
+  | 'public.redirectBinding'
+  | 'public.redirectSignIn'
+  | 'public.received'
+  | 'public.missingToken'
+  | 'public.missingParams'
+  | 'public.errorLoad'
+  | 'public.errorSubmit'
+  | 'public.bindRequired'
+  | 'public.grantRequired'
+  | 'public.notAllowed'
+  | 'public.errorSignIn'
+  | 'public.errorBinding'
   | 'title'
   | 'state.loading'
   | 'toggle.enabled'
@@ -78,6 +100,28 @@ export type MetaFormShareLabelKey =
   | 'error.clearExpiry'
 
 const LABELS: Record<MetaFormShareLabelKey, { en: string; zh: string }> = {
+  'public.title': { en: 'Public multitable form', zh: '公开多维表格表单' },
+  'public.loading': { en: 'Loading form…', zh: '正在加载表单…' },
+  'public.loadingAccess': { en: 'Loading secure form access...', zh: '正在验证表单访问权限...' },
+  'public.subtitle': { en: 'Submit your response using this form.', zh: '使用此表单提交回复。' },
+  'public.bind': { en: 'Bind DingTalk and return to this form', zh: '绑定钉钉并返回此表单' },
+  'public.recordId': { en: 'Record ID:', zh: '记录编号：' },
+  'public.another': { en: 'Submit another response', zh: '再提交一份' },
+  'public.saved': { en: 'Your response has been saved.', zh: '您的回复已保存。' },
+  'public.updated': { en: 'Your response has been updated successfully.', zh: '您的回复已更新成功。' },
+  'public.submitted': { en: 'Your response has been submitted successfully.', zh: '您的回复已提交成功。' },
+  'public.redirectBinding': { en: 'Redirecting to DingTalk binding…', zh: '正在跳转到钉钉绑定…' },
+  'public.redirectSignIn': { en: 'Redirecting to DingTalk sign-in…', zh: '正在跳转到钉钉登录…' },
+  'public.received': { en: 'Submission received', zh: '已收到提交' },
+  'public.missingToken': { en: 'Missing public token', zh: '缺少公开表单令牌' },
+  'public.missingParams': { en: 'Missing multitable route params', zh: '缺少多维表格路由参数' },
+  'public.errorLoad': { en: 'Failed to load public form', zh: '加载公开表单失败' },
+  'public.errorSubmit': { en: 'Failed to submit public form', zh: '提交公开表单失败' },
+  'public.bindRequired': { en: 'This form only accepts users with a bound DingTalk account.', zh: '此表单仅接受已绑定钉钉账户的用户。' },
+  'public.grantRequired': { en: 'This form only accepts DingTalk-authorized users.', zh: '此表单仅接受已获钉钉授权的用户。' },
+  'public.notAllowed': { en: 'This form only accepts selected system users or member groups.', zh: '此表单仅接受指定系统用户或成员组。' },
+  'public.errorSignIn': { en: 'Failed to start DingTalk sign-in', zh: '无法启动钉钉登录' },
+  'public.errorBinding': { en: 'Failed to start DingTalk binding', zh: '无法启动钉钉绑定' },
   title: { en: 'Public Form Sharing', zh: '公开表单分享' },
   'state.loading': { en: 'Loading share settings...', zh: '正在加载分享设置...' },
   'toggle.enabled': { en: 'Sharing enabled', zh: '分享已启用' },

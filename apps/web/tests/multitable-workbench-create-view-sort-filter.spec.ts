@@ -147,6 +147,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { multitableClient } from '../src/multitable/api/client'
 import { useMultitableSheetRealtime } from '../src/multitable/composables/useMultitableSheetRealtime'
+import { createGatewayInterferenceError } from '../src/utils/networkErrors'
 
 type StoredView = {
   id: string
@@ -655,6 +656,37 @@ describe('MultitableWorkbench #6075 round 3: rejected sort/filter writes are sho
     expect(badgeOf(sortTrigger(container!))).toBe('3')
     // …and the user is told — with the fixed label only (not the server's text, no rule / field names).
     expect(showErrorSpy.mock.calls).toEqual([['Sort/filter could not be saved to the view']])
+  })
+
+  it.each([false, true])('shows the safe gateway diagnostic through the actual grid and workbench callback (zh=%s)', async (isZh) => {
+    const env = await mountWorkbench()
+    const failure = createGatewayInterferenceError(500, 'req-synthetic-12345678', isZh, 'request')
+    const safeMessage = failure.message
+    failure.message = 'PRIVATE-MUTATED-MESSAGE'
+    env.updateView.mockRejectedValueOnce(failure)
+    await stageRemoveAllSorts(container!)
+    await clickSortApply(container!)
+    expect(env.updateView).toHaveBeenCalledTimes(1)
+    expect(env.store.view_grid).toEqual(allRecords())
+    expect(badgeOf(sortTrigger(container!))).toBe('3')
+    expect(showErrorSpy.mock.calls).toEqual([[safeMessage]])
+    expect(safeMessage).toContain('req-synthetic-12345678')
+    expect(safeMessage).toContain(failure.timestamp)
+    expect(safeMessage).toContain(failure.localTime)
+  })
+
+  it.each(['ordinary', 'forged'])('keeps a values-free generic toast for %s errors through the actual callback', async (kind) => {
+    const env = await mountWorkbench()
+    const failure = new Error('PRIVATE-SERVER-VALUE')
+    if (kind === 'forged') Object.assign(failure, {
+      name: 'GatewayInterferenceError', code: 'GATEWAY_INTERFERENCE', status: 500,
+      timestamp: '2026-11-11T00:00:00Z', requestId: 'req-synthetic-12345678',
+    })
+    env.updateView.mockRejectedValueOnce(failure)
+    await stageRemoveAllSorts(container!)
+    await clickSortApply(container!)
+    expect(showErrorSpy.mock.calls).toEqual([['Sort/filter could not be saved to the view']])
+    expect(container!.textContent).not.toContain('PRIVATE-SERVER-VALUE')
   })
 
   it('S3: a realtime reload while the 视图管理 save is IN FLIGHT does not PATCH the staged toolbar edit over it', async () => {

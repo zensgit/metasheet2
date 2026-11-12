@@ -46,6 +46,7 @@ import MetaViewManager from '../src/multitable/components/MetaViewManager.vue'
 import { useMultitableGrid, SORT_FILTER_WRITE_WAIT_MS, type SortRule } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
+import { createGatewayInterferenceError } from '../src/utils/networkErrors'
 import type { MetaField } from '../src/multitable/types'
 
 type StoredView = {
@@ -209,7 +210,7 @@ function mountHarness(
   server: ReturnType<typeof makeServer>,
   initialViewId = 'view_all',
   isPersonalMode?: () => boolean,
-  onSortFilterWriteFailed?: (viewId: string) => void,
+  onSortFilterWriteFailed?: (viewId: string, diagnosticMessage?: string) => void,
 ) {
   const viewId = ref(initialViewId)
   let grid!: ReturnType<typeof useMultitableGrid>
@@ -1142,6 +1143,44 @@ describe('#6075 round 3: bounded read-after-write, surfaced write failures, disc
     // …not through the shared `error` ref (the load itself succeeded)…
     expect(grid().error.value).toBeNull()
     // …but through the failure callback: exactly once, with nothing but the view id.
+    expect(onFailed.mock.calls).toEqual([['view_all']])
+  })
+
+  it.each(['sort', 'filter'])('forwards a factory-safe gateway diagnostic after a failed %s save and successful reload', async (facet) => {
+    const server = makeServer()
+    const onFailed = vi.fn()
+    const { container, grid } = mountHarness(server, 'view_all', undefined, onFailed)
+    await flush()
+    const failure = createGatewayInterferenceError(500, 'req-synthetic-12345678', true, 'request')
+    const safeMessage = failure.message
+    failure.message = 'PRIVATE-MUTATED-MESSAGE'
+    server.updateView.mockRejectedValueOnce(failure)
+    if (facet === 'sort') headerByName(container, '数量').click()
+    else {
+      grid().clearFilters()
+      grid().applySortFilter()
+    }
+    await flush()
+    expect(onFailed.mock.calls).toEqual([['view_all', safeMessage]])
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.store.view_all).toEqual(viewA())
+    expect(grid().error.value).toBeNull()
+    expect(grid().sortFilterDirty.value).toBe(false)
+  })
+
+  it.each(['ordinary', 'forged'])('keeps the original one-argument values-free callback for %s failures', async (kind) => {
+    const server = makeServer()
+    const onFailed = vi.fn()
+    const { container } = mountHarness(server, 'view_all', undefined, onFailed)
+    await flush()
+    const failure = new Error('PRIVATE-SERVER-VALUE')
+    if (kind === 'forged') Object.assign(failure, {
+      name: 'GatewayInterferenceError', code: 'GATEWAY_INTERFERENCE', status: 500,
+      timestamp: '2026-11-11T00:00:00Z', requestId: 'req-synthetic-12345678',
+    })
+    server.updateView.mockRejectedValueOnce(failure)
+    headerByName(container, '数量').click()
+    await flush()
     expect(onFailed.mock.calls).toEqual([['view_all']])
   })
 

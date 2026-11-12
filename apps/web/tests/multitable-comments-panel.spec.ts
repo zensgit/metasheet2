@@ -61,6 +61,31 @@ const baseProps = () => ({
 })
 
 describe('MetaCommentsPanel (W2 S4 extraction)', () => {
+  it.each(['en', 'zh-CN'])('uses safe author labels and preserves ownership controls in %s', async (locale) => {
+    useLocale().setLocale(locale)
+    const unknown = locale === 'zh-CN' ? '未知用户' : 'Unknown user'
+    const comments: MultitableComment[] = [
+      { id: 'root', containerId: 'sheet', targetId: 'record', mentions: [], authorId: 'synthetic-author-id', authorName: '  ', content: 'Root', resolved: false, createdAt: '2026-01-01' },
+      { id: 'reply', parentId: 'root', containerId: 'sheet', targetId: 'record', mentions: [], authorId: 'synthetic-reply-id', content: 'Reply', resolved: false, createdAt: '2026-01-02' },
+      { id: 'named', containerId: 'sheet', targetId: 'record', mentions: [], authorId: 'synthetic-named-id', authorName: '王 Demo', content: 'Named', resolved: false, createdAt: '2026-01-03' },
+    ]
+    const container = mount({ ...baseProps(), comments, currentUserId: 'synthetic-author-id', replyToCommentId: 'reply', draft: '@' })
+    await flushUi()
+    expect([...container.querySelectorAll('.meta-comments-drawer__author')].map((node) => node.textContent)).toEqual([unknown, unknown, '王 Demo'])
+    expect(container.querySelector('.meta-comments-drawer__reply-banner')?.textContent).toContain(unknown)
+    expect(container.textContent).not.toMatch(/synthetic-(author|reply|named)-id/)
+    const root = container.querySelector('.meta-comments-drawer__item')!
+    expect(root.textContent).toContain(locale === 'zh-CN' ? '编辑' : 'Edit')
+    expect(container.querySelector('.meta-comments-drawer__reply-item')?.textContent).not.toContain(locale === 'zh-CN' ? '编辑' : 'Edit')
+    const editing = mount({ ...baseProps(), comments, currentUserId: 'synthetic-author-id', editingCommentId: 'root' })
+    await flushUi()
+    expect(editing.querySelector('.meta-comments-drawer__reply-banner')?.textContent).toContain(unknown)
+    expect(editing.textContent).not.toContain('synthetic-author-id')
+    const readOnly = mount({ ...baseProps(), comments, canComment: false, canResolve: false })
+    expect(readOnly.querySelector('.meta-comments-drawer__input-area')).toBeNull()
+    expect(readOnly.querySelector('button.meta-comments-drawer__reply')).toBeNull()
+  })
+
   describe('thread render', () => {
     it('renders thread roots, replies, and reply counts', async () => {
       const container = mount({

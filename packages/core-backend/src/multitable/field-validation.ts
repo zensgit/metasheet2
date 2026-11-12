@@ -5,6 +5,23 @@
  * Rules are stored per-field in field.property.validation (FieldValidationConfig).
  */
 
+import { MultitableRecordValidationError } from './record-errors'
+
+function rejectNulJsonEntry(key: string, value: unknown): unknown {
+  if (key.includes('\u0000') || (typeof value === 'string' && value.includes('\u0000'))) {
+    throw new MultitableRecordValidationError('Record JSON keys and string values must not contain NUL')
+  }
+  return value
+}
+
+export function assertNoNulInRecordValue(value: unknown): void {
+  JSON.stringify(value, rejectNulJsonEntry)
+}
+
+export function serializeRecordData(data: Record<string, unknown>): string {
+  return JSON.stringify(data, rejectNulJsonEntry)
+}
+
 // --- Rule types ---
 
 export interface FieldValidationRule {

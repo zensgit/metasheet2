@@ -211,6 +211,7 @@ cancelRoundEntryTodoCenter
 categoryCandidateInput
 clipboard-no-bare-navigator-clipboard
 comment-affordance-color-consistency
+comment-author-public-form-i18n.spec.ts
 conditional-formatting-dialog-i18n
 data-sources-api-preview
 data-sources-ui
@@ -222,12 +223,14 @@ directoryConfigPickers
 DirectoryDeprovisionEvidencePanel.spec.ts
 DirectoryIntegrationIdentityPanel.spec.ts
 directoryManagementView
+export-sheet-client.test.ts
 featureFlags.plm.spec.ts
 featureFlagsApprovalAttachments
 featureFlagsApprovalMobile
 formViewValidation
 fwb-rule-authoring
 fwb-rule-authoring-helpers
+gateway-diagnostics.spec.ts
 integrationErrorCodeLabels
 IntegrationK3WiseSetupView
 IntegrationPipelineRunSection
@@ -338,6 +341,7 @@ multitable-embed-host
 multitable-embed-route
 multitable-export-dialog
 multitable-external-context-sync
+multitable-feedback-defaults.spec.ts
 multitable-field-config-i18n
 multitable-field-config-panel
 multitable-field-display-i18n

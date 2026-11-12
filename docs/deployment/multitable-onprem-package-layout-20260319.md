@@ -123,12 +123,27 @@ metasheet/
     multitable-onprem-package-upgrade.sh
     multitable-onprem-deploy-easy.sh
     multitable-onprem-healthcheck.sh
+    multitable-onprem-network-selfcheck.sh
+    multitable-onprem-network-selfcheck.ps1
+    multitable-onprem-network-selfcheck.mjs
   docker/app.env.multitable-onprem.template
   ops/nginx/multitable-onprem.conf.example
   docs/deployment/multitable-windows-onprem-easy-start-20260319.md
 ```
 
 ## Package mode
+
+The helper includes a token-required fixed-namespace randomized GET 404 probe,
+per-check HTTP status and summary counts; no PATCH/PUT business write tests are included.
+See the easy-start gateway matrix for authorized policy requirements and baseline caveats.
+
+Keep all three network-selfcheck files together, including when copied to the delivery
+bundle `ops/` directory. Both shell entry points use the adjacent Node 20+ runtime helper;
+PowerShell syntax targets 5.1, but Windows runtime acceptance remains a separate check.
+No additional npm dependencies are required. Run the Bash `--selftest` or PowerShell
+`-SelfTest` before delivery; these use only synthetic loopback traffic, not the configured target.
+See the easy-start guide's values-free network diagnosis section for authorization and output rules.
+
 
 This package is:
 

@@ -1787,6 +1787,8 @@ export default defineConfig({
       // Excluded HERE so the no-DB job cannot skip-green them, and wired as WHOLE FILES into the
       // `Run multitable real-DB integration` step in plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts',
+      'tests/integration/multitable-feedback-read-export-realdb.test.ts',
+      'tests/integration/multitable-date-nul-validation-realdb.test.ts',
       'tests/integration/multitable-automation-branch-local-wait.test.ts',
       'tests/integration/multitable-cross-base-automation-delete-lock.test.ts',
       'tests/integration/multitable-crossbase-realtime-fanout.test.ts',

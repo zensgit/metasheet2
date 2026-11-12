@@ -235,9 +235,9 @@ function toIsoString(value: unknown): string | null {
   return null
 }
 
-function injectSystemFieldValues(
+export function injectSystemFieldValues(
   data: Record<string, unknown>,
-  row: any,
+  row: { created_at?: unknown; updated_at?: unknown; created_by?: unknown; modified_by?: unknown },
   fields: MultitableField[],
 ): Record<string, unknown> {
   const hasSystemFields = fields.some((field) =>
@@ -418,12 +418,13 @@ export async function queryRecordsWithCursor(
   if (input.cursor) {
     const decoded = decodeRecordCursor(input.cursor)
     const op = direction === 'DESC' ? '<' : '>'
-    params.push(decoded.sortValue, decoded.id)
     if (orderBy.fieldId) {
+      params.push(decoded.sortValue, decoded.id)
       where.push(
         `(${sortExpr}, id) ${op} ($${params.length - 1}, $${params.length})`,
       )
     } else {
+      params.push(decoded.id)
       where.push(`id ${op} $${params.length}`)
     }
   }

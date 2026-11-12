@@ -7,6 +7,7 @@ import { explicitSessionOrg } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
 import { sendDelete } from './delete-fallback'
+import { gatewayRequest, gatewayTransportError, readGatewayJson, rememberGatewayResponse } from './gatewayDiagnostics'
 
 // Vite environment type declaration
 declare global {
@@ -29,6 +30,7 @@ let authRedirecting = false
 
 export interface ApiFetchOptions extends RequestInit {
   suppressUnauthorizedRedirect?: boolean
+  expectJson?: boolean
   /**
    * Header names to REMOVE after the global auth headers are applied. Needed for
    * self-service routes whose contract REJECTS subject-override headers instead of
@@ -350,7 +352,7 @@ export async function apiFetch(
   options: ApiFetchOptions = {},
 ): Promise<Response> {
   const base = getApiBase()
-  const { suppressUnauthorizedRedirect = false, omitHeaders = [], bypassDeleteFallback = false, ...requestOptions } = options
+  const { suppressUnauthorizedRedirect = false, omitHeaders = [], bypassDeleteFallback = false, expectJson = false, ...requestOptions } = options
   // `headers` is a HeadersInit: a plain record, `[name, value]` pairs, OR a Headers instance.
   // OBJECT-SPREADING the last shape yields `{}` — every entry lives behind prototype methods, none
   // is an own enumerable property — so a caller that handed us a Headers instance had its headers
@@ -371,10 +373,32 @@ export async function apiFetch(
     headers.set('Content-Type', 'application/json')
   }
 
-  const response = await fetchWithTransportCopy(`${base}${path}`, {
-    ...requestOptions,
-    headers,
-  }, bypassDeleteFallback)
+  const request = expectJson
+    ? gatewayRequest(`${base}${path}`, requestOptions, omitHeaders.some((name) => name.toLowerCase() === 'x-request-id') ? undefined : headers)
+    : undefined
+  let response: Response
+  try {
+    response = await fetchWithTransportCopy(`${base}${path}`, {
+      ...requestOptions,
+      headers,
+    }, bypassDeleteFallback)
+  } catch (error) {
+    throw gatewayTransportError(error, request, requestOptions.signal)
+  }
+
+  if (request) {
+    rememberGatewayResponse(response, request, (body) => {
+      if (suppressUnauthorizedRedirect) return
+      if (response.status === 401) handleUnauthorized(path)
+      if (response.status === 403 && body && typeof body === 'object' && 'error' in body) {
+        const error = body.error
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'PASSWORD_CHANGE_REQUIRED') {
+          handlePasswordChangeRequired(path)
+        }
+      }
+    })
+    return response
+  }
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {
     handleUnauthorized(path)
@@ -399,11 +423,13 @@ export async function apiFetch(
  * Make a GET request to the API
  */
 export async function apiGet<T = any>(path: string, options?: ApiFetchOptions): Promise<T> {
-  const response = await apiFetch(path, options)
+  const response = await apiFetch(path, { ...options, expectJson: true })
+  const { body, validJson } = await readGatewayJson(response)
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
-  return response.json()
+  if (!validJson) throw new SyntaxError('Invalid JSON response')
+  return body as T
 }
 
 /**
@@ -412,10 +438,13 @@ export async function apiGet<T = any>(path: string, options?: ApiFetchOptions): 
 export async function apiPost<T = any>(path: string, data: any): Promise<T> {
   const response = await apiFetch(path, {
     method: 'POST',
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
+    expectJson: true,
   })
+  const { body, validJson } = await readGatewayJson(response)
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
-  return response.json()
+  if (!validJson) throw new SyntaxError('Invalid JSON response')
+  return body as T
 }

@@ -2,13 +2,13 @@
   <main class="public-multitable-form">
     <section class="public-multitable-form__card">
       <header class="public-multitable-form__header">
-        <p class="public-multitable-form__eyebrow">Public multitable form</p>
+        <p class="public-multitable-form__eyebrow">{{ label('public.title') }}</p>
         <h1>{{ title }}</h1>
         <p v-if="subtitle" class="public-multitable-form__subtitle">{{ subtitle }}</p>
       </header>
 
       <div v-if="loading || redirectingToDingTalk || bindingToDingTalk" class="public-multitable-form__state">
-        {{ redirectingToDingTalk || bindingToDingTalk ? redirectingMessage : 'Loading form…' }}
+        {{ redirectingToDingTalk || bindingToDingTalk ? redirectingMessage : label('public.loading') }}
       </div>
       <div v-else-if="loadError" class="public-multitable-form__state public-multitable-form__state--error">
         <p class="public-multitable-form__state-message">{{ loadError }}</p>
@@ -20,21 +20,21 @@
           :disabled="bindingToDingTalk"
           @click="launchDingTalkBinding"
         >
-          Bind DingTalk and return to this form
+          {{ label('public.bind') }}
         </MtButton>
       </div>
       <div v-else-if="submitted && submissionResult" class="public-multitable-form__state public-multitable-form__state--success">
         <!-- A4: author-customizable thank-you. Title/body are author DATA and
              are rendered as PLAIN TEXT interpolation (never v-html) — this page
              is public + unauthenticated, so author content must not execute.
-             Falls back to the default English copy when unset. -->
+             Falls back to the localized default copy when unset. -->
         <h2>{{ confirmationTitle }}</h2>
         <p>{{ confirmationBody }}</p>
         <p v-if="submissionResult.record?.id" class="public-multitable-form__record-id">
-          Record ID: <code>{{ submissionResult.record.id }}</code>
+          {{ label('public.recordId') }} <code>{{ submissionResult.record.id }}</code>
         </p>
         <MtButton class="public-multitable-form__button" variant="primary" @click="resetForm">
-          Submit another response
+          {{ label('public.another') }}
         </MtButton>
       </div>
       <MetaFormView
@@ -60,6 +60,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useLocale } from '../composables/useLocale'
+import { formShareLabel, type MetaFormShareLabelKey } from '../multitable/utils/meta-form-share-labels'
 import type { FormSubmitResult, MetaFormContext } from '../multitable/types'
 import { multitableClient } from '../multitable/api/client'
 import MetaFormView from '../multitable/components/MetaFormView.vue'
@@ -90,29 +92,31 @@ const formKey = ref(0)
 const redirectingToDingTalk = ref(false)
 const bindingToDingTalk = ref(false)
 const loadErrorCode = ref('')
+const { isZh } = useLocale()
+const label = (key: MetaFormShareLabelKey) => formShareLabel(key, isZh.value)
 
-const title = computed(() => context.value?.view?.name || context.value?.sheet?.name || 'Public multitable form')
+const title = computed(() => context.value?.view?.name || context.value?.sheet?.name || label('public.title'))
 const subtitle = computed(() => {
-  if (!context.value) return 'Loading secure form access...'
+  if (!context.value) return label('public.loadingAccess')
   const parts = [context.value.sheet?.name, context.value.view?.name].filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-  return parts.length ? parts.join(' · ') : 'Submit this form anonymously.'
+  return parts.length ? parts.join(' · ') : label('public.subtitle')
 })
 const submissionMessage = computed(() => {
-  if (!submissionResult.value) return 'Your response has been saved.'
+  if (!submissionResult.value) return label('public.saved')
   return submissionResult.value.mode === 'update'
-    ? 'Your response has been updated successfully.'
-    : 'Your response has been submitted successfully.'
+    ? label('public.updated')
+    : label('public.submitted')
 })
 const redirectingMessage = computed(() => (
-  bindingToDingTalk.value ? 'Redirecting to DingTalk binding…' : 'Redirecting to DingTalk sign-in…'
+  bindingToDingTalk.value ? label('public.redirectBinding') : label('public.redirectSignIn')
 ))
 const canLaunchDingTalkBinding = computed(() => loadErrorCode.value === 'DINGTALK_BIND_REQUIRED')
 
 // A4: author thank-you copy. Author DATA — rendered as plain text. Default
-// English copy when unset (preserves today's behavior).
+// localized copy when unset.
 const confirmationTitle = computed(() => {
   const title = context.value?.formLayout?.confirmation?.title
-  return typeof title === 'string' && title.trim() ? title : 'Submission received'
+  return typeof title === 'string' && title.trim() ? title : label('public.received')
 })
 const confirmationBody = computed(() => {
   const body = context.value?.formLayout?.confirmation?.body
@@ -154,10 +158,10 @@ async function loadForm(): Promise<void> {
   try {
     const publicToken = props.publicToken?.trim()
     if (!publicToken) {
-      throw new Error('Missing public token')
+      throw new Error(label('public.missingToken'))
     }
     if (!props.sheetId || !props.viewId) {
-      throw new Error('Missing multitable route params')
+      throw new Error(label('public.missingParams'))
     }
     context.value = await multitableClient.loadFormContext({
       sheetId: props.sheetId,
@@ -171,7 +175,7 @@ async function loadForm(): Promise<void> {
     }
     context.value = null
     loadErrorCode.value = readErrorCode(error)
-    loadError.value = readPublicFormErrorMessage(error, 'Failed to load public form')
+    loadError.value = readPublicFormErrorMessage(error, label('public.errorLoad'))
   } finally {
     if (!redirectingToDingTalk.value && !bindingToDingTalk.value) {
       loading.value = false
@@ -183,7 +187,7 @@ async function onSubmit(data: Record<string, unknown>): Promise<void> {
   if (!context.value || submitting.value) return
   const publicToken = props.publicToken?.trim()
   if (!publicToken) {
-    submitError.value = 'Missing public token'
+    submitError.value = label('public.missingToken')
     return
   }
 
@@ -211,7 +215,7 @@ async function onSubmit(data: Record<string, unknown>): Promise<void> {
       const launched = await launchDingTalkSignIn()
       if (launched) return
     }
-    submitError.value = readPublicFormErrorMessage(error, 'Failed to submit public form')
+    submitError.value = readPublicFormErrorMessage(error, label('public.errorSubmit'))
     fieldErrors.value = readFieldErrors(error)
   } finally {
     submitting.value = false
@@ -259,13 +263,13 @@ function isDingTalkAuthRequired(error: unknown): boolean {
 function readPublicFormErrorMessage(error: unknown, fallback: string): string {
   const code = readErrorCode(error)
   if (code === 'DINGTALK_BIND_REQUIRED') {
-    return 'This form only accepts users with a bound DingTalk account.'
+    return label('public.bindRequired')
   }
   if (code === 'DINGTALK_GRANT_REQUIRED') {
-    return 'This form only accepts DingTalk-authorized users.'
+    return label('public.grantRequired')
   }
   if (code === 'DINGTALK_FORM_NOT_ALLOWED') {
-    return 'This form only accepts selected system users or member groups.'
+    return label('public.notAllowed')
   }
   return readErrorMessage(error, fallback)
 }
@@ -287,7 +291,7 @@ async function launchDingTalkSignIn(): Promise<boolean> {
     )
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.success || typeof payload?.data?.url !== 'string' || payload.data.url.trim().length === 0) {
-      throw new Error(readErrorMessage(payload, 'Failed to start DingTalk sign-in'))
+      throw new Error(readErrorMessage(payload, label('public.errorSignIn')))
     }
     if (typeof window !== 'undefined' && typeof window.location?.assign === 'function') {
       window.location.assign(payload.data.url)
@@ -300,7 +304,7 @@ async function launchDingTalkSignIn(): Promise<boolean> {
     return false
   } catch (error) {
     redirectingToDingTalk.value = false
-    loadError.value = readErrorMessage(error, 'Failed to start DingTalk sign-in')
+    loadError.value = readErrorMessage(error, label('public.errorSignIn'))
     loadErrorCode.value = ''
     return false
   }
@@ -317,7 +321,7 @@ async function launchDingTalkBinding(): Promise<boolean> {
     )
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.success || typeof payload?.data?.url !== 'string' || payload.data.url.trim().length === 0) {
-      throw new Error(readErrorMessage(payload, 'Failed to start DingTalk binding'))
+      throw new Error(readErrorMessage(payload, label('public.errorBinding')))
     }
     if (typeof window !== 'undefined' && typeof window.location?.assign === 'function') {
       window.location.assign(payload.data.url)
@@ -330,7 +334,7 @@ async function launchDingTalkBinding(): Promise<boolean> {
     return false
   } catch (error) {
     bindingToDingTalk.value = false
-    loadError.value = readErrorMessage(error, 'Failed to start DingTalk binding')
+    loadError.value = readErrorMessage(error, label('public.errorBinding'))
     loadErrorCode.value = 'DINGTALK_BIND_REQUIRED'
     return false
   }

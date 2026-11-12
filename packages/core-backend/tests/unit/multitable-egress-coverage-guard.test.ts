@@ -94,7 +94,7 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // so it adds no NEW wire-egress channel; the denied-link non-leak is already locked by
     // multitable-filter-by-link-view.test.ts, and the export parity case is in
     // tests/integration/multitable-export-allrows-maskroute-realdb.test.ts.
-    buildLinkSummaries: 7,
+    buildLinkSummaries: 8,
     serializeLinkSummaryMap: 1,
     // 3 = linkSummaries + attachmentSummaries + native person (人员) personSummaries (design
     // 2026-06-16). The personSummaries egress is routed through the SAME layer-2 ∧ layer-3

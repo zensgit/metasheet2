@@ -121,4 +121,30 @@ describe('queryRecordsWithCursor', () => {
     const result = await queryRecordsWithCursor({ query, sheetId: 'sheet1', limit: -10 })
     expect(result.items).toHaveLength(0)
   })
+
+  it.each(['asc', 'desc'] as const)('binds only used parameters for unsorted %s cursor pages', async (direction) => {
+    const fallback = makeMockQuery([])
+    let recordSql = ''
+    let recordParams: unknown[] = []
+    const query: MultitableRecordsQueryFn = async (sql, params) => {
+      if (sql.includes('FROM meta_records')) {
+        recordSql = sql
+        recordParams = params ?? []
+      }
+      return fallback(sql, params)
+    }
+    await queryRecordsWithCursor({
+      query,
+      sheetId: 'sheet1',
+      cursor: encodeRecordCursor('rec_10', 'unused'),
+      filter: { f1: 'active' },
+      sort: { direction },
+      limit: 10,
+    })
+    expect(recordParams).toEqual(['sheet1', 'f1', 'active', 'rec_10', 11])
+    expect(recordSql).toContain(`id ${direction === 'desc' ? '<' : '>'} $4`)
+    expect(recordSql).toContain('LIMIT $5')
+    const referenced = [...new Set([...recordSql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((left, right) => left - right)
+    expect(referenced).toEqual(recordParams.map((_, index) => index + 1))
+  })
 })

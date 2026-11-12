@@ -26,7 +26,9 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateDateValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { serializeRecordData } from './field-validation'
+import { MultitableRecordValidationError } from './record-errors'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
 import { fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import {
@@ -183,6 +185,17 @@ export class RecordValidationError extends Error {
   ) {
     super(message)
     this.name = 'RecordValidationError'
+  }
+}
+
+function serializeValidatedRecordData(data: Record<string, unknown>): string {
+  try {
+    return serializeRecordData(data)
+  } catch (error) {
+    if (error instanceof MultitableRecordValidationError) {
+      throw new RecordValidationError(error.message)
+    }
+    throw error
   }
 }
 
@@ -526,6 +539,7 @@ export class RecordWriteService {
     sheetId: string
     changesByRecord: Map<string, RecordChange[]>
     fieldById: Map<string, FieldMutationGuard>
+    source?: RecordPatchInput['source']
   }): Promise<void> {
     const { sheetId, changesByRecord, fieldById } = input
     const h = this.helpers
@@ -542,6 +556,9 @@ export class RecordWriteService {
       }
 
       for (const change of changes) {
+        if (input.source !== 'restore') {
+          serializeValidatedRecordData({ [change.fieldId]: change.op === 'unset' ? null : change.value })
+        }
         const field = fieldById.get(change.fieldId)
         if (!field) {
           throw new RecordValidationError(`Unknown fieldId: ${change.fieldId}`)
@@ -582,6 +599,14 @@ export class RecordWriteService {
             throw new RecordFieldForbiddenError(`Field type cannot be unset: ${change.fieldId}`, change.fieldId)
           }
           continue
+        }
+
+        if (field.type === 'date' && input.source !== 'restore') {
+          try {
+            validateDateValue(change.value, change.fieldId)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
         }
 
         if (field.type === 'select') {
@@ -718,7 +743,7 @@ export class RecordWriteService {
     // -----------------------------------------------------------------------
     // Step 0: Validate changes (field writability + value constraints)
     // -----------------------------------------------------------------------
-    await this.validateChanges({ sheetId, changesByRecord, fieldById })
+    await this.validateChanges({ sheetId, changesByRecord, fieldById, source })
     const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
       changesByRecord,
       fieldById,
@@ -1008,7 +1033,7 @@ export class RecordWriteService {
             continue
           }
 
-          if (BATCH1_FIELD_TYPES.has(field.type)) {
+          if ((source !== 'restore' && field.type === 'date') || BATCH1_FIELD_TYPES.has(field.type)) {
             try {
               patch[change.fieldId] = coerceBatch1Value(field.type, field.property, change.fieldId, change.value)
             } catch (error) {
@@ -1062,6 +1087,7 @@ export class RecordWriteService {
         // ensureRecordNotLocked. When there are unset keys, subtract them first: `(data - keys) || patch`;
         // the empty-array case is branched so existing set-only writes keep byte-identical SQL. Each UPDATE
         // template below carries its own adjacent lock-guarded marker for the RANK-8 structural scanner.
+        const serializedPatch = source === 'restore' ? JSON.stringify(patch) : serializeValidatedRecordData(patch)
         const updateRes = unsetIds.length > 0
           // lock-guarded: ensureRecordNotLocked enforced per record above (unset+set path)
           // revision-emitted: bulk PATCH unset+set — recordRecordRevision(action:'update') @998.
@@ -1070,7 +1096,7 @@ export class RecordWriteService {
                SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE sheet_id = $2 AND id = $3
                RETURNING version`,
-              [JSON.stringify(patch), sheetId, recordId, actorId, unsetIds],
+              [serializedPatch, sheetId, recordId, actorId, unsetIds],
             )
           // lock-guarded: ensureRecordNotLocked enforced per record above (set-only path)
           // revision-emitted: bulk PATCH set-only — recordRecordRevision(action:'update') @998.
@@ -1079,7 +1105,7 @@ export class RecordWriteService {
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE sheet_id = $2 AND id = $3
                RETURNING version`,
-              [JSON.stringify(patch), sheetId, recordId, actorId],
+              [serializedPatch, sheetId, recordId, actorId],
             )
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)

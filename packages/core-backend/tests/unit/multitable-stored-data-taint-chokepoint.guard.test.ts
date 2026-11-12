@@ -230,7 +230,7 @@ describe('§2a.3 stored-data taint chokepoint — durable structural guard', () 
     // chokepoints + the three write-path recompute-SKIP sites). Whole-`src` enforcement: a call from ANY
     // OTHER file is forbidden (that is exactly the ad-hoc re-bolting the chokepoint design forbids).
     const offFile = RUNTIME_FILES.filter((f) => f !== 'routes/univer-meta.ts').filter((f) =>
-      /\bresolveTaintedFormulaFieldIds\s*\(/.test(read(f)),
+      /\bresolveTainted(?:Formula|Computed)FieldIds\s*\(/.test(read(f)),
     )
     expect(
       offFile,

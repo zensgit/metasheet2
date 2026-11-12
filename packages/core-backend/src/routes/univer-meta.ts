@@ -404,9 +404,11 @@ import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
+import { injectSystemFieldValues } from '../multitable/query-service'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
-import type { FieldValidationConfig } from '../multitable/field-validation'
+import { assertNoNulInRecordValue, serializeRecordData, type FieldValidationConfig } from '../multitable/field-validation'
+import { MultitableRecordValidationError } from '../multitable/record-errors'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, withLayer2VisibilityKeys, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { assertLosslessFieldRetype, FieldRetypeNotLosslessError, FIELD_RETYPE_NOT_LOSSLESS_CODE } from '../multitable/field-retype-whitelist'
 import {
@@ -3699,8 +3701,8 @@ function shouldMaskForeignField(
  * whose MATERIALIZED value must be DROPPED because the formula (directly OR transitively via
  * formula→formula dependency edges within this sheet) reads a lookup/rollup field whose foreign
  * target field is masked for `req`'s actor (cross-base unconditional / same-base default unless
- * opt-out). Transitive closure is bounded to same-sheet formula→formula edges, which is the
- * model `formula_dependencies` records; cross-sheet formula chaining is not part of the model.
+ * opt-out). Foreign computed targets and rollup conditions participate in the same closure.
+ * Sheet metadata and resolved nodes are memoized per traversal; dependency cycles fail closed.
  *
  * Applied UNIFORMLY across EVERY sink that reads or persists materialized formula values RAW
  * (without applyLookupRollup re-masking them):
@@ -3724,136 +3726,124 @@ async function resolveTaintedFormulaFieldIds(
   authorityAccess?: ResolvedRequestAccess,
 ): Promise<Set<string>> {
   if (candidateFormulaFieldIds.size === 0) return new Set()
+  const fields = await loadFieldsForSheetShared(query, sheetId)
+  const formulaIds = new Set(fields.filter(field => field.type === 'formula' && candidateFormulaFieldIds.has(field.id)).map(field => field.id))
+  return resolveTaintedComputedFieldIds(req, query, sheetId, formulaIds, authorityAccess)
+}
 
-  const fields = (await loadFieldsForSheetShared(query, sheetId)) as UniverMetaField[]
-  // Map each lookup/rollup field id → its parsed config (the foreign target it reads).
-  const computedConfigById = new Map<string, LookupFieldConfig | RollupFieldConfig>()
-  const linkConfigById = new Map<string, LinkFieldConfig>()
-  for (const f of fields) {
-    if (f.type === 'link') {
-      const cfg = parseLinkFieldConfig(f.property)
-      if (cfg) linkConfigById.set(f.id, cfg)
-    } else if (f.type === 'lookup') {
-      const cfg = parseLookupFieldConfig(f.property)
-      if (cfg) computedConfigById.set(f.id, cfg)
-    } else if (f.type === 'rollup') {
-      const cfg = parseRollupFieldConfig(f.property)
-      if (cfg) computedConfigById.set(f.id, cfg)
+async function resolveTaintedComputedFieldIds(
+  req: Request | undefined,
+  query: QueryFn,
+  sheetId: string,
+  candidateFieldIds: Set<string>,
+  authorityAccess?: ResolvedRequestAccess,
+): Promise<Set<string>> {
+  if (candidateFieldIds.size === 0) return new Set()
+
+  async function loadTaintSheet(currentSheetId: string) {
+    const fields = (await loadFieldsForSheetShared(query, currentSheetId)) as UniverMetaField[]
+    const fieldsById = new Map(fields.map(field => [field.id, field]))
+    const computedById = new Map<string, LookupFieldConfig | RollupFieldConfig>()
+    const relationById = new Map<string, { call: RelationAggregationCall; foreignSheetId: string | null }>()
+    const dependencies = new Map<string, Set<string>>()
+    const foreignSheetIds = new Set<string>()
+    const foreignSheetOf = (linkFieldId: string): string | null => {
+      const link = fieldsById.get(linkFieldId)
+      return link?.type === 'link' ? parseLinkFieldConfig(link.property)?.foreignSheetId ?? null : null
     }
-  }
-  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
-
-  // 1b Slice A leak edge: a relation-aggregation formula reaches a FOREIGN target/criteria DIRECTLY (no
-  // lookup/rollup intermediary), so the same-sheet edge walk below can't see it. Parse the candidate
-  // formulas' sole-call expressions; further down we taint any whose target OR criteria foreign field is
-  // unreadable for THIS actor (the cross-sheet read-leak this closes).
-  const relAggByField = new Map<string, { call: RelationAggregationCall; foreignSheetId: string | null }>()
-  for (const f of fields) {
-    if (f.type !== 'formula' || !candidateFormulaFieldIds.has(f.id)) continue
-    const expr = formulaExpressionOf(f)
-    if (!expr) continue
-    const call = parseRelationAggregationCall(expr)
-    if (!call) continue
-    const linkField = fields.find((lf) => lf.id === call.linkFieldId && lf.type === 'link')
-    const foreignSheetId = linkField ? parseLinkFieldConfig(linkField.property)?.foreignSheetId ?? null : null
-    relAggByField.set(f.id, { call, foreignSheetId })
-  }
-
-  // No computed fields AND no relation-aggregation formulas → nothing a formula could taint-leak.
-  if (computedConfigById.size === 0 && relAggByField.size === 0) return new Set()
-
-  // All in-sheet dependency edges (field_id depends_on depends_on_field_id, same sheet).
-  const depRes = await query(
-    `SELECT field_id, depends_on_field_id FROM formula_dependencies
-     WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)`,
-    [sheetId],
-  )
-  const dependsOnByField = new Map<string, Set<string>>()
-  for (const raw of depRes.rows as Array<{ field_id?: unknown; depends_on_field_id?: unknown }>) {
-    const fieldId = typeof raw.field_id === 'string' ? raw.field_id : ''
-    const dep = typeof raw.depends_on_field_id === 'string' ? raw.depends_on_field_id : ''
-    if (!fieldId || !dep) continue
-    const set = dependsOnByField.get(fieldId) ?? new Set<string>()
-    set.add(dep)
-    dependsOnByField.set(fieldId, set)
-  }
-
-  // Recompute also discovers dependencies from authoritative expressions when the index is stale.
-  // Taint must include the same edges or masked hydration could overwrite a stored authorized value.
-  for (const field of fields) {
-    if (field.type !== 'formula') continue
-    const expression = formulaExpressionOf(field)
-    if (!expression) continue
-    const refs = multitableFormulaEngine.extractFieldReferences(expression)
-    const deps = dependsOnByField.get(field.id) ?? new Set<string>()
-    for (const ref of refs) deps.add(ref)
-    dependsOnByField.set(field.id, deps)
-  }
-
-  // Resolve foreign-field readability ONCE for every foreign sheet any computed field references.
-  const sourceSheet = await loadSheetRowShared(query, sheetId)
-  const sourceBaseId = sourceSheet?.baseId ?? null
-  const foreignSheetIds = new Set<string>()
-  for (const cfg of computedConfigById.values()) {
-    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
-    if (fs) foreignSheetIds.add(fs)
-  }
-  for (const { foreignSheetId } of relAggByField.values()) {
-    if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
-  }
-  const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, foreignSheetIds, authorityAccess)
-
-  // A computed (lookup/rollup) field is "masked" iff its foreign target field is masked.
-  const maskedComputedFieldIds = new Set<string>()
-  for (const [fieldId, cfg] of computedConfigById.entries()) {
-    const fs = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
-    if (shouldMaskForeignField(readability, fs, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
-      maskedComputedFieldIds.add(fieldId)
-    }
-  }
-  if (maskedComputedFieldIds.size === 0 && relAggByField.size === 0) return new Set()
-
-  // For each candidate FORMULA field, transitively resolve whether it reaches a masked computed
-  // field via same-sheet formula→formula edges (bounded — visited-guarded, no cycles). Non-formula
-  // candidate ids are ignored defensively so a caller may pass a broad allow-set (e.g. history)
-  // without ever dropping a non-formula field.
-  const tainted = new Set<string>()
-  for (const formulaFieldId of candidateFormulaFieldIds) {
-    if (!formulaFieldIds.has(formulaFieldId)) continue
-    const stack = [formulaFieldId]
-    const visited = new Set<string>()
-    let leaks = false
-    while (stack.length > 0) {
-      const current = stack.pop() as string
-      if (visited.has(current)) continue
-      visited.add(current)
-      for (const dep of dependsOnByField.get(current) ?? []) {
-        if (maskedComputedFieldIds.has(dep)) { leaks = true; break }
-        // Only chase further through formula→formula edges (a formula's deps that are themselves
-        // formulas); a dep on a non-formula, non-masked-computed field is a leaf.
-        if (formulaFieldIds.has(dep)) stack.push(dep)
+    for (const field of fields) {
+      const config = field.type === 'lookup' ? parseLookupFieldConfig(field.property)
+        : field.type === 'rollup' ? parseRollupFieldConfig(field.property) : null
+      if (config) {
+        computedById.set(field.id, config)
+        const foreignSheetId = config.foreignSheetId ?? foreignSheetOf(config.linkFieldId)
+        if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
       }
-      if (leaks) break
+      if (field.type !== 'formula') continue
+      const expression = formulaExpressionOf(field)
+      if (!expression) continue
+      dependencies.set(field.id, new Set(multitableFormulaEngine.extractFieldReferences(expression)))
+      const call = parseRelationAggregationCall(expression)
+      if (call) {
+        const foreignSheetId = foreignSheetOf(call.linkFieldId)
+        relationById.set(field.id, { call, foreignSheetId })
+        if (foreignSheetId) foreignSheetIds.add(foreignSheetId)
+      }
     }
-    if (leaks) tainted.add(formulaFieldId)
+    if (fields.some(field => field.type === 'formula')) {
+      const result = await query(
+        `SELECT field_id, depends_on_field_id FROM formula_dependencies
+         WHERE sheet_id = $1 AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $1)`,
+        [currentSheetId],
+      )
+      for (const raw of result.rows as Array<{ field_id?: unknown; depends_on_field_id?: unknown }>) {
+        if (typeof raw.field_id !== 'string' || typeof raw.depends_on_field_id !== 'string') continue
+        const refs = dependencies.get(raw.field_id) ?? new Set<string>()
+        refs.add(raw.depends_on_field_id)
+        dependencies.set(raw.field_id, refs)
+      }
+    }
+    const sourceSheet = await loadSheetRowShared(query, currentSheetId)
+    const readability = await resolveForeignFieldReadability(req, query, sourceSheet?.baseId ?? null, foreignSheetIds, authorityAccess)
+    return { fieldsById, computedById, relationById, dependencies, readability, foreignSheetOf }
   }
 
-  // 1b Slice A leak edge: taint a relation-aggregation formula when its FOREIGN target or criteria field is
-  // unreadable for this actor. Cross-base flows through the SAME per-field gate (shouldMaskForeignField: an
-  // unreadable cross-base sheet has its readable set emptied by resolveForeignFieldReadability's base-read
-  // gate → every field masks → tainted); an AUTHORIZED cross-base reader is NOT blanket-tainted, mirroring the
-  // resolveRelationAggregation gate so the formula-consumed value matches the standalone field. This is the
-  // read-path mask (maskStoredRecordFieldIds → here) that makes materialize-at-write safe: a restricted reader
-  // gets the field dropped, never the writer's materialized aggregate. A misconfigured call (no foreign
-  // sheet) is left to resolveRelationAggregation's #ERROR! — not a leak.
-  for (const [fieldId, { call, foreignSheetId }] of relAggByField) {
-    if (!foreignSheetId) continue
-    if (
-      shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false) ||
-      shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)
-    ) {
-      tainted.add(fieldId)
+  const sheetCache = new Map<string, ReturnType<typeof loadTaintSheet>>()
+  const resolved = new Map<string, boolean>()
+  const active = new Set<string>()
+  const getSheet = (currentSheetId: string) => {
+    let pending = sheetCache.get(currentSheetId)
+    if (!pending) {
+      pending = loadTaintSheet(currentSheetId)
+      sheetCache.set(currentSheetId, pending)
     }
+    return pending
+  }
+  async function isTainted(currentSheetId: string, fieldId: string): Promise<boolean> {
+    const key = JSON.stringify([currentSheetId, fieldId])
+    if (resolved.has(key)) return resolved.get(key)!
+    if (active.has(key)) return true
+    active.add(key)
+    try {
+      const context = await getSheet(currentSheetId)
+      const foreignTainted = async (foreignSheetId: string | null | undefined, targetFieldId: string, skip: boolean | undefined): Promise<boolean> => {
+        if (shouldMaskForeignField(context.readability, foreignSheetId, targetFieldId, skip)) return true
+        return foreignSheetId ? isTainted(foreignSheetId, targetFieldId) : false
+      }
+      let tainted = false
+      const config = context.computedById.get(fieldId)
+      if (config) {
+        const foreignSheetId = config.foreignSheetId ?? context.foreignSheetOf(config.linkFieldId)
+        tainted = await foreignTainted(foreignSheetId, config.targetFieldId, config.skipForeignFieldMasking)
+        if ('aggregation' in config) {
+          for (const condition of config.filters ?? []) {
+            if (await foreignTainted(foreignSheetId, condition.fieldId, false)) tainted = true
+          }
+        }
+      }
+      if (context.fieldsById.get(fieldId)?.type === 'formula') {
+        const relation = context.relationById.get(fieldId)
+        if (relation?.foreignSheetId) {
+          tainted ||= await foreignTainted(relation.foreignSheetId, relation.call.targetFieldId, false)
+          tainted ||= await foreignTainted(relation.foreignSheetId, relation.call.criteria.fieldId, false)
+        }
+        for (const dependency of context.dependencies.get(fieldId) ?? []) {
+          if (tainted) break
+          tainted = await isTainted(currentSheetId, dependency)
+        }
+      }
+      resolved.set(key, tainted)
+      return tainted
+    } finally {
+      active.delete(key)
+    }
+  }
+
+  const source = await getSheet(sheetId)
+  const tainted = new Set<string>()
+  for (const fieldId of candidateFieldIds) {
+    const fieldType = source.fieldsById.get(fieldId)?.type
+    if (fieldType && ['formula', 'lookup', 'rollup'].includes(fieldType) && await isTainted(sheetId, fieldId)) tainted.add(fieldId)
   }
   return tainted
 }
@@ -4026,12 +4016,20 @@ async function applyLookupRollup(
   const access = authorityAccess ?? (req ? await resolveRequestAccess(req) : null)
   if (!access) throw new Error('RECOVERY_READ_AUTHORITY_UNAVAILABLE')
   const foreignRecordsBySheet = new Map<string, Map<string, Record<string, unknown>>>()
+  const foreignUntaintedFieldIds = new Map<string, Set<string>>()
   for (const [foreignSheetId, ids] of foreignIdsBySheet.entries()) {
     if (!readableForeignSheetIds.has(foreignSheetId)) continue
     if (ids.size === 0) continue
     const idList = Array.from(ids)
+    const foreignFields = await loadFieldsForSheetShared(query, foreignSheetId)
+    const foreignFieldIds = new Set(foreignFields.map(field => field.id))
+    const taintedForeignFields = await resolveTaintedComputedFieldIds(req, query, foreignSheetId, foreignFieldIds, authorityAccess)
+    foreignUntaintedFieldIds.set(foreignSheetId, new Set([...foreignFieldIds].filter(fieldId => !taintedForeignFields.has(fieldId))))
+    const hasSystemFields = foreignFields.some((field) => ['createdTime', 'modifiedTime', 'createdBy', 'modifiedBy'].includes(field.type))
     const foreignRes = await query(
-      'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      hasSystemFields
+        ? 'SELECT id, data, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])'
+        : 'SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
       [foreignSheetId, idList],
     )
     let deniedForeign: Set<string> | null = null
@@ -4042,7 +4040,7 @@ async function applyLookupRollup(
     for (const raw of foreignRes.rows as any[]) {
       const fid = String(raw.id)
       if (deniedForeign?.has(fid)) continue // denied foreign record → treated as absent (no value, no count)
-      recordMap.set(fid, normalizeJson(raw.data))
+      recordMap.set(fid, injectSystemFieldValues(normalizeJson(raw.data), raw, foreignFields))
     }
     foreignRecordsBySheet.set(foreignSheetId, recordMap)
   }
@@ -4079,6 +4077,8 @@ async function applyLookupRollup(
     if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cfg.targetFieldId, cfg.skipForeignFieldMasking)) {
       return { values: [], count: 0, masked: true }
     }
+    const untaintedFieldIds = foreignUntaintedFieldIds.get(foreignSheetId)
+    if (!untaintedFieldIds?.has(cfg.targetFieldId)) return { values: [], count: 0, masked: true }
     const foreignMap = foreignRecordsBySheet.get(foreignSheetId)
     if (!foreignMap) return { values: [], count: 0, masked: true }
 
@@ -4093,7 +4093,7 @@ async function applyLookupRollup(
     const rollupCfg = 'aggregation' in cfg ? cfg : null
     const filters = rollupCfg?.filters ?? []
     for (const cond of filters) {
-      if (shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cond.fieldId, false)) {
+      if (!untaintedFieldIds.has(cond.fieldId) || shouldMaskForeignField(foreignFieldReadability, foreignSheetId, cond.fieldId, false)) {
         return { values: [], count: 0, masked: true }
       }
     }
@@ -6963,6 +6963,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
   const totalId = byName.get('总价')!
   const priorityId = byName.get('优先级')!
   const relatedId = byName.get('关联')!
+  fields.find((field) => field.id === totalId)!.property = { expression: `={${qtyId}}*{${priceId}}` }
 
   const records: Array<{ id: string; version: number; data: Record<string, unknown> }> = [
     {
@@ -6972,7 +6973,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         [nameId]: '产品A',
         [qtyId]: 10,
         [priceId]: 100,
-        [totalId]: '=B1*C1',
+        [totalId]: 1000,
         [priorityId]: 'P0',
         [relatedId]: 'PLM#6',
       },
@@ -6984,7 +6985,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         [nameId]: '产品B',
         [qtyId]: 20,
         [priceId]: 150,
-        [totalId]: '=B2*C2',
+        [totalId]: 3000,
         [priorityId]: 'P1',
         [relatedId]: 'PLM#7',
       },
@@ -6996,7 +6997,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         [nameId]: '产品C',
         [qtyId]: 15,
         [priceId]: 200,
-        [totalId]: '=B3*C3',
+        [totalId]: 3000,
         [priorityId]: 'P2',
         [relatedId]: 'PLM#8',
       },
@@ -7008,7 +7009,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         [nameId]: '产品D',
         [qtyId]: 25,
         [priceId]: 120,
-        [totalId]: '=B4*C4',
+        [totalId]: 3000,
         [priorityId]: 'P1',
         [relatedId]: 'PLM#9',
       },
@@ -7017,10 +7018,10 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
       id: buildId('rec'),
       version: 1,
       data: {
-        [nameId]: '合计',
-        [qtyId]: '',
-        [priceId]: '',
-        [totalId]: '=SUM(D1:D4)',
+        [nameId]: '产品E',
+        [qtyId]: 5,
+        [priceId]: 50,
+        [totalId]: 250,
         [priorityId]: '',
         [relatedId]: '',
       },
@@ -7074,6 +7075,8 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         [field.id, args.sheetId, field.name, field.type, JSON.stringify(field.property ?? {}), field.order],
       )
     }
+
+    await syncFormulaDependencies(query, args.sheetId, totalId, [qtyId, priceId])
 
     for (const record of records) {
       // revision-exempt: createSeededSheet template scaffold — hardcoded demo preset at sheet birth, not
@@ -17231,7 +17234,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       // D3c: export must mirror the view path's field masking — apply subject-scoped
       // field_permissions + view.hidden_field_ids, not only static property.hidden.
-      const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const sourceFields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+      const visibleFields = filterVisiblePropertyFields(sourceFields)
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, {
         hiddenFieldIds: viewHiddenFieldIds,
@@ -17308,6 +17312,31 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // computed on read (never materialized), so this map is filled only where the rows are hydrated through
       // applyLookupRollup (the filtered branch below).
       let exportLookupDateTimeZoneById = new Map<string, { zone: string; dateOnly: boolean }>()
+      const exportRelationalFields = sourceFields
+        .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
+        .filter((value): value is RelationalLinkField => !!value && !!value.cfg)
+      const exportLinkFields = exportRelationalFields.filter((field) => fieldIds.has(field.fieldId))
+      const exportPersonFields = fields.filter((field) => field.type === 'person')
+      const exportAttachmentFields = fields.filter((field) => field.type === 'attachment')
+      const hydrateExportRecords = async (records: UniverMetaRecord[]) => {
+        const linkValues = await loadLinkValuesByRecord(pool.query.bind(pool), records.map((record) => record.id), exportRelationalFields)
+        await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, records, exportRelationalFields, linkValues)
+        const links = await buildLinkSummaries(req, pool.query.bind(pool), sheetId, records, exportLinkFields, linkValues)
+        const people = await buildPersonSummaries(pool.query.bind(pool), records, exportPersonFields)
+        const attachments = await buildAttachmentSummaries(pool.query.bind(pool), req, sheetId, records, exportAttachmentFields)
+        exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, exportRelationalFields)
+        for (const record of records) {
+          for (const field of exportLinkFields) {
+            record.data[field.fieldId] = (links.get(record.id)?.get(field.fieldId) ?? []).map((item) => item.display)
+          }
+          for (const field of exportPersonFields) {
+            record.data[field.id] = (people.get(record.id)?.get(field.id) ?? []).map((item) => item.display === item.id ? '' : item.display)
+          }
+          for (const field of exportAttachmentFields) {
+            record.data[field.id] = (attachments.get(record.id)?.get(field.id) ?? []).map((item) => item.filename)
+          }
+        }
+      }
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -17378,8 +17407,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             cursor,
             limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
           })
-          for (const record of result.items) {
-            if (exportDeniedIds && exportDeniedIds.has(record.id)) continue
+          const readableRecords = result.items.filter((record) => !exportDeniedIds?.has(record.id))
+          await hydrateExportRecords(readableRecords)
+          for (const record of readableRecords) {
             rows.push(projectRecord(record))
             if (rows.length >= XLSX_MAX_ROWS) {
               truncated = result.hasMore
@@ -17395,13 +17425,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // memory profile equals a filtered /view of the same sheet; the output stays bounded by
         // XLSX_MAX_ROWS. The masked projection (`projectRecord`) is reused unchanged afterward.
         const recordRes = await pool.query(
-          'SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+          'SELECT id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
           [sheetId],
         )
-        let all = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown; created_at: unknown }>).map((r) => ({
+        let all = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown; created_at: unknown; updated_at: unknown; created_by: unknown; modified_by: unknown }>).map((r) => ({
           id: String(r.id),
           version: Number(r.version ?? 1),
-          data: normalizeJson(r.data),
+          data: injectSystemFieldValues(normalizeJson(r.data), r, sourceFields),
           createdAt: r.created_at as unknown,
         }))
 
@@ -17409,7 +17439,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // truncation flag, and the exported rows all exclude them (parity with the cursor branch).
         if (exportDeniedIds) all = all.filter((rec) => !exportDeniedIds.has(rec.id))
 
-        const relationalLinkFields = fields
+        const relationalLinkFields = sourceFields
           .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
           .filter((value): value is { fieldId: string; cfg: LinkFieldConfig } => !!value && !!value.cfg)
         const computedFieldIdSet = new Set(
@@ -17424,7 +17454,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         let linkValuesByRecord: Map<string, Map<string, string[]>> | null = null
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
-          await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          await applyLookupRollup(req, pool.query.bind(pool), sheetId, visibleFields.filter((field) => filterSortFieldIds.has(field.id)), all, relationalLinkFields, linkValuesByRecord)
           exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
@@ -17492,6 +17522,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Cap the FILTERED set at XLSX_MAX_ROWS — truncation reflects the filtered count, not raw rows.
         truncated = all.length > XLSX_MAX_ROWS
         const capped = truncated ? all.slice(0, XLSX_MAX_ROWS) : all
+        await hydrateExportRecords(capped)
         for (const record of capped) rows.push(projectRecord(record))
       }
 
@@ -18094,7 +18125,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             const limitParamIndex = firstFieldParamIndex + searchableFieldIds.length
             const offsetParamIndex = limitParamIndex + 1
             const recordRes = await pool.query(
-              `SELECT id, version, data, locked, locked_by, locked_at, COUNT(*) OVER()::int AS total
+              `SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by, COUNT(*) OVER()::int AS total
                FROM meta_records
                WHERE sheet_id = $1 AND (${predicate})
                ORDER BY created_at ASC, id ASC
@@ -18105,7 +18136,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             rows = recordRes.rows.map((r: any) => ({
               id: String(r.id),
               version: Number(r.version ?? 1),
-              data: normalizeJson(r.data),
+              data: injectSystemFieldValues(normalizeJson(r.data), r, fields),
               ...mapRecordLockState(r),
             }))
 
@@ -18122,7 +18153,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             page = { offset, limit, total, hasMore: offset + rows.length < total }
           } else {
             const recordRes = await pool.query(
-              `SELECT id, version, data, locked, locked_by, locked_at
+              `SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by
                FROM meta_records
                WHERE sheet_id = $1 AND (${predicate})
                ORDER BY created_at ASC, id ASC`,
@@ -18132,21 +18163,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             rows = recordRes.rows.map((r: any) => ({
               id: String(r.id),
               version: Number(r.version ?? 1),
-              data: normalizeJson(r.data),
+              data: injectSystemFieldValues(normalizeJson(r.data), r, fields),
               ...mapRecordLockState(r),
             }))
           }
         }
       } else if (hasInMemoryProcessing) {
         const recordRes = await pool.query(
-          'SELECT id, version, data, created_at, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+          'SELECT id, version, data, created_at, locked, locked_by, locked_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
           [sheetId],
         )
 
         let all = recordRes.rows.map((r: any) => ({
           id: String(r.id),
           version: Number(r.version ?? 1),
-          data: normalizeJson(r.data),
+          data: injectSystemFieldValues(normalizeJson(r.data), r, fields),
           createdAt: (r as any).created_at as unknown,
           lock: mapRecordLockState(r),
         }))
@@ -18257,7 +18288,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       } else {
         if (limit) {
           const recordRes = await pool.query(
-            `SELECT id, version, data, locked, locked_by, locked_at, COUNT(*) OVER()::int AS total
+            `SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by, COUNT(*) OVER()::int AS total
              FROM meta_records
              WHERE sheet_id = $1
              ORDER BY created_at ASC, id ASC
@@ -18268,7 +18299,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           rows = recordRes.rows.map((r: any) => ({
             id: String(r.id),
             version: Number(r.version ?? 1),
-            data: normalizeJson(r.data),
+            data: injectSystemFieldValues(normalizeJson(r.data), r, fields),
             ...mapRecordLockState(r),
           }))
 
@@ -18280,14 +18311,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           page = { offset, limit, total, hasMore: offset + rows.length < total }
         } else {
           const recordRes = await pool.query(
-            'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+            'SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
             [sheetId],
           )
 
           rows = recordRes.rows.map((r: any) => ({
             id: String(r.id),
             version: Number(r.version ?? 1),
-            data: normalizeJson(r.data),
+            data: injectSystemFieldValues(normalizeJson(r.data), r, fields),
             ...mapRecordLockState(r),
           }))
         }
@@ -18817,6 +18848,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const hiddenFieldIds = new Set(view.hiddenFieldIds ?? [])
       const data = parsed.data.data ?? {}
+      assertNoNulInRecordValue(data)
       const fieldErrors: Record<string, string> = {}
       const patch: Record<string, unknown> = {}
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -18950,7 +18982,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           continue
         }
 
-        if (BATCH1_FIELD_TYPES.has(field.type)) {
+        if (field.type === 'date' || BATCH1_FIELD_TYPES.has(field.type)) {
           try {
             patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
           } catch (error) {
@@ -19083,7 +19115,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE id = $2 AND sheet_id = $3
                RETURNING version, data`,
-              [JSON.stringify(patch), recordId, view.sheetId, getRequestActorId(req)],
+              [serializeRecordData(patch), recordId, view.sheetId, getRequestActorId(req)],
             )
             // D-1c slice ① required fix (zero-row RETURNING fail-closed): the SELECT ... FOR UPDATE
             // above already locked+confirmed this row exists within THIS transaction, so a concurrent
@@ -19181,7 +19213,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           [
             resultRecordId,
             view.sheetId,
-            JSON.stringify(patch),
+            serializeRecordData(patch),
             createActorId,
           ],
         )
@@ -19393,7 +19425,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof RecordLockedError) {
         return sendForbidden(res, err.message)
       }
-      if (err instanceof ValidationError) {
+      if (err instanceof ValidationError || err instanceof MultitableRecordValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
       if (isRetryableLiveLinkDatabaseConflict(err)) {
@@ -19833,11 +19865,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const recordRes = sheetId
         ? await pool.query(
-          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at, created_at, updated_at, modified_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [recordId, sheetId],
         )
         : await pool.query(
-          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1',
+          'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at, created_at, updated_at, modified_by FROM meta_records WHERE id = $1',
           [recordId],
         )
       const row: any = recordRes.rows[0]
@@ -19858,7 +19890,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const record: UniverMetaRecord = {
         id: String(row.id),
         version: Number(row.version ?? 1),
-        data: normalizeJson(row.data),
+        data: injectSystemFieldValues(normalizeJson(row.data), row, fields),
         createdBy: typeof row.created_by === 'string' ? row.created_by : null,
         ...mapRecordLockState(row),
       }
