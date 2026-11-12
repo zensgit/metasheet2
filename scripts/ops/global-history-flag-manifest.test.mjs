@@ -443,6 +443,10 @@ function globalHistoryFlagsInSource() {
   // Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key, read by the host's plugin runtime config.
   // Only this one _PATH key is scanned: its four sibling deploy-file keys predate this registry and stay out of scope.
   const stockPrepPilotPath = grepFlagTokens('INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH')
+  // Owner ruling 2026-11-11 (R-91, option A): the W4 tenant-claim door, a pilot-enable precondition since readiness v6.
+  // PLUGIN LIB, this one exact name (grep -o answers only the literal): the error codes that share its suffix
+  // (…PROJECT_TARGET_TENANT_CLAIM_REQUIRED, the bare TENANT_CLAIM_REQUIRED) are not flags and never match it.
+  const stockPrepTenantClaim = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED')
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
@@ -454,7 +458,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
@@ -1059,6 +1063,38 @@ test('stock-prep sheet-repair switch (batch-refresh step 6d-2a, R-91): boolean, 
   // Migration 108 is on disk exactly once.
   const plugin108 = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/migrations')).filter((name) => /^108_/.test(name))
   assert.deepEqual(plugin108, ['108_create_integration_stock_prep_sheet_repair.sql'])
+})
+
+// Owner ruling 2026-11-11 (R-91, option A): the W4 tenant-claim door is registered (it gates access, default off) and is a
+// pilot-enable precondition through readiness v6's tenant_claim_required — the readiness module never reads it itself.
+test('stock-prep tenant-claim door (W4; owner ruling 2026-11-11, R-91 option A): boolean, trimmed case-folded true, danger high, ONE plugin reader, wired into pilot readiness v6', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+  assert.ok(spec, 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true, 'the reader trims and folds case')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired')
+  for (const value of ['true', 'TRUE', ' True ']) assert.equal(isActivated(spec, value), true, `${JSON.stringify(value)} activates`)
+  for (const value of [undefined, '', 'false', '1', 'yes']) assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} does not activate`)
+  // The ONE reader, spelled with the trim / case fold the manifest records; the env name appears in no other plugin lib.
+  const routes = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/http-routes.cjs'), 'utf8')
+  assert.match(routes, /function stockPreparationTenantClaimRequired\(\) \{\s*return String\(process\.env\.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED \?\? ''\)\.trim\(\)\.toLowerCase\(\) === 'true'/)
+  assert.equal(routes.split('process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED').length - 1, 1, 'exactly one env read')
+  // Readiness v6: the route hands the reader's answer in; the readiness module never parses the env itself.
+  assert.match(routes, /tenantClaimRequired: stockPreparationTenantClaimRequired\(\),/)
+  const readiness = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs'), 'utf8')
+  assert.match(readiness, /'tenant_claim_required',\s*'continuation_support_version',\s*\]\)/)
+  assert.match(readiness, /return deps\.tenantClaimRequired === true/)
+  assert.doesNotMatch(readiness.replace(/\/\/[^\n]*/g, ''), /process\.env/)
+  // The record states the ruling and the residual.
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /PILOT-ENABLE PRECONDITION/)
+  assert.match(spec.purpose, /tenant_claim_required/)
+  assert.match(spec.purpose, /gates the enable only/)
+  assert.match(spec.purpose, /separate owner gate at install time/)
 })
 
 // Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key. Not a boolean — it names a file — so it is
