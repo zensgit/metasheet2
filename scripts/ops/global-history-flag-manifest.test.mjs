@@ -1086,7 +1086,9 @@ test('stock-prep tenant-claim door (W4; owner ruling 2026-11-11, R-91 option A):
   // Readiness v6: the route hands the reader's answer in; the readiness module never parses the env itself.
   assert.match(routes, /tenantClaimRequired: stockPreparationTenantClaimRequired\(\),/)
   const readiness = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs'), 'utf8')
-  assert.match(readiness, /'tenant_claim_required',\s*'continuation_support_version',\s*\]\)/)
+  // Readiness v7 (S6-5b, R-91) inserted no_open_sheet_repair_run (with its comment line) between it and the D-22 marker,
+  // which stays last.
+  assert.match(readiness, /'tenant_claim_required',\s*(?:\/\/[^\n]*\n\s*)*'no_open_sheet_repair_run',\s*'continuation_support_version',\s*\]\)/)
   assert.match(readiness, /return deps\.tenantClaimRequired === true/)
   assert.doesNotMatch(readiness.replace(/\/\/[^\n]*/g, ''), /process\.env/)
   // The record states the ruling and the residual.
