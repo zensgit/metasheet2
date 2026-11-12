@@ -405,6 +405,144 @@ describe('AutomationScheduler — waits longer than the 2^31-1 ms timer limit (f
       await s.destroy()
     }
   })
+  it('O9a: a wait of exactly the bound is one legal timer and fires at its target (no hop)', async () => {
+    vi.useFakeTimers()
+    const target = Date.parse('2027-01-01T00:00:00.000Z')
+    vi.setSystemTime(target - MAX_TIMER_DELAY_MS)
+    const { cb, calls } = recordingCallback()
+    const s = new AutomationScheduler(cb)
+    try {
+      s.register(cronRule('edge', '0 0 1 1 *'))
+      const h0 = handleOf(s, 'edge')
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(MAX_TIMER_DELAY_MS - 6)
+      expect(cb).not.toHaveBeenCalled()
+      expect(handleOf(s, 'edge')).toBe(h0)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toEqual([{ id: 'edge', at: target }])
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O9b: a wait of the bound + 1 ms takes one hop and still fires exactly at its target', async () => {
+    vi.useFakeTimers()
+    const target = Date.parse('2027-01-01T00:00:00.000Z')
+    vi.setSystemTime(target - MAX_TIMER_DELAY_MS - 1)
+    const { cb, calls } = recordingCallback()
+    const s = new AutomationScheduler(cb)
+    try {
+      s.register(cronRule('edge1', '0 0 1 1 *'))
+      const h0 = handleOf(s, 'edge1')
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      expect(handleOf(s, 'edge1')).toBe(h0)
+      await vi.advanceTimersByTimeAsync(target - Date.now() - 1)
+      expect(cb).not.toHaveBeenCalled()
+      expect(handleOf(s, 'edge1')).not.toBe(h0)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toEqual([{ id: 'edge1', at: target }])
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O9c: an interval of the bound + 1 ms is chained, not a clamped 1 ms setInterval', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-01T00:00:00.000Z'))
+    const t0 = Date.now()
+    const period = MAX_TIMER_DELAY_MS + 1
+    const { cb, calls } = recordingCallback()
+    const s = new AutomationScheduler(cb)
+    try {
+      s.register(intervalRule('edge', period))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      for (let k = 1; k <= 2; k += 1) {
+        await vi.advanceTimersByTimeAsync(t0 + k * period - Date.now() - 1)
+        expect(cb).toHaveBeenCalledTimes(k - 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(calls[k - 1]).toEqual({ id: 'edge', at: t0 + k * period })
+      }
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O9d: the cron target is fixed at registration — a wall-clock jump past it runs the pending occurrence once at the next wake, then next year', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:30.000Z'))
+    const registeredAt = Date.now()
+    const { cb, calls } = recordingCallback()
+    const s = new AutomationScheduler(cb)
+    try {
+      s.register(cronRule('yearly', '0 0 1 1 *'))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(cb).not.toHaveBeenCalled()
+      const jumpTo = Date.parse('2027-03-01T00:00:00.000Z')
+      const elapsed = Date.now() - registeredAt
+      vi.setSystemTime(jumpTo) // past the 2027-01-01 target, during the first leg
+      const wake = jumpTo + (MAX_TIMER_DELAY_MS - elapsed) // the first leg's wake on the (jumped) wall clock
+      await vi.advanceTimersByTimeAsync(wake - Date.now())
+      expect(cb).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1) // the wake found the target passed and armed a 0 ms final leg
+      expect(calls).toEqual([{ id: 'yearly', at: wake + 1 }])
+      const next = Date.parse('2028-01-01T00:00:00.000Z')
+      await vi.advanceTimersByTimeAsync(next - Date.now() - 1)
+      expect(cb).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls[1]).toEqual({ id: 'yearly', at: next })
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O9e: the cron 1 s floor still applies (registered 300 ms before the minute: fires 1 s later, not at the minute)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-28T09:14:59.700Z'))
+    const { cb, calls } = recordingCallback()
+    const s = new AutomationScheduler(cb)
+    try {
+      s.register(cronRule('floor', '15 9 * * *'))
+      await vi.advanceTimersByTimeAsync(999)
+      expect(cb).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toEqual([{ id: 'floor', at: Date.parse('2026-06-28T09:15:00.700Z') }])
+      await vi.advanceTimersByTimeAsync(DAY)
+      expect(calls[1]).toEqual({ id: 'floor', at: Date.parse('2026-06-29T09:15:00.000Z') })
+    } finally {
+      await s.destroy()
+    }
+  })
+
+  it('O9f: a cron callback that synchronously re-registers its own rule still runs once per occurrence (stale leg ignored by the identity guard)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-28T00:00:30.000Z'))
+    let s!: AutomationScheduler
+    const ran: number[] = []
+    let first = true
+    s = new AutomationScheduler((rule) => {
+      ran.push(Date.now())
+      if (first) {
+        first = false
+        s.register(rule) // the fire then deletes and re-arms again: the callback's replacement leg is left unmapped
+      }
+    })
+    try {
+      s.register(cronRule('self', '0 12 * * *'))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(ran).toEqual([])
+      await vi.advanceTimersByTimeAsync(3 * DAY)
+      expect(ran.map((t) => new Date(t).toISOString())).toEqual([
+        '2026-06-28T12:00:00.000Z',
+        '2026-06-29T12:00:00.000Z',
+        '2026-06-30T12:00:00.000Z',
+      ])
+    } finally {
+      await s.destroy()
+    }
+  })
 })
 
 describe('date-field timer delay stays far below the bound (O7)', () => {
