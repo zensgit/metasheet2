@@ -2025,10 +2025,16 @@ export class AutomationService {
       // never be armed. Done here, not in parseUpdateRuleInput, because only this block knows the RESULTING
       // type: a PATCH may omit triggerType (config-only edit of a stored interval rule) or switch to interval
       // without a config. Overwrites the plain trigger_config set above, as the date_field branch does.
+      // Minutes win only in a config this request SENT. When the config falls back to the STORED one (no
+      // triggerConfig in the PATCH), the read precedence applies: a numeric stored intervalMs is what has been
+      // running, so it stays and a stale stored intervalMinutes is dropped; a minutes-only row still converts.
       if (nextTriggerType === 'schedule.interval') {
-        updates.trigger_config = JSON.stringify(
-          normalizeIntervalTriggerConfigAtSave(nextTriggerType, nextTriggerConfig as Record<string, unknown> | null),
-        )
+        let intervalConfig = nextTriggerConfig as Record<string, unknown> | null
+        if (input.triggerConfig === undefined && isRecord(intervalConfig) && typeof intervalConfig.intervalMs === 'number') {
+          const { intervalMinutes: _staleMinutes, ...storedWithoutMinutes } = intervalConfig
+          intervalConfig = storedWithoutMinutes
+        }
+        updates.trigger_config = JSON.stringify(normalizeIntervalTriggerConfigAtSave(nextTriggerType, intervalConfig))
       }
 
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(

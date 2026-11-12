@@ -208,9 +208,11 @@ describe('intervalMinutesToMs — the one minutes-to-ms conversion', () => {
     expect(intervalMinutesToMs(5)).toBe(5 * MIN)
     expect(intervalMinutesToMs(1.5)).toBe(90_000)
     expect(intervalMinutesToMs(1 / 60)).toBe(1000)
-    // A value derived from a stored intervalMs converts back exactly (an untouched editor save is lossless);
-    // 1001 / 60000 * 60000 is 1001.0000000000001 in floating point, so this pins the rounding.
-    for (const ms of [1000, 1001, 45_123, 90_000, 7 * DAY]) expect(intervalMinutesToMs(ms / 60_000)).toBe(ms)
+    // A value derived from a stored intervalMs converts back exactly (an untouched editor save is lossless).
+    // 1001 / 60000 * 60000 is 1001.0000000000001 (pins that SOME whole-ms step exists); 1008 / 60000 * 60000 and
+    // 4.35 * 60000 land just BELOW the integer (1007.99..., 260999.99...), so these pin round-to-nearest, not floor.
+    for (const ms of [1000, 1001, 1008, 45_123, 90_000, 7 * DAY]) expect(intervalMinutesToMs(ms / 60_000)).toBe(ms)
+    expect(intervalMinutesToMs(4.35)).toBe(261_000)
     for (const bad of [0, -1, 0.01, Number.NaN, Number.POSITIVE_INFINITY, 1e306, '5', '', null, undefined, {}]) {
       expect(intervalMinutesToMs(bad), String(bad)).toBeNull()
     }
@@ -264,6 +266,27 @@ describe('S — save converts the editor\'s intervalMinutes to the stored interv
     await patchFromBody(h, rule.id, { triggerType: 'schedule.interval', triggerConfig: { intervalMs: 45_000 } })
     expect(storedTriggerConfig(h, rule.id)).toEqual({ intervalMs: 45_000 })
     await expectPeriod(h, 45_000)
+  })
+
+  it('update: a type-only PATCH (no triggerConfig) on a stored row with both keys keeps the stored intervalMs', async () => {
+    const h = makeHarness()
+    const rule = await createFromBody(h, editorCreateBody({ intervalMs: H }))
+    // A pre-fix editor save left both keys; the scheduler has been running it at intervalMs (read precedence).
+    h.rows.get(rule.id)!.trigger_config = { intervalMs: H, intervalMinutes: 10 }
+    await patchFromBody(h, rule.id, { triggerType: 'schedule.interval' })
+    // The request sent no config, so nothing the client typed can win: the period that ran stays, the stale
+    // minutes are dropped.
+    expect(storedTriggerConfig(h, rule.id)).toEqual({ intervalMs: H })
+    await expectPeriod(h, H)
+  })
+
+  it('update: a type-only PATCH on a stored minutes-only row converts the stored minutes', async () => {
+    const h = makeHarness()
+    const rule = await createFromBody(h, editorCreateBody({ intervalMs: H }))
+    h.rows.get(rule.id)!.trigger_config = { intervalMinutes: 4 }
+    await patchFromBody(h, rule.id, { triggerType: 'schedule.interval' })
+    expect(storedTriggerConfig(h, rule.id)).toEqual({ intervalMs: 4 * MIN })
+    await expectPeriod(h, 4 * MIN)
   })
 
   it('a converted period above the 2^31-1 ms timer limit takes the chained-timeout path (no 1 ms loop)', async () => {
@@ -366,11 +389,18 @@ describe('L — stored rows saved before the fix', () => {
     s.register(rule('minutes_only', { intervalMinutes: 2 }))
     s.register(rule('both', { intervalMs: 3 * MIN, intervalMinutes: 10 }))
     s.register(rule('bad_minutes', { intervalMinutes: 0 }))
+    // A present but non-number intervalMs is not "the stored field": the minutes are used.
+    s.register(rule('string_ms', { intervalMs: '60000', intervalMinutes: 2 }))
+    s.register(rule('null_ms', { intervalMs: null, intervalMinutes: 2 }))
     expect(s.isRegistered('minutes_only')).toBe(true)
     expect(s.isRegistered('both')).toBe(true)
     expect(s.isRegistered('bad_minutes')).toBe(false)
+    expect(s.isRegistered('string_ms')).toBe(true)
+    expect(s.isRegistered('null_ms')).toBe(true)
     await vi.advanceTimersByTimeAsync(6 * MIN)
     expect(fired.filter((f) => f.id === 'minutes_only').map((f) => f.at - t0)).toEqual([2 * MIN, 4 * MIN, 6 * MIN])
+    expect(fired.filter((f) => f.id === 'string_ms').map((f) => f.at - t0)).toEqual([2 * MIN, 4 * MIN, 6 * MIN])
+    expect(fired.filter((f) => f.id === 'null_ms').map((f) => f.at - t0)).toEqual([2 * MIN, 4 * MIN, 6 * MIN])
     expect(fired.filter((f) => f.id === 'both').map((f) => f.at - t0)).toEqual([3 * MIN, 6 * MIN])
   })
 })
