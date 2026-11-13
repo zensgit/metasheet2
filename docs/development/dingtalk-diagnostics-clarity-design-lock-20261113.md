@@ -34,7 +34,8 @@ acceptance work.
 - `member_detail_unverified` is produced only by the connection probe. The shared builder (also used by the
   manual run's diagnostic sample) still yields only `healthy`, `no_child_departments` and
   `scope_or_root_misconfigured`; no code value reaches `directory_sync_runs.stats.diagnosticCode` that did not
-  before. No consumer branches on the code.
+  before. The set of codes a manual run persists is not widened, so existing consumers of that stored code
+  need no handling for the new value.
 - Response keys, key order (`summary` = `code`, `title`, `nextAction`) and the existing code values are
   unchanged; no response key is added.
 
@@ -43,9 +44,10 @@ acceptance work.
 - No summary claims full coverage, says the scope is fine, or asks to widen the address-book scope to everyone.
   Every `nextAction` states that only the sampled reads were verified — not the full visible scope, every
   member's detail, or scan sign-in.
-- The shared `healthy` title names only the sampled department and member list reads (the manual run reads no
-  detail). The probe, having read one detail on a healthy diagnosis, titles it as list reads plus one member
-  detail.
+- The shared `healthy` title names only the sampled department and member list reads (the manual run's
+  diagnostic sampling phase does not itself read member detail; the run's formal pull still reads member
+  detail through the adapter as before). The probe, having read one detail on a healthy diagnosis, titles it
+  as list reads plus one member detail.
 - The equal-counts warning (access-limited sample equal to the ordinary one) keeps its trigger but no longer
   concludes that access-limited filtering is ruled out; it now says the comparison alone does not explain the
   low count.
@@ -97,7 +99,11 @@ acceptance work.
   successful response all show one fixed fallback. Failure responses carry no mode, so the fallback covers
   sign-in and binding alike. The nested `RECOVERY_AUTHORITY_BUSY` answer shows the fixed "cannot be verified
   right now, try again later" sentence.
-- Failures set no token, prime no session and do not navigate. The page makes one request and never retries an
+- A server refusal, a response without a valid success result (including a sign-in response marked successful that carries no token), and a
+  network or parse failure before a valid result is read set no token, prime no session and do not navigate.
+  When an error occurs after a successful sign-in (for example the post-sign-in navigation rejects), the page
+  only replaces the message with the fixed fallback; it does not roll back the sign-in that already succeeded
+  (existing behaviour, unchanged by this slice). The page makes one request and never retries an
   authorization code, never shows another account's identity, and never repairs anything by email. Successful
   sign-in, binding and activation handling is unchanged.
 
@@ -119,15 +125,13 @@ acceptance work.
 | G1 | Successful list reads plus a rejected detail read fail the probe (adapter test, and route-level tests through the real probe, client and transport with a stubbed provider); exactly one logical detail read of an ordinary sample (child first, ordinary root fallback, never the access-limited sample); no ordinary sample → no detail read, warning, `member_detail_unverified`; detail values absent from response and logs. |
 | G2 | Shared wording never claims full coverage or asks to widen the scope; every next action names the sampled scope; connection-test golden gains exactly the detail call and the new wording; manual-apply golden changes only its two diagnostic text values. |
 | G3 | Directory page: configuration-check label, loading and disabled state, pass / missing / allowlist / unknown / failed results, no request on open, no other login request; the connection-test status bar never says a blanket pass and a failed test clears the previous result. |
-| G4 | Callback route: each policy code survives at its status (403 / 409 / 503) with no session created and no token returned; non-policy failures carry no code; the code set is pinned, and the page's table keys are pinned to the same literal list. Unlinked refusals carry no scanned-profile value. |
-| G5 | Mounted callback tests: Chinese and English guidance for the main codes, every listed code distinct from the fallback, fallback for unknown / missing / odd-shaped / prototype codes, older responses, raw text with personal values, network errors and invalid JSON; no token, session or navigation on failure; success and binding unchanged. |
+| G4 | Callback route: each policy code survives at its status (403 / 409 / 503) with no session created and no token returned; non-policy failures carry no code; the code set is pinned, the page's table keys are pinned to the same literal list, and a backend unit test imports the page's code-table module and compares its exported code list with the backend list. Unlinked refusals carry no scanned-profile value. |
+| G5 | Mounted callback tests: Chinese and English guidance for the main codes, every listed code distinct from the fallback, fallback for unknown / missing / odd-shaped / prototype codes, older responses, raw text with personal values, network errors and invalid JSON; no token, session or navigation on a refusal, an unreadable response or a network failure; an exception after a successful sign-in response shows the fixed fallback, not the exception text (that test asserts the text only); success and binding unchanged. |
 | G6 | Mutations (detail read removed, policy code dropped from the callback, raw error text shown again, `member_detail_unverified` reverted to `healthy`, detail sample taken from the access-limited list) each turn a test red. |
 | G7 | The callback spec runs in the required web lane and the attendance web guard; the shape and manifest guards stay green. Draft only; no staging operation. |
 
 ## Out of scope
 
-- The user-management page's "服务端钉钉登录可用" server-status line (`UserManagementView.vue`) keeps its wording;
-  it reads the same runtime status and is a candidate for a follow-up.
 - The real directory's visible scope, which DingTalk errcode a missing member-detail permission returns, and
   whether a real scan identity can sign in.
 - Behaviour this lock does not describe above — including the formal directory sync's pull, matching,

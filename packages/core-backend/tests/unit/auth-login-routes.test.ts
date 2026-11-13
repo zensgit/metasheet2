@@ -2300,9 +2300,9 @@ describe('auth login routes', () => {
      * codes only another route can reach. This test pins the backend's set: a new code written in
      * those two source files, in the forms scanned below, fails it until the literal list below is
      * updated. It scans only those two files.
-     * apps/web/tests/dingtalk-auth-callback.spec.ts separately pins the callback page's code-table keys
-     * to its own copy of the same literal list. Nothing checks the two lists against each other
-     * mechanically, so change both together.
+     * The next test compares this list with the code list the callback page exports
+     * (apps/web/src/utils/dingtalkLoginErrors.ts, imported as a module), so a code added to or
+     * removed from either side fails until both sides match.
      */
     const CALLBACK_TOP_LEVEL_CODES = [
       'ACCOUNT_ACTIVATION_INVALID',
@@ -2361,6 +2361,19 @@ describe('auth login routes', () => {
       ])
       for (const code of OTHER_ROUTE_ONLY_CODES) derived.delete(code)
       expect([...derived].sort()).toEqual([...CALLBACK_TOP_LEVEL_CODES].sort())
+    })
+
+    /**
+     * Cross-package guard: the callback page's code table (apps/web/src/utils/dingtalkLoginErrors.ts)
+     * exports its keys as DINGTALK_CALLBACK_FAILURE_CODES. The module is imported, so the comparison
+     * uses the table's runtime keys, however they are written.
+     */
+    it('the callback page code table keys equal the backend callback code list', async () => {
+      const page = await import('../../../../apps/web/src/utils/dingtalkLoginErrors')
+      const keys = [...page.DINGTALK_CALLBACK_FAILURE_CODES]
+      expect(keys.length).toBeGreaterThan(0)
+      expect(new Set(keys).size).toBe(keys.length)
+      expect([...keys].sort()).toEqual([...CALLBACK_TOP_LEVEL_CODES].sort())
     })
   })
 

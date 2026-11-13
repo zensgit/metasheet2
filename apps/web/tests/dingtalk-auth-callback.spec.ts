@@ -251,9 +251,9 @@ describe('DingTalkAuthCallbackView', () => {
 
     /**
      * Pins the code table's keys to a literal list of the top-level codes the backend callback can
-     * answer. packages/core-backend/tests/unit/auth-login-routes.test.ts (CALLBACK_TOP_LEVEL_CODES)
-     * pins the backend's set to its own copy of that list. Nothing checks the two lists against each
-     * other mechanically, so change both together.
+     * answer. packages/core-backend/tests/unit/auth-login-routes.test.ts pins the backend's set
+     * (CALLBACK_TOP_LEVEL_CODES) and also imports apps/web/src/utils/dingtalkLoginErrors.ts to check
+     * that DINGTALK_CALLBACK_FAILURE_CODES equals that list.
      */
     it('has guidance for exactly the callback\'s top-level codes', () => {
       expect([...DINGTALK_CALLBACK_FAILURE_CODES]).toEqual([

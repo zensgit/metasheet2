@@ -6,9 +6,10 @@
  * failure response. A code that is not listed here, a missing code, an older response without a
  * code, a network failure or an unreadable body all show the fixed fallback.
  *
- * The keys mirror the set of top-level codes the backend callback can answer; both are pinned to the
- * same literal list (apps/web/tests/dingtalk-auth-callback.spec.ts and
- * packages/core-backend/tests/unit/auth-login-routes.test.ts) — change them together.
+ * The keys mirror the set of top-level codes the backend callback can answer. A backend unit test
+ * (packages/core-backend/tests/unit/auth-login-routes.test.ts) imports this module and requires
+ * DINGTALK_CALLBACK_FAILURE_CODES to equal the backend's pinned code list, so this module stays free
+ * of imports.
  */
 
 type Guidance = readonly [zh: string, en: string]
