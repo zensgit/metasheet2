@@ -36,7 +36,8 @@ param(
   [string]$CsvPath = '',
   [string]$StopFile = '',
   [int]$OldPid = 0,
-  [int]$OperatorTimeoutMin = 25
+  [int]$OperatorTimeoutMin = 20,
+  [switch]$RegisterOnFreshPm2Defect
 )
 
 $ErrorActionPreference = 'Continue'
@@ -89,31 +90,43 @@ function Stop-Tree {
 
 function Invoke-CmdLine {
   # Runs one cmd.exe command line from a .cmd file, detached, stdout and stderr to files, bounded.
-  param([string]$CommandLine, [string]$Cwd = '', [int]$TimeoutSec = 180)
+  param([string]$CommandLine, [string]$Cwd = '', [int]$TimeoutSec = 90)
   $id = [System.Guid]::NewGuid().ToString('N').Substring(0, 10)
   $cmdFile = Join-Path $H ("c-$id.cmd")
   $outFile = Join-Path $H ("c-$id.out")
   $errFile = Join-Path $H ("c-$id.err")
   $lines = @('@echo off')
   if (-not [string]::IsNullOrWhiteSpace($Cwd)) { $lines += ('cd /d "' + $Cwd + '"') }
+  $codeFile = Join-Path $H ("c-$id.code")
   $lines += ($CommandLine + ' >"' + $outFile + '" 2>"' + $errFile + '"')
-  $lines += 'exit /b %ERRORLEVEL%'
+  $lines += ('>"' + $codeFile + '" echo %ERRORLEVEL%')
+  $lines += 'exit /b 0'
   Set-Content -LiteralPath $cmdFile -Value $lines -Encoding ASCII
+  if ($script:TraceCmd) { Write-T ('cmd start: ' + $CommandLine.Split(' ')[0].Trim('"').Split('\')[-1]) }
+  # Exit code comes from a file the .cmd writes last; the wait is a bounded poll, never WaitForExit.
   $p = Start-Detached -CmdFile $cmdFile
   $code = $null
-  if ($p.WaitForExit($TimeoutSec * 1000)) {
-    $p.WaitForExit()
-    $code = $p.ExitCode
-  } else {
-    Write-T ("command timed out after {0}s (first token: {1})" -f $TimeoutSec, ($CommandLine.Split(' ')[0]))
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-Path -LiteralPath $codeFile) {
+      $raw = ''
+      try { $raw = ([string](Get-Content -LiteralPath $codeFile -Raw)).Trim() } catch { $raw = '' }
+      if ($raw -match '^-?\d+$') { $code = [int]$raw; break }
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  if ($null -eq $code) {
+    Write-T ("command timed out after {0}s (first token: {1})" -f $TimeoutSec, ($CommandLine.Split(' ')[0].Trim('"').Split('\')[-1]))
     Stop-Tree -ProcessId $p.Id
     $code = -9
   }
+  Remove-Item -LiteralPath $codeFile -Force -ErrorAction SilentlyContinue
   $stdout = @()
   if (Test-Path -LiteralPath $outFile) { $stdout = @(Get-Content -LiteralPath $outFile) }
   $stderr = ''
   if (Test-Path -LiteralPath $errFile) { $stderr = [string](Get-Content -LiteralPath $errFile -Raw) }
   Remove-Item -LiteralPath $cmdFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+  if ($script:TraceCmd) { Write-T ('cmd end: exit ' + $code) }
   return [pscustomobject]@{ Code = $code; Out = $stdout; Err = $stderr }
 }
 
@@ -219,10 +232,18 @@ function Get-Health {
   param([string]$Url, [string]$Commit = '')
   $code = 0; $commitMatch = $false; $commitPresent = $false
   try {
-    $resp = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 10
+    # HttpWebRequest with both timeouts, so neither connect nor body read can block for long.
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Timeout = 5000
+    $req.ReadWriteTimeout = 5000
+    $req.Proxy = $null
+    $resp = $req.GetResponse()
     $code = [int]$resp.StatusCode
+    $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $content = $sr.ReadToEnd()
+    $sr.Dispose(); $resp.Close()
     try {
-      $j = $resp.Content | ConvertFrom-Json
+      $j = $content | ConvertFrom-Json
       if ($null -ne $j.build -and -not [string]::IsNullOrWhiteSpace([string]$j.build.commit)) {
         $commitPresent = $true
         $commitMatch = ([string]$j.build.commit -eq $Commit)
@@ -758,7 +779,7 @@ function Invoke-Install {
     }
   }
   $exit = -9
-  if (-not $timedOut) { $op.WaitForExit(); $exit = $op.ExitCode }
+  if (-not $timedOut) { $exit = $op.ExitCode }
   $sw.Stop()
   Write-T ("{0}: operator step ended exit={1} after {2}s" -f $Label, $exit, [int]$sw.Elapsed.TotalSeconds)
   $res['operator_timed_out'] = $timedOut
@@ -796,15 +817,44 @@ function Invoke-Install {
   $res['dep_activate_s'] = $(if ($act.Success) { [int]$act.Groups[2].Value } else { -1 })
   $res['operator_tail'] = Get-OperatorTail -Log $log
 
+  # Known install-script defect on a host where pm2 has never registered the app (a fresh root):
+  # attendance-onprem-start-pm2.ps1:393 runs 'pm2 describe <app> *> $null' under
+  # ErrorActionPreference=Stop (:7). In Windows PowerShell 5.1 pm2's "[PM2][WARN] <app> doesn't
+  # exist" on stderr becomes a terminating error, so the Start-Pm2App branch (:395) never runs and
+  # the apply exits 1 after the migrations. A site that runs the backend already has the app
+  # registered, so this does not apply there. For the baseline only, the harness registers the
+  # app with the exact command Start-Pm2App would have run, then lets the upgrade legs run on the
+  # site-shaped state.
+  $freshDefect = ($exit -ne 0) -and $text.Contains('Start or restart PM2 service') -and ($text -match "\[PM2\]\[WARN\] \S+ doesn't exist")
+  $res['fresh_host_pm2_describe_defect'] = [bool]$freshDefect
+  $res['harness_registered_app'] = $false
+  if ($freshDefect -and $RegisterOnFreshPm2Defect) {
+    Write-T ($Label + ': fresh-host pm2 describe defect seen; registering the app as Start-Pm2App would')
+    $eco = Join-Path $Root 'ecosystem.config.cjs'
+    $reg = Invoke-WithAppEnv { Invoke-CmdLine -CommandLine ('pm2 start "' + $eco + '" --only ' + $Pm2App + ' --env production --update-env') -Cwd $Root -TimeoutSec 120 }
+    $sav = Invoke-CmdLine -CommandLine 'pm2 save' -TimeoutSec 60
+    $res['harness_register_exit'] = $reg.Code
+    $res['harness_pm2_save_exit'] = $sav.Code
+    $res['harness_registered_app'] = ($reg.Code -eq 0 -and $sav.Code -eq 0)
+    for ($i = 0; $i -lt 45; $i++) {
+      if ((Get-Health -Url ('http://127.0.0.1:' + $BackendPort + '/health')).Code -eq 200) { break }
+      Start-Sleep -Seconds 2
+    }
+  }
+
   Write-T ($Label + ': reading the after-state')
+  $script:TraceCmd = $true
   $postK = Get-KyselyState -AfterTs $preK.MaxTs
+  Write-T ('after-state: kysely ' + $postK.Count)
   $list = Get-MigrateList
+  Write-T ('after-state: migrate --list applied ' + $list.Applied + ' pending ' + $list.Pending)
   $res['kysely_count_after'] = $postK.Count
   $res['kysely_new_rows'] = $postK.NewCount
   $res['migrate_list_exit'] = $list.Code
   $res['migrate_list_applied'] = $list.Applied
   $res['migrate_list_pending'] = $list.Pending
   $postPm2 = Get-Pm2State
+  Write-T ('after-state: pm2 ' + $postPm2.status)
   $res['after_pm2'] = [ordered]@{
     present = $postPm2.present; status = $postPm2.status; restarts = $postPm2.restarts
     pid_changed = ($prePm2.present -and $postPm2.present -and $prePm2.pid -ne $postPm2.pid)
@@ -815,6 +865,8 @@ function Invoke-Install {
   $res['health_backend_code'] = $hb.Code
   $res['health_backend_commit_is_expected'] = $hb.CommitMatchesExpected
   $res['health_via_port80_code'] = $hp.Code
+  Write-T ('after-state: health ' + $hb.Code + ' / ' + $hp.Code)
+  $script:TraceCmd = $false
 
   # Was the previous backend running while the migrations executed? Same clock for all three:
   # sampler rows (UTC), kysely_migration.timestamp of the new rows (node, UTC) and the old pm2 pid.
@@ -888,9 +940,11 @@ function Invoke-Install {
 
   # Expectations (legs 1-3 gate here; leg 4 is asserted by AssertLeg4).
   if ($ExpectExit -eq 'zero') {
-    if ($exit -ne 0) { $fail += "deploy-bootstrap exit $exit" }
-    if ($res['bootstrap_marker_exit'] -ne 0) { $fail += 'bootstrap marker is not apply exit=0' }
-    if (-not $res['package_deploy_complete_line']) { $fail += 'no Package deploy complete line' }
+    if (-not ($freshDefect -and $res['harness_registered_app'])) {
+      if ($exit -ne 0) { $fail += "deploy-bootstrap exit $exit" }
+      if ($res['bootstrap_marker_exit'] -ne 0) { $fail += 'bootstrap marker is not apply exit=0' }
+      if (-not $res['package_deploy_complete_line']) { $fail += 'no Package deploy complete line' }
+    }
     if ($ExpectExecuted -ge 0 -and $executed.Count -ne $ExpectExecuted) { $fail += ("executed {0}, expected {1}" -f $executed.Count, $ExpectExecuted) }
     if ($ExpectApplied -ge 0 -and $postK.Count -ne $ExpectApplied) { $fail += ("kysely_migration {0}, expected {1}" -f $postK.Count, $ExpectApplied) }
     if ($ExpectApplied -ge 0 -and $list.Applied -ne $ExpectApplied) { $fail += ("migrate --list Applied {0}, expected {1}" -f $list.Applied, $ExpectApplied) }
@@ -976,6 +1030,11 @@ function Invoke-Summary {
         $j.health_backend_code, (Format-B $j.health_backend_commit_is_expected), $j.after_pm2.status, $j.after_pm2.restarts, $ran, $j.files.onlyR84_left_in_root))
   }
   $md.Add('')
+  $j1 = Read-Json -Path (Join-Path $Out 'leg1.json')
+  if ($null -ne $j1 -and $j1.fresh_host_pm2_describe_defect) {
+    $md.Add('**Leg 1 finding:** on the empty root the R84 deploy-bootstrap ran all migrations, then exited 1 at the pm2 start: `attendance-onprem-start-pm2.ps1` runs `pm2 describe <app> *> $null` under ErrorActionPreference Stop, and in PowerShell 5.1 the pm2 "doesn''t exist" warning on stderr aborts the script before it registers the app. The harness then registered the app with the same pm2 start command (registered: ' + (Format-B $j1.harness_registered_app) + '), which is the state a running site already has.')
+    $md.Add('')
+  }
   foreach ($leg in @('leg2', 'leg3', 'leg4')) {
     $j = Read-Json -Path (Join-Path $Out ($leg + '.json'))
     if ($null -eq $j) { continue }

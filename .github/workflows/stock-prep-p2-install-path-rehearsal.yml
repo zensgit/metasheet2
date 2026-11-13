@@ -105,7 +105,7 @@ jobs:
         timeout-minutes: 30
         shell: powershell
         run: |
-          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
           exit $LASTEXITCODE
 
       - name: Leg 2 - upgrade R84 to F (deploy-bootstrap, 1 1)
@@ -193,7 +193,7 @@ jobs:
         timeout-minutes: 30
         shell: powershell
         run: |
-          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
           exit $LASTEXITCODE
 
       # The only continue-on-error step: the injected failure. The health-check port (the harness
