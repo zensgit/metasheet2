@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
+import { useAuth } from '../src/composables/useAuth'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   createApp,
@@ -757,6 +758,115 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(dialog!.textContent).toContain('出差报销')
   })
 
+  it('pane 通过 opinion: a quick phrase fills the box, the text stays editable, and 通过 sends the edited text', async () => {
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    const chips = Array.from(container!.querySelectorAll<HTMLElement>('[data-testid^="approval-detail-pane-quick-phrase-"]'))
+    expect(chips.map((chip) => chip.textContent?.trim())).toEqual(['同意', '情况属实', '已核实无误'])
+    const box = () => container!.querySelector('[data-testid="approval-detail-pane-approve-comment"]') as HTMLInputElement
+    expect(box().value).toBe('')
+    chips[0]!.click()
+    await flushUi()
+    expect(box().value).toBe('同意')
+
+    box().value = '同意，金额已核对'
+    box().dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const confirms = document.querySelectorAll('[data-el-popconfirm-confirm="确认通过「出差报销」？"]')
+    ;(confirms[confirms.length - 1] as HTMLButtonElement).click()
+    await flushUi()
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'approve', comment: '同意，金额已核对' })
+  })
+
+  it('pane 驳回 dialog offers the 驳回 quick phrases; a chip fills the reason and confirm sends it', async () => {
+    getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-detail-pane-reject"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-testid="approval-row-reject-dialog"]') as HTMLElement
+    const chips = Array.from(dialog.querySelectorAll<HTMLElement>('[data-testid^="approval-row-reject-quick-phrase-"]'))
+    expect(chips.map((chip) => chip.textContent?.trim())).toEqual(['不符合要求', '请补充材料后重新提交'])
+    chips[1]!.click()
+    await flushUi()
+    const reason = dialog.querySelector('[data-testid="approval-row-reject-comment"]') as HTMLInputElement
+    expect(reason.value).toBe('请补充材料后重新提交')
+
+    ;(container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'reject', comment: '请补充材料后重新提交' })
+  })
+
+  it('pane 通过 opinion is cleared when the selection moves to another row', async () => {
+    getApprovalSpy.mockImplementation((id: string) => Promise.resolve(pendingRow(id, id === 'apv_1' ? '出差报销' : '采购申请')))
+    mockPendingApprovals.value = [pendingRow('apv_1', '出差报销'), pendingRow('apv_2', '采购申请')]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+    const box = () => container!.querySelector('[data-testid="approval-detail-pane-approve-comment"]') as HTMLInputElement
+    box().value = '同意，金额已核对'
+    box().dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(box().value).toBe('同意，金额已核对')
+
+    ;(container!.querySelector('[data-el-row="apv_2"]') as HTMLElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent).toContain('采购申请')
+    expect(box().value).toBe('')
+  })
+
+  // The center hands the signed-in user to both quick-phrase bars (side pane + row reject dialog);
+  // without a user they offer the presets only and no 「存为常用语」. The session cache is
+  // module-level, so this block clears it after every case: later cases here run without a user.
+  describe('with a signed-in user', () => {
+    beforeEach(() => {
+      useAuth().primeSession({ user: { id: 'user_1' } })
+    })
+
+    afterEach(() => {
+      // Also drops `user_permissions`; the file-level beforeEach writes it again for the next case.
+      useAuth().clearToken()
+      for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+        const key = localStorage.key(i)
+        if (key && key.startsWith('approval-quick-phrases:')) localStorage.removeItem(key)
+      }
+    })
+
+    it('side pane and row reject dialog both offer 「存为常用语」; a phrase saved in the dialog is listed first', async () => {
+      getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
+      mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
+      await mountView()
+
+      ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+      await flushUi()
+      expect(container!.querySelector('[data-testid="approval-detail-pane-phrase-save"]'), 'pane save control').toBeTruthy()
+
+      ;(container!.querySelector('[data-testid="approval-detail-pane-reject"]') as HTMLButtonElement).click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-testid="approval-row-reject-dialog"]') as HTMLElement
+      const reason = dialog.querySelector('[data-testid="approval-row-reject-comment"]') as HTMLInputElement
+      reason.value = '缺发票'
+      reason.dispatchEvent(new Event('input'))
+      await flushUi()
+      ;(dialog.querySelector('[data-testid="approval-row-reject-phrase-save"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      const chips = Array.from(dialog.querySelectorAll<HTMLElement>('[data-testid^="approval-row-reject-quick-phrase-"]'))
+      expect(chips.map((chip) => chip.textContent?.trim())).toEqual(['缺发票', '不符合要求', '请补充材料后重新提交'])
+    })
+  })
+
   it('a reader (approvals:read, no approvals:act) still opens the pane and its full-detail link, but the pane offers no 通过/驳回 and the row none either', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['approvals:read']))
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
@@ -1510,6 +1620,13 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
   }
 
   const pane = () => container!.querySelector('[data-testid="approval-detail-pane"]') as HTMLElement | null
+  // The pane's 通过 opinion box carries the shared quick-phrase chips; a phrase is written into the
+  // stored opinion as-is, so the presets are not localized (named exceptions, presence-checked).
+  const PANE_EXCEPTIONS = [
+    { text: '同意', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:14 (QUICK_PHRASES.approve[0])' },
+    { text: '情况属实', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:14 (QUICK_PHRASES.approve[1])' },
+    { text: '已核实无误', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:14 (QUICK_PHRASES.approve[2])' },
+  ]
 
   it('loaded pane is English only (approver labels, step, quick actions); en -> zh -> en restores', async () => {
     const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
@@ -1519,7 +1636,7 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
     expect(pane(), 'pane open').toBeTruthy()
     expect(pane()!.textContent).toContain('Approver Two')
     expect(pane()!.textContent).toMatch(/Member \d/)
-    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en)')
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), PANE_EXCEPTIONS, 'detail pane (en)')
 
     useLocale().setLocale('zh-CN')
     await flushUi()
@@ -1527,7 +1644,7 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
 
     useLocale().setLocale('en')
     await flushUi()
-    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en again)')
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), PANE_EXCEPTIONS, 'detail pane (en again)')
   })
 
   it('a failed detail fetch without a message shows the English fallback', async () => {
@@ -1536,6 +1653,6 @@ describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
     mockPendingApprovals.value = [asciiRow('apv_1')]
     await mountAndSelect('apv_1')
     expect(container!.querySelector('[data-testid="approval-detail-pane-error"]')?.textContent).toContain('Failed to load details')
-    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane error (en)')
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), PANE_EXCEPTIONS, 'detail pane error (en)')
   })
 })

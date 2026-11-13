@@ -32,6 +32,7 @@ const TARGET_FILES = [
   // Round 2 (same slice): the server-gated nav entry and the app-shell error boundary that keeps
   // either nav component from taking the shell down. Both are born token-only as well.
   'src/approvals/components/ApprovalBatchTransferNavEntry.vue',
+  'src/approvals/components/ApprovalQuickPhraseBar.vue',
   'src/components/ShellChromeBoundary.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',

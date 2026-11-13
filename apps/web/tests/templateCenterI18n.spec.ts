@@ -1042,9 +1042,12 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
     },
     { file: 'src/approvals/cardDecision.ts', ternary: 4 },
     { file: 'src/approvals/components/ApprovalDepartmentPicker.vue', ternary: 3 },
+    // 2026-10-27: the shared quick-phrase bar — its chrome lives in quickPhraseLabels.ts (zhTable).
+    { file: 'src/approvals/components/ApprovalQuickPhraseBar.vue' },
     { file: 'src/approvals/components/ApprovalRecordLinkPicker.vue' },
     { file: 'src/approvals/components/ApprovalUserPicker.vue', ternary: 1 },
     { file: 'src/approvals/components/approvalPickerLabels.ts', zhTable: 3 },
+    { file: 'src/approvals/components/quickPhraseLabels.ts', zhTable: 1 },
     // R-43 (B): +1 ternary — the zh/en "not a current option" marker on an option value no option carries.
     { file: 'src/approvals/conditionSummary.ts', ternary: 12, zhTable: 1 },
     { file: 'src/approvals/dateRangeField.ts', ternary: 4 },
@@ -1117,15 +1120,10 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
     // `isZh.value ? 'zh' : 'en'` — a language CODE sent in the request, not UI copy (no CJK on either side).
     { file: 'src/views/approval/ApprovalCenterView.vue', ternary: 15, ifZhBlock: 2 },
     { file: 'src/views/approval/ApprovalCommentsPanel.vue', ternary: 3 },
-    {
-      file: 'src/views/approval/ApprovalDetailView.vue',
-      ternary: 10,
-      exceptions: [
-        // Quick-phrase insertion joins with a full-width comma. The phrases themselves (and so the
-        // text written into the comment) stay zh-CN in this slice — an owner decision, not made here.
-        { line: 'actionComment.value = actionComment.value ? `${actionComment.value}，${phrase}` : phrase', count: 1 },
-      ],
-    },
+    // The quick-phrase full-width-comma join moved to quickPhrases.ts (`appendPhrase`, not in RULES:
+    // the phrases and the join stay zh-CN, written into the stored opinion as-is) when the chips
+    // became the shared ApprovalQuickPhraseBar.vue (2026-10-27).
+    { file: 'src/views/approval/ApprovalDetailView.vue', ternary: 10 },
     { file: 'src/views/approval/ApprovalMobileList.vue', objectTernary: 1 },
     {
       file: 'src/views/approval/ApprovalNewView.vue',

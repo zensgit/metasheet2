@@ -162,6 +162,8 @@ export const CENTER_PANE_ZH = {
   approve: '通过',
   reject: '驳回',
   openFull: '打开完整详情',
+  approveOpinionLabel: '通过意见（选填）',
+  approveOpinionPlaceholder: '通过意见（选填），可点上方短语快速填写',
 }
 
 export const CENTER_PANE_EN: Record<keyof typeof CENTER_PANE_ZH, string> = {
@@ -174,4 +176,6 @@ export const CENTER_PANE_EN: Record<keyof typeof CENTER_PANE_ZH, string> = {
   approve: 'Approve',
   reject: 'Reject',
   openFull: 'Open full details',
+  approveOpinionLabel: 'Approval opinion (optional)',
+  approveOpinionPlaceholder: 'Approval opinion (optional); click a phrase above to fill it in',
 }
