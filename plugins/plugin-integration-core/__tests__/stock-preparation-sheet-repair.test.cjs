@@ -717,8 +717,8 @@ test('MS-02 the gate\'s grammars are the WRITERS\' own: every stamp the real pla
   const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
   const extension = require(path.join(LIB, 'stock-preparation-extension-namespace.cjs'))
   for (const field of STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields) assert.equal(R.__internals.isStampFieldId(field.id), true, field.id)
-  // Every id the main template has EVER declared (the same 33 at every tag that carries the planner; none was ever
-  // removed) stays admitted: a removed or renamed id would refuse rows an older build stamped.
+  // Every id a pre-#6778 main template declared (the same 33 at every such tag carrying the planner; none ever removed;
+  // #6778 appended two, covered by the loop above) stays admitted: a removed or renamed id would refuse older stamps.
   for (const fieldId of ['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'parentComponentCode', 'parentComponentName', 'path', 'depth', 'componentCode', 'componentName', 'componentSpec', 'material', 'sourceVersion', 'rawQuantity', 'totalQuantity', 'active', 'lastPlmRefreshRunId', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmConflictSummary', 'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes', 'procurementReply', 'warehouseConfirmation', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate']) {
     assert.equal(R.__internals.isStampFieldId(fieldId), true, `${fieldId} is still a field id a stamp may name`)
   }

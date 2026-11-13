@@ -291,6 +291,20 @@ describe('R — useMultitableGrid writes a manual cell through PATCH …/manual-
     await grid.patchCell('rec_mr_manual', F.name, 'Renamed', 4)
     expect(grid.editHistory.value).toHaveLength(1)
   })
+
+  it('R-07 two saves of a manual row made on one version (ADR §3.4 「一次保存分两步」): the second goes once the first is answered, through its own route, with the version the first returned', async () => {
+    const { grid, writes } = createRoutedGrid()
+    await loaded(grid)
+    const first = grid.patchCell('rec_mr_manual', F.spec, 'SPEC-B', 3)
+    const second = grid.patchCell('rec_mr_manual', F.notes, 'note', 3)
+    expect(await first).toBeNull()
+    expect(await second).toBeNull()
+    expect(writes()).toEqual([
+      { url: '/api/multitable/records/rec_mr_manual/manual-fields', method: 'PATCH', body: { sheetId: 'sheet_mr', expectedVersion: 3, data: { [F.spec]: 'SPEC-B' } } },
+      { url: '/api/multitable/patch', method: 'POST', body: { sheetId: 'sheet_mr', viewId: 'view_mr', changes: [{ recordId: 'rec_mr_manual', fieldId: F.notes, value: 'note', expectedVersion: 4 }] } },
+    ])
+    expect(grid.rows.value.find((row) => row.id === 'rec_mr_manual')!.version).toBe(5)
+  })
 })
 
 // ── G. MetaGridTable ─────────────────────────────────────────────────────────────────────────────────────────
