@@ -50,6 +50,8 @@ import { createRequire } from 'node:module'
 import { Pool, type PoolClient } from 'pg'
 import {
   acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceImportReservationLocksV1,
+  acquireAttendanceOperationalBulkTargetLockV1,
   acquireAttendanceResultOperationLocks,
   buildAttendanceCalculationRolloutAdvisoryKey,
   buildAttendanceLegacyIdempotencyAdvisoryKey,
@@ -366,6 +368,70 @@ describeIfDatabase('W4C-0 Stage E3 — dual-connection concurrency gates (real D
       [orgId, ...params],
     )
     return (res.rows[0] as { n: number }).n
+  }
+
+  // MUT06: each lock family must keep unrelated orgs independent and same-org retries exclusive.
+  for (const family of ['legacy', 'bulk'] as const) {
+    it(`MUT06_ADVISORY_ORG_NATIVE: ${family} keeps foreign-org progress while a same-org retry really waits`, async () => {
+      await withClient(async (owner) => {
+        await withClient(async (peer) => {
+          const ownOrg = crypto.randomUUID()
+          const foreignOrg = crypto.randomUUID()
+          const acquire = (client: PoolClient, orgId: string) => family === 'legacy'
+            ? acquireAttendanceImportReservationLocksV1(
+              trx(client),
+              [],
+              parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+                orgId,
+                idempotencyKey: 'mut06-advisory-same-retry',
+              }),
+            )
+            : acquireAttendanceOperationalBulkTargetLockV1(
+              trx(client),
+              parseCanonicalAttendanceRolloutOrgKeyV1(orgId),
+            )
+          try {
+            const ownerPid = await backendPid(owner)
+            const peerPid = await backendPid(peer)
+            await owner.query('BEGIN')
+            await peer.query('BEGIN')
+            await acquire(owner, ownOrg)
+            await acquire(peer, foreignOrg)
+
+            const locks = await pool.query(
+              `SELECT classid::text AS classid, objid::text AS objid, mode, granted
+                 FROM pg_locks
+                WHERE pid = ANY($1::int[]) AND locktype = 'advisory' AND objsubid = 1
+                ORDER BY pid`,
+              [[ownerPid, peerPid]],
+            )
+            expect(locks.rows).toHaveLength(2)
+            expect(locks.rows.map((row) => ({ mode: row.mode, granted: row.granted }))).toEqual([
+              { mode: 'ExclusiveLock', granted: true },
+              { mode: 'ExclusiveLock', granted: true },
+            ])
+            expect(new Set(locks.rows.map((row) => `${row.classid}:${row.objid}`)).size).toBe(2)
+
+            await peer.query('ROLLBACK')
+            await peer.query('BEGIN')
+            const retry = acquire(peer, ownOrg).then(
+              () => ({ kind: 'acquired' }),
+              (error: unknown) => ({
+                kind: 'failed',
+                code: (error as { code?: unknown }).code,
+              }),
+            )
+            await waitUntilAdvisoryBlocked(peerPid)
+            await owner.query('COMMIT')
+            expect(await retry).toEqual({ kind: 'acquired' })
+            await peer.query('ROLLBACK')
+          } finally {
+            await owner.query('ROLLBACK').catch(() => undefined)
+            await peer.query('ROLLBACK').catch(() => undefined)
+          }
+        })
+      })
+    }, 30000)
   }
 
   // -------------------------------------------------------------------------
