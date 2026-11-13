@@ -17,8 +17,12 @@
 
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('Prepare', 'Preflight', 'Install', 'Sample', 'AssertLeg4', 'Summary', 'Diag', 'Verdict')]
+  [ValidateSet('Prepare', 'Preflight', 'Install', 'Sample', 'AssertLeg4', 'Summary', 'Diag', 'Verdict', 'Pm2Owner', 'Pm2DescribeOther')]
   [string]$Action,
+  [ValidateSet('default', 'other')]
+  [string]$Pm2Home = 'default',
+  [ValidateSet('true', 'false')]
+  [string]$ExpectOwned = 'true',
   [string]$Work = '',
   [string]$Label = '',
   [string]$Bat = '',
@@ -1069,6 +1073,85 @@ function Invoke-Verdict {
 
 function Format-B { param($v) if ($v -is [bool]) { if ($v) { return 'yes' } else { return 'no' } } return [string]$v }
 
+# ---------------------------------------------------------------- pm2 ownership check (install sheet step 2.3)
+# The site pack ships the check as ps\02-pm2-owner-check.ps1; this directory carries a byte-identical
+# copy because the job checks out scripts/ci only. Its LF hash is pinned in PM2OWNER_CHECK_SHA256; a
+# CRLF checkout is compared with CR removed.
+
+function Get-LfSha {
+  param([string]$Path)
+  $bytes = [System.IO.File]::ReadAllBytes($Path)
+  $lf = New-Object System.Collections.Generic.List[byte]
+  foreach ($b in $bytes) { if ($b -ne 13) { $lf.Add($b) } }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  return ([System.BitConverter]::ToString($sha.ComputeHash($lf.ToArray())) -replace '-', '').ToLowerInvariant()
+}
+
+function Get-OtherPm2Home {
+  $d = Join-Path $W 'pm2-other-home'
+  New-Item -ItemType Directory -Force -Path $d | Out-Null
+  return $d
+}
+
+function Invoke-Pm2OwnerCheck {
+  # Runs the check in a child Windows PowerShell 5.1 under the requested PM2_HOME: 'default' removes
+  # PM2_HOME for the child (the usual site shape), 'other' points it at an empty directory.
+  param([string]$HomeKind, [string]$OutName)
+  $check = Join-Path $PSScriptRoot 'stock-prep-p2-pm2-owner-check.ps1'
+  $saved = $env:PM2_HOME
+  if ($HomeKind -eq 'other') { $env:PM2_HOME = Get-OtherPm2Home } else { Remove-Item Env:PM2_HOME -ErrorAction SilentlyContinue }
+  try {
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $r = Invoke-CmdLine -CommandLine ('"' + $ps + '" -NoProfile -ExecutionPolicy Bypass -File "' + $check + '" -Diag') -TimeoutSec 120
+  } finally {
+    if ($null -eq $saved) { Remove-Item Env:PM2_HOME -ErrorAction SilentlyContinue } else { $env:PM2_HOME = $saved }
+  }
+  $lines = @($r.Out | ForEach-Object { [string]$_ })
+  Set-Content -LiteralPath (Join-Path $Out $OutName) -Value (@('exit=' + $r.Code) + $lines) -Encoding ASCII
+  foreach ($l in $lines) { Write-H ('  ' + $l) }
+  return [pscustomobject]@{ Code = $r.Code; Last = [string]($lines | Select-Object -Last 1) }
+}
+
+function Invoke-Pm2Owner {
+  $check = Join-Path $PSScriptRoot 'stock-prep-p2-pm2-owner-check.ps1'
+  $sha = Get-LfSha -Path $check
+  $pin = [string]$env:PM2OWNER_CHECK_SHA256
+  Write-H ('pm2 owner check: lf sha matches pin = ' + ($sha -eq $pin))
+  if ($sha -ne $pin) { exit 1 }
+  Write-H ('pm2 owner check ' + $Label + ': PM2_HOME ' + $Pm2Home + ', expect owned=' + $ExpectOwned)
+  $res = Invoke-Pm2OwnerCheck -HomeKind $Pm2Home -OutName ('pm2owner-' + $Label + '.txt')
+  $want = 'PM2OWNER_RESULT owned=' + $ExpectOwned + ' status=complete'
+  if ($res.Last -ne $want) { Write-H ($Label + ': got [' + $res.Last + '], expected [' + $want + ']'); exit 1 }
+  Write-H ($Label + ': as expected')
+}
+
+function Invoke-Pm2DescribeOther {
+  # Observation only (OPEN-QUESTIONS 4.8): what `pm2 describe` answers under a PM2_HOME that never
+  # registered the app, i.e. the condition start-pm2.ps1:393 trips on. Nothing is killed afterwards:
+  # if the pm2 pipes are machine-wide, a `pm2 kill` here would reach the default daemon. The command
+  # runs detached (Invoke-CmdLine), so a daemon it may start cannot hold this step's pipes. Then the
+  # default-home check runs again to show whether the app is still owned there.
+  $other = Get-OtherPm2Home
+  $saved = $env:PM2_HOME
+  $env:PM2_HOME = $other
+  try {
+    $hadPid = Test-Path -LiteralPath (Join-Path $other 'pm2.pid')
+    $d = Invoke-CmdLine -CommandLine ('pm2 describe ' + $Pm2App) -TimeoutSec 120
+    $startedPid = Test-Path -LiteralPath (Join-Path $other 'pm2.pid')
+  } finally {
+    if ($null -eq $saved) { Remove-Item Env:PM2_HOME -ErrorAction SilentlyContinue } else { $env:PM2_HOME = $saved }
+  }
+  $res = Invoke-Pm2OwnerCheck -HomeKind 'default' -OutName 'pm2owner-after-describe-default.txt'
+  $obs = @(
+    ('other_home_daemon_pid_before=' + $hadPid),
+    ('describe_exit=' + $d.Code),
+    ('describe_left_a_daemon_pid_in_other_home=' + $startedPid),
+    ('default_home_check_after=' + $res.Last)
+  )
+  Set-Content -LiteralPath (Join-Path $Out 'pm2-describe-other-home.txt') -Value $obs -Encoding ASCII
+  foreach ($o in $obs) { Write-H ('observe ' + $o) }
+}
+
 function Invoke-Summary {
   $md = New-Object System.Collections.Generic.List[string]
   $md.Add('## Package-2 install path rehearsal (' + $Label + ')')
@@ -1171,5 +1254,7 @@ switch ($Action) {
   'Summary' { Invoke-Summary }
   'Diag' { Invoke-Diag }
   'Verdict' { Invoke-Verdict }
+  'Pm2Owner' { Invoke-Pm2Owner }
+  'Pm2DescribeOther' { Invoke-Pm2DescribeOther }
 }
 exit 0
