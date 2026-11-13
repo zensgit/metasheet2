@@ -31,6 +31,7 @@ export default defineConfig({
     exclude: [
       // Whole-file real PostgreSQL lane: plm-visual-consumer.yml.
       'tests/integration/plm-visual-source-authority-realdb.test.ts',
+      'tests/integration/data-source-permission-catalogue.db.test.ts',
       // Whole file runs with EXPECT_DB=1 in plm-bom-listener.yml.
       'tests/integration/plm-bom-review-realdb.test.ts',
       'tests/integration/plm-record-ingress-realdb.test.ts',
