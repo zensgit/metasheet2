@@ -34,6 +34,11 @@
  * that does nothing, and at the end the call that runs it; an UPDATE, a MERGE and any other INSERT
  * are `unreadable`.
  *
+ * A table name of three or more parts is never read: a write on one is `unreadable` whatever else
+ * the statement does, and so is a table definition, an inheritance or partition parent, or a
+ * `SELECT … INTO` target named that way. A table written after a substituted schema is read as the
+ * table it names, and the substitution keeps the verdict of a dynamic target beside it.
+ *
  * A write target that cannot be read is a dynamic target: a substituted or concatenated table, a
  * query-builder table argument that is not a plain name, a helper table argument that is neither a
  * literal nor a constant of the file, and a dynamically executed statement that is not one literal.
@@ -52,7 +57,7 @@ import {
   AUTHORIZATION_INPUT_MIGRATION_TABLE_RULES,
 } from '../../src/rbac/authorization-input-writers'
 import type { AuthorizationInputDynamicForm, AuthorizationInputMigrationColumnRule, AuthorizationInputMigrationVerdict } from '../../src/rbac/authorization-input-writers'
-import { blankSqlComments, builderTable, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS } from './authorization-input-scan'
+import { blankSqlComments, builderTable, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS, USERS_INPUT_COLUMNS } from './authorization-input-scan'
 import type { WriteVerb } from './authorization-input-scan'
 
 export type MigrationJudgment = Readonly<{
@@ -302,17 +307,27 @@ function nameOf(token: Token | undefined): string | null {
   return null
 }
 
-/** A possibly schema-qualified table name at `index` (after an optional ONLY); the schema is dropped. */
+/**
+ * A possibly schema-qualified table name at `index` (after an optional ONLY); the schema is dropped,
+ * and a substituted schema leaves the table as written. A name of three or more parts is not read:
+ * which part is the table depends on what the other parts are.
+ */
 function tableAt(tokens: readonly Token[], index: number): { name: string; next: number } | null {
   let i = index
   if (isKeyword(tokens[i], 'ONLY')) i += 1
   const first = nameOf(tokens[i])
-  if (first === null) return null
-  if (isOp(tokens[i + 1], '.')) {
+  if (isOp(tokens[i + 1], '.') && (first !== null || tokens[i]?.type === 'subst')) {
     const second = nameOf(tokens[i + 2])
-    return second === null ? null : { name: second, next: i + 3 }
+    return second === null || isOp(tokens[i + 3], '.') ? null : { name: second, next: i + 3 }
   }
-  return { name: first, next: i + 1 }
+  return first === null ? null : { name: first, next: i + 1 }
+}
+
+/** Whether a name of three or more parts stands at `index` (after an optional ONLY). */
+function multiPartNameAt(tokens: readonly Token[], index: number): boolean {
+  const i = isKeyword(tokens[index], 'ONLY') ? index + 1 : index
+  const part = (token: Token | undefined) => nameOf(token) !== null || token?.type === 'subst'
+  return part(tokens[i]) && isOp(tokens[i + 1], '.') && part(tokens[i + 2]) && isOp(tokens[i + 3], '.')
 }
 
 /** Whether the write target at `index` (after an optional ONLY and an optional schema) is an unfolded substitution. */
@@ -740,8 +755,9 @@ function countDynamic(sink: Sink, form: AuthorizationInputDynamicForm): void {
 
 function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mode: StatementMode): void {
   const scanned = matchText(file, scannerView(sql), line)
-  // A substitution in a text assembled from a `+` chain is a concatenation operand.
-  const dynamicForms: AuthorizationInputDynamicForm[] = scanned.dynamic.map((target) => (target.form === 'template_substitution' && sql.concatenated ? 'concatenation' : target.form))
+  // A substitution in a text assembled from a `+` chain is a concatenation operand. A write target
+  // of three or more parts is not a form an exemption can name; it is refused below.
+  const dynamicForms: AuthorizationInputDynamicForm[] = scanned.dynamic.flatMap((target) => (target.form === 'multi_part_name' ? [] : [target.form === 'template_substitution' && sql.concatenated ? 'concatenation' : target.form]))
   if (mode.count) {
     for (const write of scanned.writes) countWrite(sink, write.table, write.verb)
     for (const form of dynamicForms) countDynamic(sink, form)
@@ -763,6 +779,10 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   // An identifier written with unicode escapes is never read, wherever it stands: in the statement
   // itself, or in the text of a block or function body the statement carries.
   if (tokens.some((token) => token.type === 'uqid' || ((token.type === 'dollar' || token.type === 'str' || token.type === 'pstr') && UNICODE_ESCAPED_IDENTIFIER.test(token.text)))) return push(head, 'unreadable', 'identifier written with unicode escapes')
+
+  // A write target of three or more parts is never read, whatever else the statement does: it may
+  // name an input table or a cascade parent in a part that is not taken for the table.
+  if (scanned.dynamic.some((target) => target.form === 'multi_part_name')) return push(head, 'unreadable', 'write target has more than two parts')
 
   // A dollar-quoted block body is cut and judged again; its own statements carry the verdicts.
   if (head === 'DO') {
@@ -800,6 +820,9 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
 
   // 1. A write on an input table, wherever it sits in the statement, makes the statement an input write.
   if (inputWrites.length > 0) {
+    // A dynamic target beside the input write keeps the verdict it would have alone.
+    const beside = dynamicForms.filter((form) => form !== 'users_update_dynamic_set')
+    if (beside.length > 0) push(head, 'unreadable', 'dynamic write target', { dynamic: beside, inputWrite: false })
     for (const write of inputWrites) {
       const outcome: ColumnOutcome & { forbiddenTable?: boolean } = write.form === 'upsert' ? SAFE : judgeInputWrite(write.table, write.verb, tokens)
       push(write.verb, outcome.verdict, outcome.detail, { table: write.table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
@@ -807,9 +830,10 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     // A TRUNCATE names a list: an input table the scanner does not report (one written with another schema) is judged as well.
     if (head === 'TRUNCATE') {
       const reported = new Set(inputWrites.filter((write) => write.verb === 'TRUNCATE').map((write) => write.table))
-      for (const item of truncateTargets(tokens, 0)) {
-        if (item.name === null) push('TRUNCATE', 'unreadable', 'write target is not readable')
-        else if (INPUTS.has(item.name) && !reported.has(item.name)) {
+      for (const [index, item] of truncateTargets(tokens, 0).entries()) {
+        // Only a substituted first item already has its dynamic verdict.
+        if (item.name === null && !(index === 0 && item.substituted && beside.length > 0)) push('TRUNCATE', 'unreadable', 'write target is not readable')
+        else if (item.name !== null && INPUTS.has(item.name) && !reported.has(item.name)) {
           const outcome = judgeInputWrite(item.name, 'TRUNCATE', tokens)
           push('TRUNCATE', outcome.verdict, outcome.detail, { table: item.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
         }
@@ -843,6 +867,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       while (isKeyword(tokens[at], 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) at += 1
       const created = tableAt(tokens, at)
       if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
+      if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
     }
     return push(head, 'safe', '')
   }
@@ -852,7 +877,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       const listed = truncateTargets(tokens, 0).flatMap((item) => (item.name !== null && INPUTS.has(item.name) ? [item.name] : []))
       for (const table of listed) {
         const outcome = judgeInputWrite(table, 'TRUNCATE', tokens)
-        push(head, outcome.verdict, outcome.detail, { table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
+        push(head, outcome.verdict, outcome.detail, { table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable, inputWrite: true })
       }
       if (listed.length === 0 && dynamicForms.length === 0) push(head, 'safe', '')
       return
@@ -862,9 +887,15 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     // A substituted target already has its dynamic verdict; any other unreadable target is refused here.
     if (target === null) return dynamicForms.length > 0 && substitutedTargetAt(tokens, targetAt) ? undefined : push(head, 'unreadable', 'write target is not readable')
     if (!INPUTS.has(target.name)) return push(head, 'safe', '')
-    // The scanner counts a `users` UPDATE only when it assigns an input column; the other columns are judged here.
+    // The scanner counts a `users` UPDATE only when it assigns an input column; the other columns are
+    // judged here, and so is an input table written with another schema. The latter is a write of
+    // the table it names. An UPDATE of `users` whose SET clause names no input column is not, nor
+    // is a COPY, whose direction the scan reads.
     const outcome = judgeInputWrite(target.name, head, tokens)
-    return push(head, outcome.verdict, outcome.detail, { table: target.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
+    const set = head === 'UPDATE' && target.name === 'users' ? topLevelKeyword(tokens, 0, tokens.length, 'SET') : -1
+    const setEnd = set < 0 ? -1 : topLevelKeyword(tokens, set + 1, tokens.length, 'FROM', 'WHERE', 'RETURNING')
+    const otherColumnsOnly = set >= 0 && !tokens.slice(set + 1, setEnd < 0 ? tokens.length : setEnd).some((token) => (USERS_INPUT_COLUMNS as readonly string[]).includes(nameOf(token) ?? ''))
+    return push(head, outcome.verdict, outcome.detail, { table: target.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable, inputWrite: head !== 'COPY' && !otherColumnsOnly })
   }
   if (head === 'ALTER' && isKeyword(tokens[1], 'TABLE')) {
     let i = 2

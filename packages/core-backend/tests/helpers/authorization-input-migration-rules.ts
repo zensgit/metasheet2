@@ -2,8 +2,9 @@
  * The rule a migration outside the frozen list must satisfy, and the traversal that applies it.
  *
  * A migration that writes an input table must contain the bounded try form of the world lock
- * inside one statement literal together with its retry-loop marks, and no blocking form. Every
- * statement that writes an input table must be judged `safe`. In a new migration (one whose path is
+ * inside one statement literal together with its retry-loop marks, and no blocking form. A write
+ * is one the scan reports, or one the judgment reads on an input table named with another schema.
+ * Every statement that writes an input table must be judged `safe`. In a new migration (one whose path is
  * not in the pinned set of historical migration files) every judged statement must be `safe`,
  * whether or not it writes: schema changes, helper calls and literals that mention an input table
  * are judged as well. Every write the scanner reports must lie inside a judged statement.
@@ -99,7 +100,10 @@ export function checkNewMigration(file: string, source: string, isNew: boolean =
   const isSource = SOURCE_EXTENSIONS.has(path.extname(file))
   const result = isSource ? scanSource(file, source) : scanText(file, source)
   const inputWrites = result.writes.filter((write) => (INPUT_TABLES as readonly string[]).includes(write.table))
-  if (inputWrites.length > 0) {
+  const judged = judgeMigrationInputWrites(file, source)
+  // The lock block is required by every input write: one the scan reports, and one only the
+  // judgment reads (an input table named with another schema).
+  if (inputWrites.length > 0 || judged.judgments.some((judgment) => judgment.inputWrite)) {
     // Comments never satisfy the lock rule: SQL comments inside a literal are blanked before the search.
     const texts = isSource ? literalSqlTexts(file, source) : [commentStrippedText(file, source)]
     const lockText = texts.find((text) => text.includes(AUTHORIZATION_INPUT_MIGRATION_LOCK_FORM))
@@ -107,7 +111,6 @@ export function checkNewMigration(file: string, source: string, isNew: boolean =
     else for (const mark of AUTHORIZATION_INPUT_MIGRATION_LOCK_BLOCK_MARKS) if (!lockText.includes(mark)) problems.push(`world lock try form without ${mark}`)
     if (texts.some((text) => /pg_advisory_xact_lock\(\s*20261106\b/.test(text))) problems.push('blocking world lock form')
   }
-  const judged = judgeMigrationInputWrites(file, source)
   const exempt = exemptDynamicForms(file, judged.dynamic, exemptions)
   const isExempt = (judgment: MigrationJudgment) => judgment.dynamic !== undefined && judgment.dynamic.length > 0 && judgment.dynamic.every((form) => exempt.has(form))
   const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment))

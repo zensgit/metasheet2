@@ -623,6 +623,149 @@ describe('targets that are read item by item or not at all', () => {
     expect(check(unlocked('SELECT user_id INTO audit_copy FROM user_roles')).problems).toEqual([])
     expect(check(unlocked('DO $$ DECLARE n int; BEGIN SELECT count(*) INTO n FROM user_roles; END $$')).problems).toEqual([])
   })
+
+  it('a TRUNCATE list is read from the verb: an input table after an item that is not a plain name is a write the scan reports, and requires the lock block', () => {
+    const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
+    for (const statement of ['TRUNCATE "audit log", role_permissions', 'TRUNCATE TABLE ONLY "audit log" *, public.user_permissions CASCADE']) {
+      const without = check(unlocked(statement))
+      expect(without.problems, statement).toEqual(['missing world lock try form'])
+      expect(without.inputWrites, statement).toBe(1)
+      expect(check(locked(statement)).problems, statement).toEqual([])
+      expect(check(unlocked(statement), historical, false).problems, statement).toEqual(['missing world lock try form'])
+    }
+    expect(check(locked('TRUNCATE "audit log", user_roles')).problems).toEqual([MEMBERSHIP])
+    // After a substituted first item as well, whose own verdict a registered exemption sets aside.
+    const line = 'await sql`TRUNCATE ${sql.table(tableName)}, role_permissions`.execute(db)'
+    const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+    const without = checkNewMigration(NEW_TS, up(line), true, [cover])
+    expect(without.problems).toEqual(['missing world lock try form'])
+    expect(without.inputWrites).toBe(1)
+    expect(checkNewMigration(NEW_TS, lockedCode(line), true, [cover]).problems).toEqual([])
+    expect(checkNewMigration(NEW_TS, lockedCode(line), true, []).problems).toEqual(['unreadable TRUNCATE: dynamic write target'])
+  })
+
+  it('an input table written with another schema is a write of the table it names and requires the lock block, though the scan does not report it', () => {
+    const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
+    const statements = [
+      'TRUNCATE app.role_permissions',
+      "DELETE FROM app.role_permissions WHERE role_id = 'x'",
+      "INSERT INTO app.user_namespace_admissions (user_id, namespace, enabled) VALUES ('u', 'crm', true)",
+      "UPDATE app.users SET role = 'user'",
+    ]
+    for (const statement of statements) {
+      const without = check(unlocked(statement))
+      expect(without.problems, statement).toEqual(['missing world lock try form'])
+      expect(without.inputWrites, statement).toBe(0)
+      expect(check(locked(statement)).problems, statement).toEqual([])
+      expect(check(unlocked(statement), historical, false).problems, statement).toEqual(['missing world lock try form'])
+    }
+    // An update of the other columns of an account, and a copy out, write no input.
+    expect(check(unlocked('UPDATE app.users SET email = lower(email)')).problems).toEqual([])
+    expect(check(unlocked("UPDATE users SET email = lower(email) WHERE role = 'user'")).problems).toEqual([])
+    expect(check(unlocked('COPY app.users TO STDOUT')).problems).toEqual(['unreadable COPY: COPY on users has no readable form'])
+  })
+})
+
+describe('a write target of three or more parts is not read', () => {
+  const refused = (kind: string) => [`unreadable ${kind}: write target has more than two parts`]
+  const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+
+  const writes: Array<[string, string, string]> = [
+    ['an insert of a membership', "INSERT INTO metasheet.public.user_roles (user_id, role_id) VALUES ('u1', 'admin')", 'INSERT'],
+    ['an update of an account', 'UPDATE metasheet.public.users SET is_admin = TRUE', 'UPDATE'],
+    ['a delete of memberships', 'DELETE FROM metasheet.public.user_roles', 'DELETE'],
+    ['a delete with every part quoted', 'DELETE FROM "metasheet"."public"."role_permissions"', 'DELETE'],
+    ['a delete whose first part is not a plain name', 'DELETE FROM "my db".public.role_permissions', 'DELETE'],
+    ['a name that begins with the usual schema', 'DELETE FROM public.role_permissions.archived', 'DELETE'],
+    ['an update of the key of a cascade parent', "UPDATE metasheet.public.roles SET id = 'ops_admin' WHERE id = 'ops_lead'", 'UPDATE'],
+    ['a write inside a CTE of a read', 'WITH x AS (DELETE FROM metasheet.public.user_roles RETURNING 1) SELECT 1 FROM x', 'WITH'],
+    ['an item of a TRUNCATE list', 'TRUNCATE audit_x, metasheet.public.user_roles', 'TRUNCATE'],
+  ]
+  for (const [name, statement, kind] of writes) {
+    it(`${name} is unreadable, with or without the lock block`, () => {
+      for (const source of [locked(statement), unlocked(statement)]) {
+        const result = check(source)
+        expect(result.verdicts.map((line) => line.verdict)).toEqual(['unreadable'])
+        expect(result.problems).toEqual(refused(kind))
+        expect(result.inputWrites).toBe(0)
+      }
+    })
+  }
+
+  it('a substituted part does not make it readable, and no exemption covers it', () => {
+    const source = lockedCode('await sql`DELETE FROM ${sql.id(database)}.public.user_roles`.execute(db)')
+    expect(checkNewMigration(NEW_TS, source, true, []).problems).toEqual(refused('DELETE'))
+    expect(checkNewMigration(NEW_TS, source, true, [cover]).problems).toEqual(refused('DELETE'))
+    const last = lockedCode('await sql`DELETE FROM metasheet.public.${sql.id(table)}`.execute(db)')
+    expect(checkNewMigration(NEW_TS, last, true, [cover]).problems).toEqual(refused('DELETE'))
+  })
+
+  const named: Array<[string, string, string]> = [
+    ['an inheritance parent', 'CREATE TABLE users_shadow () INHERITS (metasheet.public.users)', 'unreadable CREATE TABLE: INHERITS names a table that is not readable'],
+    ['a partition parent', "CREATE TABLE user_roles_2027 PARTITION OF metasheet.public.user_roles FOR VALUES IN ('a')", 'unreadable CREATE TABLE: PARTITION OF names a table that is not readable'],
+    ['an inheritance parent added to a table', 'ALTER TABLE audit_x INHERIT metasheet.public.users', 'unreadable ALTER TABLE: INHERIT names a table that is not readable'],
+    ['a table attached as a partition', "ALTER TABLE audit_x ATTACH PARTITION metasheet.public.user_roles FOR VALUES IN ('a')", 'unreadable ALTER TABLE: ATTACH PARTITION names a table that is not readable'],
+    ['the table a partition is attached to', "ALTER TABLE metasheet.public.user_roles ATTACH PARTITION audit_x FOR VALUES IN ('a')", 'unreadable ALTER TABLE: table is not readable'],
+    ['a created table', 'CREATE TABLE metasheet.public.user_roles (user_id text, role_id text)', 'unreadable CREATE TABLE: table is not readable'],
+    ['a dropped table', 'DROP TABLE IF EXISTS metasheet.public.user_roles', 'unreadable DROP TABLE: table is not readable'],
+    ['a table created by SELECT INTO', 'SELECT id INTO metasheet.public.users FROM staging', 'unreadable SELECT INTO: creates a table whose name has more than two parts'],
+  ]
+  for (const [name, statement, problem] of named) {
+    it(`${name} named with three parts is unreadable`, () => {
+      const result = check(unlocked(statement))
+      expect(result.verdicts.map((line) => line.verdict)).toEqual(['unreadable'])
+      expect(result.problems).toEqual([problem])
+    })
+  }
+
+  it('a name of two parts is still read as schema and table, and a name of three parts that spells no scanned table is not judged', () => {
+    expect(check(locked("DELETE FROM public.role_permissions WHERE role_id = 'x'")).problems).toEqual([])
+    expect(check(unlocked('CREATE TABLE audit_y () INHERITS (public.audit_base)')).problems).toEqual([])
+    expect(check(unlocked('DELETE FROM warehouse.reporting.daily_totals')).problems).toEqual([])
+    expect(check(unlocked("UPDATE metasheet.public.audit_x SET note = 'roles'")).problems).toEqual([])
+  })
+})
+
+describe('a table written after a substituted schema is read as the table it names', () => {
+  const MEMBERSHIP = 'writes user_roles: a migration does not change memberships; use the contract entry or the maintenance tool'
+  const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+  const line = (statement: string) => 'await sql`' + statement.replace(/\$\{s\}/g, '${sql.id(schema)}') + '`.execute(db)'
+
+  const inputs: Array<[string, string, string[]]> = [
+    ['an insert of a membership', "INSERT INTO ${s}.user_roles (user_id, role_id) VALUES ('u1', 'admin')", [MEMBERSHIP]],
+    ['an account made an administrator', 'UPDATE ${s}.users SET is_admin = TRUE', ['sets is_admin']],
+    ['a raising code granted to a role', "INSERT INTO ${s}.role_permissions (role_id, permission_code) VALUES ('viewer', 'users:write')", ['grants class-raising code users:write']],
+    ['a delete of role grants', "DELETE FROM ${s}.role_permissions WHERE role_id = 'x'", []],
+  ]
+  for (const [name, statement, problems] of inputs) {
+    it(`${name} is one write of the input table, judged by its rules; the substitution keeps its own verdict`, () => {
+      const head = statement.split(' ')[0]
+      const withLock = lockedCode(line(statement))
+      expect(checkNewMigration(NEW_TS, withLock, true, [cover]).problems).toEqual(problems)
+      expect(checkNewMigration(NEW_TS, withLock, true, []).problems).toEqual([`unreadable ${head}: dynamic write target`, ...problems])
+      const without = checkNewMigration(NEW_TS, up(line(statement)), true, [cover])
+      expect(without.problems).toEqual(['missing world lock try form', ...problems])
+      expect(without.inputWrites).toBe(1)
+    })
+  }
+
+  it('the key of a cascade parent written that way is refused, with or without an exemption for the substitution', () => {
+    const source = up(line("UPDATE ${s}.roles SET id = 'ops_admin' WHERE id = 'ops_lead'"))
+    expect(checkNewMigration(NEW_TS, source, true, [cover]).problems).toEqual(['unreadable UPDATE: assigns a key column of roles'])
+    expect(checkNewMigration(NEW_TS, source, true, []).problems).toEqual(['unreadable UPDATE: dynamic write target', 'unreadable UPDATE: assigns a key column of roles'])
+    expect(checkNewMigration(NEW_TS, up(line("UPDATE ${s}.roles SET name = 'x' WHERE id = 'r'")), true, [cover]).problems).toEqual([])
+  })
+
+  it('a table that is not scanned stays a dynamic target and nothing more', () => {
+    const source = up(line('DELETE FROM ${s}.audit_x WHERE id = 1'))
+    expect(checkNewMigration(NEW_TS, source, true, []).problems).toEqual(['unreadable DELETE: dynamic write target'])
+    expect(checkNewMigration(NEW_TS, source, true, [cover]).problems).toEqual([])
+  })
+
+  it('an inheritance parent written that way is read as the table it names', () => {
+    const source = up('await sql`CREATE TABLE users_shadow () INHERITS (${sql.id(schema)}.users)`.execute(db)')
+    expect(check(source).problems).toEqual(['unreadable CREATE TABLE: INHERITS names the input table users'])
+  })
 })
 
 describe('dynamic targets and registered exemptions', () => {
@@ -671,7 +814,7 @@ describe('dynamic targets and registered exemptions', () => {
       ['INSERT INTO $1 SELECT user_id FROM user_roles WHERE EXISTS (WITH d AS (DELETE FROM ${t} RETURNING 1) SELECT 1 FROM d)', ['unreadable INSERT: write target is not readable']],
     ]
     for (const [statement, problems] of cases) {
-      const source = up('await sql`' + statement.replace(/\$\{t\}/g, '${sql.table(tableName)}') + '`.execute(db)')
+      const source = lockedCode('await sql`' + statement.replace(/\$\{t\}/g, '${sql.table(tableName)}') + '`.execute(db)')
       const count = (statement.match(/(?:FROM|INTO|TRUNCATE) \$\{t\}/g) ?? []).length
       expect(checkWith(source, { ...cover, count }).problems, statement).toEqual(problems)
       expect(checkWith(source).problems, statement).toEqual(['unreadable ' + statement.split(' ')[0] + ': dynamic write target', ...problems])

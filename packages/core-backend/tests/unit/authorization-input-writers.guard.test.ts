@@ -211,6 +211,11 @@ describe('scan controls', () => {
     ['schema with white space around the dot', "const x = 'DELETE FROM public . user_roles WHERE user_id = $1'", 'user_roles|DELETE'],
     ['SQL comment between the verb and the table', "const x = 'INSERT INTO /* note */ user_roles (user_id, role_id) VALUES ($1, $2)'", 'user_roles|INSERT'],
     ['SQL line comment between the verb and the table', "const x = 'DELETE FROM -- note\\n user_permissions WHERE user_id = $1'", 'user_permissions|DELETE'],
+    ['a table after a substituted schema', 'const x = `DELETE FROM ${schema}.user_roles WHERE user_id = $1`', 'user_roles|DELETE'],
+    ['a lower-case write after a substituted schema', 'const x = `update "${schema}"."users" set role = $1`', 'users|UPDATE'],
+    ['TRUNCATE after an item that is not a plain name', 'const x = \'TRUNCATE "audit log", role_permissions\'', 'role_permissions|TRUNCATE'],
+    ['TRUNCATE after a substituted item', 'const x = `TRUNCATE ${table}, user_permissions`', 'user_permissions|TRUNCATE'],
+    ['TRUNCATE of a table after a substituted schema', 'const x = `TRUNCATE audit_logs, ${schema}.user_roles`', 'user_roles|TRUNCATE'],
   ]
   for (const [name, replacement, expected] of positives) {
     it(`POSITIVE CONTROL — ${name} is counted`, () => {
@@ -227,6 +232,11 @@ describe('scan controls', () => {
     ['users UPDATE with a concatenated SET clause', "const x = 'UPDATE users SET ' + assignments + ' WHERE id = $1'", 'users_update_dynamic_set'],
     ['query builder non-literal table', 'const x = db.updateTable(table as any).set({})', 'query_builder_non_literal'],
     ['users UPDATE with a substituted SET clause', 'const x = `UPDATE users SET ${assignments} WHERE id = $1`', 'users_update_dynamic_set'],
+    ['a name of three parts that ends in a scanned table', "const x = 'DELETE FROM metasheet.public.user_roles WHERE user_id = $1'", 'multi_part_name'],
+    ['a name of three parts that begins with the usual schema', "const x = 'DELETE FROM public.user_roles.archived'", 'multi_part_name'],
+    ['a quoted name of three parts on a cascade parent', 'const x = \'UPDATE "my db"."public"."roles" SET id = $1\'', 'multi_part_name'],
+    ['a name of three parts with a substituted part', 'const x = `INSERT INTO metasheet.public.${table} (id) VALUES ($1)`', 'multi_part_name'],
+    ['a name of three parts in a TRUNCATE list', "const x = 'TRUNCATE audit_logs, metasheet.public.user_roles'", 'multi_part_name'],
   ]
   for (const [name, replacement, form] of dynamicPositives) {
     it(`POSITIVE CONTROL — ${name} is a dynamic target`, () => {
@@ -253,6 +263,9 @@ describe('scan controls', () => {
     ['a multi-table TRUNCATE naming no scanned table', "const x = 'TRUNCATE audit_logs, sessions'"],
     ['a write inside an SQL block comment of a literal', "const x = 'SELECT 1 /* DELETE FROM user_roles */'"],
     ['a write inside an SQL line comment of a literal', "const x = 'SELECT 1 -- INSERT INTO user_roles (user_id) VALUES (1)'"],
+    ['a name of three parts none of which is a scanned table', "const x = 'INSERT INTO smoke_db.dbo.smoke_probe (id) VALUES (1)'"],
+    ['a copy out of a name of three parts', "const x = 'COPY metasheet.public.users TO STDOUT'"],
+    ['a TRUNCATE item in another schema', "const x = 'TRUNCATE audit_logs, app.user_roles'"],
   ]
   for (const [name, replacement] of negatives) {
     it(`NEGATIVE CONTROL — ${name} is not counted`, () => {
@@ -261,6 +274,12 @@ describe('scan controls', () => {
       expect(result.dynamic).toEqual([])
     })
   }
+
+  it('CONTROLS — the writes of one text are reported in the order of the text, however each of them is found', () => {
+    const result = mutate('const x = `DELETE FROM user_permissions; TRUNCATE "audit log", user_roles; DELETE FROM ${schema}.delegated_role_admin_scopes; DELETE FROM users`')
+    const added = result.writes.filter((write) => !baseline.writes.some((known) => known.table === write.table && known.verb === write.verb))
+    expect(added.map((write) => `${write.table}|${write.verb}`)).toEqual(['user_permissions|DELETE', 'user_roles|TRUNCATE', 'delegated_role_admin_scopes|DELETE', 'users|DELETE'])
+  })
 
   it('CONTROLS — a users upsert action counts an UPDATE only when it assigns an input column, and is dynamic when its SET clause is substituted', () => {
     const keyOf = (w: LiteralWrite) => `${w.table}|${w.verb}|${w.form}`
