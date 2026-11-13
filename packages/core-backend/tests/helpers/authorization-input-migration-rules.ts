@@ -3,7 +3,9 @@
  *
  * A migration that writes an input table must contain the bounded try form of the world lock
  * inside one statement literal together with its retry-loop marks, and no blocking form. A write
- * is one the scan reports, or one the judgment reads on an input table named with another schema.
+ * is one the scan reports, or one the judgment takes for a write of an input table: an input table
+ * named with another schema or after a substituted one, and a target that is not read where it may
+ * be an input table.
  * Every statement that writes an input table must be judged `safe`. In a new migration (one whose path is
  * not in the pinned set of historical migration files) every judged statement must be `safe`,
  * whether or not it writes: schema changes, helper calls and literals that mention an input table
