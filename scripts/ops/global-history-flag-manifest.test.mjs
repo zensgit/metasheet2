@@ -1587,3 +1587,24 @@ test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: the registry entry and both envir
     assert.equal(comment.split(sentence).length - 1, 1, `${template} states the sentence exactly once`)
   }
 })
+
+// What an operator checks before turning the switch on, and when to check again, is stated in the same
+// words in the registry entry and in both environment templates: the rule counts active sources only and
+// treats rows of one enterprise as one source, so these two counts are what the switch does not cover.
+test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: the registry entry and both environment templates state the two counts to read before turning the switch on, and when to read them again', () => {
+  const sentence =
+    'Before turning it on, two read-only counts must be zero in the environment: linked active accounts under pull-type sources that are not active, and groups of rows of one external enterprise in which a row is unverified or the applications differ. Take both again right after turning it on, and after every manual sync, link or admission on a pull-type source that is not active, every second row created for one enterprise, and every policy clear.'
+  const purpose = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED.purpose
+  assert.equal(purpose.split(sentence).length - 1, 1, 'the registry entry states the sentence exactly once')
+  assert.ok(purpose.endsWith(sentence), 'the sentence closes the registry entry')
+  for (const template of ['docker/app.env.example', 'docker/app.staging.env.example']) {
+    const comment = readRepoSource(template)
+      .split('\n')
+      .filter((line) => line.startsWith('#'))
+      .map((line) => line.replace(/^#\s?/, ''))
+      .join(' ')
+    assert.equal(comment.split(sentence).length - 1, 1, `${template} states the sentence exactly once`)
+    // It follows the advice to set policies first and precedes the note on the exact literal.
+    assert.ok(comment.includes(`set their policies before turning it on. ${sentence} Exact literal 'true' only.`), template)
+  }
+})
