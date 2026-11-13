@@ -445,6 +445,7 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/ApprovalDetailView.vue', 'formatFieldValue(row.cells[column.id], column)'],
     ['src/views/approval/ApprovalNewView.vue', 'approval-attachment-input-${field.id}'],
     ['src/views/approval/TemplateAuthoringView.vue', 'approval-step-field-access-${field.id}'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'label: field.label.trim() || field.id.trim(),'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approval-node-field-access-${field.id}'],
   ]),
   ...group('OUT-OF-SCOPE', 'a graph NODE key/name (structural authored key), not a member identity -- excluded by class definition', [

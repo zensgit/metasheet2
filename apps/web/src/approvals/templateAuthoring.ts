@@ -27,7 +27,13 @@ import type {
   RuntimePolicy,
   SamePersonPolicy,
 } from '../types/approval'
-import { APPROVAL_TYPE_VALUES, NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+import {
+  APPROVAL_TYPE_VALUES,
+  FORM_SCHEMA_SUMMARY_FIELD_MAX,
+  NODE_FIELD_ACCESS_VALUES,
+  NODE_TIMEOUT_MAX_AFTER_MINUTES,
+  NODE_TIMEOUT_SUPPORTED_EFFECTS,
+} from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
@@ -429,6 +435,9 @@ export interface TemplateAuthoringDraft {
   // #3183). The editor does NOT author it yet — it is carried hydrate→save VERBATIM so an
   // authoring-page save cannot silently drop a preset-shipped control (the #3161 §1 exposure).
   amountConsistencyCheck?: FormSchema['amountConsistencyCheck']
+  // 列表摘要字段（formSchema.summaryFieldIds）。在「基本信息」里选择；不设 / 空 = 默认前 3 个字段。
+  // 删除或改类型的字段不在这里同步移除，由 buildFormSchema 在保存时按当前字段裁掉（撤销删除后选择仍在）。
+  summaryFieldIds?: string[]
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -1928,6 +1937,10 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     ...(template.formSchema.amountConsistencyCheck
       ? { amountConsistencyCheck: { ...template.formSchema.amountConsistencyCheck } }
       : {}),
+    // 列表摘要字段：浅拷贝，未设置时不写这个键（往返不产生多余键）。
+    ...(template.formSchema.summaryFieldIds?.length
+      ? { summaryFieldIds: [...template.formSchema.summaryFieldIds] }
+      : {}),
     ...(complex
       ? {
           preservedGraph: template.approvalGraph,
@@ -2113,7 +2126,32 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
     // Preserve side of the #3161 §1 fix: re-emit the amount total-check mapping verbatim. The editor
     // doesn't author it, so a rebuild that dropped it would silently kill a preset-shipped control.
     ...(draft.amountConsistencyCheck ? { amountConsistencyCheck: { ...draft.amountConsistencyCheck } } : {}),
+    ...buildSummaryFieldIdsPart(draft),
   }
+}
+
+const SUMMARY_INELIGIBLE_FIELD_TYPES: ReadonlySet<string> = new Set(['attachment', 'detail', 'explanation'])
+
+/** 可作为列表摘要的顶层字段：有 id，且不是附件 / 明细 / 说明（与后端 assertFormSchema 的白名单一致）。 */
+export function summaryEligibleDraftFields(draft: Pick<TemplateAuthoringDraft, 'fields'>): FieldAuthoringDraft[] {
+  return draft.fields.filter((field) => field.id.trim() !== '' && !SUMMARY_INELIGIBLE_FIELD_TYPES.has(field.type))
+}
+
+/**
+ * 保存时输出的列表摘要字段：只保留仍存在且可用的字段 id，去重，按选择顺序，最多
+ * FORM_SCHEMA_SUMMARY_FIELD_MAX 个。为空时不写这个键，模板回到默认摘要。
+ */
+function buildSummaryFieldIdsPart(draft: TemplateAuthoringDraft): Pick<FormSchema, 'summaryFieldIds'> {
+  if (!draft.summaryFieldIds?.length) return {}
+  const eligibleIds = new Set(summaryEligibleDraftFields(draft).map((field) => field.id.trim()))
+  const ids: string[] = []
+  for (const raw of draft.summaryFieldIds) {
+    const id = typeof raw === 'string' ? raw.trim() : ''
+    if (!eligibleIds.has(id) || ids.includes(id)) continue
+    ids.push(id)
+    if (ids.length >= FORM_SCHEMA_SUMMARY_FIELD_MAX) break
+  }
+  return ids.length > 0 ? { summaryFieldIds: ids } : {}
 }
 
 /** Exported (G-B2-06) so `linearStepSpine.ts` can derive the same `ApprovalAssigneeSource` the
