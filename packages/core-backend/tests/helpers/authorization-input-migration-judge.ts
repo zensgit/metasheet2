@@ -1077,13 +1077,15 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     const targetInto = verb >= 0 && isKeyword(tokens[verb], 'INSERT', 'MERGE') ? verb + 1 : -1
     for (let into = topLevelKeyword(tokens, 1, tokens.length, 'INTO'); into >= 0; into = topLevelKeyword(tokens, into + 1, tokens.length, 'INTO')) {
       // The words that may precede the name are passed over one by one, and a name is read at
-      // each of them as well: such a word may be the schema the name is written with.
+      // each of them as well: such a word may be the schema the name is written with. At the INTO
+      // of a write the table is read past a substituted schema, as the target of a write is.
       for (let at = into + 1; ; at += 1) {
-        const created = tableAt(tokens, at)
+        const created = tableAt(tokens, at, into === targetInto)
         if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
         if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
-        // A name written in pieces is refused at the INTO of a write as well: no verdict stands for it.
-        if (created === null && piecedNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+        // A name in pieces that is not read, or whose pieces spell an input table, is refused at the
+        // INTO of a write as well: no verdict stands for it.
+        if ((created === null && piecedNameAt(tokens, at)) || inputSpelledInPiecesAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
         if (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) continue
         if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
         break

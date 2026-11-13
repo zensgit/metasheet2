@@ -866,15 +866,19 @@ describe('targets that are read item by item or not at all', () => {
     expect(check(unlocked('SELECT id INTO GLOBAL TEMPORARY TABLE app.audit_copy FROM users')).problems).toEqual([])
   })
 
-  it('a name written in pieces after the INTO of a write is refused: it is not read, and no registered dynamic target stands for it', () => {
+  it('after the INTO of a write the table is read past a substituted schema; a name in pieces that is not read, or whose pieces spell an input table, is refused, and no registered dynamic target stands for it', () => {
+    const under = ['unreadable SELECT INTO: creates a table under an input table name']
     const unread = ['unreadable SELECT INTO: creates a table whose name is not readable']
     const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
     const line = (statement: string) => 'await sql`' + statement + '`.execute(db)'
+    // A table in pieces, alone or after a schema, and a schema whose pieces spell an input table.
     const pieces = [
       'EXPLAIN INSERT INTO TEMP users${sql.raw(x)} SELECT user_id FROM user_roles',
       'WITH w AS (SELECT user_id FROM user_roles) MERGE INTO UNLOGGED app.user_roles${sql.raw(x)} m USING w ON m.user_id = w.user_id WHEN MATCHED THEN DELETE',
       'EXPLAIN INSERT INTO TABLE audit_x${sql.raw(x)} SELECT user_id FROM user_roles',
       'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO TEMP ${sql.raw(x)}_copy SELECT user_id FROM w',
+      'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO TEMP app.audit_x${sql.raw(x)} SELECT user_id FROM w',
+      'EXPLAIN INSERT INTO TEMP users${sql.raw(x)}.audit_x SELECT user_id FROM user_roles',
     ]
     for (const statement of pieces) {
       expect(checkNewMigration(NEW_TS, up(line(statement)), true, []).problems, statement).toEqual(unread)
@@ -882,10 +886,20 @@ describe('targets that are read item by item or not at all', () => {
     }
     // Text against a constant of the file is pieces as well.
     expect(check(up("const K = 'x'", line('EXPLAIN INSERT INTO TEMP users${K} SELECT user_id FROM user_roles'))).problems).toEqual(unread)
-    // A target that is one substitution, alone or as schema and table, stays the dynamic target of the write.
-    for (const statement of ['EXPLAIN INSERT INTO ${sql.id(schema)}.${sql.id(name)} SELECT user_id FROM user_roles', 'EXPLAIN INSERT INTO ${sql.id(schema)}.audit_x SELECT user_id FROM user_roles']) {
+    // An input table after a substituted schema, or after a schema in pieces, is read as that table.
+    for (const statement of ['WITH w AS (SELECT user_id FROM user_roles) INSERT INTO TEMP ${sql.id(schema)}.users SELECT user_id FROM w', 'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO TEMP pub${sql.raw(x)}.user_roles SELECT user_id FROM w']) {
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, [cover]).problems, statement).toEqual(under)
+    }
+    // A target that is one substitution, alone or as schema and table, and another table after a
+    // substituted schema or a schema in pieces, stay the dynamic target of the write.
+    const dynamic = [
+      'EXPLAIN INSERT INTO ${sql.id(schema)}.${sql.id(name)} SELECT user_id FROM user_roles',
+      'EXPLAIN INSERT INTO ${sql.id(schema)}.audit_x SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO pub${sql.raw(x)}.audit_x SELECT user_id FROM w',
+    ]
+    for (const statement of dynamic) {
       expect(checkNewMigration(NEW_TS, up(line(statement)), true, [cover]).problems, statement).toEqual([])
-      expect(checkNewMigration(NEW_TS, up(line(statement)), true, []).problems, statement).toEqual(['unreadable EXPLAIN: dynamic write target'])
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, []).problems, statement).toEqual([`unreadable ${statement.split(' ')[0]}: dynamic write target`])
     }
   })
 
