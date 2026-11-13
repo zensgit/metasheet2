@@ -1,4 +1,6 @@
 import { computed, onScopeDispose, reactive, ref, shallowRef, watch, type Ref } from 'vue'
+import { ATTENDANCE_GROUP_FIXED_SCHEDULE_STATES_V1, type AttendanceGroupFixedScheduleStateV1 } from './attendanceGroupEffectivePolicyLabels'
+import { FIXED_SCHEDULE_REASON_CODES } from './attendanceFixedScheduleEffectiveness'
 
 type Translate = (en: string, zh: string) => string
 type Candidate = { shiftId: string; startDate: string; endDate: string }
@@ -6,7 +8,7 @@ type Desired = Candidate & { revision: number }
 export type FixedScheduleManagedSet = Omit<Candidate, 'endDate'> & { endDate: string | null; producerKey: string; rowCount: number }
 export type FixedScheduleEditor = {
   groupId: string
-  state: 'not_configured' | 'configuration_changed' | 'effective' | 'pending_apply'
+  state: AttendanceGroupFixedScheduleStateV1
   reasonCodes: string[]
   desired: Desired | null
   drift: { managedSets: FixedScheduleManagedSet[] }
@@ -33,8 +35,8 @@ type Options = {
   reloadAssignments: (isCurrent: () => boolean) => Promise<void>
   confirm: (message: string) => boolean
 }
-const states = ['not_configured', 'configuration_changed', 'effective', 'pending_apply']
-const reasons = new Set(['NO_DESIRED_CONFIG', 'NO_TARGET_MEMBERS', 'DIFFERENT_MANAGED_KEY_ACTIVE', 'TARGET_MEMBER_MISSING', 'NON_MEMBER_TARGET_ACTIVE', 'DUPLICATE_MATCHING_ASSIGNMENT', 'ASSIGNMENT_VALUE_MISMATCH', 'UNPUBLISHED_MANAGED_ROW', 'EFFECTIVE'])
+const states: readonly string[] = ATTENDANCE_GROUP_FIXED_SCHEDULE_STATES_V1
+const reasons = new Set<string>(FIXED_SCHEDULE_REASON_CODES)
 const multiSegmentCode = 'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)

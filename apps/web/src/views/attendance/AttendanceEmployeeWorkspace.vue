@@ -436,6 +436,14 @@
             <small class="attendance__field-hint">{{ tr('Read-only summary of the rules currently used for you.', '当前适用于您的考勤规则只读摘要。') }}</small>
           </div>
         </div>
+        <AttendanceFixedScheduleProjection
+          v-if="fixedScheduleGroups"
+          surface="employee"
+          :groups="fixedScheduleGroups"
+          :expected-org-id="fixedScheduleOrgId"
+          :context-key="fixedScheduleContextKey ?? ''"
+          :enabled="selfRulesHasData && !selfRulesLoading && !selfRulesError"
+        />
         <p v-if="selfRulesLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
         <p v-else-if="selfRulesError" class="attendance__error" data-selfservice-rules-error>{{ selfRulesError }}</p>
         <div v-else-if="selfRulesHasData" class="attendance__selfrules" data-selfservice-rules>
@@ -503,6 +511,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceFixedScheduleProjection from './AttendanceFixedScheduleProjection.vue'
 import { computed } from 'vue'
 import AttendanceEmployeeCommonIcon from './AttendanceEmployeeCommonIcon.vue'
 import type { AttendanceOverviewAttentionItem } from './attendanceOverviewPriority'
@@ -569,6 +578,9 @@ interface AnnualBalanceSummary {
 
 const props = defineProps<{
   tr: TranslateFn
+  fixedScheduleGroups?: readonly { id?: string | null; name?: string | null; code?: string | null }[]
+  fixedScheduleOrgId?: string | null
+  fixedScheduleContextKey?: string
   // Today band
   heroClockTime: string
   heroClockDate: string
