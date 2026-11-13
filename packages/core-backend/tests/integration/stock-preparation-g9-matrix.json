@@ -65,7 +65,7 @@
     ]
   },
   "manual": [
-    { "id": "U07-OLD-BUILD", "what": "the section 7.5 drill proper: a pre-step-6 build (the parent of migration 106's first commit) against a database migrated by the candidate and carrying the G9-U07 artifacts and the G9-S66-U07 one (a repair run left running: the 108 header query non-zero, so the rollback is refused until it is closed); preview / apply / export refused where the stop queries say so; no ADD or INACTIVE written (runner: --old-build-drill prints the commands)" },
+    { "id": "U07-OLD-BUILD", "what": "the section 7.5 drill proper, criterion restated 2026-11-13 (register R-91): a pre-step-6 build (the parent of migration 106's first commit) and the candidate, each on a twin clone of a database migrated by the candidate and carrying the drill artifacts (the G9-U07 ones, the B-22 shape, an open hold, a claim-active continuation and the G9-S66-U07 open repair run); every blocking stop query non-zero, so the rollback is refused until they read 0 (the operator rule; the old build is not expected to refuse writes); export refused on every governed artifact project in both builds; the old build writes no row the candidate would not; after clearing, the old build answers as the candidate does (runner: --old-build-drill prints the steps and the full criterion)" },
     { "id": "U09", "what": "the pilot pages in a real browser on a deployment built from the frozen sha" },
     { "id": "MUTANTS", "what": "the plan section 9 mutant list (step-4 section 19, step-6 section 11, BI section 11.4), each turning its named case red on a scratch copy, restored byte-identical" },
     { "id": "PE-DEPLOY", "what": "the positive pilot-enable leg on a real deployment built from the frozen sha, values-free evidence" },
