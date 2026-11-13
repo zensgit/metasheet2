@@ -2357,6 +2357,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'scope-1',
@@ -2660,6 +2661,10 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
+      .mockResolvedValueOnce(lockedUserResult('user-2', 'user'))
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'template-1',
@@ -2682,11 +2687,6 @@ describe('admin-users routes', () => {
           member_count: 2,
         }],
       })
-      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
-      .mockResolvedValueOnce(lockedUserResult('user-2', 'user'))
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
-      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -2725,6 +2725,8 @@ describe('admin-users routes', () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2796,6 +2798,10 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
+      .mockResolvedValueOnce(lockedUserResult('user-2', 'user'))
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'template-1',
@@ -2823,10 +2829,6 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
-      .mockResolvedValueOnce(lockedUserResult('user-2', 'user'))
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -5883,6 +5885,7 @@ describe('admin-users routes', () => {
   })
 
   it('persists includeChildren false and updates it on conflict', async () => {
+    vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'true')
     rbacMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       const statement = String(sql)
@@ -5932,6 +5935,300 @@ describe('admin-users routes', () => {
     expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
     expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('DELETE FROM delegated_role_admin_scopes'))).toBe(true)
     expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
+  })
+
+  function mockDelegatedScopeReads(options: { storedScope?: boolean | null; templateDepartment?: boolean | null } = {}): void {
+    const storedScope = options.storedScope === undefined ? null : options.storedScope
+    const templateDepartment = options.templateDepartment === undefined ? null : options.templateDepartment
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = String(sql)
+      if (statement.includes('FOR UPDATE') && statement.includes('delegated_role_scope_templates')) {
+        return { rows: [{ id: 'template-1' }] }
+      }
+      if (statement.includes('FOR UPDATE')) {
+        const id = String(params?.[0] ?? '')
+        return lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+      }
+      if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      if (statement.includes('FROM users')) {
+        return { rows: [{ id: 'user-2', name: 'Plugin Admin', role: 'user', is_active: true }] }
+      }
+      if (statement.includes('FROM directory_departments') && !statement.includes('delegated_role_scope_template_departments')) {
+        return { rows: [{ id: 'dept-1' }] }
+      }
+      if (statement.includes('SELECT include_children') && statement.includes('delegated_role_admin_scopes')) {
+        return storedScope === null ? { rows: [] } : { rows: [{ include_children: storedScope }] }
+      }
+      if (statement.includes('SELECT include_children') && statement.includes('delegated_role_scope_template_departments')) {
+        return templateDepartment === null ? { rows: [] } : { rows: [{ include_children: templateDepartment }] }
+      }
+      if (statement.includes('FROM delegated_role_scope_templates') && !statement.includes('COUNT(')) {
+        return { rows: [{ id: 'template-1' }] }
+      }
+      if (statement.includes('FROM delegated_role_scope_template_departments')) {
+        return templateDepartment === null
+          ? { rows: [] }
+          : { rows: [{ directory_department_id: 'dept-1', include_children: templateDepartment }] }
+      }
+      return { rows: [] }
+    })
+  }
+
+  function delegatedScopeMutations(): string[] {
+    return pgMocks.query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((sql) => (
+        sql.includes('INSERT INTO delegated_role_admin_scopes')
+        || sql.includes('DELETE FROM delegated_role_admin_scopes')
+        || sql.includes('INSERT INTO delegated_role_scope_template_departments')
+        || sql.includes('DELETE FROM delegated_role_scope_template_departments')
+        || sql.includes('UPDATE delegated_role_scope_templates')
+        || sql.includes('INSERT INTO delegated_role_admin_member_groups')
+        || sql.includes('DELETE FROM delegated_role_admin_member_groups')
+      ))
+  }
+
+  function stubExactDepartmentFlag(value: string | undefined): void {
+    if (value === undefined) vi.unstubAllEnvs()
+    else vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', value)
+  }
+
+  it('reports exactDepartmentScopeAvailable only for the byte-exact true flag', async () => {
+    state.authUser = { id: 'crm-admin-1', role: 'user' }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (String(sql).includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
+      return { rows: [] }
+    })
+
+    const read = async () => {
+      const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+      expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+      return (response.body as Record<string, any>).data.exactDepartmentScopeAvailable
+    }
+
+    expect(await read()).toBe(false)
+    for (const value of ['1', 'TRUE', ' true ', 'true ', 'yes', 'on']) {
+      stubExactDepartmentFlag(value)
+      expect(await read(), value).toBe(false)
+    }
+    stubExactDepartmentFlag('true')
+    expect(await read()).toBe(true)
+  })
+
+  it('refuses an explicit exact department on direct and template assign before any query', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    for (const value of [undefined, '1', 'TRUE', ' true ', 'true '] as const) {
+      stubExactDepartmentFlag(value)
+      pgMocks.query.mockClear()
+      auditMocks.auditLog.mockClear()
+      rbacMocks.invalidateUserPerms.mockClear()
+
+      const direct = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+        params: { userId: 'user-2', action: 'assign' },
+        body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: false },
+      })
+      const template = await invokeRoute('post', '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', {
+        params: { templateId: 'template-1', action: 'assign' },
+        body: { directoryDepartmentId: 'dept-1', includeChildren: false },
+      })
+
+      for (const response of [direct, template]) {
+        expect(response.statusCode, String(value)).toBe(403)
+        expect((response.body as Record<string, any>).error).toEqual({
+          code: 'DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED',
+          message: 'Exact department scope is disabled',
+        })
+      }
+      expect(pgMocks.query, String(value)).not.toHaveBeenCalled()
+      expect(auditMocks.auditLog, String(value)).not.toHaveBeenCalled()
+      expect(rbacMocks.invalidateUserPerms, String(value)).not.toHaveBeenCalled()
+    }
+  })
+
+  it('refuses template apply of a locked exact department before merge or replace writes', async () => {
+    for (const value of [undefined, '1', 'TRUE', ' true ', 'true '] as const) {
+      for (const mode of ['merge', 'replace'] as const) {
+        stubExactDepartmentFlag(value)
+        mockDelegatedScopeReads({ templateDepartment: false })
+        auditMocks.auditLog.mockClear()
+        rbacMocks.invalidateUserPerms.mockClear()
+
+        const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scope-templates/apply', {
+          params: { userId: 'user-2' },
+          body: { namespace: 'crm', templateId: 'template-1', mode },
+        })
+
+        expect(response.statusCode, `${String(value)} ${mode} ${JSON.stringify(response.body)}`).toBe(403)
+        expect((response.body as Record<string, any>).error.code).toBe('DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED')
+        expect(delegatedScopeMutations(), mode).toEqual([])
+        expect(auditMocks.auditLog).not.toHaveBeenCalled()
+        expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+        const sqls = pgMocks.query.mock.calls.map((call) => String(call[0]))
+        const userLock = sqls.findIndex((sql) => sql.includes('FROM users') && sql.includes('FOR UPDATE'))
+        const templateLock = sqls.findIndex((sql) => sql.includes('delegated_role_scope_templates') && sql.includes('FOR UPDATE'))
+        const departmentRead = sqls.findIndex((sql) => sql.includes('FROM delegated_role_scope_template_departments'))
+        expect(userLock, mode).toBeGreaterThanOrEqual(0)
+        expect(templateLock, mode).toBeGreaterThan(userLock)
+        expect(departmentRead, mode).toBeGreaterThan(templateLock)
+      }
+    }
+  })
+
+  it('persists the locked exact department on apply when the flag is byte-exact true', async () => {
+    vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'true')
+    for (const mode of ['merge', 'replace'] as const) {
+      mockDelegatedScopeReads({ templateDepartment: false })
+      auditMocks.auditLog.mockClear()
+
+      const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scope-templates/apply', {
+        params: { userId: 'user-2' },
+        body: { namespace: 'crm', templateId: 'template-1', mode },
+      })
+
+      expect(response.statusCode, `${mode} ${JSON.stringify(response.body)}`).toBe(200)
+      const sqls = pgMocks.query.mock.calls.map((call) => String(call[0]))
+      const departmentRead = sqls.findIndex((sql) => sql.includes('FROM delegated_role_scope_template_departments'))
+      const deleted = sqls.findIndex((sql) => sql.includes('DELETE FROM delegated_role_admin_scopes'))
+      const insert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))
+      expect(insert?.[1]).toEqual(['user-2', 'crm', 'dept-1', false, 'admin-1'])
+      if (mode === 'replace') expect(deleted).toBeGreaterThan(departmentRead)
+      else expect(deleted).toBe(-1)
+      expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+        meta: expect.objectContaining({
+          mode,
+          includeChildrenSemantics: [{
+            directoryDepartmentId: 'dept-1',
+            includeChildren: false,
+            semantics: 'exact-department',
+          }],
+        }),
+      }))
+    }
+  })
+
+  it('preserves a stored exact department when an omitted assign runs with the flag off', async () => {
+    mockDelegatedScopeReads({ storedScope: false, templateDepartment: false })
+
+    const direct = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+    expect(direct.statusCode, JSON.stringify(direct.body)).toBe(200)
+    const scopeInsert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))
+    expect(scopeInsert?.[1]).toEqual(['user-2', 'crm', 'dept-1', false, 'admin-1'])
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      meta: expect.objectContaining({
+        includeChildren: false,
+        includeChildrenSemantics: 'exact-department',
+      }),
+    }))
+
+    pgMocks.query.mockClear()
+    auditMocks.auditLog.mockClear()
+    const template = await invokeRoute('post', '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', {
+      params: { templateId: 'template-1', action: 'assign' },
+      body: { directoryDepartmentId: 'dept-1' },
+    })
+    expect(template.statusCode, JSON.stringify(template.body)).toBe(200)
+    const templateInsert = pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_scope_template_departments'))
+    expect(templateInsert?.[1]).toEqual(['template-1', 'dept-1', false])
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      meta: {
+        templateId: 'template-1',
+        directoryDepartmentId: 'dept-1',
+        includeChildren: false,
+        includeChildrenSemantics: 'exact-department',
+      },
+    }))
+  })
+
+  it('keeps omitted assigns true when nothing exact is stored, and widens a stored exact row only while the flag is on', async () => {
+    mockDelegatedScopeReads()
+    const created = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+    expect(created.statusCode, JSON.stringify(created.body)).toBe(200)
+    expect(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))?.[1]).toEqual([
+      'user-2', 'crm', 'dept-1', true, 'admin-1',
+    ])
+
+    vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'true')
+    mockDelegatedScopeReads({ storedScope: false })
+    const widened = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
+    })
+    expect(widened.statusCode, JSON.stringify(widened.body)).toBe(200)
+    expect(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))?.[1]).toEqual([
+      'user-2', 'crm', 'dept-1', true, 'admin-1',
+    ])
+  })
+
+  it('allows an explicit true write while the flag is off', async () => {
+    mockDelegatedScopeReads({ storedScope: false })
+    const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'assign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true },
+    })
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))?.[1]).toEqual([
+      'user-2', 'crm', 'dept-1', true, 'admin-1',
+    ])
+  })
+
+  it('audits unassign from the stored exact bit and omits the flag when no row was stored', async () => {
+    mockDelegatedScopeReads({ storedScope: false, templateDepartment: false })
+    const removed = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'unassign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: false },
+    })
+    expect(removed.statusCode, JSON.stringify(removed.body)).toBe(200)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'revoke',
+      meta: {
+        userId: 'user-2',
+        namespace: 'crm',
+        directoryDepartmentId: 'dept-1',
+        includeChildren: false,
+        includeChildrenSemantics: 'exact-department',
+      },
+    }))
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
+
+    auditMocks.auditLog.mockClear()
+    const templateRemoved = await invokeRoute('post', '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', {
+      params: { templateId: 'template-1', action: 'unassign' },
+      body: { directoryDepartmentId: 'dept-1', includeChildren: true },
+    })
+    expect(templateRemoved.statusCode, JSON.stringify(templateRemoved.body)).toBe(200)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'revoke',
+      meta: {
+        templateId: 'template-1',
+        directoryDepartmentId: 'dept-1',
+        includeChildren: false,
+        includeChildrenSemantics: 'exact-department',
+      },
+    }))
+
+    mockDelegatedScopeReads()
+    auditMocks.auditLog.mockClear()
+    const missing = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
+      params: { userId: 'user-2', action: 'unassign' },
+      body: { namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true },
+    })
+    expect(missing.statusCode, JSON.stringify(missing.body)).toBe(200)
+    const meta = auditMocks.auditLog.mock.calls.at(-1)?.[0]?.meta as Record<string, unknown>
+    expect(meta).toEqual({
+      userId: 'user-2',
+      namespace: 'crm',
+      directoryDepartmentId: 'dept-1',
+      includeChildrenSemantics: 'unassigned',
+    })
+    expect(meta).not.toHaveProperty('includeChildren')
   })
 
   it('expands delegated department scope only when the seed includes children', async () => {

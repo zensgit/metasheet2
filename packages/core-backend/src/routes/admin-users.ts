@@ -85,6 +85,15 @@ import {
   handleAdminUserBatchUpdate,
 } from './admin-user-batch'
 import {
+  DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED,
+  describeIncludeChildren,
+  isDelegatedScopeExactDepartmentEnabled,
+  readIncludeChildrenIntent,
+  resolveDelegatedIncludeChildrenWrite,
+  type IncludeChildrenIntent,
+  type IncludeChildrenSemantics,
+} from '../admin/delegated-scope-rollout'
+import {
   assertPlatformActorAuthority,
   lockSharedAccessSubjects,
   PlatformActorAuthorityLost,
@@ -767,11 +776,88 @@ function readOptionalExpectedUpdatedAt(body: unknown): number | null {
   return parsed
 }
 
-/** Only an absent value defaults to true. Explicit null is rejected. */
-function readIncludeChildren(value: unknown): boolean | undefined {
-  if (value === undefined) return true
-  if (typeof value === 'boolean') return value
-  return undefined
+type TemplateStatementClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: ReadonlyArray<Record<string, unknown>> }>
+}
+
+function storedIncludeChildren(value: unknown): boolean | null {
+  if (value === true || value === false) return value
+  return null
+}
+
+function exactDepartmentDisabled(res: Response) {
+  return jsonError(
+    res,
+    403,
+    DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED,
+    'Exact department scope is disabled',
+  )
+}
+
+function includeChildrenAuditFields(stored: boolean | null): {
+  includeChildrenSemantics: IncludeChildrenSemantics
+  includeChildren?: boolean
+} {
+  const includeChildrenSemantics = describeIncludeChildren(stored)
+  if (stored === null) return { includeChildrenSemantics }
+  return { includeChildrenSemantics, includeChildren: stored }
+}
+
+/**
+ * Parent-row lock shared by template department edits, member-group edits, and apply.
+ * Call it only after any access-subject locks. It waits, then the caller re-reads.
+ * It does not compare updated_at, so it serializes edits without lost-update detection.
+ */
+async function lockDelegatedScopeTemplate(client: TemplateStatementClient, templateId: string): Promise<boolean> {
+  const locked = await client.query(
+    `SELECT id
+     FROM delegated_role_scope_templates
+     WHERE id = $1
+     FOR UPDATE`,
+    [templateId],
+  )
+  return locked.rows.length > 0
+}
+
+async function readStoredScopeIncludeChildren(
+  client: TemplateStatementClient,
+  userId: string,
+  namespace: string,
+  directoryDepartmentId: string,
+): Promise<boolean | null> {
+  const current = await client.query(
+    `SELECT include_children
+     FROM delegated_role_admin_scopes
+     WHERE admin_user_id = $1
+       AND namespace = $2
+       AND directory_department_id = $3`,
+    [userId, namespace, directoryDepartmentId],
+  )
+  if (!current.rows.length) return null
+  return storedIncludeChildren(current.rows[0]?.include_children)
+}
+
+async function readStoredTemplateIncludeChildren(
+  client: TemplateStatementClient,
+  templateId: string,
+  directoryDepartmentId: string,
+): Promise<boolean | null> {
+  const current = await client.query(
+    `SELECT include_children
+     FROM delegated_role_scope_template_departments
+     WHERE template_id = $1
+       AND directory_department_id = $2`,
+    [templateId, directoryDepartmentId],
+  )
+  if (!current.rows.length) return null
+  return storedIncludeChildren(current.rows[0]?.include_children)
+}
+
+function refuseExplicitExactDepartment(res: Response, action: string, intent: IncludeChildrenIntent): boolean {
+  if (action !== 'assign' || intent.kind !== 'explicit' || intent.value !== false) return false
+  if (isDelegatedScopeExactDepartmentEnabled()) return false
+  exactDepartmentDisabled(res)
+  return true
 }
 
 async function lockRoleRowForShare(
@@ -1979,8 +2065,8 @@ async function fetchDelegatedScopeTemplates(search = '') {
   }))
 }
 
-async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
-  const result = await query<DelegatedScopeTemplateDepartmentRow>(
+async function fetchDelegatedScopeTemplateDepartments(templateId: string, reader: TemplateStatementClient = { query }) {
+  const result = await reader.query(
     `SELECT
         td.template_id,
         d.id AS directory_department_id,
@@ -2000,8 +2086,9 @@ async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
      ORDER BY i.name ASC, COALESCE(d.full_path, d.name) ASC`,
     [templateId],
   )
+  const rows = result.rows as DelegatedScopeTemplateDepartmentRow[]
 
-  return result.rows.map((row) => ({
+  return rows.map((row) => ({
     directoryDepartmentId: row.directory_department_id,
     includeChildren: row.include_children !== false,
     integrationId: row.integration_id,
@@ -2015,8 +2102,8 @@ async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
   }))
 }
 
-async function fetchDelegatedScopeTemplateMemberGroups(templateId: string) {
-  const result = await query<DelegatedScopeTemplateMemberGroupRow>(
+async function fetchDelegatedScopeTemplateMemberGroups(templateId: string, reader: TemplateStatementClient = { query }) {
+  const result = await reader.query(
     `SELECT
         tg.template_id,
         g.id AS group_id,
@@ -2031,8 +2118,9 @@ async function fetchDelegatedScopeTemplateMemberGroups(templateId: string) {
      ORDER BY g.name ASC`,
     [templateId],
   )
+  const rows = result.rows as DelegatedScopeTemplateMemberGroupRow[]
 
-  return result.rows.map((row) => ({
+  return rows.map((row) => ({
     id: row.group_id,
     name: row.group_name,
     description: row.group_description,
@@ -3306,6 +3394,7 @@ export function adminUsersRouter(): Router {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        exactDepartmentScopeAvailable: isDelegatedScopeExactDepartmentEnabled(),
         roleCatalog,
         scopeAssignments,
         groupAssignments,
@@ -3500,14 +3589,11 @@ export function adminUsersRouter(): Router {
       const directoryDepartmentId = String(req.body?.directoryDepartmentId || '').trim()
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
       if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
-      let includeChildren = true
-      if (action === 'assign') {
-        const parsedIncludeChildren = readIncludeChildren(req.body?.includeChildren)
-        if (parsedIncludeChildren === undefined) {
-          return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
-        }
-        includeChildren = parsedIncludeChildren
+      const includeChildrenIntent = action === 'assign' ? readIncludeChildrenIntent(req.body) : { kind: 'omitted' as const }
+      if (includeChildrenIntent.kind === 'invalid') {
+        return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
       }
+      if (refuseExplicitExactDepartment(res, action, includeChildrenIntent)) return
 
       const templateExists = await query<{ id: string }>(
         'SELECT id FROM delegated_role_scope_templates WHERE id = $1 LIMIT 1',
@@ -3529,31 +3615,52 @@ export function adminUsersRouter(): Router {
         if (!department.rows.length) {
           return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
         }
-        await query(
-          `INSERT INTO delegated_role_scope_template_departments (
-             template_id, directory_department_id, include_children, created_at
-           )
-           VALUES ($1, $2, $3, NOW())
-           ON CONFLICT (template_id, directory_department_id)
-           DO UPDATE SET include_children = EXCLUDED.include_children`,
-          [templateId, directoryDepartmentId, includeChildren],
-        )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_scope_template_departments
-           WHERE template_id = $1
-             AND directory_department_id = $2`,
-          [templateId, directoryDepartmentId],
-        )
       }
 
-      await query(
-        `UPDATE delegated_role_scope_templates
-         SET updated_by = $2,
-             updated_at = NOW()
-         WHERE id = $1`,
-        [templateId, adminUserId],
-      )
+      const written = await transaction(async (client) => {
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return { missing: true as const }
+        const stored = await readStoredTemplateIncludeChildren(client, templateId, directoryDepartmentId)
+        let persisted: boolean | null = null
+        if (action === 'assign') {
+          const decision = resolveDelegatedIncludeChildrenWrite({
+            intent: includeChildrenIntent,
+            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
+            exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
+          })
+          if (decision.outcome === 'refuse') return { missing: false as const, refused: true as const }
+          persisted = decision.includeChildren
+          await client.query(
+            `INSERT INTO delegated_role_scope_template_departments (
+               template_id, directory_department_id, include_children, created_at
+             )
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (template_id, directory_department_id)
+             DO UPDATE SET include_children = EXCLUDED.include_children`,
+            [templateId, directoryDepartmentId, persisted],
+          )
+        } else {
+          persisted = stored
+          await client.query(
+            `DELETE FROM delegated_role_scope_template_departments
+             WHERE template_id = $1
+               AND directory_department_id = $2`,
+            [templateId, directoryDepartmentId],
+          )
+        }
+        await client.query(
+          `UPDATE delegated_role_scope_templates
+           SET updated_by = $2,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [templateId, adminUserId],
+        )
+        return { missing: false as const, refused: false as const, persisted }
+      })
+      if (written.missing) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (written.refused) return exactDepartmentDisabled(res)
 
       const item = await fetchDelegatedScopeTemplateDetail(templateId)
       await auditLog({
@@ -3565,6 +3672,7 @@ export function adminUsersRouter(): Router {
         meta: {
           templateId,
           directoryDepartmentId,
+          ...includeChildrenAuditFields(written.persisted),
         },
       })
 
@@ -3605,31 +3713,38 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
       }
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO delegated_role_scope_template_member_groups (
-             template_id, group_id, created_at
-           )
-           VALUES ($1, $2, NOW())
-           ON CONFLICT DO NOTHING`,
-          [templateId, groupId],
+      const linked = await transaction(async (client) => {
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return false
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO delegated_role_scope_template_member_groups (
+               template_id, group_id, created_at
+             )
+             VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING`,
+            [templateId, groupId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM delegated_role_scope_template_member_groups
+             WHERE template_id = $1
+               AND group_id = $2`,
+            [templateId, groupId],
+          )
+        }
+        await client.query(
+          `UPDATE delegated_role_scope_templates
+           SET updated_by = $2,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [templateId, adminUserId],
         )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_scope_template_member_groups
-           WHERE template_id = $1
-             AND group_id = $2`,
-          [templateId, groupId],
-        )
+        return true
+      })
+      if (!linked) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
       }
-
-      await query(
-        `UPDATE delegated_role_scope_templates
-         SET updated_by = $2,
-             updated_at = NOW()
-         WHERE id = $1`,
-        [templateId, adminUserId],
-      )
 
       const item = await fetchDelegatedScopeTemplateDetail(templateId)
       await auditLog({
@@ -3695,14 +3810,11 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
       if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
-      let includeChildren = true
-      if (action === 'assign') {
-        const parsedIncludeChildren = readIncludeChildren(req.body?.includeChildren)
-        if (parsedIncludeChildren === undefined) {
-          return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
-        }
-        includeChildren = parsedIncludeChildren
+      const includeChildrenIntent = action === 'assign' ? readIncludeChildrenIntent(req.body) : { kind: 'omitted' as const }
+      if (includeChildrenIntent.kind === 'invalid') {
+        return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
       }
+      if (refuseExplicitExactDepartment(res, action, includeChildrenIntent)) return
 
       const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
@@ -3735,9 +3847,16 @@ export function adminUsersRouter(): Router {
         await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (action === 'assign' && !adminNamespaces.includes(namespace)) {
-          return { refused: true as const, adminNamespaces }
+          return { refused: 'namespace' as const, adminNamespaces }
         }
+        const stored = await readStoredScopeIncludeChildren(client, userId, namespace, directoryDepartmentId)
         if (action === 'assign') {
+          const decision = resolveDelegatedIncludeChildrenWrite({
+            intent: includeChildrenIntent,
+            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
+            exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
+          })
+          if (decision.outcome === 'refuse') return { refused: 'exact' as const, adminNamespaces }
           await client.query(
             `INSERT INTO delegated_role_admin_scopes (
                admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
@@ -3748,22 +3867,23 @@ export function adminUsersRouter(): Router {
                include_children = EXCLUDED.include_children,
                created_by = EXCLUDED.created_by,
                updated_at = NOW()`,
-            [userId, namespace, directoryDepartmentId, includeChildren, adminUserId],
+            [userId, namespace, directoryDepartmentId, decision.includeChildren, adminUserId],
           )
-        } else {
-          await client.query(
-            `DELETE FROM delegated_role_admin_scopes
-             WHERE admin_user_id = $1
-               AND namespace = $2
-               AND directory_department_id = $3`,
-            [userId, namespace, directoryDepartmentId],
-          )
+          return { refused: false as const, adminNamespaces, persisted: decision.includeChildren }
         }
-        return { refused: false as const, adminNamespaces }
+        await client.query(
+          `DELETE FROM delegated_role_admin_scopes
+           WHERE admin_user_id = $1
+             AND namespace = $2
+             AND directory_department_id = $3`,
+          [userId, namespace, directoryDepartmentId],
+        )
+        return { refused: false as const, adminNamespaces, persisted: stored }
       })
-      if (locked.refused) {
+      if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
+      if (locked.refused === 'exact') return exactDepartmentDisabled(res)
       const adminNamespaces = locked.adminNamespaces
 
       await auditLog({
@@ -3776,6 +3896,7 @@ export function adminUsersRouter(): Router {
           userId,
           namespace,
           directoryDepartmentId,
+          ...includeChildrenAuditFields(locked.persisted),
         },
       })
 
@@ -3971,20 +4092,15 @@ export function adminUsersRouter(): Router {
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
       if (!['replace', 'merge'].includes(mode)) return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
 
-      const [profile, roleIds, template] = await Promise.all([
+      const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
         fetchUserRoleIds(userId),
-        fetchDelegatedScopeTemplateDetail(templateId),
       ])
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-      if (!template) return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
 
       const previewNamespaces = deriveDelegableNamespaces(roleIds)
       if (!previewNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
-      }
-      if (template.departments.length === 0 && template.memberGroups.length === 0) {
-        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
       }
 
       const locked = await transaction(async (client) => {
@@ -3993,7 +4109,22 @@ export function adminUsersRouter(): Router {
         await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (!adminNamespaces.includes(namespace)) {
-          return { refused: true as const, adminNamespaces }
+          return { refused: 'namespace' as const, adminNamespaces }
+        }
+        // Access-subject locks are already held. The parent lock then makes this
+        // the snapshot that is gated and written. A pre-transaction read is not used.
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return { refused: 'missing-template' as const, adminNamespaces }
+        const departments = await fetchDelegatedScopeTemplateDepartments(templateId, client)
+        const memberGroups = await fetchDelegatedScopeTemplateMemberGroups(templateId, client)
+        if (departments.length === 0 && memberGroups.length === 0) {
+          return { refused: 'empty' as const, adminNamespaces }
+        }
+        if (
+          !isDelegatedScopeExactDepartmentEnabled()
+          && departments.some((department) => department.includeChildren === false)
+        ) {
+          return { refused: 'exact' as const, adminNamespaces }
         }
         if (mode === 'replace') {
           await client.query(
@@ -4009,7 +4140,7 @@ export function adminUsersRouter(): Router {
             [userId, namespace],
           )
         }
-        for (const department of template.departments) {
+        for (const department of departments) {
           await client.query(
             `INSERT INTO delegated_role_admin_scopes (
                admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
@@ -4023,7 +4154,7 @@ export function adminUsersRouter(): Router {
             [userId, namespace, department.directoryDepartmentId, department.includeChildren, adminUserId],
           )
         }
-        for (const group of template.memberGroups) {
+        for (const group of memberGroups) {
           await client.query(
             `INSERT INTO delegated_role_admin_member_groups (
                admin_user_id, namespace, group_id, created_by, created_at, updated_at
@@ -4036,11 +4167,18 @@ export function adminUsersRouter(): Router {
             [userId, namespace, group.id, adminUserId],
           )
         }
-        return { refused: false as const, adminNamespaces }
+        return { refused: false as const, adminNamespaces, departments, memberGroups }
       })
-      if (locked.refused) {
+      if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
+      if (locked.refused === 'missing-template') {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (locked.refused === 'empty') {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
+      }
+      if (locked.refused === 'exact') return exactDepartmentDisabled(res)
       const adminNamespaces = locked.adminNamespaces
 
       const [scopeAssignments, groupAssignments] = await Promise.all([
@@ -4058,8 +4196,13 @@ export function adminUsersRouter(): Router {
           namespace,
           templateId,
           mode,
-          departmentCount: template.departments.length,
-          memberGroupCount: template.memberGroups.length,
+          departmentCount: locked.departments.length,
+          memberGroupCount: locked.memberGroups.length,
+          includeChildrenSemantics: locked.departments.map((department) => ({
+            directoryDepartmentId: department.directoryDepartmentId,
+            includeChildren: department.includeChildren,
+            semantics: describeIncludeChildren(department.includeChildren),
+          })),
         },
       })
 

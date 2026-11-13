@@ -125,23 +125,40 @@ type Script = {
   permissions?: unknown
   actorRole?: string
   actorRoles?: string[]
+  actorActive?: boolean
+  actorActivationStatus?: string
+  actorIsAdmin?: boolean
   targetRoles?: string[]
   targetActive?: boolean
   deletedAt?: string | null
   missingTarget?: boolean
   failWrite?: Error | null
   suppressWrite?: boolean
+  holdActorAdmission?: boolean
 }
 
 function installScript(script: Script) {
   const sqlLog: string[] = []
   const order: string[] = []
   let permissionWrite: unknown[] | undefined
+  let releaseAdmission = (): void => undefined
+  const admissionHeld = script.holdActorAdmission === true
+    ? new Promise<void>((resolve) => { releaseAdmission = resolve })
+    : null
+  let markAdmission = (): void => undefined
+  const admissionStarted = admissionHeld
+    ? new Promise<void>((resolve) => { markAdmission = resolve })
+    : null
   pgMocks.transaction.mockImplementation(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
     const client = {
       query: async (sql: string, params?: unknown[]) => {
         const text = String(sql)
         sqlLog.push(text)
+        if (text.includes('pg_advisory_xact_lock') && String(params?.[0]) === 'namespace-admission:admin-1' && admissionHeld) {
+          markAdmission()
+          await admissionHeld
+          return { rows: [] }
+        }
         if (text.includes('ORDER BY role_id ASC')) {
           const roles = params?.[0] === 'admin-1' ? (script.actorRoles ?? ['admin']) : []
           return { rows: roles.map((roleId) => ({ role_id: roleId })) }
@@ -161,8 +178,9 @@ function installScript(script: Script) {
             rows: [{
               id,
               role: id === 'admin-1' ? (script.actorRole ?? 'admin') : 'user',
-              activation_status: 'activated',
-              is_active: id === 'admin-1' ? true : (script.targetActive ?? true),
+              activation_status: id === 'admin-1' ? (script.actorActivationStatus ?? 'activated') : 'activated',
+              is_active: id === 'admin-1' ? script.actorActive !== false : (script.targetActive ?? true),
+              is_admin: id === 'admin-1' ? script.actorIsAdmin === true : false,
               access_generation: 1,
               deleted_at: id === 'admin-1' ? null : (script.deletedAt ?? null),
               purged_at: null,
@@ -197,7 +215,25 @@ function installScript(script: Script) {
       throw error
     }
   })
-  return { sqlLog, order, readWrite: () => permissionWrite }
+  return {
+    sqlLog,
+    order,
+    readWrite: () => permissionWrite,
+    admissionStarted,
+    releaseAdmission: () => releaseAdmission(),
+  }
+}
+
+function expectClosedLegacyRefusal(script: { sqlLog: string[]; readWrite: () => unknown }, response: { statusCode: number; body: unknown }) {
+  expect(response.statusCode).toBe(403)
+  expect((response.body as { code?: string }).code).toBe('FORBIDDEN')
+  expect(script.readWrite()).toBeUndefined()
+  expect(script.sqlLog.some((sql) => sql.includes('SET permissions'))).toBe(false)
+  expect(script.sqlLog.some((sql) => sql.includes('directory_deprovision'))).toBe(false)
+  expect(script.sqlLog.some((sql) => sql.includes('SET access_generation'))).toBe(false)
+  expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
 }
 
 describe('legacy permission revoke', () => {
@@ -364,6 +400,100 @@ describe('legacy permission revoke', () => {
     expect((response.body as { code?: string }).code).toBe('FORBIDDEN')
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('refuses a raw users.role admin with no live user_roles admin membership', async () => {
+    const script = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'admin',
+      actorRoles: [],
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expectClosedLegacyRefusal(script, response)
+    expect(script.sqlLog.some((sql) => sql.includes('ORDER BY role_id ASC'))).toBe(true)
+  })
+
+  it('refuses an is_admin row and a token admin claim without calling isAdmin', async () => {
+    state.authUser = { id: 'admin-1', role: 'admin', isAdmin: true }
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const script = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'user',
+      actorRoles: [],
+      actorIsAdmin: true,
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expectClosedLegacyRefusal(script, response)
+  })
+
+  it('refuses a pending or inactive actor who still holds user_roles admin', async () => {
+    const pending = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'admin',
+      actorRoles: ['admin'],
+      actorActivationStatus: 'pending_activation',
+    })
+    const pendingResponse = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+    expectClosedLegacyRefusal(pending, pendingResponse)
+
+    const inactive = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'admin',
+      actorRoles: ['admin'],
+      actorActive: false,
+    })
+    const inactiveResponse = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+    expectClosedLegacyRefusal(inactive, inactiveResponse)
+  })
+
+  it('allows a live user_roles admin whose users.role is user', async () => {
+    const script = installScript({
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'user',
+      actorRoles: ['admin'],
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toEqual({
+      success: true,
+      userId: 'user-1',
+      permission: 'attendance:read',
+      changed: true,
+    })
+    expect(script.readWrite()?.[1]).toBe(JSON.stringify([]))
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+  })
+
+  it('refuses when a waiting lock drops only user_roles admin and users.role stays admin', async () => {
+    const actor = {
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+      actorRole: 'admin',
+      actorRoles: ['admin'],
+      holdActorAdmission: true,
+    }
+    const script = installScript(actor)
+
+    const pending = invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+    await script.admissionStarted
+    actor.actorRoles = []
+    script.releaseAdmission()
+    const response = await pending
+
+    expect(actor.actorRole).toBe('admin')
+    expect(actor.actorRoles).toEqual([])
+    expectClosedLegacyRefusal(script, response)
   })
 
   it('[recovery-census:permissions:legacy-revoke] rolls the response back when the permission write hits a recovery lease', async () => {

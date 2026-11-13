@@ -199,6 +199,117 @@ describe('legacy revoke waits for the live actor', () => {
     expect(state.auditLog).not.toHaveBeenCalled()
   })
 
+  it('refuses when the waiting lock deletes only user_roles admin and users.role stays admin', async () => {
+    let release = (): void => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let markStarted = (): void => undefined
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const actor = { role: 'admin', roles: ['admin'] }
+    const sqlLog: string[] = []
+    let permissionWrite: unknown
+    state.transaction.mockImplementation(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          const text = String(sql)
+          sqlLog.push(text)
+          if (text.includes('DELETE FROM user_permissions') || (text.includes('role_permissions') && text.includes('DELETE'))) {
+            throw new Error('legacy revoke touched a direct or role grant')
+          }
+          if (text.includes('pg_advisory_xact_lock') && String(params?.[0]) === 'namespace-admission:admin-1') {
+            markStarted()
+            await gate
+            return { rows: [] }
+          }
+          if (text.includes('ORDER BY role_id ASC')) {
+            return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          }
+          if (text.includes('FROM user_roles')) return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [{ id: params?.[0] }] }
+          if (text.includes('FOR UPDATE')) {
+            const id = String(params?.[0] ?? '')
+            return {
+              rows: [{
+                id,
+                role: id === 'admin-1' ? actor.role : 'user',
+                activation_status: 'activated',
+                is_active: true,
+                access_generation: 3,
+                deleted_at: null,
+                purged_at: null,
+              }],
+            }
+          }
+          if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
+          if (text.includes('SET permissions') || text.includes('SET access_generation') || text.includes('directory_deprovision')) {
+            permissionWrite = params
+            throw new Error('legacy revoke wrote after a role-only demotion')
+          }
+          throw new Error(`unexpected sql ${text.slice(0, 120)}`)
+        },
+      }
+      return handler(client)
+    })
+
+    const pending = invokeLegacyRevoke({ userId: 'user-9', permission: 'workflow:read' })
+    await started
+    actor.roles = []
+    release()
+    const response = await pending
+
+    expect(actor.role).toBe('admin')
+    expect(response.statusCode).toBe(403)
+    expect((response.body as { code?: string }).code).toBe('FORBIDDEN')
+    expect(permissionWrite).toBeUndefined()
+    expect(sqlLog.some((sql) => sql.includes('SET permissions'))).toBe(false)
+    expect(sqlLog.some((sql) => sql.includes('directory_deprovision'))).toBe(false)
+    expect(sqlLog.some((sql) => sql.includes('SET access_generation'))).toBe(false)
+    expect(state.auditLog).not.toHaveBeenCalled()
+    expect(getPermCacheStatus().cacheSize).toBe(0)
+  })
+
+  it('allows a live user_roles admin whose users.role is user', async () => {
+    state.transaction.mockImplementation(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          const text = String(sql)
+          if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+          if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
+          if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
+          if (text.includes('FOR UPDATE')) {
+            const id = String(params?.[0] ?? '')
+            return {
+              rows: [{
+                id,
+                role: 'user',
+                activation_status: 'activated',
+                is_active: true,
+                access_generation: 4,
+                deleted_at: null,
+                purged_at: null,
+              }],
+            }
+          }
+          if (text.includes('SET permissions')) return { rows: [{ id: params?.[0] }], rowCount: 1 }
+          if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
+          if (text.includes('directory_deprovision')) return { rows: [] }
+          if (text.includes('SET access_generation')) return { rows: [{ access_generation: 5 }] }
+          throw new Error(`unexpected sql ${text.slice(0, 120)}`)
+        },
+      }
+      return handler(client)
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-9', permission: 'workflow:read' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toEqual({
+      success: true,
+      userId: 'user-9',
+      permission: 'workflow:read',
+      changed: true,
+    })
+  })
+
   it('rolls back the legacy column and deprovision evidence when the generation write fails', async () => {
     const database = {
       permissions: ['  workflow:read ', 'workflow:read', 'keep'],

@@ -51,7 +51,9 @@ function acknowledgedLegacyWrite(result: PermissionWriteResult, userId: string):
  *
  * This writer does not touch roles, so it does not pre-read or FOR SHARE
  * lock them. It locks the actor and target through lockSharedAccessSubjects,
- * then checks the live locked actor. The target may be inactive or pending.
+ * then requires the locked actor to be active, activated, not recycled, and
+ * to hold a live user_roles admin membership. users.role, is_admin, and a
+ * token claim are not authority. The target may be inactive or pending.
  * A missing or recycled target is refused.
  *
  * `to_jsonb(permissions)` is already decoded by the driver. A scalar is left
@@ -76,7 +78,9 @@ export async function revokeLegacyUserPermission(
   const target = subjects.get(userId)
   if (!target) throw new AccessGraphUserUnavailableError('NOT_FOUND')
   if (target.deletedAt || target.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')
-  await assertPlatformActorAuthority(client, subjects.get(actorId))
+  await assertPlatformActorAuthority(client, subjects.get(actorId), {
+    requireLiveRbacAdmin: true,
+  })
 
   const inspected = await client.query(
     `SELECT pg_typeof(permissions)::text AS permissions_type,

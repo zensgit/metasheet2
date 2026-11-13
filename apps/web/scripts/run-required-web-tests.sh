@@ -1746,6 +1746,7 @@ exec npx vitest run \
   IntegrationWorkbenchView \
   lineDerivation \
   LoginView.spec.ts \
+  managementRouteGuardFailClosed.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \

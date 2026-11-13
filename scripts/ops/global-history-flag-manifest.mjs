@@ -1027,6 +1027,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "Default OFF; exact literal 'true' only, byte-identical (no trim, no case folding; unset, '', false, TRUE, ' true', 'true ', 1 and yes stay OFF). While OFF the router factory returns null, so POST /api/auth/security-actions/verify is not mounted, and every action-proof service entry point refuses before any SQL statement. Turn it on only after `migrate.js --confirm zzzz20261106120000_create_security_action_challenges` exits 0. While ON, the route issues a 300-second single-use proof only for a purpose whose own prerequisites are delivered; in this revision no purpose is, so every verify request is refused before any data is read and the table receives no row. Not a grant: it enables no binding, login grant or session change. Deploying and enabling are separate owner decisions.",
     source: 'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
   },
+  {
+    key: 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF. Only the byte-exact env string 'true' enables persisting an exact department scope (includeChildren false); no trim and no case folding. Unset, '', false, 0, TRUE, True, ' true', 'true ', ' true ', 1, yes and on stay OFF. Gates three write sinks before any scope or template mutation: template department assign, direct delegated-admin scope assign, and template apply in both merge and replace. A refusal is HTTP 403 DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED with no audit and no permission invalidation, and replace does not delete first. Readers are not gated. Rollback: turning the flag off does not rewrite a stored false and does not change reader semantics; explicit true and unassign remain available; an omitted includeChildren on an existing false is preserved; a new omitted assign still defaults to true. Enabling a deployed process is a separate owner decision.",
+    source: 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

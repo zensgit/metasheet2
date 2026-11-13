@@ -323,14 +323,21 @@
                   </option>
                 </select>
                 <label class="delegation-page__check">
-                  <input v-model="includeChildren" data-testid="scope-include-children" type="checkbox" />
+                  <input
+                    data-testid="scope-include-children"
+                    type="checkbox"
+                    :checked="includeChildren"
+                    :disabled="exactDepartmentChoiceLocked(includeChildren)"
+                    @change="onIncludeChildrenChange($event, 'scope')"
+                  />
                   包含下级部门
                 </label>
                 <span data-testid="scope-include-children-value">{{ departmentScopeChoiceLabel(includeChildren) }}</span>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedDepartmentId" @click="void updateScope('assign')">
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedDepartmentId || directExactAssignBlocked" @click="void updateScope('assign')">
                   添加部门范围
                 </button>
               </div>
+              <p v-if="!exactDepartmentWritesEnabled" class="delegation-page__hint" data-testid="exact-department-unavailable">{{ exactDepartmentUnavailableText }}</p>
               <div class="delegation-page__role-actions">
                 <select v-model="selectedAudienceGroupId" class="delegation-page__input">
                   <option value="">请选择平台成员集</option>
@@ -422,12 +429,13 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length"
+                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length || exactDepartmentApplyBlocked"
                 @click="void applyTemplate()"
               >
                 覆盖应用到当前命名空间
               </button>
             </div>
+            <p v-if="exactDepartmentApplyBlocked" class="delegation-page__hint" data-testid="exact-department-apply-unavailable">{{ exactDepartmentApplyUnavailableText }}</p>
 
             <template v-if="selectedTemplate">
               <div class="delegation-page__role-actions">
@@ -438,14 +446,21 @@
                   </option>
                 </select>
                 <label class="delegation-page__check">
-                  <input v-model="templateIncludeChildren" data-testid="template-include-children" type="checkbox" />
+                  <input
+                    data-testid="template-include-children"
+                    type="checkbox"
+                    :checked="templateIncludeChildren"
+                    :disabled="exactDepartmentChoiceLocked(templateIncludeChildren)"
+                    @change="onIncludeChildrenChange($event, 'template')"
+                  />
                   包含下级部门
                 </label>
                 <span data-testid="template-include-children-value">{{ departmentScopeChoiceLabel(templateIncludeChildren) }}</span>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedTemplateDepartmentId" @click="void updateTemplateDepartment('assign')">
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedTemplateDepartmentId || templateExactAssignBlocked" @click="void updateTemplateDepartment('assign')">
                   添加模板部门
                 </button>
               </div>
+              <p v-if="!exactDepartmentWritesEnabled" class="delegation-page__hint" data-testid="exact-department-unavailable">{{ exactDepartmentUnavailableText }}</p>
               <div class="delegation-page__role-actions">
                 <select v-model="selectedTemplateMemberGroupId" class="delegation-page__input">
                   <option value="">选择成员集加入模板</option>
@@ -619,6 +634,7 @@ type DelegationSummary = {
   actorId: string
   isPlatformAdmin: boolean
   delegableNamespaces: string[]
+  exactDepartmentScopeAvailable?: unknown
   roleCatalog: RoleCatalogItem[]
   scopeAssignments: ScopeAssignment[]
   groupAssignments: GroupAssignment[]
@@ -689,6 +705,7 @@ const users = ref<UserCandidate[]>([])
 const usersForbidden = ref(false)
 const includeChildren = ref(true)
 const templateIncludeChildren = ref(true)
+const exactDepartmentBlocked = ref(false)
 const pendingConfirmation = ref<DelegationConfirmation | null>(null)
 const departments = ref<DepartmentCatalogItem[]>([])
 const templates = ref<ScopeTemplateSummary[]>([])
@@ -726,6 +743,23 @@ const selectedUserDisabled = computed(() => {
   return row?.selectable === false
 })
 
+const EXACT_DEPARTMENT_DISABLED_CODE = 'DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'
+const exactDepartmentUnavailableText = '当前不能新建仅本部门的范围。新的部门范围需要包含下级部门。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以移除。'
+const exactDepartmentApplyUnavailableText = '这个模板含有仅本部门的范围，当前不能覆盖应用。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以从模板中移除。'
+
+const exactDepartmentWritesEnabled = computed(() => (
+  summary.value?.exactDepartmentScopeAvailable === true && exactDepartmentBlocked.value === false
+))
+const directExactAssignBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && includeChildren.value !== true
+))
+const templateExactAssignBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && templateIncludeChildren.value !== true
+))
+const exactDepartmentApplyBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)
+))
+
 watch(selectedUserId, (userId) => {
   const pending = pendingConfirmation.value
   if (pending && pending.targetUserId !== userId) pendingConfirmation.value = null
@@ -753,6 +787,7 @@ function readLocationUserId(): string {
 
 let delegationAccessGeneration = 0
 let usersRequestGeneration = 0
+let summaryRequestGeneration = 0
 const initialPinnedUserId = readLocationUserId()
 let pinnedUserPending = initialPinnedUserId.length > 0
 
@@ -760,6 +795,40 @@ function departmentScopeChoiceLabel(value: unknown): string {
   if (value === true) return '包含下级部门'
   if (value === false) return '仅本部门'
   return '未返回是否包含下级'
+}
+
+function templateContainsExactDepartment(template: ScopeTemplateDetail | null): boolean {
+  if (!template || !Array.isArray(template.departments)) return false
+  return template.departments.some((department) => department.includeChildren === false)
+}
+
+function exactDepartmentChoiceLocked(checked: boolean): boolean {
+  return !exactDepartmentWritesEnabled.value && checked === true
+}
+
+function noteExactDepartmentDisabledByServer(): void {
+  exactDepartmentBlocked.value = true
+  summaryRequestGeneration += 1
+}
+
+function isExactDepartmentDisabledResponse(response: { status?: number }, payload: Record<string, unknown>): boolean {
+  if (response.status !== 403) return false
+  const error = payload.error
+  if (!error || typeof error !== 'object') return false
+  return (error as { code?: unknown }).code === EXACT_DEPARTMENT_DISABLED_CODE
+}
+
+function onIncludeChildrenChange(event: Event, target: 'scope' | 'template'): void {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) return
+  const current = target === 'scope' ? includeChildren.value : templateIncludeChildren.value
+  if (!input.checked && !exactDepartmentWritesEnabled.value) {
+    input.checked = current
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
+  if (target === 'scope') includeChildren.value = input.checked
+  else templateIncludeChildren.value = input.checked
 }
 
 function candidatePrimaryLabel(user: UserCandidate): string {
@@ -943,12 +1012,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 async function loadSummary(): Promise<void> {
+  const requestGeneration = ++summaryRequestGeneration
   const response = await apiFetch('/api/admin/role-delegation/summary')
   const payload = await readJson(response)
+  if (requestGeneration !== summaryRequestGeneration) return
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载角色委派摘要失败'))
   }
   summary.value = payload.data as DelegationSummary
+  exactDepartmentBlocked.value = false
 }
 
 async function loadDepartments(): Promise<void> {
@@ -1122,6 +1194,10 @@ async function updateTemplateDepartment(action: 'assign' | 'unassign', directory
   if (!summary.value?.isPlatformAdmin || !selectedTemplateId.value) return
   const departmentId = directoryDepartmentId || selectedTemplateDepartmentId.value
   if (!departmentId) return
+  if (action === 'assign' && templateIncludeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
   scopeBusy.value = true
   try {
     const requestedIncludeChildren = templateIncludeChildren.value === true
@@ -1134,6 +1210,10 @@ async function updateTemplateDepartment(action: 'assign' | 'unassign', directory
       body: JSON.stringify(templateDepartmentBody),
     })
     const payload = await readJson(response)
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      throw new Error(exactDepartmentUnavailableText)
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新模板部门失败'))
     }
@@ -1607,6 +1687,10 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
   const namespace = action === 'assign' ? selectedScopeNamespace.value : scope?.namespace || ''
   const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
   if (!namespace || !directoryDepartmentId) return
+  if (action === 'assign' && includeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
 
   scopeBusy.value = true
   try {
@@ -1621,6 +1705,11 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
       body: JSON.stringify(scopeBody),
     })
     const payload = await readJson(response)
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      if (!delegationReadStillCurrent(generation, targetUserId)) return
+      throw new Error(exactDepartmentUnavailableText)
+    }
     if (!delegationReadStillCurrent(generation, targetUserId)) return
     if (response.status === 403 || !response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
@@ -1738,6 +1827,10 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 async function applyTemplate(): Promise<void> {
   const targetUserId = selectedUserId.value
   if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
+  if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
+    setStatus(exactDepartmentApplyUnavailableText, 'error')
+    return
+  }
   scopeBusy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-templates/apply`, {
@@ -1749,6 +1842,10 @@ async function applyTemplate(): Promise<void> {
       }),
     })
     const payload = await readJson(response)
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      throw new Error(exactDepartmentApplyUnavailableText)
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }

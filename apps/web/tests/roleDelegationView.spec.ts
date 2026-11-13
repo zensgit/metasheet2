@@ -1131,7 +1131,7 @@ describe('RoleDelegationView', () => {
       callLog.push(rawUrl)
       const { pathname } = new URL(rawUrl, 'http://localhost')
       if (pathname === '/api/admin/role-delegation/summary') {
-        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], exactDepartmentScopeAvailable: true, roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
       }
       if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [department] } })
       if (pathname === '/api/admin/role-delegation/member-groups') return createJsonResponse({ ok: true, data: { items: [] } })
@@ -1739,7 +1739,7 @@ describe('RoleDelegationView', () => {
       callLog.push(rawUrl)
       const { pathname } = new URL(rawUrl, 'http://localhost')
       if (pathname === '/api/admin/role-delegation/summary') {
-        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], exactDepartmentScopeAvailable: true, roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
       }
       if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [department] } })
       if (pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
@@ -1953,7 +1953,7 @@ describe('RoleDelegationView', () => {
       callLog.push(rawUrl)
       const { pathname } = new URL(rawUrl, 'http://localhost')
       if (pathname === '/api/admin/role-delegation/summary') {
-        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], exactDepartmentScopeAvailable: true, roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
       }
       if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [department] } })
       if (pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
@@ -2542,5 +2542,510 @@ describe('RoleDelegationView', () => {
     expect(callLog.some((entry) => entry.includes('/users/user-2/access'))).toBe(false)
     expect(statusText()).not.toContain('该成员已不在可管理范围内')
     expect(window.location.pathname + window.location.search + window.location.hash).toBe(location)
+  })
+
+  function catalogDepartment(overrides: Record<string, unknown> = {}) {
+    return {
+      directoryDepartmentId: 'dept-1',
+      integrationId: 'ding',
+      integrationName: '目录',
+      provider: 'dingtalk',
+      corpId: null,
+      externalDepartmentId: 'ext-1',
+      departmentName: '可选部门',
+      departmentFullPath: '可选部门',
+      departmentActive: true,
+      ...overrides,
+    }
+  }
+
+  function selectControl(text: string): HTMLSelectElement {
+    const select = Array.from(container!.querySelectorAll('select')).find((candidate) => candidate.textContent?.includes(text))
+    if (!(select instanceof HTMLSelectElement)) throw new Error(`Select not found: ${text}`)
+    return select
+  }
+
+  async function mountCapabilitySummary(availability: unknown, includeAvailability: boolean): Promise<void> {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        const data: Record<string, unknown> = {
+          actorId: 'admin-1',
+          isPlatformAdmin: true,
+          delegableNamespaces: [],
+          roleCatalog: [],
+          scopeAssignments: [],
+          groupAssignments: [],
+        }
+        if (includeAvailability) data.exactDepartmentScopeAvailable = availability
+        return createJsonResponse({ ok: true, data })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') {
+        return createJsonResponse({ ok: true, data: { items: [catalogDepartment()] } })
+      }
+      if (pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    if (app) app.unmount()
+    container?.replaceChildren()
+    mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
+  }
+
+  it('treats missing, false, and non-true exact-department availability as disabled', async () => {
+    const cases: Array<{ label: string, include: boolean, value?: unknown }> = [
+      { label: 'missing', include: false },
+      { label: 'false', include: true, value: false },
+      { label: 'string true', include: true, value: 'true' },
+      { label: 'number 1', include: true, value: 1 },
+    ]
+    for (const entry of cases) {
+      await mountCapabilitySummary(entry.value, entry.include)
+      const box = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
+      const templateHint = container!.querySelector('[data-testid="template-include-children"]')
+      expect(box.checked, entry.label).toBe(true)
+      expect(box.disabled, entry.label).toBe(true)
+      expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent, entry.label).toContain('包含下级部门')
+      expect(container?.textContent, entry.label).toContain('当前不能新建仅本部门的范围')
+      expect(container?.textContent, entry.label).not.toContain('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED')
+      expect(container?.textContent, entry.label).not.toContain('exactDepartmentScopeAvailable')
+      expect(templateHint, entry.label).toBeNull()
+      box.checked = false
+      box.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(box.checked, entry.label).toBe(true)
+      expect(callLog.some((url) => url.includes('/scopes/assign')), entry.label).toBe(false)
+    }
+  })
+
+  it('enables exact-department controls only when the summary boolean is true', async () => {
+    await mountCapabilitySummary(true, true)
+    const box = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(box.disabled).toBe(false)
+    expect(container?.querySelector('[data-testid="exact-department-unavailable"]')).toBeNull()
+    expect(container?.textContent).not.toContain('当前不能新建仅本部门的范围')
+    expect(container?.textContent).not.toContain('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED')
+  })
+
+  it('keeps a stored exact department visible for a business admin when availability is absent', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'delegate-1',
+            isPlatformAdmin: false,
+            delegableNamespaces: ['crm'],
+            roleCatalog: [],
+            scopeAssignments: [
+              catalogDepartment({ id: 'scope-false', namespace: 'crm', departmentName: '财务部', departmentFullPath: '财务部', includeChildren: false }),
+              catalogDepartment({ id: 'scope-true', namespace: 'crm', directoryDepartmentId: 'dept-true', departmentName: '研发部', departmentFullPath: '研发部', includeChildren: true }),
+              catalogDepartment({ id: 'scope-omit', namespace: 'crm', directoryDepartmentId: 'dept-omit', departmentName: '销售部', departmentFullPath: '销售部' }),
+            ],
+            groupAssignments: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountDelegation()
+    await waitForCondition(() => choiceLabels().includes('仅本部门'))
+    expect(choiceLabels()).toEqual(expect.arrayContaining(['仅本部门', '包含下级部门', '未返回是否包含下级']))
+    expect(container?.querySelector('[data-testid="scope-include-children"]')).toBeNull()
+    expect(container?.textContent).toContain('财务部')
+    expect(container?.textContent).not.toContain('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED')
+  })
+
+  it('does not request a false direct scope, template department, or false template apply while availability is off', async () => {
+    const posts: Array<{ path: string, body: Record<string, unknown> }> = []
+    const falseScope = catalogDepartment({
+      id: 'scope-false', namespace: 'crm', directoryDepartmentId: 'dept-false', departmentName: '财务部', departmentFullPath: '财务部', includeChildren: false,
+    })
+    const omittedScope = catalogDepartment({
+      id: 'scope-omit', namespace: 'crm', directoryDepartmentId: 'dept-omit', departmentName: '销售部', departmentFullPath: '销售部',
+    })
+    const falseTemplateDepartment = catalogDepartment({
+      directoryDepartmentId: 'tmpl-false', departmentName: '模板本级', departmentFullPath: '模板本级', includeChildren: false,
+    })
+    let directSaved = false
+    let falseScopeRemoved = false
+    let templateDepartments = [falseTemplateDepartment]
+    const scopeData = () => ({
+      ok: true,
+      data: {
+        actorId: 'admin-1',
+        user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+        adminNamespaces: ['crm'],
+        scopeAssignments: [
+          ...(falseScopeRemoved ? [] : [falseScope]),
+          omittedScope,
+          ...(directSaved ? [catalogDepartment({ id: 'scope-new', namespace: 'crm', includeChildren: true })] : []),
+        ],
+        groupAssignments: [],
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string, body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], exactDepartmentScopeAvailable: false,
+            roleCatalog: [], scopeAssignments: [], groupAssignments: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [catalogDepartment()] } })
+      if (pathname === '/api/admin/role-delegation/member-groups') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'template-1', name: '华东销售', description: '', createdBy: null, updatedBy: null, createdAt: '', updatedAt: '', departmentCount: templateDepartments.length, memberGroupCount: 0 }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/scope-templates/template-1') {
+        return createJsonResponse({
+          ok: true,
+          data: { item: { id: 'template-1', name: '华东销售', description: '', departmentCount: templateDepartments.length, memberGroupCount: 0, departments: templateDepartments, memberGroups: [] } },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') return createJsonResponse(scopeData())
+      if (pathname.endsWith('/scopes/assign') || pathname.endsWith('/departments/assign') || pathname.endsWith('/scope-templates/apply')) {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        if (body.includeChildren === false || pathname.endsWith('/scope-templates/apply')) {
+          posts.push({ path: pathname, body })
+          throw new Error(`unexpected false-scope write ${pathname}`)
+        }
+        posts.push({ path: pathname, body })
+        if (pathname.endsWith('/scopes/assign')) {
+          directSaved = true
+          return createJsonResponse(scopeData())
+        }
+        templateDepartments = [
+          falseTemplateDepartment,
+          catalogDepartment({ directoryDepartmentId: 'dept-1', departmentName: '可选部门', departmentFullPath: '可选部门', includeChildren: true }),
+        ]
+        return createJsonResponse({
+          ok: true,
+          data: { item: { id: 'template-1', name: '华东销售', description: '', departmentCount: 2, memberGroupCount: 0, departments: templateDepartments, memberGroups: [] } },
+        })
+      }
+      if (pathname.endsWith('/scopes/unassign') || pathname.endsWith('/departments/unassign')) {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        posts.push({ path: pathname, body })
+        if (pathname.endsWith('/scopes/unassign')) {
+          falseScopeRemoved = true
+          return createJsonResponse(scopeData())
+        }
+        templateDepartments = templateDepartments.filter((department) => department.directoryDepartmentId !== body.directoryDepartmentId)
+        return createJsonResponse({
+          ok: true,
+          data: { item: { id: 'template-1', name: '华东销售', description: '', departmentCount: templateDepartments.length, memberGroupCount: 0, departments: templateDepartments, memberGroups: [] } },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountDelegation()
+    await waitForCondition(() => choiceLabels().includes('仅本部门') && choiceLabels().includes('未返回是否包含下级'))
+    const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
+    expect(scopeBox.checked).toBe(true)
+    expect(scopeBox.disabled).toBe(true)
+    expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent).toContain('包含下级部门')
+    expect(container?.textContent).toContain('当前不能新建仅本部门的范围')
+    expect(container?.textContent).not.toContain('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED')
+    scopeBox.checked = false
+    scopeBox.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(scopeBox.checked).toBe(true)
+    selectControl('crm').value = 'crm'
+    selectControl('crm').dispatchEvent(new Event('change'))
+    const departmentSelect = selectControl('可选部门')
+    departmentSelect.value = 'dept-1'
+    departmentSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '添加部门范围').click()
+    await waitForCondition(() => posts.some((post) => post.path.endsWith('/scopes/assign')) && statusText().includes('插件管理员部门范围已添加'))
+    expect(posts.find((post) => post.path.endsWith('/scopes/assign'))?.body).toEqual({
+      namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true,
+    })
+    expect(choiceLabels().some((label) => label.includes('仅本部门'))).toBe(true)
+
+    selectControl('华东销售').value = 'template-1'
+    selectControl('华东销售').dispatchEvent(new Event('change'))
+    await waitForCondition(() => (container?.textContent || '').includes('模板本级') && Boolean(container?.querySelector('[data-testid="template-include-children"]')))
+    const templateBox = container!.querySelector('[data-testid="template-include-children"]') as HTMLInputElement
+    expect(templateBox.checked).toBe(true)
+    expect(templateBox.disabled).toBe(true)
+    expect(container?.querySelector('[data-testid="template-include-children-value"]')?.textContent).toContain('包含下级部门')
+    const templateChoices = Array.from(container!.querySelectorAll('.delegation-page__scope-card')).filter((card) => card.textContent?.includes('模板本级'))
+    expect(templateChoices.some((card) => card.querySelector('[data-testid="department-scope-choice"]')?.textContent?.includes('仅本部门'))).toBe(true)
+    templateBox.checked = false
+    templateBox.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(templateBox.checked).toBe(true)
+    const applyButton = findButtonByText(container!, '覆盖应用到当前命名空间')
+    expect(applyButton.disabled).toBe(true)
+    expect(container?.querySelector('[data-testid="exact-department-apply-unavailable"]')?.textContent).toContain('这个模板含有仅本部门的范围')
+    applyButton.click()
+    await flushUi(4)
+    expect(posts.some((post) => post.path.includes('/scope-templates/apply'))).toBe(false)
+    expect(callLog.some((url) => url.includes('/scope-templates/apply'))).toBe(false)
+
+    selectControl('选择部门加入模板').value = 'dept-1'
+    selectControl('选择部门加入模板').dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '添加模板部门').click()
+    await waitForCondition(() => posts.some((post) => post.path.endsWith('/departments/assign')))
+    expect(posts.find((post) => post.path.endsWith('/departments/assign'))?.body).toEqual({
+      directoryDepartmentId: 'dept-1', includeChildren: true,
+    })
+    expect(posts.some((post) => post.body.includeChildren === false)).toBe(false)
+    await waitForCondition(() => statusText().includes('模板部门已添加') && !findButtonByText(container!, '移除部门范围').disabled)
+
+    findButtonByText(container!, '移除部门范围').click()
+    await waitForCondition(() => posts.some((post) => post.path.endsWith('/scopes/unassign')))
+    expect(posts.find((post) => post.path.endsWith('/scopes/unassign'))?.body).toEqual({
+      namespace: 'crm', directoryDepartmentId: 'dept-false',
+    })
+    expect(posts.find((post) => post.path.endsWith('/scopes/unassign'))?.body).not.toHaveProperty('includeChildren')
+    await waitForCondition(() => statusText().includes('插件管理员部门范围已移除') && !findButtonByText(container!, '移除模板部门').disabled)
+
+    findButtonByText(container!, '移除模板部门').click()
+    await waitForCondition(() => posts.some((post) => post.path.endsWith('/departments/unassign')))
+    expect(posts.find((post) => post.path.endsWith('/departments/unassign'))?.body).toEqual({ directoryDepartmentId: 'tmpl-false' })
+    expect(posts.find((post) => post.path.endsWith('/departments/unassign'))?.body).not.toHaveProperty('includeChildren')
+    await waitForCondition(() => statusText().includes('模板部门已移除'))
+  })
+
+  it('still applies a template that has no exact department while availability is off', async () => {
+    const posts: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string, body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/member-groups') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'template-true', name: '含下级模板', description: '', createdBy: null, updatedBy: null, createdAt: '', updatedAt: '', departmentCount: 1, memberGroupCount: 0 }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/scope-templates/template-true') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            item: {
+              id: 'template-true', name: '含下级模板', description: '', departmentCount: 1, memberGroupCount: 0,
+              departments: [catalogDepartment({ includeChildren: true, departmentName: '模板下级', departmentFullPath: '模板下级' })],
+              memberGroups: [],
+            },
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', user: { id: 'user-1' }, adminNamespaces: ['crm'], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname.endsWith('/scope-templates/apply')) {
+        posts.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [catalogDepartment({ id: 'scope-applied', namespace: 'crm', includeChildren: true })],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
+    selectControl('crm').value = 'crm'
+    selectControl('crm').dispatchEvent(new Event('change'))
+    selectControl('含下级模板').value = 'template-true'
+    selectControl('含下级模板').dispatchEvent(new Event('change'))
+    await waitForCondition(() => (container?.textContent || '').includes('模板下级'))
+    const applyButton = findButtonByText(container!, '覆盖应用到当前命名空间')
+    expect(applyButton.disabled).toBe(false)
+    applyButton.click()
+    await waitForCondition(() => posts.length === 1)
+    expect(posts[0]).toEqual({ namespace: 'crm', templateId: 'template-true', mode: 'replace' })
+    expect(posts[0]).not.toHaveProperty('includeChildren')
+    await waitForCondition(() => statusText().includes('范围模板已覆盖应用到该插件管理员命名空间'))
+  })
+
+  it('explains a stale exact-department 403 and still allows an explicit include-descendants write', async () => {
+    const posts: Array<Record<string, unknown>> = []
+    const falseScope = catalogDepartment({
+      id: 'scope-false', namespace: 'crm', directoryDepartmentId: 'dept-false', departmentName: '财务部', departmentFullPath: '财务部', includeChildren: false,
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string, body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], exactDepartmentScopeAvailable: true, roleCatalog: [], scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [catalogDepartment()] } })
+      if (pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [falseScope],
+            groupAssignments: [],
+          },
+        })
+      }
+      if (pathname.endsWith('/scopes/assign')) {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        posts.push(body)
+        if (body.includeChildren === false) {
+          return createJsonResponse({
+            ok: false,
+            error: { code: 'DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED', message: 'Exact department scope is disabled' },
+          }, 403)
+        }
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: [falseScope, catalogDepartment({ id: 'scope-new', namespace: 'crm', includeChildren: true })],
+            groupAssignments: [],
+          },
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountDelegation()
+    await waitForCondition(() => choiceLabels().includes('仅本部门') && Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
+    selectControl('crm').value = 'crm'
+    selectControl('crm').dispatchEvent(new Event('change'))
+    selectControl('可选部门').value = 'dept-1'
+    selectControl('可选部门').dispatchEvent(new Event('change'))
+    await flushUi()
+    const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
+    expect(scopeBox.disabled).toBe(false)
+    scopeBox.checked = false
+    scopeBox.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent).toContain('仅本部门')
+    findButtonByText(container!, '添加部门范围').click()
+    await waitForCondition(() => statusText().includes('当前不能新建仅本部门的范围'))
+    expect(posts).toEqual([{ namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: false }])
+    expect(statusText()).not.toContain('插件管理员部门范围已添加')
+    expect(statusText()).not.toContain('Exact department scope is disabled')
+    expect(container?.textContent).not.toContain('DELEGATED_SCOPE_EXACT_DEPARTMENT')
+    expect(choiceLabels()).toContain('仅本部门')
+    expect(scopeBox.disabled).toBe(false)
+    findButtonByText(container!, '添加部门范围').click()
+    await flushUi(4)
+    expect(posts).toHaveLength(1)
+
+    scopeBox.checked = true
+    scopeBox.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(scopeBox.checked).toBe(true)
+    expect(scopeBox.disabled).toBe(true)
+    scopeBox.checked = false
+    scopeBox.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(scopeBox.checked).toBe(true)
+    expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent).toContain('包含下级部门')
+    findButtonByText(container!, '添加部门范围').click()
+    await waitForCondition(() => posts.length === 2)
+    expect(posts[1]).toEqual({ namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true })
+    await waitForCondition(() => statusText().includes('插件管理员部门范围已添加'))
+    expect(choiceLabels()).toContain('仅本部门')
   })
 })

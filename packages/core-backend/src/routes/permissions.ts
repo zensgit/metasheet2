@@ -285,9 +285,11 @@ export function permissionsRouter(): Router {
   })
 
   // Clears matching users.permissions entries only. Direct grants, roles, is_admin,
-  // and admissions stay. Authority is the locked database actor, not a token claim
-  // and not isAdmin(). Inactive and pending targets remain writable. Missing and
-  // recycled targets are refused. A no-match read does not audit or invalidate.
+  // and admissions stay. Authority is the locked actor's live user_roles admin
+  // membership, not users.role, a token claim, or isAdmin(). The actor must be
+  // active, activated, and not recycled. Inactive and pending targets remain
+  // writable. Missing and recycled targets are refused. A no-match read does
+  // not audit or invalidate.
   r.post('/api/permissions/legacy/revoke', authenticate, async (req: Request, res: Response) => {
     try {
       const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '').trim()

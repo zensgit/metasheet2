@@ -37,6 +37,15 @@ const rollbackId = randomUUID()
 const demoteActorId = randomUUID()
 const demoteTargetId = randomUUID()
 const inspectId = randomUUID()
+const rawRoleId = randomUUID()
+const tokenOnlyId = randomUUID()
+const pendingActorId = randomUUID()
+const inactiveActorId = randomUUID()
+const rbacOnlyId = randomUUID()
+const rbacTargetId = randomUUID()
+const barrierActorId = randomUUID()
+const barrierTargetId = randomUUID()
+const sentinelTargetId = randomUUID()
 const ownedUserIds = [
   adminId,
   flagId,
@@ -48,6 +57,15 @@ const ownedUserIds = [
   demoteActorId,
   demoteTargetId,
   inspectId,
+  rawRoleId,
+  tokenOnlyId,
+  pendingActorId,
+  inactiveActorId,
+  rbacOnlyId,
+  rbacTargetId,
+  barrierActorId,
+  barrierTargetId,
+  sentinelTargetId,
 ]
 const ownedRoleIds = [namedRoleId, orphanRoleId]
 const namespace = `pux${runHex}`
@@ -67,12 +85,12 @@ function assertUuid(value: string): void {
   }
 }
 
-function mintToken(id: string): string {
+function mintToken(id: string, role = 'user'): string {
   return authService.createToken({
     id,
     email: `${id}@example.test`,
     name: 'synthetic',
-    role: 'user',
+    role,
     tenantId: `pux-${runHex}`,
     permissions: [],
     created_at: new Date(),
@@ -88,17 +106,47 @@ async function postLegacy(token: string, userId: string, permission: unknown) {
   return { status: response.status, body: response.body as Record<string, unknown> }
 }
 
-async function insertUser(id: string, options: { role?: string; isAdmin?: boolean; active?: boolean; adminRole?: boolean }): Promise<void> {
+async function insertUser(id: string, options: {
+  role?: string
+  isAdmin?: boolean
+  active?: boolean
+  adminRole?: boolean
+  activationStatus?: string
+}): Promise<void> {
   await query(
     `INSERT INTO users (
        id, username, email, name, password_hash, role, is_admin, is_active,
        activation_status, must_change_password, local_password_set
-     ) VALUES ($1, $1, $2, 'synthetic', 'synthetic', $3, $4, $5, 'activated', false, true)`,
-    [id, `${id}@example.test`, options.role ?? 'user', options.isAdmin === true, options.active !== false],
+     ) VALUES ($1, $1, $2, 'synthetic', 'synthetic', $3, $4, $5, $6, false, true)`,
+    [
+      id,
+      `${id}@example.test`,
+      options.role ?? 'user',
+      options.isAdmin === true,
+      options.active !== false,
+      options.activationStatus ?? 'activated',
+    ],
   )
   if (options.adminRole) {
     await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [id, 'admin'])
   }
+}
+
+async function auditCount(userId: string): Promise<number> {
+  const result = await query(
+    `SELECT COUNT(*)::text AS count
+       FROM audit_logs
+      WHERE resource_id = ANY($1::text[])
+         OR action_details->>'userId' = $2
+         OR action_details->>'adminUserId' = $2`,
+    [[`${userId}:${obsoleteCode}`, `${userId}:${catalogCode}`], userId],
+  )
+  return Number(result.rows[0]?.count ?? 0)
+}
+
+async function generationOf(userId: string): Promise<string> {
+  const result = await query('SELECT access_generation::text AS generation FROM users WHERE id = $1', [userId])
+  return String(result.rows[0]?.generation ?? '')
 }
 
 async function writeLegacy(userId: string, values: unknown[]): Promise<void> {
@@ -385,10 +433,20 @@ describe('permission ux legacy real database', () => {
       insertedCatalogCode = true
     }
     await query('SELECT id FROM roles WHERE id = $1', ['admin'])
-    for (const id of [adminId, demoteActorId]) {
+    for (const id of [adminId, demoteActorId, barrierActorId]) {
       await insertUser(id, { role: 'admin', isAdmin: false, adminRole: true })
     }
     await insertUser(flagId, { role: 'user', isAdmin: true, adminRole: false })
+    await insertUser(rawRoleId, { role: 'admin', isAdmin: false, adminRole: false })
+    await insertUser(tokenOnlyId, { role: 'user', isAdmin: false, adminRole: false })
+    await insertUser(pendingActorId, {
+      role: 'admin',
+      isAdmin: false,
+      adminRole: true,
+      activationStatus: 'pending_activation',
+    })
+    await insertUser(inactiveActorId, { role: 'admin', isAdmin: false, active: false, adminRole: true })
+    await insertUser(rbacOnlyId, { role: 'user', isAdmin: false, adminRole: true })
     await insertUser(targetId, { role: 'user', isAdmin: false, active: true })
     await insertUser(missingCodeId, { role: 'user', isAdmin: false })
     await insertUser(inactiveId, { role: 'user', isAdmin: false, active: false })
@@ -396,6 +454,9 @@ describe('permission ux legacy real database', () => {
     await insertUser(rollbackId, { role: 'user', isAdmin: false })
     await insertUser(demoteTargetId, { role: 'user', isAdmin: false })
     await insertUser(inspectId, { role: 'user', isAdmin: false })
+    await insertUser(sentinelTargetId, { role: 'user', isAdmin: false })
+    await insertUser(rbacTargetId, { role: 'user', isAdmin: false })
+    await insertUser(barrierTargetId, { role: 'user', isAdmin: false })
     await query('UPDATE users SET deleted_at = NOW() WHERE id = $1', [recycleId])
     await query(
       'INSERT INTO roles (id, name) VALUES ($1, $2)',
@@ -424,6 +485,9 @@ describe('permission ux legacy real database', () => {
     await writeLegacy(inactiveId, [obsoleteCode])
     await writeLegacy(rollbackId, [obsoleteCode, keptCode])
     await writeLegacy(demoteTargetId, [obsoleteCode])
+    await writeLegacy(sentinelTargetId, [obsoleteCode])
+    await writeLegacy(rbacTargetId, [obsoleteCode])
+    await writeLegacy(barrierTargetId, [obsoleteCode])
     evidenceIds = await seedEvidence(targetId)
     rollbackEvidenceIds = await seedEvidence(rollbackId)
   })
@@ -619,6 +683,183 @@ describe('permission ux legacy real database', () => {
     const response = await postLegacy(mintToken(adminId), recycleId, obsoleteCode)
     expect(response.status).toBe(409)
     expect(response.body.code).toBe('USER_IN_RECYCLE_BIN')
+  })
+
+  it('refuses a raw users.role admin with no live user_roles admin membership', async () => {
+    const before = await readLegacy(sentinelTargetId)
+    const beforeGeneration = await generationOf(sentinelTargetId)
+    const beforeAudit = await auditCount(sentinelTargetId)
+    const response = await postLegacy(mintToken(rawRoleId), sentinelTargetId, obsoleteCode)
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('FORBIDDEN')
+    expect(await readLegacy(sentinelTargetId)).toEqual(before)
+    expect(await generationOf(sentinelTargetId)).toBe(beforeGeneration)
+    expect(await auditCount(sentinelTargetId)).toBe(beforeAudit)
+    const actor = await query('SELECT role, is_admin FROM users WHERE id = $1', [rawRoleId])
+    expect(actor.rows[0]).toMatchObject({ role: 'admin', is_admin: false })
+    const membership = await query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [rawRoleId],
+    )
+    expect(membership.rows).toHaveLength(0)
+  })
+
+  it('refuses a token admin claim with no live user_roles admin membership', async () => {
+    const before = await readLegacy(sentinelTargetId)
+    const response = await postLegacy(mintToken(tokenOnlyId, 'admin'), sentinelTargetId, obsoleteCode)
+    expect(response.status).toBe(403)
+    expect(response.body.code).toBe('FORBIDDEN')
+    expect(await readLegacy(sentinelTargetId)).toEqual(before)
+    const actor = await query(
+      'SELECT role, is_admin FROM users WHERE id = $1',
+      [tokenOnlyId],
+    )
+    expect(actor.rows[0]).toMatchObject({ role: 'user', is_admin: false })
+  })
+
+  it('refuses a pending actor and an inactive actor who still hold user_roles admin', async () => {
+    const before = await readLegacy(sentinelTargetId)
+    const beforeSentinelGeneration = await generationOf(sentinelTargetId)
+    const beforePendingGeneration = await generationOf(pendingActorId)
+    const beforeInactiveGeneration = await generationOf(inactiveActorId)
+    const beforeAudit = await auditCount(sentinelTargetId) + await auditCount(pendingActorId) + await auditCount(inactiveActorId)
+    const evidenceCount = async (userId: string) => {
+      const result = await query(
+        'SELECT COUNT(*)::text AS count FROM directory_deprovision_events WHERE local_user_id = $1',
+        [userId],
+      )
+      return String(result.rows[0]?.count ?? '0')
+    }
+    const beforeEvidence = [
+      await evidenceCount(sentinelTargetId),
+      await evidenceCount(pendingActorId),
+      await evidenceCount(inactiveActorId),
+    ]
+    const unauthorized = {
+      ok: false,
+      error: { code: 'UNAUTHORIZED', message: 'Invalid token' },
+    }
+    const pending = await postLegacy(mintToken(pendingActorId), sentinelTargetId, obsoleteCode)
+    expect(pending.status).toBe(401)
+    expect(pending.body).toEqual(unauthorized)
+    const inactive = await postLegacy(mintToken(inactiveActorId), sentinelTargetId, obsoleteCode)
+    expect(inactive.status).toBe(401)
+    expect(inactive.body).toEqual(unauthorized)
+    expect(await readLegacy(sentinelTargetId)).toEqual(before)
+    expect(await generationOf(sentinelTargetId)).toBe(beforeSentinelGeneration)
+    expect(await generationOf(pendingActorId)).toBe(beforePendingGeneration)
+    expect(await generationOf(inactiveActorId)).toBe(beforeInactiveGeneration)
+    expect(await auditCount(sentinelTargetId) + await auditCount(pendingActorId) + await auditCount(inactiveActorId)).toBe(beforeAudit)
+    expect([
+      await evidenceCount(sentinelTargetId),
+      await evidenceCount(pendingActorId),
+      await evidenceCount(inactiveActorId),
+    ]).toEqual(beforeEvidence)
+    const pendingRow = await query(
+      'SELECT activation_status, is_active FROM users WHERE id = $1',
+      [pendingActorId],
+    )
+    expect(pendingRow.rows[0]).toMatchObject({ activation_status: 'pending_activation', is_active: true })
+    const inactiveRow = await query('SELECT activation_status, is_active FROM users WHERE id = $1', [inactiveActorId])
+    expect(inactiveRow.rows[0]).toMatchObject({ activation_status: 'activated', is_active: false })
+    const pendingMembership = await query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [pendingActorId],
+    )
+    const inactiveMembership = await query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [inactiveActorId],
+    )
+    expect(pendingMembership.rows).toHaveLength(1)
+    expect(inactiveMembership.rows).toHaveLength(1)
+  })
+
+  it('allows a live user_roles admin whose users.role stays user', async () => {
+    const response = await postLegacy(mintToken(rbacOnlyId), rbacTargetId, obsoleteCode)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      success: true,
+      userId: rbacTargetId,
+      permission: obsoleteCode,
+      changed: true,
+    })
+    expect(await readLegacy(rbacTargetId)).toEqual([])
+    const actor = await query('SELECT role FROM users WHERE id = $1', [rbacOnlyId])
+    expect(actor.rows[0]?.role).toBe('user')
+    const membership = await query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [rbacOnlyId],
+    )
+    expect(membership.rows).toHaveLength(1)
+    expect(await readLegacy(sentinelTargetId)).toEqual([obsoleteCode])
+  })
+
+  it('refuses when a waiting lock deletes only user_roles admin and users.role stays admin', async () => {
+    const sorted = [barrierActorId, barrierTargetId].sort()
+    const beforeLegacy = await readLegacy(barrierTargetId)
+    const beforeTargetGeneration = await generationOf(barrierTargetId)
+    const beforeActorGeneration = await generationOf(barrierActorId)
+    const beforeAudit = await auditCount(barrierTargetId) + await auditCount(barrierActorId)
+    const beforeEvidence = await query(
+      'SELECT COUNT(*)::text AS count FROM directory_deprovision_events WHERE local_user_id = $1',
+      [barrierTargetId],
+    )
+    const holder = new Client({
+      connectionString: process.env.DATABASE_URL,
+      application_name: `pux-role-${runHex}`,
+    })
+    let committed = false
+    let pending: ReturnType<typeof postLegacy> | null = null
+    let waiting = false
+    let failure: unknown
+    try {
+      await holder.connect()
+      await holder.query('BEGIN')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`namespace-admission:${sorted[0]}`])
+      pending = postLegacy(mintToken(barrierActorId), barrierTargetId, obsoleteCode)
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline && !waiting) {
+        const status = await query(
+          `SELECT 1
+           FROM pg_stat_activity
+           WHERE state = 'active'
+             AND wait_event_type = 'Lock'
+             AND query ILIKE '%pg_advisory_xact_lock%'
+             AND pid <> pg_backend_pid()
+           LIMIT 1`,
+        )
+        waiting = status.rows.length > 0
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      await holder.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [barrierActorId])
+      await holder.query('COMMIT')
+      committed = true
+    } catch (error) {
+      failure = error
+    } finally {
+      await releaseLockHolder(holder, committed)
+    }
+    const response = pending ? await pending : null
+    if (failure) throw failure
+    expect(waiting).toBe(true)
+    expect(response?.status).toBe(403)
+    expect(response?.body.code).toBe('FORBIDDEN')
+    expect(await readLegacy(barrierTargetId)).toEqual(beforeLegacy)
+    expect(await generationOf(barrierTargetId)).toBe(beforeTargetGeneration)
+    expect(await generationOf(barrierActorId)).toBe(beforeActorGeneration)
+    expect(await auditCount(barrierTargetId) + await auditCount(barrierActorId)).toBe(beforeAudit)
+    const actor = await query('SELECT role FROM users WHERE id = $1', [barrierActorId])
+    expect(actor.rows[0]?.role).toBe('admin')
+    const membership = await query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [barrierActorId],
+    )
+    expect(membership.rows).toHaveLength(0)
+    const afterEvidence = await query(
+      'SELECT COUNT(*)::text AS count FROM directory_deprovision_events WHERE local_user_id = $1',
+      [barrierTargetId],
+    )
+    expect(afterEvidence.rows).toEqual(beforeEvidence.rows)
   })
 
   it('rejects a non-string permission', async () => {

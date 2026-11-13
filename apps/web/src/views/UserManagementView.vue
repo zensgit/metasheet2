@@ -1131,7 +1131,7 @@
             <div class="user-admin__section-head">
               <div>
                 <h3>管理范围</h3>
-                <p class="user-admin__hint">部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
+                <p class="user-admin__hint">每条部门范围单独设置是否包含下级部门。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
               </div>
               <router-link class="user-admin__link" data-testid="management-scope-link" :to="managementScopeLocation">
                 查看该成员的管理范围
