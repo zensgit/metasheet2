@@ -13,13 +13,29 @@
  * double quotes, in any letter case, and with white space around the dot after its schema. The
  * table argument of a query-builder call is read the same way: its double quotes, its schema and
  * its `as` alias are removed and its case is folded; an argument that is then not a bare name is a
- * dynamic target.
+ * dynamic target. The call is recognised by its method name, written after a dot or as a string
+ * literal between brackets.
+ *
+ * A write target of three or more parts (`database.schema.table`) is not read: which part is the
+ * table depends on what the other parts are. When one of its parts is a scanned table name or a
+ * substitution it is a dynamic target of its own form, and no write is counted from it. A table
+ * written after a substituted schema is read as the table it names: the write is counted, and the
+ * substitution stays a dynamic target.
+ *
+ * A name part written in pieces, identifier characters and substitutions against one another with
+ * no white space between, spells one name that is not known. After a write verb it is a dynamic
+ * target, like a substitution alone; as a schema it is a substituted schema. A scanned table name
+ * with a substitution written against it is still counted as that table, and is a dynamic target
+ * as well.
  *
  * A `users` UPDATE counts as an input write only when its SET clause names `role`, `is_admin` or
  * `permissions` (bare, quoted or inside a tuple assignment); a SET clause that contains a
  * substitution is a dynamic target. A `users` INSERT whose `ON CONFLICT … DO UPDATE SET` clause names
- * an input column counts as an additional `users` UPDATE. A multi-table TRUNCATE counts each
- * scanned table it names, wherever the table stands in the list.
+ * an input column counts as an additional `users` UPDATE. A TRUNCATE names a list, which is read
+ * item by item from the verb: each scanned table it names is counted wherever it stands, past an
+ * item in another schema, past an item that is not a plain name and past an item written in
+ * pieces. The name that directly follows a write verb is counted when it is a scanned table even
+ * with a dot after it.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -54,7 +70,7 @@ export type LiteralWrite = Readonly<{
   form: 'sql' | 'query_builder' | 'folded' | 'upsert'
 }>
 
-export type DynamicForm = 'template_substitution' | 'concatenation' | 'query_builder_non_literal' | 'users_update_dynamic_set'
+export type DynamicForm = 'template_substitution' | 'concatenation' | 'query_builder_non_literal' | 'users_update_dynamic_set' | 'multi_part_name'
 
 export type DynamicTarget = Readonly<{
   file: string
@@ -71,13 +87,19 @@ const VERB = '(INSERT\\s+INTO|DELETE\\s+FROM|UPDATE|TRUNCATE(?:\\s+TABLE)?|MERGE
 const SCHEMA = '(?:"?public"?\\s*\\.\\s*)?'
 const TABLE = `(?:ONLY\\s+)?${SCHEMA}("?)([A-Za-z_][A-Za-z0-9_]*)\\2`
 const LITERAL_WRITE = new RegExp(`\\b${VERB}\\s+${TABLE}(?![A-Za-z0-9_])`, 'gi')
-/**
- * The next item of a TRUNCATE list: what is left of the previous item (the name after another
- * schema, a descendant mark), the comma, then an optional schema (groups 1 and 2) and the table
- * (group 4).
- */
-const TRUNCATE_LIST_ITEM = new RegExp(`^(?:\\s*\\.\\s*"?[A-Za-z_][A-Za-z0-9_]*"?)?\\s*\\*?\\s*,\\s*(?:ONLY\\s+)?(?:("?)([A-Za-z_][A-Za-z0-9_]*)\\1\\s*\\.\\s*)?("?)([A-Za-z_][A-Za-z0-9_]*)\\3(?![A-Za-z0-9_])`, 'i')
-const DYNAMIC_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?${SCHEMA}"?${SUBSTITUTION}`, 'g')
+/** A name part written in pieces: identifier characters and substitutions against one another, at least one substitution among them. */
+const PIECES = `[A-Za-z0-9_${SUBSTITUTION}]*${SUBSTITUTION}[A-Za-z0-9_${SUBSTITUTION}]*`
+/** One part of a qualified name: pieces around a substitution, a bare identifier, or a double-quoted identifier. */
+const NAME_PART = `(?:${PIECES}|[A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")*")`
+/** A write verb followed by a name of three or more parts (group 2). */
+const MULTI_PART_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?(${NAME_PART}(?:\\s*\\.\\s*${NAME_PART}){2,})`, 'gi')
+/** A write verb followed by a substituted schema, alone or with pieces written against it, and the table it qualifies (group 3). */
+const SUBSTITUTED_SCHEMA_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?(?:"?${SUBSTITUTION}"?|${PIECES})\\s*\\.\\s*("?)([A-Za-z_][A-Za-z0-9_]*)\\2(?![A-Za-z0-9_])`, 'gi')
+const TRUNCATE_HEAD = /\bTRUNCATE(?:\s+TABLE)?\s+/gi
+/** The next item of a TRUNCATE list: an optional ONLY, the name with all its parts (group 1), a descendant mark, and the comma when the list goes on (group 2). */
+const TRUNCATE_ITEM = new RegExp(`^\\s*(?:ONLY\\s+)?(${NAME_PART}(?:\\s*\\.\\s*${NAME_PART})*)\\s*\\*?\\s*(,)?`, 'i')
+/** A write verb followed by a target that begins with a substitution, or with pieces written against one. */
+const DYNAMIC_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?${SCHEMA}"?[A-Za-z0-9_]*${SUBSTITUTION}`, 'g')
 export const QUERY_BUILDER_WRITERS: ReadonlyMap<string, WriteVerb> = new Map([['insertInto', 'INSERT'], ['updateTable', 'UPDATE'], ['deleteFrom', 'DELETE'], ['mergeInto', 'MERGE'], ['replaceInto', 'INSERT']])
 const INPUT_COLUMN = `(?:${USERS_INPUT_COLUMNS.join('|')})`
 /** `role =`, `"role" =`, or a tuple assignment `(…, role, …) =`. */
@@ -85,7 +107,28 @@ const USERS_INPUT_SET = new RegExp(`(?:\\b|")${INPUT_COLUMN}(?:\\b|")\\s*=|\\([^
 const UPSERT_UPDATE = /\bON\s+CONFLICT\b[\s\S]{0,200}?\bDO\s+UPDATE\s+SET\b/i
 
 /** The dynamic forms the scan reports. */
-export const SCANNED_DYNAMIC_FORMS: readonly DynamicForm[] = ['template_substitution', 'concatenation', 'query_builder_non_literal', 'users_update_dynamic_set']
+export const SCANNED_DYNAMIC_FORMS: readonly DynamicForm[] = ['template_substitution', 'concatenation', 'query_builder_non_literal', 'users_update_dynamic_set', 'multi_part_name']
+
+/**
+ * One part of a qualified name. `name`: quotes removed and case folded; for a part written in
+ * pieces, the piece it begins with (empty when it begins with a substitution).
+ */
+type NamePart = Readonly<{ name: string; substituted: boolean }>
+
+function nameParts(name: string): NamePart[] {
+  const parts: NamePart[] = []
+  for (const match of name.matchAll(new RegExp(NAME_PART, 'g'))) {
+    const part = match[0]
+    if (part.includes(SUBSTITUTION)) parts.push({ name: (/^[A-Za-z_][A-Za-z0-9_]*/.exec(part)?.[0] ?? '').toLowerCase(), substituted: true })
+    else parts.push({ name: (part.startsWith('"') ? part.slice(1, -1).replace(/""/g, '"') : part).toLowerCase(), substituted: false })
+  }
+  return parts
+}
+
+/** A name of three or more parts that may stand for a scanned table: one of its parts is such a name, or is not known. */
+function isUnreadMultiPartName(parts: readonly NamePart[]): boolean {
+  return parts.length >= 3 && parts.some((part) => part.substituted || SCANNED_TABLES.has(part.name))
+}
 
 const BARE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -100,6 +143,17 @@ export function builderTable(argument: string): string | null {
   const parts = name.split('.').map((part) => part.trim())
   if (parts.length > 2 || parts.some((part) => !BARE_IDENTIFIER.test(part))) return null
   return parts[parts.length - 1].toLowerCase()
+}
+
+/**
+ * The method a call invokes on its receiver: `receiver.method(…)`, or `receiver['method'](…)` with
+ * the name written as a string literal. Null for any other callee.
+ */
+export function calledMethod(call: ts.CallExpression): string | null {
+  const callee = call.expression
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text
+  if (ts.isElementAccessExpression(callee) && (ts.isStringLiteral(callee.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(callee.argumentExpression))) return callee.argumentExpression.text
+  return null
 }
 
 function verbOf(keyword: string): WriteVerb {
@@ -145,41 +199,78 @@ export function matchText(file: string, text: string, line: number, basePosition
   const dynamic: DynamicTarget[] = []
   const lineAt = (index: number) => line + text.slice(0, index).split('\n').length - 1
   const positionAt = (index: number) => basePosition + index
-  for (const match of text.matchAll(LITERAL_WRITE)) {
+  const shown = (expression: string) => expression.split(SUBSTITUTION).join('${…}')
+  // A name of three or more parts is never read as a table.
+  const multiPart = new Set<number>()
+  for (const match of text.matchAll(MULTI_PART_WRITE)) {
     const index = match.index ?? 0
     const verb = verbOf(match[1])
-    const table = match[3].toLowerCase()
-    const end = index + match[0].length
-    if (verb === 'TRUNCATE') {
-      // `TRUNCATE a, b, c`: every further table in the list.
-      let cursor = end
-      for (;;) {
-        const item = TRUNCATE_LIST_ITEM.exec(text.slice(cursor))
-        if (!item) break
-        const listed = item[4].toLowerCase()
-        // An item in another schema is passed over: the list goes on after it.
-        const inPublic = item[2] === undefined || item[2].toLowerCase() === 'public'
-        if (inPublic && SCANNED_TABLES.has(listed)) writes.push({ file, line: lineAt(index), position: positionAt(index), table: listed, verb, form: 'sql' })
-        cursor += item[0].length
-      }
-    }
-    if (!SCANNED_TABLES.has(table)) continue
+    // The list of a TRUNCATE is read item by item below.
+    if (verb === 'TRUNCATE' || !isUnreadMultiPartName(nameParts(match[2]))) continue
     if (verb === 'UPDATE' && isUpdateClause(text, index)) continue
-    if (verb === 'COPY' && isCopyRead(text, end)) continue
+    if (verb === 'COPY' && isCopyRead(text, index + match[0].length)) continue
+    multiPart.add(index)
+    dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'multi_part_name', expression: shown(match[0]) })
+  }
+  /** One write of `verb` on `table`, named by the text that ends at `end`. */
+  const record = (index: number, end: number, verb: WriteVerb, table: string, expression: string): void => {
+    if (!SCANNED_TABLES.has(table)) return
+    if (verb === 'UPDATE' && isUpdateClause(text, index)) return
+    if (verb === 'COPY' && isCopyRead(text, end)) return
     if (verb === 'UPDATE' && table === 'users') {
       const set = setClause(text, end)
       if (set.includes(SUBSTITUTION)) {
-        dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'users_update_dynamic_set', expression: match[0] })
-        continue
+        dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'users_update_dynamic_set', expression })
+        return
       }
-      if (!USERS_INPUT_SET.test(set)) continue
+      if (!USERS_INPUT_SET.test(set)) return
     }
     writes.push({ file, line: lineAt(index), position: positionAt(index), table, verb, form: 'sql' })
     if (verb === 'INSERT' && table === 'users') {
       // An upsert action that assigns an input column is a `users` UPDATE as well.
       const set = upsertSetClause(text, end)
-      if (set.includes(SUBSTITUTION)) dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'users_update_dynamic_set', expression: `${match[0]} … ON CONFLICT DO UPDATE` })
+      if (set.includes(SUBSTITUTION)) dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'users_update_dynamic_set', expression: `${expression} … ON CONFLICT DO UPDATE` })
       else if (USERS_INPUT_SET.test(set)) writes.push({ file, line: lineAt(index), position: positionAt(index), table, verb: 'UPDATE', form: 'upsert' })
+    }
+  }
+  for (const match of text.matchAll(LITERAL_WRITE)) {
+    const index = match.index ?? 0
+    const verb = verbOf(match[1])
+    if (verb === 'TRUNCATE' || multiPart.has(index)) continue
+    record(index, index + match[0].length, verb, match[3].toLowerCase(), match[0])
+  }
+  // A substituted schema leaves the table readable: the write is on the table the text names.
+  for (const match of text.matchAll(SUBSTITUTED_SCHEMA_WRITE)) {
+    const index = match.index ?? 0
+    const verb = verbOf(match[1])
+    if (verb === 'TRUNCATE' || multiPart.has(index)) continue
+    record(index, index + match[0].length, verb, match[3].toLowerCase(), shown(match[0]))
+  }
+  // `TRUNCATE a, b, c`: every table of the list, read from the verb.
+  for (const match of text.matchAll(TRUNCATE_HEAD)) {
+    const index = match.index ?? 0
+    let cursor = index + match[0].length
+    let first = true
+    for (;;) {
+      const item = TRUNCATE_ITEM.exec(text.slice(cursor))
+      if (!item) break
+      const parts = nameParts(item[1])
+      if (parts.length >= 3) {
+        if (isUnreadMultiPartName(parts)) dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'multi_part_name', expression: shown(`${match[0]}${item[1]}`) })
+      } else {
+        // An item in another schema is passed over; a substituted schema, alone or with pieces written
+        // against it, leaves the table as written. The name that directly follows the verb is counted
+        // when it is a scanned table even with a dot after it, as it is after the other verbs: a
+        // schema spelled like a scanned table is read as that table. So is the scanned table name a
+        // substituted schema begins with, wherever the item stands.
+        const inPublic = parts.length === 1 || (parts[0].name === 'public' && !parts[0].substituted) || parts[0].substituted
+        const table = inPublic ? parts[parts.length - 1].name : first ? parts[0].name : null
+        const counted = [table, parts.length === 2 && parts[0].substituted ? parts[0].name : null].filter((name): name is string => name !== null && SCANNED_TABLES.has(name))
+        for (const name of new Set(counted)) writes.push({ file, line: lineAt(index), position: positionAt(index), table: name, verb: 'TRUNCATE', form: 'sql' })
+      }
+      if (item[2] === undefined) break
+      cursor += item[0].length
+      first = false
     }
   }
   for (const match of text.matchAll(DYNAMIC_WRITE)) {
@@ -187,6 +278,8 @@ export function matchText(file: string, text: string, line: number, basePosition
     if (verbOf(match[1]) === 'UPDATE' && isUpdateClause(text, index)) continue
     dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'template_substitution', expression: match[0].replace(SUBSTITUTION, '${…}') })
   }
+  // Writes are reported in the order of the text, whichever pass found them.
+  writes.sort((a, b) => a.position - b.position)
   return { writes, dynamic }
 }
 
@@ -382,8 +475,8 @@ export function scanSource(relativePath: string, source: string): { writes: Lite
         if (!(ts.isStringLiteral(inner) || ts.isNoSubstitutionTemplateLiteral(inner))) visit(operand)
       }
       return
-    } else if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const method = node.expression.name.text
+    } else if (ts.isCallExpression(node) && calledMethod(node) !== null) {
+      const method = calledMethod(node)!
       const verb = QUERY_BUILDER_WRITERS.get(method)
       if (verb && node.arguments.length > 0) {
         const first = node.arguments[0]

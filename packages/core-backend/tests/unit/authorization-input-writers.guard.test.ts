@@ -28,6 +28,7 @@ import {
   AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS,
   AUTHORIZATION_INPUT_FROZEN_MIGRATIONS,
   AUTHORIZATION_INPUT_LATE_ROLE_ROW_CALLERS,
+  AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE,
   AUTHORIZATION_INPUT_MIGRATION_LOCK_BLOCK_MARKS,
   AUTHORIZATION_INPUT_MIGRATION_LOCK_FORM,
   AUTHORIZATION_INPUT_SCRIPT_CLASSES,
@@ -38,9 +39,19 @@ import {
   hasPendingWriters,
   registeredWriteCounts,
 } from '../../src/rbac/authorization-input-writers'
-import type { AuthorizationInputLateRoleRowCaller, AuthorizationInputWriterEntry } from '../../src/rbac/authorization-input-writers'
+import type { AuthorizationInputDynamicExemption, AuthorizationInputLateRoleRowCaller, AuthorizationInputWriterEntry } from '../../src/rbac/authorization-input-writers'
 import { AUTHORIZATION_INPUT_TAKEOVER_CALLERS, AUTHORIZATION_INPUT_WORLD_LOCK_KEY1 } from '../../src/rbac/authorization-input-lock'
-import { checkNewMigration, COMPLIANT_LOCK_BLOCK, migrationRuleProblems, traversalProblems } from '../helpers/authorization-input-migration-rules'
+import {
+  checkNewMigration,
+  COMPLIANT_LOCK_BLOCK,
+  exemptDynamicForms,
+  isMigrationPath,
+  JUDGED_ONLY_DYNAMIC_FORMS,
+  judgedOnlyExemptionProblems,
+  migrationRuleProblems,
+  reachableTableProblems,
+  traversalProblems,
+} from '../helpers/authorization-input-migration-rules'
 import {
   CASCADE_PARENT_TABLES,
   enclosingFunctionAt,
@@ -144,10 +155,44 @@ describe('production writers equal the registry', () => {
       expected.set(key, (expected.get(key) ?? 0) + writer.dynamic.count)
     }
     expect(sortedEntries(byFileAndForm(production.dynamic))).toEqual(sortedEntries(expected))
-    for (const exemption of [...AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, ...AUTHORIZATION_INPUT_SCRIPT_DYNAMIC_EXEMPTIONS]) {
-      for (const table of exemption.reachableTables) expect(SCANNED_TABLES.has(table.toLowerCase()), `${exemption.id} reaches ${table}`).toBe(false)
+    const registered = [...AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, ...AUTHORIZATION_INPUT_SCRIPT_DYNAMIC_EXEMPTIONS]
+    expect(reachableTableProblems(registered, AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)).toEqual([])
+    for (const exemption of registered) {
+      expect(exemption.reachableTables.length, exemption.id).toBeGreaterThan(0)
       expect(exemption.reason.length).toBeGreaterThan(0)
     }
+  })
+
+  it('the one exemption of the migration helper module is pinned, and sets no verdict aside when a migration is judged', () => {
+    const ofHelper = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((exemption) => exemption.file === AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    expect(ofHelper.map((exemption) => [exemption.form, exemption.count, [...exemption.reachableTables]])).toEqual([['query_builder_non_literal', 1, ['<migration helper parameter>']]])
+    expect([...exemptDynamicForms(AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, new Map([['query_builder_non_literal', 1]]), AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS)]).toEqual([])
+    // Every other exemption under the migration streams covers its form in its own file.
+    const others = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((exemption) => isMigrationPath(exemption.file) && exemption.file !== AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    expect(others.length).toBeGreaterThan(0)
+    for (const exemption of others) expect([...exemptDynamicForms(exemption.file, new Map([[exemption.form, exemption.count]]), AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS)], exemption.id).toEqual([exemption.form])
+  })
+
+  it('POSITIVE CONTROL — an exemption that reaches an input table or a cascade parent under another spelling, and a migration exemption that names a pattern, are problems', () => {
+    const virtual = (id: string, file: string, reachableTables: string[]): AuthorizationInputDynamicExemption => ({ id, file, form: 'template_substitution', count: 1, reachableTables, reason: 'control' })
+    const sourceFile = `${SRC}/admin/user-recycle.ts`
+    const migration = `${SRC}/db/migrations/zzzz20270101000000_control.ts`
+    const legacy = 'packages/core-backend/migrations/999_control.sql'
+    const problemsOf = (...exemptions: AuthorizationInputDynamicExemption[]) => reachableTableProblems(exemptions, AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    for (const [spelling, name] of [['users', 'users'], ['public.users', 'users'], ['"users"', 'users'], [' users', 'users'], ['user_roles ', 'user_roles'], ['"PUBLIC" . "Roles"', 'roles'], ['metasheet.public.permissions', 'permissions']]) {
+      expect(problemsOf(virtual('V-1', sourceFile, ['audit_logs', spelling])), spelling).toEqual([`V-1: reaches ${name}`])
+      expect(problemsOf(virtual('V-1', migration, [spelling])), spelling).toEqual([`V-1: reaches ${name}`])
+    }
+    for (const spelling of ['*', '<any table>', 'integration_*', 'audit logs', '']) {
+      expect(problemsOf(virtual('V-2', migration, [spelling])), spelling).toEqual([`V-2: ${spelling} is not a plain table name`])
+      expect(problemsOf(virtual('V-2', legacy, ['audit_x', spelling])), spelling).toEqual([`V-2: ${spelling} is not a plain table name`])
+      // Outside the migration streams a reachable set may be a pattern: it sets no verdict aside there.
+      expect(problemsOf(virtual('V-2', sourceFile, [spelling])), spelling).toEqual([])
+    }
+    expect(problemsOf(virtual('V-3', migration, ['audit_x', 'public.audit_y', '"Audit_Z"']))).toEqual([])
+    // The helper module's own entry is the one place a placeholder stands under the migration streams.
+    expect(problemsOf(virtual('V-4', AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, ['<migration helper parameter>']))).toEqual([])
+    expect(problemsOf(virtual('V-4', AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, ['users']))).toEqual(['V-4: reaches users'])
   })
 
   it('a `D` entry registers no literal statements and every other entry registers at least one', () => {
@@ -161,6 +206,15 @@ describe('production writers equal the registry', () => {
       }
     }
     expect(new Set(AUTHORIZATION_INPUT_WRITERS.map((writer) => writer.id)).size).toBe(AUTHORIZATION_INPUT_WRITERS.length)
+  })
+
+  it('every writer declares whether it has a human operator, with one of the two values', () => {
+    const values: readonly string[] = ['human', 'n/a']
+    for (const writer of AUTHORIZATION_INPUT_WRITERS) {
+      expect(Object.hasOwn(writer, 'actor'), writer.id).toBe(true)
+      expect(values, writer.id).toContain(writer.actor)
+    }
+    expect(AUTHORIZATION_INPUT_WRITERS.length).toBeGreaterThan(30)
   })
 
   it('the registry is still entirely pending: no production caller uses the contract yet', () => {
@@ -211,6 +265,25 @@ describe('scan controls', () => {
     ['schema with white space around the dot', "const x = 'DELETE FROM public . user_roles WHERE user_id = $1'", 'user_roles|DELETE'],
     ['SQL comment between the verb and the table', "const x = 'INSERT INTO /* note */ user_roles (user_id, role_id) VALUES ($1, $2)'", 'user_roles|INSERT'],
     ['SQL line comment between the verb and the table', "const x = 'DELETE FROM -- note\\n user_permissions WHERE user_id = $1'", 'user_permissions|DELETE'],
+    ['query builder call with its method name in brackets', "const x = db['deleteFrom']('user_roles')", 'user_roles|DELETE'],
+    ['query builder call with its method name as a template in brackets', 'const x = db[`insertInto`](\'public.user_permissions\').values({})', 'user_permissions|INSERT'],
+    ['a table after a substituted schema', 'const x = `DELETE FROM ${schema}.user_roles WHERE user_id = $1`', 'user_roles|DELETE'],
+    ['a lower-case write after a substituted schema', 'const x = `update "${schema}"."users" set role = $1`', 'users|UPDATE'],
+    ['TRUNCATE past an item in another schema', "const x = 'TRUNCATE audit_logs, other.thing, user_roles'", 'user_roles|TRUNCATE'],
+    ['TRUNCATE of a scanned name that directly follows the verb, with a dot after it', "const x = 'TRUNCATE users.archive'", 'users|TRUNCATE'],
+    ['DELETE of a scanned name that directly follows the verb, with a dot after it', "const x = 'DELETE FROM user_roles.archive'", 'user_roles|DELETE'],
+    ['TRUNCATE after an item that is not a plain name', 'const x = \'TRUNCATE "audit log", role_permissions\'', 'role_permissions|TRUNCATE'],
+    ['TRUNCATE after a substituted item', 'const x = `TRUNCATE ${table}, user_permissions`', 'user_permissions|TRUNCATE'],
+    ['TRUNCATE of a table after a substituted schema', 'const x = `TRUNCATE audit_logs, ${schema}.user_roles`', 'user_roles|TRUNCATE'],
+    ['a table after a schema written as text against a substitution', 'const x = `INSERT INTO tenant_${id}.user_roles (user_id) VALUES ($1)`', 'user_roles|INSERT'],
+    ['a table after a schema written as a substitution against text', 'const x = `DELETE FROM ${prefix}lic.user_permissions WHERE user_id = $1`', 'user_permissions|DELETE'],
+    ['a table after a schema written as two substitutions', 'const x = `UPDATE ${a}${b}.users SET is_admin = TRUE`', 'users|UPDATE'],
+    ['a table after a schema concatenated from text and an operand', "const x = 'DELETE FROM tenant_' + id + '.role_permissions'", 'role_permissions|DELETE'],
+    ['a scanned name with a substitution written against it', 'const x = `DELETE FROM user_roles${where}`', 'user_roles|DELETE'],
+    ['TRUNCATE after an item written in pieces', 'const x = `TRUNCATE audit_${suffix}, user_permissions`', 'user_permissions|TRUNCATE'],
+    ['TRUNCATE of a table after a schema written in pieces', 'const x = `TRUNCATE audit_logs, tenant_${id}.user_roles`', 'user_roles|TRUNCATE'],
+    ['TRUNCATE of a scanned name with a substitution written against it, later in the list', 'const x = `TRUNCATE audit_logs, users${suffix}`', 'users|TRUNCATE'],
+    ['TRUNCATE of a scanned name that a schema in pieces begins with, later in the list', 'const x = `TRUNCATE audit_logs, users${suffix}.archive`', 'users|TRUNCATE'],
   ]
   for (const [name, replacement, expected] of positives) {
     it(`POSITIVE CONTROL — ${name} is counted`, () => {
@@ -227,6 +300,17 @@ describe('scan controls', () => {
     ['users UPDATE with a concatenated SET clause', "const x = 'UPDATE users SET ' + assignments + ' WHERE id = $1'", 'users_update_dynamic_set'],
     ['query builder non-literal table', 'const x = db.updateTable(table as any).set({})', 'query_builder_non_literal'],
     ['users UPDATE with a substituted SET clause', 'const x = `UPDATE users SET ${assignments} WHERE id = $1`', 'users_update_dynamic_set'],
+    ['query builder call in brackets with a non-literal table', "const x = db['updateTable'](table as any).set({})", 'query_builder_non_literal'],
+    ['a name of three parts that ends in a scanned table', "const x = 'DELETE FROM metasheet.public.user_roles WHERE user_id = $1'", 'multi_part_name'],
+    ['a name of three parts that begins with the usual schema', "const x = 'DELETE FROM public.user_roles.archived'", 'multi_part_name'],
+    ['a quoted name of three parts on a cascade parent', 'const x = \'UPDATE "my db"."public"."roles" SET id = $1\'', 'multi_part_name'],
+    ['a name of three parts with a substituted part', 'const x = `INSERT INTO metasheet.public.${table} (id) VALUES ($1)`', 'multi_part_name'],
+    ['a name of three parts in a TRUNCATE list', "const x = 'TRUNCATE audit_logs, metasheet.public.user_roles'", 'multi_part_name'],
+    ['text against a substitution after a verb', 'const x = `INSERT INTO user_${suffix} (user_id, role_id) VALUES ($1, $2)`', 'template_substitution'],
+    ['text against a substitution after a verb and the usual schema', 'const x = `UPDATE public.user${suffix} SET is_admin = TRUE`', 'template_substitution'],
+    ['text against a substitution as the first item of a TRUNCATE list', 'const x = `TRUNCATE TABLE user_${suffix}`', 'template_substitution'],
+    ['text against a concatenation operand after a verb', "const x = 'DELETE FROM user_' + suffix", 'concatenation'],
+    ['a name of three parts with a part written in pieces', 'const x = `DELETE FROM metasheet.pub${suffix}.user_roles`', 'multi_part_name'],
   ]
   for (const [name, replacement, form] of dynamicPositives) {
     it(`POSITIVE CONTROL — ${name} is a dynamic target`, () => {
@@ -253,6 +337,14 @@ describe('scan controls', () => {
     ['a multi-table TRUNCATE naming no scanned table', "const x = 'TRUNCATE audit_logs, sessions'"],
     ['a write inside an SQL block comment of a literal', "const x = 'SELECT 1 /* DELETE FROM user_roles */'"],
     ['a write inside an SQL line comment of a literal', "const x = 'SELECT 1 -- INSERT INTO user_roles (user_id) VALUES (1)'"],
+    ['a name of three parts none of which is a scanned table', "const x = 'INSERT INTO smoke_db.dbo.smoke_probe (id) VALUES (1)'"],
+    ['a copy out of a name of three parts', "const x = 'COPY metasheet.public.users TO STDOUT'"],
+    ['a TRUNCATE item in another schema', "const x = 'TRUNCATE audit_logs, app.user_roles'"],
+    ['a later TRUNCATE item whose schema is spelled like a scanned table', "const x = 'TRUNCATE audit_logs, users.archive'"],
+    ['text against a substitution after a non-verb', 'const x = `SELECT * FROM user_${suffix}`'],
+    ['a lower-case prose verb before text against a substitution', 'const x = `update row_${count} of the list`'],
+    ['a substitution after white space behind the table of a write', 'const x = `DELETE FROM sessions ${where}`'],
+    ['a later TRUNCATE item written in pieces that names no scanned table', 'const x = `TRUNCATE audit_logs, user_${suffix}`'],
   ]
   for (const [name, replacement] of negatives) {
     it(`NEGATIVE CONTROL — ${name} is not counted`, () => {
@@ -261,6 +353,12 @@ describe('scan controls', () => {
       expect(result.dynamic).toEqual([])
     })
   }
+
+  it('CONTROLS — the writes of one text are reported in the order of the text, however each of them is found', () => {
+    const result = mutate('const x = `DELETE FROM user_permissions; TRUNCATE "audit log", user_roles; DELETE FROM ${schema}.delegated_role_admin_scopes; DELETE FROM users`')
+    const added = result.writes.filter((write) => !baseline.writes.some((known) => known.table === write.table && known.verb === write.verb))
+    expect(added.map((write) => `${write.table}|${write.verb}`)).toEqual(['user_permissions|DELETE', 'user_roles|TRUNCATE', 'delegated_role_admin_scopes|DELETE', 'users|DELETE'])
+  })
 
   it('CONTROLS — a users upsert action counts an UPDATE only when it assigns an input column, and is dynamic when its SET clause is substituted', () => {
     const keyOf = (w: LiteralWrite) => `${w.table}|${w.verb}|${w.form}`
@@ -360,6 +458,36 @@ describe('migrations', () => {
     const scannedForms: readonly string[] = SCANNED_DYNAMIC_FORMS
     const expected = sortedEntries(new Map(AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((e) => e.file.includes('/db/migrations/') && scannedForms.includes(e.form)).map((e) => [`${e.file}|${e.form}`, e.count])))
     expect(sortedEntries(byFileAndForm(migrations.dynamic))).toEqual(expected)
+  })
+
+  it('an exemption of a form only the judgment finds names an existing file in which the judgment finds that many targets', () => {
+    const sourceOrNull = (file: string) => (fs.existsSync(path.join(REPO_ROOT, file)) ? read(file) : null)
+    expect(judgedOnlyExemptionProblems(AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, sourceOrNull)).toEqual([])
+    // Every registered form is one the scan reports or one only the judgment finds, never both.
+    const scannedForms: readonly string[] = SCANNED_DYNAMIC_FORMS
+    expect(JUDGED_ONLY_DYNAMIC_FORMS.filter((form) => scannedForms.includes(form))).toEqual([])
+    for (const exemption of AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS) expect([...scannedForms, ...JUDGED_ONLY_DYNAMIC_FORMS], exemption.id).toContain(exemption.form)
+  })
+
+  it('POSITIVE CONTROL — such an exemption for a file that does not exist, or with another count than the judgment finds, is a problem', () => {
+    const helperFile = `${MIG}/zzzz20270101000000_control_helper.ts`
+    const blockFile = `${MIG}/zzzz20270101000001_control_block.ts`
+    const missing = `${MIG}/zzzz20270101000002_control_missing.ts`
+    const sources: Record<string, string> = {
+      [helperFile]: "import { checkTableExists } from './_patterns'\nexport async function up(db, tableName) {\n  await checkTableExists(db, tableName)\n}",
+      [blockFile]: `export async function up(db) {\n  await db.query("DO $$ BEGIN EXECUTE format('DELETE FROM %I', t); EXECUTE format('DELETE FROM %I', u); END $$")\n}`,
+    }
+    const sourceOf = (file: string) => sources[file] ?? null
+    const virtual = (id: string, file: string, form: AuthorizationInputDynamicExemption['form'], count: number): AuthorizationInputDynamicExemption => ({ id, file, form, count, reachableTables: ['audit_x'], reason: 'control' })
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'helper_table_argument', 1)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 2)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 1), virtual('V-2', blockFile, 'dynamic_statement', 1)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'helper_table_argument', 2)], sourceOf)).toEqual([`${helperFile}|helper_table_argument: registered 2, found 1`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'dynamic_statement', 1)], sourceOf)).toEqual([`${helperFile}|dynamic_statement: registered 1, found 0`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 1)], sourceOf)).toEqual([`${blockFile}|dynamic_statement: registered 1, found 2`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', missing, 'helper_table_argument', 1)], sourceOf)).toEqual([`${missing}|helper_table_argument: the file does not exist`])
+    // A form the scan reports is compared with the scan, not here.
+    expect(judgedOnlyExemptionProblems([virtual('V-1', missing, 'template_substitution', 9)], sourceOf)).toEqual([])
   })
 
   it('every migration outside the frozen list is checked: one that writes an input carries the bounded try form and each of its writes is judged safe', () => {

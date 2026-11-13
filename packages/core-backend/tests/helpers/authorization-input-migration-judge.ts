@@ -32,7 +32,37 @@
  * A query-builder write of a cascade parent has no assignment list to read. It is accepted as a
  * DELETE, or as an INSERT whose chain of calls is its values, a returning clause, a conflict clause
  * that does nothing, and at the end the call that runs it; an UPDATE, a MERGE and any other INSERT
- * are `unreadable`.
+ * are `unreadable`. The call is recognised by its method name, written after a dot or as a string
+ * literal in brackets. A literal that is the name of a cascade parent and is not the table of a
+ * call that is read (a query-builder write, a mapped helper, a walked array of table names, a
+ * foreign-key reference) is `unreadable`: it may be the target of a write that has no text.
+ *
+ * The body of a function or a procedure is read only as dollar-quoted text. A definition whose
+ * body is a quoted string, or that carries no dollar-quoted text, is `unreadable`, like a block
+ * whose body is not dollar-quoted.
+ *
+ * A table name of three or more parts is never read: a write on one is `unreadable` in every file,
+ * whatever else the statement does, and so is a table definition, an inheritance or partition
+ * parent, or a `SELECT … INTO` target named that way. A write on a table after a substituted
+ * schema is judged as a write on the table it names, beside the verdict of the dynamic target the
+ * substitution is, whether or not the scan counts the write; where the scan reports no dynamic
+ * target for it, and inside another statement, it stays `unreadable`. Anywhere but at the target
+ * of a write, a name after a substituted schema is not read, and `SELECT … INTO` a name that is
+ * not read is `unreadable`: the table it creates may carry an input table name. A TRUNCATE of an
+ * input table inside another statement is `unreadable` as well: its list is read only at the head
+ * of a statement.
+ *
+ * A name part written in pieces, text against a substitution or against a folded constant with no
+ * white space between, is never read, and no piece of it is taken for the name. As a schema, pieces
+ * that hold a substitution are a substituted schema. As a table they leave the name unread: it is
+ * `unreadable` wherever a table is named, a write on it inside another statement is refused, and at
+ * the target of a write the verdict stands in every file when the pieces spell an input table.
+ *
+ * A verdict that ends the judgment of a statement before the statement is judged by its head
+ * stands for the write of an input table the statement itself is, as far as its target is read:
+ * an unread target after a substituted schema, a write that is not read inside another statement,
+ * a cascade-parent write that is refused. An unread target after a substituted schema stands for a
+ * write of the input table it names as well.
  *
  * A write target that cannot be read is a dynamic target: a substituted or concatenated table, a
  * query-builder table argument that is not a plain name, a helper table argument that is neither a
@@ -52,7 +82,7 @@ import {
   AUTHORIZATION_INPUT_MIGRATION_TABLE_RULES,
 } from '../../src/rbac/authorization-input-writers'
 import type { AuthorizationInputDynamicForm, AuthorizationInputMigrationColumnRule, AuthorizationInputMigrationVerdict } from '../../src/rbac/authorization-input-writers'
-import { blankSqlComments, builderTable, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS } from './authorization-input-scan'
+import { blankSqlComments, builderTable, calledMethod, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS, USERS_INPUT_COLUMNS } from './authorization-input-scan'
 import type { WriteVerb } from './authorization-input-scan'
 
 export type MigrationJudgment = Readonly<{
@@ -87,6 +117,8 @@ const PARENTS: ReadonlySet<string> = new Set(CASCADE_PARENT_TABLES)
 const INPUT_NAME_IN_TEXT = new RegExp(`(?<![A-Za-z0-9_])(?:${INPUT_TABLES.join('|')})(?![A-Za-z0-9_])`, 'i')
 /** The opening of an identifier written with unicode escapes, inside quoted or dollar-quoted text. */
 const UNICODE_ESCAPED_IDENTIFIER = /(?<![A-Za-z0-9_])U&"/i
+/** The same opening with its quote left to a substitution. */
+const UNICODE_MARK_BEFORE_SUBSTITUTION = new RegExp(`(?<![A-Za-z0-9_])U&${SUBSTITUTION}`, 'i')
 
 /* ───────────────────────────── statement boundaries ───────────────────────────── */
 
@@ -148,10 +180,16 @@ type Token = Readonly<{
   value: string
   /** `str`: the literal contains a backslash or an unfolded substitution. */
   opaque?: boolean
+  /** The token is written against the one before it: no white space lies between the two. */
+  joined?: boolean
 }>
 
 function tokenize(text: string, folds: readonly string[]): Token[] {
   const tokens: Token[] = []
+  // Every pass over a character that is not white space emits one token, which begins there.
+  const joined = new Set<number>()
+  let emitted = 0
+  let lastEnd = -1
   let i = 0
   const foldValue = (inner: string): { value: string; opaque: boolean } => {
     let opaque = inner.includes('\\') || inner.includes(SUBSTITUTION)
@@ -163,11 +201,16 @@ function tokenize(text: string, folds: readonly string[]): Token[] {
     return { value, opaque }
   }
   while (i < text.length) {
+    if (tokens.length > emitted) {
+      emitted = tokens.length
+      lastEnd = i
+    }
     const ch = text[i]
     if (/\s/.test(ch)) {
       i += 1
       continue
     }
+    if (i === lastEnd) joined.add(tokens.length)
     if (ch === SUBSTITUTION) {
       tokens.push({ type: 'subst', text: ch, value: '' })
       i += 1
@@ -249,7 +292,7 @@ function tokenize(text: string, folds: readonly string[]): Token[] {
     tokens.push({ type: 'op', text: ch, value: ch })
     i += 1
   }
-  return tokens
+  return tokens.map((token, index) => (joined.has(index) ? { ...token, joined: true } : token))
 }
 
 const isKeyword = (token: Token | undefined, ...words: string[]) => token !== undefined && token.type === 'id' && words.includes(token.value)
@@ -302,33 +345,133 @@ function nameOf(token: Token | undefined): string | null {
   return null
 }
 
-/** A possibly schema-qualified table name at `index` (after an optional ONLY); the schema is dropped. */
-function tableAt(tokens: readonly Token[], index: number): { name: string; next: number } | null {
-  let i = index
-  if (isKeyword(tokens[i], 'ONLY')) i += 1
-  const first = nameOf(tokens[i])
+type NamePart = Readonly<{
+  /** The name the part spells, lower-cased; null when it spells none that is read. */
+  name: string | null
+  /** The part is an unfolded substitution, or pieces written against one. */
+  substituted: boolean
+  /** The part is written in pieces. */
+  pieced: boolean
+  next: number
+}>
+
+const NAME_PART_HEADS: ReadonlyArray<Token['type']> = ['id', 'qid', 'fold', 'subst']
+const NAME_PART_PIECES: ReadonlyArray<Token['type']> = [...NAME_PART_HEADS, 'num']
+
+/**
+ * The part of a qualified name that begins at `index`. A part is one token, or pieces: a run of
+ * tokens written against one another with no white space between, one of them a substitution or a
+ * folded constant. Pieces spell one name together, which is not read: none of them is taken for it.
+ */
+function partAt(tokens: readonly Token[], index: number): NamePart | null {
+  const first = tokens[index]
+  if (first === undefined || !NAME_PART_HEADS.includes(first.type)) return null
+  let next = index + 1
+  while (tokens[next]?.joined === true && NAME_PART_PIECES.includes(tokens[next].type)) next += 1
+  const run = tokens.slice(index, next)
+  if (run.length > 1 && run.some((token) => token.type === 'subst' || token.type === 'fold')) return { name: null, substituted: run.some((token) => token.type === 'subst'), pieced: true, next }
+  return { name: nameOf(first), substituted: first.type === 'subst', pieced: false, next: index + 1 }
+}
+
+/**
+ * A possibly schema-qualified table name at `index` (after an optional ONLY); the schema is dropped.
+ * A name of three or more parts is not read: which part is the table depends on what the other
+ * parts are. Nor is a part written in pieces. A name after a substituted schema is read only where
+ * `pastSubstitutedSchema` asks for it: at the target of a write.
+ */
+function tableAt(tokens: readonly Token[], index: number, pastSubstitutedSchema = false): { name: string; next: number } | null {
+  const first = partAt(tokens, isKeyword(tokens[index], 'ONLY') ? index + 1 : index)
   if (first === null) return null
-  if (isOp(tokens[i + 1], '.')) {
-    const second = nameOf(tokens[i + 2])
-    return second === null ? null : { name: second, next: i + 3 }
+  if (isOp(tokens[first.next], '.') && (first.name !== null || (pastSubstitutedSchema && first.substituted))) {
+    const second = partAt(tokens, first.next + 1)
+    return second === null || second.name === null || isOp(tokens[second.next], '.') ? null : { name: second.name, next: second.next }
   }
-  return { name: first, next: i + 1 }
+  return first.name === null ? null : { name: first.name, next: first.next }
 }
 
-/** Whether the write target at `index` (after an optional ONLY and an optional schema) is an unfolded substitution. */
+/** Whether a name of three or more parts stands at `index` (after an optional ONLY). */
+function multiPartNameAt(tokens: readonly Token[], index: number): boolean {
+  const part = (at: number): NamePart | null => {
+    const found = partAt(tokens, at)
+    return found !== null && (found.name !== null || found.substituted || found.pieced) ? found : null
+  }
+  const first = part(isKeyword(tokens[index], 'ONLY') ? index + 1 : index)
+  if (first === null || !isOp(tokens[first.next], '.')) return false
+  const second = part(first.next + 1)
+  return second !== null && isOp(tokens[second.next], '.')
+}
+
+/** Whether a part of the name at `index` (after an optional ONLY), its schema or its table, is written in pieces. */
+function piecedNameAt(tokens: readonly Token[], index: number): boolean {
+  const first = partAt(tokens, isKeyword(tokens[index], 'ONLY') ? index + 1 : index)
+  if (first === null) return false
+  return first.pieced || (isOp(tokens[first.next], '.') && partAt(tokens, first.next + 1)?.pieced === true)
+}
+
+/**
+ * Whether pieces spell an input table: one of them does by itself, or their text does once the
+ * folded constants among them are put in. A substitution among them ends a name like white space.
+ */
+function piecesSpellInput(pieces: readonly Token[]): boolean {
+  return pieces.some((token) => INPUTS.has(nameOf(token) ?? '')) || INPUT_NAME_IN_TEXT.test(pieces.map((token) => (token.type === 'fold' ? token.value : token.text)).join(''))
+}
+
+/**
+ * Whether a part of the name at `index` (after an optional ONLY) is written in pieces that spell an
+ * input table. The name is not read; it may stand for that table.
+ */
+function inputSpelledInPiecesAt(tokens: readonly Token[], index: number): boolean {
+  const at = isKeyword(tokens[index], 'ONLY') ? index + 1 : index
+  const spelled = (part: NamePart | null, from: number): boolean => part !== null && part.pieced && piecesSpellInput(tokens.slice(from, part.next))
+  const first = partAt(tokens, at)
+  if (first === null) return false
+  return spelled(first, at) || (isOp(tokens[first.next], '.') && spelled(partAt(tokens, first.next + 1), first.next + 1))
+}
+
+/** Whether a name written in pieces anywhere in `tokens` spells an input table. */
+function inputSpelledInPieces(tokens: readonly Token[]): boolean {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const part = partAt(tokens, i)
+    if (part === null || !part.pieced) continue
+    if (piecesSpellInput(tokens.slice(i, part.next))) return true
+    i = part.next - 1
+  }
+  return false
+}
+
+/**
+ * The scanned tables that a write verb in `tokens` names after a substituted schema. A table
+ * written in pieces counts by the piece it begins with, as the scan counts it.
+ */
+function scannedTablesWrittenAfterSubstitutedSchema(tokens: readonly Token[]): string[] {
+  return tokens.flatMap((token, index) => {
+    if (!isKeyword(token, 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'MERGE', 'COPY') || isKeyword(tokens[index - 1], 'FOR', 'KEY', 'DO', 'ON')) return []
+    let at = index + 1
+    if (isKeyword(tokens[at], 'INTO', 'FROM', 'TABLE')) at += 1
+    if (isKeyword(tokens[at], 'ONLY')) at += 1
+    const schema = partAt(tokens, at)
+    if (schema === null || !schema.substituted || !isOp(tokens[schema.next], '.')) return []
+    const table = partAt(tokens, schema.next + 1)
+    const name = table === null || isOp(tokens[table.next], '.') ? null : table.pieced ? nameOf(tokens[schema.next + 1]) : table.name
+    return name !== null && SCANNED_TABLES.has(name) ? [name] : []
+  })
+}
+
+/** Whether the write target at `index` (after an optional ONLY and an optional schema) is an unfolded substitution, alone or with pieces written against it. */
 function substitutedTargetAt(tokens: readonly Token[], index: number): boolean {
-  let i = index
-  if (isKeyword(tokens[i], 'ONLY')) i += 1
-  if (nameOf(tokens[i]) !== null && isOp(tokens[i + 1], '.')) i += 2
-  return tokens[i]?.type === 'subst'
+  const first = partAt(tokens, isKeyword(tokens[index], 'ONLY') ? index + 1 : index)
+  if (first === null) return false
+  if (first.name !== null && isOp(tokens[first.next], '.')) return partAt(tokens, first.next + 1)?.substituted === true
+  return first.substituted
 }
 
-type TruncateItem = Readonly<{ name: string | null; substituted: boolean }>
+/** `spelled`: the item is written in pieces, one of which spells an input table. */
+type TruncateItem = Readonly<{ name: string | null; substituted: boolean; pieced: boolean; spelled: boolean }>
 
-/** The items of the list a TRUNCATE at `verbAt` names: each table with its schema dropped, or null when the item is not a name. */
+/** The items of the list a TRUNCATE at `verbAt` names: each table with its schema dropped, or null when the item is not a name that is read. */
 function truncateTargets(tokens: readonly Token[], verbAt: number): TruncateItem[] {
   const from = verbAt + (isKeyword(tokens[verbAt + 1], 'TABLE') ? 2 : 1)
-  return splitTopLevel(tokens, from, tokens.length).map((item) => ({ name: tableAt(item, 0)?.name ?? null, substituted: substitutedTargetAt(item, 0) }))
+  return splitTopLevel(tokens, from, tokens.length).map((item) => ({ name: tableAt(item, 0)?.name ?? null, substituted: substitutedTargetAt(item, 0), pieced: piecedNameAt(item, 0), spelled: inputSpelledInPiecesAt(item, 0) }))
 }
 
 /* ───────────────────────────── operands ───────────────────────────── */
@@ -538,7 +681,7 @@ export function judgeInputWrite(table: string, verb: WriteVerb | string, tokens:
   if (rule === 'safe') return SAFE
   if (rule === 'raising') return { verdict: 'raising', detail: `writes ${table}`, raises: { what: 'delegated_scope', value: table } }
   // by_column: the statement must begin with the write itself.
-  const target = verb === 'INSERT' && isKeyword(tokens[0], 'INSERT') && isKeyword(tokens[1], 'INTO') ? tableAt(tokens, 2) : verb === 'UPDATE' && isKeyword(tokens[0], 'UPDATE') ? tableAt(tokens, 1) : null
+  const target = verb === 'INSERT' && isKeyword(tokens[0], 'INSERT') && isKeyword(tokens[1], 'INTO') ? tableAt(tokens, 2, true) : verb === 'UPDATE' && isKeyword(tokens[0], 'UPDATE') ? tableAt(tokens, 1, true) : null
   if (target === null || target.name !== table) return { verdict: 'unreadable', detail: `${verb} on ${table} is not the outermost statement` }
   return verb === 'INSERT' ? judgeInsert(table, tokens, target.next) : judgeUpdate(table, tokens, target.next)
 }
@@ -702,6 +845,8 @@ const READ_KINDS = ['SELECT', 'WITH', 'VALUES', 'TABLE', 'PERFORM', 'EXPLAIN', '
  * A write verb on an input table after the first token of a statement: a data-modifying CTE, the
  * statement an EXPLAIN runs, a write nested in another write. A row-lock clause (`FOR UPDATE`), an
  * upsert action (`DO UPDATE`) and a foreign-key action (`ON UPDATE`, `ON DELETE`) are not writes.
+ * The table is read past a substituted schema; a target written in pieces is not read, and is
+ * refused for that.
  */
 function nestedInputWrite(tokens: readonly Token[]): string | null {
   for (let i = 1; i < tokens.length; i += 1) {
@@ -709,14 +854,48 @@ function nestedInputWrite(tokens: readonly Token[]): string | null {
     if (!isKeyword(token, 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'MERGE', 'COPY')) continue
     if (isKeyword(tokens[i - 1], 'FOR', 'KEY', 'DO', 'ON')) continue
     if (token.value === 'TRUNCATE') {
-      const listed = truncateTargets(tokens, i).find((item) => item.name !== null && INPUTS.has(item.name))
+      const items = truncateTargets(tokens, i)
+      const listed = items.find((item) => item.name !== null && INPUTS.has(item.name))
       if (listed !== undefined) return `TRUNCATE on ${listed.name} inside another statement`
+      if (items.some((item) => item.pieced)) return 'TRUNCATE on a name written in pieces inside another statement'
       continue
     }
     let at = i + 1
     if (isKeyword(tokens[at], 'INTO', 'FROM', 'TABLE')) at += 1
-    const target = tableAt(tokens, at)
+    const target = tableAt(tokens, at, true)
     if (target !== null && INPUTS.has(target.name)) return `${token.value} on ${target.name} inside another statement`
+    if (target === null && multiPartNameAt(tokens, at)) return `${token.value} on a name of more than two parts inside another statement`
+    if (target === null && piecedNameAt(tokens, at)) return `${token.value} on a name written in pieces inside another statement`
+  }
+  return null
+}
+
+/**
+ * A write after the first token of a statement that is read only at the head of one: a TRUNCATE
+ * whose list names an input table or an item that is not a name, and a write whose table follows a
+ * substituted schema. The scan counts both wherever they stand; inside another statement neither is
+ * judged by the rule of its table.
+ */
+function nestedWriteReadOnlyAtHead(tokens: readonly Token[]): string | null {
+  /** Where a substituted schema that begins at `at` ends, or -1 when none stands there. */
+  const substitutedSchemaEnd = (at: number): number => {
+    const part = partAt(tokens, at)
+    if (part === null) return -1
+    return part.substituted || (tokens[at].type === 'qid' && tokens[at].value.includes(SUBSTITUTION)) ? part.next : -1
+  }
+  for (let i = 1; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (!isKeyword(token, 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'MERGE', 'COPY')) continue
+    if (isKeyword(tokens[i - 1], 'FOR', 'KEY', 'DO', 'ON')) continue
+    if (token.value === 'TRUNCATE') {
+      if (truncateTargets(tokens, i).some((item) => item.name === null || INPUTS.has(item.name))) return 'TRUNCATE of an input table inside another statement'
+      continue
+    }
+    let at = i + 1
+    if (isKeyword(tokens[at], 'INTO', 'FROM', 'TABLE')) at += 1
+    if (isKeyword(tokens[at], 'ONLY')) at += 1
+    const schemaEnd = substitutedSchemaEnd(at)
+    if (schemaEnd >= 0 && isOp(tokens[schemaEnd], '.')) return `${token.value} after a substituted schema inside another statement`
   }
   return null
 }
@@ -740,8 +919,9 @@ function countDynamic(sink: Sink, form: AuthorizationInputDynamicForm): void {
 
 function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mode: StatementMode): void {
   const scanned = matchText(file, scannerView(sql), line)
-  // A substitution in a text assembled from a `+` chain is a concatenation operand.
-  const dynamicForms: AuthorizationInputDynamicForm[] = scanned.dynamic.map((target) => (target.form === 'template_substitution' && sql.concatenated ? 'concatenation' : target.form))
+  // A substitution in a text assembled from a `+` chain is a concatenation operand. A write target
+  // of three or more parts is not a form an exemption can name; it is refused below.
+  const dynamicForms: AuthorizationInputDynamicForm[] = scanned.dynamic.flatMap((target) => (target.form === 'multi_part_name' ? [] : [target.form === 'template_substitution' && sql.concatenated ? 'concatenation' : target.form]))
   if (mode.count) {
     for (const write of scanned.writes) countWrite(sink, write.table, write.verb)
     for (const form of dynamicForms) countDynamic(sink, form)
@@ -763,6 +943,14 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   // An identifier written with unicode escapes is never read, wherever it stands: in the statement
   // itself, or in the text of a block or function body the statement carries.
   if (tokens.some((token) => token.type === 'uqid' || ((token.type === 'dollar' || token.type === 'str' || token.type === 'pstr') && UNICODE_ESCAPED_IDENTIFIER.test(token.text)))) return push(head, 'unreadable', 'identifier written with unicode escapes')
+  // The same mark put together with a folded constant, which the tokens above do not show, or left
+  // open before a substitution.
+  if ((sql.folds.length > 0 && UNICODE_ESCAPED_IDENTIFIER.test(scannerView(sql))) || UNICODE_MARK_BEFORE_SUBSTITUTION.test(sql.text)) return push(head, 'unreadable', 'identifier written with unicode escapes')
+
+  // A write target of three or more parts is never read, whatever else the statement does: it may
+  // name an input table or a cascade parent in a part that is not taken for the table.
+  // The table may be an input table, so the verdict stands in every file, new or not.
+  if (scanned.dynamic.some((target) => target.form === 'multi_part_name')) return push(head, 'unreadable', 'write target has more than two parts', { inputWrite: true })
 
   // A dollar-quoted block body is cut and judged again; its own statements carry the verdicts.
   if (head === 'DO') {
@@ -782,6 +970,16 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     }
     pushDynamicStatement()
   }
+  // The body of a function or procedure is read only as dollar-quoted text: a definition without
+  // one, or with a quoted string where the body stands, is not read at all.
+  if (head === 'CREATE') {
+    let at = 1
+    while (isKeyword(tokens[at], 'OR', 'REPLACE')) at += 1
+    if (isKeyword(tokens[at], 'FUNCTION', 'PROCEDURE')) {
+      const quotedBody = tokens.some((token, index) => isKeyword(token, 'AS') && (tokens[index + 1]?.type === 'str' || tokens[index + 1]?.type === 'pstr'))
+      if (quotedBody || !tokens.some((token) => token.type === 'dollar')) return push(`CREATE ${tokens[at].value}`, 'unreadable', 'body is not dollar-quoted text')
+    }
+  }
   // The body of a function or procedure definition is read for dynamic execution as well.
   if (head === 'CREATE' && tokens.some((token) => isKeyword(token, 'FUNCTION', 'PROCEDURE'))) {
     for (const body of tokens.filter((token) => token.type === 'dollar')) {
@@ -792,14 +990,36 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     }
   }
   // A bare word followed by a single colon is the resource part of a permission code, not a table.
-  const mentionsInput = tokens.some((token, index) => {
+  // A name written in pieces mentions the input table its pieces spell together.
+  const mentionsInput = inputSpelledInPieces(tokens) || tokens.some((token, index) => {
     if (token.type === 'id') return INPUTS.has(nameOf(token) ?? '') && !isOp(tokens[index + 1], ':')
     if (token.type === 'qid' || token.type === 'fold') return INPUTS.has(nameOf(token) ?? '')
     return (token.type === 'str' || token.type === 'dollar' || token.type === 'pstr') && INPUT_NAME_IN_TEXT.test(token.type === 'pstr' ? token.text : token.value)
   })
 
+  // The statement itself is a write of an input table, as far as its target is read; a target in
+  // pieces that spell an input table counts. A verdict that ends the judgment before the statement
+  // is judged by its head stands for that write.
+  const headWritesInput = (): boolean => {
+    if (!DML_VERBS.includes(head) || head === 'COPY') return false
+    if (head === 'TRUNCATE') return truncateTargets(tokens, 0).some((item) => item.spelled || (item.name !== null && INPUTS.has(item.name)))
+    const targetAt = head === 'UPDATE' ? 1 : 2
+    const target = tableAt(tokens, targetAt, true)
+    return target === null ? inputSpelledInPiecesAt(tokens, targetAt) : INPUTS.has(target.name)
+  }
+
+  // A scanned table after a substituted schema is read as the table it names only beside the verdict
+  // of the substitution. Where the scan reports no dynamic target, the target stays unread, and the
+  // verdict stands for a write of an input table when the table named is one.
+  const unreadAfterSchema = dynamicForms.length === 0 ? scannedTablesWrittenAfterSubstitutedSchema(tokens) : []
+  if (unreadAfterSchema.length > 0) return push(head, 'unreadable', 'write target is not readable', { inputWrite: inputWrites.length > 0 || unreadAfterSchema.some((table) => INPUTS.has(table)) || headWritesInput() })
   // 1. A write on an input table, wherever it sits in the statement, makes the statement an input write.
   if (inputWrites.length > 0) {
+    const nested = nestedWriteReadOnlyAtHead(tokens)
+    if (nested !== null) return push(head, 'unreadable', nested)
+    // A dynamic target beside the input write keeps the verdict it would have alone.
+    const beside = dynamicForms.filter((form) => form !== 'users_update_dynamic_set')
+    if (beside.length > 0) push(head, 'unreadable', 'dynamic write target', { dynamic: beside, inputWrite: false })
     for (const write of inputWrites) {
       const outcome: ColumnOutcome & { forbiddenTable?: boolean } = write.form === 'upsert' ? SAFE : judgeInputWrite(write.table, write.verb, tokens)
       push(write.verb, outcome.verdict, outcome.detail, { table: write.table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
@@ -807,9 +1027,10 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     // A TRUNCATE names a list: an input table the scanner does not report (one written with another schema) is judged as well.
     if (head === 'TRUNCATE') {
       const reported = new Set(inputWrites.filter((write) => write.verb === 'TRUNCATE').map((write) => write.table))
-      for (const item of truncateTargets(tokens, 0)) {
-        if (item.name === null) push('TRUNCATE', 'unreadable', 'write target is not readable')
-        else if (INPUTS.has(item.name) && !reported.has(item.name)) {
+      for (const [index, item] of truncateTargets(tokens, 0).entries()) {
+        // Only a substituted first item already has its dynamic verdict.
+        if (item.name === null && !(index === 0 && item.substituted && beside.length > 0)) push('TRUNCATE', 'unreadable', 'write target is not readable')
+        else if (item.name !== null && INPUTS.has(item.name) && !reported.has(item.name)) {
           const outcome = judgeInputWrite(item.name, 'TRUNCATE', tokens)
           push('TRUNCATE', outcome.verdict, outcome.detail, { table: item.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
         }
@@ -824,25 +1045,51 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (dynamicForms.length > 0) push(head, 'unreadable', 'dynamic write target', { dynamic: dynamicForms })
   // 3. A write on a cascade parent that assigns a key column, wherever it sits in the statement.
   for (const write of parentWrites) {
-    const at = tokens.findIndex((token, index) => isKeyword(token, write.verb) && tableAt(tokens, index + (write.verb === 'UPDATE' ? 1 : 2))?.name === write.table)
+    const at = tokens.findIndex((token, index) => isKeyword(token, write.verb) && tableAt(tokens, index + (write.verb === 'UPDATE' ? 1 : 2), true)?.name === write.table)
     const problem = at < 0 ? `${write.verb} on ${write.table} is not readable` : parentKeyProblem(write.table, write.verb, tokens.slice(at))
-    if (problem !== null) return push(write.verb, 'unreadable', problem, { table: write.table })
+    // The verdict ends the judgment: it stands for the write of an input table the statement itself is.
+    if (problem !== null) return push(write.verb, 'unreadable', problem, { table: write.table, inputWrite: headWritesInput() })
   }
-  // A TRUNCATE list item that is not a name is a target of its own. Only a substituted first item already has its dynamic verdict.
-  if (head === 'TRUNCATE' && truncateTargets(tokens, 0).some((item, index) => item.name === null && !(index === 0 && item.substituted && dynamicForms.length > 0))) return push(head, 'unreadable', 'write target is not readable')
+  // A TRUNCATE list item that is not a name is a target of its own. Only a substituted first item
+  // already has its dynamic verdict, unless one of its pieces spells an input table. The verdict
+  // stands for a write of an input table when the list names one, or spells one in pieces.
+  if (head === 'TRUNCATE') {
+    const items = truncateTargets(tokens, 0)
+    if (items.some((item, index) => item.name === null && !(index === 0 && item.substituted && !item.spelled && dynamicForms.length > 0))) {
+      return push(head, 'unreadable', 'write target is not readable', { inputWrite: items.some((item) => item.spelled || (item.name !== null && INPUTS.has(item.name))) })
+    }
+  }
   if (!mentionsInput) return
   // 4. A write on an input table that is not the outermost statement is never read.
+  // The statement it sits in is not judged further: the verdict stands for the write of an input
+  // table that statement itself is.
   const hidden = nestedInputWrite(tokens)
-  if (hidden !== null) return push(head, 'unreadable', hidden)
+  if (hidden !== null) return push(head, 'unreadable', hidden, { inputWrite: headWritesInput() })
   // 5. By the kind of the outermost statement.
   if (READ_KINDS.includes(head)) {
-    // `SELECT … INTO <table>` creates the table it names.
-    const into = topLevelKeyword(tokens, 1, tokens.length, 'INTO')
-    if (into >= 0) {
-      let at = into + 1
-      while (isKeyword(tokens[at], 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) at += 1
-      const created = tableAt(tokens, at)
-      if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
+    // `SELECT … INTO <table>` creates the table it names, so the name must be read, at every INTO
+    // of the statement. A word spelled like a write verb before an INTO does not make it the INTO
+    // of a write: the statement that follows WITH or EXPLAIN is a write only when its verb, the
+    // first verb word outside parentheses, is INSERT or MERGE. The INTO directly after that verb
+    // names the target of the write, not a table the statement creates: it alone is spared the
+    // refusal of a name that is not read, and is read like any other INTO otherwise.
+    const verb = head === 'WITH' || head === 'EXPLAIN' ? topLevelKeyword(tokens, 1, tokens.length, 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'VALUES', 'TABLE') : -1
+    const targetInto = verb >= 0 && isKeyword(tokens[verb], 'INSERT', 'MERGE') ? verb + 1 : -1
+    for (let into = topLevelKeyword(tokens, 1, tokens.length, 'INTO'); into >= 0; into = topLevelKeyword(tokens, into + 1, tokens.length, 'INTO')) {
+      // The words that may precede the name are passed over one by one, and a name is read at
+      // each of them as well: such a word may be the schema the name is written with. At the INTO
+      // of a write the table is read past a substituted schema, as the target of a write is.
+      for (let at = into + 1; ; at += 1) {
+        const created = tableAt(tokens, at, into === targetInto)
+        if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
+        if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
+        // A name in pieces that is not read, or whose pieces spell an input table, is refused at the
+        // INTO of a write as well: no verdict stands for it.
+        if ((created === null && piecedNameAt(tokens, at)) || inputSpelledInPiecesAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+        if (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) continue
+        if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+        break
+      }
     }
     return push(head, 'safe', '')
   }
@@ -852,19 +1099,32 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       const listed = truncateTargets(tokens, 0).flatMap((item) => (item.name !== null && INPUTS.has(item.name) ? [item.name] : []))
       for (const table of listed) {
         const outcome = judgeInputWrite(table, 'TRUNCATE', tokens)
-        push(head, outcome.verdict, outcome.detail, { table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
+        push(head, outcome.verdict, outcome.detail, { table, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable, inputWrite: true })
       }
       if (listed.length === 0 && dynamicForms.length === 0) push(head, 'safe', '')
       return
     }
     const targetAt = head === 'UPDATE' || head === 'COPY' ? 1 : 2
-    const target = tableAt(tokens, targetAt)
-    // A substituted target already has its dynamic verdict; any other unreadable target is refused here.
-    if (target === null) return dynamicForms.length > 0 && substitutedTargetAt(tokens, targetAt) ? undefined : push(head, 'unreadable', 'write target is not readable')
+    // Beside the verdict of a dynamic target the table is read past a substituted schema, as the
+    // table it names: the scan counts such a write only when it reads the rest of the statement.
+    const target = tableAt(tokens, targetAt, dynamicForms.length > 0)
+    // A substituted target already has its dynamic verdict; any other unreadable target is refused
+    // here, and so is one written in pieces that spell an input table: it stands for a write of it.
+    if (target === null) {
+      const spelled = inputSpelledInPiecesAt(tokens, targetAt)
+      if (!spelled && dynamicForms.length > 0 && substitutedTargetAt(tokens, targetAt)) return
+      return push(head, 'unreadable', 'write target is not readable', { inputWrite: spelled && head !== 'COPY' })
+    }
     if (!INPUTS.has(target.name)) return push(head, 'safe', '')
-    // The scanner counts a `users` UPDATE only when it assigns an input column; the other columns are judged here.
+    // The scanner counts a `users` UPDATE only when it assigns an input column; the other columns are
+    // judged here, and so is an input table written with another schema. The latter is a write of
+    // the table it names. An UPDATE of `users` whose SET clause names no input column is not, nor
+    // is a COPY, whose direction the scan reads.
     const outcome = judgeInputWrite(target.name, head, tokens)
-    return push(head, outcome.verdict, outcome.detail, { table: target.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable })
+    const set = head === 'UPDATE' && target.name === 'users' ? topLevelKeyword(tokens, 0, tokens.length, 'SET') : -1
+    const setEnd = set < 0 ? -1 : topLevelKeyword(tokens, set + 1, tokens.length, 'FROM', 'WHERE', 'RETURNING')
+    const otherColumnsOnly = set >= 0 && !tokens.slice(set + 1, setEnd < 0 ? tokens.length : setEnd).some((token) => (USERS_INPUT_COLUMNS as readonly string[]).includes(nameOf(token) ?? ''))
+    return push(head, outcome.verdict, outcome.detail, { table: target.name, raises: outcome.raises, forbiddenTable: outcome.forbiddenTable, inputWrite: head !== 'COPY' && !otherColumnsOnly })
   }
   if (head === 'ALTER' && isKeyword(tokens[1], 'TABLE')) {
     let i = 2
@@ -875,7 +1135,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     if (!INPUTS.has(target.name)) {
       // Another table: a rename onto an input table's name, and a sub-action that ties the table to
       // an input table by inheritance or as a partition, are not plain references.
-      const renamed = actions.some((action) => isKeyword(action[0], 'RENAME') && isKeyword(action[1], 'TO') && INPUTS.has(nameOf(action[2]) ?? ''))
+      const renamed = actions.some((action) => isKeyword(action[0], 'RENAME') && isKeyword(action[1], 'TO') && (INPUTS.has(nameOf(action[2]) ?? '') || inputSpelledInPiecesAt(action, 2)))
       if (renamed) return push('ALTER TABLE', 'unreadable', 'renames a table to an input table name')
       const tied = actions.map((action) => hierarchyActionProblem(action)).find((found) => found !== null)
       return tied ? push('ALTER TABLE', 'unreadable', tied) : push('ALTER TABLE', 'safe', '')
@@ -1173,8 +1433,10 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       // A query-builder write has no statement text: on an input table it is never readable, and
       // on a cascade parent an UPDATE or a MERGE has no assignment list to read. An INSERT of a
       // cascade parent is accepted only as a plain insert, read to the call that runs it.
-      if (ts.isPropertyAccessExpression(node.expression) && QUERY_BUILDER_WRITERS.has(node.expression.name.text) && node.arguments.length > 0) {
-        const verb = QUERY_BUILDER_WRITERS.get(node.expression.name.text)!
+      // The call is recognised by its method name, after a dot or as a string literal in brackets.
+      const method = calledMethod(node)
+      if (method !== null && QUERY_BUILDER_WRITERS.has(method) && node.arguments.length > 0) {
+        const verb = QUERY_BUILDER_WRITERS.get(method)!
         const first = node.arguments[0]
         const argument = stringOf(first) ?? (ts.isAsExpression(first) ? stringOf(first.expression) : null) ?? strictFold(first)
         // The table is read as the builder reads it: quotes, schema and alias removed, case folded.
@@ -1207,6 +1469,10 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       }
     }
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      // A literal that is the name of a cascade parent, and is not the table of a call read above,
+      // may be the target of a write that has no text. The name of an input table is refused as text.
+      const named = builderTable(node.text)
+      if (named !== null && PARENTS.has(named)) sink.judgments.push({ line: lineOf(node), kind: 'literal', verdict: 'unreadable', detail: `names the cascade parent ${named} outside a call that is read`, inputWrite: false, table: named })
       judgeText(node.text, [], node)
       return
     }
