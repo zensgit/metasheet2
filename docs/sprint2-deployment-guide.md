@@ -176,9 +176,10 @@ curl -X GET http://localhost:8900/api/admin/safety/rules \
 # 预期: {"success":true,"rules":[],"count":0}
 
 # 创建测试规则
+# 自 PR #5677 起，此写端点需管理员角色（requireAdminRole()），身份取自 req.user；x-user-id 头被忽略。
 curl -X POST http://localhost:8900/api/admin/safety/rules \
   -H "Content-Type: application/json" \
-  -H "x-user-id: admin" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{
     "rule_name": "Test Protection Rule",
     "description": "Test rule for deployment verification",
@@ -271,9 +272,10 @@ systemctl restart grafana-server
 
 ```bash
 # 1. 创建阻止删除生产快照的规则
+# 自 PR #5677 起，此写端点需管理员角色（requireAdminRole()），身份取自 req.user；x-user-id 头被忽略。
 curl -X POST http://localhost:8900/api/admin/safety/rules \
   -H "Content-Type: application/json" \
-  -H "x-user-id: admin" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{
     "rule_name": "Block Production Snapshot Deletion",
     "description": "Prevent deletion of production snapshots",
@@ -291,9 +293,10 @@ curl -X POST http://localhost:8900/api/admin/safety/rules \
   }'
 
 # 2. 干运行评估
+# 自 PR #5677 起，此写端点需管理员角色（requireAdminRole()），身份取自 req.user；x-user-id 头被忽略。
 curl -X POST http://localhost:8900/api/admin/safety/rules/evaluate \
   -H "Content-Type: application/json" \
-  -H "x-user-id: admin" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{
     "entity_type": "snapshot",
     "entity_id": "snap_123",
