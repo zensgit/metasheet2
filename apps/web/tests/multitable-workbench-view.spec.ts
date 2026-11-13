@@ -3177,6 +3177,26 @@ describe('MultitableWorkbench view wiring', () => {
     expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
   })
 
+  it('a form view shows its own record (the form context\'s), not the grid\'s row of it, and submits with its version', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record' } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: 10, data: { fld_title: 'Form record' } }, attachmentSummaries: {} })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    // The grid's page holds rec_1 too, at another version.
+    expect(gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')).toMatchObject({ version: 1 })
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 9 }))
+  })
+
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
     workbenchMock.views.value = [
       { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
@@ -5528,7 +5548,8 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
-    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`).
+    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`); the drawer
+    // still shows the grid's row while the record is on the page, and the copy only once it leaves the page.
     function mergeAnswer(row: { version: number; data: Record<string, unknown> }, data?: Record<string, unknown>) {
       workbenchMock.client.getRecord.mockResolvedValue({
         record: { id: 'rec_1', version: row.version, data: { ...(data ?? row.data) } },
@@ -5553,23 +5574,36 @@ describe('MultitableWorkbench view wiring', () => {
       return { answers, calls }
     }
 
-    it('saves made on a copy of the record shown (kept after a realtime merge, the record on the page) are sent with the copy\'s version, not chained past it', async () => {
+    it('after a realtime merge of the record shown (on the page) the drawer shows the grid\'s row, not the copy: its saves are the row\'s, which the grid chains', async () => {
       await openRec1()
       const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row)
       await realtimeMerge()('rec_1')
       await flushUi()
-      expect(inspectorStubSeen.record).not.toBe(row)
+      expect(inspectorStubSeen.record).toBe(row)
       gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', ATTEMPTED, row.version, { chainVersion: false })
-      // Without a copy (the drawer shows the grid row), the grid chains the version as usual.
-      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version])
+    })
+
+    it('a record opened by its link before the page\'s rows came: the drawer shows its copy until the rows hold the record, then the grid\'s row, whose saves the grid chains', async () => {
+      const pageRows = gridMock.rows.value
+      const pageRow = pageRows.find((r: { id: string }) => r.id === 'rec_1')
+      gridMock.rows.value = []
+      mergeAnswer(pageRow)
+      mountWorkbench({ recordId: 'rec_1' })
+      await flushUi(8)
+      expect(workbenchMock.client.getRecord).toHaveBeenCalled()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_1', version: pageRow.version })
+      gridMock.rows.value = pageRows
       await flushUi()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      expect(inspectorStubSeen.record).toBe(row)
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell.mock.calls.at(-1)).toHaveLength(4)
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version])
     })
 
     it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
@@ -5595,7 +5629,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(versions).toEqual([start, start + 1])
     })
 
-    it('a copy gone stale while another record was shown is never given a version past the data it shows: its saves keep conflicting', async () => {
+    it('a copy gone stale while another record was shown is not shown again: back on the record, the drawer shows the row, with the other user\'s change and its version', async () => {
       await openRec1()
       const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row0)
@@ -5613,7 +5647,7 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
       await flushUi()
-      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
+      expect(inspectorStubSeen.record).toMatchObject({ version: 2, data: { fld_status: 'theirs' } })
       const sent: Array<[string, number]> = []
       gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, _value: unknown, version: number) => {
         sent.push([fieldId, version])
@@ -5628,9 +5662,10 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
       await flushUi()
-      // A status save made on the status the drawer shows (not 'theirs') is not stored over 'theirs'.
-      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
-      expect(sent).toEqual([['fld_title', 1], ['fld_status', 1]])
+      // Both are made on the row, which shows 'theirs' with its version: both are stored (the stand-in does not move
+      // the row's version on; the real grid chains the second).
+      expect(sent).toEqual([['fld_title', 2], ['fld_status', 2]])
+      expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
     it.each([

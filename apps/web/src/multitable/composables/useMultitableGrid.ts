@@ -1513,9 +1513,6 @@ export function useMultitableGrid(opts: {
       nextLinkSummaries?: LinkedRecordSummary[]
       /** Told the record's version the server returned for THIS write. */
       onCommitted?: (version: number) => void
-      /** false: send the version given, never one of this record's own accepted writes returned (the caller's
-       *  copy of the record takes a write only once it is accepted, as an off-page one does). */
-      chainVersion?: boolean
     },
   ): Promise<GridPatchFailure | typeof CELL_WRITE_SUPERSEDED | null> {
     if (rangePending) return {
@@ -1584,7 +1581,7 @@ export function useMultitableGrid(opts: {
     }
 
     let expectedVersion = version
-    if (write.inPage && options?.chainVersion !== false) {
+    if (write.inPage) {
       for (let next = turns.advanced.get(expectedVersion); next !== undefined; next = turns.advanced.get(expectedVersion)) {
         expectedVersion = next
       }
@@ -1612,6 +1609,17 @@ export function useMultitableGrid(opts: {
       const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
       if (typeof committedVersion === 'number') {
         if (committedVersion > expectedVersion) turns.advanced.set(expectedVersion, committedVersion)
+        // The row was reloaded or merged meanwhile. It takes this write's version (above) only when it shows the version
+        // this write was sent at, or an older one that only this record's own accepted writes moved on from. Otherwise
+        // it keeps its own: a reload that read before another user's change (and landed after it) must not be given a
+        // version past data it does not show, so a write made on it conflicts; one that read after this write is newer.
+        if (live && live !== row && typeof liveVersion === 'number' && liveVersion !== expectedVersion) {
+          let reached = liveVersion
+          for (let next = turns.advanced.get(reached); next !== undefined && reached < expectedVersion; next = turns.advanced.get(reached)) {
+            reached = next
+          }
+          if (reached !== expectedVersion) live.version = liveVersion
+        }
         // The row was reloaded or merged from a version before this write: it shows the value now stored (unless a
         // newer write of the cell waits, which it shows).
         if (live && live !== row && typeof liveVersion === 'number' && liveVersion < committedVersion

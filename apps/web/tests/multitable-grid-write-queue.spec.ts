@@ -226,18 +226,6 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
   })
 
-  it('chainVersion: false sends the version given: a write made on the version before the first answer conflicts, one after it is stored', async () => {
-    const { grid, server } = await setup([r1()])
-    void grid.patchCell('r1', 'f1', 'b', 1, { chainVersion: false })
-    const second = grid.patchCell('r1', 'f2', 'y', 1, { chainVersion: false })
-    await server.answerAll()
-    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
-    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
-    const third = grid.patchCell('r1', 'f2', 'y', 2, { chainVersion: false })
-    await server.answerAll()
-    expect(await third).toBeNull()
-  })
-
   it('a write made after the first answer reads the version it returned, and goes as given', async () => {
     const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f_qty', 6, row(grid).version)
@@ -384,6 +372,56 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     await grid.loadViewData(0)
     await server.release()
     expect(row(grid).data.f2).toBe('theirs')
+  })
+
+  it('a row reloaded from a version before another user\'s change (the reload landed after their merge) keeps its version when a write made on their version is accepted: a write made on it conflicts, and their value stays', async () => {
+    const { grid, server } = await setup([r1()])
+    const stored = server.stored.get('r1')!
+    // Another user stores f2 = 'theirs' (version 2), and their merge reaches the grid.
+    stored.version = 2
+    stored.data.f2 = 'theirs'
+    grid.mergeRemoteRecord({ id: 'r1', version: 2, data: { ...stored.data } })
+    const first = grid.patchCell('r1', 'f1', 'b', row(grid).version)
+    // A reload that read version 1, before their change, lands now.
+    grid.rows.value = [r1()]
+    await server.answerAll()
+    expect(await first).toBeNull()
+    expect(row(grid)).toMatchObject({ version: 1, data: { f1: 'b', f2: 'x' } })
+    const second = grid.patchCell('r1', 'f2', 'mine', row(grid).version)
+    await server.answerAll()
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(server.stored.get('r1')!.data.f2).toBe('theirs')
+  })
+
+  it('a row reloaded from a version before an earlier write of the record still in its chain takes the version of the next accepted write', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    const second = grid.patchCell('r1', 'f2', 'y', 1)
+    await server.answer()
+    // A reload that read version 1, before the first write, lands while the second is out.
+    grid.rows.value = [r1()]
+    await server.answerAll()
+    expect(await second).toBeNull()
+    expect(row(grid).version).toBe(3)
+    const third = grid.patchCell('r1', 'f3', 'z', row(grid).version)
+    await server.answerAll()
+    expect(await third).toBeNull()
+  })
+
+  it('a row reloaded after the write was stored and another user moved the record on keeps its newer version: the next write made on it is stored', async () => {
+    const { grid, server } = await setup([r1()])
+    const only = grid.patchCell('r1', 'f2', 'y', 1)
+    server.store()
+    const stored = server.stored.get('r1')!
+    stored.version += 1
+    stored.data.f3 = 'theirs'
+    await grid.loadViewData(0)
+    await server.release()
+    expect(await only).toBeNull()
+    expect(row(grid)).toMatchObject({ version: 3, data: { f2: 'y', f3: 'theirs' } })
+    const next = grid.patchCell('r1', 'f1', 'b', row(grid).version)
+    await server.answerAll()
+    expect(await next).toBeNull()
   })
 
   it('an older answer brings every link field\'s summaries: a waiting link write keeps its own', async () => {
