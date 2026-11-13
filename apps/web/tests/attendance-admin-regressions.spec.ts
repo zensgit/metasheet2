@@ -3992,6 +3992,7 @@ describe('Attendance admin regressions', () => {
       groupId: 'group-a',
       step: 'schedule',
       surface: 'assignments',
+      originStage: 'schedule',
     })
   })
 
@@ -5711,6 +5712,38 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-attendance-group-punch-method-drawer]')).toBeNull()
   })
 
+
+  it('hydrates an authorized returned B/policies once and keeps a new draft across a delayed catalog response', async () => {
+    const returnedGroup = {
+      id: 'group-b', name: 'Authorized returned group B', timezone: 'Asia/Shanghai',
+      attendanceType: 'fixed_shift' as const,
+    }
+    const fallback = vi.mocked(apiFetch).getMockImplementation()!
+    let resolveGroups!: (response: Response) => void
+    const delayedGroups = new Promise<Response>((resolve) => { resolveGroups = resolve })
+    vi.mocked(apiFetch).mockImplementation((input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.startsWith('/api/attendance/groups?')) return delayedGroups
+      return fallback(input, init)
+    })
+    app = createAttendanceApp(AttendanceView, {
+      mode: 'admin',
+      initialSectionId: 'attendance-admin-groups',
+      returnGroupContext: { group: returnedGroup, stage: 'policies' },
+    })
+    app.mount(container!)
+    await flushUi(8)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe(returnedGroup.name)
+    expect(container!.querySelector('[data-attendance-group-workflow-step="policies"]')?.getAttribute('aria-current')).toBe('step')
+    setInput(container!, '#attendance-group-name', 'New unsaved return draft')
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="people"]')!.click()
+    resolveGroups(jsonResponse(200, { ok: true, data: { items: [{ ...returnedGroup, name: 'Later server label' }], total: 1 } }))
+    await flushUi(10)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-group-name')?.value).toBe('New unsaved return draft')
+    expect(container!.querySelector('[data-attendance-group-workflow-step="people"]')?.getAttribute('aria-current')).toBe('step')
+    expect(vi.mocked(apiFetch).mock.calls.filter(([, init]) => ['PUT', 'PATCH', 'DELETE'].includes(String(init?.method)))).toEqual([])
+  })
+
   it('navigates from attendance group summary cards without issuing API writes', async () => {
     const openGroupRoute = vi.fn()
     app = createAttendanceApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
@@ -5755,7 +5788,7 @@ describe('Attendance admin regressions', () => {
 
     const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeNavCalls)
     expect(newCalls).toHaveLength(0)
-    expect(openGroupRoute.mock.calls.map(([target]) => target)).toEqual(expectedRoutes.map(([, target]) => target))
+    expect(openGroupRoute.mock.calls.map(([target]) => target)).toEqual(expectedRoutes.map(([, target]) => ({ ...target, originStage: 'basics' })))
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).not.toBe('none')
   })
 
@@ -5787,7 +5820,7 @@ describe('Attendance admin regressions', () => {
 
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
     expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
-    expect(openGroupRoute).toHaveBeenCalledWith({ groupId: 'group-a', step: 'calendar', surface: null })
+    expect(openGroupRoute).toHaveBeenCalledWith({ groupId: 'group-a', step: 'calendar', surface: null, originStage: 'basics' })
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).not.toBe('none')
   })
 
@@ -5815,7 +5848,7 @@ describe('Attendance admin regressions', () => {
       await flushUi(2)
       container!.querySelector<HTMLButtonElement>(selector)!.click()
       await flushUi(2)
-      expect(openGroupRoute).toHaveBeenLastCalledWith(target)
+      expect(openGroupRoute).toHaveBeenLastCalledWith({ ...target, originStage: 'basics' })
       expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
     }
 
@@ -5832,7 +5865,7 @@ describe('Attendance admin regressions', () => {
       await flushUi(2)
       container!.querySelector<HTMLButtonElement>(selector)!.click()
       await flushUi(2)
-      expect(openGroupRoute).toHaveBeenLastCalledWith(target)
+      expect(openGroupRoute).toHaveBeenLastCalledWith({ ...target, originStage: 'basics' })
       expect(container!.querySelector('[data-attendance-group-rule-policy-drawer]')).toBeNull()
     }
 
@@ -5844,6 +5877,7 @@ describe('Attendance admin regressions', () => {
       groupId: 'group-a',
       step: 'schedule',
       surface: 'assignments',
+      originStage: 'schedule',
     })
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
   })
@@ -5922,6 +5956,7 @@ describe('Attendance admin regressions', () => {
       groupId: 'group-a',
       step: 'schedule',
       surface: 'advanced-scheduling',
+      originStage: 'schedule',
     })
   })
 
