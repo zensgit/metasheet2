@@ -258,7 +258,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 
    只看这些计数，不看退出码：退出码还会因别的原因不为 0（例如某个项目在等恢复，§1.5）。任一条不满足：先按交付说明 §5-5 第 2 步用 `--tenant-id` 重新换发令牌（`scripts/ops/attendance-window-runner-mint-token.mjs`），把 `--allow-tenantless` 从启动行删掉，换好再从 (a) 查起。**不要**为了让脚本跑通而加 `--allow-tenantless`。
 2. 按交付说明 §5-5 的前置顺序做完其余几步（`user_orgs` 每个账号恰好一条活跃行、全员重新登录）。
-3. 在 `app.env` 里加一行 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`，重启后端。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；做法、Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步）。交付说明 §5-5 第 4 步只写「重载重启」，它 §7.1 的现成写法是先把 env 文件装进当前 PowerShell、再裸跑 `pm2 restart metasheet-backend --update-env`（`customer-delivery-guide-20260904.md:746-752`）：在 Windows 现场由这个启动脚本代替。然后按 §5-5 第 4 步核两条（进程环境里能看到这一行；一个没有租户声明的旧令牌被拒 403 `OPERATOR_SCOPE_TENANT_REQUIRED`）。
+3. 在 `app.env` 里加一行 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`，重启后端。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；做法、Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步）。交付说明 §5-5 第 4 步只写「重载重启」，它 §7.1 的现成写法是先把 env 文件装进当前 PowerShell、再裸跑 `pm2 restart metasheet-backend --update-env`（`customer-delivery-guide-20260904.md:746-752`，本 PR 基线 e80a3d700 上）：在 Windows 现场由这个启动脚本代替。然后按 §5-5 第 4 步核两条（进程环境里能看到这一行；一个没有租户声明的旧令牌被拒 403 `OPERATOR_SCOPE_TENANT_REQUIRED`）。
 4. 再手动触发一次定时拉取：每个项目的结果应与打开前相同。
 
 **停止条件：只要有任何一个试点已启用，就不得删掉这一行。** 就绪检查只管「启用」这一下：启用之后，运行时没有任何检查因此拒绝，试点也不会因此被撤销（只有就绪的 GET 会重新列出 `tenant_claim_required`，§3 第 7 步；试点标记只能由 §3 的手册语句清掉）。删掉这一行，这张试点表上旧分支的路径就重新打开。交付说明 §5-5 的「回滚 = 删掉这一行」**只在没有试点启用时**适用；有试点时要回滚，先由 owner 裁定，按 §3「退出试点」处理每个试点之后才删。
@@ -396,7 +396,7 @@ Remove-Variable token
   - `GET …/target/sheet-repair/runs`：这张表最近 50 次运行（更多时回答带 `truncated: true`），无值，不含备份（`stock-preparation-sheet-repair-store.cjs:75`、`:287-292`）。restore 和续关要用的运行 id 从这里取。
 - 开关 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED` 只认精确的 `true`：不去空格，也不认大写（`stock-preparation-sheet-repair.cjs:83-85`）。它或项目表开关不是 `true` 时，三条路由（预览、补填报告、运行列表都算）一律 404、零 IO（`http-routes.cjs:6854-6859`）。所以给客户准备 Q3 的补填报告，也要先开开关。
 - **开关按部署生效。** 开着时，这个部署上**每一个**项目的表都能被修复。窗口开始时在 `app.env` 里加这一行、重启；窗口结束时关掉它、重启（关法见下一条）。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步），不跑交付说明 §7.1 里裸的 `pm2 restart --update-env`。
-- **关开关不能只删这一行。** 启动脚本重读 `app.env`，再走 `pm2 restart … --update-env`（`attendance-onprem-start-pm2.ps1:79`、`:378`）；它只为自己列出的两个键删掉 pm2 的应用定义（`:8-11`）。交付说明记过实测：`pm2 restart --update-env` 不会因为某一行从 `app.env` 里删掉，就把它从运行中的进程里清掉（`customer-delivery-guide-20260904.md:717`）。这一条是读代码加交付说明的实测，本手册没有另做见证。所以窗口结束时：先把这一行显式改成 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED=false`（开关只认精确的 `true`），用启动脚本重启；核对修复路由答 404 `STOCK_PREP_SHEET_REPAIR_DISABLED`（本 PR 基线 e80a3d700 上 `http-routes.cjs:6911-6912`）；然后再删掉这一行。
+- **关开关不能只删这一行。** 启动脚本重读 `app.env`，再走 `pm2 restart … --update-env`（本 PR 基线 e80a3d700 上：导入 `attendance-onprem-start-pm2.ps1:51`，调用在 `:352`；重启 `:378`）；它只为自己列出的两个键删掉 pm2 的应用定义（`:8-11`）。交付说明记过实测：`pm2 restart --update-env` 不会因为某一行从 `app.env` 里删掉，就把它从运行中的进程里清掉（`customer-delivery-guide-20260904.md:717`，同一基线）。这一条是读代码加交付说明的实测，本手册没有另做见证。所以窗口结束时：先把这一行显式改成 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED=false`（开关只认精确的 `true`），用启动脚本重启；核对修复路由答 404 `STOCK_PREP_SHEET_REPAIR_DISABLED`（本 PR 基线 e80a3d700 上 `http-routes.cjs:6911-6912`）；然后再删掉这一行。
 - 开关开着而 108 没跑：修复路由答 503 `STOCK_PREP_SHEET_REPAIR_STORE_FAILED`，什么都不写（`108_…:67-70`）。
 - `approvalRef` 只记录、不核验：服务端不查它是不是 owner 真批过。批复原文和编号的对照只进私有记录（§8）。
 
