@@ -103,6 +103,15 @@ describe('DingTalk directory adapter', () => {
       infoSpy.mockRestore()
     })
 
+    it('prefers the first child sample over a different ordinary root sample when both are present', async () => {
+      armListReads(['a0g-u1'], ['a0g-u3'], ['a0g-u9'])
+      const result = await dingtalkDirectoryAdapter.probeConnection!(config)
+      expect(clientMocks.getDingTalkUserDetail).toHaveBeenCalledTimes(1)
+      expect(clientMocks.getDingTalkUserDetail).toHaveBeenCalledWith('a0g-token', 'a0g-u1', { baseUrl: undefined })
+      expect(clientMocks.getDingTalkUserDetail).not.toHaveBeenCalledWith('a0g-token', 'a0g-u3', expect.anything())
+      expect(result.summary.code).toBe('healthy')
+    })
+
     it('falls back to the ordinary root sample when the first child sample is empty — never the access-limited one', async () => {
       armListReads([], ['a0g-u3'], ['a0g-u9', 'a0g-u3'])
       const result = await dingtalkDirectoryAdapter.probeConnection!(config)

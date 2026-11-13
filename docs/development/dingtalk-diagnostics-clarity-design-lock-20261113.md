@@ -71,7 +71,7 @@ acceptance work.
 - A `DingTalkLoginPolicyError` refusal answers `{ success: false, error, code }` with its existing stable code at
   its unchanged HTTP status. Activation-intent errors keep their code as before. Upstream (502), local (500),
   state (400), missing-code (400) and not-configured (503) failures still answer without a code; the nested
-  recovery-conflict answer is unchanged. No refusal creates a session or a token.
+  recovery-conflict answer is unchanged. No refusal creates a session or returns a token to the client.
 - The three unlinked-account refusal messages no longer contain the email from the scanned profile. The
   container sign-in route forwards the same messages, so its response text changes the same way.
 - The set of top-level codes the callback can answer is pinned as a literal set, derived from the sources:
@@ -119,7 +119,7 @@ acceptance work.
 | G1 | Successful list reads plus a rejected detail read fail the probe (adapter test, and route-level tests through the real probe, client and transport with a stubbed provider); exactly one logical detail read of an ordinary sample (child first, ordinary root fallback, never the access-limited sample); no ordinary sample → no detail read, warning, `member_detail_unverified`; detail values absent from response and logs. |
 | G2 | Shared wording never claims full coverage or asks to widen the scope; every next action names the sampled scope; connection-test golden gains exactly the detail call and the new wording; manual-apply golden changes only its two diagnostic text values. |
 | G3 | Directory page: configuration-check label, loading and disabled state, pass / missing / allowlist / unknown / failed results, no request on open, no other login request; the connection-test status bar never says a blanket pass and a failed test clears the previous result. |
-| G4 | Callback route: each policy code survives at its status (403 / 409 / 503) with no session or token; non-policy failures carry no code; the code set is pinned and mirrored by the page's table keys. Unlinked refusals carry no scanned-profile value. |
+| G4 | Callback route: each policy code survives at its status (403 / 409 / 503) with no session created and no token returned; non-policy failures carry no code; the code set is pinned, and the page's table keys are pinned to the same literal list. Unlinked refusals carry no scanned-profile value. |
 | G5 | Mounted callback tests: Chinese and English guidance for the main codes, every listed code distinct from the fallback, fallback for unknown / missing / odd-shaped / prototype codes, older responses, raw text with personal values, network errors and invalid JSON; no token, session or navigation on failure; success and binding unchanged. |
 | G6 | Mutations (detail read removed, policy code dropped from the callback, raw error text shown again, `member_detail_unverified` reverted to `healthy`, detail sample taken from the access-limited list) each turn a test red. |
 | G7 | The callback spec runs in the required web lane and the attendance web guard; the shape and manifest guards stay green. Draft only; no staging operation. |
@@ -130,5 +130,5 @@ acceptance work.
   it reads the same runtime status and is a candidate for a follow-up.
 - The real directory's visible scope, which DingTalk errcode a missing member-detail permission returns, and
   whether a real scan identity can sign in.
-- The anonymous probe response's fields, the server-side log lines, and the formal sync's handling of detail
-  failures.
+- Behaviour this lock does not describe above — including the formal directory sync's pull, matching,
+  persistence and deprovisioning — is unchanged by this slice.

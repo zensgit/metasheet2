@@ -2297,9 +2297,12 @@ describe('auth login routes', () => {
      * every literal `code:` of a DingTalk login policy refusal (dingtalk-oauth.ts) plus the two
      * activation-denial codes it forwards, every activation-intent code and policy code thrown in
      * routes/auth.ts, and the literal codes of the callback route's own early answers — minus the
-     * codes only another route can reach. A new code fails this test until it is added here AND to
-     * the callback page's code table, whose keys are pinned to the same literal set in
-     * apps/web/tests/dingtalk-auth-callback.spec.ts — change both together.
+     * codes only another route can reach. This test pins the backend's set: a new code written in
+     * those two source files, in the forms scanned below, fails it until the literal list below is
+     * updated. It scans only those two files.
+     * apps/web/tests/dingtalk-auth-callback.spec.ts separately pins the callback page's code-table keys
+     * to its own copy of the same literal list. Nothing checks the two lists against each other
+     * mechanically, so change both together.
      */
     const CALLBACK_TOP_LEVEL_CODES = [
       'ACCOUNT_ACTIVATION_INVALID',
