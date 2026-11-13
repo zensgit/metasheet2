@@ -252,7 +252,7 @@ function Start-Proxy {
   # Harness stand-in for the site's nginx: the apply health-checks http://127.0.0.1/health and
   # http://127.0.0.1/api/plugins (port 80, apply-package.ps1 -BaseUrl/-ApiBase defaults), and neither
   # the launcher nor the .bat forwards an override. 127.0.0.1:80 -> 127.0.0.1:8900, 502 when down.
-  if (Test-PortListening -Port 80) { return $true }
+  if (Test-PortListening -Port 80) { return (@(Get-Port80Owners) -contains 'node') }
   $proxyJs = Join-Path $H 'proxy.cjs'
   $proxyCmd = Join-Path $H 'proxy-start.cmd'
   $proxyLog = Join-Path $H 'proxy.log'
@@ -280,9 +280,39 @@ server.listen(80, '127.0.0.1')
   return $false
 }
 
-function Stop-Proxy {
+function Get-Port80Owners {
+  $names = @()
   foreach ($c in @(Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue)) {
-    Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+    $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+    if ($null -ne $p) { $names += [string]$p.ProcessName } else { $names += ('pid' + $c.OwningProcess) }
+  }
+  return @($names | Select-Object -Unique)
+}
+
+function Clear-RunnerPort80 {
+  # The windows image can hold 127.0.0.1:80 itself (http.sys under the System process, IIS).
+  # This runner is disposable, so the harness frees the port before it puts its nginx stand-in there.
+  $steps = @()
+  foreach ($svc in @('W3SVC', 'WAS', 'IISADMIN')) {
+    if ($null -ne (Get-Service -Name $svc -ErrorAction SilentlyContinue)) {
+      Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+      $steps += ('stop-' + $svc)
+    }
+  }
+  Start-Sleep -Seconds 2
+  if ((Test-PortListening -Port 80) -and (@(Get-Port80Owners) -contains 'System')) {
+    $r = Invoke-CmdLine -CommandLine 'net stop http /y'
+    $steps += ('net-stop-http-exit-' + $r.Code)
+    Start-Sleep -Seconds 2
+  }
+  return $steps
+}
+
+function Stop-Proxy {
+  # Only the harness's own node proxy is stopped; never a system process.
+  foreach ($c in @(Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue)) {
+    $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+    if ($null -ne $p -and $p.ProcessName -eq 'node') { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }
   }
   for ($i = 0; $i -lt 40; $i++) {
     if (-not (Test-PortListening -Port 80)) { return $true }
@@ -466,8 +496,12 @@ function Invoke-Preflight {
   $res['corepack_path_in_program_files'] = (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'nodejs\corepack.cmd'))
 
   $res['port80_free_before'] = -not (Test-PortListening -Port 80)
+  $res['port80_owners_before'] = @(Get-Port80Owners)
+  $res['port80_clear_steps'] = @()
+  if (-not $res['port80_free_before']) { $res['port80_clear_steps'] = @(Clear-RunnerPort80) }
+  $res['port80_free_after_clear'] = -not (Test-PortListening -Port 80)
   $res['port8900_free_before'] = -not (Test-PortListening -Port $BackendPort)
-  if (-not $res['port80_free_before']) { $fail += 'port 80 already in use on the runner' }
+  if (-not $res['port80_free_after_clear']) { $fail += ('port 80 still in use on the runner by ' + ((@(Get-Port80Owners)) -join '/')) }
   if (-not $res['port8900_free_before']) { $fail += 'port 8900 already in use on the runner' }
 
   $pm = Invoke-CmdLine -CommandLine ('npm install -g pm2@' + $env:PM2_VERSION + ' --no-audit --no-fund')
