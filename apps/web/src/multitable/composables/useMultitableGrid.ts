@@ -131,6 +131,11 @@ export interface GridPatchFailure {
   fieldErrors?: Record<string, string>
 }
 
+/** What `retryConflict` returns: `true` once the retried value is stored; `false` when there was no conflict to
+ *  retry, or the retry was replaced unsent by a newer write of its cell (whose answer is the cell's); otherwise the
+ *  retry's own failure (a `GridPatchFailure`, or just the message when no request was made). */
+export type ConflictRetryResult = boolean | { message: string }
+
 /** A cell write waiting for, or holding, its record's turn (see `patchCell`). */
 interface QueuedCellWrite {
   fieldId: string
@@ -667,7 +672,10 @@ export function useMultitableGrid(opts: {
   // Cell patches whose answer has not come back. A patch joins the undo history only once it succeeds
   // (after its await), so an undo or redo while one is in flight would step over it and replay an earlier,
   // unrelated edit to the server instead: undo and redo do nothing until it settles.
-  let pendingCellPatches = 0
+  // Exposed read-only as `pendingCellWriteCount`: a write is counted from its call until it is answered, or replaced
+  // unsent by a newer write of its cell, so a caller can tell that leaving the page now may lose one.
+  const pendingCellPatches = ref(0)
+  const pendingCellWriteCount = computed(() => pendingCellPatches.value)
   // Cell writes go out one at a time per record (`patchCell`), while it has one in flight.
   const recordWriteQueues = new Map<string, RecordWriteQueue>()
   let rangeContextId = 0
@@ -1544,7 +1552,7 @@ export function useMultitableGrid(opts: {
     const contextId = rangeContextId
     let nextLinkSummaries: LinkedRecordSummary[] | undefined
     activeGridWrites++
-    pendingCellPatches++
+    pendingCellPatches.value++
 
     // Optimistic update
     if (row) row.data[fieldId] = value
@@ -1571,7 +1579,7 @@ export function useMultitableGrid(opts: {
       const turn = await new Promise<'send' | typeof CELL_WRITE_SUPERSEDED>((resolve) => { write.wake = resolve })
       if (turn === CELL_WRITE_SUPERSEDED) {
         activeGridWrites--
-        pendingCellPatches--
+        pendingCellPatches.value--
         return CELL_WRITE_SUPERSEDED
       }
     }
@@ -1709,7 +1717,7 @@ export function useMultitableGrid(opts: {
       }
     } finally {
       activeGridWrites--
-      pendingCellPatches--
+      pendingCellPatches.value--
       const next = turns.waiting.shift()
       if (next) next.wake('send')
       else recordWriteQueues.delete(recordId)
@@ -1750,7 +1758,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function undo() {
-    if (rangePending || pendingCellPatches > 0 || opts.holdsHistory?.() || !canUndo.value) return
+    if (rangePending || pendingCellPatches.value > 0 || opts.holdsHistory?.() || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
     const route = manualReplayRoute(edit)
@@ -1771,7 +1779,7 @@ export function useMultitableGrid(opts: {
   }
 
   async function redo() {
-    if (rangePending || pendingCellPatches > 0 || opts.holdsHistory?.() || !canRedo.value) return
+    if (rangePending || pendingCellPatches.value > 0 || opts.holdsHistory?.() || !canRedo.value) return
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
@@ -2014,7 +2022,10 @@ export function useMultitableGrid(opts: {
     conflict.value = null
   }
 
-  async function retryConflict(): Promise<boolean> {
+  // The retry answers for itself (`ConflictRetryResult`): it decides from what its own `patchCell` returned, not from
+  // `conflict` / `error` read after the await. Those are shared: an older write of the record that fails while the
+  // retry waits its turn sets `error`, and a newer write clears both.
+  async function retryConflict(): Promise<ConflictRetryResult> {
     const pending = conflict.value
     if (!pending) return false
 
@@ -2025,17 +2036,24 @@ export function useMultitableGrid(opts: {
       row = rows.value.find((record) => record.id === pending.recordId)
     }
     if (!row) {
-      error.value = fallback('grid.errorRecordVersionUnavailable')
-      return false
+      const message = fallback('grid.errorRecordVersionUnavailable')
+      error.value = message
+      return { message }
     }
 
     const pendingConflict = pending
     conflict.value = null
-    await patchCell(row.id, pending.fieldId, pending.attemptedValue, row.version, {
+    const write = patchCell(row.id, pending.fieldId, pending.attemptedValue, row.version, {
       previousLinkSummaries: pendingConflict.previousLinkSummaries,
       nextLinkSummaries: pendingConflict.nextLinkSummaries,
     })
-    return !conflict.value && !error.value
+    // patchCell's local row-action refusal sets `error` before the call returns (and returns no failure).
+    const refusedLocally = error.value
+    const failure = await write
+    if (failure === CELL_WRITE_SUPERSEDED) return false
+    if (failure) return failure
+    if (refusedLocally) return { message: refusedLocally }
+    return true
   }
 
   function setLinkSummaries(recordId: string, fieldId: string, summaries?: LinkedRecordSummary[]) {
@@ -2222,6 +2240,7 @@ export function useMultitableGrid(opts: {
   return {
     // State
     fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
+    pendingCellWriteCount,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,

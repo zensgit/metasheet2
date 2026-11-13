@@ -22,6 +22,9 @@ export default defineConfig({
       'tests/integration/permission-lifecycle-realdb.test.ts',
       'tests/integration/permission-role-delete-realdb.test.ts',
       'tests/integration/permission-browser-realdb.test.ts',
+      // Permission-management UX uses dedicated configs with token trust disabled
+      // before imports, and a separate CI PostgreSQL instance per slice.
+      'tests/integration/permission-ux-*.db.test.ts',
     ],
     testTimeout: 30000,
     hookTimeout: 15000,

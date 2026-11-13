@@ -323,6 +323,32 @@ describe('rbac namespace admission', () => {
     expect(statements.join('\n')).not.toMatch(/user_orgs/)
   })
 
+  it('groups inherited role grants and keeps an orphan role visible', async () => {
+    state.poolQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          { code: 'crm:write', role_id: 'crm_operator', role_name: 'CRM Operator' },
+          { code: 'crm:read', role_id: 'crm_operator', role_name: 'CRM Operator' },
+          { code: 'qa:read', role_id: 'qa_orphan', role_name: null },
+          { code: 'workflow:read' },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ permissions: [] }] })
+    state.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const inspection = await inspectUserPermissionGrants('user-inherited-roles')
+
+    expect(inspection.inherited).toEqual(['crm:read', 'crm:write', 'qa:read', 'workflow:read'])
+    expect(inspection.inheritedRoles).toEqual([
+      { roleId: 'crm_operator', roleName: 'CRM Operator', permissions: ['crm:read', 'crm:write'] },
+      { roleId: 'qa_orphan', roleName: null, permissions: ['qa:read'] },
+    ])
+    expect(state.poolQuery).toHaveBeenCalledTimes(3)
+  })
+
   it('discards a partial inspection when a later source SELECT is 42P01', async () => {
     const previous = process.env.RBAC_OPTIONAL
     process.env.RBAC_OPTIONAL = '1'
