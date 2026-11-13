@@ -148,18 +148,23 @@ function load_env_file() {
   set -u
 }
 
-[[ -f "$ENV_FILE" ]] || die "ENV_FILE not found: ${ENV_FILE}"
-[[ -n "$ADMIN_EMAIL" ]] || die "ADMIN_EMAIL is required"
-[[ -n "$ADMIN_PASSWORD" ]] || die "ADMIN_PASSWORD is required"
+function require_admin_inputs() {
+  [[ -n "$ADMIN_EMAIL" ]] || die "ADMIN_EMAIL is required"
+  [[ -n "$ADMIN_PASSWORD" ]] || die "ADMIN_PASSWORD is required"
 
-if [[ "${#ADMIN_PASSWORD}" -lt 12 ]]; then
-  die "ADMIN_PASSWORD must be at least 12 characters for production"
-fi
+  if [[ "${#ADMIN_PASSWORD}" -lt 12 ]]; then
+    die "ADMIN_PASSWORD must be at least 12 characters for production"
+  fi
+}
+
+[[ -f "$ENV_FILE" ]] || die "ENV_FILE not found: ${ENV_FILE}"
+require_admin_inputs
 
 require_cmd node
 require_cmd psql
 
 load_env_file
+require_admin_inputs
 
 if [[ -n "${ENV_OVERRIDE_BCRYPT_SALT_ROUNDS}" ]]; then
   BCRYPT_SALT_ROUNDS="${ENV_OVERRIDE_BCRYPT_SALT_ROUNDS}"
