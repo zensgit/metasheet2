@@ -838,6 +838,34 @@ describe('targets that are read item by item or not at all', () => {
     }
   })
 
+  it('a word that may precede the name SELECT INTO creates may be the schema of the name: a name is read at each such word, at the INTO of a SELECT and at the INTO of a write', () => {
+    const under = ['unreadable SELECT INTO: creates a table under an input table name']
+    const parts = ['unreadable SELECT INTO: creates a table whose name has more than two parts']
+    const unread = ['unreadable SELECT INTO: creates a table whose name is not readable']
+    const named = [
+      'SELECT id INTO temp.users FROM staging',
+      'SELECT id INTO TEMP local.users FROM staging',
+      'SELECT id AS insert INTO UNLOGGED global.role_permissions FROM staging',
+      'EXPLAIN INSERT INTO TEMP local.users SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT user_id FROM user_roles) MERGE INTO TABLE global.user_roles m USING w ON m.user_id = w.user_id WHEN MATCHED THEN DELETE',
+      'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO UNLOGGED temp.role_permissions SELECT user_id FROM w',
+    ]
+    for (const statement of named) {
+      const result = check(unlocked(statement))
+      expect(result.verdicts.map((line) => line.verdict), statement).toEqual(['unreadable'])
+      expect(result.problems, statement).toEqual(under)
+    }
+    for (const statement of ['SELECT id INTO TEMP local.a.users FROM staging', 'EXPLAIN INSERT INTO TEMP local.a.users SELECT user_id FROM user_roles']) {
+      expect(check(unlocked(statement)).problems, statement).toEqual(parts)
+    }
+    // A table a SELECT creates in a schema spelled like such a word is not read past the word, and stays refused.
+    expect(check(unlocked('SELECT id INTO temp.audit_copy FROM users')).problems).toEqual(unread)
+    // A write into another table of such a schema, and a read into a name after such words, stay accepted.
+    expect(check(unlocked('WITH w AS (SELECT user_id FROM user_roles) INSERT INTO temp.audit_x SELECT user_id FROM w')).problems).toEqual([])
+    expect(check(unlocked('EXPLAIN INSERT INTO TEMP local.audit_x SELECT user_id FROM user_roles')).problems).toEqual([])
+    expect(check(unlocked('SELECT id INTO GLOBAL TEMPORARY TABLE app.audit_copy FROM users')).problems).toEqual([])
+  })
+
   it('a TRUNCATE list is read from the verb: an input table after an item that is not a plain name is a write the scan reports, and requires the lock block', () => {
     const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
     for (const statement of ['TRUNCATE "audit log", role_permissions', 'TRUNCATE TABLE ONLY "audit log" *, public.user_permissions CASCADE']) {

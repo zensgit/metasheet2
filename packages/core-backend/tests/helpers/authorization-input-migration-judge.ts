@@ -1076,12 +1076,16 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     const verb = head === 'WITH' || head === 'EXPLAIN' ? topLevelKeyword(tokens, 1, tokens.length, 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'VALUES', 'TABLE') : -1
     const targetInto = verb >= 0 && isKeyword(tokens[verb], 'INSERT', 'MERGE') ? verb + 1 : -1
     for (let into = topLevelKeyword(tokens, 1, tokens.length, 'INTO'); into >= 0; into = topLevelKeyword(tokens, into + 1, tokens.length, 'INTO')) {
-      let at = into + 1
-      while (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) at += 1
-      const created = tableAt(tokens, at)
-      if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
-      if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
-      if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+      // The words that may precede the name are passed over one by one, and a name is read at
+      // each of them as well: such a word may be the schema the name is written with.
+      for (let at = into + 1; ; at += 1) {
+        const created = tableAt(tokens, at)
+        if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
+        if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
+        if (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) continue
+        if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+        break
+      }
     }
     return push(head, 'safe', '')
   }
