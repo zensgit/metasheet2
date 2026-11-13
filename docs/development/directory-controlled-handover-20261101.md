@@ -58,7 +58,22 @@ rollback／finalize 输入必须且只能包含交接 `id`、apply 返回的 `di
 
 卡片 INSERT 触发器与同步共享冻结锁，并持集成 `FOR SHARE`。apply 更新集成 tuple 版本，旧 REPEATABLE READ 写事务也不能使用旧快照穿过冻结。该局部序列化拒绝转换为专属数据库约束错误；发送执行器只把这个确知尚未调用提供方的错误记为可重试失败。其他错误和不确定发送继续保守拒绝自动重发。
 
-交接日志的配置、权限／身份内容只保存摘要，凭据及密码不复制到日志；目录账号和部门恢复快照只留在受限业务数据库，不进入 PR／报告。日志非空时迁移 down 拒绝，避免删除冻结历史。
+从 v2 交接日志起，`applied` 仅保存原全量快照的 SHA-256、迁移账号的内部 ID 与原更新时间，以及原目标部门 ID。回退以当前受保护的源／目标部门键反向更新成员关系，恢复后必须与原全量摘要完全相符。完成或回退会在同一事务清空 `before_state`，保留状态、操作者、时间和交接摘要。
+
+### 升级与回退检查
+
+1. 维护窗口暂停两版 CLI 和新的交接写入。仅用下面的汇总了解范围，避免把 JSON 或人员信息写入运维记录。
+   ```sql
+   SELECT state, count(*) FROM directory_handovers GROUP BY state ORDER BY state;
+   ```
+2. 经单独批准并验证可恢复的备份后，随新后端运行 `zzzz20261105180000_minimize_directory_handover_journals`。迁移先取得交接日志排他锁（最多等 5 秒）。对所有在途记录核对活动快照与原 `after_digest`，然后收缩旧格式，并清空两种终态的历史载荷。任一在途记录漂移或锁获取失败就停止。保留原记录，在旧版本核明原因；不要重签摘要或绕过冻结。
+3. 升级验收只记录计数。下面两项都应为 0。该操作针对活动业务库中的逻辑数据；历史备份和归档按既有留存策略另行管理。
+   ```sql
+   SELECT count(*) FILTER (WHERE state = 'applied' AND (before_state->>'version') IS DISTINCT FROM '2') AS unexpected_applied,
+          count(*) FILTER (WHERE state IN ('finalized','rolled_back') AND before_state <> '{}'::jsonb) AS retained_terminal
+   FROM directory_handovers;
+   ```
+4. 退回旧写入程序前暂停交接，先用新版本按批准流程完成或回退在途记录。只要仍有 `applied`，隐私迁移的 `down` 会拒绝。允许降级时仅移除格式约束；已擦除的历史明细不可逆。降级后继续暂停旧版写入，避免重新产生完整快照。
 
 applied 或 finalized 后，不得直接降级为不了解交接冻结的旧后端。优先用本版本 rollback（仅 applied 且无漂移）；已 finalize／出现变化需另行方案。数据库备份恢复只在一致维护窗口、匹配版本代码下执行，不能覆盖此后业务写入。恢复后的冻结触发器、日志、权限和待办须重新验收。
 
