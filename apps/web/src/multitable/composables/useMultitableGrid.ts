@@ -22,6 +22,7 @@ import { metaCoreLabel } from '../utils/meta-core-labels'
 import { workbenchLabel } from '../utils/workbench-labels'
 import { DEFAULT_GRID_PAGE_SIZE, clampGridPageSize } from '../utils/grid-page-size'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
+import { CELL_WRITE_SUPERSEDED } from '../utils/cell-write'
 
 // --- Sort / Filter types ---
 
@@ -128,6 +129,30 @@ export interface GridPatchFailure {
   code?: string
   message: string
   fieldErrors?: Record<string, string>
+}
+
+/** A cell write waiting for, or holding, its record's turn (see `patchCell`). */
+interface QueuedCellWrite {
+  fieldId: string
+  /** The value written, and the link summaries it set (link fields): the cell shows them until it is answered. */
+  value: unknown
+  nextLinkSummaries?: LinkedRecordSummary[]
+  /** The record was on the page when the cell was written, so the cell showed every earlier write at once, and the
+   *  value was made on all of them. */
+  inPage: boolean
+  /** What the cell held before this write, or before an older write of the same cell that failed or that this
+   *  one replaced unsent: the write rolls back to it, and is undone to it. */
+  oldValue: unknown
+  oldLinkSummaries: LinkedRecordSummary[] | undefined
+  /** Starts the write's turn, or ends it unsent. */
+  wake: (turn: 'send' | typeof CELL_WRITE_SUPERSEDED) => void
+}
+
+interface RecordWriteQueue {
+  /** The writes waiting their turn, in order (not the one in flight): at most one per cell. */
+  waiting: QueuedCellWrite[]
+  /** For each version an accepted write was sent with, the version it returned. */
+  advanced: Map<number, number>
 }
 
 /** 人工补充行 B3: the value the manual-fields route treats as CLEARING a column (its isClearingManualRowValue rule). */
@@ -641,6 +666,8 @@ export function useMultitableGrid(opts: {
   // (after its await), so an undo or redo while one is in flight would step over it and replay an earlier,
   // unrelated edit to the server instead: undo and redo do nothing until it settles.
   let pendingCellPatches = 0
+  // Cell writes go out one at a time per record (`patchCell`), while it has one in flight.
+  const recordWriteQueues = new Map<string, RecordWriteQueue>()
   let rangeContextId = 0
   let loadedRangeContextId = -1
   // Invalidate immediately, including an away/back roundtrip hidden by Vue's batched watcher.
@@ -1456,6 +1483,26 @@ export function useMultitableGrid(opts: {
     await loadViewData(page.value.offset)
   }
 
+  /**
+   * Write one cell. The cell shows the value at once; the request goes out in the record's turn.
+   * - The server takes a record's write only on the version it was made on, so a write sent before the record's
+   *   previous one is answered would be rejected (each part of a date typed, each arrow key in a number box, two
+   *   fields left in a row): a record's writes go out one at a time, in order.
+   * - A write made on a version one of these writes moved the record away from (the caller read it before the
+   *   answer) is sent with the version that write returned, when the record is on the page (its cells show every
+   *   write at once, so the value was made on them). Any other version is sent as given: a change from elsewhere
+   *   is still a conflict. A record off the page (a deep-linked one) keeps its version: its copy takes a write only
+   *   once it is accepted.
+   * - A write still waiting when the same cell is written again is not sent (it returns `CELL_WRITE_SUPERSEDED`):
+   *   only the cell's newest value goes out, rolled back and undone to what the cell held before the older one.
+   * - The record's row keeps showing the writes still waiting, also when it was reloaded or merged meanwhile (the
+   *   server's answer to an older write brings its own link summaries for every link field). A write accepted after
+   *   the row was reloaded from an older version is shown on it; one rejected is rolled back on it.
+   * - It counts as in flight from the call on (undo, redo and range writes are refused until it is answered), and
+   *   goes to the sheet and view it was made in; its answer after a move to another sheet or view does not enter
+   *   that one's undo history, nor its conflict unless the record is in the rows shown (after a move to another
+   *   sheet these are the old sheet's rows until the new sheet's rows land).
+   */
   async function patchCell(
     recordId: string,
     fieldId: string,
@@ -1464,10 +1511,13 @@ export function useMultitableGrid(opts: {
     options?: {
       previousLinkSummaries?: LinkedRecordSummary[]
       nextLinkSummaries?: LinkedRecordSummary[]
-      /** 人工补充行 B3: told the record's version the server returned for THIS write (the drawer's two-step save). */
+      /** Told the record's version the server returned for THIS write. */
       onCommitted?: (version: number) => void
+      /** false: send the version given, never one of this record's own accepted writes returned (the caller's
+       *  copy of the record takes a write only once it is accepted, as an off-page one does). */
+      chainVersion?: boolean
     },
-  ): Promise<GridPatchFailure | null> {
+  ): Promise<GridPatchFailure | typeof CELL_WRITE_SUPERSEDED | null> {
     if (rangePending) return {
       recordId, fieldId, attemptedValue: value, status: 409, code: 'RANGE_BUSY',
       message: fallback('grid.errorPatchCell'),
@@ -1483,8 +1533,13 @@ export function useMultitableGrid(opts: {
       return null
     }
     const row = rows.value.find((r) => r.id === recordId)
-    const oldValue = row?.data[fieldId]
-    const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
+    const entryLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
+    const write: QueuedCellWrite = {
+      fieldId, value, inPage: Boolean(row), oldValue: row?.data[fieldId], oldLinkSummaries: entryLinkSummaries, wake: () => {},
+    }
+    const sheetId = opts.sheetId.value || undefined
+    const viewId = opts.viewId.value || undefined
+    const contextId = rangeContextId
     let nextLinkSummaries: LinkedRecordSummary[] | undefined
     activeGridWrites++
     pendingCellPatches++
@@ -1492,51 +1547,118 @@ export function useMultitableGrid(opts: {
     // Optimistic update
     if (row) row.data[fieldId] = value
     if (Array.isArray(value) && fields.value.find((field) => field.id === fieldId)?.type === 'link') {
-      nextLinkSummaries = options?.nextLinkSummaries ?? oldLinkSummaries?.filter((item) => value.map(String).includes(item.id))
+      nextLinkSummaries = options?.nextLinkSummaries ?? entryLinkSummaries?.filter((item) => value.map(String).includes(item.id))
       setLinkSummaries(recordId, fieldId, nextLinkSummaries)
+      write.nextLinkSummaries = nextLinkSummaries
+    }
+
+    let queue = recordWriteQueues.get(recordId)
+    if (!queue) {
+      queue = { waiting: [], advanced: new Map() }
+      recordWriteQueues.set(recordId, queue)
+    } else {
+      const at = queue.waiting.findIndex((queued) => queued.fieldId === fieldId)
+      if (at >= 0) {
+        // The newer write goes last, as if the older one had not been made: the undo history keeps the order of edits.
+        const [older] = queue.waiting.splice(at, 1)
+        write.oldValue = older.oldValue
+        write.oldLinkSummaries = older.oldLinkSummaries
+        older.wake(CELL_WRITE_SUPERSEDED)
+      }
+      queue.waiting.push(write)
+      const turn = await new Promise<'send' | typeof CELL_WRITE_SUPERSEDED>((resolve) => { write.wake = resolve })
+      if (turn === CELL_WRITE_SUPERSEDED) {
+        activeGridWrites--
+        pendingCellPatches--
+        return CELL_WRITE_SUPERSEDED
+      }
+    }
+    const turns = queue
+    // The row as it is now (a reload or a merge replaces it) shows the writes still waiting.
+    const showWaiting = () => {
+      const live = rows.value.find((r) => r.id === recordId)
+      for (const queued of turns.waiting) {
+        if (live) live.data[queued.fieldId] = queued.value
+        if (queued.nextLinkSummaries) setLinkSummaries(recordId, queued.fieldId, queued.nextLinkSummaries)
+      }
+    }
+
+    let expectedVersion = version
+    if (write.inPage && options?.chainVersion !== false) {
+      for (let next = turns.advanced.get(expectedVersion); next !== undefined; next = turns.advanced.get(expectedVersion)) {
+        expectedVersion = next
+      }
     }
 
     try {
       const result = manualWrite
         ? await client.patchManualRowFields(recordId, {
-          sheetId: opts.sheetId.value || undefined,
-          expectedVersion: version,
+          sheetId,
+          expectedVersion,
           data: { [fieldId]: value },
         })
         : await client.patchRecords({
-          sheetId: opts.sheetId.value || undefined,
-          viewId: opts.viewId.value || undefined,
-          changes: [{ recordId, fieldId, value, expectedVersion: version }],
+          sheetId,
+          viewId,
+          changes: [{ recordId, fieldId, value, expectedVersion }],
         })
+      const live = rows.value.find((r) => r.id === recordId)
+      const liveVersion = live?.version
       applyPatchResult(result)
+      showWaiting()
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null
       const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
-      if (typeof committedVersion === 'number') options?.onCommitted?.(committedVersion)
+      if (typeof committedVersion === 'number') {
+        if (committedVersion > expectedVersion) turns.advanced.set(expectedVersion, committedVersion)
+        // The row was reloaded or merged from a version before this write: it shows the value now stored (unless a
+        // newer write of the cell waits, which it shows).
+        if (live && live !== row && typeof liveVersion === 'number' && liveVersion < committedVersion
+          && !turns.waiting.some((queued) => queued.fieldId === fieldId)) {
+          live.data[fieldId] = value
+        }
+        options?.onCommitted?.(committedVersion)
+      }
       // Push to undo history — 人工补充行 B3 (N12): except a manual cell whose undo would CLEAR a column that must not be
       // cleared (its route refuses it), which is left out of the stack instead of becoming an undo that cannot work.
-      if (!(manualWrite?.required && isClearingCellValue(oldValue))) {
+      // Not after a move to another sheet or view, whose history starts empty.
+      if (contextId === rangeContextId && !(manualWrite?.required && isClearingCellValue(write.oldValue))) {
         editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
         editHistory.value.push({
-          recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries,
+          recordId, fieldId, oldValue: write.oldValue, newValue: value, version: expectedVersion,
+          oldLinkSummaries: write.oldLinkSummaries, newLinkSummaries: nextLinkSummaries,
           ...(manualWrite ? { route: 'manual' as const } : {}),
         })
         historyIndex.value = editHistory.value.length - 1
       }
     } catch (e: any) {
-      // Revert optimistic update
-      if (row) row.data[fieldId] = oldValue
-      setLinkSummaries(recordId, fieldId, oldLinkSummaries)
+      // Revert optimistic update — unless the cell was written again meanwhile: it shows that newer write, which
+      // now rolls back (and is undone) to what this one would have. The row as it is now is rolled back too when it
+      // still shows this write (it was reloaded or merged meanwhile, and a waiting write put the value back).
+      const newer = turns.waiting.find((queued) => queued.fieldId === fieldId)
+      if (newer) {
+        newer.oldValue = write.oldValue
+        newer.oldLinkSummaries = write.oldLinkSummaries
+      } else {
+        if (row) row.data[fieldId] = write.oldValue
+        const live = rows.value.find((r) => r.id === recordId)
+        if (live && live !== row && live.data[fieldId] === value) live.data[fieldId] = write.oldValue
+        setLinkSummaries(recordId, fieldId, write.oldLinkSummaries)
+      }
+      showWaiting()
       lastBatchId.value = null
-      if (e?.code === 'VERSION_CONFLICT') {
+      // After a move, only when the record is in the rows shown: after a move to another view of the sheet it usually
+      // is, and the banner's retry works. After a move to another sheet it is not, once that sheet's rows have landed
+      // (before that the old sheet's rows are still shown, and the conflict is raised there).
+      if (e?.code === 'VERSION_CONFLICT' && (contextId === rangeContextId || rows.value.some((r) => r.id === recordId))) {
         conflict.value = {
           recordId,
           fieldId,
           attemptedValue: value,
           message: e.message ?? fallback('grid.errorCellUpdatedElsewhere'),
           serverVersion: typeof e.serverVersion === 'number' ? e.serverVersion : undefined,
-          previousLinkSummaries: oldLinkSummaries,
+          previousLinkSummaries: write.oldLinkSummaries,
           nextLinkSummaries,
         }
       }
@@ -1555,6 +1677,9 @@ export function useMultitableGrid(opts: {
     } finally {
       activeGridWrites--
       pendingCellPatches--
+      const next = turns.waiting.shift()
+      if (next) next.wake('send')
+      else recordWriteQueues.delete(recordId)
     }
     return null
   }
