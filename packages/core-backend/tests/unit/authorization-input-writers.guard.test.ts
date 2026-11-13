@@ -28,6 +28,7 @@ import {
   AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS,
   AUTHORIZATION_INPUT_FROZEN_MIGRATIONS,
   AUTHORIZATION_INPUT_LATE_ROLE_ROW_CALLERS,
+  AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE,
   AUTHORIZATION_INPUT_MIGRATION_LOCK_BLOCK_MARKS,
   AUTHORIZATION_INPUT_MIGRATION_LOCK_FORM,
   AUTHORIZATION_INPUT_SCRIPT_CLASSES,
@@ -38,9 +39,19 @@ import {
   hasPendingWriters,
   registeredWriteCounts,
 } from '../../src/rbac/authorization-input-writers'
-import type { AuthorizationInputLateRoleRowCaller, AuthorizationInputWriterEntry } from '../../src/rbac/authorization-input-writers'
+import type { AuthorizationInputDynamicExemption, AuthorizationInputLateRoleRowCaller, AuthorizationInputWriterEntry } from '../../src/rbac/authorization-input-writers'
 import { AUTHORIZATION_INPUT_TAKEOVER_CALLERS, AUTHORIZATION_INPUT_WORLD_LOCK_KEY1 } from '../../src/rbac/authorization-input-lock'
-import { checkNewMigration, COMPLIANT_LOCK_BLOCK, migrationRuleProblems, traversalProblems } from '../helpers/authorization-input-migration-rules'
+import {
+  checkNewMigration,
+  COMPLIANT_LOCK_BLOCK,
+  exemptDynamicForms,
+  isMigrationPath,
+  JUDGED_ONLY_DYNAMIC_FORMS,
+  judgedOnlyExemptionProblems,
+  migrationRuleProblems,
+  reachableTableProblems,
+  traversalProblems,
+} from '../helpers/authorization-input-migration-rules'
 import {
   CASCADE_PARENT_TABLES,
   enclosingFunctionAt,
@@ -144,10 +155,44 @@ describe('production writers equal the registry', () => {
       expected.set(key, (expected.get(key) ?? 0) + writer.dynamic.count)
     }
     expect(sortedEntries(byFileAndForm(production.dynamic))).toEqual(sortedEntries(expected))
-    for (const exemption of [...AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, ...AUTHORIZATION_INPUT_SCRIPT_DYNAMIC_EXEMPTIONS]) {
-      for (const table of exemption.reachableTables) expect(SCANNED_TABLES.has(table.toLowerCase()), `${exemption.id} reaches ${table}`).toBe(false)
+    const registered = [...AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, ...AUTHORIZATION_INPUT_SCRIPT_DYNAMIC_EXEMPTIONS]
+    expect(reachableTableProblems(registered, AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)).toEqual([])
+    for (const exemption of registered) {
+      expect(exemption.reachableTables.length, exemption.id).toBeGreaterThan(0)
       expect(exemption.reason.length).toBeGreaterThan(0)
     }
+  })
+
+  it('the one exemption of the migration helper module is pinned, and sets no verdict aside when a migration is judged', () => {
+    const ofHelper = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((exemption) => exemption.file === AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    expect(ofHelper.map((exemption) => [exemption.form, exemption.count, [...exemption.reachableTables]])).toEqual([['query_builder_non_literal', 1, ['<migration helper parameter>']]])
+    expect([...exemptDynamicForms(AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, new Map([['query_builder_non_literal', 1]]), AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS)]).toEqual([])
+    // Every other exemption under the migration streams covers its form in its own file.
+    const others = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((exemption) => isMigrationPath(exemption.file) && exemption.file !== AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    expect(others.length).toBeGreaterThan(0)
+    for (const exemption of others) expect([...exemptDynamicForms(exemption.file, new Map([[exemption.form, exemption.count]]), AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS)], exemption.id).toEqual([exemption.form])
+  })
+
+  it('POSITIVE CONTROL — an exemption that reaches an input table or a cascade parent under another spelling, and a migration exemption that names a pattern, are problems', () => {
+    const virtual = (id: string, file: string, reachableTables: string[]): AuthorizationInputDynamicExemption => ({ id, file, form: 'template_substitution', count: 1, reachableTables, reason: 'control' })
+    const sourceFile = `${SRC}/admin/user-recycle.ts`
+    const migration = `${SRC}/db/migrations/zzzz20270101000000_control.ts`
+    const legacy = 'packages/core-backend/migrations/999_control.sql'
+    const problemsOf = (...exemptions: AuthorizationInputDynamicExemption[]) => reachableTableProblems(exemptions, AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE)
+    for (const [spelling, name] of [['users', 'users'], ['public.users', 'users'], ['"users"', 'users'], [' users', 'users'], ['user_roles ', 'user_roles'], ['"PUBLIC" . "Roles"', 'roles'], ['metasheet.public.permissions', 'permissions']]) {
+      expect(problemsOf(virtual('V-1', sourceFile, ['audit_logs', spelling])), spelling).toEqual([`V-1: reaches ${name}`])
+      expect(problemsOf(virtual('V-1', migration, [spelling])), spelling).toEqual([`V-1: reaches ${name}`])
+    }
+    for (const spelling of ['*', '<any table>', 'integration_*', 'audit logs', '']) {
+      expect(problemsOf(virtual('V-2', migration, [spelling])), spelling).toEqual([`V-2: ${spelling} is not a plain table name`])
+      expect(problemsOf(virtual('V-2', legacy, ['audit_x', spelling])), spelling).toEqual([`V-2: ${spelling} is not a plain table name`])
+      // Outside the migration streams a reachable set may be a pattern: it sets no verdict aside there.
+      expect(problemsOf(virtual('V-2', sourceFile, [spelling])), spelling).toEqual([])
+    }
+    expect(problemsOf(virtual('V-3', migration, ['audit_x', 'public.audit_y', '"Audit_Z"']))).toEqual([])
+    // The helper module's own entry is the one place a placeholder stands under the migration streams.
+    expect(problemsOf(virtual('V-4', AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, ['<migration helper parameter>']))).toEqual([])
+    expect(problemsOf(virtual('V-4', AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, ['users']))).toEqual(['V-4: reaches users'])
   })
 
   it('a `D` entry registers no literal statements and every other entry registers at least one', () => {
@@ -379,6 +424,36 @@ describe('migrations', () => {
     const scannedForms: readonly string[] = SCANNED_DYNAMIC_FORMS
     const expected = sortedEntries(new Map(AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((e) => e.file.includes('/db/migrations/') && scannedForms.includes(e.form)).map((e) => [`${e.file}|${e.form}`, e.count])))
     expect(sortedEntries(byFileAndForm(migrations.dynamic))).toEqual(expected)
+  })
+
+  it('an exemption of a form only the judgment finds names an existing file in which the judgment finds that many targets', () => {
+    const sourceOrNull = (file: string) => (fs.existsSync(path.join(REPO_ROOT, file)) ? read(file) : null)
+    expect(judgedOnlyExemptionProblems(AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, sourceOrNull)).toEqual([])
+    // Every registered form is one the scan reports or one only the judgment finds, never both.
+    const scannedForms: readonly string[] = SCANNED_DYNAMIC_FORMS
+    expect(JUDGED_ONLY_DYNAMIC_FORMS.filter((form) => scannedForms.includes(form))).toEqual([])
+    for (const exemption of AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS) expect([...scannedForms, ...JUDGED_ONLY_DYNAMIC_FORMS], exemption.id).toContain(exemption.form)
+  })
+
+  it('POSITIVE CONTROL — such an exemption for a file that does not exist, or with another count than the judgment finds, is a problem', () => {
+    const helperFile = `${MIG}/zzzz20270101000000_control_helper.ts`
+    const blockFile = `${MIG}/zzzz20270101000001_control_block.ts`
+    const missing = `${MIG}/zzzz20270101000002_control_missing.ts`
+    const sources: Record<string, string> = {
+      [helperFile]: "import { checkTableExists } from './_patterns'\nexport async function up(db, tableName) {\n  await checkTableExists(db, tableName)\n}",
+      [blockFile]: `export async function up(db) {\n  await db.query("DO $$ BEGIN EXECUTE format('DELETE FROM %I', t); EXECUTE format('DELETE FROM %I', u); END $$")\n}`,
+    }
+    const sourceOf = (file: string) => sources[file] ?? null
+    const virtual = (id: string, file: string, form: AuthorizationInputDynamicExemption['form'], count: number): AuthorizationInputDynamicExemption => ({ id, file, form, count, reachableTables: ['audit_x'], reason: 'control' })
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'helper_table_argument', 1)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 2)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 1), virtual('V-2', blockFile, 'dynamic_statement', 1)], sourceOf)).toEqual([])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'helper_table_argument', 2)], sourceOf)).toEqual([`${helperFile}|helper_table_argument: registered 2, found 1`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', helperFile, 'dynamic_statement', 1)], sourceOf)).toEqual([`${helperFile}|dynamic_statement: registered 1, found 0`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', blockFile, 'dynamic_statement', 1)], sourceOf)).toEqual([`${blockFile}|dynamic_statement: registered 1, found 2`])
+    expect(judgedOnlyExemptionProblems([virtual('V-1', missing, 'helper_table_argument', 1)], sourceOf)).toEqual([`${missing}|helper_table_argument: the file does not exist`])
+    // A form the scan reports is compared with the scan, not here.
+    expect(judgedOnlyExemptionProblems([virtual('V-1', missing, 'template_substitution', 9)], sourceOf)).toEqual([])
   })
 
   it('every migration outside the frozen list is checked: one that writes an input carries the bounded try form and each of its writes is judged safe', () => {

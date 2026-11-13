@@ -138,7 +138,11 @@ export type AuthorizationInputDynamicExemption = Readonly<{
   file: string
   form: AuthorizationInputDynamicForm
   count: number
-  /** Every table the dynamic expression can name; must not contain an input or a cascade parent. */
+  /**
+   * Every table the dynamic expression can name; must not contain an input or a cascade parent,
+   * however the name is spelled. An exemption of a migration names plain tables only: a pattern or
+   * a placeholder sets no verdict of a migration aside.
+   */
   reachableTables: readonly string[]
   reason: string
 }>

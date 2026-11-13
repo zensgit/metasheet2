@@ -801,6 +801,19 @@ describe('dynamic targets and registered exemptions', () => {
     expect(checkWith(source, exemptionFor(form, { count: 1 }), exemptionFor(form, { id: 'T-2', count: 0, reachableTables: ['users'] })).problems).toEqual([problem])
   })
 
+  it('an input table or a cascade parent is reached under any spelling, and a reachable table that is not a plain table name covers nothing', () => {
+    const [form, source, problem] = sources[0]
+    const reached = [['public.users'], ['"users"'], [' users'], ['user_roles '], ['"PUBLIC" . "Roles"'], ['metasheet.public.user_roles'], ['audit_x', 'Public.Permissions']]
+    const notNames = [['*'], ['<any table>'], ['audit_*'], ['audit x'], [''], ['audit_x', '<external data source tables>']]
+    for (const reachableTables of [...reached, ...notNames]) {
+      expect(checkWith(source, exemptionFor(form, { reachableTables })).problems, JSON.stringify(reachableTables)).toEqual([problem])
+    }
+    // A plain table name stays one with a schema, quotes, white space or upper case around it.
+    for (const reachableTables of [['audit_x'], ['public.audit_x'], ['"audit_x"'], [' Audit_X '], ['audit_x', 'app . audit_y']]) {
+      expect(checkWith(source, exemptionFor(form, { reachableTables })).problems, JSON.stringify(reachableTables)).toEqual([])
+    }
+  })
+
   it('an exemption sets aside the dynamic verdict only: whatever else the statement does is still judged', () => {
     const cover = exemptionFor('template_substitution')
     const cases: Array<[string, string[]]> = [
