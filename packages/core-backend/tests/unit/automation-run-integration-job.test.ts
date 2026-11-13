@@ -186,6 +186,13 @@ describe('run_integration_job — AutomationService save gate', () => {
     chain.execute = vi.fn(async () => [])
     chain.executeTakeFirst = vi.fn(async () => undefined)
     const service = new AutomationService(new EventBus(), chain as never, queryFn as never)
+    // R-69 B1: an enabled job rule is saved only by a user who holds the job authority live (the acting user, in the
+    // binding tenant). These cases are about the gate's other checks, so the creator and the editor both hold it.
+    service.setRunIntegrationJobEditorAuthorityResolverForTest(async ({ principalId, tenantId }) => (
+      ['svc_user', 'editor_2'].includes(principalId) && tenantId === 'tenant_1'
+        ? { ok: true, user: { id: principalId, permissions: ['workflow:write'], roles: [], role: 'user', tenantId } }
+        : { ok: false, reason: 'principal_unauthorized' }
+    ))
     return { service, inserted, queryFn }
   }
   const cronInput = (actionConfig: Record<string, unknown>, triggerConfig: Record<string, unknown> | undefined = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }, triggerType = 'schedule.cron') => ({

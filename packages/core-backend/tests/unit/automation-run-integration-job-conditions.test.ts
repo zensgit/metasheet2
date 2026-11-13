@@ -40,6 +40,8 @@ const STAMPED = { ...JOB, timeoutMs: 30 * 60_000, binding: { principalId: 'svc_u
 const CRON = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }
 const CONDITIONS = { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }
 const EMPTY_GROUP = { conjunction: 'AND', conditions: [] }
+/** R-69 B1: a save that leaves an ENABLED job rule names its acting user (the creator, who holds the job authority). */
+const ACTOR = 'svc_user'
 
 function makeHarness() {
   const inserted: Record<string, unknown>[] = []
@@ -66,6 +68,13 @@ function makeHarness() {
   const storedReads: Array<Record<string, unknown> | undefined> = []
   chain.executeTakeFirst = vi.fn(async () => (storedReads.length > 0 ? storedReads.shift() : stored))
   const service = new AutomationService(new EventBus(), chain as never, queryFn as never)
+  // R-69 B1: an enabled job rule is saved only by a user who holds the job authority live (the acting user, in the
+  // binding tenant); here the creator holds it, and the saves that leave an enabled job rule pass it as the actor.
+  service.setRunIntegrationJobEditorAuthorityResolverForTest(async ({ principalId, tenantId }) => (
+    principalId === 'svc_user' && tenantId === 'tenant_1'
+      ? { ok: true, user: { id: principalId, permissions: ['workflow:write'], roles: [], role: 'user', tenantId } }
+      : { ok: false, reason: 'principal_unauthorized' }
+  ))
   return {
     service,
     inserted,
@@ -160,7 +169,7 @@ describe('run_integration_job conditions — AutomationService save', () => {
       const local = makeHarness()
       local.setStored(storedPlainRule({ conditions: CONDITIONS }))
       local.pushExecute([storedJobRule({ conditions })])
-      expect(await local.service.updateRule(RULE_ID, SHEET_ID, { actionType: 'run_integration_job', actionConfig: JOB, conditions } as never)).not.toBeNull()
+      expect(await local.service.updateRule(RULE_ID, SHEET_ID, { actionType: 'run_integration_job', actionConfig: JOB, conditions } as never, ACTOR)).not.toBeNull()
       expect(local.sets).toHaveLength(1)
       expect(local.sets[0].conditions).toBe(conditions === null ? null : JSON.stringify(EMPTY_GROUP))
       local.service.unregisterSchedule(RULE_ID)
@@ -192,7 +201,7 @@ describe('run_integration_job conditions — AutomationService save', () => {
       const local = makeHarness()
       local.setStored(storedJobRule({ conditions: CONDITIONS }))
       local.pushExecute([storedJobRule({ conditions })])
-      expect(await local.service.updateRule(RULE_ID, SHEET_ID, { conditions } as never)).not.toBeNull()
+      expect(await local.service.updateRule(RULE_ID, SHEET_ID, { conditions } as never, ACTOR)).not.toBeNull()
       expect(local.sets).toHaveLength(1)
       local.service.unregisterSchedule(RULE_ID)
     }
@@ -203,13 +212,13 @@ describe('run_integration_job conditions — AutomationService save', () => {
     expect((await h.service.setRuleEnabled(RULE_ID, SHEET_ID, false))?.enabled).toBe(false)
     h.setStored(storedJobRule({ conditions: CONDITIONS, enabled: false }))
     h.pushExecute([storedJobRule({ conditions: CONDITIONS, enabled: true })])
-    expect((await h.service.setRuleEnabled(RULE_ID, SHEET_ID, true))?.enabled).toBe(true)
+    expect((await h.service.setRuleEnabled(RULE_ID, SHEET_ID, true, ACTOR))?.enabled).toBe(true)
     expect(h.sets.map((set) => Object.keys(set).sort())).toEqual([['enabled', 'updated_at'], ['enabled', 'updated_at']])
   })
   it('allowed on a stored job rule that DOES carry conditions: a rename, and a delete', async () => {
     h.setStored(storedJobRule({ conditions: CONDITIONS }))
     h.pushExecute([storedJobRule({ conditions: CONDITIONS, name: 'renamed' })])
-    expect((await h.service.updateRule(RULE_ID, SHEET_ID, { name: 'renamed' }))?.name).toBe('renamed')
+    expect((await h.service.updateRule(RULE_ID, SHEET_ID, { name: 'renamed' }, ACTOR))?.name).toBe('renamed')
     expect(h.sets).toHaveLength(1)
     h.pushExecute([{ numDeletedRows: BigInt(1) }])
     expect(await h.service.deleteRule(RULE_ID, SHEET_ID)).toBe(true)
@@ -241,7 +250,7 @@ describe('run_integration_job conditions — I6d: the editor wire shape, and the
     expectConditionsRefusal(await refusal(h.service.updateRule(RULE_ID, SHEET_ID, WIRE as never)))
     expect(h.sets).toHaveLength(0)
     h.pushExecute([storedJobRule({ conditions: null })])
-    expect(await h.service.updateRule(RULE_ID, SHEET_ID, { ...WIRE, conditions: null } as never)).not.toBeNull()
+    expect(await h.service.updateRule(RULE_ID, SHEET_ID, { ...WIRE, conditions: null } as never, ACTOR)).not.toBeNull()
     expect(h.sets).toHaveLength(1)
     expect(h.sets[0].conditions).toBeNull()
   })
@@ -258,7 +267,7 @@ describe('run_integration_job conditions — I6d: the editor wire shape, and the
     local.queueStoredReads(storedPlainRule({ conditions: null }), storedPlainRule({ conditions: null }))
     local.setStored(storedPlainRule({ conditions: null }))
     local.pushExecute([storedJobRule()])
-    expect(await local.service.updateRule(RULE_ID, SHEET_ID, patch as never)).not.toBeNull()
+    expect(await local.service.updateRule(RULE_ID, SHEET_ID, patch as never, ACTOR)).not.toBeNull()
     expect(local.sets).toHaveLength(1)
     local.service.unregisterSchedule(RULE_ID)
   })

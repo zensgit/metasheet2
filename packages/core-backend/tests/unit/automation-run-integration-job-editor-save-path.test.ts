@@ -206,6 +206,14 @@ function makeService(options: {
     return { rows: [], rowCount: 0 }
   })
   const service = new AutomationService(new EventBus(), db as never, queryFn as never)
+  // R-69 B1: an enabled job rule is saved only by a user who holds the job authority live (the acting user, in the
+  // binding tenant). These cases are about the gate's shape checks, so the creator and the other editor both hold it;
+  // the refusals of B1 itself are automation-run-integration-job-editor-authority.test.ts.
+  service.setRunIntegrationJobEditorAuthorityResolverForTest(async ({ principalId, tenantId }) => (
+    [CREATOR, 'editor_2'].includes(principalId) && tenantId === 'tenant_1'
+      ? { ok: true, user: { id: principalId, permissions: ['workflow:write'], roles: [], role: 'user', tenantId } }
+      : { ok: false, reason: 'principal_unauthorized' }
+  ))
   const registryReads = () => queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)
   const tenantReads = () => queryFn.mock.calls.filter(([sql]) => ORGS.test(String(sql))).length
 

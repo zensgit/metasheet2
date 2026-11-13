@@ -162,8 +162,10 @@ import type { Queryable } from './automation-durable-dispatcher'
 import { getIntegrationRunPort } from '../core/integration-run-port'
 import {
   RUN_INTEGRATION_JOB_ACTION_TYPE,
+  RUN_INTEGRATION_JOB_NOT_SOLE_ERROR,
   collectRunIntegrationJobOccurrences,
   isIntegrationAutomationRunActionEnabled,
+  parsePersistedRunIntegrationJobConfig,
   stampRunIntegrationJobConfig,
   validateRunIntegrationJobConditions,
   validateRunIntegrationJobConfig,
@@ -215,6 +217,9 @@ export type AutomationRuleValidationCode =
   // R-69 1b-ii (ADR §7): a rule carrying run_integration_job while INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is
   // not 'true' — the automation routes answer this one code with 403, every other code with 400.
   | 'RUN_ACTION_DISABLED'
+  // R-69 B1: an enabled job rule saved by a user without the job authority, or whose authority could not be checked
+  // (a 400 like every other save refusal; see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE below).
+  | typeof RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -225,6 +230,31 @@ export type AutomationRuleValidationCode =
  */
 export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
 export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
+
+/**
+ * R-69 I6d, finding B1 ("editor authority") — owner-approved 2026-11-13 (「按建议执行」). T-LAYER DEFAULT
+ * (direction ruled by the owner 2026-11-13; this exact wording is a T-layer elaboration the owner can veto,
+ * decision register R-92, 11-13 note):
+ *
+ *   "When a save (create or update, including setRuleEnabled) leaves a rule that carries run_integration_job AND is
+ *   enabled after the write, the acting user must pass the SAME live-authority predicate the executor applies at run
+ *   time (resolveIntegrationRunPrincipalOnTransaction, with principalId = the acting user and tenantId = the rule's
+ *   binding tenant). A missing acting user is refused. No check when the write leaves the rule disabled or removes
+ *   the job. The binding principal stays the stored creator (ADR §6.2)."
+ *
+ * Why: a save re-stamps the binding from the rule's STORED creator and the executor checks only that principal, so
+ * without this someone who may manage the sheet's automations but holds no job authority could retype the creator's
+ * schedule rule into a job rule, switch one on, or edit an enabled one — and the job ran under the creator's authority.
+ * ONE code (a 400, like every other save refusal on these routes; only RUN_ACTION_DISABLED is a 403) and two fixed,
+ * values-free messages: "not authorized" (a missing acting user, or the predicate said no) and "could not be checked"
+ * (the read failed, or the rule's binding tenant cannot be named) — both refuse; neither ever saves.
+ * Implemented by AutomationService.assertRunIntegrationJobEditorAuthority.
+ */
+export const RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE = 'RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED'
+export const RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE =
+  'an enabled run_integration_job rule can only be saved by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); the rule was not saved'
+export const RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE =
+  'run_integration_job: the saving user\'s job authority could not be checked; the rule was not saved'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -1944,6 +1974,18 @@ export class AutomationService {
         ? { ...((input.triggerConfig ?? {}) as Record<string, unknown>), effectiveAt: now }
         : runFinishedTriggerConfig ?? ((input.triggerConfig ?? {}) as Record<string, unknown>)
 
+    // R-69 B1 (T-layer default, see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE): an ENABLED job rule is saved only
+    // by a user who holds the job authority live. On create the acting user IS the creator (the route passes the
+    // request user as createdBy); the action shape judged is the one about to be inserted, binding stamped. Last
+    // before the write, so every shape refusal above keeps its own message.
+    await this.assertRunIntegrationJobEditorAuthority({
+      actorId: input.createdBy,
+      enabledAfterWrite: input.enabled ?? true,
+      actionType: input.actionType,
+      actionConfig,
+      actions,
+    })
+
     const row = {
       id: ruleId,
       sheet_id: sheetId,
@@ -2550,7 +2592,26 @@ export class AutomationService {
     // F1: a write is never sent without the version it was validated against. Not reachable today — every field that
     // puts a key into `updates` also opens the T1-2 block above, which reads the stored row — so this is the
     // fail-closed side of a future edit that breaks that pairing, not a path with a caller.
-    if (validatedVersion === undefined) throw new Error('updateRule: no stored rule snapshot was read before the write')
+    if (validatedVersion === undefined || boundRule === undefined) throw new Error('updateRule: no stored rule snapshot was read before the write')
+
+    // R-69 B1 (T-layer default, see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE): a write that leaves an ENABLED job
+    // rule needs the ACTING user's own live job authority — whatever this PATCH touches (a rename, a trigger edit and
+    // the on/off switch included; setRuleEnabled routes through here). Judged on THIS attempt's resulting rule: enabled
+    // = incoming ?? `boundRule` (this attempt's first read, the row version the UPDATE below is bound to); actions = the
+    // shape an action-shaped edit persists (binding re-stamped from the stored creator), else `boundRule`'s. A save that
+    // lost a race runs this again on its next attempt, against the row as it then is.
+    const resultingShape = nextActionShapeForConditions ?? {
+      actionType: boundRule.action_type,
+      actionConfig: (boundRule.action_config ?? null) as Record<string, unknown> | null,
+      actions: boundRule.actions ?? null,
+    }
+    await this.assertRunIntegrationJobEditorAuthority({
+      actorId: authoringActorId,
+      enabledAfterWrite: input.enabled !== undefined ? input.enabled : boundRule.enabled !== false,
+      actionType: resultingShape.actionType,
+      actionConfig: resultingShape.actionConfig,
+      actions: resultingShape.actions,
+    })
 
     // F1: the row version moves strictly forward with every write, in the statement that writes it (see updateRule).
     const stampedAt = new Date().toISOString()
@@ -3258,6 +3319,84 @@ export class AutomationService {
         : `${label} rules need a creator bound to exactly one active tenant (several found)`)
     }
     return { principalId, tenantId: tenantIds[0] }
+  }
+
+  /**
+   * R-69 B1 — the T-layer default stated at RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE. The caller hands in the
+   * rule's RESULTING state: the action shape that will be stored (create: the stamped input; update: what this attempt
+   * persists, else its bound row) and whether the rule is enabled after the write. In order:
+   *   - disabled after the write, or no run_integration_job anywhere in the shape (top level or nested) → nothing to do;
+   *   - no acting user → refused (not authorized);
+   *   - the binding tenant is read from the shape's own stamped binding (what the executor will run under): every
+   *     top-level occurrence must carry a binding the executor's re-parse accepts, all naming ONE tenant; a nested
+   *     occurrence (never saveable; a hand-written row) has no binding this method reads — any of that → refused
+   *     (could not be checked). A fresh stamp comes from the stored creator, so the tenant is never the editor's;
+   *   - the predicate itself: principalId = the acting user, tenantId = that tenant. principal_unauthorized → refused
+   *     (not authorized); authority_unavailable or any throw → refused (could not be checked). Never a pass by default.
+   * The binding principal is not touched here: it stays the stored creator (ADR §6.2), and the executor still checks
+   * that principal on every trigger. What this does NOT decide: the plugin's own job permission (the PULL ladder or
+   * legacy integration:write/admin) — that definition lives only in the plugin's governed entry (ADR §2 ③) and is
+   * applied there, to the bound principal, at run time; it is not re-derived here.
+   */
+  private async assertRunIntegrationJobEditorAuthority(input: {
+    actorId: string | null | undefined
+    enabledAfterWrite: boolean
+    actionType: string
+    actionConfig: Record<string, unknown> | null
+    actions: AutomationAction[] | null
+  }): Promise<void> {
+    if (!input.enabledAfterWrite) return
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, null)
+    if (occurrences.length === 0 && error === null) return
+    const unauthorized = () => new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+    const unavailable = () => new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+    // The acting user exactly as the route authenticated it (never trimmed into another id).
+    const actorId = typeof input.actorId === 'string' && input.actorId.trim().length > 0 ? input.actorId : null
+    if (actorId === null) throw unauthorized()
+    // `error` other than the sole-action refusal is the nested one: a binding inside a branch is not read here.
+    if (error !== null && error !== RUN_INTEGRATION_JOB_NOT_SOLE_ERROR) throw unavailable()
+    const tenantIds = new Set<string>()
+    for (const occurrence of occurrences) {
+      const persisted = parsePersistedRunIntegrationJobConfig(occurrence.config)
+      if (!persisted) throw unavailable()
+      tenantIds.add(persisted.binding.tenantId)
+    }
+    if (tenantIds.size !== 1) throw unavailable()
+    const [tenantId] = [...tenantIds]
+    const resolution = await this.readRunIntegrationJobEditorAuthority({ principalId: actorId, tenantId })
+    if (resolution.ok === true) return
+    throw resolution.reason === 'principal_unauthorized' ? unauthorized() : unavailable()
+  }
+
+  /** Test seam: replaces the live acting-user authority read of assertRunIntegrationJobEditorAuthority. */
+  private runIntegrationJobEditorAuthorityResolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null = null
+
+  setRunIntegrationJobEditorAuthorityResolverForTest(resolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null): void {
+    this.runIntegrationJobEditorAuthorityResolver = resolver
+  }
+
+  /**
+   * The executor's live-authority predicate, run the way the executor runs it (resolveIntegrationRunPrincipal): one
+   * committed READ COMMITTED transaction of the production pool, the predicate on that transaction, nothing held after
+   * it commits (the same accepted revoke-after-commit window). Any throw is authority_unavailable (fail closed); the
+   * log line is values-free (the error's class / code only — never its message, never the ids).
+   */
+  private async readRunIntegrationJobEditorAuthority(binding: { principalId: string; tenantId: string }): Promise<IntegrationRunPrincipalResolution> {
+    try {
+      if (this.runIntegrationJobEditorAuthorityResolver) return await this.runIntegrationJobEditorAuthorityResolver(binding)
+      return await poolManager.get().transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        return resolveIntegrationRunPrincipalOnTransaction({
+          query: async (sqlText: string, params?: unknown[]) => {
+            const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+            return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+          },
+        }, binding)
+      })
+    } catch (error) {
+      logger.warn('run_integration_job save: the acting user\'s live authority could not be read; the rule was not saved', describeLookupError(error))
+      return { ok: false, reason: 'authority_unavailable' }
+    }
   }
 
   // ── R-69 1c: integration.run_finished (Bridge 2) ────────────────────────────────────────────────────────

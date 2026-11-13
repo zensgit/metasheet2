@@ -126,6 +126,24 @@ async function registerRuleSheet(sheetId: string = SHEET, tenantId: string = TEN
   )
 }
 const unregisterRuleSheets = () => q(`DELETE FROM integration_stock_prep_project_target WHERE tenant_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
+/**
+ * R-69 B1 (owner-approved 2026-11-13): saving an ENABLED job rule needs the SAVING user's own live authority — the
+ * executor's predicate (resolveIntegrationRunPrincipalOnTransaction: active, one active membership in the binding
+ * tenant, an automation capability). So every user who saves one here holds `workflow:write`, granted the way the
+ * request path grants it (a role). The role id carries the user id (and so RUN): each describe's cleanup removes it.
+ */
+const capabilityRoleOf = (userId: string) => `role_cap_${userId}`
+async function grantAutomationCapability(userId: string): Promise<void> {
+  await q(`INSERT INTO permissions (code, name) SELECT $1::varchar, $1::varchar WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE code = $1::varchar)`, ['workflow:write'])
+  await q(`INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [capabilityRoleOf(userId), capabilityRoleOf(userId)])
+  await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'workflow:write') ON CONFLICT DO NOTHING`, [capabilityRoleOf(userId)])
+  await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [userId, capabilityRoleOf(userId)])
+}
+async function dropAutomationCapability(userId: string): Promise<void> {
+  await q(`DELETE FROM user_roles WHERE user_id = $1`, [userId]).catch(() => undefined)
+  await q(`DELETE FROM role_permissions WHERE role_id = $1`, [capabilityRoleOf(userId)]).catch(() => undefined)
+  await q(`DELETE FROM roles WHERE id = $1`, [capabilityRoleOf(userId)]).catch(() => undefined)
+}
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /** The production transaction seam shape (AutomationService wires poolManager.transaction the same way). */
@@ -471,6 +489,11 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     const sheet = `sheet6d_${RUN}`
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc6d'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    // R-69 B1: the creator and the other editor both save the enabled job rule, so both hold the job authority.
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [editorId, `${editorId}@example.test`, 'editor6d'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [editorId, TENANT])
+    await grantAutomationCapability(principalId)
+    await grantAutomationCapability(editorId)
     await registerRuleSheet(sheet, TENANT, project)
     const service = new AutomationService(new EventBus(), db as never, q as never)
 
@@ -571,6 +594,80 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     }
   }, 30_000)
 
+  // ── R-69 B1 (owner-approved 2026-11-13): the SAVING user's own live job authority, on real auth rows ─────────
+  //
+  // No seam: the service runs the executor's own predicate (resolveIntegrationRunPrincipalOnTransaction) in a committed
+  // READ COMMITTED transaction of the production pool, with principalId = the acting user, tenantId = the binding's.
+  test('R-69 B1: an editor WITHOUT the job authority cannot retype, switch on or edit an enabled job rule (refused, row unchanged) but can switch it off; an editor WITH it can, and the binding stays the creator\'s; revoking it is seen on the next save', async () => {
+    const creatorId = `svcb1_${RUN}`
+    /** An active member of TENANT with no automation capability. */
+    const plainEditor = `edb1plain_${RUN}`
+    /** An active member of TENANT holding workflow:write (a role). */
+    const okEditor = `edb1ok_${RUN}`
+    /** Holds workflow:write, but is a member of ANOTHER tenant only. */
+    const strangerEditor = `edb1far_${RUN}`
+    const project = `PB1-${RUN}`
+    const sheet = `sheetb1_${RUN}`
+    for (const [userId, tenantId] of [[creatorId, TENANT], [plainEditor, TENANT], [okEditor, TENANT], [strangerEditor, `${TENANT}_b1far`]]) {
+      await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [userId, `${userId}@example.test`, 'b1'])
+      await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [userId, tenantId])
+    }
+    for (const userId of [creatorId, okEditor, strangerEditor]) await grantAutomationCapability(userId)
+    await registerRuleSheet(sheet, TENANT, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const cron = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }
+    const jobConfig = { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' }, timeoutMs: 60_000 }
+    const stamped = { ...jobConfig, binding: { principalId: creatorId, tenantId: TENANT } }
+    const storedRow = async (ruleId: string) => (await q(`SELECT name, enabled, trigger_config, action_type, action_config, actions, created_by FROM automation_rules WHERE id = $1`, [ruleId])).rows[0] as Record<string, unknown>
+    const refusalOf = (work: Promise<unknown>) => work.then(() => null, (error: unknown) => error as Error)
+    const expectEditorRefusal = (error: Error | null, label: string) => {
+      expect(error, `${label}: must be refused`).toBeInstanceOf(AutomationRuleValidationError)
+      expect((error as AutomationRuleValidationError).code, label).toBe('RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED')
+      for (const needle of [creatorId, plainEditor, okEditor, strangerEditor, TENANT, sheet, project]) expect(error!.message, label).not.toContain(needle)
+    }
+
+    // the creator (who holds the authority) saves an enabled plain schedule rule and a DISABLED job rule
+    const plain = await service.createRule(sheet, { name: `b1plain_${RUN}`, triggerType: 'schedule.cron', triggerConfig: cron, actionType: 'record_click', actionConfig: {}, createdBy: creatorId } as never)
+    const jobRule = await service.createRule(sheet, { name: `b1job_${RUN}`, triggerType: 'schedule.cron', triggerConfig: cron, actionType: 'run_integration_job', actionConfig: jobConfig, enabled: false, createdBy: creatorId } as never)
+    try {
+      // (a) the editor without the authority retypes the creator's enabled schedule rule into a job rule: refused
+      const plainBefore = await storedRow(plain.id)
+      expectEditorRefusal(await refusalOf(service.updateRule(plain.id, sheet, { actionType: 'run_integration_job', actionConfig: jobConfig }, plainEditor)), 'retype')
+      expect(await storedRow(plain.id)).toEqual(plainBefore)
+      // (b) switching the job rule on: refused for the plain editor, for an editor of another tenant, for an unknown user
+      for (const actor of [plainEditor, strangerEditor, `nobody_${RUN}`]) {
+        expectEditorRefusal(await refusalOf(service.setRuleEnabled(jobRule.id, sheet, true, actor)), `enable by ${actor === plainEditor ? 'plain' : actor === strangerEditor ? 'stranger' : 'unknown'}`)
+      }
+      expect((await storedRow(jobRule.id)).enabled).toBe(false)
+      // (g) the editor WITH the authority switches it on; the binding is still the creator's
+      expect((await service.setRuleEnabled(jobRule.id, sheet, true, okEditor))?.enabled).toBe(true)
+      const enabledRow = await storedRow(jobRule.id)
+      expect(enabledRow).toMatchObject({ enabled: true, action_config: stamped, created_by: creatorId })
+      // (c) a trigger-only edit of the now-enabled job rule by the plain editor: refused, the row byte-identical
+      expectEditorRefusal(await refusalOf(service.updateRule(jobRule.id, sheet, { triggerConfig: { cron: '30 7 * * *', timezone: 'Asia/Shanghai' } }, plainEditor)), 'trigger edit')
+      expect(await storedRow(jobRule.id)).toEqual(enabledRow)
+      // (d) … and the same editor CAN switch it off
+      expect((await service.setRuleEnabled(jobRule.id, sheet, false, plainEditor))?.enabled).toBe(false)
+      // (g) the editor WITH the authority retypes the plain rule: saved, stamped from the STORED creator, its own binding dropped
+      const retyped = await service.updateRule(plain.id, sheet, { actionType: 'run_integration_job', actionConfig: { ...jobConfig, binding: { principalId: okEditor, tenantId: `${TENANT}_b1far` } } }, okEditor)
+      expect(retyped).not.toBeNull()
+      const retypedRow = await storedRow(plain.id)
+      expect(retypedRow).toMatchObject({ enabled: true, action_type: 'run_integration_job', action_config: stamped, created_by: creatorId })
+      expect(JSON.stringify(retypedRow)).not.toContain(okEditor)
+      // live, every save: once that editor's capability is revoked, its next save of the enabled rule is refused
+      await q(`DELETE FROM role_permissions WHERE role_id = $1`, [capabilityRoleOf(okEditor)])
+      expectEditorRefusal(await refusalOf(service.updateRule(plain.id, sheet, { name: `b1plain_${RUN}_renamed` }, okEditor)), 'after revoke')
+      expect(await storedRow(plain.id)).toEqual(retypedRow)
+      // createRule: the creator is the acting user — without the capability it cannot create an ENABLED job rule
+      await q(`DELETE FROM role_permissions WHERE role_id = $1`, [capabilityRoleOf(creatorId)])
+      expectEditorRefusal(await refusalOf(service.createRule(sheet, { name: `b1new_${RUN}`, triggerType: 'schedule.cron', triggerConfig: cron, actionType: 'run_integration_job', actionConfig: jobConfig, createdBy: creatorId } as never)), 'create')
+      expect((await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [sheet])).rows).toHaveLength(2)
+    } finally {
+      for (const id of [plain.id, jobRule.id]) service.unregisterSchedule(id)
+      await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    }
+  }, 30_000)
+
   test("R-69 I6a (ADR §3.1 + §6.5): the save refuses ANOTHER tenant's registered sheet (nothing written); a trigger after the rule sheet is ARCHIVED is skipped(rule_sheet_unregistered) with 0 port calls, no intent row, no lease", async () => {
     // Its own principal (one active membership in TENANT), its own registered sheet + project, its own scope.
     const principalId = `svc6_${RUN}`
@@ -580,6 +677,7 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     const scope = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, projectNo: project })
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc6'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await grantAutomationCapability(principalId)
     await registerRuleSheet(sheet, TENANT, project)
     await registerRuleSheet(foreignSheet, `${TENANT}_other`, project)
     const service = new AutomationService(new EventBus(), db as never, q as never)
@@ -634,6 +732,7 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     const scope = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, projectNo: project })
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc7'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await grantAutomationCapability(principalId)
     await registerRuleSheet(sheet, TENANT, project)
     const service = new AutomationService(new EventBus(), db as never, q as never)
     const ruleInput = {
@@ -793,6 +892,8 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
     process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcf1'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    // R-69 B1: every PATCH here is this principal's own, and many leave an enabled job rule: it holds the authority.
+    await grantAutomationCapability(principalId)
     await registerRuleSheet(sheet, TENANT, project)
     A = ownBackendService()
     B = ownBackendService()
@@ -804,6 +905,7 @@ describeIfDatabase('R-69 I6d fix round 2 (F1): a PATCH whose stored row changed 
     else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
     await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
     await q(`DELETE FROM integration_stock_prep_project_target WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    await dropAutomationCapability(principalId)
     await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
     await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)
     await A?.close().catch(() => undefined)
@@ -1403,6 +1505,8 @@ describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions
     await registerRuleSheet(sheet, TENANT, project)
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcc'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    // R-69 B1: the creator creates an ENABLED job rule here, so it holds the job authority.
+    await grantAutomationCapability(principalId)
   })
   afterAll(async () => {
     if (savedFlag === undefined) delete process.env[FLAG]
@@ -1411,6 +1515,7 @@ describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions
     else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
     await unregisterRuleSheets()
     await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    await dropAutomationCapability(principalId)
     await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
     await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)
   })
