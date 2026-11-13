@@ -203,13 +203,21 @@ export function censusHaystack(entry: Pick<AdvisoryTwoInt4CensusEntryV1, 'kind'>
   return entry.kind === 'doc-comment' ? site.window : site.code
 }
 
+/** Whether `entry` classifies `site`: same file (or a file under the entry's prefix), same key1 expression, and the window substring present. */
+export function censusEntryOwns(entry: Pick<AdvisoryTwoInt4CensusEntryV1, 'file' | 'fileMatch' | 'key1' | 'window' | 'kind'>, site: AdvisoryTwoInt4SiteV1): boolean {
+  const fileMatches = entry.fileMatch === 'prefix' ? site.file.startsWith(entry.file) : site.file === entry.file
+  return fileMatches && site.key1 === entry.key1 && censusHaystack(entry, site).includes(entry.window)
+}
+
 export type AdvisoryTwoInt4CensusEntryV1 = Readonly<{
   file: string
+  /** `prefix`: `file` is a directory prefix and the entry stands for every site under it (default: exact file). */
+  fileMatch?: 'exact' | 'prefix'
   key1: string
   /** Substring of the site's window that identifies it among same-file, same-key1 sites. */
   window: string
-  /** Number of sites this entry stands for (default 1). */
-  count?: number
+  /** Number of sites this entry stands for (default 1); `any` for a prefix entry whose population grows with the tree. */
+  count?: number | 'any'
   kind: 'constant' | 'variable' | 'doc-comment'
   /** constant / doc-comment: registry entry names whose value the site's key1 takes. */
   registry?: readonly string[]
@@ -232,6 +240,11 @@ export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[
   // Constant key1 written as a literal.
   { file: `${CORE}/audit/AuditRepository.ts`, key1: "hashtext('audit_logs_partition')", window: '', count: 3, kind: 'constant', registry: ['audit-logs-partition'], binding: 'literal in the partition maintenance SQL' },
   { file: `${CORE}/db/migrations/zzzz20260830123000_create_elearning_titles.ts`, key1: "hashtext('elearning-title-balance-org')", window: '', kind: 'constant', registry: ['elearning-title-balance-org'], binding: 'literal in the trigger function' },
+  { file: `${CORE}/rbac/authorization-input-lock.ts`, key1: '20261106', window: '', count: 3, kind: 'constant', registry: ['authorization-input-world'], boundConstants: [{ name: 'AUTHORIZATION_INPUT_WORLD_LOCK_KEY1', registry: 'authorization-input-world' }], binding: 'SQL literal (20261106, 1) in the shared, shared-try and exclusive-try world-lock statements' },
+  // Any migration that writes an authorization input takes the world lock with the exclusive try form
+  // (the only form the writer guard admits there); the population grows with the migration tree.
+  { file: `${CORE}/db/migrations/`, fileMatch: 'prefix', key1: '20261106', window: 'pg_try_advisory_xact_lock(20261106, 1)', count: 'any', kind: 'constant', registry: ['authorization-input-world'], binding: 'SQL literal (20261106, 1) in the bounded exclusive try block of a migration' },
+  { file: 'packages/core-backend/migrations/', fileMatch: 'prefix', key1: '20261106', window: 'pg_try_advisory_xact_lock(20261106, 1)', count: 'any', kind: 'constant', registry: ['authorization-input-world'], binding: 'SQL literal (20261106, 1) in the bounded exclusive try block of a SQL-stream migration' },
   // Constant key1 passed as a bind parameter.
   { file: `${CORE}/multitable/stock-preparation-persist-unit-of-work.ts`, key1: '$1::int', window: 'STOCK_PREPARATION_PROJECT_LOCK_NS', kind: 'constant', registry: ['stock-preparation-project'], boundConstants: [{ name: 'STOCK_PREPARATION_PROJECT_LOCK_NS', registry: 'stock-preparation-project' }], binding: 'params [STOCK_PREPARATION_PROJECT_LOCK_NS, …]' },
   { file: `${CORE}/multitable/stock-preparation-persist-unit-of-work.ts`, key1: '$1::int', window: 'STOCK_PREPARATION_BATCH_LOCK_NS', kind: 'constant', registry: ['stock-preparation-batch'], boundConstants: [{ name: 'STOCK_PREPARATION_BATCH_LOCK_NS', registry: 'stock-preparation-batch' }], binding: 'params [STOCK_PREPARATION_BATCH_LOCK_NS, …]' },
