@@ -35,7 +35,8 @@ param(
   [string]$LogPath = '',
   [string]$CsvPath = '',
   [string]$StopFile = '',
-  [int]$OldPid = 0
+  [int]$OldPid = 0,
+  [int]$OperatorTimeoutMin = 25
 )
 
 $ErrorActionPreference = 'Continue'
@@ -69,23 +70,61 @@ if ([string]::IsNullOrWhiteSpace($env:PM2_HOME) -and -not [string]::IsNullOrWhit
 
 # ---------------------------------------------------------------- helpers
 
+function Write-T { param([string]$m) Write-Host ("[p2reh] {0} {1}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss')), $m) }
+
+function Start-Detached {
+  # Starts a .cmd file through ShellExecute (Start-Process without redirection), so the child
+  # inherits none of this process's handles. A daemon it spawns (pm2) therefore cannot hold the
+  # step's output pipe open, and the caller waits on the process itself, never on a pipe EOF.
+  param([string]$CmdFile)
+  $p = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList @('/d', '/c', $CmdFile) -WindowStyle Hidden -PassThru
+  $null = $p.Handle
+  return $p
+}
+
+function Stop-Tree {
+  param([int]$ProcessId)
+  $null = & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $ProcessId /T /F 2>&1
+}
+
 function Invoke-CmdLine {
-  # Runs one cmd.exe command line from a .cmd file. stdout is returned, stderr goes to a file.
-  param([string]$CommandLine, [string]$Cwd = '')
+  # Runs one cmd.exe command line from a .cmd file, detached, stdout and stderr to files, bounded.
+  param([string]$CommandLine, [string]$Cwd = '', [int]$TimeoutSec = 180)
   $id = [System.Guid]::NewGuid().ToString('N').Substring(0, 10)
   $cmdFile = Join-Path $H ("c-$id.cmd")
+  $outFile = Join-Path $H ("c-$id.out")
   $errFile = Join-Path $H ("c-$id.err")
   $lines = @('@echo off')
   if (-not [string]::IsNullOrWhiteSpace($Cwd)) { $lines += ('cd /d "' + $Cwd + '"') }
-  $lines += ($CommandLine + ' 2>"' + $errFile + '"')
+  $lines += ($CommandLine + ' >"' + $outFile + '" 2>"' + $errFile + '"')
   $lines += 'exit /b %ERRORLEVEL%'
   Set-Content -LiteralPath $cmdFile -Value $lines -Encoding ASCII
-  $stdout = @(& cmd.exe /d /c $cmdFile)
-  $code = $LASTEXITCODE
+  $p = Start-Detached -CmdFile $cmdFile
+  $code = $null
+  if ($p.WaitForExit($TimeoutSec * 1000)) {
+    $p.WaitForExit()
+    $code = $p.ExitCode
+  } else {
+    Write-T ("command timed out after {0}s (first token: {1})" -f $TimeoutSec, ($CommandLine.Split(' ')[0]))
+    Stop-Tree -ProcessId $p.Id
+    $code = -9
+  }
+  $stdout = @()
+  if (Test-Path -LiteralPath $outFile) { $stdout = @(Get-Content -LiteralPath $outFile) }
   $stderr = ''
   if (Test-Path -LiteralPath $errFile) { $stderr = [string](Get-Content -LiteralPath $errFile -Raw) }
-  Remove-Item -LiteralPath $cmdFile, $errFile -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $cmdFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
   return [pscustomobject]@{ Code = $code; Out = $stdout; Err = $stderr }
+}
+
+function Write-ProcessSnapshot {
+  # Values-free process view for a hang: names and pids, and command lines cut to the script name.
+  $names = @('node.exe', 'cmd.exe', 'powershell.exe', 'corepack.exe', 'pnpm.exe', 'psql.exe')
+  foreach ($pr in @(Get-CimInstance -ClassName Win32_Process | Where-Object { $names -contains $_.Name })) {
+    $cl = [string]$pr.CommandLine
+    $tokens = @([regex]::Matches($cl, '[A-Za-z0-9_.@-]+\.(js|cjs|mjs|ps1|cmd|bat)\b|\b(install|prepare|jlist|start|restart|save|ping|--offline|--frozen-lockfile|--version)\b') | ForEach-Object { $_.Value } | Select-Object -First 8)
+    Write-T ("proc pid={0} ppid={1} {2} {3}" -f $pr.ProcessId, $pr.ParentProcessId, $pr.Name, ($tokens -join ' '))
+  }
 }
 
 function Read-AppEnv {
@@ -137,7 +176,7 @@ function Invoke-AppSql {
   $env:PGPASSWORD = $m.Groups[2].Value
   try {
     $psql = Join-Path (Get-PgBin) 'psql.exe'
-    $r = Invoke-CmdLine -CommandLine ('"' + $psql + '" -h 127.0.0.1 -p 5432 -U ' + $AppRole + ' -d ' + $AppDb + ' -X -q -tA -v ON_ERROR_STOP=1 -f "' + $sqlFile + '"')
+    $r = Invoke-CmdLine -CommandLine ('"' + $psql + '" -h 127.0.0.1 -p 5432 -U ' + $AppRole + ' -d ' + $AppDb + ' -w -X -q -tA -v ON_ERROR_STOP=1 -f "' + $sqlFile + '"')
   }
   finally {
     $env:PGPASSWORD = $prev
@@ -509,6 +548,10 @@ function Invoke-Preflight {
   $pv = Invoke-CmdLine -CommandLine 'pm2 --version'
   $res['pm2_version'] = ((@($pv.Out) | Select-Object -Last 1) -join '').Trim()
   if ($pm.Code -ne 0 -or $pv.Code -ne 0) { $fail += 'pm2 global install' }
+  # A site already runs the pm2 daemon before an install; start it here the same way, detached.
+  $ping = Invoke-CmdLine -CommandLine 'pm2 ping' -TimeoutSec 120
+  $res['pm2_daemon_ping_exit'] = $ping.Code
+  if ($ping.Code -ne 0) { $fail += 'pm2 daemon did not start' }
 
   # PostgreSQL that the windows image ships (service postgresql-x64-NN, disabled by default).
   $svc = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -562,8 +605,8 @@ function Invoke-Preflight {
   )
   $prev = $env:PGPASSWORD
   $env:PGPASSWORD = $suPass
-  $cr = Invoke-CmdLine -CommandLine ('"' + (Join-Path $pgBin 'psql.exe') + '" -h 127.0.0.1 -p 5432 -U ' + $suUser + ' -d postgres -X -q -v ON_ERROR_STOP=1 -f "' + $sqlFile + '"')
-  $ver = Invoke-CmdLine -CommandLine ('"' + (Join-Path $pgBin 'psql.exe') + '" -h 127.0.0.1 -p 5432 -U ' + $suUser + ' -d postgres -X -tA -c "SHOW server_version_num"')
+  $cr = Invoke-CmdLine -CommandLine ('"' + (Join-Path $pgBin 'psql.exe') + '" -h 127.0.0.1 -p 5432 -U ' + $suUser + ' -d postgres -w -X -q -v ON_ERROR_STOP=1 -f "' + $sqlFile + '"')
+  $ver = Invoke-CmdLine -CommandLine ('"' + (Join-Path $pgBin 'psql.exe') + '" -h 127.0.0.1 -p 5432 -U ' + $suUser + ' -d postgres -w -X -tA -c "SHOW server_version_num"')
   $env:PGPASSWORD = $prev
   Remove-Item -LiteralPath $sqlFile -Force -ErrorAction SilentlyContinue
   $res['pg_role_db_create_exit'] = $cr.Code
@@ -652,6 +695,7 @@ function Invoke-Install {
   $stop = Join-Path $H ($Label + '-sampler.stop')
   Remove-Item -LiteralPath $log, $csv, $stop -Force -ErrorAction SilentlyContinue
 
+  Write-T ($Label + ': reading the before-state')
   $preK = Get-KyselyState
   $prePm2 = Get-Pm2State
   $preCore = Get-CorepackState
@@ -686,10 +730,39 @@ function Invoke-Install {
     ('call "' + $Bat + '" "' + $Zip + '" "' + $Root + '" 1 1 >"' + $log + '" 2>&1'),
     'exit /b %ERRORLEVEL%'
   )
+  Write-T ($Label + ': operator step starts (deploy-bootstrap .bat, install-deps 1, run-migrations 1)')
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  & cmd.exe /d /c $wrapper
-  $exit = $LASTEXITCODE
+  $op = Start-Detached -CmdFile $wrapper
+  $timedOut = $false
+  $nextBeat = 60
+  while (-not $op.WaitForExit(5000)) {
+    $el = [int]$sw.Elapsed.TotalSeconds
+    if ($el -ge $nextBeat) {
+      $nextBeat += 60
+      $lastLine = ''
+      if (Test-Path -LiteralPath $log) {
+        $lastLine = [string](@(Get-Content -LiteralPath $log | Where-Object { $_ -match '^\[(multitable-onprem-|corepack|node-rm)' }) | Select-Object -Last 1)
+      }
+      $depLog = Get-ChildItem -LiteralPath (Join-Path $Root 'output\logs') -Filter 'dependency-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+      $depInfo = ''
+      if ($null -ne $depLog) { $depInfo = ('{0} {1}B' -f $depLog.Name, $depLog.Length) }
+      Write-T ("{0}: running {1}s; last: {2}; dep log: {3}" -f $Label, $el, $lastLine, $depInfo)
+    }
+    if ($el -ge ($OperatorTimeoutMin * 60)) {
+      $timedOut = $true
+      Write-T ("{0}: operator step still running after {1} min; snapshot then stop" -f $Label, $OperatorTimeoutMin)
+      Write-ProcessSnapshot
+      Invoke-Diag
+      Stop-Tree -ProcessId $op.Id
+      break
+    }
+  }
+  $exit = -9
+  if (-not $timedOut) { $op.WaitForExit(); $exit = $op.ExitCode }
   $sw.Stop()
+  Write-T ("{0}: operator step ended exit={1} after {2}s" -f $Label, $exit, [int]$sw.Elapsed.TotalSeconds)
+  $res['operator_timed_out'] = $timedOut
+  if ($timedOut) { $fail += ('operator step did not finish within ' + $OperatorTimeoutMin + ' min') }
   New-Item -ItemType File -Force -Path $stop | Out-Null
   Start-Sleep -Seconds 2
   $res['exit_code'] = $exit
@@ -723,6 +796,7 @@ function Invoke-Install {
   $res['dep_activate_s'] = $(if ($act.Success) { [int]$act.Groups[2].Value } else { -1 })
   $res['operator_tail'] = Get-OperatorTail -Log $log
 
+  Write-T ($Label + ': reading the after-state')
   $postK = Get-KyselyState -AfterTs $preK.MaxTs
   $list = Get-MigrateList
   $res['kysely_count_after'] = $postK.Count
