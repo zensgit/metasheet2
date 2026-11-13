@@ -98,7 +98,8 @@ function Invoke-CmdLine {
   $lines = @('@echo off')
   if (-not [string]::IsNullOrWhiteSpace($Cwd)) { $lines += ('cd /d "' + $Cwd + '"') }
   $codeFile = Join-Path $H ("c-$id.code")
-  $lines += ($CommandLine + ' >"' + $outFile + '" 2>"' + $errFile + '"')
+  # 'call' so a batch command (pm2.cmd, npm.cmd, corepack.cmd) returns here and the exit code line runs.
+  $lines += ('call ' + $CommandLine + ' >"' + $outFile + '" 2>"' + $errFile + '"')
   $lines += ('>"' + $codeFile + '" echo %ERRORLEVEL%')
   $lines += 'exit /b 0'
   Set-Content -LiteralPath $cmdFile -Value $lines -Encoding ASCII
@@ -228,6 +229,21 @@ function Get-MigrateList {
   return [pscustomobject]@{ Code = $r.Code; Applied = $applied; Pending = $pending }
 }
 
+function Get-WebErrorCode {
+  # HTTP status from a failed request (502, 404, ...), 0 when nothing answered. PowerShell wraps the
+  # WebException (MethodInvocationException), so walk the inner exceptions.
+  param($ErrorRecord)
+  $ex = $ErrorRecord.Exception
+  while ($null -ne $ex) {
+    if ($ex -is [System.Net.WebException]) {
+      if ($null -ne $ex.Response) { try { return [int]$ex.Response.StatusCode } catch { return -1 } }
+      return 0
+    }
+    $ex = $ex.InnerException
+  }
+  return 0
+}
+
 function Get-Health {
   param([string]$Url, [string]$Commit = '')
   $code = 0; $commitMatch = $false; $commitPresent = $false
@@ -251,7 +267,7 @@ function Get-Health {
     } catch { }
   }
   catch {
-    if ($null -ne $_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = -1 } } else { $code = 0 }
+    $code = Get-WebErrorCode -ErrorRecord $_
   }
   return [pscustomobject]@{ Code = $code; CommitPresent = $commitPresent; CommitMatchesExpected = $commitMatch }
 }
@@ -564,7 +580,7 @@ function Invoke-Preflight {
   if (-not $res['port80_free_after_clear']) { $fail += ('port 80 still in use on the runner by ' + ((@(Get-Port80Owners)) -join '/')) }
   if (-not $res['port8900_free_before']) { $fail += 'port 8900 already in use on the runner' }
 
-  $pm = Invoke-CmdLine -CommandLine ('npm install -g pm2@' + $env:PM2_VERSION + ' --no-audit --no-fund')
+  $pm = Invoke-CmdLine -CommandLine ('npm install -g pm2@' + $env:PM2_VERSION + ' --no-audit --no-fund') -TimeoutSec 600
   $res['pm2_global_install_exit'] = $pm.Code
   $pv = Invoke-CmdLine -CommandLine 'pm2 --version'
   $res['pm2_version'] = ((@($pv.Out) | Select-Object -Last 1) -join '').Trim()
@@ -680,7 +696,7 @@ function Invoke-Sample {
       $r = Invoke-WebRequest -UseBasicParsing -Uri ('http://127.0.0.1:' + $BackendPort + '/health') -TimeoutSec 2
       $code = [int]$r.StatusCode
     } catch {
-      if ($null -ne $_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { $code = -1 } }
+      $code = Get-WebErrorCode -ErrorRecord $_
     }
     $alive = 0
     if ($OldPid -gt 0 -and $null -ne (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) { $alive = 1 }
