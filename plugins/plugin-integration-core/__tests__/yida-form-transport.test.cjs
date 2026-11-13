@@ -430,11 +430,16 @@ test('a stalled 2xx body ends as RECEIPT at the transport body deadline (not by 
     cancel() { cancels += 1; return Promise.reject(new Error('synthetic-private-cleanup')) },
   }, { highWaterMark: 0 })
   const started = Date.now()
-  const result = transport(async () => new Response(body), { bodyReadTimeoutMs: 20 }).send(createRequest(), { signal: controller.signal })
+  let fetchSignal
+  const result = transport(async (_url, options) => { fetchSignal = options.signal; return new Response(body) }, { bodyReadTimeoutMs: 20 })
+    .send(createRequest(), { signal: controller.signal })
   let settled = false
   result.then(() => { settled = true }, () => { settled = true })
   await entered.promise
   controller.abort('synthetic-private')
+  // Gate 1/6: the forwarding was removed when the status line arrived, so this late run abort never reaches the
+  // fetch signal (R82 mutant G1_transport_forward_abort kept the listener and survived this file without it).
+  assert.equal(fetchSignal.aborted, false, 'a run abort after the status line is not forwarded to the fetch signal')
   await nextTurn()
   assert.equal(settled, false, 'an abort after the status line does not end the attempt')
   await assert.rejects(result, code('RECEIPT'))
@@ -451,26 +456,27 @@ test('abort immediately after chunk delivery publishes the ACK (the 2xx had alre
   assert.equal(controller.signal.aborted, true)
 })
 
-test('undici model: an abort before the status line is ABORTED; one microtask after it the errored body is RECEIPT, later it is a receipt', async () => {
-  // Models real undici: the request follows options.signal for its whole life, so a late abort
-  // errors the body stream instead of being ignored. The transport must not hand it that signal
-  // after the status line, and must classify what it still gets as "2xx received".
-  function undiciLike(respond) {
-    return (_url, options) => new Promise((resolve, reject) => {
-      const fetchSignal = options.signal
-      if (fetchSignal.aborted) { reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })); return }
-      let controller
-      const body = new ReadableStream({
-        start(stream) { controller = stream },
-        pull(stream) { respond(stream) },
-      }, { highWaterMark: 0 })
-      fetchSignal.addEventListener('abort', () => { try { controller.error(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })) } catch { /* already closed */ } }, { once: true })
-      setImmediate(() => {
-        if (fetchSignal.aborted) reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' }))
-        else resolve(new Response(body))
-      })
+// Models real undici: the request follows options.signal for its whole life, so a late abort
+// errors the body stream instead of being ignored. The transport must not hand it that signal
+// after the status line, and must classify what it still gets as "2xx received".
+function undiciLike(respond) {
+  return (_url, options) => new Promise((resolve, reject) => {
+    const fetchSignal = options.signal
+    if (fetchSignal.aborted) { reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })); return }
+    let controller
+    const body = new ReadableStream({
+      start(stream) { controller = stream },
+      pull(stream) { respond(stream) },
+    }, { highWaterMark: 0 })
+    fetchSignal.addEventListener('abort', () => { try { controller.error(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' })) } catch { /* already closed */ } }, { once: true })
+    setImmediate(() => {
+      if (fetchSignal.aborted) reject(Object.assign(new Error('synthetic-private-abort'), { name: 'AbortError' }))
+      else resolve(new Response(body))
     })
-  }
+  })
+}
+
+test('undici model: an abort before the status line is ABORTED; one microtask after it the errored body is RECEIPT, later it is a receipt', async () => {
   const chunk = Buffer.from('{"result":"synthetic-instance"}')
   // (a) abort while the request is in flight (the model answers on the next turn): torn down, nothing known.
   const early = new AbortController()
@@ -496,6 +502,31 @@ test('undici model: an abort before the status line is ABORTED; one microtask af
   await nextTurn(); await nextTurn()
   late.abort('synthetic-private')
   assert.deepEqual(await lateResult, { statusCode: 200, instanceId: 'synthetic-instance' })
+})
+
+test('undici model: a run-signal abort while the 2xx body is still streaming is not forwarded; the body completes and the receipt is returned', async () => {
+  // The body is held open across the abort (pull is pending on a gate), so a forwarding listener still attached
+  // after the status line would abort the fetch signal, error the undici body and turn this received 2xx into
+  // RECEIPT (runner: outcome_unknown). Pins R82 mutant G1_transport_forward_abort in this file.
+  const chunk = Buffer.from('{"result":"synthetic-instance"}')
+  const gate = deferred()
+  const controller = new AbortController()
+  let pulled = false
+  let fetchSignal
+  const fetch = undiciLike((stream) => {
+    pulled = true
+    // Resolve the stream from the gate's callback; under a forwarded abort the stream is already errored.
+    gate.promise.then(() => { try { stream.enqueue(chunk); stream.close() } catch { /* errored by a forwarded abort */ } })
+  })
+  const result = transport((url, options) => { fetchSignal = options.signal; return fetch(url, options) })
+    .send(createRequest(), { signal: controller.signal })
+  result.then(() => {}, () => {}) // observed below; never an unhandled rejection if an assertion fails first
+  await nextTurn(); await nextTurn()
+  assert.equal(pulled, true, 'the status line is in hand and the body read is pending')
+  controller.abort('synthetic-private')
+  assert.equal(fetchSignal.aborted, false, 'a run abort while the body streams is not forwarded to the fetch signal')
+  gate.resolve()
+  assert.deepEqual(await result, { statusCode: 200, instanceId: 'synthetic-instance' })
 })
 
 test('transport/read errors are values-free and never retried or sent through refresh', async () => {
