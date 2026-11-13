@@ -1395,6 +1395,9 @@ import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
 import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
+/** A save's record, field, value and version (the options a call carries are pinned where they matter). */
+const firstFourArgs = (calls: unknown[][]) => calls.map((call) => call.slice(0, 4))
+
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -6144,7 +6147,7 @@ describe('MultitableWorkbench view wiring', () => {
       field.value = 'typed on rec_remote'
       acceptNextPatch()
       await deepLinkToFar(host, false)
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
       expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
       expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', data: { fld_title: 'typed on rec_remote' } })
       expect(document.activeElement).toBe(field)
@@ -6539,7 +6542,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[0].version = 7
       acceptNextPatch()
       await patchAddedFor('rec_1')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7]])
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_1', 'fld_files', expected, 7]])
     })
 
     it('an upload naming the record shown (rec_2), whose list changed while it ran: also its list as it is now, then the ids it added', async () => {
@@ -6547,7 +6550,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: ['att_y'] }
       acceptNextPatch()
       await patchAddedFor('rec_2')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_y', 'att_new'], 1]])
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_2', 'fld_files', ['att_y', 'att_new'], 1]])
       expect(showSuccessSpy).toHaveBeenCalledTimes(1)
     })
 
@@ -6555,7 +6558,7 @@ describe('MultitableWorkbench view wiring', () => {
       await openRemoteThenRec2(['att_1', 'att_2'])
       acceptNextPatch()
       await patchAddedFor('rec_remote')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_1', 'att_2', 'att_new'], 4]])
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_remote', 'fld_files', ['att_1', 'att_2', 'att_new'], 4]])
     })
 
     // --- the drawer's upload or delete request itself fails after the drawer moved on: a toast, since the panel's
