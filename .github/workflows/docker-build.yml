@@ -207,7 +207,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main' && needs.build.outputs.published == 'true' }}
     runs-on: ubuntu-latest
     # Above the remote_deploy step's limit plus the sync, status, summary and smoke steps.
-    timeout-minutes: 330
+    timeout-minutes: 345
     concurrency:
       group: metasheet2-production-deploy
       cancel-in-progress: false
@@ -301,10 +301,10 @@ jobs:
         id: remote_deploy
         if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}
         continue-on-error: true
-        # The window's own time limits add up to about 259 minutes with the default tunables, one
-        # host check per phase and every bounded step at its limit; the runbook says what a
-        # runner timeout means.
-        timeout-minutes: 285
+        # The window's own time limits add up to about 290 minutes on its longest path with the
+        # default tunables, one host check per phase, three app-data paths and every bounded step
+        # at its limit; the runbook says what a runner timeout means.
+        timeout-minutes: 300
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

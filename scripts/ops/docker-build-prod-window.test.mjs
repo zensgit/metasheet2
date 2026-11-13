@@ -121,7 +121,11 @@ function linuxStartTick(pid) {
   }
 }
 function processTable() {
-  const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat=,lstart=,command='], { encoding: 'utf8' }).stdout ?? ''
+  // lstart is printed in the locale's date format; the parser below reads the C form.
+  const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat=,lstart=,command='], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+  }).stdout ?? ''
   const rows = []
   for (const line of listing.split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/)

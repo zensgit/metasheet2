@@ -136,29 +136,38 @@ never any other backend).
   for a background job (the pull, the app-data copy-out, the dump and its two reads, the
   migration), the TERM acts at once: the job is stopped (the migration one-off is killed
   and the ledger decides). Otherwise it acts once the current foreground step returns.
+  Two foreground steps are whole loops that return only at their end: the new backend's
+  health wait (up to 12 minutes: 60 tries of up to 10 s plus a 2 s pause) and the
+  read-back of the app data after the commit (up to 30 s plus 600 s per app-data path).
+  A TERM during either acts when the loop ends.
   Steps with a time limit: every docker and compose call except the two
   `docker image inspect` digest reads after the pull and the `docker compose` /
   `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
   request unless the step sets less); the deploy checkout's `git fetch` (300 s); each host
-  check (400 s). The longest foreground limit is 600 s (copying the app data into, or
-  reading it back from, the new backend). Steps without a limit: local file work
-  (`git checkout` / `git merge` in the deploy directory, the env-file writes, listing and
-  hashing the run directory's files) and `scripts/ops/attendance-preflight.sh`. The exit
-  branch starts with a `raw_rc=` line in `window.log`; from then on the window ignores
-  further TERM signals and ends by the same limits (restarting the old version can take
-  up to about 30 minutes: host check, `docker start`, the old-version checks). If no
-  `raw_rc=` line appears within 10 minutes of the TERM, the owner decides. Never send
-  KILL: the window then ends without its exit branch, `state` stays unfinished, no `rc`
-  file is written and production stays in whatever phase it was.
+  check (400 s). The longest single limit is 600 s (copying the app data into the new
+  backend, or reading one app-data path back from it). Steps without a limit: local file
+  work (`git checkout` / `git merge` in the deploy directory, the env-file writes, listing
+  and hashing the run directory's files), `df`, `crontab -l` and
+  `scripts/ops/attendance-preflight.sh`. The exit branch starts with a `raw_rc=` line in
+  `window.log`; from then on the window ignores further TERM signals and ends by the same
+  limits (restarting the old version can take up to about 30 minutes: host check,
+  `docker start`, the old-version checks). The `raw_rc=` line can be missing: a TERM that
+  arrives while the window writes a host file sends the exit branch's lines into that
+  file. So judge by `state`, the `rc` file and the `window.pid` process, not by the log
+  line: while the process runs, the window is still inside its limits; once it is gone,
+  follow "the window has ended" under Outcomes. Never send KILL: the window then ends
+  without its exit branch, `state` stays unfinished, no `rc` file is written and
+  production stays in whatever phase it was.
 - Users see connection refused on the public port from the web stop to the web start
   (stop, drain, dump, dump verification, migration, backend start). There is no
   maintenance page; open tabs must be refreshed afterwards.
 - The dispatcher stays on call until the window's final `outcome=` line, or, after a
   runner timeout, 255 or 76, until the host `state` shows a terminal phase.
-- The `remote_deploy` step is limited to 285 minutes and the `deploy` job to 330. The
-  window's own time limits add up to about 259 minutes with the default tunables, one
-  host check per phase and every limited step at its limit; raised tunables or more host
-  checks can exceed the step limit. A runner timeout
+- The `remote_deploy` step is limited to 300 minutes and the `deploy` job to 345. The
+  window's own time limits add up to about 290 minutes on its longest path (a migration
+  that exits non-zero while the ledger reads committed) with the default tunables, one
+  host check per phase, three app-data paths and every limited step at its limit; raised
+  tunables or more host checks can exceed the step limit. A runner timeout
   ends only the log follower: the window finishes its branch on the host, and the
   read-only status step (or `state` on the host) shows where it ended.
 
