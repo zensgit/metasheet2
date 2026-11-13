@@ -663,6 +663,71 @@ catalog 化 readPath、fixture GetDetail 三项**已重贴到 P2/P3**,不在 P1 
   运行时不可达);条件步骤会绿而不执行(`integration-guard.yml:479`),所以证据要贴 run id **加**执行日志行。
 - **声明面越小越好**。不承重的声明**删掉**,不是加限定词;本轮被杀的结论多数是"过强声明"而非坏代码。
 - **空读先怀疑读法**。本地工作树不是 main:引用一律经 `git show <sha>:<path>`,行号是该 blob 的行号。
+
+---
+
+## 7. 验收后 API Profile 演进顺序(PROPOSED / DEFERRED)
+
+> **owner direction, 2026-08-06**:把演进顺序写入唯一权威计划。该同意只授权记录路线,
+> **不授权**现在实施通用 API Profile、修改既有 profile 身份、迁移存量配置、接 runtime、部署或 rollout。
+> 本节不得阻塞 §1 的单客户 K3 WISE 实体机验收。
+
+当前第一方实现已经具备 profile 的组成层,但尚未形成可供其他 ERP API 复用的完整合同。现有身份必须
+分开记录,不能因为名称相近而合并成一个版本:
+
+- connector kind:`erp:k3-wise-webapi`,负责 K3 WISE 的认证、传输与基础响应处理;
+- document template id:`k3wise.material.v1`,负责 Material 文档端点与字段模板;
+- read-smoke preset id:`k3wise.material-list.v1`,负责有界 Material list 探测;
+- B4 action profile version:`k3wise.material_list.v1`,负责 approved read binding 与 qualification 身份;
+- customer write profile:`material-k3wise-customer-profile-v1`,负责 Material Save-only、最多 3 行与
+  GetDetail 回读姿态。
+
+上述身份分别进入配置、preset、binding、qualification 或 provenance。后续通用化采用**逐层新增版本**,
+不得通过原地改写 v1 字面量,也不得把四个版本坐标压成一个字段,来重新解释已经批准的配置或资格证据。
+
+### 7.1 权威顺序
+
+1. **完成当前客户验收**。先跑通数据库/K3 读 → 备料清洗 → dry-run → 人工批准 → K3 Material
+   Save-only(1–3 行)→ GetDetail 回读。mock、staging 与实体机证据必须分层记录,不得相互替代。
+2. **冻结 v1 行为与兼容边界**。记录现有 profileId、binding/provenance 输入、错误词表和运行期限制;
+   修复只能保持 v1 合同或新增版本,不得静默放宽写端点、行数或生命周期。
+3. **定义通用 API Profile contract 与 first-party registry**。合同至少闭合 profileId/version、
+   connectorKind、认证方式、业务对象、允许操作、请求/响应 codec、分页与完整性、字段 schema、错误映射、
+   写入上限、生命周期、幂等/重放和写后验证。profile 定义只能由一方代码注册,不得从客户配置自动铸造。
+4. **新增 K3 v2 适配通用合同**。复用既有 K3 transport,把 Material GetList/GetDetail/Save 的业务规则
+   搬入标准 action profile。template、preset、action profile 与 write profile 是否都需要升版,由兼容性矩阵
+   逐项决定并分别命名;不得先发明一个总 `k3wise.material.v2` 覆盖所有坐标。v1 继续可验证、可回放。
+5. **用第二个真实 API Profile 证伪抽象**。优先选择 K3 BOM 只读或另一个已获准 ERP API。只有当第二个
+   profile 能在不修改核心 orchestration/routes 的前提下接入,才可声称 API Profile 合同具备复用性。
+6. **再扩展 PLM/ERP/CRM/SRM**。按 profile 逐个认证和交付;不得以“平台已通用”为由跳过各系统的认证、
+   映射、幂等、补偿、权限和实体机验收。
+
+### 7.2 合同边界
+
+- 平台核心只编排 read → clean/validate → dry-run → approval → apply → verify,不承载 K3 专用字段或端点。
+- connector profile 负责传输、认证与供应商协议;action profile 负责业务对象和动作;field mapping/version
+  是独立配置身份。三者不得用一个 `version` 字段混称。
+- 受保护写动作不得接受调用方任意覆盖 URL、Submit/Audit 端点、生命周期或行数上限。
+- profileId/version、approved config identity 与 mappingVersion 必须分别进入可审计 provenance;
+  哪些字段进入 qualification digest 由后续设计门明确,不得从本节推导 runtime 实现。
+- 真正不可信的第三方 connector 不以同进程 JavaScript profile 作为安全边界;需要独立 worker/process 与
+  canonical IPC 合同,另行设计和授权。
+
+### 7.3 每一步的放行谓词
+
+| 步骤 | 最小放行证据 |
+|---|---|
+| 当前客户验收 | staging 全链 PASS + 一次实体机受控 PASS;Submit/Audit=0;flag 恢复 OFF |
+| v1 冻结 | v1 profile/binding/provenance 金标与兼容测试进入 required `integration-guard` |
+| 通用合同 | 闭合 schema、first-party registry、版本不可变与任意端点覆盖负控均有判别式测试 |
+| K3 v2 | 与 v1 客户场景结果等价;旧 v1 配置不被静默迁移;新身份产生不同且可追溯的 provenance |
+| 第二 profile | 只新增 profile/codec/mapping/tests,核心 orchestration/routes 无业务特例改动 |
+| 多系统推广 | 每个系统单独完成 profile 审核、真实 API 测试和客户 binding 验收 |
+
+本节只定义依赖顺序与验收谓词。长期场景包装的背景材料仍可参考
+`stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md`,但发生冲突时以本节的
+“当前客户先交付、v1 不原地改写、第二 profile 后才能宣称复用”三条为准。
+
 ---
 
 ## 附录 A — P1/P2 开工后的实测修正(2026-08-04,写在计划正文之后,不改正文)
