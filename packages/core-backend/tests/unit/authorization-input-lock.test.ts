@@ -9,11 +9,11 @@
  * state of a missing role row per intent; the witness slot; locks added by `work`, one request at
  * a time; the closed shapes of a plan, a witness and a request for added locks; the held-row
  * checks; the refusal inside the pull-source gate marker; the borrow-period error listener; dense
- * placeholders and the literal world-lock key; and the key's distance from every other fixed
- * two-int4 namespace.
+ * placeholders and the literal world-lock key; the key's distance from every other fixed two-int4
+ * namespace; and the CI wiring of the two real-database files.
  */
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
@@ -59,6 +59,11 @@ const ROOT = path.resolve(__dirname, '..', '..', '..', '..')
 const BACKEND = path.join(ROOT, 'packages', 'core-backend')
 const SRC = path.join(BACKEND, 'src')
 const LOCK_MODULE = path.join(SRC, 'rbac', 'authorization-input-lock.ts')
+const DB_SPECS = [
+  'tests/integration/authorization-input-serialization.db.test.ts',
+  'tests/integration/authorization-input-census.db.test.ts',
+]
+const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'plugin-tests.yml')
 const RECOVERY_MARKER = 'METASHEET_RECOVERY_AUTHORITY_BUSY'
 
 type Recorded = { sql: string; params?: unknown[]; extra: number; listeners: number }
@@ -1415,4 +1420,18 @@ describe('statement text and the world-lock key', () => {
     expect(source).not.toMatch(/security-action-privilege|external-login-assurance/)
     expect(source).not.toMatch(/require\(|import\(/)
   })
+})
+
+describe('real-database files are wired', () => {
+  const config = readFileSync(path.join(BACKEND, 'vitest.config.ts'), 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  for (const spec of DB_SPECS) {
+    it(`${spec} exists, is excluded from the default lane and runs once in the approval real-DB step`, () => {
+      expect(existsSync(path.join(BACKEND, spec))).toBe(true)
+      expect(config.split(`'${spec}'`).length - 1).toBe(1)
+      const step = workflow.slice(workflow.indexOf('id: approval-real-db-integration'))
+      const run = step.slice(0, step.indexOf('\n      - '))
+      expect(run.split(`${spec} \\\n`).length - 1).toBe(1)
+    })
+  }
 })

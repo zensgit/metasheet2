@@ -450,6 +450,21 @@ export default defineConfig({
       // approval-routing-prerequisite-ci-wiring.test.mjs).
       'tests/integration/approval-routing-policy-required.db.test.ts',
       'tests/integration/approval-routing-policy-required.api.test.ts',
+      // Authorization-input contract entry points against real PostgreSQL: world-lock compatibility,
+      // READ COMMITTED pin, token rejection, timeout restoration, terminated backend, no convoy, and
+      // the role-row-first order of a role delete against a membership write. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/authorization-input-lock.test.ts, the position by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/authorization-input-serialization.db.test.ts',
+      // Database-side census of the classifier input tables (triggers, rules, function bodies,
+      // users-locking functions, cascading foreign keys) against the migrated schema.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/authorization-input-lock.test.ts, the position by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/authorization-input-census.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
