@@ -15,7 +15,7 @@ All host paths below are relative to the deploy user's home directory (`$HOME`).
 | `$HOME/metasheet2-deploy-window/state` | the window's state (`phase=`, `env_written=`, `backend_verified=`, `web_verified=`, `rc=` ...). Only the lock holder writes it |
 | `$HOME/metasheet2-deploy-window/abort` | created by the operator to abort a window before the migration (see below) |
 | `$HOME/metasheet2-deploy-window/host-checks/` | owner-installed host checks: every executable here runs with one argument, the phase (`pre-stop`, `pre-restart-old`, `post-backend`); all must exit 0 and at least `DEPLOY_WINDOW_MIN_HOST_CHECKS` must be present (see "Host checks") |
-| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log` (the same lines as the public run log), `window-detail.log` (host-only details, see "Public log and host details"), `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, and raw tool outputs. Host only; never uploaded |
+| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log` (the same lines as the public run log), `window-detail.log` (host-only details, see "Public log and host details"), `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, `git-sync.out` (the output of the deploy checkout's git sync), and raw tool outputs. Host only; never uploaded |
 
 The env snapshots and `globals.sql` hold secrets and password hashes. Keep the run
 directories on the host and prune old dumps by hand; the workflow never deletes a
@@ -34,10 +34,16 @@ the deploy. These details stay on the host, in the run directory's `window-detai
   `running_backend_commit=match`, `old_images recorded=ok`, `old version restarted revision=match`);
 - the in-play migration names, the exclusion-proof details and every ledger count
   (public: `pending_set=match|mismatch`, `exclusion_proof=ok|fail`,
-  `ledger=committed|other`, `MIGRATE COMMITTED ledger=committed`);
+  `ledger=committed|rolled-back|other`, `MIGRATE COMMITTED ledger=committed`);
 - the per-migration result lines of `migrate.js` (public: `migrate rc=<n> sqlstate=<code|none>`);
 - database, dump, app-data and free-space sizes (public: `disk_gate=ok|fail`,
-  `backup ok sha256=<hash>`, `appdata copy=ok sha256=<hash>`, `appdata read_back=match|mismatch`).
+  `backup ok sha256=<hash>`, `appdata copy=ok sha256=<hash>`, `appdata read_back=match|mismatch`);
+- the output of the deploy checkout's git sync (fetch, stash, checkout, merge), which names
+  commits and changed files, in `git-sync.out` (public: `git_sync=ok`, or
+  `git_sync=fail step=<step>`).
+
+The host file sync step before the window still prints the deploy path's free space
+(`[host-sync] disk_available_kb=`), as the workflow did before this window.
 
 The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_written`,
 `backend_verified`, `web_verified`, `updated_utc`.
@@ -77,6 +83,18 @@ The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_wr
   unset it after verification.
 - Measure the database dump size and time at a quiet hour and set
   `DEPLOY_BACKUP_TIMEOUT_S` to about twice the measured time (default 1200 s).
+- `docker/app.env` must not set `LOG_LEVEL` stricter than `info` (`warn`, `error`). After
+  the commit the window checks a line the new backend logs at `info`; without it every
+  deploy ends 73 with the committed backend stopped.
+- Check the size of the attendance-import volume (the compose volume
+  `metasheet-attendance-import-data`, mounted at `/app/uploads/attendance-import`), for
+  example with `docker system df -v`. After the commit, the read-back of the app data from
+  the created backend streams that volume too (`docker cp` of the uploads path cannot leave
+  it out; it is not counted), within 600 s per app-data path. A volume too large to stream
+  in that time ends the window 73 with the new backend never started.
+- A deploy is always a fresh dispatch. "Re-run failed jobs" on a deploy run skips the
+  build job's input validation (the probe-silence check included) and runs the window
+  again with the first attempt's inputs; never use it for the deploy job.
 - No staging window-runner, docker GC or env-reconcile dispatch may run during the
   window. The deploy user's crontab must have no docker GC / prune entry (the window
   refuses otherwise).
@@ -115,14 +133,29 @@ never any other backend).
   It takes the same branch as an abort for the phase it is in (before the stop: 70; after
   the stop and before the commit: per `pre_commit_abort`; during the migration: the one-off
   is killed and the ledger decides; after the commit: 73 or 74). It acts once the current
-  foreground step returns (every step is bounded by a timeout). Never send KILL: the window
-  then ends without its exit branch, `state` stays unfinished and production stays in
-  whatever phase it was.
+  foreground step returns; a wait for a background job (pull, copy-out, dump, its reads,
+  the migration) returns at once. Steps with a time limit: every docker and compose call
+  except the two `docker image inspect` digest reads after the pull and the
+  `docker compose` / `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
+  request unless the step sets less); the deploy checkout's `git fetch` (300 s); each host
+  check (400 s). Steps without one: local file work (`git checkout` / `git merge` in the
+  deploy directory, the env-file writes, listing and hashing the run directory's files)
+  and `scripts/ops/attendance-preflight.sh`. Once the exit branch has started, the window
+  ignores further TERM signals and ends by those limits. If a TERM has no visible effect
+  within 20 minutes (the longest single limit, the dump, with the default
+  `DEPLOY_BACKUP_TIMEOUT_S`), the owner decides. Never send KILL: the window then ends
+  without its exit branch, `state` stays unfinished, no `rc` file is written and
+  production stays in whatever phase it was.
 - Users see connection refused on the public port from the web stop to the web start
   (stop, drain, dump, dump verification, migration, backend start). There is no
   maintenance page; open tabs must be refreshed afterwards.
 - The dispatcher stays on call until the window's final `outcome=` line, or, after a
   runner timeout, 255 or 76, until the host `state` shows a terminal phase.
+- The `remote_deploy` step is limited to 285 minutes and the `deploy` job to 330. The
+  window's own time limits add up to about 259 minutes with the default tunables (every
+  limited step at its limit); raised tunables can exceed the step limit. A runner timeout
+  ends only the log follower: the window finishes its branch on the host, and the
+  read-only status step (or `state` on the host) shows where it ended.
 
 ## Outcomes
 
@@ -170,6 +203,10 @@ has ended and the owner has read the ledger.
   in the run's `window.pid` is gone; and `flock -n "$HOME/metasheet2-deploy-window/lock" true`
   succeeds and the run's `rc` file exists. While the window may still run, a ledger at the
   `ledger before` count proves nothing: the window may be about to migrate.
+- A window that died without its exit branch (KILL, out of memory, a host reboot) never
+  writes `rc`, and `state` keeps its last phase. When the lock is free (the `flock -n`
+  command succeeds) and the `window.pid` process is gone, the window has ended: the owner
+  decides from the ledger alone.
 - `ledger before` and the in-play count are `ledger_before=` and `inplay=` in `state`
   (also the `ledger before=` line of `window-detail.log`).
 - Then the ledger either reads fully applied (`ledger before` + the in-play count, every
@@ -195,10 +232,13 @@ With the owner's word, and only when the ledger reads fully applied, start the s
   (`docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' metasheet-postgres`);
   the run's `[deploy] repo_path=` line names the same directory. Run every step below
   from it (`cd <deploy dir>`).
-- `<compose file>`: `<deploy dir>/<DEPLOY_COMPOSE_FILE>`, the compose file the deploy used
-  (the `DEPLOY_COMPOSE_FILE` secret, default `docker-compose.app.yml`). It equals the
-  `com.docker.compose.project.config_files` label of `metasheet-postgres`; a different
-  file would create backend and web from another compose definition.
+- `<compose file>`: the `com.docker.compose.project.config_files` label of
+  `metasheet-postgres`
+  (`docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' metasheet-postgres`).
+  The window verified that it is the compose file the deploy used (the
+  `DEPLOY_COMPOSE_FILE` secret, default `docker-compose.app.yml`, taken relative to the
+  deploy directory unless it is an absolute path; a secret cannot be read back, so use the
+  label). A different file would create backend and web from another compose definition.
 - `<project>`: the value of the run's `compose_identity=match project=` log line (the
   `com.docker.compose.project` label of `metasheet-postgres`).
 - `<run dir>`: `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>` of the run;
@@ -226,4 +266,5 @@ sequential restore).
 Only the owner clears a `needs-owner` or unfinished state, after recovery, by editing
 `state` to a terminal phase or removing it. First confirm that no window is running:
 `flock -n "$HOME/metasheet2-deploy-window/lock" true` succeeds and the run's `rc` file
-exists. Until the state is cleared every dispatch, and the host file sync, refuses with 75.
+exists, or, for a window that died without its exit branch, the `window.pid` process is
+gone. Until the state is cleared every dispatch, and the host file sync, refuses with 75.
