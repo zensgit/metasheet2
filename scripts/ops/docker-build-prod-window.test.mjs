@@ -39,6 +39,9 @@ const STATUS_RUN = deploySteps.find((step) => step.id === 'window_status').run
 
 const SHA_NEW = 'a'.repeat(40)
 const SHA_OLD = 'b'.repeat(40)
+const SHA_OLD_SHORT = SHA_OLD.slice(0, 7)
+// The migration file the git double's sync output names (as `git merge` prints a diffstat).
+const GIT_SYNC_FILE = 'zzzz20260601120000_harness_git_sync_marker'
 const FAKE_SECRET = 'harness-fake-jwt-value-QXJx7mPLtw'
 const EXCLUDED = 'zzzz20260919090000_create_approval_template_group_backfill_batches'
 const BASE_MIGRATIONS = Array.from({ length: 9 }, (_, i) => `zzzz2026010${i + 1}120000_harness_base_${i + 1}`)
@@ -46,6 +49,8 @@ const INPLAY = Array.from({ length: 5 }, (_, i) => `zzzz2026110${i + 1}120000_ha
 const IMAGE_MIGRATIONS = [...BASE_MIGRATIONS, EXCLUDED, ...INPLAY]
 const sha256 = (text) => createHash('sha256').update(text).digest('hex')
 const INPLAY_SHA = sha256(INPLAY.join('\n'))
+// Ledger rows the image does not know: the ledger count (1238) then differs from --list Applied (9).
+const LEDGER_UNKNOWN = Array.from({ length: 1229 }, (_, i) => `zzzz2025${String(i).padStart(10, '0')}_harness_unknown`)
 // A distinctive database size for the worlds that check what the public outputs carry.
 const DB_BYTES = '987654321'
 const DB_KB = String(Math.ceil(Number(DB_BYTES) / 1024))
@@ -325,9 +330,12 @@ function makeWorld(t, options = {}) {
     mkdirSync(vol, { recursive: true })
     writeFileSync(path.join(vol, 'upload.csv'), 'a,b\n')
     mkdirSync(path.join(ds, 'ctr/metasheet-backend/fs/app/uploads/attendance-import'), { recursive: true })
+    // A generic upload in the backend's own layer beside the volume: copied and counted, so a
+    // read-back filter that skipped the whole uploads path would miss it.
+    writeFileSync(path.join(ds, 'ctr/metasheet-backend/fs/app/uploads/generic-upload.bin'), 'gen\n')
   }
   if (options.extraNames) writeFileSync(path.join(ds, 'extra_names'), options.extraNames.join('\n') + '\n')
-  writeFileSync(path.join(ds, 'ledger'), BASE_MIGRATIONS.join('\n') + '\n')
+  writeFileSync(path.join(ds, 'ledger'), [...BASE_MIGRATIONS, ...(options.ledgerExtra ?? [])].join('\n') + '\n')
   if (options.crontab) writeFileSync(path.join(root, 'crontab'), options.crontab)
   if (options.state !== undefined) writeFileSync(path.join(windowHome, 'state'), options.state)
   if (options.abort) writeFileSync(path.join(windowHome, 'abort'), '')
@@ -715,7 +723,7 @@ function checkSummaryTail(text) {
 // Production state before the deploy stays in host files: deploy.log, the step summary and the
 // status output carry no old commit, image id or digest, no in-play or excluded migration name,
 // no database size and no ledger count (L0, L0 + n) in a key=value or migrate --list form.
-const OLD_STATE_VALUES = [SHA_OLD, '1'.repeat(64), '3'.repeat(64), 'sha256:oldbackendimage', 'sha256:oldwebimage', ...INPLAY, EXCLUDED, DB_BYTES, DB_KB]
+const OLD_STATE_VALUES = [SHA_OLD, SHA_OLD_SHORT, GIT_SYNC_FILE, '1'.repeat(64), '3'.repeat(64), 'sha256:oldbackendimage', 'sha256:oldwebimage', ...INPLAY, EXCLUDED, DB_BYTES, DB_KB]
 const LEDGER_COUNTS = new Set([String(BASE_MIGRATIONS.length), String(BASE_MIGRATIONS.length + INPLAY.length)])
 function assertNoPreDeployState(label, text) {
   for (const value of OLD_STATE_VALUES) assert.ok(!text.includes(value), `${label} must not carry ${value}`)
@@ -735,6 +743,11 @@ async function checkPublicOutputs(world, r, { drill = 'none', reachedInplay = tr
     assertNoPreDeployState(label, text)
     assert.ok(!text.includes(INPLAY_SHA), `${label} must not carry the expected pending-set hash (a repository secret)`)
   }
+  // The deploy checkout's sync output (previous commit, changed files) stays on the host.
+  assert.match(r.deployLog, /^\[deploy\] git_sync=ok$/m)
+  const gitSync = readFileSync(path.join(r.runDir, 'git-sync.out'), 'utf8')
+  assert.ok(gitSync.includes(`${SHA_OLD_SHORT}..`) && gitSync.includes(GIT_SYNC_FILE), 'control: git-sync.out holds the sync output')
+  assert.equal(statSync(path.join(r.runDir, 'git-sync.out')).mode & 0o077, 0, 'git-sync.out is private to the deploy user')
   const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
   assert.ok(detail.includes(`running_backend_commit=${SHA_OLD}`), 'control: the detail log holds the running commit')
   assert.ok(detail.includes('sha256:oldbackendimage'), 'control: the detail log holds the old image id')
@@ -746,6 +759,22 @@ async function checkPublicOutputs(world, r, { drill = 'none', reachedInplay = tr
   assert.equal(statSync(path.join(r.runDir, 'window-detail.log')).mode & 0o077, 0, 'the detail log is private to the deploy user')
   assert.match(status, /^\[deploy-status\] state phase=/m, 'the status step still prints the phase')
   return { summary, status }
+}
+// For a window that refused or stopped with needs-owner: deploy.log and the step summary carry no
+// pre-deploy state and none of `extra` (values of this world); each [file, text] of `controls`
+// must be in that host file of the run directory, so the check is not vacuous.
+async function checkPublicText(world, r, { extra = [], controls = [], status = false } = {}) {
+  const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+  const texts = [['deploy.log', r.deployLog], ['step summary', summary]]
+  if (status) texts.push(['status output', await runStatus(world, r.runId)])
+  for (const [label, text] of texts) {
+    assertNoPreDeployState(label, text)
+    assert.ok(!text.includes(INPLAY_SHA), `${label} must not carry the in-play set hash`)
+    for (const value of extra) assert.ok(!text.includes(value), `${label} must not carry ${value}`)
+  }
+  for (const [file, text] of controls) {
+    assert.ok((readIf(path.join(r.runDir, file)) ?? '').includes(text), `control: ${file} holds ${text}`)
+  }
 }
 
 // ---------- scenarios ----------
@@ -760,8 +789,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
 
   scenario('1 happy path with app data: full order, IMAGE_TAG on every compose call, .env written at the commit', async (t) => {
     const world = makeWorld(t, { appdata: true })
-    const r = await runWindow(t, world, { env: { H_DB_BYTES: DB_BYTES, H_DUMP_MODE: 'slow' } })
+    const r = await runWindow(t, world, { env: { H_DB_BYTES: DB_BYTES, H_DUMP_MODE: 'slow', H_GIT_DIRTY: '1' } })
     checkHappy(r, { appdata: true })
+    assert.ok(r.calls.some((call) => call.kind === 'git' && /^stash push /.test(call.args)), 'the dirty deploy checkout was stashed')
     const { summary } = await checkPublicOutputs(world, r)
     // The slow dump outlasts a heartbeat interval: its progress line carries no size.
     assert.match(r.deployLog, /^\[deploy-window\] heartbeat phase=backup elapsed_s=\d+$/m)
@@ -792,20 +822,23 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['pulled web revision label differs', {}, { H_NEW_REV_WEB: 'f'.repeat(40) }],
     ['pulled web image has no repo digest', {}, { H_NO_DIGEST: 'web' }],
     ['pulled backend image has no repo digest', {}, { H_NO_DIGEST: 'backend' }],
-    ['pre-pull disk gate', {}, { H_DF_FREE_KB: String(1024 * 1024) }],
-    ['post-pull disk gate (database larger than the free space)', {}, { H_DB_BYTES: String(200 * 1024 ** 3) }],
-    ['in-play sha mismatch', {}, { EXPECTED_PENDING_SHA256: 'f'.repeat(64) }],
-    ['in-play sha with a trailing newline is refused (names joined by newline without a trailing one)', {}, { EXPECTED_PENDING_SHA256: sha256(INPLAY.join('\n') + '\n') }],
-    ['excluded name missing from the image', {}, { H_IMAGE_MIGRATIONS: [...BASE_MIGRATIONS, ...INPLAY].join(',') }],
+    ['pre-pull disk gate', {}, { H_DF_FREE_KB: '1234567' }, { extra: ['1234567'], controls: [['window-detail.log', 'free_kb=1234567']] }],
+    ['post-pull disk gate (database larger than the free space)', {}, { H_DB_BYTES: '219902325555' },
+      { extra: ['219902325555', '214748365', '216845517'], controls: [['window-detail.log', 'database_kb=214748365']] }],
+    ['in-play sha mismatch', {}, { EXPECTED_PENDING_SHA256: 'f'.repeat(64) }, { controls: [['window-detail.log', `inplay_sha256=${INPLAY_SHA}`]] }],
+    ['in-play sha with a trailing newline is refused (names joined by newline without a trailing one)', {}, { EXPECTED_PENDING_SHA256: sha256(INPLAY.join('\n') + '\n') },
+      { controls: [['window-detail.log', `inplay_sha256=${INPLAY_SHA}`]] }],
+    ['excluded name missing from the image', {}, { H_IMAGE_MIGRATIONS: [...BASE_MIGRATIONS, ...INPLAY].join(',') }, { controls: [['window-detail.log', `exclusion_proof not_pending=${EXCLUDED}`]] }],
+    ['migrate --list Applied differs from the ledger count', { ledgerExtra: LEDGER_UNKNOWN }, {}, { extra: ['1238'], controls: [['window-detail.log', 'list applied=9 ledger=1238']] }],
     ['app.env key in export form', { appEnv: 'DATABASE_URL=postgres://u:p@postgres:5432/db\nexport MIGRATION_EXCLUDE=x\n' }, {}],
     ['app.env key with spaces', { appEnv: 'DATABASE_URL=postgres://u:p@postgres:5432/db\n  ALLOW_DB_RESET = true\n' }, {}],
     ['env guard in the one-off fails', {}, { H_ONEOFF_ENV: 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=true' }],
-    ['--list rc 1', {}, { H_LIST_RC: '1' }],
+    ['--list rc 1', {}, { H_LIST_RC: '1' }, { extra: ['ECONNREFUSED'], controls: [['list-before.out', 'ECONNREFUSED']] }],
     ['compose label mismatch', { labels: { web: { 'com.docker.compose.service': 'frontend' } } }, {}],
     ['hashed legacy container', { extraNames: ['0a1b2d_metasheet-backend'] }, {}],
     ['redis unhealthy', { containers: { 'metasheet-redis': { health: 'unhealthy' } } }, {}],
     ['backend not running', { containers: { 'metasheet-backend': { running: 'false' } } }, {}],
-    ['host check fails', {}, { H_HOSTCHECK_FAIL: 'pre-stop' }],
+    ['host check fails', {}, { H_HOSTCHECK_FAIL: 'pre-stop' }, { extra: ['harness host check private output'], controls: [['host-checks.out', 'harness host check private output']] }],
     ['no host check installed', { hostCheck: false }, {}],
     ['quiet schedule', {}, { H_EPOCH: String(BUSY_EPOCH) }],
     ['docker GC cron', { crontab: '# keep\n15 4 * * * docker system prune -af\n' }, {}],
@@ -821,11 +854,12 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['host re-validation: restore_proof free text', {}, { RESTORE_PROOF: 'yes' }],
     ['host re-validation: a tunable that is not a positive integer', {}, { DEPLOY_WINDOW_DRAIN_S: '0' }],
   ]
-  for (const [label, worldOptions, env] of REFUSALS) {
+  for (const [label, worldOptions, env, leak] of REFUSALS) {
     scenario(`2 refusal before any stop: ${label} -> 70, env files byte-identical`, async (t) => {
       const world = makeWorld(t, worldOptions)
       const r = await runWindow(t, world, { env })
       checkRefused(r)
+      await checkPublicText(world, r, leak)
       if (env.H_HOSTCHECK_FAIL) assert.deepEqual(r.hostChecks, ['pre-stop'])
       if (env.H_PULL_RC || env.H_NEW_REV_BACKEND || env.H_NEW_REV_WEB || env.H_NO_DIGEST || env.H_DB_BYTES) assert.ok(any(r, isPull), 'reached the pull')
       if (env.H_NEW_REV_WEB) assert.match(r.windowLog, /pulled web image revision label does not equal the dispatched commit/)
@@ -867,7 +901,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_MIGRATE: 'fail-rollback', H_DB_BYTES: DB_BYTES } })
     checkRestoredOld(r)
-    await checkPublicOutputs(world, r)
+    const { summary: publicSummary } = await checkPublicOutputs(world, r)
+    assert.match(r.deployLog, /^\[deploy-window\] ledger=rolled-back$/m, 'the public log names the ledger row')
+    assert.match(publicSummary, /^- `ledger=rolled-back`$/m)
     assert.match(r.deployLog, /^\[deploy-window\] old version restarted revision=match$/m)
     assert.ok(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8').includes(`old version restarted backend_commit=${SHA_OLD} web_commit=${SHA_OLD}`))
     assert.ok(first(r, isLatest) >= 0)
@@ -891,6 +927,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_MIGRATE: 'fail-partial', H_PARTIAL: '3' } })
     assertCommon(r, 74)
+    assert.match(r.deployLog, /^\[deploy-window\] ledger=other$/m)
+    await checkPublicText(world, r, { status: true, controls: [['window-detail.log', `inplay name=${INPLAY[0]}`]] })
     assert.equal(r.state.phase, 'needs-owner')
     assert.ok(!any(r, (call) => /^start /.test(call.args)), 'nothing started')
     assert.ok(!any(r, isUp), 'nothing created')
@@ -901,11 +939,27 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_POSTLIST_EXTRA: 'zzzz20261201120000_harness_unexpected' } })
     assertCommon(r, 74)
+    await checkPublicText(world, r, {
+      status: true,
+      extra: ['zzzz20261201120000_harness_unexpected'],
+      controls: [['window-detail.log', 'post-commit list applied=']],
+    })
     assert.equal(r.state.phase, 'needs-owner')
     assert.equal(r.state.env_written, 'new')
     assert.equal(dotEnvTag(r), SHA_NEW)
     assert.ok(!any(r, (call) => /^start /.test(call.args)))
     assert.ok(!any(r, isUp))
+  })
+
+  scenario('8 migrate rc 0 but the post-commit list shows a non-excluded name in place of the excluded one -> 74: the name stays on the host', async (t) => {
+    const world = makeWorld(t)
+    const extra = 'zzzz20261201120000_harness_unexpected'
+    const r = await runWindow(t, world, { env: { H_POSTLIST_EXTRA: extra, H_POSTLIST_ONLY_EXTRA: '1' } })
+    assertCommon(r, 74)
+    assert.equal(r.state.env_written, 'new')
+    assert.match(r.windowLog, /post-commit: a non-excluded migration is still pending/)
+    assert.ok(!any(r, (call) => /^start /.test(call.args)))
+    await checkPublicText(world, r, { status: true, extra: [extra], controls: [['window-detail.log', `post-commit still_pending=${extra}`]] })
   })
 
   scenario('9 migrate timeout, kill, wait, ledger L0 -> 71; default sends no pg_cancel_backend', async (t) => {
@@ -1233,7 +1287,9 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(any(r, (call) => call.args === 'cp metasheet-backend:/app/uploads -'), 'the uploads path is read back too')
     assert.match(readFileSync(path.join(r.runDir, 'appdata.readback.list'), 'utf8'), /uploads\/attendance-import\/org1\/upload\.csv$/m,
       'control: the read-back stream did carry the volume file')
-    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^appdata read_back files=2 bytes=16$/m)
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata copy files=3 bytes=20$/m, 'the copy-out holds the upload beside the volume')
+    assert.match(detail, /^appdata read_back files=3 bytes=20$/m, 'the read-back counts the upload beside the volume, not the volume')
   })
 
   scenario('app data present with the attendance-import volume, the read-back misses a file outside it -> 73: never started', async (t) => {
@@ -1300,6 +1356,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_MIGRATE_IGNORE_EXCLUDE: '1' } })
     assertCommon(r, 74)
+    await checkPublicText(world, r, { controls: [['window-detail.log', `inplay name=${INPLAY[0]}`]] })
     assert.ok(!any(r, (call) => /^start /.test(call.args)))
     assert.ok(!any(r, isUp))
   })
@@ -1390,6 +1447,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_MIGRATE: 'term-after-commit' } })
     assertCommon(r, 74)
+    await checkPublicText(world, r, { status: true, controls: [['window-detail.log', `inplay name=${INPLAY[0]}`]] })
     assert.equal(r.state.phase, 'needs-owner')
     assert.equal(r.state.env_written, 'new')
     assert.equal(dotEnvTag(r), SHA_NEW)
@@ -1406,6 +1464,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
       const world = makeWorld(t)
       const r = await runWindow(t, world, { env: { H_MIGRATE: migrate, H_PSQL_FAIL_AFTER_MIGRATE: '1' } })
       assertCommon(r, 74)
+      await checkPublicText(world, r, { controls: [['window-detail.log', `inplay name=${INPLAY[0]}`]] })
       assert.equal(r.state.phase, 'needs-owner')
       assert.equal(r.state.env_written, 'old')
       assert.match(r.windowLog, rcLine)
@@ -1435,17 +1494,19 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!any(r, isUp), 'nothing new is started')
   })
 
-  for (const [label, worldOptions, env] of [
+  for (const [label, worldOptions, env, leak] of [
     ['attendance preflight fails', {}, { H_PREFLIGHT_RC: '3' }],
     ['postgres data mount is not the project volume', { containers: { 'metasheet-postgres': { volume: 'other_metasheet-postgres-data' } } }, {}],
     ['running backend /health commit differs from its image revision', {}, { H_OLD_HEALTH_WRONG: '1' }],
-    ['excluded migration already in the ledger (stale exclusion)', {}, { H_LEDGER_EXTRA: EXCLUDED }],
-    ['excluded tables already exist', {}, { H_EXCLUDED_TABLES: '1' }],
+    ['excluded migration already in the ledger (stale exclusion)', {}, { H_LEDGER_EXTRA: EXCLUDED }, { controls: [['window-detail.log', `exclusion_proof applied_already=${EXCLUDED}`]] }],
+    ['excluded tables already exist', {}, { H_EXCLUDED_TABLES: '1' }, { controls: [['window-detail.log', 'exclusion_proof excluded_tables_present=']] }],
   ]) {
     scenario(`2 refusal before any stop: ${label} -> 70`, async (t) => {
       const world = makeWorld(t, worldOptions)
       if (env.H_LEDGER_EXTRA) writeFileSync(path.join(world.ds, 'ledger'), [...BASE_MIGRATIONS, env.H_LEDGER_EXTRA].join('\n') + '\n')
-      checkRefused(await runWindow(t, world, { env }))
+      const r = await runWindow(t, world, { env })
+      checkRefused(r)
+      await checkPublicText(world, r, leak)
     })
   }
 
@@ -1765,6 +1826,19 @@ describe('production deploy window: remote_deploy step run against test doubles'
       const lines = composeCalls.filter((line) => pattern.test(line))
       assert.equal(lines.length, 1, `one compose line matches ${pattern}`)
       assert.equal(lines[0].match(/\btimeout\s+(\S+)\s+docker compose\b/)?.[1], seconds, `${pattern} is bounded by timeout ${seconds}`)
+    }
+    // curl and the git network call are bounded too: a wrapper gives every curl a connect and a
+    // total time limit (defined before the first curl), and the sync's fetch runs under timeout.
+    const wrapper = code.findIndex((line) => /^curl\(\) \{ command curl --connect-timeout \d+ --max-time \d+ "\$@"; \}$/.test(line))
+    assert.ok(wrapper >= 0, 'the window defines a bounded curl wrapper')
+    assert.ok(code.findIndex((line) => /(^|[^-\w])curl /.test(line) && !/^curl\(\)/.test(line)) > wrapper, 'the wrapper comes before the first curl call')
+    const fetches = plain.filter((line) => /\bgit fetch\b/.test(line))
+    assert.equal(fetches.length, 1)
+    assert.match(fetches[0], /^\s*timeout \d+ git fetch origin main >>"\$\{git_sync_out\}" 2>&1 /, 'the fetch is bounded and its output stays on the host')
+    for (const sub of ['git stash push', 'git checkout main', 'git merge --ff-only origin/main']) {
+      const lines = plain.filter((line) => line.includes(sub))
+      assert.equal(lines.length, 1, sub)
+      assert.match(lines[0], />>"\$\{git_sync_out\}" 2>&1 /, `${sub}: output stays on the host`)
     }
     const hostCheckCalls = plain.filter((line) => /"\$check" "\$phase"/.test(line))
     assert.equal(hostCheckCalls.length, 1)
