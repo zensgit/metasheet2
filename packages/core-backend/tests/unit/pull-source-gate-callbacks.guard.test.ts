@@ -20,15 +20,24 @@
  *         constant followed by `context.lockedStatus`).
  *       - `joins`: `(lockedStatus) => expression` over its own parameter and literals, with `===`, `!==`,
  *         `&&`, `||`, `??`, `!` and `?:`. No call, no `await`, no other name.
- *     The function must be visible: written in the call, or held in a `const` declared in a scope
- *     around the call. A name the scan cannot resolve to such a function fails. The options are an
- *     object literal with the known keys.
+ *     The function must be visible: written in the call, or held in a name. A name is read the way the
+ *     compiler binds it at the place it is used, so the function checked is the one the gate is handed
+ *     and never an outer one of the same name. The name must be bound by exactly one `const` statement
+ *     whose initial value is a function expression. A name bound in any other way fails: a parameter,
+ *     plain or destructured; a destructuring declaration; the head of a loop; a catch clause; `var`,
+ *     `let` or `using`; a function or class declaration; the name of a function expression; an import;
+ *     a second declaration; nothing; or any other declaration. The parameter constants are read the
+ *     same way. The options are an object literal with the known keys.
  *  4. The gate's names are reached by a plain named import and a direct call only, so no call is hidden
  *     behind another name.
  *
- * Under 3, a caller's function cannot reach an authorization-input entry point or a lock helper at all:
- * not directly, not through another function, and not on a second connection, because the only call it
- * may contain is the one statement on the gate's connection.
+ * Under 3, the body of a function handed to the gate holds no call but the one statement on the gate's
+ * connection: it does not call an authorization-input entry point or a lock helper, directly or through
+ * another function, on that connection or on a second one.
+ *
+ * Not read here: the values a call passes as data, which are the target, the row id, and what the
+ * parameter constants hold. An accessor or a serialisation hook on such a value is code of the caller
+ * that runs inside the gate transaction, and this guard does not see it.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -478,33 +487,78 @@ const unwrap = (node: ts.Expression): ts.Expression => {
   return cur
 }
 
+const CHECKERS = new WeakMap<ts.SourceFile, ts.TypeChecker>()
+
 /**
- * The function an argument is: written in place, or the initializer of a `const` declared in a scope that
- * encloses the call (a `const` cannot be assigned again). Anything else is not resolved.
+ * The compiler's own name resolution over one source file, built from the text in hand and never from
+ * the disk. No import is followed and no library is loaded, so what a name is bound to is read from
+ * that text alone.
  */
-function resolveFunction(argument: ts.Expression, source: ts.SourceFile): ts.ArrowFunction | ts.FunctionExpression | string {
+function checkerOf(source: ts.SourceFile): ts.TypeChecker {
+  const known = CHECKERS.get(source)
+  if (known) return known
+  const host: ts.CompilerHost = {
+    getSourceFile: (name) => (name === source.fileName ? source : undefined),
+    getDefaultLibFileName: () => 'lib.d.ts',
+    writeFile: () => undefined,
+    getCurrentDirectory: () => '/',
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => '\n',
+    fileExists: (name) => name === source.fileName,
+    readFile: (name) => (name === source.fileName ? source.text : undefined),
+  }
+  const program = ts.createProgram([source.fileName], { allowJs: true, noResolve: true, noLib: true, types: [], target: ts.ScriptTarget.Latest }, host)
+  if (program.getSourceFile(source.fileName) !== source) throw new Error(`the compiler did not read ${source.fileName} from the text it was given`)
+  const checker = program.getTypeChecker()
+  CHECKERS.set(source, checker)
+  return checker
+}
+
+/**
+ * The declaration that binds a name at the place it is used, when that is exactly one `const` statement;
+ * otherwise how the name is bound instead. The binding is the one the compiler resolves, so a nearer
+ * binding of the same name is the one judged, in whatever form it is written.
+ */
+function constStatementOf(identifier: ts.Identifier): ts.VariableDeclaration | string {
+  const declarations = checkerOf(identifier.getSourceFile()).getSymbolAtLocation(identifier)?.declarations ?? []
+  if (declarations.length === 0) return 'does not resolve to a declaration'
+  if (declarations.length > 1) return 'has more than one declaration'
+  const declaration = declarations[0]
+  if (ts.isBindingElement(declaration)) {
+    let root: ts.Node = declaration
+    while (ts.isBindingElement(root) || ts.isObjectBindingPattern(root) || ts.isArrayBindingPattern(root)) root = root.parent
+    return ts.isParameter(root) ? 'is bound by a destructured parameter' : 'is bound by a destructuring declaration'
+  }
+  if (ts.isParameter(declaration)) return 'is a parameter'
+  if (ts.isFunctionDeclaration(declaration)) return 'is a function declaration'
+  if (ts.isImportSpecifier(declaration) || ts.isImportClause(declaration) || ts.isNamespaceImport(declaration) || ts.isImportEqualsDeclaration(declaration)) return 'is an import'
+  if (!ts.isVariableDeclaration(declaration)) return `is not bound by a const statement (${ts.SyntaxKind[declaration.kind]})`
+  if (ts.isCatchClause(declaration.parent)) return 'is the variable of a catch clause'
+  if (!ts.isVariableStatement(declaration.parent.parent)) return 'is bound in the head of a loop'
+  if ((declaration.parent.flags & ts.NodeFlags.BlockScoped) !== ts.NodeFlags.Const) return 'is not declared with const'
+  return declaration
+}
+
+/** What follows the way a name is bound, in the two sentences that name what was expected instead. */
+const NOT_A_WRITTEN_FUNCTION: Readonly<Record<string, string>> = {
+  'is a parameter': ', not a function written here',
+  'is a function declaration': ', not a constant holding a function expression',
+}
+
+/**
+ * The function an argument is: written in place, or the initial value of the one `const` statement that
+ * binds the name (a `const` cannot be assigned again). Anything else is not resolved.
+ */
+function resolveFunction(argument: ts.Expression): ts.ArrowFunction | ts.FunctionExpression | string {
   const expression = unwrap(argument)
   if (isFunctionLike(expression)) return expression
   if (!ts.isIdentifier(expression)) return `${ts.SyntaxKind[expression.kind]} is not a function written in the call or a constant of the calling function`
-  const name = expression.text
-  for (let scope: ts.Node | undefined = argument.parent; scope; scope = scope.parent) {
-    // A parameter of an enclosing function shadows any outer constant of the same name.
-    if (ts.isFunctionLike(scope) && scope.parameters.some((parameter) => parameter.name.getText(source) === name)) return `${name} is a parameter, not a function written here`
-    const statements = ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) ? scope.statements : undefined
-    if (!statements) continue
-    for (const statement of statements) {
-      if (ts.isFunctionDeclaration(statement) && statement.name?.text === name) return `${name} is a function declaration, not a constant holding a function expression`
-      if (!ts.isVariableStatement(statement)) continue
-      for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
-        if (!(statement.declarationList.flags & ts.NodeFlags.Const)) return `${name} is not declared with const`
-        const initializer = declaration.initializer ? unwrap(declaration.initializer) : undefined
-        if (!initializer || !isFunctionLike(initializer)) return `${name} is not initialised with a function expression`
-        return initializer
-      }
-    }
-  }
-  return `${name} is not declared in a scope around the call`
+  const bound = constStatementOf(expression)
+  if (typeof bound === 'string') return `${expression.text} ${bound}${NOT_A_WRITTEN_FUNCTION[bound] ?? ''}`
+  const initializer = bound.initializer ? unwrap(bound.initializer) : undefined
+  if (!initializer || !isFunctionLike(initializer)) return `${expression.text} is not initialised with a function expression`
+  return initializer
 }
 
 const plainParameters = (fn: ts.ArrowFunction | ts.FunctionExpression, max: number): string[] | string => {
@@ -531,24 +585,18 @@ const isLiteralText = (node: ts.Node): node is ts.StringLiteral | ts.NoSubstitut
 const isMemberOf = (node: ts.Expression, object: string | undefined, member: string): boolean =>
   object !== undefined && ts.isPropertyAccessExpression(node) && !node.questionDotToken && ts.isIdentifier(node.expression) && node.expression.text === object && node.name.text === member
 
-/** Whether `name` is a `const` declared outside `fn`, in a scope around it, that does not hold a function. */
-function isOuterConstant(node: ts.Expression, fn: ts.Node, own: readonly string[]): boolean {
-  if (!ts.isIdentifier(node) || own.includes(node.text)) return false
-  for (let scope: ts.Node | undefined = fn.parent; scope; scope = scope.parent) {
-    if (ts.isFunctionLike(scope) && scope.parameters.some((parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === node.text)) return false
-    const statements = ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) ? scope.statements : undefined
-    for (const statement of statements ?? []) {
-      if (ts.isFunctionDeclaration(statement) && statement.name?.text === node.text) return false
-      if (!ts.isVariableStatement(statement)) continue
-      for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== node.text) continue
-        if (!(statement.declarationList.flags & ts.NodeFlags.Const) || !declaration.initializer) return false
-        const initializer = unwrap(declaration.initializer)
-        return !isFunctionLike(initializer) && !ts.isClassExpression(initializer)
-      }
-    }
-  }
-  return false
+/**
+ * Why an expression is not a constant computed before the call; empty when it is one: a name bound by
+ * exactly one `const` statement whose initial value is not a function.
+ */
+function notAConstant(node: ts.Expression): string {
+  if (!ts.isIdentifier(node)) return 'it is not a name'
+  const bound = constStatementOf(node)
+  if (typeof bound === 'string') return `${node.text} ${bound}`
+  const initializer = bound.initializer ? unwrap(bound.initializer) : undefined
+  if (!initializer) return `${node.text} has no initial value`
+  if (isFunctionLike(initializer) || ts.isClassExpression(initializer)) return `${node.text} holds a function`
+  return ''
 }
 
 /** Why a function is not a `write` of the allowed shape; empty when it is. */
@@ -581,17 +629,18 @@ function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): strin
     sqlText(sql)
   }
 
-  const constant = (node: ts.Expression): boolean => isOuterConstant(node, fn, names)
   const parameterList = (node: ts.Expression): void => {
-    if (constant(node)) return
+    const whole = notAConstant(node)
+    if (!whole) return
     if (ts.isArrayLiteralExpression(node)) {
       for (const element of node.elements) {
-        const ok = ts.isSpreadElement(element) ? constant(unwrap(element.expression)) : constant(element) || isMemberOf(element, context, 'lockedStatus')
-        if (!ok) problems.push(`a parameter is computed inside write (${ts.SyntaxKind[element.kind]})`)
+        if (!ts.isSpreadElement(element) && isMemberOf(element, context, 'lockedStatus')) continue
+        const why = notAConstant(ts.isSpreadElement(element) ? unwrap(element.expression) : element)
+        if (why) problems.push(`a parameter is computed inside write (${ts.SyntaxKind[element.kind]}): ${why}`)
       }
       return
     }
-    problems.push(`the parameters are not a constant computed before the call (${ts.SyntaxKind[node.kind]})`)
+    problems.push(`the parameters are not a constant computed before the call (${ts.SyntaxKind[node.kind]}): ${whole}`)
   }
   if (body.arguments.length === 2) {
     const params = unwrap(body.arguments[1])
@@ -661,7 +710,7 @@ function gateUse(files: SourceFile[]): GateUse {
         const isDeclaration = file.path === GATE_MODULE && ts.isIdentifier(node) && ts.isFunctionDeclaration(parent) && parent.name === node
         if (isCall) {
           sites.push({ path: file.path, line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1, callee: named, owner: ownerOf(node) })
-          for (const problem of callProblems(parent, named, source)) problems.push(`${at(node)} ${problem}`)
+          for (const problem of callProblems(parent, named)) problems.push(`${at(node)} ${problem}`)
         } else if (!isPlainImport && !isDeclaration) {
           problems.push(`${at(node)} uses ${named} other than by importing it under its own name and calling it`)
         }
@@ -673,7 +722,7 @@ function gateUse(files: SourceFile[]): GateUse {
   return { sites, problems }
 }
 
-function callProblems(call: ts.CallExpression, callee: string, source: ts.SourceFile): string[] {
+function callProblems(call: ts.CallExpression, callee: string): string[] {
   if (call.arguments.some((argument) => ts.isSpreadElement(argument))) return ['spreads its arguments']
   if (callee === GATED_CLEAR) {
     return call.arguments.length === 2 && !call.arguments.some((argument) => isFunctionLike(unwrap(argument)))
@@ -682,7 +731,7 @@ function callProblems(call: ts.CallExpression, callee: string, source: ts.Source
   }
   if (call.arguments.length < 2 || call.arguments.length > 3) return [`passes ${call.arguments.length} arguments`]
   const problems: string[] = []
-  const write = resolveFunction(call.arguments[1], source)
+  const write = resolveFunction(call.arguments[1])
   if (typeof write === 'string') problems.push(`write: ${write}`)
   else problems.push(...writeShapeProblems(write))
   if (call.arguments.length === 3) {
@@ -706,7 +755,7 @@ function callProblems(call: ts.CallExpression, callee: string, source: ts.Source
         if (isFunctionLike(unwrap(property.initializer))) problems.push(`options.${key} is a function`)
         continue
       }
-      const joins = resolveFunction(property.initializer, source)
+      const joins = resolveFunction(property.initializer)
       if (typeof joins === 'string') problems.push(`joins: ${joins}`)
       else problems.push(...joinsShapeProblems(joins))
     }
@@ -758,7 +807,7 @@ describe('every function handed to the gate has an allowed shape', () => {
     const found: Array<{ owner: string; sql: string[]; joins: boolean }> = []
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === GATED_WRITE) {
-        const write = resolveFunction(node.arguments[1], source)
+        const write = resolveFunction(node.arguments[1])
         expect(typeof write).not.toBe('string')
         const body = soleExpression(write as ts.ArrowFunction)
         const sql: string[] = []
@@ -850,10 +899,13 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a parameter read off the context other than the locked status', write: `(client, context) => client.query(${UPDATE}, [...params, context.joined])`, expected: /a parameter is computed inside write \(PropertyAccessExpression\)/ },
     { form: 'a function among the parameters', write: `(client) => client.query(${UPDATE}, [lockThenWrite])`, expected: /a parameter is computed inside write \(Identifier\)/ },
     { form: 'parameters that are a parameter of the calling function', write: `(client) => client.query(${UPDATE}, injected as never)`, expected: /the parameters are not a constant computed before the call/ },
+    { form: 'a constant among the parameters that holds a function', write: `(client) => client.query(${UPDATE}, [holder])`, prelude: '  const holder = () => userIds', expected: /a parameter is computed inside write \(Identifier\): holder holds a function/ },
+    { form: 'parameters held in a constant that has no initial value', write: `(client) => client.query(${UPDATE}, plan)`, expected: /the parameters are not a constant computed before the call \(Identifier\): plan has no initial value/ },
     { form: 'parameters chosen by something else', write: `(client, context) => client.query(${UPDATE}, context.joined ? params : params)`, expected: /the parameters are chosen by something other than context\.gated/ },
     // A function the guard cannot see.
     { form: 'a parameter of the calling function', write: 'injected', expected: /write: injected is a parameter, not a function written here/ },
-    { form: 'an imported function', write: 'query as never', expected: /write: query is not declared in a scope around the call/ },
+    { form: 'an imported function', write: 'query as never', expected: /write: query is an import/ },
+    { form: 'a name that is declared nowhere', write: 'undeclaredWriter', expected: /write: undeclaredWriter does not resolve to a declaration/ },
     { form: 'a let binding', write: 'rebound', expected: /write: rebound is not declared with const/ },
     { form: 'a var binding', write: 'hoisted', prelude: `  var hoisted = (client: PullSourceGateClient) => client.query(${UPDATE}, params)`, expected: /write: hoisted is not declared with const/ },
     { form: 'a constant that holds a call result', write: 'made', prelude: '  const made = ((): never => lockThenWrite as never)()', expected: /write: made is not initialised with a function expression/ },
@@ -899,6 +951,81 @@ describe('every function handed to the gate has an allowed shape', () => {
     })
   }
 
+  // A name is read the way the compiler binds it where it is used, so a nearer binding of the same name
+  // is the one judged. In every control below the module holds a constant of that name that would pass,
+  // and the call sits where another binding of the name takes its place.
+  const NAMED: ReadonlyArray<{ place: string; name: string; passing: string; call: string; reported: string }> = [
+    { place: 'write', name: 'update', passing: `(client: PullSourceGateClient) => client.query(${UPDATE}, params)`, call: 'runGatedPullSourceWrite(target, update)', reported: 'write: update ' },
+    { place: 'joins', name: 'judge', passing: "(status: string | null) => status !== 'active'", call: 'runGatedPullSourceWrite(target, update, { joins: judge })', reported: 'joins: judge ' },
+    {
+      place: 'the parameters',
+      name: 'params',
+      passing: '[1]',
+      call: `runGatedPullSourceWrite(target, (client) => client.query(${UPDATE}, params))`,
+      reported: 'the parameters are not a constant computed before the call (Identifier): params ',
+    },
+    {
+      place: 'parameters spread into a list',
+      name: 'params',
+      passing: '[1]',
+      call: `runGatedPullSourceWrite(target, (client, context) => client.query(${UPDATE}, [...params, context.lockedStatus]))`,
+      reported: 'a parameter is computed inside write (SpreadElement): params ',
+    },
+  ]
+  const callerOfNamed = (entry: string): SourceFile[] => [{
+    path: 'directory/synthetic-named.ts',
+    text: [
+      "import { runGatedPullSourceWrite, type PullSourceGateClient } from '../directory/pull-source-write-gate'",
+      'declare const target: never',
+      'const params: unknown[] = [1]',
+      `const update = (client: PullSourceGateClient) => client.query(${UPDATE}, params)`,
+      "const judge = (status: string | null) => status !== 'active'",
+      entry,
+    ].join('\n'),
+  }]
+  const NEARER_BINDINGS: ReadonlyArray<{ form: string; bound: string; entry: (name: string, passing: string, call: string) => string }> = [
+    { form: 'a destructured parameter', bound: 'is bound by a destructured parameter', entry: (name, _passing, call) => `export async function entry({ ${name} }: Record<string, never>) {\n  return ${call}\n}` },
+    {
+      form: 'a destructured parameter, nested and renamed',
+      bound: 'is bound by a destructured parameter',
+      entry: (name, _passing, call) => `export async function entry({ given: [{ inner: ${name} }] }: { given: [{ inner: never }] }) {\n  return ${call}\n}`,
+    },
+    { form: 'a parameter of an arrow function around the call', bound: 'is a parameter', entry: (name, _passing, call) => `export const entry = async (${name}: never) => ${call}` },
+    { form: 'a destructuring declaration', bound: 'is bound by a destructuring declaration', entry: (name, _passing, call) => `export async function entry(given: Record<string, never>) {\n  const { ${name} } = given\n  return ${call}\n}` },
+    { form: 'an array destructuring declaration', bound: 'is bound by a destructuring declaration', entry: (name, _passing, call) => `export async function entry(given: never[]) {\n  const [${name}] = given\n  return ${call}\n}` },
+    { form: 'the head of a for-of loop', bound: 'is bound in the head of a loop', entry: (name, _passing, call) => `export async function entry(given: never[]) {\n  for (const ${name} of given) return ${call}\n}` },
+    { form: 'the head of a for-in loop', bound: 'is bound in the head of a loop', entry: (name, _passing, call) => `export async function entry(given: Record<string, never>) {\n  for (const ${name} in given) return ${call}\n}` },
+    { form: 'the head of a for loop, with an initial value that would pass', bound: 'is bound in the head of a loop', entry: (name, passing, call) => `export async function entry() {\n  for (const ${name} = ${passing}; ;) return ${call}\n}` },
+    { form: 'the variable of a catch clause', bound: 'is the variable of a catch clause', entry: (name, _passing, call) => `export async function entry() {\n  try {\n    throw new Error('thrown')\n  } catch (${name}) {\n    return ${call}\n  }\n}` },
+    {
+      form: 'a var hoisted out of a nested block, with an initial value that would pass',
+      bound: 'is not declared with const',
+      entry: (name, passing, call) => `export async function entry(flag: boolean) {\n  if (flag) {\n    var ${name} = ${passing}\n  }\n  return ${call}\n}`,
+    },
+    { form: 'a let, with an initial value that would pass', bound: 'is not declared with const', entry: (name, passing, call) => `export async function entry() {\n  let ${name} = ${passing}\n  return ${call}\n}` },
+    { form: 'an await using declaration, with an initial value that would pass', bound: 'is not declared with const', entry: (name, passing, call) => `export async function entry() {\n  await using ${name} = ${passing}\n  return ${call}\n}` },
+    { form: 'a function declaration', bound: 'is a function declaration', entry: (name, _passing, call) => `export async function entry() {\n  function ${name}() { return undefined }\n  return ${call}\n}` },
+    { form: 'the name of a function expression around the call', bound: 'is not bound by a const statement (FunctionExpression)', entry: (name, _passing, call) => `export const entry = async function ${name}() {\n  return ${call}\n}` },
+    { form: 'a class declaration', bound: 'is not bound by a const statement (ClassDeclaration)', entry: (name, _passing, call) => `export async function entry() {\n  class ${name} {}\n  return ${call}\n}` },
+    { form: 'a second declaration, a namespace of the same name', bound: 'has more than one declaration', entry: (name, _passing, call) => `namespace ${name} { export type Kind = string }\nexport async function entry() {\n  return ${call}\n}` },
+  ]
+  for (const { place, name, passing, call, reported } of NAMED) {
+    it(`control (${place}: the constant of the module, with no nearer binding of its name) passes`, () => {
+      const use = gateUse(callerOfNamed(`export async function entry() {\n  return ${call}\n}`))
+      expect(use.sites).toHaveLength(1)
+      expect(use.problems).toEqual([])
+    })
+    for (const { form, bound, entry } of NEARER_BINDINGS) {
+      it(`positive control, ${place} (the name is bound nearer the call by ${form}) fails`, () => {
+        const use = gateUse(callerOfNamed(entry(name, passing, call)))
+        expect(use.sites).toHaveLength(1)
+        expect(use.problems).toHaveLength(1)
+        expect(use.problems[0]).toContain(`directory/synthetic-named.ts:`)
+        expect(use.problems[0]).toContain(`${reported}${bound}`)
+      })
+    }
+  }
+
   const HIDDEN_CALLS: ReadonlyArray<{ form: string; code: string; expected: RegExp }> = [
     { form: 'the gated write under another name', code: "import { runGatedPullSourceWrite as gated } from '../directory/pull-source-write-gate'\nexport const hidden0 = gated", expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
     { form: 'the gated write bound to a constant', code: 'declare function runGatedPullSourceWrite(...a: unknown[]): unknown\nexport const hidden1 = runGatedPullSourceWrite', expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
@@ -938,5 +1065,32 @@ describe('every function handed to the gate has an allowed shape', () => {
     // The judgement reading the status from the row read before the transaction.
     const staleJudgement = edited(sync.text, "joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',", "joins: () => current.status !== 'active',")
     expect(gateUse(withSync(staleJudgement)).problems.join('\n')).toMatch(/joins contains PropertyAccessExpression/)
+    // The save called where a destructured parameter of the same name stands in for its statement: the
+    // function the gate is handed is the one passed in, which locks first.
+    const callOpens = "      ? runGatedPullSourceWrite(\n        { orgId: current.org_id, provider: current.provider, corpId: normalized.corpId, enforce: 'flagged' },\n        update,\n"
+    const callCloses = "          joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',\n        },\n      )\n"
+    const beforeTheCall = '  // A save whose resulting status is active may add a pull source: it goes through the gate, which runs\n'
+    const withLocking = edited(
+      sync.text,
+      beforeTheCall,
+      `  const locking = async (client: PullSourceGateClient, context: PullSourceWriteContext) => (await lockUsersForAccessGraphWrite(client as never, [integrationId]), update(client, context))\n${beforeTheCall}`,
+    )
+    const standIn = edited(
+      edited(withLocking, callOpens, callOpens.replace('? runGatedPullSourceWrite(', '? (({ update }: { update: typeof locking }) => runGatedPullSourceWrite(')),
+      callCloses,
+      callCloses.replace('      )\n', '      ))({ update: locking })\n'),
+    )
+    const standInProblems = gateUse(withSync(standIn)).problems
+    expect(standInProblems).toHaveLength(1)
+    expect(standInProblems[0]).toContain('write: update is bound by a destructured parameter')
+    // The same call inside a loop whose head binds the name.
+    const loopHead = edited(
+      edited(withLocking, callOpens, callOpens.replace('? runGatedPullSourceWrite(', '? (() => {\n        for (const update of [locking]) return runGatedPullSourceWrite(')),
+      callCloses,
+      callCloses.replace('      )\n', "      )\n        throw new Error('unreachable') })()\n"),
+    )
+    const loopHeadProblems = gateUse(withSync(loopHead)).problems
+    expect(loopHeadProblems).toHaveLength(1)
+    expect(loopHeadProblems[0]).toContain('write: update is bound in the head of a loop')
   })
 })
