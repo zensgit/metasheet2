@@ -208,6 +208,15 @@ describe('production writers equal the registry', () => {
     expect(new Set(AUTHORIZATION_INPUT_WRITERS.map((writer) => writer.id)).size).toBe(AUTHORIZATION_INPUT_WRITERS.length)
   })
 
+  it('every writer declares whether it has a human operator, with one of the two values', () => {
+    const values: readonly string[] = ['human', 'n/a']
+    for (const writer of AUTHORIZATION_INPUT_WRITERS) {
+      expect(Object.hasOwn(writer, 'actor'), writer.id).toBe(true)
+      expect(values, writer.id).toContain(writer.actor)
+    }
+    expect(AUTHORIZATION_INPUT_WRITERS.length).toBeGreaterThan(30)
+  })
+
   it('the registry is still entirely pending: no production caller uses the contract yet', () => {
     expect(hasPendingWriters()).toBe(true)
     expect(AUTHORIZATION_INPUT_WRITERS.filter((writer) => writer.status === 'converted')).toEqual([])

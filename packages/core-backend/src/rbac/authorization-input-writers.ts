@@ -10,7 +10,7 @@
  * not yet run inside a contract transaction; `converted` means its enclosing function takes the
  * branded transaction and every registered statement is issued on it, which the guard checks on
  * the syntax tree. A status only moves from `pending` to `converted` together with the regression
- * that proves the conversion.
+ * that proves the conversion. Every entry also declares whether its writes have a human operator.
  *
  * Classes: `U+` user-level write that may raise the written user's class; `U0` user-level write
  * that cannot; `U-` user-level write that only lowers; `W+`/`W0` role content write that may or may
@@ -32,6 +32,12 @@ export type AuthorizationInputWriterStatus = 'pending' | 'converted'
 export type AuthorizationInputWriterStatement = Readonly<{ table: string; verb: AuthorizationInputWriteVerb; count: number }>
 
 /**
+ * Whether a write transaction that reaches an entry has a human operator: `human` when at least
+ * one of them has, `n/a` when none has.
+ */
+export type AuthorizationInputWriterActor = 'human' | 'n/a'
+
+/**
  * How a write target that cannot be read is written. The first four forms are found by the write
  * scan in every tree. The last two are found by the migration judgment only: a table argument of a
  * migration helper that is neither a literal nor a constant of its file, and a dynamically executed
@@ -47,6 +53,8 @@ export type AuthorizationInputWriterEntry = Readonly<{
   intent: AuthorizationInputIntent | null
   class: AuthorizationInputWriterClass
   statements: readonly AuthorizationInputWriterStatement[]
+  /** Every entry states it; there is no default. */
+  actor: AuthorizationInputWriterActor
   status: AuthorizationInputWriterStatus
   slice: string
   /** `D` entries: the dynamic form and the number of sites it stands for. */
@@ -63,48 +71,48 @@ function entry(fields: Omit<AuthorizationInputWriterEntry, 'status'> & { status?
 
 /** Production writers (`packages/core-backend/src`, repository plugins). */
 export const AUTHORIZATION_INPUT_WRITERS: readonly AuthorizationInputWriterEntry[] = Object.freeze([
-  entry({ id: 'W-01', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'assignUserRoles', intent: 'GRANT_ROLE', class: 'U+', statements: [st('user_roles', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-02', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'unassignUserRoles', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('user_roles', 'DELETE')], slice: 'AIS-2a' }),
-  entry({ id: 'W-03', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'clearDelegatedAdminScopesWhereNamespaceLost', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE')], slice: 'AIS-2a' }),
-  entry({ id: 'W-04', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-05', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'REVOKE_DIRECT', class: 'U-', statements: [st('user_permissions', 'DELETE')], slice: 'AIS-2a' }),
-  entry({ id: 'W-06', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-07a', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-07b', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], slice: 'AIS-2c' }),
+  entry({ id: 'W-01', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'assignUserRoles', intent: 'GRANT_ROLE', class: 'U+', statements: [st('user_roles', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-02', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'unassignUserRoles', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('user_roles', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-03', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'clearDelegatedAdminScopesWhereNamespaceLost', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-04', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-05', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'REVOKE_DIRECT', class: 'U-', statements: [st('user_permissions', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-06', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-07a', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], actor: 'n/a', slice: 'AIS-2a' }),
+  entry({ id: 'W-07b', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
   // One statement serves both directions: its `enabled` argument is a runtime boolean, so the same UPDATE is U+ when it is true and U- when it is false.
-  entry({ id: 'W-08', file: `${SRC}/routes/admin-users.ts`, symbol: 'syncLegacyAdminProfile', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], slice: 'AIS-2c' }),
-  entry({ id: 'W-10', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], slice: 'AIS-2c' }),
-  entry({ id: 'W-11', file: `${SRC}/admin/user-recycle.ts`, symbol: 'applyRecyclePurge', intent: 'PURGE', class: 'U-', statements: [st('user_permissions', 'DELETE'), st('users', 'UPDATE')], slice: 'AIS-2a' }),
-  entry({ id: 'W-12', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_scopes', 'DELETE')], slice: 'AIS-2c' }),
-  entry({ id: 'W-13', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_member_groups', 'INSERT'), st('delegated_role_admin_member_groups', 'DELETE')], slice: 'AIS-2c' }),
-  entry({ id: 'W-14', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE'), st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_member_groups', 'INSERT')], slice: 'AIS-2c' }),
-  entry({ id: 'W-15', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'grantNamespaceAdmissions', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-16', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'writeUserNamespaceAdmission', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], slice: 'AIS-2c' }),
-  entry({ id: 'W-17', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'disableNamespaceAdmissionsWithoutRoles', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'W-18', file: `${SRC}/directory/directory-sync.ts`, symbol: 'applyDirectoryProjectedMemberGroupGovernanceInTransaction', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], slice: 'AIS-2b' }),
-  entry({ id: 'W-19', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('role_permissions', 'INSERT')], slice: 'AIS-3a' }),
-  entry({ id: 'W-20', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'UPDATE', 2), st('role_permissions', 'DELETE'), st('role_permissions', 'INSERT')], slice: 'AIS-3a' }),
-  entry({ id: 'W-21', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'DELETE_ROLE', class: 'X', statements: [st('role_permissions', 'DELETE'), st('roles', 'DELETE')], slice: 'AIS-3a' }),
-  entry({ id: 'W-22', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('role_permissions', 'INSERT')], slice: 'AIS-3a' }),
-  entry({ id: 'W-23', file: `${SRC}/services/stock-preparation-members.ts`, symbol: 'callback:runLockedWrite', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('roles', 'UPDATE'), st('role_permissions', 'INSERT', 2), st('role_permissions', 'DELETE')], slice: 'AIS-3a' }),
-  entry({ id: 'W-24', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('role_permissions', 'INSERT')], slice: 'AIS-3a' }),
-  entry({ id: 'W-25', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.put', intent: 'SET_ADMIN_PROFILE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, slice: 'AIS-2a' }),
-  entry({ id: 'X-03', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.delete', intent: 'PURGE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, slice: 'AIS-2a' }),
-  entry({ id: 'X-02', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: 'CASCADE_PARENT_DELETE', class: 'X', statements: [st('directory_departments', 'DELETE')], slice: 'AIS-3a' }),
-  entry({ id: 'B-01', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], slice: 'AIS-2a' }),
-  entry({ id: 'B-02', file: `${SRC}/auth/dingtalk-oauth.ts`, symbol: 'callback:transaction', intent: null, class: 'B0', statements: [st('users', 'INSERT')], slice: 'none' }),
-  entry({ id: 'B-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'createDirectoryAdmittedUserInTransaction', intent: 'PROJECTION_GRANT', class: 'B', statements: [st('users', 'INSERT')], slice: 'AIS-2b' }),
-  entry({ id: 'B-04', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], slice: 'AIS-2c' }),
-  entry({ id: 'B-05', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], slice: 'AIS-2c' }),
+  entry({ id: 'W-08', file: `${SRC}/routes/admin-users.ts`, symbol: 'syncLegacyAdminProfile', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-10', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-11', file: `${SRC}/admin/user-recycle.ts`, symbol: 'applyRecyclePurge', intent: 'PURGE', class: 'U-', statements: [st('user_permissions', 'DELETE'), st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-12', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_scopes', 'DELETE')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-13', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_member_groups', 'INSERT'), st('delegated_role_admin_member_groups', 'DELETE')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-14', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE'), st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_member_groups', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-15', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'grantNamespaceAdmissions', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-16', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'writeUserNamespaceAdmission', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-17', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'disableNamespaceAdmissionsWithoutRoles', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-18', file: `${SRC}/directory/directory-sync.ts`, symbol: 'applyDirectoryProjectedMemberGroupGovernanceInTransaction', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'n/a', slice: 'AIS-2b' }),
+  entry({ id: 'W-19', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-20', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'UPDATE', 2), st('role_permissions', 'DELETE'), st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-21', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'DELETE_ROLE', class: 'X', statements: [st('role_permissions', 'DELETE'), st('roles', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-22', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-23', file: `${SRC}/services/stock-preparation-members.ts`, symbol: 'callback:runLockedWrite', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('roles', 'UPDATE'), st('role_permissions', 'INSERT', 2), st('role_permissions', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-24', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'W-25', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.put', intent: 'SET_ADMIN_PROFILE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'X-03', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.delete', intent: 'PURGE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'X-02', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: 'CASCADE_PARENT_DELETE', class: 'X', statements: [st('directory_departments', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
+  entry({ id: 'B-01', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'n/a', slice: 'AIS-2a' }),
+  entry({ id: 'B-02', file: `${SRC}/auth/dingtalk-oauth.ts`, symbol: 'callback:transaction', intent: null, class: 'B0', statements: [st('users', 'INSERT')], actor: 'n/a', slice: 'none' }),
+  entry({ id: 'B-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'createDirectoryAdmittedUserInTransaction', intent: 'PROJECTION_GRANT', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2b' }),
+  entry({ id: 'B-04', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'B-05', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
   // Permission catalogue inserts: they register codes and grant them to nobody.
-  entry({ id: 'C-01', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], slice: 'none' }),
-  entry({ id: 'C-02', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], slice: 'none' }),
+  entry({ id: 'C-01', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], actor: 'human', slice: 'none' }),
+  entry({ id: 'C-02', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], actor: 'human', slice: 'none' }),
   // Content writes on cascade parents that are not deletes: they cannot remove an input row.
-  entry({ id: 'P-01', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT')], slice: 'none' }),
-  entry({ id: 'P-02', file: `${SRC}/directory/directory-sync.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE')], slice: 'none' }),
-  entry({ id: 'P-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'syncProjectedDepartmentMemberGroupsInTransaction', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT'), st('platform_member_groups', 'UPDATE')], slice: 'none' }),
-  entry({ id: 'P-04', file: `${SRC}/directory/local-directory-org.ts`, symbol: 'callback:withLocalAnchorTransaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE', 2)], slice: 'none' }),
-  entry({ id: 'P-05', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:r.post', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT')], slice: 'none' }),
+  entry({ id: 'P-01', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT')], actor: 'human', slice: 'none' }),
+  entry({ id: 'P-02', file: `${SRC}/directory/directory-sync.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE')], actor: 'n/a', slice: 'none' }),
+  entry({ id: 'P-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'syncProjectedDepartmentMemberGroupsInTransaction', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT'), st('platform_member_groups', 'UPDATE')], actor: 'n/a', slice: 'none' }),
+  entry({ id: 'P-04', file: `${SRC}/directory/local-directory-org.ts`, symbol: 'callback:withLocalAnchorTransaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE', 2)], actor: 'human', slice: 'none' }),
+  entry({ id: 'P-05', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:r.post', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT')], actor: 'human', slice: 'none' }),
 ])
 
 /* ───────────────────────────── late role rows ───────────────────────────── */
