@@ -1175,6 +1175,69 @@ describe('W-10R the drawer on the REAL grid composable (a stand-in server checks
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 
+  it('a record off the page: an attachment removal is sent, a save made after it is stored first, and the removal is stored and answered first: the copy takes the save, then the removal, so the removal\'s patch and a later save are stored', async () => {
+    await openedOffThePage('rec_wb_far')
+    let answerDelete = () => {}
+    workbenchMock.client.deleteAttachment = vi.fn(() => new Promise((resolve) => {
+      answerDelete = () => {
+        const record = server.stored.get('rec_wb_far')!
+        record.version += 1
+        record.data[F.code] = ['att_2']
+        resolve({ deleted: 'att_1' })
+      }
+    }))
+    const remove = (captured.MetaRecordInspector!['delete-attachment-fn'] as (id: string, context: { recordId: string; fieldId: string }) => Promise<void>)('att_1', { recordId: 'rec_wb_far', fieldId: F.code })
+    await step()
+    const save = onPatch()(F.notes, 'a')
+    await step()
+    server.store()
+    answerDelete()
+    await server.tick()
+    await server.release()
+    await save
+    await remove
+    const patch = onPatch()(F.code, ['att_2'])
+    await step()
+    await server.answerAll()
+    await patch
+    const later = onPatch()(F.notes, 'b')
+    await step()
+    await server.answerAll()
+    await later
+    expect(writes()).toEqual([[F.notes, 'a', 8, 'stored v9'], [F.code, ['att_2'], 10, 'stored v11'], [F.notes, 'b', 11, 'stored v12']])
+    expect(shown()).toMatchObject({ id: 'rec_wb_far', version: 12, data: { [F.notes]: 'b', [F.code]: ['att_2'] } })
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([['in the grid'], ['in the drawer']])('a record on the page: a save is stored (its answer on the way), and an attachment removal is stored and answered: the page is reloaded at once, so a save of 规格 made %s meanwhile goes from the reloaded row and is stored', async (where) => {
+    server.stored.get('rec_wb_plm')!.data[F.code] = ['att_1', 'att_2']
+    await onTheRow('rec_wb_plm')
+    const first = onPatch()(F.notes, 'a')
+    await step()
+    server.store()
+    workbenchMock.client.deleteAttachment = vi.fn(async () => {
+      const record = server.stored.get('rec_wb_plm')!
+      record.version += 1
+      record.data[F.code] = ['att_2']
+      return { deleted: 'att_1' }
+    })
+    const remove = (captured.MetaRecordInspector!['delete-attachment-fn'] as (id: string, context: { recordId: string; fieldId: string }) => Promise<void>)('att_1', { recordId: 'rec_wb_plm', fieldId: F.code })
+    await server.tick()
+    expect(row('rec_wb_plm')).toMatchObject({ version: 7, data: { [F.code]: ['att_2'] } })
+    const second = where === 'in the grid' ? gridEdit('rec_wb_plm', F.spec, 'X') : onPatch()(F.spec, 'X')
+    await step()
+    await server.release()
+    await server.answerAll()
+    await Promise.all([first, second, remove])
+    const patch = onPatch()(F.code, ['att_2'])
+    await step()
+    await server.answerAll()
+    await patch
+    expect(writes()).toEqual([[F.notes, 'a', 5, 'stored v6'], [F.spec, 'X', 7, 'stored v8'], [F.code, ['att_2'], 8, 'stored v9']])
+    expect(realGrid.conflict.value).toBeNull()
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
   it('a save on the row, and a realtime merge that read before it was stored lands while it is out (the drawer now holds a copy): the copy takes the save, so once the row leaves the page a save on the copy is stored', async () => {
     await onTheRow('rec_wb_plm')
     const first = onPatch()(F.notes, 'a')

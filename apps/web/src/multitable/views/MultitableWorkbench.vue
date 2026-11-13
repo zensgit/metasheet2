@@ -3001,14 +3001,17 @@ const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, 
   holdingHistory(() => deleteAttachment(attachmentId, context))
 
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
-  // The record's drawer saves out when the delete is sent were stored before it: the copy takes them (at their
-  // answers) before it takes the delete, which then moves it one version on from theirs.
-  const savesBefore = context?.recordId ? drawerSavesOutOf(context.recordId) : []
   await workbench.client.deleteAttachment(attachmentId)
-  await Promise.allSettled(savesBefore)
-  // The deep-linked copy (the reload below refreshes the page's rows only) takes the delete as the server does for
-  // an attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on:
-  // a later patch of that record starts from it.
+  // The page's rows are reloaded at once: a save made meanwhile goes from the row the delete left.
+  const reload = Promise.resolve(grid.loadViewData(grid.page.value.offset))
+  reload.catch(() => undefined)
+  // The record's drawer saves still out when the delete is answered (also those made after it was sent) went at the
+  // version before it: the copy takes them (at their answers) before it takes the delete, which then moves it one
+  // version on from theirs.
+  await Promise.allSettled(context?.recordId ? drawerSavesOutOf(context.recordId) : [])
+  // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
+  // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
+  // later patch of that record starts from it.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
     const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
@@ -3027,7 +3030,7 @@ async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUp
       [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
     }
   }
-  await grid.loadViewData(grid.page.value.offset)
+  await reload
 }
 
 async function loadCommentsForRecord(recordId: string, options?: { highlightCommentId?: string | null; markReadCommentId?: string | null }) {
