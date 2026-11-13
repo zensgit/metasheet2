@@ -30,10 +30,12 @@
       :key="groupRouteHostKey"
       :context="routeGroupContext"
       @return="returnFromGroupRoute"
+      @open-group-stage="openGroupStage"
     >
       <template #default="{ group, step, surface, returnTo }">
         <AttendanceAdminCenter
           :route-group-context="{ group, step, surface, returnTo }"
+          :group-stage-request="groupStageRequest"
           @clear-section="returnFromGroupRoute"
           @open-group-route="openGroupRoute"
         />
@@ -115,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
@@ -130,7 +132,8 @@ import {
   isAttendanceGroupContextPath,
   resolveAttendanceGroupRouteContext,
 } from '../../router/attendanceGroupContextRoute'
-import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../../router/attendanceGroupContextRoute'
+import type { AttendanceGroupRouteContext, AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../../router/attendanceGroupContextRoute'
+import type { AttendanceGroupEffectivePolicyStageActionV1 } from './attendanceGroupEffectivePolicyLabels'
 import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
@@ -193,6 +196,17 @@ const groupRouteActive = computed(() => groupRoutePathActive.value && routeGroup
 const groupRouteHostKey = computed(() => routeGroupContext.value
   ? `${routeGroupContext.value.groupId}:${routeGroupContext.value.step}:${routeGroupContext.value.surface ?? ''}`
   : route.path)
+
+const groupStageRequest = shallowRef<AttendanceGroupEffectivePolicyStageActionV1 | null>(null)
+watch(routeGroupContext, () => { groupStageRequest.value = null }, { flush: 'sync' })
+
+function openGroupStage(target: AttendanceGroupEffectivePolicyStageActionV1, source: AttendanceGroupRouteContext): void {
+  // Compare the source context object as well as its ID: old A actions stay old after A -> B -> A.
+  if (source !== routeGroupContext.value || !groupRouteActive.value
+    || source.groupId !== target.groupId || !canAccessAdmin.value
+    || !hasFeature('attendanceGroupEffectivePolicyPanel')) return
+  groupStageRequest.value = { groupId: target.groupId, stage: target.stage }
+}
 
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canAccessWorkflow = computed(() => hasFeature('workflow'))

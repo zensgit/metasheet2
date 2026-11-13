@@ -22,7 +22,6 @@
 // P2-1 finding comment for why an array + switch let a union member go missing undetected).
 
 import {
-  ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO,
   ATTENDANCE_GROUP_ROUTE_STEPS,
   ATTENDANCE_GROUP_STEP_SURFACES,
   buildAttendanceGroupRouteHref,
@@ -301,34 +300,33 @@ export function parseAttendanceGroupEffectivePolicyEditorRefV1(
   return null
 }
 
-export type AttendanceGroupEffectivePolicyEditorNavigationV1 =
-  | { readonly kind: 'route'; readonly href: string }
-  | { readonly kind: 'group-list'; readonly href: string }
+export type AttendanceGroupEffectivePolicyStageActionV1 = {
+  readonly groupId: string
+  readonly stage: 'basics' | 'people' | 'schedule' | 'policies'
+}
 
-/**
- * Resolve one editorRef into a navigable target.
- *
- * `group_context_route` reuses the EXISTING #4711 route builder
- * (`buildAttendanceGroupRouteHref`) verbatim — the same function
- * `AttendanceExperienceView.vue`'s `openGroupRoute` already uses.
- *
- * `group_stage` (`basics|people|schedule|policies`) has no query-addressable deep link into a
- * specific stage tab today: the only existing entry point is clicking a group row inside the
- * classic groups list, which then exposes the stage tabs internally
- * (`selectAttendanceGroupStage` in `AttendanceView.vue` — a private ref with no external route
- * contract). Rather than inventing a NEW query-param/deep-link contract for that (design-lock
- * W6-R8: "mints no second navigation spelling and no caller-supplied section IDs"), every
- * `group_stage` ref resolves to the existing groups-list section
- * (`ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO`) — the honest, zero-invention target. Reaching the
- * specific stage tab from there still requires the existing manual click onto the group.
- */
+export type AttendanceGroupEffectivePolicyEditorNavigationV1 =
+  | { readonly kind: 'route'; readonly href: string; readonly sameRouteStage?: AttendanceGroupEffectivePolicyStageActionV1 }
+  | ({ readonly kind: 'group-stage' } & AttendanceGroupEffectivePolicyStageActionV1)
+
+/** Reuse #4711 routes for schedule/policies and the live selector for ordinary editor stages. */
 export function resolveAttendanceGroupEffectivePolicyEditorNavigationV1(
   editorRef: AttendanceGroupEffectivePolicyEditorRefV1,
   context: { readonly groupId: string; readonly returnTo: string },
 ): AttendanceGroupEffectivePolicyEditorNavigationV1 | null {
   switch (editorRef.kind) {
-    case 'group_stage':
-      return { kind: 'group-list', href: ATTENDANCE_GROUP_ROUTE_DEFAULT_RETURN_TO }
+    case 'group_stage': {
+      if (editorRef.stage === 'basics' || editorRef.stage === 'people') {
+        return { kind: 'group-stage', groupId: context.groupId, stage: editorRef.stage }
+      }
+      const href = buildAttendanceGroupRouteHref({
+        groupId: context.groupId,
+        step: editorRef.stage === 'schedule' ? 'schedule' : 'rules',
+        surface: null,
+        returnTo: context.returnTo,
+      })
+      return href ? { kind: 'route', href, sameRouteStage: { groupId: context.groupId, stage: editorRef.stage } } : null
+    }
     case 'group_context_route': {
       const href = buildAttendanceGroupRouteHref({
         groupId: context.groupId,

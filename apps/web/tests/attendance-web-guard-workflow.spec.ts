@@ -142,6 +142,24 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('registers W6 navigation, labels, panel and gate specs in both live lanes', () => {
+    const targeted = targetedRunCommand(workflow).split(/\s+/)
+    const requiredScript = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const required = logicalLinesWithLineNumbers(requiredScript)
+      .filter(({ line }) => line.includes('npx vitest run '))
+      .flatMap(({ line }) => line.split('npx vitest run ')[1]!.split(/\s+/))
+    for (const spec of [
+      'attendanceGroupEffectivePolicyLabels',
+      'AttendanceGroupEffectivePolicyPanel',
+      'attendanceGroupContextHostEffectivePolicyGate',
+      'attendanceGroupEffectivePolicyStageNavigation',
+    ]) {
+      expect(workflow.split(`apps/web/tests/${spec}.spec.ts`)).toHaveLength(3)
+      expect(targeted).toContain(spec)
+      expect(required).toContain(spec)
+    }
+  })
+
   it('carries server clock and admin control specs in the classifiers and both test lanes', () => {
     const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
     const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)
