@@ -17,7 +17,7 @@
 
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('Prepare', 'Preflight', 'Install', 'Sample', 'AssertLeg4', 'Summary', 'Diag')]
+  [ValidateSet('Prepare', 'Preflight', 'Install', 'Sample', 'AssertLeg4', 'Summary', 'Diag', 'Verdict')]
   [string]$Action,
   [string]$Work = '',
   [string]$Label = '',
@@ -273,23 +273,41 @@ function Get-Health {
 }
 
 function Get-Pm2State {
-  $r = Invoke-CmdLine -CommandLine 'pm2 jlist'
-  $res = [ordered]@{ jlistExit = $r.Code; present = $false; status = ''; pid = 0; restarts = -1; uptimeMs = 0; execUnderRoot = $false }
-  if ($r.Code -ne 0) { return [pscustomobject]$res }
-  # pm2 may print '[PM2] ...' daemon lines first; jlist itself is the last line that is a JSON array.
-  $json = @($r.Out | Where-Object { $_ -match '^\s*\[\s*(\{|\])' }) | Select-Object -Last 1
-  if ([string]::IsNullOrWhiteSpace([string]$json)) { return [pscustomobject]$res }
-  try { $apps = ([string]$json) | ConvertFrom-Json } catch { return [pscustomobject]$res }
-  $app = @($apps) | Where-Object { $_.name -eq $Pm2App } | Select-Object -First 1
-  if ($null -eq $app) { return [pscustomobject]$res }
-  $res.present = $true
-  $res.status = [string]$app.pm2_env.status
-  $res.pid = [int]$app.pid
-  $res.restarts = [int]$app.pm2_env.restart_time
-  $res.uptimeMs = [long]$app.pm2_env.pm_uptime
-  $exec = [string]$app.pm2_env.pm_exec_path
-  $res.execUnderRoot = $exec.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase)
-  return [pscustomobject]$res
+  # pm2 jlist carries each app's environment; on Windows it can hold keys that differ only in case
+  # (Path / PATH), which Windows PowerShell 5.1 ConvertFrom-Json rejects. Parse it in node instead.
+  $js = Join-Path $H 'pm2state.cjs'
+  if (-not (Test-Path -LiteralPath $js)) {
+    $src = @'
+const { execSync } = require('node:child_process')
+let raw = ''
+try {
+  raw = execSync('pm2 jlist', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 60000 })
+} catch (e) { console.log('ERR|jlist'); process.exit(3) }
+const line = raw.split(/\r?\n/).filter((l) => /^\s*\[\s*(\{|\])/.test(l)).pop()
+if (!line) { console.log('ERR|nojson'); process.exit(4) }
+let apps
+try { apps = JSON.parse(line) } catch (e) { console.log('ERR|parse'); process.exit(5) }
+const app = apps.find((a) => a.name === process.argv[2])
+if (!app) { console.log('ABSENT|' + apps.length); process.exit(0) }
+const env = app.pm2_env || {}
+const restarts = typeof env.restart_time === 'number' ? env.restart_time : -1
+console.log(['PRESENT', env.status || '', app.pid || 0, restarts, env.pm_uptime || 0, env.pm_exec_path || ''].join('|'))
+'@
+    Set-Content -LiteralPath $js -Value $src -Encoding ASCII
+  }
+  $r = Invoke-CmdLine -CommandLine ('node "' + $js + '" ' + $Pm2App)
+  $present = $false; $status = ''; $procId = 0; $restarts = -1; $uptime = 0; $underRoot = $false
+  $line = [string](@($r.Out | Where-Object { $_ -match '^(PRESENT|ABSENT|ERR)\|' }) | Select-Object -Last 1)
+  $parts = $line.Split('|')
+  if ($parts[0] -eq 'PRESENT' -and $parts.Length -ge 6) {
+    $present = $true
+    $status = $parts[1]
+    $procId = [int]$parts[2]
+    $restarts = [int]$parts[3]
+    $uptime = [long]$parts[4]
+    $underRoot = $parts[5].StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase)
+  }
+  return [pscustomobject]@{ jlistExit = $r.Code; reader = $parts[0]; present = $present; status = $status; pid = $procId; restarts = $restarts; uptimeMs = $uptime; execUnderRoot = $underRoot }
 }
 
 function Get-CorepackState {
@@ -870,7 +888,7 @@ function Invoke-Install {
   $res['migrate_list_applied'] = $list.Applied
   $res['migrate_list_pending'] = $list.Pending
   $postPm2 = Get-Pm2State
-  Write-T ('after-state: pm2 ' + $postPm2.status)
+  Write-T ('after-state: pm2 reader ' + $postPm2.reader + ' status ' + $postPm2.status + ' under root ' + $postPm2.execUnderRoot)
   $res['after_pm2'] = [ordered]@{
     present = $postPm2.present; status = $postPm2.status; restarts = $postPm2.restarts
     pid_changed = ($prePm2.present -and $postPm2.present -and $prePm2.pid -ne $postPm2.pid)
@@ -882,7 +900,36 @@ function Invoke-Install {
   $res['health_backend_commit_is_expected'] = $hb.CommitMatchesExpected
   $res['health_via_port80_code'] = $hp.Code
   Write-T ('after-state: health ' + $hb.Code + ' / ' + $hp.Code)
-  $script:TraceCmd = $false
+
+  $watchdog = Start-Watchdog -Minutes 8
+  $prov = Read-Json -Path (Join-Path $Root 'BUILD_PROVENANCE.json')
+  $rootProvIsExpected = ($null -ne $prov -and [string]$prov.gitCommit -eq $ExpectCommit)
+  $res['root_provenance_commit_is_expected'] = $rootProvIsExpected
+
+  # Expectations (legs 1-3 gate here; leg 4 is asserted by AssertLeg4).
+  if ($ExpectExit -eq 'zero') {
+    if (-not ($freshDefect -and $res['harness_registered_app'])) {
+      if ($exit -ne 0) { $fail += "deploy-bootstrap exit $exit" }
+      if ($res['bootstrap_marker_exit'] -ne 0) { $fail += 'bootstrap marker is not apply exit=0' }
+      if (-not $res['package_deploy_complete_line']) { $fail += 'no Package deploy complete line' }
+    }
+    if ($ExpectExecuted -ge 0 -and $executed.Count -ne $ExpectExecuted) { $fail += ("executed {0}, expected {1}" -f $executed.Count, $ExpectExecuted) }
+    if ($ExpectApplied -ge 0 -and $postK.Count -ne $ExpectApplied) { $fail += ("kysely_migration {0}, expected {1}" -f $postK.Count, $ExpectApplied) }
+    if ($ExpectApplied -ge 0 -and $list.Applied -ne $ExpectApplied) { $fail += ("migrate --list Applied {0}, expected {1}" -f $list.Applied, $ExpectApplied) }
+    if ($list.Pending -ne 0) { $fail += ("migrate --list Pending {0}" -f $list.Pending) }
+    if ($ExpectExecuted -ge 0 -and $postK.NewCount -ne $ExpectExecuted) { $fail += ("new kysely rows {0}, expected {1}" -f $postK.NewCount, $ExpectExecuted) }
+    if ($hb.Code -ne 200) { $fail += ("backend health {0}" -f $hb.Code) }
+    if (-not $hb.CommitMatchesExpected) { $fail += 'build.commit is not the expected commit' }
+    if (-not ($postPm2.present -and $postPm2.status -eq 'online')) { $fail += 'pm2 app not online' }
+    if (-not $rootProvIsExpected) { $fail += 'root BUILD_PROVENANCE.json is not the expected commit' }
+  }
+  $res['failures'] = $fail
+  Write-Json -Value $res -Path (Join-Path $Out ($Label + '.json'))
+  Write-H ("{0}: exit={1} wall_s={2} executed={3} kysely={4} applied={5} pending={6} health={7} commit_ok={8} pm2={9}" -f $Label, $exit, $res['wall_s'], $executed.Count, $postK.Count, $list.Applied, $list.Pending, $hb.Code, $hb.CommitMatchesExpected, $postPm2.status)
+  foreach ($l in $res['operator_tail']) { Write-H ('operator> ' + $l) }
+  # Core numbers are on disk before the extended analysis, so a stall there cannot lose them.
+  Write-T ($Label + ': core result written; extended analysis')
+  $script:TraceCmd = $true
 
   # Was the previous backend running while the migrations executed? Same clock for all three:
   # sampler rows (UTC), kysely_migration.timestamp of the new rows (node, UTC) and the old pm2 pid.
@@ -917,11 +964,13 @@ function Invoke-Install {
   }
   $res['running_during_migrate'] = $run
 
+  Write-T ($Label + ': samples parsed')
   $postCore = Get-CorepackState
   $res['corepack_before'] = $preCore
   $res['corepack_after'] = $postCore
   $res['corepack_global_state_changed'] = (($preCore | ConvertTo-Json -Compress) -ne ($postCore | ConvertTo-Json -Compress))
 
+  Write-T ($Label + ': corepack state read')
   # Which files does the root hold now: R84's or F's? And what does R84 leave behind?
   $diff = Read-Json -Path (Join-Path $H 'package-diff.json')
   $fileView = [ordered]@{ changed_total = 0; changed_root_is_f = 0; changed_root_is_r84 = 0; changed_root_other_or_missing = 0
@@ -932,8 +981,8 @@ function Invoke-Install {
       $fileView['changed_total'] += 1
       $rp = Join-Path $Root $e.p
       if (Test-Path -LiteralPath $rp) {
-        $h = Get-FileSha -Path $rp
-        if ($h -eq $e.f) { $fileView['changed_root_is_f'] += 1 } elseif ($h -eq $e.r84) { $fileView['changed_root_is_r84'] += 1 } else { $fileView['changed_root_other_or_missing'] += 1 }
+        $fileHash = Get-FileSha -Path $rp
+        if ($fileHash -eq $e.f) { $fileView['changed_root_is_f'] += 1 } elseif ($fileHash -eq $e.r84) { $fileView['changed_root_is_r84'] += 1 } else { $fileView['changed_root_other_or_missing'] += 1 }
       } else { $fileView['changed_root_other_or_missing'] += 1 }
     }
     foreach ($e in @($diff.onlyF)) { $fileView['onlyF_total'] += 1; if (Test-Path -LiteralPath (Join-Path $Root $e.p)) { $fileView['onlyF_present'] += 1 } }
@@ -946,35 +995,17 @@ function Invoke-Install {
       }
     }
   }
-  $prov = Read-Json -Path (Join-Path $Root 'BUILD_PROVENANCE.json')
-  $fileView['root_provenance_commit_is_expected'] = ($null -ne $prov -and [string]$prov.gitCommit -eq $ExpectCommit)
+  $fileView['root_provenance_commit_is_expected'] = $rootProvIsExpected
   $res['files'] = $fileView
   $res['files_left_from_r84'] = $leftList
+  Write-T ($Label + ': file view done')
   $res['staging_leftovers'] = Get-StagingLeftovers
   $res['node_modules_backups_left'] = Get-NodeModulesBackups
   $res['root_node_modules_present'] = (Test-Path -LiteralPath (Join-Path $Root 'node_modules'))
 
-  # Expectations (legs 1-3 gate here; leg 4 is asserted by AssertLeg4).
-  if ($ExpectExit -eq 'zero') {
-    if (-not ($freshDefect -and $res['harness_registered_app'])) {
-      if ($exit -ne 0) { $fail += "deploy-bootstrap exit $exit" }
-      if ($res['bootstrap_marker_exit'] -ne 0) { $fail += 'bootstrap marker is not apply exit=0' }
-      if (-not $res['package_deploy_complete_line']) { $fail += 'no Package deploy complete line' }
-    }
-    if ($ExpectExecuted -ge 0 -and $executed.Count -ne $ExpectExecuted) { $fail += ("executed {0}, expected {1}" -f $executed.Count, $ExpectExecuted) }
-    if ($ExpectApplied -ge 0 -and $postK.Count -ne $ExpectApplied) { $fail += ("kysely_migration {0}, expected {1}" -f $postK.Count, $ExpectApplied) }
-    if ($ExpectApplied -ge 0 -and $list.Applied -ne $ExpectApplied) { $fail += ("migrate --list Applied {0}, expected {1}" -f $list.Applied, $ExpectApplied) }
-    if ($list.Pending -ne 0) { $fail += ("migrate --list Pending {0}" -f $list.Pending) }
-    if ($ExpectExecuted -ge 0 -and $postK.NewCount -ne $ExpectExecuted) { $fail += ("new kysely rows {0}, expected {1}" -f $postK.NewCount, $ExpectExecuted) }
-    if ($hb.Code -ne 200) { $fail += ("backend health {0}" -f $hb.Code) }
-    if (-not $hb.CommitMatchesExpected) { $fail += 'build.commit is not the expected commit' }
-    if (-not ($postPm2.present -and $postPm2.status -eq 'online')) { $fail += 'pm2 app not online' }
-    if (-not $fileView['root_provenance_commit_is_expected']) { $fail += 'root BUILD_PROVENANCE.json is not the expected commit' }
-  }
-  $res['failures'] = $fail
+  Write-T ($Label + ': extended analysis done')
   Write-Json -Value $res -Path (Join-Path $Out ($Label + '.json'))
-  Write-H ("{0}: exit={1} wall_s={2} executed={3} kysely={4} applied={5} pending={6} health={7} commit_ok={8} pm2={9}" -f $Label, $exit, $res['wall_s'], $executed.Count, $postK.Count, $list.Applied, $list.Pending, $hb.Code, $hb.CommitMatchesExpected, $postPm2.status)
-  foreach ($l in $res['operator_tail']) { Write-H ('operator> ' + $l) }
+  if ($null -ne $watchdog) { Stop-Process -Id $watchdog.Id -Force -ErrorAction SilentlyContinue }
   if ($ExpectExit -eq 'nonzero') {
     # Injected failure leg: report the bootstrap's own exit code so the workflow step shows it.
     if ($exit -eq 0) { exit 0 }
@@ -1011,6 +1042,27 @@ function Invoke-AssertLeg4 {
   foreach ($k in $a.Keys) { Write-H ("assert {0} = {1}" -f $k, $a[$k]) }
   foreach ($k in $obs.Keys) { Write-H ("observe {0} = {1}" -f $k, $obs[$k]) }
   if ($bad.Count -gt 0) { Write-H ('LEG 4 OBSERVATION DIFFERS FROM THE DOCUMENTED CAVEAT: ' + ($bad -join ', ')); exit 1 }
+}
+
+function Start-Watchdog {
+  # A detached process that ends this harness process if the extended analysis stalls. The core
+  # result is already on disk; the step verdict reads it (Action Verdict), so the leg still counts.
+  param([int]$Minutes)
+  $cmd = ('Start-Sleep -Seconds ' + ($Minutes * 60) + '; Stop-Process -Id ' + $PID + ' -Force')
+  return (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-Command', $cmd) -WindowStyle Hidden -PassThru)
+}
+
+function Invoke-Verdict {
+  $j = Read-Json -Path (Join-Path $Out ($Label + '.json'))
+  if ($null -eq $j) { Write-H ($Label + ': no result file'); exit 1 }
+  if ($ExpectExit -eq 'nonzero') {
+    Write-H ($Label + ': injected-failure leg, bootstrap exit ' + $j.exit_code)
+    if ([int]$j.exit_code -eq 0) { exit 0 }
+    exit 1
+  }
+  $f = @($j.failures | Where-Object { $_ })
+  if ($f.Count -gt 0) { Write-H ($Label + ' FAILED: ' + ($f -join '; ')); exit 1 }
+  Write-H ($Label + ': passed')
 }
 
 function Format-B { param($v) if ($v -is [bool]) { if ($v) { return 'yes' } else { return 'no' } } return [string]$v }
@@ -1116,5 +1168,6 @@ switch ($Action) {
   'AssertLeg4' { Invoke-AssertLeg4 }
   'Summary' { Invoke-Summary }
   'Diag' { Invoke-Diag }
+  'Verdict' { Invoke-Verdict }
 }
 exit 0

@@ -106,6 +106,8 @@ jobs:
         shell: powershell
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg1
           exit $LASTEXITCODE
 
       - name: Leg 2 - upgrade R84 to F (deploy-bootstrap, 1 1)
@@ -113,6 +115,8 @@ jobs:
         shell: powershell
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg2 -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT -ExpectApplied $env:F_APPLIED -ExpectExecuted $env:F_NEW_MIGRATIONS
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg2
           exit $LASTEXITCODE
 
       - name: Leg 3 - re-run the same F install (expects 0 migrations)
@@ -120,6 +124,8 @@ jobs:
         shell: powershell
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg3 -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT -ExpectApplied $env:F_APPLIED -ExpectExecuted 0
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg3
           exit $LASTEXITCODE
 
       - name: Diagnostics on failure
@@ -194,6 +200,8 @@ jobs:
         shell: powershell
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg1
           exit $LASTEXITCODE
 
       # The only continue-on-error step: the injected failure. The health-check port (the harness
@@ -205,6 +213,8 @@ jobs:
         shell: powershell
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg4 -Inject health-port-blocked -ExpectExit nonzero -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg4 -ExpectExit nonzero
           exit $LASTEXITCODE
 
       - name: Leg 4 - assert the observed behaviour
