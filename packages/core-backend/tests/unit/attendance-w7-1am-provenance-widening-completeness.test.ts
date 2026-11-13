@@ -45,6 +45,63 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
     expect(violations.map((violation) => `${violation.kind}: ${violation.detail}`)).toEqual([])
   })
 
+  it('approved correction preserves the widened parent owner with one exact mandatory ledger entry', () => {
+    const file = 'packages/core-backend/src/attendance/approved-correction-apply.ts'
+    const text = "posture: 'present', projectionOwner: source.record.projection_owner as 'w4' | 'w4_group',"
+    const entries = W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry => entry.file === file)
+    expect(entries).toEqual([{ file, text, rule: 'widened_predicate' }])
+    const sites = derivation.sites.filter(site => site.file === file && site.text === text)
+    expect(sites).toHaveLength(1)
+    const site = sites[0]
+    expect(site.family).toBe('projection_owner')
+    expect(site.hasNewValue).toBe(true)
+    expect(site.hasWideningSymbol).toBe(false)
+
+    // Removing this exact entry must expose the real derived read.
+    expect(diffProvenanceWideningV1(
+      derivation, W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry => entry !== entries[0]),
+    )).toEqual([{
+      kind: 'unledgered_site',
+      detail: file + ':' + site.line + ' (' + site.family + ') — ' + text,
+    }])
+    // Removing the source construct must leave a stale entry, not a path grant.
+    expect(diffProvenanceWideningV1(
+      { ...derivation, sites: derivation.sites.filter(item => item !== site) },
+      W7_PROVENANCE_WIDENING_LEDGER_V1,
+    )).toEqual([{ kind: 'stale_ledger_entry', detail: file + ' — ' + text }])
+  })
+
+  it('the approved-correction read rule rejects a synthetic narrowing even if its ledger text is updated', () => {
+    const entry = W7_PROVENANCE_WIDENING_LEDGER_V1.find(item =>
+      item.file === 'packages/core-backend/src/attendance/approved-correction-apply.ts',
+    )!
+    // Isolated text probes only: no product source, input or fingerprint is fabricated.
+    const scan = (text: string) => scanPlanted('approved-correction-owner-read.ts', [
+      'export function parent(source: { record: { projection_owner: string } }) {',
+      '  return {', '    ' + text, '  }', '}', '',
+    ].join('\n'))
+    const widened = scan(entry.text)
+    expect(widened.sites).toHaveLength(1)
+    const widenedSite = widened.sites[0]
+    expect(diffProvenanceWideningV1(widened, [{
+      file: widenedSite.file, text: widenedSite.text, rule: entry.rule,
+    }])).toEqual([])
+
+    const narrowedText = entry.text.replace("source.record.projection_owner as 'w4' | 'w4_group'", "'w4'")
+    expect(narrowedText).not.toBe(entry.text)
+    const narrowed = scan(narrowedText)
+    expect(narrowed.sites).toHaveLength(1)
+    const narrowedSite = narrowed.sites[0]
+    expect(narrowedSite.hasNewValue).toBe(false)
+    expect(narrowedSite.hasWideningSymbol).toBe(false)
+    expect(diffProvenanceWideningV1(narrowed, [{
+      file: narrowedSite.file, text: narrowedSite.text, rule: entry.rule,
+    }])).toEqual([{
+      kind: 'not_widened',
+      detail: narrowedSite.file + ':' + narrowedSite.line + ' rule=widened_predicate — ' + narrowedSite.text,
+    }])
+  })
+
   it('ACP uses the canonical owner type and pointer predicate with mandatory exact ledger entries', () => {
     const types = fs.readFileSync(path.join(repoRoot, 'packages/core-backend/src/db/types.ts'), 'utf8')
     expect(types).toContain("import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'")

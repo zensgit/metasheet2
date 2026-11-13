@@ -99,6 +99,12 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readShadowTraceCalculation', 1, 'immutable_shadow_trace_scope'),
   entry('packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', 'readTraceSegments', 1, 'immutable_authorized_trace_segment_scope'),
   entry('plugins/plugin-attendance/index.cjs', 'loadW4c3cRecordSubjectForOperation', 1, 'write_precondition'),
+  // Approved correction reads are exact source/write preconditions, never ordinary lists.
+  // The response echoes the same transaction's approved write; source selection rejects
+  // retired parents and validates the authoritative pointer or independent shadow history.
+  entry('packages/core-backend/src/attendance/approved-correction-apply.ts', 'appendApprovedCorrectionCalculationV1', 1, 'write_response_echo'),
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'loadResolvedAttendanceCorrectionSourceV1', 1, 'correction_frozen_source_precondition'),
+  entry('packages/core-backend/src/attendance/approved-correction-target-source.ts', 'readRetainedAttendanceCorrectionsV1', 1, 'retained_correction_carry_precondition'),
 ])
 
 function keyOf(site) {

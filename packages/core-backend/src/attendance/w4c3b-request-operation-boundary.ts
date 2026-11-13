@@ -253,6 +253,54 @@ export interface AttendanceRequestOperationContextV1 {
   readonly routeVariant: AttendanceRequestOperationRouteVariantV1 | null
 }
 
+type CorrectionDecisionExecutionV1 = Readonly<{
+  phase: 'prepare' | 'execute'
+  client: AttendanceRequestPluginTrxV1
+  orgId: string
+  userId: string
+  requestId: unknown
+  action: unknown
+  actorId: string
+  operationId: string | null
+  correlationId: string
+  mode: NonNullable<AttendanceRequestOperationContextV1['acceptedWritePosture']>
+  kind: AttendanceRequestOperationKindV1
+}>
+const correctionDecisionExecutions = new WeakMap<object, CorrectionDecisionExecutionV1>()
+
+/** Reads an active existing-boundary execution; does not issue a new authority. */
+export function requireAttendanceCorrectionDecisionExecutionV1(
+  client: unknown,
+  operation: unknown,
+  identity: Readonly<{ orgId: string; userId: string; requestId: string; actorId: string;
+    operationId: string; correlationId: string; mode: string }>,
+): void {
+  const admitted = typeof operation === 'object' && operation !== null
+    ? correctionDecisionExecutions.get(operation) : undefined
+  if (!admitted || admitted.phase !== 'execute' || admitted.client !== client || admitted.kind !== 'request_decision'
+    || admitted.action !== 'approve' || admitted.mode === 'legacy_projection_only'
+    || admitted.orgId !== identity.orgId || admitted.userId !== identity.userId
+    || admitted.requestId !== identity.requestId || admitted.actorId !== identity.actorId
+    || admitted.operationId !== identity.operationId || admitted.correlationId !== identity.correlationId
+    || admitted.mode !== identity.mode) fail('ATTENDANCE_CORRECTION_OPERATION_REQUIRED', 400)
+}
+
+/** Reuses the one rollout-locked preflight resolution for source preparation. */
+export function requireAttendanceCorrectionSourcePostureV1(
+  client: unknown,
+  operation: unknown,
+  subject: Readonly<{ orgId: string; userId: string }>,
+): 'shadow' | 'authoritative' {
+  const admitted = typeof operation === 'object' && operation !== null
+    ? correctionDecisionExecutions.get(operation) : undefined
+  if (!admitted || admitted.client !== client || admitted.orgId !== subject.orgId
+    || admitted.userId !== subject.userId
+    || (admitted.mode !== 'shadow' && admitted.mode !== 'authoritative')) {
+    fail('ATTENDANCE_CORRECTION_OPERATION_REQUIRED', 400)
+  }
+  return admitted.mode
+}
+
 export interface AttendanceRequestOperationAdapterV1<TState = unknown> {
   /**
    * Read-only identity projection used by stable-ID preflight. It may read only
@@ -917,55 +965,79 @@ async function runRequestOperationProtocolV1(
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
 
-          const verifyScheduleSource = await takeTripPrefix()
-          const verifyTimezone = await prepareTimezone()
-          const prepared = await adapter.prepare(shapedTrx,input.routeInput,operation)
-          if (input.operationId !== null && !preparedIdentityCongruent(identityPrepared, prepared)) {
-            fail('W4C3B_REQUEST_IDENTITY_CHANGED', 409)
-          }
-
-          const result = await adapter.execute(shapedTrx, prepared, Object.freeze({
-            ...operation,
-            acceptedWritePosture: preflight.org.acceptedWritePosture,
-            // From the preflight's own resolve, taken under the rollout SHARED lock at
-            // step 2 — the one resolution this transaction performs.
-            referenceSegments: preflight.referenceSegments,
+          correctionDecisionExecutions.set(operation, Object.freeze({
+            phase: 'prepare', client: shapedTrx, kind: input.kind, orgId: identityPrepared.orgId,
+            userId: identityPrepared.subjectUserId, requestId: identityPrepared.commandPayload.requestId,
+            action: identityPrepared.commandPayload.action, actorId: identityPrepared.actorId,
+            operationId: operation.operationId, correlationId: operation.correlationId,
+            mode: preflight.org.acceptedWritePosture,
           }))
-          // Before the outbox enqueue and before the seal — a refused attempt must leave neither.
-          // On the HTTP entry this throws exactly where the adapter used to throw: the adapter
-          // returned immediately at its refusal point, so no statement runs between the old throw
-          // site and this one.
-          if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
-          if (verifyTimezone) await verifyTimezone()
-            if (verifyScheduleSource) await verifyScheduleSource()
-          if (preflight.kind === 'legacy_no_operation') {
-            return { kind: 'legacy' as const, response: result.response }
-          }
+          try {
+            const verifyScheduleSource = await takeTripPrefix()
+            const verifyTimezone = await prepareTimezone()
+            const prepared = await adapter.prepare(shapedTrx,input.routeInput,operation)
+            if (input.operationId !== null && !preparedIdentityCongruent(identityPrepared, prepared)) {
+              fail('W4C3B_REQUEST_IDENTITY_CHANGED', 409)
+            }
 
-          const identity = preflight.itemIdentities[0]
-          if (!identity) fail('W4C3B_REQUEST_OPERATION_IDENTITY_MISSING', 500)
-          const isLegacyCompat = preflight.org.acceptedWritePosture === 'legacy_projection_only'
-          const [event] = result.lifecycleEvents
-          if (!event) fail('W4C3B_REQUEST_LIFECYCLE_EVENT_MISSING', 500)
-          if (!isLegacyCompat) {
-            await enqueueAttendanceResultEventOutboxV1(trx, identity, [{
-              eventKind: event.eventKind,
-              payload: event.payload,
-              payloadSchemaVersion: 1,
-              businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
-                kind: event.eventKind,
-                orgId: envelope.orgId,
-                operationId: identity.id,
-              }),
-            }])
-          }
-          await sealAttendanceResultOperationV1(trx, identity, {
-            responseSnapshot: jsonValue(result.response),
-            resolvedRequestId: result.resolvedRequestId,
-          })
-          return {
-            kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
-            response: result.response,
+            const executingOperation = Object.freeze({
+              ...operation,
+              acceptedWritePosture: preflight.org.acceptedWritePosture,
+              // From the preflight's own resolve, taken under the rollout SHARED lock at
+              // step 2 — the one resolution this transaction performs.
+              referenceSegments: preflight.referenceSegments,
+            })
+            correctionDecisionExecutions.set(executingOperation, Object.freeze({
+              phase: 'execute', client: shapedTrx, kind: input.kind, orgId: prepared.orgId,
+              userId: prepared.subjectUserId, requestId: prepared.commandPayload.requestId,
+              action: prepared.commandPayload.action, actorId: prepared.actorId,
+              operationId: executingOperation.operationId, correlationId: executingOperation.correlationId,
+              mode: preflight.org.acceptedWritePosture,
+            }))
+            let result: AttendanceRequestOperationExecutionResultV1
+            try {
+              result = await adapter.execute(shapedTrx, prepared, executingOperation)
+            } finally {
+              correctionDecisionExecutions.delete(executingOperation)
+            }
+            // Before the outbox enqueue and before the seal — a refused attempt must leave neither.
+            // On the HTTP entry this throws exactly where the adapter used to throw: the adapter
+            // returned immediately at its refusal point, so no statement runs between the old throw
+            // site and this one.
+            if (isBusinessRefusal(result)) return takeBusinessRefusal(result, mode)
+            if (verifyTimezone) await verifyTimezone()
+              if (verifyScheduleSource) await verifyScheduleSource()
+            if (preflight.kind === 'legacy_no_operation') {
+              return { kind: 'legacy' as const, response: result.response }
+            }
+
+            const identity = preflight.itemIdentities[0]
+            if (!identity) fail('W4C3B_REQUEST_OPERATION_IDENTITY_MISSING', 500)
+            const isLegacyCompat = preflight.org.acceptedWritePosture === 'legacy_projection_only'
+            const [event] = result.lifecycleEvents
+            if (!event) fail('W4C3B_REQUEST_LIFECYCLE_EVENT_MISSING', 500)
+            if (!isLegacyCompat) {
+              await enqueueAttendanceResultEventOutboxV1(trx, identity, [{
+                eventKind: event.eventKind,
+                payload: event.payload,
+                payloadSchemaVersion: 1,
+                businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+                  kind: event.eventKind,
+                  orgId: envelope.orgId,
+                  operationId: identity.id,
+                }),
+              }])
+            }
+            await sealAttendanceResultOperationV1(trx, identity, {
+              responseSnapshot: jsonValue(result.response),
+              resolvedRequestId: result.resolvedRequestId,
+            })
+            return {
+              kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
+              response: result.response,
+            }
+          } finally {
+            correctionDecisionExecutions.delete(operation)
           }
         }
 }

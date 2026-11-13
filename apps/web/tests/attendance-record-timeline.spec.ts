@@ -104,6 +104,13 @@ function installAttendanceMock(options?: {
   ]
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = String(input)
+    if (url.startsWith('/api/attendance/correction-targets?')) {
+      // Unit fixture premise: this simulated dataset is explicitly legacy-projection-only.
+      // This supplies no canonical/native credit and is not a fallback from an error or missing endpoint.
+      return jsonResponse(200, { ok: true, data: {
+        schemaVersion: 1, posture: 'legacy_projection_only', source: null, candidates: [],
+      } })
+    }
     if (url.startsWith('/api/attendance/timezone-context/me?')) {
       const workDate = new URL(url, 'http://localhost').searchParams.get('workDate')!
       const timezone = options?.recordTimezone ?? 'Asia/Shanghai'

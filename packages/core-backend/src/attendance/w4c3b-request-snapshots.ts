@@ -1,3 +1,4 @@
+import { normalizeAttendanceCorrectionTargetsV1, type AttendanceCorrectionTargetsV1 } from './approved-correction-target-contract'
 /**
  * W4C-3b Stage P12 — immutable attendance request calculation snapshots.
  *
@@ -138,7 +139,7 @@ export const ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1 = REQUEST_TYPES
 export type AttendanceRequestSnapshotRequestTypeV1 =
   (typeof REQUEST_TYPES)[number]
 
-export type AttendanceRequestCalculationPayloadV1 = Readonly<{
+type AttendanceRequestCalculationPayloadLegacyV1 = Readonly<{
   schemaVersion: 1
   workDate: string
   requestedInAt: string | null
@@ -153,6 +154,12 @@ export type AttendanceRequestCalculationPayloadV1 = Readonly<{
     source: string
   }> | null
 }>
+
+export type AttendanceRequestCalculationPayloadV1 = AttendanceRequestCalculationPayloadLegacyV1
+  | (Omit<AttendanceRequestCalculationPayloadLegacyV1, 'schemaVersion'> & Readonly<{
+      schemaVersion: 2
+      correctionTargets: AttendanceCorrectionTargetsV1
+    }>)
 
 const PAYLOAD_KEYS = Object.freeze([
   'schemaVersion',
@@ -307,14 +314,21 @@ function normalizeOutdoorPunch(
 export function normalizeAttendanceRequestCalculationPayloadV1(
   input: unknown,
 ): AttendanceRequestCalculationPayloadV1 {
-  if (!hasExactKeys(input, PAYLOAD_KEYS)) {
+  const versionDescriptor = input && typeof input === 'object'
+    ? Object.getOwnPropertyDescriptor(input, 'schemaVersion') : undefined
+  const version = versionDescriptor && 'value' in versionDescriptor ? versionDescriptor.value : null
+  if (!hasExactKeys(input, version === 2 ? [...PAYLOAD_KEYS, 'correctionTargets'] : PAYLOAD_KEYS)) {
     fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.INPUT_INVALID, 400, 'Invalid request snapshot input')
   }
-  if (input.schemaVersion !== 1) {
+  if (input.schemaVersion !== 1 && input.schemaVersion !== 2) {
     fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.INPUT_INVALID, 400, 'Invalid request snapshot input')
   }
-  return Object.freeze({
-    schemaVersion: 1 as const,
+  const targets = version === 2 ? normalizeAttendanceCorrectionTargetsV1(input.correctionTargets) : undefined
+  if (targets && ((input.requestedInAt == null) !== (targets.checkIn === null)
+    || (input.requestedOutAt == null) !== (targets.checkOut === null))) {
+    fail(W4C3B_REQUEST_SNAPSHOT_ERROR_CODES.INPUT_INVALID, 400, 'Invalid request snapshot input')
+  }
+  const base = {
     workDate: requireDateKey(input.workDate),
     requestedInAt: optionalIsoOrNull(input.requestedInAt),
     requestedOutAt: optionalIsoOrNull(input.requestedOutAt),
@@ -322,7 +336,10 @@ export function normalizeAttendanceRequestCalculationPayloadV1(
     minutes: optionalNonNegIntOrNull(input.minutes),
     leaveTypeCode: optionalNonEmptyOrNull(input.leaveTypeCode, 64),
     outdoorPunch: normalizeOutdoorPunch(input.outdoorPunch),
-  })
+  }
+  return targets
+    ? Object.freeze({ schemaVersion: 2 as const, ...base, correctionTargets: targets })
+    : Object.freeze({ schemaVersion: 1 as const, ...base })
 }
 
 /**
@@ -337,9 +354,11 @@ export function buildAttendanceRequestCalculationPayloadFromRequestRowV1(input: 
   readonly minutes?: unknown
   readonly leaveTypeCode?: unknown
   readonly outdoorPunch?: unknown
+  readonly correctionTargets?: unknown
 }): AttendanceRequestCalculationPayloadV1 {
   return normalizeAttendanceRequestCalculationPayloadV1({
-    schemaVersion: 1,
+    schemaVersion: input.correctionTargets === undefined ? 1 : 2,
+    ...(input.correctionTargets === undefined ? {} : { correctionTargets: input.correctionTargets }),
     workDate:
       typeof input.workDate === 'string'
         ? input.workDate.slice(0, 10)
@@ -392,6 +411,7 @@ export function extractAttendanceRequestPayloadMetadataFieldsV1(metadataInput: u
   minutes: number | null
   leaveTypeCode: string | null
   outdoorPunch: AttendanceRequestCalculationPayloadV1['outdoorPunch']
+  correctionTargets?: AttendanceCorrectionTargetsV1
 }> {
   const meta = coerceAttendanceRequestMetadataObjectV1(metadataInput)
   const minutesRaw = meta.minutes
@@ -425,7 +445,9 @@ export function extractAttendanceRequestPayloadMetadataFieldsV1(metadataInput: u
       source: typeof outdoor.source === 'string' && outdoor.source ? outdoor.source : 'mobile',
     })
   }
-  return Object.freeze({ minutes, leaveTypeCode, outdoorPunch })
+  return Object.freeze({ minutes, leaveTypeCode, outdoorPunch,
+    ...(meta.correctionTargets === undefined ? {} : { correctionTargets: normalizeAttendanceCorrectionTargetsV1(meta.correctionTargets) }),
+  })
 }
 
 export function computeAttendanceRequestPayloadFingerprintV1(
@@ -436,7 +458,9 @@ export function computeAttendanceRequestPayloadFingerprintV1(
     .createHash('sha256')
     .update(
       Buffer.concat([
-        Buffer.from(PAYLOAD_FINGERPRINT_DOMAIN, 'utf8'),
+        Buffer.from(normalized.schemaVersion === 2
+          ? 'metasheet2:attendance:w4:request-calculation-snapshot-payload:v2'
+          : PAYLOAD_FINGERPRINT_DOMAIN, 'utf8'),
         Buffer.from([0]),
         Buffer.from(canonicalAttendanceJsonV1(normalized), 'utf8'),
       ]),
@@ -986,6 +1010,7 @@ export type AppendAttendanceRequestCreateSnapshotInputV1 = Readonly<{
     readonly minutes?: unknown
     readonly leaveTypeCode?: unknown
     readonly outdoorPunch?: unknown
+    readonly correctionTargets?: unknown
   }
   attributionSnapshot?: unknown
   contextSnapshot?: unknown
@@ -1040,6 +1065,7 @@ export async function appendAttendanceRequestCreateSnapshotV1(
         minutes: input.payloadFields?.minutes,
         leaveTypeCode: input.payloadFields?.leaveTypeCode,
         outdoorPunch: input.payloadFields?.outdoorPunch,
+        correctionTargets: input.payloadFields?.correctionTargets,
       })
 
   const { attributionSnapshot, contextSnapshot } = await resolveSnapshotMaterial(input)
@@ -1085,6 +1111,7 @@ export type AppendAttendanceRequestEditSnapshotInputV1 = Readonly<{
     readonly minutes?: unknown
     readonly leaveTypeCode?: unknown
     readonly outdoorPunch?: unknown
+    readonly correctionTargets?: unknown
   }
   attributionSnapshot?: unknown
   contextSnapshot?: unknown
@@ -1168,6 +1195,7 @@ export async function appendAttendanceRequestEditSnapshotV1(
         minutes: input.payloadFields?.minutes,
         leaveTypeCode: input.payloadFields?.leaveTypeCode,
         outdoorPunch: input.payloadFields?.outdoorPunch,
+        correctionTargets: input.payloadFields?.correctionTargets,
       })
 
   const hasNewMaterial = Boolean(

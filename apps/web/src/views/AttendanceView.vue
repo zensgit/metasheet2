@@ -307,6 +307,11 @@
                 @refresh="requestTimezone.refresh"
                 @select="(key, value) => { requestTimezone.selected[key] = value }"
               />
+              <AttendanceCorrectionTargetsSection
+                :tr="tr" :result="correctionTargets.result.value" :loading="correctionTargets.loading.value"
+                :error="correctionTargets.error.value" :chosen="correctionTargets.chosen" :requested="correctionTargets.requested.value"
+                @refresh="correctionTargets.refresh" @select="(side, index) => { correctionTargets.chosen[side] = index }"
+              />
             </template>
           </AttendanceEmployeeMakeupRequestCard>
           <AttendanceEmployeeOvertimeRequestCard
@@ -654,6 +659,13 @@
           />
           <AttendanceBusinessTripRequestCard :tr="tr" :refresh-requests="loadRequests" />
           <div class="attendance__request-form">
+          <div v-if="correctionEdit.active.value" class="attendance__field--full" data-correction-edit-notice>
+            {{ tr('Editing pending request. Work date and frozen source remain bound to this request.', '正在编辑待审批申请，工作日及冻源绑定于原申请。') }}
+            <button type="button" class="attendance__btn" @click="correctionEdit.cancel()">{{ tr('Cancel editing', '取消编辑') }}</button>
+          </div>
+          <p v-if="correctionEdit.message.value" class="attendance__field--full" role="alert" data-correction-edit-error>
+            {{ tr('Editing is unavailable or the frozen context changed. Cancel and reopen the request; no change was automatically resubmitted.', '编辑未完成或冻结上下文已变化，请取消并重新打开申请；系统不会自动重提交。') }}
+          </p>
           <AttendanceRequestTimezoneFields v-if="!isShiftSwapRequest"
             :tr="tr"
             :target="requestTimezone.target.value"
@@ -671,11 +683,12 @@
                 id="attendance-request-work-date"
                 name="requestWorkDate"
                 v-model="requestForm.workDate"
+                :disabled="!!correctionEdit.active.value"
               />
             </label>
             <label class="attendance__field" for="attendance-request-type">
               <span>{{ tr('Type', '类型') }}</span>
-              <select id="attendance-request-type" name="requestType" v-model="requestForm.requestType">
+              <select id="attendance-request-type" name="requestType" v-model="requestForm.requestType" :disabled="!!correctionEdit.active.value">
                 <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
                 <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
                 <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
@@ -820,6 +833,12 @@
             <p v-if="recordRequestPrefill" class="attendance__field-hint attendance__field--full" data-record-request-time-policy>
               {{ tr('Times use the frozen target shift timezone. Unchanged times retain the original instant; edited repeated times require an offset choice.', '时间按冻结的目标班次时区显示。未修改的时间保留原始时刻；修改后的重复时间需要选择偏移。') }}
             </p>
+            <AttendanceCorrectionTargetsSection
+              v-if="isMakeupRequest"
+              :tr="tr" :result="correctionTargets.result.value" :loading="correctionTargets.loading.value"
+              :error="correctionTargets.error.value" :chosen="correctionTargets.chosen" :requested="correctionTargets.requested.value"
+              @refresh="correctionTargets.refresh" @select="(side, index) => { correctionTargets.chosen[side] = index }"
+            />
             <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
               <span>{{ tr('Duration (min)', '时长（分钟）') }}</span>
               <input
@@ -857,8 +876,8 @@
                 :placeholder="tr('Optional', '可选')"
               />
             </label>
-            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting || (!isShiftSwapRequest && !requestTimezone.ready.value)" @click="submitRequest">
-              {{ requestSubmitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
+            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting || (!isShiftSwapRequest && !requestTimezone.ready.value) || (!!correctionEdit.active.value && !correctionEdit.ready.value)" @click="submitRequest">
+              {{ requestSubmitting ? tr('Submitting...', '提交中...') : correctionEdit.active.value ? tr('Save pending request', '保存待审批申请') : tr('Submit request', '提交申请') }}
             </button>
           </div>
 
@@ -891,6 +910,7 @@
                   <span v-if="item.metadata.overtimeRule">{{ tr('Overtime', '加班') }}: {{ item.metadata.overtimeRule.name }}</span>
                   <span v-if="item.metadata.minutes">{{ tr('Minutes', '分钟') }}: {{ item.metadata.minutes }}</span>
                 </div>
+                <AttendanceFrozenCorrectionTargets :tr="tr" :value="item.metadata?.correctionTargets" />
                 <div class="attendance__request-meta" v-if="requestReasonText(item)">
                   <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
                 </div>
@@ -903,7 +923,13 @@
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
                   <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id, item.request_type)">{{ tr('Cancel', '取消') }}</button>
-                  <template v-if="canReviewAttendanceRequest(item)">
+                  <button v-if="correctionEdit.eligible(item)" class="attendance__btn" type="button" data-correction-edit @click="beginCorrectionEdit(item)">{{ tr('Edit', '编辑') }}</button>
+                  <AttendanceCorrectionDecisionActions
+                    v-if="item.metadata?.correctionTargets !== undefined"
+                    :row="item" :entitled="canReviewAttendanceRequest(item)" :editing="correctionEdit.blocks(item)"
+                    :tr="tr" :send="apiFetch" @reload="loadRequests" @resolved="correctionDecisionResolved"
+                  />
+                  <template v-else-if="canReviewAttendanceRequest(item)">
                     <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
                     <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">
                       {{ tr('Reject', '驳回') }}
@@ -10486,6 +10512,11 @@ import { attendanceTimezoneErrorMessage } from './attendance/attendanceTimezoneE
 import AttendanceBusinessTripRequestCard from './attendance/AttendanceBusinessTripRequestCard.vue'
 import AttendanceRequestTimezoneFields from './attendance/AttendanceRequestTimezoneFields.vue'
 import { useAttendanceRequestTimezone } from './attendance/useAttendanceRequestTimezone'
+import AttendanceCorrectionTargetsSection from './attendance/AttendanceCorrectionTargetsSection.vue'
+import { useAttendanceCorrectionTargets } from './attendance/useAttendanceCorrectionTargets'
+import AttendanceFrozenCorrectionTargets from './attendance/AttendanceFrozenCorrectionTargets.vue'
+import AttendanceCorrectionDecisionActions from './attendance/AttendanceCorrectionDecisionActions.vue'
+import { useAttendanceCorrectionEdit } from './attendance/useAttendanceCorrectionEdit'
 import {
   attendanceApprovalOptionCopy,
   withApprovalOptionSaveNotice,
@@ -11131,6 +11162,7 @@ interface AttendanceRequest {
   reason?: string | null
   status: string
   metadata?: Record<string, any>
+  decisionContext?: unknown
   // Navigability audit fix 2: the backend's `mapAttendanceRequestRow` spreads the raw
   // `attendance_requests` row (`{ ...row }`) before shaping the response, so `user_id` has always
   // been present on the wire — just not previously declared here. Used to decide row-level
@@ -16815,18 +16847,56 @@ const requestForm = reactive({
 
 const recordRequestPrefill = ref<AttendanceRecordRequestPrefill | null>(null)
 
+const correctionEditOriginals = ref<{ requestedInAt: string; requestedOutAt: string } | null>(null)
+
 const requestTimezone = useAttendanceRequestTimezone({
   workDate: () => requestForm.workDate,
   userId: () => currentUserId.value ?? '',
   enabled: () => showOverview.value && requestForm.requestType !== 'shift_swap',
   inAt: () => requestForm.requestedInAt,
   outAt: () => requestForm.requestedOutAt,
-  originals: () => readAttendanceRecordRequestPrefill(
+  originals: () => correctionEditOriginals.value ?? readAttendanceRecordRequestPrefill(
     recordRequestPrefill.value, getAuthPrincipalKey(), attendanceSessionGuard.orgId,
   ),
   guard: attendanceSessionGuard,
   fetch: apiFetch,
 })
+
+const correctionTargets = useAttendanceCorrectionTargets({
+  workDate: () => requestForm.workDate,
+  userId: () => currentUserId.value ?? '',
+  orgId: () => orgId.value.trim(),
+  requestType: () => requestForm.requestType,
+  inAt: () => requestForm.requestedInAt,
+  outAt: () => requestForm.requestedOutAt,
+  enabled: () => showOverview.value && ['missed_check_in', 'missed_check_out', 'time_correction'].includes(requestForm.requestType),
+  guard: attendanceSessionGuard,
+  fetch: apiFetch,
+})
+const correctionEdit = useAttendanceCorrectionEdit({
+  form: requestForm, originals: correctionEditOriginals,
+  userId: () => currentUserId.value ?? '', orgId: () => orgId.value,
+  guard: attendanceSessionGuard, targets: correctionTargets, timezone: requestTimezone, send: apiFetch,
+  reload: loadRequests,
+})
+async function beginCorrectionEdit(item: AttendanceRequest): Promise<void> {
+  clearRecordRequestPrefill()
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
+  if (!await correctionEdit.begin(item)) {
+    setStatus(tr('Frozen request timezone context is unavailable. Reload the request before editing.', '缺少冻结申请时区上下文，请重新加载申请后编辑。'), 'error')
+    return
+  }
+  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
+}
+async function correctionDecisionResolved(): Promise<void> {
+  await loadRequests()
+  await loadSummary()
+  await loadRecords()
+}
+let correctionRetry: { key: string; operationId: string } | null = null
 
 const scheduleDispatchForm = reactive({
   userId: '',
@@ -18045,6 +18115,7 @@ function clearRecordRequestPrefill(): void {
 }
 
 async function applyRecordRequestPrefill(draft: AttendanceRecordRequestPrefill): Promise<void> {
+  if (correctionEdit.active.value) correctionEdit.cancel()
   clearRequestSubmitStatus()
   requestForm.workDate = draft.workDate
   requestForm.requestType = draft.requestType
@@ -18159,6 +18230,7 @@ watch(
 )
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
+  if (correctionEdit.active.value) correctionEdit.cancel()
   clearRecordRequestPrefill()
   clearRequestSubmitStatus()
   if (item.state === 'pending') {
@@ -18244,6 +18316,7 @@ async function submitDedicatedLeaveRequestCard(): Promise<void> {
 }
 
 function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
+  if (correctionEdit.active.value) correctionEdit.cancel()
   clearRecordRequestPrefill()
   const typeChanged = requestForm.requestType !== requestType
   const dateChanged = requestForm.workDate !== workDate
@@ -24071,6 +24144,10 @@ async function submitRequest() {
       setStatus(appendStatusContext(validationMessage, requestTimezoneContextHint.value), 'error')
       return
     }
+    if (isMakeupRequest.value && !correctionTargets.ready.value) {
+      setStatus(tr('Select correction targets or refresh them before submitting.', '请选择补卡目标，或刷新目标后再提交。'), 'error')
+      return
+    }
     const orgValue = normalizedOrgId()
     if (requestForm.requestType === 'shift_swap') {
       const payload = {
@@ -24109,14 +24186,41 @@ async function submitRequest() {
       attachmentUrl: requestForm.attachmentUrl || undefined,
       orgId: orgValue,
     }
+    if (correctionEdit.active.value) {
+      if (await correctionEdit.save(payload)) setStatus(tr('Pending request updated. Approval must use the new displayed snapshot.', '待审批申请已更新，审批须使用重新显示的新快照。'))
+      else setStatus(tr('Edit was not confirmed. Check the frozen context and retry or reopen explicitly.', '编辑未能确认，请检查冻结上下文后重试，或明确重新打开申请。'), 'error')
+      return
+    }
+    const targets = isMakeupRequest.value && correctionTargets.result.value?.posture === 'canonical'
+      ? correctionTargets.payload.value : null
+    let operationId: string | undefined
+    if (targets) {
+      const key = JSON.stringify({ ...payload, correctionTargets: targets })
+      if (!correctionRetry || correctionRetry.key !== key) correctionRetry = { key, operationId: randomUuid() }
+      operationId = correctionRetry.operationId
+    }
+    const submissionScope = [requestForm.workDate, requestForm.requestType, currentUserId.value, orgId.value]
     const response = await apiFetch('/api/attendance/requests', {
       method: 'POST',
-      body: JSON.stringify(payload)
+      body: JSON.stringify(targets ? { ...payload, correctionTargets: targets, operationId } : payload)
     })
     const data = await response.json()
+    if (!attendanceSessionGuard.isCurrent() || JSON.stringify(submissionScope)
+      !== JSON.stringify([requestForm.workDate, requestForm.requestType, currentUserId.value, orgId.value])) return
     if (!response.ok || !data.ok) {
+      if (response.status === 409 && data?.error?.code === 'ATTENDANCE_CORRECTION_TARGET_STALE') {
+        correctionRetry = null
+        correctionTargets.stale()
+        setStatus(tr('The correction target changed. Refresh and choose again.', '补卡目标已变化，请刷新后重新选择。'), 'error')
+        return
+      }
+      if (response.status === 422 && data?.error?.code === 'ATTENDANCE_CORRECTION_TARGET_SELECTION_REQUIRED') {
+        setStatus(tr('Select a target for each requested direction.', '请为每个申请方向选择补卡目标。'), 'error')
+        return
+      }
       throw createApiError(response, data, tr('Request failed', '申请失败'))
     }
+    correctionRetry = null
     setStatus(appendStatusContext(tr('Request submitted.', '申请已提交。'), requestTimezoneContextHint.value))
     await loadRequests()
   } catch (error: any) {

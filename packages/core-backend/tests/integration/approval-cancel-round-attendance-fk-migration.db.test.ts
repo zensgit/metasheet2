@@ -532,11 +532,11 @@ describeIfDatabase('WI-3 Q1c attendance FK migration (§14.3 #10/#11): real-DB a
     })
 
     it.each([
-      ['executeGenericRequestCreate', 'async function executeGenericRequestCreate(trx, prepared)'],
+      ['executeGenericRequestCreate', 'async function executeGenericRequestCreate(trx, prepared, operation)'],
       ['executeOutdoorRequestCreate', 'async function executeOutdoorRequestCreate(trx, prepared)'],
       ['executeScheduleDispatchRequestCreate', 'async function executeScheduleDispatchRequestCreate(trx, prepared)'],
       ['executeShiftSwapRequestCreate', 'async function executeShiftSwapRequestCreate(trx, prepared)'],
-      ['executeRequestPendingEdit', 'execute: async function executeRequestPendingEdit(trx, prepared)'],
+      ['executeRequestPendingEdit', 'execute: async function executeRequestPendingEdit(trx, prepared, operation)'],
     ])('%s pairs approval_instance_id with approval_workflow_key in the same statement', (_name, anchor) => {
       const idx = source.indexOf(anchor)
       expect(idx, `anchor not found: ${anchor}`).toBeGreaterThanOrEqual(0)

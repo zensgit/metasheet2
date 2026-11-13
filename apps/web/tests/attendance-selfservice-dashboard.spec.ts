@@ -669,6 +669,13 @@ function installMakeupRejectMock(options: { code: string; status?: number; succe
   vi.mocked(apiFetch).mockImplementation(async (input, init) => {
     const url = typeof input === 'string' ? input : input.url
     const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+    if (url.startsWith('/api/attendance/correction-targets?') && method === 'GET') {
+      // Unit fixture premise: this simulated dataset is explicitly legacy-projection-only.
+      // This supplies no canonical/native credit and is not a fallback from an error or missing endpoint.
+      return jsonResponse(200, { ok: true, data: {
+        schemaVersion: 1, posture: 'legacy_projection_only', source: null, candidates: [],
+      } })
+    }
     if (url.endsWith('/api/attendance/requests') && method === 'POST') {
       createBodies.push(JSON.parse(String((init as RequestInit | undefined)?.body || '{}')))
       if (options.succeedAfter !== undefined && createBodies.length > options.succeedAfter) {
