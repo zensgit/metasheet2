@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -98,6 +99,28 @@ test('buildOptionSetsFixture: contract-only source keys carrying the enum litera
   assert.ok(values('stock_preparation_exception_severity_v1').includes('blocking'))
   assert.ok(values('stock_preparation_resolution_action_v1').includes('manual_hold'))
   assert.ok(values('stock_preparation_resolution_action_v1').includes('accepted_change'))
+})
+
+// Since #5394 the MVP option-sync route merges the contract catalog under a caller set and REFUSES a
+// caller set that drops a catalog value (stock-preparation-mvp-provisioning.cjs
+// mergeContractDefaultsUnderCallerSets, 422 OPTION_SYNC_CONTRACT_VALUE_REMOVAL_REFUSED). A fixture
+// narrower than the catalog therefore makes every smoke that posts it go red against any server since
+// #5394. This pins the fixture to the catalog, key by key: every catalog value present, catalog order kept.
+test('buildOptionSetsFixture: every set covers its contract catalog set, in catalog order', () => {
+  const catalogPath = fileURLToPath(
+    new URL('../../plugins/plugin-integration-core/lib/stock-preparation-mvp-option-catalog.cjs', import.meta.url),
+  )
+  const { STOCK_PREPARATION_MVP_CONTRACT_OPTION_SETS: catalog } = createRequire(import.meta.url)(catalogPath)
+  const sets = buildOptionSetsFixture()
+  assert.deepEqual(Object.keys(sets).sort(), Object.keys(catalog).sort())
+  for (const [key, entries] of Object.entries(catalog)) {
+    const fixtureValues = sets[key].map((option) => option.value)
+    const catalogValues = entries.map((option) => option.value)
+    const missing = catalogValues.filter((value) => !fixtureValues.includes(value))
+    assert.deepEqual(missing, [], `${key} is missing catalog values`)
+    assert.deepEqual(fixtureValues.filter((value) => catalogValues.includes(value)), catalogValues,
+      `${key} lists the catalog values out of catalog order`)
+  }
 })
 
 test('leakScan flags embedded sentinels and ignores empty ones', () => {

@@ -18,5 +18,5 @@
 // positive leg by setting it to 1 in memory for one test and restoring it — no service, config or env
 // value can flip it on a deployment. It is not an env flag and must not become one.
 module.exports = {
-  CONTINUATION_SUPPORT_VERSION: 0,
+  CONTINUATION_SUPPORT_VERSION: 1,
 }

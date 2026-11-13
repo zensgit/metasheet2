@@ -435,9 +435,18 @@ function globalHistoryFlagsInSource() {
   // (…_DISABLED, …_STORE_FAILED, …) and the `_ENV` constant are not mistaken for flags.
   const stockPrepPullBatch = grepPluginFlagTokens('STOCK_PREP_PULL_BATCH_[A-Z_0-9]*')
     .filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // Batch-refresh step 6d-2a (R-91): the doubled-sheet repair switch, read by the plugin's repair library only (the host
+  // never reads it). One family by name shape, PLUGIN LIB ONLY; `_ENABLED` only, so the `_ENV` constant and the
+  // STOCK_PREP_SHEET_REPAIR_* refusal codes (which carry no MULTITABLE_ prefix) are not mistaken for flags.
+  const stockPrepSheetRepair = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_SHEET_REPAIR_[A-Z_0-9]*')
+    .filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key, read by the host's plugin runtime config.
   // Only this one _PATH key is scanned: its four sibling deploy-file keys predate this registry and stay out of scope.
   const stockPrepPilotPath = grepFlagTokens('INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH')
+  // Owner ruling 2026-11-11 (R-91, option A): the W4 tenant-claim door, a pilot-enable precondition since readiness v6.
+  // PLUGIN LIB, this one exact name (grep -o answers only the literal): the error codes that share its suffix
+  // (…PROJECT_TARGET_TENANT_CLAIM_REQUIRED, the bare TENANT_CLAIM_REQUIRED) are not flags and never match it.
+  const stockPrepTenantClaim = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED')
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
@@ -449,7 +458,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepPilotPath, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...attendanceCancelRound, ...userRecycle, ...automationClassB])].sort()
 }
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
@@ -1056,6 +1065,102 @@ test('stock-prep pull-batch switch (批次标识 BI-1b, R-65): boolean, exact tr
   assert.match(spec.purpose, /per-sheet install/)
   assert.match(spec.purpose, /born ready/)
   assert.match(spec.purpose, /409 STOCK_PREP_PULL_BATCH_DISABLED before any IO/)
+})
+
+// Batch-refresh step 6d-2a (S6-6, register R-91; design §6.6, acceptance MF-01): the doubled-sheet repair switch.
+test('stock-prep sheet-repair switch (batch-refresh step 6d-2a, R-91): boolean, exact true, default OFF, danger medium, sourced from the plugin repair library; the host never reads it', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED
+  assert.ok(spec, 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.rules, undefined, 'no rule: the switch with the project-sheets switch off is inert, not illegal')
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs#stockPrepSheetRepairWriteEnabled')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+  // The reader spells the exact-literal comparison against the same env name (a trim / case fold reds here).
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs'), 'utf8')
+  assert.match(plugin, /STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV = 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED'/)
+  assert.match(plugin, /env\[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV\] === 'true'/)
+  assert.doesNotMatch(plugin, /STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV\]\.(trim|toLowerCase)/)
+  // ONE reader in the plugin: every other runtime file reaches the switch through that function.
+  const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
+  const readers = readdirSync(libDir).filter((name) => name.endsWith('.cjs') && /process\.env[^\n]*SHEET_REPAIR|SHEET_REPAIR_WRITE_ENABLED_ENV\]/.test(readFileSync(path.join(libDir, name), 'utf8')))
+  assert.deepEqual(readers, ['stock-preparation-sheet-repair.cjs'], 'the repair library is the switch\'s one reader')
+  const routes = readFileSync(path.join(libDir, 'http-routes.cjs'), 'utf8')
+  assert.match(routes, /stockPreparationSheetRepair\.stockPrepSheetRepairWriteEnabled\(\)/, 'the routes read it per request through the library')
+  // The host never reads it (grep exits 1 on "no match": that IS the expected answer; any other failure rethrows).
+  let hostHits = ''
+  try {
+    hostHits = execSync(`grep -rlE 'MULTITABLE_STOCK_PREP_SHEET_REPAIR' ${path.join(REPO_ROOT, 'packages/core-backend/src')} --include='*.ts'`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  } catch (error) {
+    if (error.status !== 1) throw error
+  }
+  assert.equal(hostHits.trim(), '', 'no host source names the switch')
+  // The off contract and the gates are stated in the record.
+  assert.match(spec.purpose, /Default OFF; exact literal 'true' only/)
+  assert.match(spec.purpose, /404 STOCK_PREP_SHEET_REPAIR_DISABLED after their gate and before any IO/)
+  assert.match(spec.purpose, /preview, fills report and run list included/)
+  // S6-5b (readiness v7): OFF keeps the repair ROUTES away from 108, but readiness and the enable's in-lease re-read read
+  // the run table whatever the switch says — the record must say so, never the old "never read" sentence.
+  assert.match(spec.purpose, /the repair routes never read or write migration 108's two tables/)
+  assert.match(spec.purpose, /Pilot readiness v7 \(no_open_sheet_repair_run, S6-5b\) and the pilot enable's in-lease re-read READ integration_stock_prep_sheet_repair_run whatever this switch says/)
+  assert.match(spec.purpose, /a run left open while the switch was on still refuses the enable after it is off, and without 108 readiness fails for every project/)
+  assert.doesNotMatch(spec.purpose, /migration 108's two tables are never read or written, and no existing route, answer or readiness check changes/)
+  assert.match(spec.purpose, /409 STOCK_PREP_SHEET_REPAIR_ALREADY_CONSUMED/)
+  assert.match(spec.purpose, /409 STOCK_PREP_SHEET_REPAIR_INSTALL_IN_PROGRESS/)
+  // Round 2 (coordinator rulings C-2 / C-3): the install gate does not depend on the pull-batch switch, and the
+  // continuation writes no row.
+  assert.match(spec.purpose, /whatever the pull-batch switch says/)
+  assert.match(spec.purpose, /whose aborted install still holds its persisted plan or its settings lock, is refused/)
+  assert.doesNotMatch(spec.purpose, /While the pull-batch switch is on/)
+  assert.match(spec.purpose, /verify_and_close_run, which verifies every planned row against the run's own backup and writes NO row/)
+  assert.match(spec.purpose, /owner gate ② per sheet/)
+  assert.match(spec.purpose, /register R-91/)
+  // Migration 108 is on disk exactly once.
+  const plugin108 = readdirSync(path.join(REPO_ROOT, 'packages/core-backend/migrations')).filter((name) => /^108_/.test(name))
+  assert.deepEqual(plugin108, ['108_create_integration_stock_prep_sheet_repair.sql'])
+})
+
+// Owner ruling 2026-11-11 (R-91, option A): the W4 tenant-claim door is registered (it gates access, default off) and is a
+// pilot-enable precondition through readiness v6's tenant_claim_required — the readiness module never reads it itself.
+test('stock-prep tenant-claim door (W4; owner ruling 2026-11-11, R-91 option A): boolean, trimmed case-folded true, danger high, ONE plugin reader, wired into pilot readiness v6', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+  assert.ok(spec, 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, true, 'the reader trims and folds case')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired')
+  for (const value of ['true', 'TRUE', ' True ']) assert.equal(isActivated(spec, value), true, `${JSON.stringify(value)} activates`)
+  for (const value of [undefined, '', 'false', '1', 'yes']) assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} does not activate`)
+  // The ONE reader, spelled with the trim / case fold the manifest records; the env name appears in no other plugin lib.
+  const routes = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/http-routes.cjs'), 'utf8')
+  assert.match(routes, /function stockPreparationTenantClaimRequired\(\) \{\s*return String\(process\.env\.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED \?\? ''\)\.trim\(\)\.toLowerCase\(\) === 'true'/)
+  assert.equal(routes.split('process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED').length - 1, 1, 'exactly one env read')
+  // Readiness v6: the route hands the reader's answer in; the readiness module never parses the env itself.
+  assert.match(routes, /tenantClaimRequired: stockPreparationTenantClaimRequired\(\),/)
+  const readiness = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs'), 'utf8')
+  // Readiness v7 (S6-5b, R-91) inserted no_open_sheet_repair_run (with its comment line) between it and the D-22 marker,
+  // which stays last.
+  assert.match(readiness, /'tenant_claim_required',\s*(?:\/\/[^\n]*\n\s*)*'no_open_sheet_repair_run',\s*'continuation_support_version',\s*\]\)/)
+  assert.match(readiness, /return deps\.tenantClaimRequired === true/)
+  assert.doesNotMatch(readiness.replace(/\/\/[^\n]*/g, ''), /process\.env/)
+  // The record states the ruling and the residual.
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /PILOT-ENABLE PRECONDITION/)
+  assert.match(spec.purpose, /tenant_claim_required/)
+  assert.match(spec.purpose, /gates the enable only/)
+  assert.match(spec.purpose, /separate owner gate at install time/)
 })
 
 // Pre-pilot fix batch 8(f) (R-91): the pilot declarations' DEPLOY-FILE key. Not a boolean — it names a file — so it is

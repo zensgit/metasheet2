@@ -6,7 +6,12 @@ import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfService
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
 import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
-import { recordInvite } from '../auth/invite-ledger'
+import {
+  INVITE_ACCOUNT_ALREADY_ONBOARDED,
+  INVITE_RESEND_CONFLICT,
+  inviteAccountOnboardedSql,
+  recordInvite,
+} from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
 import { LOGIN_NAME_RULE_CODE, validateLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
@@ -314,6 +319,8 @@ type AdminInviteLedgerRow = {
   user_name: string | null
   invited_by_email: string | null
   invited_by_name: string | null
+  /** Read only where a resend is decided: the invited account has completed its first sign-in. */
+  account_onboarded?: boolean | null
 }
 
 type AdminDingTalkGrantRow = {
@@ -4982,7 +4989,8 @@ export function adminUsersRouter(): Router {
             inv.updated_at,
             u.name AS user_name,
             inviter.email AS invited_by_email,
-            inviter.name AS invited_by_name
+            inviter.name AS invited_by_name,
+            ${inviteAccountOnboardedSql('inv')} AS account_onboarded
          FROM user_invites inv
          LEFT JOIN users u ON u.id = inv.user_id
          LEFT JOIN users inviter ON inviter.id = inv.invited_by
@@ -4999,6 +5007,16 @@ export function adminUsersRouter(): Router {
       if (normalized.status === 'accepted') {
         return jsonError(res, 409, 'INVITE_ALREADY_ACCEPTED', 'Accepted invite cannot be resent')
       }
+      // An account that has completed its first sign-in is not sent another invite. Decided before a
+      // token is issued, so a refusal writes nothing.
+      if (current.account_onboarded === true) {
+        return jsonError(
+          res,
+          409,
+          INVITE_ACCOUNT_ALREADY_ONBOARDED,
+          'This account has already been set up; an invite cannot be resent',
+        )
+      }
 
       const inviteToken = issueInviteToken({
         userId: current.user_id,
@@ -5006,6 +5024,8 @@ export function adminUsersRouter(): Router {
         presetId: current.preset_id,
       })
 
+      // The write states its own conditions rather than relying on the read above: the row is not
+      // accepted, and its account has not completed its first sign-in.
       const updateResult = await query<AdminInviteLedgerRow>(
         `UPDATE user_invites
          SET invite_token = $2,
@@ -5016,6 +5036,8 @@ export function adminUsersRouter(): Router {
              last_sent_at = NOW(),
              updated_at = NOW()
          WHERE id = $1
+           AND status <> 'accepted'
+           AND NOT ${inviteAccountOnboardedSql('user_invites')}
          RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at,
                    NULL::text AS user_name,
                    NULL::text AS invited_by_email,
@@ -5023,9 +5045,16 @@ export function adminUsersRouter(): Router {
         [inviteId, inviteToken, adminUserId],
       )
 
+      // No row means the invite or its account changed after the read; nothing was written and the
+      // token issued above is stored nowhere, so it cannot be used.
       const invite = updateResult.rows[0]
       if (!invite) {
-        return jsonError(res, 404, 'INVITE_NOT_FOUND', 'Invite not found')
+        return jsonError(
+          res,
+          409,
+          INVITE_RESEND_CONFLICT,
+          'The invite or its account changed while it was being resent; reload and try again',
+        )
       }
 
       const preset = getAccessPreset(invite.preset_id)

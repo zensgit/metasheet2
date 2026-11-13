@@ -140,7 +140,8 @@
       "sourceVersion",
       "rawQuantity",
       "totalQuantity",
-      "active"
+      "active",
+      "projectSpecModel"
     ],
     "conflictTypes": [
       "add_missing",
