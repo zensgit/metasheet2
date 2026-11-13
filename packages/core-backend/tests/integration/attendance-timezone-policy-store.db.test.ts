@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
@@ -324,5 +324,124 @@ describe('D1 timezone persistence (isolated real PostgreSQL)', () => {
     await closed.end()
     const unavailable = create({ query: (sql, values) => closed.query(sql, values), transaction, authorizeManage: async () => true })
     await expect(unavailable.readPolicy({ orgId: 'org-a' })).rejects.toMatchObject(error('STORE_UNAVAILABLE', 503))
+  })
+
+  it('MUT06_EMPLOYEE_OVERRIDE_ORG_NATIVE: isolates a legal dual-org member without relabelling foreign authority', async () => {
+    const client = await pool.connect()
+    const userId = 'mut06-employee-org-' + randomUUID()
+    const referenceId = randomUUID()
+    const calls: { sql: string; values: unknown[]; rows: Input[] }[] = []
+    const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const snapshot = async () => ({
+      users: (await client.query('SELECT * FROM users ORDER BY id')).rows,
+      memberships: (await client.query('SELECT * FROM user_orgs ORDER BY user_id, org_id')).rows,
+      overrides: (await client.query('SELECT * FROM attendance_employee_timezone_overrides ORDER BY id')).rows,
+      policies: (await client.query('SELECT * FROM attendance_timezone_policies ORDER BY org_id')).rows,
+      audit: (await client.query('SELECT * FROM attendance_timezone_policy_audit ORDER BY id')).rows,
+    })
+    let before: Awaited<ReturnType<typeof snapshot>> | undefined
+    let after: Awaited<ReturnType<typeof snapshot>> | undefined
+    let catalogValidated = false
+    let positiveControlPassed = false
+    let scopedAbsencePassed = false
+    let rolledBack = false
+    try {
+      await client.query('BEGIN')
+      expect((await client.query('SELECT current_schema() AS schema')).rows).toEqual([{ schema }])
+      expect((await client.query(
+        "SELECT convalidated, confrelid = 'users'::regclass AS references_users, "
+          + 'pg_get_constraintdef(oid) AS definition FROM pg_constraint '
+          + "WHERE conrelid = 'user_orgs'::regclass AND contype = 'f' ORDER BY conname",
+      )).rows).toEqual([{
+        convalidated: true, references_users: true,
+        definition: 'FOREIGN KEY (user_id) REFERENCES users(id)',
+      }])
+      expect((await client.query(
+        'SELECT t.tgenabled AS enabled, t.tgtype::integer AS type, p.proname AS function_name, '
+          + 'p.pronamespace = c.relnamespace AS function_in_schema '
+          + 'FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid '
+          + 'JOIN pg_class c ON c.oid = t.tgrelid '
+          + "WHERE t.tgrelid = 'attendance_employee_timezone_overrides'::regclass "
+          + "AND t.tgname = 'attendance_employee_timezone_member' AND NOT t.tgisinternal",
+      )).rows).toEqual([{
+        enabled: 'O', type: 23,
+        function_name: 'attendance_employee_timezone_member_guard', function_in_schema: true,
+      }])
+      catalogValidated = true
+      await client.query('INSERT INTO users (id,is_active) VALUES ($1,true)', [userId])
+      await client.query(
+        "INSERT INTO user_orgs (user_id,org_id,is_active) VALUES ($1,'org-a',true),($1,'org-b',true)",
+        [userId],
+      )
+      await client.query(
+        'INSERT INTO attendance_employee_timezone_overrides '
+          + '(id,org_id,user_id,timezone,effective_from,effective_to,created_by,updated_by) '
+          + "VALUES ($1,'org-b',$2,'Asia/Singapore',$3,$4,'actor-b','actor-b')",
+        [referenceId, userId, from, to],
+      )
+      expect((await client.query(
+        'SELECT org_id,is_active FROM user_orgs WHERE user_id=$1 ORDER BY org_id', [userId],
+      )).rows).toEqual([{ org_id: 'org-a', is_active: true }, { org_id: 'org-b', is_active: true }])
+      expect((await client.query(
+        'SELECT id,org_id,user_id,timezone,version,effective_from,effective_to,created_by,updated_by '
+          + 'FROM attendance_employee_timezone_overrides WHERE user_id=$1 ORDER BY org_id', [userId],
+      )).rows).toEqual([{
+        id: referenceId, org_id: 'org-b', user_id: userId, timezone: 'Asia/Singapore', version: 1,
+        effective_from: from, effective_to: to, created_by: 'actor-b', updated_by: 'actor-b',
+      }])
+      const nativeQuery: Query = async (sql, values) => {
+        const result = await client.query(sql, values)
+        calls.push({ sql, values, rows: result.rows })
+        return result
+      }
+      const nativeStore = create({
+        query: nativeQuery, transaction: work => work(nativeQuery), authorizeManage: async () => false,
+      })
+      before = await snapshot()
+      expect(await nativeStore.readEmployeeOverride({ orgId: 'org-b', userId, at: middle })).toEqual({
+        orgId: 'org-b', userId, referenceId, timezone: 'Asia/Singapore', version: 1,
+        effectiveFrom: from, effectiveTo: to,
+      })
+      positiveControlPassed = true
+      const scoped = await nativeStore.readEmployeeOverride({ orgId: 'org-a', userId, at: middle })
+      after = await snapshot()
+      expect(after).toEqual(before)
+      expect(calls.map(({ sql, values }) => ({
+        member: sql.includes('FROM users u JOIN user_orgs uo'),
+        employee: sql.includes('FROM attendance_employee_timezone_overrides '),
+        values,
+      }))).toEqual([
+        { member: true, employee: false, values: [userId, 'org-b'] },
+        { member: false, employee: true, values: ['org-b', userId, middle] },
+        { member: true, employee: false, values: [userId, 'org-a'] },
+        { member: false, employee: true, values: ['org-a', userId, middle] },
+      ])
+      expect(calls[0].rows).toEqual([{ id: userId }])
+      expect(calls[2].rows).toEqual([{ id: userId }])
+      expect(scoped).toBeNull()
+      scopedAbsencePassed = true
+    } finally {
+      try {
+        await client.query('ROLLBACK')
+        rolledBack = true
+      } finally {
+        client.release()
+        console.info('MUT06_EMPLOYEE_OVERRIDE_ORG_NATIVE:', JSON.stringify({
+          code: 'MUT06_EMPLOYEE_OVERRIDE_ORG_NATIVE',
+          catalogValidated, positiveControlPassed, scopedAbsencePassed, rolledBack,
+          storeQueryCount: calls.length,
+          storeQueries: calls.map(({ sql, values, rows }, index) => ({
+            ordinal: index + 1,
+            sqlSHA256: createHash('sha256').update(sql).digest('hex'),
+            bindingsSHA256: digest(values),
+            sqlAndBindingsSHA256: digest({ sql, values }),
+            rowCount: rows.length,
+          })),
+          beforeRowsSnapshotSHA256: before === undefined ? null : digest(before),
+          afterRowsSnapshotSHA256: after === undefined ? null : digest(after),
+          snapshotsEqual: before !== undefined && after !== undefined && digest(before) === digest(after),
+        }))
+      }
+    }
   })
 })
