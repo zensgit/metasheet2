@@ -2,7 +2,7 @@
 
 > **用途。** 这是分批刷新第一期上客户机的现场手册（plan §7 的 G10）：先装 main 基线包，再逐表准备，最后开启第一个试点；中间任何时候都可能要做恢复，或者要回退。设计见 `design-stock-prep-batch-refresh-step6-20261027.md`（**开头的 2026-11-09 改正节优先于正文**），决策见登记册 **R-91**（第 6 步）、**R-65**（批次标识）、R-54 / R-55（试点启用）、R-56 / R-57 / R-61 / R-63 / R-77（对所有项目生效的默认值）。
 >
-> **基线。** 下文所有 `path:line` 都在 `origin/main` **d47eab0ea**（#6870 合入）上亲读核过；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）、S6-9a #6844（G9 验收工具）、S6-6 #6843（修复工具，迁移 108）、#6870（就绪 v6：租户声明开关是启用试点的前提）。**还没合入**（写这一句时）：S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖它的地方标了 **【待定 S6-9】**；它合入后要回到本手册改写，改之前不按这些段落执行。**2026-11-12 补充（S6-9，与翻转同一个 PR 合入）：** `stock-preparation-continuation-support.cjs:21` 现在是 `CONTINUATION_SUPPORT_VERSION: 1`；就绪最后一项 `continuation_support_version` 在带 S6-9 的包上通过。§0、§3 第 4–5 步、§7.1、§7.2、§7.4 与 §8 的示例按此改写（本次核的锚点在 `origin/main` 0f0d1842b 上）。翻转本身能证明的已写实；还要在冻结候选与真实部署上才能证明的两件——U07 旧构建演练（G9 手动项 `U07-OLD-BUILD`）和真实部署上的正向启用一腿（`PE-DEPLOY`）——改标 **【待定 S6-9 冻结候选】**。**2026-11-11 补充（owner 裁定，R-91 ㉘–㉜）：** §0 的闸门表、§1.6、§3 第 4–7 步与 §8 按裁定改写。**2026-11-12 补充（S6-8b）：** #6843 与 #6870 合入后，全手册的 `path:line` 重核到 d47eab0ea；§1 的迁移清单加上 108；§6 按合入的修复工具定稿；#6843 与 #6844 的待定标记已清掉。**2026-11-12 补充（S6-5b）：** 就绪升到 **v7**，新检查 `no_open_sheet_repair_run`：这张表有未结束的修复运行就启用不了（原来只靠 §3 第 5 步人工核）；普查遇到缺关键列的表答 `field_missing`，不再答 `complete`（R-91 ㉕ 的残留关掉）。§0、§1.1、§3 第 4–5 步、§5.2、§6.5 与 §8 的示例按此改写；这些段落里标了 **（S6-5b）** 的 `path:line` 按 S6-5b 的提交核过，其余仍按 d47eab0ea。**2026-11-13 补充（#6778，模板加两列）：** 装的包带 #6778 时，主模板从 33 列变成 35 列，每张已有的项目表和每份显式的 env 绑定在补齐之前都答 422。新增 §1.4a（窗口内重新导出 env 绑定、逐项目补列），§0 第 3 行、§1.3 第 1 步、§1.5 末尾、§3 第 0 步与第 4 步按此改写。这些段落里标了 **（#6778）** 的 `path:line` 在 `origin/main` **e051316c4** 上核过（引到的文件 #6778 都没改，合并后逐字节相同）；只有 `stock-preparation-templates.cjs` 是 #6778 自己改的文件，它的行号按 #6778 合并 e051316c4 之后的树。
+> **基线。** 下文所有 `path:line` 都在 `origin/main` **d47eab0ea**（#6870 合入）上亲读核过；lib 路径相对于 `plugins/plugin-integration-core/lib/`，迁移相对于 `packages/core-backend/migrations/`。已合入 main：S6-0 #6600、R-91 与设计 #6834、启用前修补批 #6836、S6-1 #6835（迁移 106）、S6-2 #6837（恢复，就绪 v4）、S6-3 #6840（恢复卡片）、S6-5 #6842（普查路由、残留确认，迁移 107，就绪 v5）、S6-9a #6844（G9 验收工具）、S6-6 #6843（修复工具，迁移 108）、#6870（就绪 v6：租户声明开关是启用试点的前提）。**还没合入**（写这一句时）：S6-9（翻转 `CONTINUATION_SUPPORT_VERSION`）。依赖它的地方标了 **【待定 S6-9】**；它合入后要回到本手册改写，改之前不按这些段落执行。**2026-11-12 补充（S6-9，与翻转同一个 PR 合入）：** `stock-preparation-continuation-support.cjs:21` 现在是 `CONTINUATION_SUPPORT_VERSION: 1`；就绪最后一项 `continuation_support_version` 在带 S6-9 的包上通过。§0、§3 第 4–5 步、§7.1、§7.2、§7.4 与 §8 的示例按此改写（本次核的锚点在 `origin/main` 0f0d1842b 上）。翻转本身能证明的已写实；还要在冻结候选与真实部署上才能证明的两件——U07 旧构建演练（G9 手动项 `U07-OLD-BUILD`）和真实部署上的正向启用一腿（`PE-DEPLOY`）——改标 **【待定 S6-9 冻结候选】**。**2026-11-11 补充（owner 裁定，R-91 ㉘–㉜）：** §0 的闸门表、§1.6、§3 第 4–7 步与 §8 按裁定改写。**2026-11-12 补充（S6-8b）：** #6843 与 #6870 合入后，全手册的 `path:line` 重核到 d47eab0ea；§1 的迁移清单加上 108；§6 按合入的修复工具定稿；#6843 与 #6844 的待定标记已清掉。**2026-11-12 补充（S6-5b）：** 就绪升到 **v7**，新检查 `no_open_sheet_repair_run`：这张表有未结束的修复运行就启用不了（原来只靠 §3 第 5 步人工核）；普查遇到缺关键列的表答 `field_missing`，不再答 `complete`（R-91 ㉕ 的残留关掉）。§0、§1.1、§3 第 4–5 步、§5.2、§6.5 与 §8 的示例按此改写；这些段落里标了 **（S6-5b）** 的 `path:line` 按 S6-5b 的提交核过，其余仍按 d47eab0ea。**2026-11-13 补充（#6778，模板加两列）：** 装的包带 #6778 时，主模板从 33 列变成 35 列，每张已有的项目表和每份显式的 env 绑定在补齐之前都答 422。新增 §1.4a（窗口内重新导出 env 绑定、逐项目补列），§0 第 3 行、§1.3 第 1 步、§1.5 末尾、§3 第 0 步与第 4 步按此改写。这些段落里标了 **（#6778）** 的 `path:line` 在 `origin/main` **e051316c4** 上核过（引到的文件 #6778 都没改，合并后逐字节相同）；只有 `stock-preparation-templates.cjs` 是 #6778 自己改的文件，它的行号按 #6778 合并 e051316c4 之后的树。**2026-11-13 补充（U07 判据重述、回退预演的发现、owner 裁定，R-91 ㊾ ㊿）：** §0 第 2–3 行、§1.1 末句、§1.2 (1) 与 §1.4a 第 2 步各一处措辞、§1.3 第 2–3 步、§6.2 第 2 条、§7.2、§7.3、§7.4 与待定标记清单按此改写。这些段落新引的 `path:line` 在 `origin/main` **220bd80ab** 上核过；带 `onprem-r84:` / `onprem-r83:` 前缀的在那个标签上核过。文中「预演」指 2026-11-13 的开发机预演：一次性库，合成数据，候选是 6a23319cd。两个迁移目录、`migrate.ts` 和 `migration-provider.ts` 在 220bd80ab 上与它的哈希相同，所以迁移和回退形状的结论照样成立；执行过候选应用代码的那几条（§7.2 的清理顺序）要在冻结候选上重走。
 >
 > **owner 闸门。** 本手册里每一次装包、改 `app.env`、逐表写入（批次标识装机、残留确认、修复、启用）、读客户数据（普查）、回退，都是 owner 动作，按 §0 的表逐项先批后做。没有批复的步骤一律不做。
 >
@@ -14,8 +14,8 @@
 |---|---|---|---|
 | 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**已裁（2026-11-11，R-91 ㉙ ㉚；2026-11-12 由 ㉝ 修订）：试点随基于 main 的客户包发布，分两步：先出 R 线维护版 R84（不带试点、没有迁移、没有新开关），再出第一个 main 包，即试点包，它带 S6-9。** 切包提交本身仍未定 | 否 |
 | 1 | Q-B：同意在 102 / 103 / 104 的私有列里存业务值，并定保留期（102 头注释 `102_create_integration_stock_prep_continuation.sql:41-43`：**部署 102 之前**要批） | owner。**已裁（2026-11-11，R-91 ㉛）：批准，只存在客户自己的库里，随记录保留（按设计行从不删除）** | 否 |
-| 2 | 接受对所有项目生效的行为变化（§2） | owner（G-B9） | 否 |
-| 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、包带 #6778 时重新导出 env 绑定并逐项目补列（§1.4a，各自另批）、换定时拉取脚本（§1） | owner（gate 4） | 是（迁移，只加表 / 加列） |
+| 2 | 接受对所有项目生效的行为变化（§2） | owner（G-B9）。**已接受（2026-11-13，owner 原话「接受B5」，R-91 ㊿）：§2 的 10 条（e051316c4 上的文字，到 220bd80ab 未变）** | 否 |
+| 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、包带 #6778 时重新导出 env 绑定并逐项目补列（§1.4a，各自另批）、换定时拉取脚本（§1） | owner（gate 4）。**装包路径已裁（2026-11-13，「按建议执行」，R-91 ㊿）：用这个 Release 自带的 deploy-bootstrap，run-migrations 填 1（§1.3 第 2 步），不用 upgrade-inplace** | 是（迁移，只加表 / 加列） |
 | 3a | **打开租户声明开关** `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`（§1.6）。这是**启用试点的前提**：开关关着时，就绪检查 `tenant_claim_required` 不通过，任何项目都启用不了试点（R-91 ㉘，方案 A）。打开之前先确认定时拉取用的令牌绑定了租户（按 §1.6 第 1 步记「是 / 否」和计数） | owner（装机时另批，不随第 3 步的批复） | 是（改 `app.env`、重启） |
 | 4 | 逐表：批次标识装机（另一本手册）→ 普查（§5）→ 需要时客户回答 Q1 / Q3 → 残留确认或修复窗口 → 看就绪 → 启用（§3） | 装机 O-BI-1；普查 O6-3；残留确认 O6-5；修复 O6-6；启用 G-C12 | 装机、确认、修复、启用都写 |
 | 5 | 恢复：哪天一次写入没正常结束，拉取人员在「拉取待确认」页核对并结束（§4）；证明不了时平台管理员按手册结束 | 拉取人员不用另批；按手册结束要工单（O6-7 定谁能做，**未裁**） | 是（插件库） |
@@ -42,13 +42,13 @@
 - 备料 SQL 迁移 8 个：`100_create_integration_stock_prep_project_write_lock`（表写锁）、`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable`（试点列与审计词表）、`102_create_integration_stock_prep_continuation`（沿用关系）、`103_create_integration_stock_prep_refresh_state`（刷新状态、待定、执行台账）、`104_create_integration_stock_prep_change_plan`（变更计划）、`106_extend_integration_stock_prep_refresh_execution_for_recovery`（执行 intent 日志与关闭形态）、`107_create_integration_stock_prep_component_ruling`（部件裁定 / 残留确认）、`108_create_integration_stock_prep_sheet_repair`（修复台账与一次性占用，S6-6 #6843）。`105` 两边逐字节相同，R83 已经跑过。
 - 平台 Kysely 迁移 10 个：`zzzz20261022150000_add_meta_sheets_grid_export_closure`、`zzzz20261031120000_add_users_recycle_bin`、`zzzz20261101090000_create_directory_handovers`、`zzzz20261102150000_dingtalk_login_repairs`、`zzzz20261103120000_outbound_intent_attempt_lease_target_key`、`zzzz20261104150000_create_task_source_links`、`zzzz20261106120000_create_security_action_challenges`、`zzzz20261106130000_create_directory_integration_capabilities`、`zzzz20261107010000_deprovision_effect_provider`、`zzzz20261111093417_create_user_notification_endpoints_preferences`（#6857，2026-11-11 合入；切包提交更新时按实际再算一次）。
 
-**全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。108 缺失时，修复路由在开关打开后答 503、什么都不写（`108_create_integration_stock_prep_sheet_repair.sql:67-70`）；**而且**从 S6-5b 起，就绪 v7 的 `no_open_sheet_repair_run` 读不出修复台账，对每个项目都不通过，和 107 一样（S6-5b；108 头注释 DEPLOY SHAPE 段 `108_…:67-70` 由 S6-8c 补上了这一点，只改注释、DDL 不变）。所以这次升级**绝不用 `-RunMigrations 0`**（升级脚本默认 `'1'`，`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:269`；为 `0` 时跳过迁移，`:2864-2878`）。
+**全部随包一起跑，不能只装构建不跑迁移。** 106 头注释（`106_extend_integration_stock_prep_refresh_execution_for_recovery.sql:40-44`）：缺 106 时，**每个项目**的每次拉取和每次正式导出都答 503 `STOCK_PREP_REFRESH_STORE_FAILED`；104 同样（`104_create_integration_stock_prep_change_plan.sql:38-40`）。107 缺失时就绪清单的残留检查对每个项目都不通过（`107_create_integration_stock_prep_component_ruling.sql:37-39`）。108 缺失时，修复路由在开关打开后答 503、什么都不写（`108_create_integration_stock_prep_sheet_repair.sql:67-70`）；**而且**从 S6-5b 起，就绪 v7 的 `no_open_sheet_repair_run` 读不出修复台账，对每个项目都不通过，和 107 一样（S6-5b；108 头注释 DEPLOY SHAPE 段 `108_…:67-70` 由 S6-8c 补上了这一点，只改注释、DDL 不变）。所以这次升级**绝不用 `-RunMigrations 0`**（deploy-bootstrap `.bat` 的第 4 个位置参数 run-migrations 填 `1`，不填时默认也是 `1`，`scripts/ops/multitable-onprem-package-build.sh:393-394`；为 `0` 时 apply 助手跳过迁移，`scripts/ops/multitable-onprem-apply-package.ps1:1276-1284`；见 §1.3 第 2 步）。
 
 ### 1.2 只读预检（窗口之前，结果只记计数）
 
 **(1) 迁移清单。** 新包还没装，不在现场跑它的 `migrate.js`。窗口之前分两步核：
 
-- 用**已安装的 R83** 的 `migrate.js`，带与升级脚本相同的环境（先导入 `docker/app.env`）：
+- 用**已安装的 R83** 的 `migrate.js`，带与装包脚本相同的环境（先导入 `docker/app.env`）：
 
   ```powershell
   node packages\core-backend\dist\src\db\migrate.js --list
@@ -118,8 +118,19 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 ### 1.3 维护窗口内
 
 1. 停定时拉取任务，通知拉取人员窗口内不要拉。**装的包带 #6778 时，定时任务一直停到 §1.4a 第 4 步对每个未归档的已登记项目都做完为止**；在那之前不要告诉拉取人员窗口已结束（§1.4a 末尾说明为什么）。
-2. 按交付说明 §2.1 的就地升级路径装包，`-RunMigrations 1`。升级脚本 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1` **不在包里**（打包清单 `REQUIRED_PATHS` 没有它，`scripts/ops/multitable-onprem-package-build.sh:47`；交付说明 §1 的交付物表）：从切包的**同一个提交**单独拷到现场，调用时**显式**传 `-RootDir <安装根目录>`——它的默认值是脚本所在目录往上两级（`multitable-onprem-package-upgrade-inplace.ps1:229`），不是安装根目录。
-3. 升级脚本跑完、后端起来后做 §1.4。不通过就按 §7 回退，不要在现场改库或改代码。
+2. **用这个 Release 自带的 deploy-bootstrap 装包，run-migrations 填 `1`**（owner 2026-11-13 裁定，「按建议执行」，R-91 ㊿；命令与装 R81、R83 时相同，只换包；R84 的装机单也按它写）。不用 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`。
+   - **命令。** `<包名>-deploy-bootstrap.bat <包.zip> <安装根目录> <install-deps> <run-migrations>`，参数按位置给，**第 4 个 run-migrations 填 `1`**；install-deps 不能填 `0`，`RunMigrations 1` 要求 `InstallDeps` 不为 `0`（`scripts/ops/multitable-onprem-deploy-launcher.ps1:20-21`）。安装根目录显式写上：不写时它取当前目录（`scripts/ops/multitable-onprem-package-build.sh:389-390`）。在现场机本地窗口或远程桌面里跑，不要挂在 SSH 会话上。
+   - **它是什么。** 它和包在同一次打包里生成，`SHA256SUMS` 钉住它（`multitable-onprem-package-build.sh:810-813`）：`.ps1` 是包内启动器的拷贝（`multitable-onprem-package-build.sh:380`），`.bat` 把四个参数传给它（`:383-402`）。启动器把包解到临时目录，再调用**包内**的 apply 助手（`multitable-onprem-deploy-launcher.ps1` 文首说明）。apply 助手在 `RunMigrations` 不为 `0` 时，执行安装根目录下的 `packages\core-backend\dist\src\db\migrate.js`（`scripts/ops/multitable-onprem-apply-package.ps1:1276-1284`）。
+   - **成功的样子。** 退出码 0，最后一行是 `apply exit=0`（`.bat` 打印的标记，`multitable-onprem-package-build.sh:401`）。
+   - **这条路径的两点限制（读代码得出，没有在现场形状的机器上跑过）：**
+     - **迁移之前不停后端。** apply 助手先覆盖文件，再跑迁移，最后才重启（`multitable-onprem-apply-package.ps1:1167-1304`：覆盖在 `:1167-1180`，迁移在 `:1276-1284`，重启在 `:1294-1305`）。apply 助手、启动器（`multitable-onprem-deploy-launcher.ps1:42-43`：不调用 PM2）和 deploy-bootstrap 的生成代码（`multitable-onprem-package-build.sh:380-402`）里都没有停后端的一步。所以迁移跑的时候，旧后端还在服务。
+     - **迁移之后失败时，文件备份被删掉，不会还原。** 只有依赖安装失败时，它才把文件和 node_modules 换回（`:1193-1217`）。迁移、重启或健康检查失败时的换回只在 `InstallDeps` 为 `0` 时做（`:1316-1368`）；本次 install-deps 不为 `0`，走不到那一段。收尾时文件备份目录被删掉（`:1375-1381`），安装根目录里留着本包的文件。
+   - **所以：**
+     - 窗口内**没有用户使用系统**，不只是不拉取；
+     - 装包之前，先把回退用的旧 Release（现场是 R84 就是 `onprem-r84`，是 R83 就是 `onprem-r83`）连同它自己的 deploy-bootstrap 下载好，并核对 sha256；
+     - 装包失败（退出码不是 0，或最后一行不是 `apply exit=0`）就**停下，报 owner**。不要重跑，不要自己处理。由 owner 决定是否按 §7 用旧包、`RunMigrations 0` 装回；
+     - 数据库照旧先手工做一次完整备份：deploy-bootstrap 不备份数据库（apply 助手和启动器里都没有 `pg_dump` 一类的步骤，读代码得出）。
+3. deploy-bootstrap 跑完、后端起来后做 §1.4。不通过就停下报 owner，由 owner 决定是否按 §7 回退；不要在现场改库或改代码。
 
 ### 1.4 装后核对
 
@@ -178,7 +189,7 @@ SELECT (SELECT count(*) FROM integration_stock_prep_continuation)      AS contin
 **下面第 3、4、5 步都是 owner 批准的现场动作，不会自动执行。** 逐项写进上机单，批了再做。两道 422 怎么区分、各自的完整症状表，见 `runbook-stock-prep-project-sheets-switch-on-20261014.md` 附录 C；本节只定它们在窗口里的顺序。
 
 1. **定时拉取保持暂停**（§1.3 第 1 步），直到第 4 步对每个未归档的已登记项目都做完（个数对上 §1.2 (2) 的 `registry_active`）。
-2. **从切包的同一个提交拷两个脚本。** `scripts/ops/stock-preparation-derive-target-binding.mjs` 和 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs` **都不在包里**：打包清单 `REQUIRED_PATHS`（`scripts/ops/multitable-onprem-package-build.sh:47-210`）里没有它们，构建只拷这份清单（`:651-653`）。照 §1.3 第 2 步拷升级脚本的做法，从切包提交拷到 `<安装根目录>\scripts\ops\`，两份拷贝的 SHA-256 记进私有记录。放在这个目录是有原因的：导出脚本从它自己所在的目录往上两级找插件 lib（`stock-preparation-derive-target-binding.mjs:61-63`），放在这里才按**已装的** 35 列模板计算；补列脚本按 `--root` 找已装的 `packages/core-backend/dist`、插件 lib 和 `packages/core-backend/node_modules/pg`（`stock-preparation-sandbox-add-missing-template-fields.cjs:26`、`:44-46`）。`--root` 默认是当前目录，所以要显式传 `--root <安装根目录>`。包本身不带 `node_modules`（`multitable-onprem-package-build.sh:451`），`pg` 用的是装包时在安装根目录装好的那份。
+2. **从切包的同一个提交拷两个脚本。** `scripts/ops/stock-preparation-derive-target-binding.mjs` 和 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs` **都不在包里**：打包清单 `REQUIRED_PATHS`（`scripts/ops/multitable-onprem-package-build.sh:47-210`）里没有它们，构建只拷这份清单（`:651-653`）。从切包的同一个提交单独拷到 `<安装根目录>\scripts\ops\`（2026-11-13 起 §1.3 第 2 步不再拷 upgrade-inplace，这两个脚本仍要单独拷），两份拷贝的 SHA-256 记进私有记录。放在这个目录是有原因的：导出脚本从它自己所在的目录往上两级找插件 lib（`stock-preparation-derive-target-binding.mjs:61-63`），放在这里才按**已装的** 35 列模板计算；补列脚本按 `--root` 找已装的 `packages/core-backend/dist`、插件 lib 和 `packages/core-backend/node_modules/pg`（`stock-preparation-sandbox-add-missing-template-fields.cjs:26`、`:44-46`）。`--root` 默认是当前目录，所以要显式传 `--root <安装根目录>`。包本身不带 `node_modules`（`multitable-onprem-package-build.sh:451`），`pg` 用的是装包时在安装根目录装好的那份。
 3. **重新导出 env 绑定（每个部署一次；改生产 `app.env`，owner 批准）。** env 动作 `plm.stock-preparation.pull-bom.v1` 的 `target.fieldIdMap` 非空就要做：装了客户包的部署都是这样，项目表开关开着、关着都要做。为空（`{}`）时跳过。做法按 switch-on 手册附录 C 第 2 步：
    - 离线跑上一步拷来的导出脚本，`--pack` 用原来那份客户包文件，带 `--action-fragment --compact`。只数个数（35 个模板列加上客户包的全部 `ext_` 列），不贴内容。
    - 备份 `app.env`，把那一项的 `target` 和 `extensionFieldIds` 两个键整体替换，再带 `--update-env` 重启。
@@ -386,7 +397,7 @@ Remove-Variable token
 ### 6.2 开窗之前（每张表、每个窗口）
 
 1. **owner 批这张表的窗口（O6-6）。** 修复备份会把每个计划行的三个标记格按读到的原样存进 108 的运行表（只限插件自己写入方的那几种形式；没有任何路由回答它，R-91 ㉞ (d)）。这算不算 Q-B 的范围，随第一张表的修复批复一起交 owner 裁定（R-91 ㊱）。
-2. **暂停这个项目的拉取**（定时任务 + 通知拉取人员），从 retire 一直停到 restore 或裁定完成（设计 O6-6）。同时数一下这张表上的自动化规则和 webhook，窗口内暂停。工具看不到定时任务：表写租约挡得住同时进行的拉取、恢复和装机，但按 #6843 的说明，大 BOM 分块没有版本栅栏，已批准的大作业只靠暂停挡住。暂停期间如果定时拉取还碰到修复占着这张表，它记的是**失败**：`error` / `STOCK_PREP_PROJECT_WRITE_LOCKED`、`failed: true`；只有批次标识装机占着表时才记跳过（`scripts/ops/stock-preparation-scheduled-pull.mjs:596-615`）。这是有意的：说明暂停没做到，要有人去看。owner 2026-11-12 撤回了把它改成「held」的切片（R-91 ㊲）。
+2. **暂停这个项目的拉取**（定时任务 + 通知拉取人员），从 retire 一直停到 restore 或裁定完成（设计 O6-6）。同时数一下这张表上的自动化规则和 webhook，窗口内暂停。**正式导出也和拉取一起暂停**（2026-11-13，R-91 ㊾）：修复的项目还没受治理，修复租约一放开，它的导出就不再被挡，导出也不读修复台账（`108_…:69`）；预演里，一张留着 `running` 运行的表照样导出 200。工具看不到定时任务：表写租约挡得住同时进行的拉取、恢复和装机，但按 #6843 的说明，大 BOM 分块没有版本栅栏，已批准的大作业只靠暂停挡住。暂停期间如果定时拉取还碰到修复占着这张表，它记的是**失败**：`error` / `STOCK_PREP_PROJECT_WRITE_LOCKED`、`failed: true`；只有批次标识装机占着表时才记跳过（`scripts/ops/stock-preparation-scheduled-pull.mjs:596-615`）。这是有意的：说明暂停没做到，要有人去看。owner 2026-11-12 撤回了把它改成「held」的切片（R-91 ㊲）。
 3. **修复窗口与批次标识装机窗口从不交错**（改正节 B-10）。注意：设计 B-10 说「装机在租约内的摘要核对随后会拒绝」，这只在装机的 dry_run 与第一次装机之间成立；对已在装机中的表**不成立**——`continue` / `resume_aborted` 直接用持久化的计划（`stock-preparation-pull-batch-install.cjs:624-629`、`:647-648`），只比对请求摘要和这份计划的摘要（`:788-792`），从不重算。S6-6 复核第 1 轮的探针显示：在规则 `predecessor_suffix` 下，同一部件的副本会落成不同的「首次批次」，而且标签永不改写；规则 `material` 下标签不受影响（本手册只读了代码路径，没有复跑探针）。
 4. **先查这张表的批次台账行。** 工具自己也会拒：每次预览和执行都读这一行，不管批次开关开没开（`http-routes.cjs:6977` 读，`stock-preparation-sheet-repair.cjs:332` 判定）；`installing`，或 `pending` 而还留着计划或设置锁，答 409 `STOCK_PREP_SHEET_REPAIR_INSTALL_IN_PROGRESS`；台账没接线或读不出答 503。窗口之前仍要先跑这条只读查询，好提前知道要不要先做装机。它读的是客户库，按 §0 第 4 行的批复做（语句本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍）：
 
@@ -504,13 +515,22 @@ SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'run
 ```
 
 - 106 那条不为 0：对每个这样的项目做一次干净的试算并结算，再查（R-91 ⑳：只计 `verified_closed` 的旧写法会漏掉排在透明关闭之后的未结算 `succeeded` 主体）。
+- **104 那条（或 103 的待定那条）不为 0：只用路由按下面的顺序清，不用 SQL**（2026-11-13，R-91 ㊾）。这是预演里用拉取人员档在真实路由上走通的顺序（开发机已见证），没有证明是最短的。它执行的是候选的应用代码，Y8 之后计划器和写入器又改过，所以要在第二个包的冻结候选上重走一遍。用到的路由：`…/refresh/change-plans/current`、`…/refresh/change-plans/confirm`、`…/refresh/change-reviews/complete`（`http-routes.cjs:379-381`），确认时的阅读回执取自 `…/refresh/holds`（`:368`）。
+  1. **留在「已确认」的计划（`confirmed`）：** 试算（答 `ready`）→ 应用 → 复核写下的计划（`change-reviews/complete`）→ 再试算一次，结算。
+  2. **「已写入待复核」的计划（`written`，恢复写入的也算）：先复核，再试算。** 复核 → 试算；答 `suspended` 时，确认它给出的提案（`change-plans/confirm`：提案取自 `change-plans/current`，阅读回执取自 `holds`）→ 试算（`ready`）→ 应用 → 再复核 → 再试算一次，结算。确认答 400 `STOCK_PREP_REFRESH_DECISION_REQUEST_INVALID` 时，重读这两页再发（预演里出过一次，是页面过期）。
+  3. **顺序陷阱。** 在已写入的计划上先试算，会打开一个内容变更待定，103 的待定那条随之变成非零。这时复核答 409 `STOCK_PREP_CHANGE_REVIEW_BLOCKED`，原因 `hold_open`（`stock-preparation-refresh-decisions.cjs:1405-1406`；锁内再判一次，`stock-preparation-continuation-store.cjs:2690-2691`）。出路（预演走通）：先确认提案，待定并进一份已确认的计划。这时复核答同一个码，原因换成 `change_plan_pending`（`stock-preparation-refresh-decisions.cjs:1407`；`stock-preparation-continuation-store.cjs:2692-2693`），要等这份计划应用之后才能复核：试算（`ready`）→ 应用 → 复核 → 再试算一次，结算。（按预演结束时各状态的计数推断：原来那份已写入的计划变成 `superseded`。）
+  4. **未完成的执行（103 的第二条）：** 先按 §4 恢复（`…/refresh/executions/<执行 id>/recover`，`http-routes.cjs:388`：先核对，再关闭），再试算 → 应用 → 再试算。
+
+  每做完一个项目，就重跑上面的查询，直到全部为 0。
 - 回退到 R83 时，再加一条：§1.4 (3) 那组里除 `component_ruling`（107，只供参考：R83 不读它，残留确认可以在启用之前就记下）以外的各表行数**全部为 0**，带试点标记的登记行为 0。
 - 108 那条不为 0：按 §6.5 先把每一次未结束的修复运行关掉，再查。这一条对回退到任何更早的构建都适用（108 头注释：回退之前不得有未结束的运行）；已经停用的行留在表上，旧构建把它们当普通的停用行读。
-- **【待定 S6-9 冻结候选】** G9 工具已随 #6844 合入（`scripts/ops/stock-prep-g9-frozen-candidate.mjs`，`--old-build-drill` 打印 U07 旧构建一半的做法）。S6-9 把「留着一次未结束的修复运行」做成了 G9 的真实库用例 `G9-S66-U07`：一次修复的收尾没跑成时，108 头注释里的停止条件查询（`SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'running'`，用例从迁移文件里读，不抄）答 1，启用被拒；按 §6.5 的续关结束后答 0。`--old-build-drill` 现在把这条查询（同样从冻结候选的 108 里读）列进第 4 步：它不为 0 就不回退。U07 回退演练本身（旧构建 + `RunMigrations 0`，库里带着未完成执行、透明关闭、已确认计划和未结束修复运行这些产物）仍要在冻结候选上做；演练没过之前，本节只是读代码得出的条件，不是演练过的。
+- **【待定 S6-9 冻结候选】** G9 工具已随 #6844 合入（`scripts/ops/stock-prep-g9-frozen-candidate.mjs`，`--old-build-drill` 打印 U07 旧构建一半的做法）。S6-9 把「留着一次未结束的修复运行」做成了 G9 的真实库用例 `G9-S66-U07`：一次修复的收尾没跑成时，108 头注释里的停止条件查询（`SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'running'`，用例从迁移文件里读，不抄）答 1，启用被拒；按 §6.5 的续关结束后答 0。`--old-build-drill` 现在把这条查询（同样从冻结候选的 108 里读）列进第 4 步：它不为 0 就不回退。**2026-11-13 判据重述（R-91 ㊾）：** U07 回退演练按 `--old-build-drill` 第 3–5 步做，判据只写在那里。要点：旧构建**并不**拒绝每一次写入。预演里旧构建和候选在每个产物项目上回答相同（同样的码、同样的行数和修订数），所以保护只有本节的停止规则（阻断查询全为 0 才回退），正式导出的 C2 摘要比对兜底（设计 2026-11-13 补充）。演练要在**第二个包的冻结候选**上重跑；演练没过之前，本节只是读代码得出的条件，不是演练过的。
 
-### 7.3 非备料停止条件（读代码得出，没有实际执行过；下面的查询（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍））
+### 7.3 非备料停止条件（读代码得出；第 1 条已在 2026-11-13 的预演上见证，其余没有实际执行过；下面的查询（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍））
 
-1. **外发开关。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 精确为 `true` 时（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）不能回 R83：`zzzz20261103120000` 把唯一索引改成 4 列（`…/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts:55-58`），而 R83 的认领语句写的是 3 列 `ON CONFLICT`（`git show onprem-r83:packages/core-backend/src/multitable/automation-outbound-intent.ts` 第 103 行），每次外发认领都会失败。要求：开关不是 `true`（§1.2 (3) 的计数为 0）。
+1. **外发开关。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 精确为 `true` 时（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）不能回 R83：`zzzz20261103120000` 把唯一索引改成 4 列（`…/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts:55-58`），而 R83 的认领语句写的是 3 列 `ON CONFLICT`（`git show onprem-r83:packages/core-backend/src/multitable/automation-outbound-intent.ts` 第 103 行），每次外发认领都会失败。要求：开关不是 `true`（§1.2 (3) 的计数为 0）。回 R84 也一样：`onprem-r84` 的同一行（`onprem-r84:packages/core-backend/src/multitable/automation-outbound-intent.ts:103`）也是 3 列。
+   - **预演见证（2026-11-13，R-91 ㊾；R84 与 R83 结果相同）。** 在升级后的库上，旧代码的 `claimOutboundIntent` 报 SQLSTATE **42P10**（没有和 `ON CONFLICT` 匹配的唯一约束）。旧执行器的 `send_webhook` 过了 SSRF 门之后以这条消息记为 `failed`，发出 0 次，intent 0 行（调用点 `onprem-r84:packages/core-backend/src/multitable/automation-executor.ts:4953`）。对照组是旧库：认领答 `proceed`，发送 `success`，发出 1 次。
+   - **含义。** 开关开着时回退，每一次 B 类 webhook 发送都失败，而且是失败关闭：什么都不发，也不会重复发。别的 B 类发送调用的是同一个认领（`automation-executor.ts:5293`、`:5490` 等，只读了代码，没有跑）。
 2. **通讯录交接。** 要求 0 行：`SELECT count(*) FROM directory_handovers WHERE state IN ('applied', 'finalized');`（状态词见 `…/zzzz20261101090000_create_directory_handovers.ts:9`）。不为 0 时，回 R83 后向相关集成投递审批卡片会被触发器拒（55000），而 R83 代码不处理这种拒绝。
 3. **钉钉登录修复。** 要求 0 行：`SELECT count(*) FROM dingtalk_login_repairs WHERE state = 'applied';`（`…/zzzz20261102150000_dingtalk_login_repairs.ts:6`、`:25`）。不为 0 时，回 R83 后改动被钉住的身份或关联会被拒（55000）。
 4. **数据源令牌要重填的清单。** main 把 `bearerToken` 列为加密字段（`packages/core-backend/src/data-adapters/DataSourceManager.ts:33`），R83 不列（同文件 R83 版第 31 行），回 R83 后这类令牌会以密文交给适配器。回退前数一下、把数据源 id 记进私有记录，回退后逐个重填：
@@ -522,7 +542,12 @@ SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'run
 
 ### 7.4 怎么回退，什么时候不能再回退
 
-- **做法：** 停定时拉取；用旧构建的包重装，**`-RunMigrations 0`**；不跑任何迁移的 `down()`。SQL 迁移只有 up（`102_…:30`）；旧构建在 102 / 103 已记录的库上**不能再跑 `db:migrate`**（迁移器会报「previously executed migration … is missing」，`102_…:37-39`）。表和行都留着。回退后把定时拉取脚本换回 `.pre-main-*` 那份。
+- **做法：** 停定时拉取；用旧构建的包重装，**`-RunMigrations 0`**（用旧 Release 自己的 deploy-bootstrap，第 4 个位置参数填 `0`）；不跑任何迁移的 `down()`。SQL 迁移只有 up（`102_…:30`）；回退后**不要用旧构建跑 `db:migrate`**。表和行都留着。回退后把定时拉取脚本换回 `.pre-main-*` 那份。
+- **回退后怎么读迁移器（预演见证，2026-11-13，R-91 ㊾；R84 与 R83 结果相同）。** 现场是覆盖安装：旧包的文件盖在安装根目录上，什么都不删（`onprem-r84:scripts/ops/multitable-onprem-apply-package.ps1:861-868` 的 `Copy-PackageOverlay`）。本包多出的 18 个迁移文件（含 10 个 dist 模块）留在盘上，旧迁移器照样加载它们。所以回到旧构建之后：
+  - 旧构建的 `migrate.js --list` 答 **Applied 474 / Pending 0**（「schema is up to date」）；
+  - `migrate` 退出码 0，执行 0 条；
+  - **不会**报 102 头注释（`102_…:37-39`）说的「previously executed migration … is missing」。那个报错和 456 / 0 只在安装根目录整个换成旧树时出现，现场不是这样装的。
+  - 这两种读数都不说明回退成没成，也不要把「旧迁移器会拒绝」当成保护。以 `SELECT count(*) FROM kysely_migration;` 为准：回退不改它，它应等于装完本包之后的数（预演里是 474）。
 - **不能再回退到 R83 的时刻：** 库里出现第一行第 4 步数据——也就是第一个试点开启并拉过一次之后。从此只能向前修复。清掉试点标记（§3）也不改变这一点：已写下的行仍在保护那个项目。
 - **回退底线是不是「代码保证」，看包里带不带 S6-9。** 包里不带 S6-9：`CONTINUATION_SUPPORT_VERSION` 是 0，试点根本开不了，第 4 步各表必然为空，这是代码保证。包里带了 S6-9：只是操作保证——前提是没人点「开启试点」。第 0 步已裁（R-91 ㉚ ㉝）：R 线维护版 R84 不带 S6-9（代码保证），第二个包即第一个 main 包带 S6-9（S6-9 已合入 main），装上它之后 §7.1 第一条就只是操作保证。
 - **一张表装上批次两列之后**，回退的目标构建必须带批次标识（R83 带；更早的 R 线包不带，见装机手册 §8）。
@@ -556,5 +581,5 @@ SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'run
 
 | 标记 | 位置 | 合入后要做的 |
 |---|---|---|
-| 【待定 S6-9 冻结候选】 | §3 第 5 步；§7.2 U07 演练 | 翻转已随 S6-9 合入；附录 B.3 已与启用路由逐步对过（0f0d1842b），附录 B.2 的作业状态与 SQL 还没重核（留在本行）。冻结候选上：按 `--old-build-drill` 跑 U07 旧构建演练（含未结束修复运行与 108 查询），在真实部署上拿正向启用一腿（`PE-DEPLOY`），两样结果写进本手册 |
+| 【待定 S6-9 冻结候选】 | §3 第 5 步；§7.2 U07 演练 | 翻转已随 S6-9 合入；附录 B.3 已与启用路由逐步对过（0f0d1842b），附录 B.2 的作业状态与 SQL 还没重核（留在本行）。冻结候选上：按 `--old-build-drill`（2026-11-13 重述的判据，R-91 ㊾）跑 U07 旧构建演练（含未结束修复运行与 108 查询），并重走 §7.2 的清理顺序，在真实部署上拿正向启用一腿（`PE-DEPLOY`），两样结果写进本手册 |
 | owner 未裁 | §0（切包提交、第 3a 步打开开关的时间、O6-7、试点项目、拉取人员；S6-9 随包与 Q-B 已于 2026-11-11 裁定，R-91 ㉚ ㉛）；§6.2 第 1 条（修复备份算不算 Q-B，R-91 ㊱） | 裁定后记进登记册，再执行对应步骤 |
