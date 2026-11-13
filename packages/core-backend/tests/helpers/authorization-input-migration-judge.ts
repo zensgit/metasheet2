@@ -32,7 +32,14 @@
  * A query-builder write of a cascade parent has no assignment list to read. It is accepted as a
  * DELETE, or as an INSERT whose chain of calls is its values, a returning clause, a conflict clause
  * that does nothing, and at the end the call that runs it; an UPDATE, a MERGE and any other INSERT
- * are `unreadable`.
+ * are `unreadable`. The call is recognised by its method name, written after a dot or as a string
+ * literal in brackets. A literal that is the name of a cascade parent and is not the table of a
+ * call that is read (a query-builder write, a mapped helper, a walked array of table names, a
+ * foreign-key reference) is `unreadable`: it may be the target of a write that has no text.
+ *
+ * The body of a function or a procedure is read only as dollar-quoted text. A definition whose
+ * body is a quoted string, or that carries no dollar-quoted text, is `unreadable`, like a block
+ * whose body is not dollar-quoted.
  *
  * A table name of three or more parts is never read: a write on one is `unreadable` whatever else
  * the statement does, and so is a table definition, an inheritance or partition parent, or a
@@ -57,7 +64,7 @@ import {
   AUTHORIZATION_INPUT_MIGRATION_TABLE_RULES,
 } from '../../src/rbac/authorization-input-writers'
 import type { AuthorizationInputDynamicForm, AuthorizationInputMigrationColumnRule, AuthorizationInputMigrationVerdict } from '../../src/rbac/authorization-input-writers'
-import { blankSqlComments, builderTable, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS, USERS_INPUT_COLUMNS } from './authorization-input-scan'
+import { blankSqlComments, builderTable, calledMethod, CASCADE_PARENT_TABLES, INPUT_TABLES, matchText, QUERY_BUILDER_WRITERS, SCANNED_TABLES, SOURCE_EXTENSIONS, USERS_INPUT_COLUMNS } from './authorization-input-scan'
 import type { WriteVerb } from './authorization-input-scan'
 
 export type MigrationJudgment = Readonly<{
@@ -92,6 +99,8 @@ const PARENTS: ReadonlySet<string> = new Set(CASCADE_PARENT_TABLES)
 const INPUT_NAME_IN_TEXT = new RegExp(`(?<![A-Za-z0-9_])(?:${INPUT_TABLES.join('|')})(?![A-Za-z0-9_])`, 'i')
 /** The opening of an identifier written with unicode escapes, inside quoted or dollar-quoted text. */
 const UNICODE_ESCAPED_IDENTIFIER = /(?<![A-Za-z0-9_])U&"/i
+/** The same opening with its quote left to a substitution. */
+const UNICODE_MARK_BEFORE_SUBSTITUTION = new RegExp(`(?<![A-Za-z0-9_])U&${SUBSTITUTION}`, 'i')
 
 /* ───────────────────────────── statement boundaries ───────────────────────────── */
 
@@ -779,6 +788,8 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   // An identifier written with unicode escapes is never read, wherever it stands: in the statement
   // itself, or in the text of a block or function body the statement carries.
   if (tokens.some((token) => token.type === 'uqid' || ((token.type === 'dollar' || token.type === 'str' || token.type === 'pstr') && UNICODE_ESCAPED_IDENTIFIER.test(token.text)))) return push(head, 'unreadable', 'identifier written with unicode escapes')
+  // The same mark put together from a folded constant, or left open before a substitution.
+  if (UNICODE_ESCAPED_IDENTIFIER.test(scannerView(sql)) || UNICODE_MARK_BEFORE_SUBSTITUTION.test(sql.text)) return push(head, 'unreadable', 'identifier written with unicode escapes')
 
   // A write target of three or more parts is never read, whatever else the statement does: it may
   // name an input table or a cascade parent in a part that is not taken for the table.
@@ -801,6 +812,16 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       return
     }
     pushDynamicStatement()
+  }
+  // The body of a function or procedure is read only as dollar-quoted text: a definition without
+  // one, or with a quoted string where the body stands, is not read at all.
+  if (head === 'CREATE') {
+    let at = 1
+    while (isKeyword(tokens[at], 'OR', 'REPLACE')) at += 1
+    if (isKeyword(tokens[at], 'FUNCTION', 'PROCEDURE')) {
+      const quotedBody = tokens.some((token, index) => isKeyword(token, 'AS') && (tokens[index + 1]?.type === 'str' || tokens[index + 1]?.type === 'pstr'))
+      if (quotedBody || !tokens.some((token) => token.type === 'dollar')) return push(`CREATE ${tokens[at].value}`, 'unreadable', 'body is not dollar-quoted text')
+    }
   }
   // The body of a function or procedure definition is read for dynamic execution as well.
   if (head === 'CREATE' && tokens.some((token) => isKeyword(token, 'FUNCTION', 'PROCEDURE'))) {
@@ -1204,8 +1225,10 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       // A query-builder write has no statement text: on an input table it is never readable, and
       // on a cascade parent an UPDATE or a MERGE has no assignment list to read. An INSERT of a
       // cascade parent is accepted only as a plain insert, read to the call that runs it.
-      if (ts.isPropertyAccessExpression(node.expression) && QUERY_BUILDER_WRITERS.has(node.expression.name.text) && node.arguments.length > 0) {
-        const verb = QUERY_BUILDER_WRITERS.get(node.expression.name.text)!
+      // The call is recognised by its method name, after a dot or as a string literal in brackets.
+      const method = calledMethod(node)
+      if (method !== null && QUERY_BUILDER_WRITERS.has(method) && node.arguments.length > 0) {
+        const verb = QUERY_BUILDER_WRITERS.get(method)!
         const first = node.arguments[0]
         const argument = stringOf(first) ?? (ts.isAsExpression(first) ? stringOf(first.expression) : null) ?? strictFold(first)
         // The table is read as the builder reads it: quotes, schema and alias removed, case folded.
@@ -1238,6 +1261,10 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       }
     }
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      // A literal that is the name of a cascade parent, and is not the table of a call read above,
+      // may be the target of a write that has no text. The name of an input table is refused as text.
+      const named = builderTable(node.text)
+      if (named !== null && PARENTS.has(named)) sink.judgments.push({ line: lineOf(node), kind: 'literal', verdict: 'unreadable', detail: `names the cascade parent ${named} outside a call that is read`, inputWrite: false, table: named })
       judgeText(node.text, [], node)
       return
     }

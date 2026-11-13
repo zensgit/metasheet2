@@ -518,6 +518,97 @@ describe('query-builder writes', () => {
   })
 })
 
+describe('a query-builder call written with brackets, and a cascade parent named outside a call that is read', () => {
+  const MEMBERSHIP = 'writes user_roles: a migration does not change memberships; use the contract entry or the maintenance tool'
+  const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
+
+  it('a write whose method name is a string literal in brackets is read like the same call written with a dot', () => {
+    expect(check(up("await db['insertInto']('permissions').values({ code: 'a' }).onConflict((oc) => oc.column('code').doUpdateSet({ code: 'b' })).execute()")).problems).toEqual(['unreadable INSERT: INSERT on permissions through a query builder has no assignment list'])
+    expect(check(up("await db['updateTable']('permissions').set({ code: 'b' }).execute()")).problems).toEqual(['unreadable UPDATE: UPDATE on permissions through a query builder has no assignment list'])
+    expect(check(up("await db[`mergeInto`]('roles as r').using('staging as s', 's.id', 'r.id').whenMatched().thenUpdateSet({ id: 'x' }).execute()")).problems).toEqual(['unreadable MERGE: MERGE on roles through a query builder has no assignment list'])
+    expect(check(up("await db['insertInto']('permissions').values({ code: 'docs:read', name: 'Read' }).execute()")).problems).toEqual([])
+    expect(check(up("await db['deleteFrom']('platform_member_groups').execute()")).problems).toEqual([])
+    expect(check(up("await db['deleteFrom'](tableName).execute()")).problems).toEqual(['unreadable DELETE: dynamic write target'])
+    // On an input table it is one write the scan reports, so the lock block is required.
+    const membership = check(up("await db['deleteFrom']('user_roles').execute()"))
+    expect(membership.problems).toEqual(['missing world lock try form', MEMBERSHIP])
+    expect(membership.inputWrites).toBe(1)
+    expect(check(lockedCode("await db['deleteFrom']('public.user_roles as ur').execute()")).problems).toEqual([MEMBERSHIP])
+    expect(check(lockedCode("await db['updateTable']('users').set({ is_admin: true }).execute()")).problems).toEqual(['unreadable UPDATE: UPDATE on users through a query builder has no statement text'])
+  })
+
+  const outside: Array<[string, string, string]> = [
+    ['a write whose method name is not a literal', "await db[method]('permissions').values(rows).execute()", 'permissions'],
+    ['a call that receives the table name', "await upsertInto(db, 'roles', rows)", 'roles'],
+    ['a table name applied to the method of the builder', "await Reflect.apply(db.insertInto, db, ['permissions']).values(rows).execute()", 'permissions'],
+    ['a name with a schema', "await run(db, 'public.roles')", 'roles'],
+    ['a quoted name with an alias and upper case', "await run(db, '\"Directory_Departments\" AS d')", 'directory_departments'],
+    ['a template without substitutions', 'await run(db, `platform_member_groups`)', 'platform_member_groups'],
+    ['a read through the query builder', "await db.selectFrom('roles').select('id').execute()", 'roles'],
+    ['a schema change through the query builder', "await db.schema.alterTable('permissions').addColumn('note', 'text').execute()", 'permissions'],
+  ]
+  for (const [name, line, table] of outside) {
+    it(`${name} is unreadable: the name may be the target of a write that has no text`, () => {
+      const result = check(up(line))
+      expect(result.verdicts).toEqual([{ verdict: 'unreadable', kind: 'literal', detail: `names the cascade parent ${table} outside a call that is read`, table, value: undefined }])
+      expect(result.problems).toEqual([`unreadable literal: names the cascade parent ${table} outside a call that is read`])
+      expect(check(up(line), historical, false).problems).toEqual([])
+    })
+  }
+
+  it('the table of a call that is read is not such a name, nor is a name inside statement text', () => {
+    const HELPERS = "import { addColumnIfNotExists, checkTableExists } from './_patterns'"
+    const withHelpers = (...lines: string[]) => `${HELPERS}\nexport async function up(db) {\n${lines.join('\n')}\n}`
+    expect(check(withHelpers("await checkTableExists(db, 'roles')", "await addColumnIfNotExists(db, 'permissions', 'note', 'text')")).problems).toEqual([])
+    expect(check(withHelpers("for (const table of ['roles', 'permissions']) { if (!(await checkTableExists(db, table))) throw new Error('x') }")).problems).toEqual([])
+    expect(check(up("await db.schema.createTable('audit_x').addColumn('role_id', 'text', (c) => c.references('roles.id')).execute()")).problems).toEqual([])
+    expect(check(up("await db.insertInto('roles').values({ id: 'ops_lead', name: 'Ops' }).execute()", "await db.deleteFrom('permissions').execute()")).problems).toEqual([])
+    expect(check(unlocked('ALTER TABLE roles ADD COLUMN note text', 'SELECT id FROM roles', "INSERT INTO permissions (code, name) VALUES ('docs:read', 'Roles')")).problems).toEqual([])
+  })
+
+  it('a constant that names a cascade parent is refused by its declaration, whatever the call that uses it', () => {
+    expect(check(up("const TABLE = 'roles'", 'await db.deleteFrom(TABLE).execute()')).problems).toEqual(['unreadable literal: names the cascade parent roles outside a call that is read'])
+    expect(check(up("const TABLE = 'audit_x'", 'await db.deleteFrom(TABLE).execute()')).problems).toEqual([])
+  })
+})
+
+describe('the body of a function or a procedure is read only as dollar-quoted text', () => {
+  const refused = (kind: string) => [`unreadable CREATE ${kind}: body is not dollar-quoted text`]
+  const DYNAMIC_DELETE = "CREATE FUNCTION g(t text) RETURNS void LANGUAGE plpgsql AS 'BEGIN EXECUTE ''DELETE FROM '' || t; END'"
+
+  const red: Array<[string, string, string]> = [
+    ['a function whose quoted body runs a dynamic statement', DYNAMIC_DELETE, 'FUNCTION'],
+    ['a replaced function with a quoted body', "CREATE OR REPLACE FUNCTION g() RETURNS int LANGUAGE sql AS 'SELECT 1'", 'FUNCTION'],
+    ['a procedure with a quoted body', "CREATE PROCEDURE p(t text) LANGUAGE plpgsql AS 'BEGIN EXECUTE ''TRUNCATE '' || t; END'", 'PROCEDURE'],
+    ['a function whose body is an escape string', "CREATE FUNCTION g() RETURNS int LANGUAGE sql AS E'SELECT 1'", 'FUNCTION'],
+    ['a quoted body beside dollar-quoted text elsewhere in the definition', "CREATE FUNCTION g(t text DEFAULT $$x$$) RETURNS void LANGUAGE plpgsql AS 'BEGIN EXECUTE ''DELETE FROM '' || t; END'", 'FUNCTION'],
+    ['an escape-string body beside dollar-quoted text elsewhere in the definition', "CREATE FUNCTION g(t text DEFAULT $$x$$) RETURNS int LANGUAGE sql AS E'SELECT 1'", 'FUNCTION'],
+    ['a function whose body is not text', 'CREATE FUNCTION one() RETURNS int LANGUAGE sql RETURN 1', 'FUNCTION'],
+    ['a function loaded from an object file', "CREATE FUNCTION c_add(int, int) RETURNS int AS 'lib', 'c_add' LANGUAGE C", 'FUNCTION'],
+  ]
+  for (const [name, statement, kind] of red) {
+    it(`${name} is unreadable`, () => {
+      const result = check(unlocked(statement))
+      expect(result.verdicts.map((line) => line.verdict)).toEqual(['unreadable'])
+      expect(result.problems).toEqual(refused(kind))
+    })
+  }
+
+  it('the definition is refused whatever calls the function later, and in a new file only', () => {
+    expect(check(unlocked(DYNAMIC_DELETE, "SELECT g('user_roles')")).problems).toEqual(refused('FUNCTION'))
+    expect(check(unlocked(DYNAMIC_DELETE, "SELECT g('user_roles')"), historicalMigrationFiles().find((file) => file.endsWith('.ts'))!, false).problems).toEqual([])
+    expect(check(`${DYNAMIC_DELETE};\n`, NEW_SQL).problems).toEqual(refused('FUNCTION'))
+  })
+
+  it('a dollar-quoted body is read as before, and a trigger definition has no body', () => {
+    expect(check(unlocked('CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN NEW.updated_at := now(); RETURN NEW; END $$ LANGUAGE plpgsql')).problems).toEqual([])
+    expect(check(unlocked("CREATE OR REPLACE PROCEDURE tidy() LANGUAGE plpgsql AS $body$ BEGIN DELETE FROM audit_x WHERE note = 'x'; END $body$")).problems).toEqual([])
+    expect(check(unlocked("CREATE FUNCTION g(t text) RETURNS void AS $$ BEGIN EXECUTE 'DELETE FROM ' || t; END $$ LANGUAGE plpgsql")).problems).toEqual(['unreadable EXECUTE: dynamic statement'])
+    expect(check(unlocked('CREATE TRIGGER t BEFORE UPDATE ON audit_x FOR EACH ROW EXECUTE FUNCTION touch_updated_at()')).problems).toEqual([])
+    expect(check(unlocked('CREATE TRIGGER t BEFORE UPDATE ON audit_x FOR EACH ROW EXECUTE PROCEDURE touch_updated_at()')).problems).toEqual([])
+  })
+})
+
 describe('a table tied to an input table by inheritance or as a partition', () => {
   const red: Array<[string, string, string]> = [
     ['a table created as an inheritance child of the memberships, and then written', unlocked('CREATE TABLE user_roles_archive () INHERITS (user_roles)', "INSERT INTO user_roles_archive (user_id, role_id) VALUES ('u1', 'admin')"), 'unreadable CREATE TABLE: INHERITS names the input table user_roles'],
@@ -592,6 +683,16 @@ describe('targets that are read item by item or not at all', () => {
       expect(result.problems[0], statement).toMatch(/^unreadable (?:CREATE|DO): identifier written with unicode escapes$/)
     }
     expect(check(unlocked('CREATE FUNCTION f() RETURNS void AS $$ BEGIN UPDATE audit_x SET note = U&\'d\\0061ta\'; END $$ LANGUAGE plpgsql')).problems).toEqual([])
+  })
+
+  it('the opening of such an identifier put together from a constant of the file, or left open before a substitution, is unreadable as well', () => {
+    const openBeforeSubstitution = lockedCode('await sql`UPDATE U&${sql.raw(quote)}\\\\0075sers" SET is_admin = TRUE`.execute(db)')
+    expect(check(openBeforeSubstitution).problems).toEqual(['unreadable UPDATE: identifier written with unicode escapes'])
+    const foldedQuote = lockedCode("const Q = '\"'", 'await sql.raw(`UPDATE U&${Q}\\\\0075sers" SET is_admin = TRUE`).execute(db)')
+    expect(check(foldedQuote).problems).toEqual(['unreadable UPDATE: identifier written with unicode escapes'])
+    // An operator before a substitution, and a constant that opens nothing, are read as before.
+    expect(check(up('await sql`SELECT flags & ${mask} FROM audit_x`.execute(db)')).problems).toEqual([])
+    expect(check(lockedCode("const CODE = 'docs:read'", 'await sql`' + INSERT_RP + " VALUES ('viewer', ${CODE})`.execute(db)")).problems).toEqual([])
   })
 
   it('every table of a TRUNCATE list is judged, past an item in another schema', () => {

@@ -13,7 +13,8 @@
  * double quotes, in any letter case, and with white space around the dot after its schema. The
  * table argument of a query-builder call is read the same way: its double quotes, its schema and
  * its `as` alias are removed and its case is folded; an argument that is then not a bare name is a
- * dynamic target.
+ * dynamic target. The call is recognised by its method name, written after a dot or as a string
+ * literal between brackets.
  *
  * A write target of three or more parts (`database.schema.table`) is not read: which part is the
  * table depends on what the other parts are. When one of its parts is a scanned table name or a
@@ -126,6 +127,17 @@ export function builderTable(argument: string): string | null {
   const parts = name.split('.').map((part) => part.trim())
   if (parts.length > 2 || parts.some((part) => !BARE_IDENTIFIER.test(part))) return null
   return parts[parts.length - 1].toLowerCase()
+}
+
+/**
+ * The method a call invokes on its receiver: `receiver.method(…)`, or `receiver['method'](…)` with
+ * the name written as a string literal. Null for any other callee.
+ */
+export function calledMethod(call: ts.CallExpression): string | null {
+  const callee = call.expression
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text
+  if (ts.isElementAccessExpression(callee) && (ts.isStringLiteral(callee.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(callee.argumentExpression))) return callee.argumentExpression.text
+  return null
 }
 
 function verbOf(keyword: string): WriteVerb {
@@ -440,8 +452,8 @@ export function scanSource(relativePath: string, source: string): { writes: Lite
         if (!(ts.isStringLiteral(inner) || ts.isNoSubstitutionTemplateLiteral(inner))) visit(operand)
       }
       return
-    } else if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const method = node.expression.name.text
+    } else if (ts.isCallExpression(node) && calledMethod(node) !== null) {
+      const method = calledMethod(node)!
       const verb = QUERY_BUILDER_WRITERS.get(method)
       if (verb && node.arguments.length > 0) {
         const first = node.arguments[0]
