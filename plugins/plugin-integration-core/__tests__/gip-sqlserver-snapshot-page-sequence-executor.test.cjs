@@ -595,6 +595,12 @@ function noProductionConsumerExists() {
       'plugins/plugin-integration-core/scripts',
       'run-gip-sqlserver-snapshot-page-sequence-executor.cjs',
     ),
+    // Writer registry: names the runner script path as data; no import, no run.
+    path.join(
+      repoRoot,
+      'packages/core-backend/src/rbac',
+      'authorization-input-writers.ts',
+    ),
     __filename,
   ])
   const consumers = files.filter((file) => {
