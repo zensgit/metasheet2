@@ -14,11 +14,16 @@
  *  3. Every call of `runGatedPullSourceWrite` in production source hands over functions of these shapes
  *     and nothing else. Anything not listed fails:
  *       - `write`: `(client, context) => client.query(SQL, PARAMS)` and nothing more. SQL is a complete
- *         literal (or `context.gated ? literal : literal`) that starts with an INSERT into, or an UPDATE
- *         of, the integration table and holds no row-lock clause, no advisory-lock call and no second
- *         statement. PARAMS is a constant computed before the call (or, under `context.gated`, that
- *         constant followed by `context.lockedStatus`). A constant spread into a list is one whose
- *         initial value is an array literal, so the spread iterates an array.
+ *         literal that starts with an INSERT into, or an UPDATE of, the integration table and holds no
+ *         row-lock clause, no advisory-lock call and no second statement. PARAMS is a constant computed
+ *         before the call, or such constants written in a list. A constant spread into a list is one
+ *         whose initial value is an array literal, so the spread iterates an array. `context` is read
+ *         in one pair only, both halves together or neither: SQL as `context.gated ? literal : literal`
+ *         with PARAMS as `context.gated ? [...C, context.lockedStatus] : C`. C is one constant, the
+ *         same in both lists, whose initial value is an array literal. The locked status stands once,
+ *         last, and in the gated list alone. The highest `$n` of the gated text is one above that of
+ *         the other text. Written any other way, the pair fails, and so does `context.lockedStatus`
+ *         in parameters the pair does not choose.
  *       - `joins`: `(lockedStatus) => expression` over its own parameter and literals, with `===`, `!==`,
  *         `&&`, `||`, `??`, `!` and `?:`. No call, no `await`, no other name.
  *     The function must be visible: written in the call, or held in a name. A name is read the way the
@@ -602,6 +607,9 @@ function notAConstant(node: ts.Expression, spread = false): string {
   return ''
 }
 
+/** The highest `$n` a statement text names; 0 when it names none. */
+const highestPlaceholder = (text: string): number => Math.max(0, ...(text.match(/\$\d+/g) ?? []).map((name) => Number(name.slice(1))))
+
 /** Why a function is not a `write` of the allowed shape; empty when it is. */
 function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): string[] {
   const names = plainParameters(fn, 2)
@@ -614,30 +622,41 @@ function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): strin
   }
   if (body.arguments.length < 1 || body.arguments.length > 2) return [`write passes ${body.arguments.length} arguments to query`]
   const problems: string[] = []
+  const sql = unwrap(body.arguments[0])
+  const params = body.arguments.length === 2 ? unwrap(body.arguments[1]) : undefined
+  // `context.gated` chooses the statement and the parameters together, or neither of them.
+  if (ts.isConditionalExpression(sql) !== (params !== undefined && ts.isConditionalExpression(params))) {
+    problems.push('the statement and the parameters are not chosen by context.gated together')
+  }
 
-  const sqlText = (node: ts.Expression): void => {
+  /** The text of a statement written as a complete literal; null, with the reason reported, when it is not one. */
+  const sqlText = (node: ts.Expression): string | null => {
     if (!isLiteralText(node)) {
       problems.push(`the statement is not a complete literal (${ts.SyntaxKind[node.kind]})`)
-      return
+      return null
     }
     if (!SQL_START.test(node.text)) problems.push(`the statement does not start with an INSERT into, or an UPDATE of, ${TABLE}`)
     for (const { what, pattern } of SQL_FORBIDDEN) if (pattern.test(node.text)) problems.push(`the statement holds ${what}`)
+    return node.text
   }
-  const sql = unwrap(body.arguments[0])
   if (ts.isConditionalExpression(sql)) {
     if (!isMemberOf(unwrap(sql.condition), context, 'gated')) problems.push('the statement is chosen by something other than context.gated')
-    sqlText(unwrap(sql.whenTrue))
-    sqlText(unwrap(sql.whenFalse))
+    const gated = sqlText(unwrap(sql.whenTrue))
+    const plain = sqlText(unwrap(sql.whenFalse))
+    // The gated text takes the locked status as one parameter more, after the parameters of the other text.
+    if (gated !== null && plain !== null && highestPlaceholder(gated) !== highestPlaceholder(plain) + 1) {
+      problems.push(`the statement inside a gate transaction does not name exactly one parameter more than the statement outside one ($${highestPlaceholder(gated)} against $${highestPlaceholder(plain)})`)
+    }
   } else {
     sqlText(sql)
   }
 
+  /** Parameters `context.gated` does not choose: a constant, or constants written in a list. Nothing is read off `context`. */
   const parameterList = (node: ts.Expression): void => {
     const whole = notAConstant(node)
     if (!whole) return
     if (ts.isArrayLiteralExpression(node)) {
       for (const element of node.elements) {
-        if (!ts.isSpreadElement(element) && isMemberOf(element, context, 'lockedStatus')) continue
         const why = ts.isSpreadElement(element) ? notAConstant(unwrap(element.expression), true) : notAConstant(element)
         if (why) problems.push(`a parameter is computed inside write (${ts.SyntaxKind[element.kind]}): ${why}`)
       }
@@ -645,15 +664,42 @@ function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): strin
     }
     problems.push(`the parameters are not a constant computed before the call (${ts.SyntaxKind[node.kind]}): ${whole}`)
   }
-  if (body.arguments.length === 2) {
-    const params = unwrap(body.arguments[1])
-    if (ts.isConditionalExpression(params)) {
-      if (!isMemberOf(unwrap(params.condition), context, 'gated')) problems.push('the parameters are chosen by something other than context.gated')
-      parameterList(unwrap(params.whenTrue))
-      parameterList(unwrap(params.whenFalse))
+
+  /** The one pair of parameter lists `context.gated` chooses between: `[...C, context.lockedStatus]` and `C`. */
+  const chosenParameters = (chosen: ts.ConditionalExpression): void => {
+    if (!isMemberOf(unwrap(chosen.condition), context, 'gated')) problems.push('the parameters are chosen by something other than context.gated')
+    const gated = unwrap(chosen.whenTrue)
+    const plain = unwrap(chosen.whenFalse)
+    let spread: ts.Identifier | undefined
+    if (!ts.isArrayLiteralExpression(gated)) {
+      problems.push(`the parameters inside a gate transaction are not a list written in place (${ts.SyntaxKind[gated.kind]})`)
+    } else if (gated.elements.length !== 2) {
+      problems.push(`the parameters inside a gate transaction are ${gated.elements.length} elements, not one constant spread and then context.lockedStatus`)
     } else {
-      parameterList(params)
+      const [first, last] = gated.elements
+      const operand = ts.isSpreadElement(first) ? unwrap(first.expression) : undefined
+      if (operand && ts.isIdentifier(operand)) spread = operand
+      else problems.push('the parameters inside a gate transaction do not start with one constant spread')
+      if (!isMemberOf(last, context, 'lockedStatus')) problems.push('the parameters inside a gate transaction do not end with context.lockedStatus')
     }
+    if (!ts.isIdentifier(plain)) {
+      problems.push(`the parameters outside a gate transaction are not a constant on its own (${ts.SyntaxKind[plain.kind]})`)
+    } else if (spread && spread.text !== plain.text) {
+      problems.push(`the parameters are built on two constants: ${spread.text} inside a gate transaction, ${plain.text} outside one`)
+    }
+    // The two names stand in one expression, so one name is one binding and is read once. It is spread,
+    // so its initial value must be an array literal.
+    const built: ts.Identifier[] = []
+    if (spread) built.push(spread)
+    if (ts.isIdentifier(plain) && plain.text !== spread?.text) built.push(plain)
+    for (const name of built) {
+      const why = notAConstant(name, true)
+      if (why) problems.push(`the parameters chosen by context.gated are not built on a list computed before the call: ${why}`)
+    }
+  }
+  if (params !== undefined) {
+    if (ts.isConditionalExpression(params)) chosenParameters(params)
+    else parameterList(params)
   }
   return problems
 }
@@ -791,6 +837,10 @@ function callerWith(write: string, options?: string, prelude = ''): SourceFile[]
 
 const INSERT = '`INSERT INTO directory_integrations (org_id) VALUES ($1) RETURNING id`'
 const UPDATE = '`UPDATE directory_integrations SET name = $1 WHERE id = $2`'
+/** The same update as it runs inside a gate transaction: one parameter more, the status read under the row lock. */
+const GATED_UPDATE = '`UPDATE directory_integrations SET name = $1 WHERE id = $2 AND status = $3`'
+/** Problems without the place they are reported at. */
+const unplaced = (problems: string[]): string[] => problems.map((problem) => problem.replace(/^\S+:\d+ /, ''))
 
 describe('every function handed to the gate has an allowed shape', () => {
   it('production source calls the gated write twice and the policy clear once, and each call passes', () => {
@@ -836,9 +886,10 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a function expression with one return', write: `function (client) { return client.query(${UPDATE}, params) }` },
     { form: 'a statement without parameters', write: `(client) => client.query(${INSERT})` },
     {
-      form: 'a statement and parameters chosen by context.gated, with the locked status last',
-      write: `(client, context) => client.query(context.gated ? ${UPDATE} : ${INSERT}, context.gated ? [...params, context.lockedStatus] : params)`,
+      form: 'a statement and parameters chosen by context.gated together: one parameter more inside a gate transaction, the locked status, last',
+      write: `(client, context) => client.query(context.gated ? ${GATED_UPDATE} : ${UPDATE}, context.gated ? [...params, context.lockedStatus] : params)`,
     },
+    { form: 'constants written in a list, one of them spread', write: `(client) => client.query(${UPDATE}, [...params, extra])`, prelude: '  const extra = 2' },
     { form: 'a double-quoted literal', write: '(client) => client.query("UPDATE directory_integrations SET name = $1", params)' },
     { form: 'a judgement over the locked status', write: `(client) => client.query(${UPDATE}, params)`, options: "{ lockRowId: 'id', joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active' }" },
     { form: 'a judgement that is a constant answer', write: `(client) => client.query(${UPDATE}, params)`, options: '{ joins: () => false, env: process.env }' },
@@ -894,8 +945,6 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a template with a substitution', write: '(client, context) => client.query(`UPDATE directory_integrations SET name = $1${context.gated ? " AND status = $2" : ""}`, params)', expected: /the statement is not a complete literal \(TemplateExpression\)/ },
     { form: 'a concatenated statement', write: "(client) => client.query('UPDATE directory_integrations ' + 'SET name = $1', params)", expected: /the statement is not a complete literal \(BinaryExpression\)/ },
     { form: 'a statement held in a name', write: '(client) => client.query(sql, params)', prelude: `  const sql = ${UPDATE}`, expected: /the statement is not a complete literal \(Identifier\)/ },
-    { form: 'a statement chosen by something else', write: `(client, context) => client.query(context.joined ? ${UPDATE} : ${INSERT}, params)`, expected: /the statement is chosen by something other than context\.gated/ },
-    { form: 'one branch that is not an integration write', write: `(client, context) => client.query(context.gated ? ${UPDATE} : \`SELECT 1\`, params)`, expected: /the statement does not start with/ },
     // The parameters.
     { form: 'parameters built in the body', write: `(client) => client.query(${UPDATE}, [JSON.stringify(userIds)])`, expected: /a parameter is computed inside write \(CallExpression\)/ },
     { form: 'parameters returned by a call', write: `(client) => client.query(${UPDATE}, userIds.slice())`, expected: /the parameters are not a constant computed before the call \(CallExpression\)/ },
@@ -905,22 +954,21 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a constant among the parameters that holds a function', write: `(client) => client.query(${UPDATE}, [holder])`, prelude: '  const holder = () => userIds', expected: /a parameter is computed inside write \(Identifier\): holder holds a function/ },
     {
       form: 'a spread of a constant that is an object with its own iteration',
-      write: `(client, context) => client.query(${UPDATE}, [...iterable, context.lockedStatus])`,
+      write: `(client) => client.query(${UPDATE}, [...iterable])`,
       prelude: '  const iterable = { *[Symbol.iterator]() { yield userIds } }',
       expected: /a parameter is computed inside write \(SpreadElement\): iterable is spread and its initial value is not an array literal/,
     },
     {
       form: 'a spread of a constant that holds a call result',
-      write: `(client, context) => client.query(${UPDATE}, [...copied, context.lockedStatus])`,
+      write: `(client) => client.query(${UPDATE}, [...copied])`,
       prelude: '  const copied = userIds.slice()',
       expected: /a parameter is computed inside write \(SpreadElement\): copied is spread and its initial value is not an array literal/,
     },
     { form: 'parameters held in a constant that has no initial value', write: `(client) => client.query(${UPDATE}, plan)`, expected: /the parameters are not a constant computed before the call \(Identifier\): plan has no initial value/ },
     { form: 'parameters that are an import', write: `(client) => client.query(${UPDATE}, pool as never)`, expected: /the parameters are not a constant computed before the call \(Identifier\): pool is an import/ },
-    { form: 'a spread of an import', write: `(client, context) => client.query(${UPDATE}, [...(pool as never as unknown[]), context.lockedStatus])`, expected: /a parameter is computed inside write \(SpreadElement\): pool is an import/ },
+    { form: 'a spread of an import', write: `(client) => client.query(${UPDATE}, [...(pool as never as unknown[])])`, expected: /a parameter is computed inside write \(SpreadElement\): pool is an import/ },
     { form: 'parameters that are declared nowhere', write: `(client) => client.query(${UPDATE}, undeclaredParams)`, expected: /the parameters are not a constant computed before the call \(Identifier\): undeclaredParams does not resolve to a declaration/ },
-    { form: 'a spread of a name that is declared nowhere', write: `(client, context) => client.query(${UPDATE}, [...undeclaredParams, context.lockedStatus])`, expected: /a parameter is computed inside write \(SpreadElement\): undeclaredParams does not resolve to a declaration/ },
-    { form: 'parameters chosen by something else', write: `(client, context) => client.query(${UPDATE}, context.joined ? params : params)`, expected: /the parameters are chosen by something other than context\.gated/ },
+    { form: 'a spread of a name that is declared nowhere', write: `(client) => client.query(${UPDATE}, [...undeclaredParams])`, expected: /a parameter is computed inside write \(SpreadElement\): undeclaredParams does not resolve to a declaration/ },
     // A function the guard cannot see.
     { form: 'a parameter of the calling function', write: 'injected', expected: /write: injected is a parameter, not a function written here/ },
     { form: 'an imported function', write: 'query as never', expected: /write: query is an import/ },
@@ -937,6 +985,91 @@ describe('every function handed to the gate has an allowed shape', () => {
       const use = gateUse(callerWith(write, undefined, prelude))
       expect(use.sites).toHaveLength(1)
       expect(use.problems.join('\n')).toMatch(expected)
+      for (const problem of use.problems) expect(problem).toContain('directory/synthetic-entry.ts:')
+    })
+  }
+
+  // The one pair `context.gated` chooses: the statement and the parameters, together. Each control below
+  // is that pair with the difference it names, and lists every problem the difference is reported as.
+  const PAIRED_SQL = `context.gated ? ${GATED_UPDATE} : ${UPDATE}`
+  const PAIRED_PARAMS = 'context.gated ? [...params, context.lockedStatus] : params'
+  const paired = (sql: string, parameters?: string): string => `(client, context) => client.query(${sql}${parameters === undefined ? '' : `, ${parameters}`})`
+  const NOT_TOGETHER = 'the statement and the parameters are not chosen by context.gated together'
+  const SQL_NOT_BY_GATED = 'the statement is chosen by something other than context.gated'
+  const PARAMS_NOT_BY_GATED = 'the parameters are chosen by something other than context.gated'
+  const NO_SPREAD_FIRST = 'the parameters inside a gate transaction do not start with one constant spread'
+  const NO_STATUS_LAST = 'the parameters inside a gate transaction do not end with context.lockedStatus'
+  const notOneMore = (gated: number, plain: number): string => `the statement inside a gate transaction does not name exactly one parameter more than the statement outside one ($${gated} against $${plain})`
+  const elements = (count: number): string => `the parameters inside a gate transaction are ${count} elements, not one constant spread and then context.lockedStatus`
+  const gatedNotAList = (kind: string): string => `the parameters inside a gate transaction are not a list written in place (${kind})`
+  const plainNotAlone = (kind: string): string => `the parameters outside a gate transaction are not a constant on its own (${kind})`
+  const notBuiltOn = (why: string): string => `the parameters chosen by context.gated are not built on a list computed before the call: ${why}`
+  const OTHER = '  const other: unknown[] = [2]'
+
+  it('control (the pair, as the controls below start from it) passes', () => {
+    const use = gateUse(callerWith(paired(PAIRED_SQL, PAIRED_PARAMS), undefined, OTHER))
+    expect(use.sites).toHaveLength(1)
+    expect(use.problems).toEqual([])
+  })
+
+  const REFUSED_PAIRS: ReadonlyArray<{ form: string; write: string; prelude?: string; problems: string[] }> = [
+    // The parameters inside a gate transaction: the constant spread, then the locked status, and no more.
+    { form: 'the locked status first', write: paired(PAIRED_SQL, 'context.gated ? [context.lockedStatus, ...params] : params'), problems: [NO_SPREAD_FIRST, NO_STATUS_LAST] },
+    { form: 'the locked status twice', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.lockedStatus, context.lockedStatus] : params'), problems: [elements(3)] },
+    { form: 'a second constant spread', write: paired(PAIRED_SQL, 'context.gated ? [...params, ...other, context.lockedStatus] : params'), prelude: OTHER, problems: [elements(3)] },
+    { form: 'a further constant before the locked status', write: paired(PAIRED_SQL, 'context.gated ? [...params, other, context.lockedStatus] : params'), prelude: OTHER, problems: [elements(3)] },
+    { form: 'a further constant after the locked status', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.lockedStatus, other] : params'), prelude: OTHER, problems: [elements(3)] },
+    { form: 'the constant spread and no locked status', write: paired(PAIRED_SQL, 'context.gated ? [...params] : params'), problems: [elements(1)] },
+    { form: 'the constant as one element, not spread', write: paired(PAIRED_SQL, 'context.gated ? [params, context.lockedStatus] : params'), problems: [NO_SPREAD_FIRST] },
+    { form: 'a spread of something that is not a name', write: paired(PAIRED_SQL, 'context.gated ? [...[1], context.lockedStatus] : params'), problems: [NO_SPREAD_FIRST] },
+    { form: 'another member of context last', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.joined] : params'), problems: [NO_STATUS_LAST] },
+    { form: 'a constant last', write: paired(PAIRED_SQL, 'context.gated ? [...params, other] : params'), prelude: OTHER, problems: [NO_STATUS_LAST] },
+    { form: 'the locked status read through an optional chain', write: paired(PAIRED_SQL, 'context.gated ? [...params, context?.lockedStatus] : params'), problems: [NO_STATUS_LAST] },
+    { form: 'the constant itself inside a gate transaction', write: paired(PAIRED_SQL, 'context.gated ? params : params'), problems: [gatedNotAList('Identifier')] },
+    // The parameters outside a gate transaction: the same constant, on its own.
+    { form: 'the locked status outside a gate transaction and not inside one', write: paired(PAIRED_SQL, 'context.gated ? params : [...params, context.lockedStatus]'), problems: [gatedNotAList('Identifier'), plainNotAlone('ArrayLiteralExpression')] },
+    { form: 'the locked status in both lists', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.lockedStatus] : [...params, context.lockedStatus]'), problems: [plainNotAlone('ArrayLiteralExpression')] },
+    { form: 'a copy of the constant outside a gate transaction', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.lockedStatus] : [...params]'), problems: [plainNotAlone('ArrayLiteralExpression')] },
+    { form: 'a different constant outside a gate transaction', write: paired(PAIRED_SQL, 'context.gated ? [...params, context.lockedStatus] : other'), prelude: OTHER, problems: ['the parameters are built on two constants: params inside a gate transaction, other outside one'] },
+    { form: 'a different constant inside a gate transaction', write: paired(PAIRED_SQL, 'context.gated ? [...other, context.lockedStatus] : params'), prelude: OTHER, problems: ['the parameters are built on two constants: other inside a gate transaction, params outside one'] },
+    // What chooses.
+    { form: 'the parameters chosen by the negation of context.gated', write: paired(PAIRED_SQL, '!context.gated ? [...params, context.lockedStatus] : params'), problems: [PARAMS_NOT_BY_GATED] },
+    { form: 'the parameters chosen by another member of context', write: paired(PAIRED_SQL, 'context.joined ? [...params, context.lockedStatus] : params'), problems: [PARAMS_NOT_BY_GATED] },
+    { form: 'the parameters chosen by a comparison of context.gated', write: paired(PAIRED_SQL, 'context.gated === true ? [...params, context.lockedStatus] : params'), problems: [PARAMS_NOT_BY_GATED] },
+    { form: 'the statement chosen by the negation of context.gated', write: paired(`!context.gated ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [SQL_NOT_BY_GATED] },
+    { form: 'the statement chosen by another member of context', write: paired(`context.joined ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [SQL_NOT_BY_GATED] },
+    // The constant the two lists are built on.
+    { form: 'a constant that holds a call result', write: paired(PAIRED_SQL, 'context.gated ? [...copied, context.lockedStatus] : copied'), prelude: '  const copied = userIds.slice()', problems: [notBuiltOn('copied is spread and its initial value is not an array literal')] },
+    { form: 'a constant that is an object with its own iteration', write: paired(PAIRED_SQL, 'context.gated ? [...iterable, context.lockedStatus] : iterable'), prelude: '  const iterable = { *[Symbol.iterator]() { yield userIds } }', problems: [notBuiltOn('iterable is spread and its initial value is not an array literal')] },
+    { form: 'a constant that holds a function', write: paired(PAIRED_SQL, 'context.gated ? [...holder, context.lockedStatus] : holder'), prelude: '  const holder = () => userIds', problems: [notBuiltOn('holder holds a function')] },
+    { form: 'a constant that has no initial value', write: paired(PAIRED_SQL, 'context.gated ? [...userIds, context.lockedStatus] : userIds'), problems: [notBuiltOn('userIds has no initial value')] },
+    { form: 'an import', write: paired(PAIRED_SQL, 'context.gated ? [...pool, context.lockedStatus] : pool'), problems: [notBuiltOn('pool is an import')] },
+    { form: 'a parameter of the calling function', write: paired(PAIRED_SQL, 'context.gated ? [...injected, context.lockedStatus] : injected'), problems: [notBuiltOn('injected is a parameter')] },
+    { form: 'a name that is declared nowhere', write: paired(PAIRED_SQL, 'context.gated ? [...undeclaredParams, context.lockedStatus] : undeclaredParams'), problems: [notBuiltOn('undeclaredParams does not resolve to a declaration')] },
+    { form: 'two constants, neither of them a list computed before the call', write: paired(PAIRED_SQL, 'context.gated ? [...injected, context.lockedStatus] : pool'), problems: ['the parameters are built on two constants: injected inside a gate transaction, pool outside one', notBuiltOn('injected is a parameter'), notBuiltOn('pool is an import')] },
+    // The two texts.
+    { form: 'the two texts the other way round', write: paired(`context.gated ? ${UPDATE} : ${GATED_UPDATE}`, PAIRED_PARAMS), problems: [notOneMore(2, 3)] },
+    { form: 'the same text twice', write: paired(`context.gated ? ${UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [notOneMore(2, 2)] },
+    { form: 'two parameters more inside a gate transaction', write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $2 AND status = $3 AND corp_id = $4` : ' + UPDATE, PAIRED_PARAMS), problems: [notOneMore(4, 2)] },
+    { form: 'a text that names no parameter inside a gate transaction', write: paired('context.gated ? `UPDATE directory_integrations SET name = NULL` : ' + UPDATE, PAIRED_PARAMS), problems: [notOneMore(0, 2)] },
+    { form: 'one text held in a name', write: paired(`context.gated ? ${GATED_UPDATE} : sql`, PAIRED_PARAMS), prelude: `  const sql = ${UPDATE}`, problems: ['the statement is not a complete literal (Identifier)'] },
+    { form: 'both texts held in names', write: paired('context.gated ? gatedSql : sql', PAIRED_PARAMS), prelude: `  const sql = ${UPDATE}\n  const gatedSql = ${GATED_UPDATE}`, problems: ['the statement is not a complete literal (Identifier)', 'the statement is not a complete literal (Identifier)'] },
+    { form: 'one text that is not an integration write', write: paired(`context.gated ? ${GATED_UPDATE} : \`SELECT $1, $2\``, PAIRED_PARAMS), problems: ['the statement does not start with an INSERT into, or an UPDATE of, directory_integrations'] },
+    { form: 'one text with a row-lock clause', write: paired('context.gated ? `UPDATE directory_integrations SET name = (SELECT name FROM users WHERE id = $1 FOR SHARE) WHERE id = $2 AND status = $3` : ' + UPDATE, PAIRED_PARAMS), problems: ['the statement holds a row-lock clause'] },
+    { form: 'a choice inside a choice', write: paired(`context.gated ? (context.joined ? ${GATED_UPDATE} : ${GATED_UPDATE}) : ${UPDATE}`, PAIRED_PARAMS), problems: ['the statement is not a complete literal (ConditionalExpression)'] },
+    // One half without the other.
+    { form: 'the statement chosen and the parameters not', write: paired(PAIRED_SQL, 'params'), problems: [NOT_TOGETHER] },
+    { form: 'the statement chosen and no parameters', write: paired(PAIRED_SQL), problems: [NOT_TOGETHER] },
+    { form: 'the parameters chosen and the statement not', write: paired(GATED_UPDATE, PAIRED_PARAMS), problems: [NOT_TOGETHER] },
+    { form: 'the locked status in parameters that are not chosen', write: paired(GATED_UPDATE, '[...params, context.lockedStatus]'), problems: ['a parameter is computed inside write (PropertyAccessExpression): it is not a name'] },
+    { form: 'the locked status as the one parameter, not chosen', write: paired(GATED_UPDATE, '[context.lockedStatus]'), problems: ['a parameter is computed inside write (PropertyAccessExpression): it is not a name'] },
+    { form: 'the statement chosen by the negation, the texts the other way round, the parameters not chosen', write: paired(`!context.gated ? ${UPDATE} : ${GATED_UPDATE}`, 'params'), problems: [NOT_TOGETHER, SQL_NOT_BY_GATED, notOneMore(2, 3)] },
+  ]
+  for (const { form, write, prelude, problems } of REFUSED_PAIRS) {
+    it(`positive control, the pair chosen by context.gated (${form}) fails`, () => {
+      const use = gateUse(callerWith(write, undefined, prelude))
+      expect(use.sites).toHaveLength(1)
+      expect(unplaced(use.problems)).toEqual(problems)
       for (const problem of use.problems) expect(problem).toContain('directory/synthetic-entry.ts:')
     })
   }
@@ -989,8 +1122,15 @@ describe('every function handed to the gate has an allowed shape', () => {
       place: 'parameters spread into a list',
       name: 'params',
       passing: '[1]',
-      call: `runGatedPullSourceWrite(target, (client, context) => client.query(${UPDATE}, [...params, context.lockedStatus]))`,
+      call: `runGatedPullSourceWrite(target, (client) => client.query(${UPDATE}, [...params]))`,
       reported: 'a parameter is computed inside write (SpreadElement): params ',
+    },
+    {
+      place: 'the parameters chosen by context.gated',
+      name: 'params',
+      passing: '[1]',
+      call: `runGatedPullSourceWrite(target, (client, context) => client.query(context.gated ? ${GATED_UPDATE} : ${UPDATE}, context.gated ? [...params, context.lockedStatus] : params))`,
+      reported: 'the parameters chosen by context.gated are not built on a list computed before the call: params ',
     },
   ]
   const callerOfNamed = (entry: string): SourceFile[] => [{
@@ -1088,6 +1228,25 @@ describe('every function handed to the gate has an allowed shape', () => {
       expect(gateUse([...SOURCE, { path: 'legacy/hidden.js', text: javascript }]).problems.join('\n')).toMatch(expected)
     })
   }
+
+  it('positive control: the pair of the production save written any other way fails', () => {
+    const sync = SOURCE.find((file) => file.path === SYNC)!
+    const problemsOf = (text: string): string[] => unplaced(gateUse(SOURCE.map((file) => (file.path === SYNC ? { ...file, text } : file))).problems)
+    const chosen = '    context.gated ? [...updateParams, context.lockedStatus] : updateParams,\n'
+    expect(problemsOf(sync.text)).toEqual([])
+    // The locked status first: every parameter of the statement would move one place.
+    expect(problemsOf(edited(sync.text, chosen, '    context.gated ? [context.lockedStatus, ...updateParams] : updateParams,\n'))).toEqual([NO_SPREAD_FIRST, NO_STATUS_LAST])
+    // The locked status outside a gate transaction, and not inside one.
+    expect(problemsOf(edited(sync.text, chosen, '    context.gated ? updateParams : [...updateParams, context.lockedStatus],\n'))).toEqual([gatedNotAList('Identifier'), plainNotAlone('ArrayLiteralExpression')])
+    // The locked status twice: one parameter more than the statement names.
+    expect(problemsOf(edited(sync.text, chosen, '    context.gated ? [...updateParams, context.lockedStatus, context.lockedStatus] : updateParams,\n'))).toEqual([elements(3)])
+    // The parameters no longer chosen, the statement still chosen.
+    expect(problemsOf(edited(sync.text, chosen, '    updateParams,\n'))).toEqual([NOT_TOGETHER])
+    // The text inside a gate transaction without the status it is guarded by.
+    expect(problemsOf(edited(sync.text, ' AND corp_id = $11 AND status = $12\n', ' AND corp_id = $11\n'))).toEqual([notOneMore(11, 11)])
+    // The text outside a gate transaction guarded by a status it is given no parameter for.
+    expect(problemsOf(edited(sync.text, ' AND corp_id = $11\n', ' AND corp_id = $11 AND status = $12\n'))).toEqual([notOneMore(12, 12)])
+  })
 
   it('positive control: each production write turned into a function that does more fails', () => {
     const sync = SOURCE.find((file) => file.path === SYNC)!
