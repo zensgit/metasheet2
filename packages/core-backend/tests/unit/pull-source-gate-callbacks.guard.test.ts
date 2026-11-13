@@ -1,0 +1,942 @@
+/**
+ * Guard over the functions a caller hands to the pull-source write gate (no database).
+ *
+ * A gate transaction holds an organisation's pull-source lock, which is outside the authorization-input
+ * lock order: while it is held, no authorization-input lock may be taken, on the gate's connection or on
+ * any other. What the gate module itself does is fixed by its imports. What a caller's function does
+ * inside the transaction is fixed here, by shape:
+ *
+ *  1. The gate module's imports are an exact set: the database module, the pull-source rule module and
+ *     the pull-source gate marker module, each with the listed names. One more import fails.
+ *  2. Among everything the gate module exports, a parameter of function type exists in two places and
+ *     no other: `write` and `options.joins` of `runGatedPullSourceWrite`. A third fails, and so does a
+ *     parameter whose type the scan cannot read.
+ *  3. Every call of `runGatedPullSourceWrite` in production source hands over functions of these shapes
+ *     and nothing else. Anything not listed fails:
+ *       - `write`: `(client, context) => client.query(SQL, PARAMS)` and nothing more. SQL is a complete
+ *         literal (or `context.gated ? literal : literal`) that starts with an INSERT into, or an UPDATE
+ *         of, the integration table and holds no row-lock clause, no advisory-lock call and no second
+ *         statement. PARAMS is a constant computed before the call (or, under `context.gated`, that
+ *         constant followed by `context.lockedStatus`).
+ *       - `joins`: `(lockedStatus) => expression` over its own parameter and literals, with `===`, `!==`,
+ *         `&&`, `||`, `??`, `!` and `?:`. No call, no `await`, no other name.
+ *     The function must be visible: written in the call, or held in a `const` declared in a scope
+ *     around the call. A name the scan cannot resolve to such a function fails. The options are an
+ *     object literal with the known keys.
+ *  4. The gate's names are reached by a plain named import and a direct call only, so no call is hidden
+ *     behind another name.
+ *
+ * Under 3, a caller's function cannot reach an authorization-input entry point or a lock helper at all:
+ * not directly, not through another function, and not on a second connection, because the only call it
+ * may contain is the one statement on the gate's connection.
+ */
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
+
+import ts from 'typescript'
+import { describe, expect, it } from 'vitest'
+
+const SRC_ROOT = join(__dirname, '../../src')
+const GATE_MODULE = 'directory/pull-source-write-gate.ts'
+const SYNC = 'directory/directory-sync.ts'
+const ROUTING_POLICY_ROUTE = 'routes/admin-directory-routing-policy.ts'
+const GATED_WRITE = 'runGatedPullSourceWrite'
+const GATED_CLEAR = 'runGatedRoutingPolicyClear'
+const TABLE = 'directory_integrations'
+
+type SourceFile = { path: string; text: string }
+
+const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'] as const
+
+function walk(root: string, directory: string = root, out: string[] = []): string[] {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name !== 'node_modules') walk(root, path, out)
+    } else if (SOURCE_EXTENSIONS.some((extension) => entry.name.endsWith(extension)) && !/\.d\.[cm]?ts$/.test(entry.name)) {
+      out.push(path)
+    }
+  }
+  return out
+}
+
+/** Every production source file, with no directory left out. */
+const SOURCE: SourceFile[] = walk(SRC_ROOT).map((file) => ({
+  path: relative(SRC_ROOT, file).split('\\').join('/'),
+  text: readFileSync(file, 'utf8'),
+}))
+const GATE_SOURCE = SOURCE.find((file) => file.path === GATE_MODULE)?.text ?? ''
+
+const parse = (path: string, text: string): ts.SourceFile => ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true)
+const isExported = (node: ts.Node): boolean =>
+  (ts.canHaveModifiers(node) ? ts.getModifiers(node) ?? [] : []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+const isFunctionLike = (node: ts.Node): node is ts.ArrowFunction | ts.FunctionExpression => ts.isArrowFunction(node) || ts.isFunctionExpression(node)
+
+function edited(text: string, from: string | RegExp, to: string): string {
+  const out = text.replace(from, to)
+  expect(out, String(from)).not.toBe(text)
+  return out
+}
+
+// ── 1. the gate module's imports ───────────────────────────────────────────────────────────────────
+
+/** What the gate module imports: module specifier → the names it takes, sorted. */
+const GATE_IMPORTS: Readonly<Record<string, readonly string[]>> = {
+  '../db/pg': ['query as poolQuery', 'transaction'],
+  './pull-source-gate-context': ['runInsidePullSourceGate'],
+  './pull-source-rule': [
+    'APPROVAL_ROUTING_POLICY_EXISTS_SQL',
+    'DirectoryRoutingPolicyRequiredError',
+    'PULL_SOURCE_THRESHOLD',
+    'PullSourceCountUnavailableError',
+    'countActivePullSources',
+    'countOtherActivePullSources',
+    'directoryOrgLockSql',
+    'isApprovalRoutingRequirePolicyEnabled',
+  ],
+}
+
+/** The imports of a module, and every other way it could load one. */
+function importsOf(text: string): { named: Record<string, string[]>; problems: string[] } {
+  const source = parse('module.ts', text)
+  const named: Record<string, string[]> = {}
+  const problems: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      const specifier = ts.isStringLiteral(node.moduleSpecifier) ? node.moduleSpecifier.text : node.moduleSpecifier.getText(source)
+      const clause = node.importClause
+      if (node.parent !== source) problems.push(`import of ${specifier} is not at module level`)
+      if (!clause || clause.name || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)) {
+        problems.push(`import of ${specifier} does not name what it imports`)
+        named[specifier] = [...(named[specifier] ?? []), '*']
+      } else {
+        const names = clause.namedBindings.elements.map((element) => (element.propertyName ? `${element.propertyName.text} as ${element.name.text}` : element.name.text))
+        named[specifier] = [...(named[specifier] ?? []), ...names].sort()
+      }
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) problems.push(`re-export from ${node.moduleSpecifier.getText(source)}`)
+    if (ts.isImportEqualsDeclaration(node)) problems.push(`import assignment ${node.name.text}`)
+    if (ts.isImportTypeNode(node)) problems.push(`import type expression ${node.getText(source)}`)
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      problems.push(`module loaded at run time: ${node.getText(source)}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return { named, problems }
+}
+
+describe('the gate module imports an exact set', () => {
+  it('the database module, the rule module and the gate marker module, with the listed names and nothing else', () => {
+    expect(GATE_SOURCE.length).toBeGreaterThan(1000)
+    const { named, problems } = importsOf(GATE_SOURCE)
+    expect(problems).toEqual([])
+    expect(named).toEqual(GATE_IMPORTS)
+    // The same set as the compiler's own pre-processing reads it, so no import form is missed above.
+    expect(ts.preProcessFile(GATE_SOURCE, true, true).importedFiles.map((file) => file.fileName).sort()).toEqual(Object.keys(GATE_IMPORTS).sort())
+  })
+
+  const FURTHER_IMPORTS: ReadonlyArray<{ form: string; code: string; expected: RegExp | null }> = [
+    { form: 'a user-row lock helper', code: "import { lockUsersForAccessGraphWrite } from './access-graph-mutex'", expected: null },
+    { form: 'the authorization-input entry points', code: "import { withAuthorizationInputTransaction } from '../rbac/authorization-input-lock'", expected: null },
+    { form: 'the directory sync module', code: "import { DirectoryConflictError } from './directory-sync'", expected: null },
+    { form: 'one more name from the rule module', code: "import { directoryOrgLockKey } from './pull-source-rule'", expected: null },
+    { form: 'the marker read from the marker module', code: "import { isInsidePullSourceGate } from './pull-source-gate-context'", expected: null },
+    { form: 'a type-only import', code: "import type { PoolClient } from 'pg'", expected: null },
+    { form: 'a namespace import', code: "import * as mutex from './access-graph-mutex'", expected: /does not name what it imports/ },
+    { form: 'a default import', code: "import mutex from './access-graph-mutex'", expected: /does not name what it imports/ },
+    { form: 'a side-effect import', code: "import './access-graph-mutex'", expected: /does not name what it imports/ },
+    { form: 'a re-export', code: "export { lockUsersForAccessGraphWrite } from './access-graph-mutex'", expected: /re-export from/ },
+    { form: 'a runtime require', code: "const mutex = require('./access-graph-mutex')", expected: /module loaded at run time/ },
+    { form: 'a dynamic import', code: "export const load = () => import('../rbac/authorization-input-lock')", expected: /module loaded at run time/ },
+    { form: 'an import type expression', code: "export type Tx = import('../rbac/authorization-input-lock').AuthorizationInputTx", expected: /import type expression/ },
+    { form: 'an import assignment', code: "import mutex = require('./access-graph-mutex')", expected: /import assignment/ },
+  ]
+  for (const { form, code, expected } of FURTHER_IMPORTS) {
+    it(`positive control (${form}) changes the set or is reported`, () => {
+      const { named, problems } = importsOf(`${GATE_SOURCE}\n${code}\n`)
+      if (expected) expect(problems.join('\n')).toMatch(expected)
+      else expect(named).not.toEqual(GATE_IMPORTS)
+    })
+  }
+
+  it('positive control: a dropped import changes the set', () => {
+    const without = edited(GATE_SOURCE, "import { runInsidePullSourceGate } from './pull-source-gate-context'\n", '')
+    expect(importsOf(without).named).not.toEqual(GATE_IMPORTS)
+  })
+})
+
+// ── 2. parameters of function type among the gate module's exports ─────────────────────────────────
+
+/** Type references that are data, not functions. */
+const DATA_TYPE_REFERENCES = new Set(['NodeJS.ProcessEnv'])
+/** Generic wrappers whose function-typed inputs are those of their type arguments. */
+const TRANSPARENT_WRAPPERS = new Set(['Array', 'ReadonlyArray', 'Readonly', 'Partial', 'Required', 'Promise'])
+const DATA_KEYWORDS = new Set([
+  ts.SyntaxKind.StringKeyword, ts.SyntaxKind.NumberKeyword, ts.SyntaxKind.BooleanKeyword, ts.SyntaxKind.BigIntKeyword,
+  ts.SyntaxKind.UnknownKeyword, ts.SyntaxKind.UndefinedKeyword, ts.SyntaxKind.NullKeyword, ts.SyntaxKind.NeverKeyword,
+  ts.SyntaxKind.VoidKeyword, ts.SyntaxKind.SymbolKeyword,
+])
+
+interface ModuleSurface {
+  /** Names of the functions and classes the module exports. */
+  callables: string[]
+  /** Every other value the module exports. */
+  values: string[]
+  /** `function(path)` of every parameter position that has a function type. */
+  functionInputs: string[]
+  /** Parameter positions and exports the scan cannot read; any entry fails the guard. */
+  unreadable: string[]
+}
+
+/** The exported surface of a module, read from its own text: no type of another module is resolved. */
+function surfaceOf(text: string): ModuleSurface {
+  const source = parse('module.ts', text)
+  const interfaces = new Map<string, ts.InterfaceDeclaration[]>()
+  const aliases = new Map<string, ts.TypeAliasDeclaration>()
+  for (const statement of source.statements) {
+    if (ts.isInterfaceDeclaration(statement)) interfaces.set(statement.name.text, [...(interfaces.get(statement.name.text) ?? []), statement])
+    if (ts.isTypeAliasDeclaration(statement)) aliases.set(statement.name.text, statement)
+  }
+  const surface: ModuleSurface = { callables: [], values: [], functionInputs: [], unreadable: [] }
+
+  const classify = (type: ts.TypeNode | undefined, at: string, typeParameters: ReadonlySet<string>, seen: ReadonlySet<string>): void => {
+    if (!type) {
+      surface.unreadable.push(`${at}: no type annotation`)
+      return
+    }
+    if (ts.isFunctionTypeNode(type) || ts.isConstructorTypeNode(type)) {
+      surface.functionInputs.push(at)
+      return
+    }
+    if (ts.isParenthesizedTypeNode(type) || ts.isTypeOperatorNode(type) || ts.isArrayTypeNode(type) || ts.isOptionalTypeNode(type) || ts.isRestTypeNode(type)) {
+      classify(ts.isArrayTypeNode(type) ? type.elementType : type.type, at, typeParameters, seen)
+      return
+    }
+    if (ts.isUnionTypeNode(type) || ts.isIntersectionTypeNode(type)) {
+      for (const member of type.types) classify(member, at, typeParameters, seen)
+      return
+    }
+    if (ts.isTupleTypeNode(type)) {
+      for (const element of type.elements) classify(ts.isNamedTupleMember(element) ? element.type : element, at, typeParameters, seen)
+      return
+    }
+    if (ts.isLiteralTypeNode(type) || DATA_KEYWORDS.has(type.kind)) return
+    if (ts.isTypeLiteralNode(type)) {
+      members(type.members, at, typeParameters, seen)
+      return
+    }
+    if (ts.isTypeReferenceNode(type)) {
+      reference(type.typeName.getText(source), type.typeArguments, at, typeParameters, seen)
+      return
+    }
+    surface.unreadable.push(`${at}: type ${ts.SyntaxKind[type.kind]} is not read`)
+  }
+
+  /** A type named in the module: an interface (with what it extends), an alias, or one of the known names. */
+  const reference = (name: string, typeArguments: ts.NodeArray<ts.TypeNode> | undefined, at: string, typeParameters: ReadonlySet<string>, seen: ReadonlySet<string>): void => {
+    if (name === 'Function') {
+      surface.functionInputs.push(at)
+      return
+    }
+    if (typeParameters.has(name)) {
+      surface.unreadable.push(`${at}: a bare type parameter ${name} can be a function`)
+      return
+    }
+    if (DATA_TYPE_REFERENCES.has(name)) return
+    if (TRANSPARENT_WRAPPERS.has(name) && typeArguments?.length) {
+      for (const argument of typeArguments) classify(argument, at, typeParameters, seen)
+      return
+    }
+    if (seen.has(name)) return
+    const next = new Set([...seen, name])
+    const declared = interfaces.get(name)
+    if (declared) {
+      for (const declaration of declared) {
+        for (const clause of declaration.heritageClauses ?? []) {
+          for (const parent of clause.types) reference(parent.expression.getText(source), parent.typeArguments, at, typeParameters, next)
+        }
+        members(declaration.members, at, typeParameters, next)
+      }
+      return
+    }
+    const alias = aliases.get(name)
+    if (alias) {
+      classify(alias.type, at, typeParameters, next)
+      return
+    }
+    surface.unreadable.push(`${at}: type ${name} is not declared in the module`)
+  }
+
+  const members = (list: ts.NodeArray<ts.TypeElement>, at: string, typeParameters: ReadonlySet<string>, seen: ReadonlySet<string>): void => {
+    for (const member of list) {
+      const name = member.name ? member.name.getText(source) : '[]'
+      const inner = `${at.replace(/\)$/, '')}.${name})`
+      if (ts.isPropertySignature(member)) classify(member.type, inner, typeParameters, seen)
+      else if (ts.isIndexSignatureDeclaration(member)) classify(member.type, inner, typeParameters, seen)
+      else surface.functionInputs.push(ts.isMethodSignature(member) ? inner : at)
+    }
+  }
+
+  const parameters = (owner: string, declaration: ts.SignatureDeclaration): void => {
+    const typeParameters = new Set((declaration.typeParameters ?? []).map((parameter) => parameter.name.text))
+    for (const parameter of declaration.parameters) {
+      const name = ts.isIdentifier(parameter.name) ? parameter.name.text : parameter.name.getText(source)
+      if (!ts.isIdentifier(parameter.name)) surface.unreadable.push(`${owner}(${name}): the parameter is destructured`)
+      else classify(parameter.type, `${owner}(${name})`, typeParameters, new Set())
+    }
+  }
+
+  const containsFunction = (node: ts.Node): boolean => {
+    let found = false
+    const visit = (inner: ts.Node): void => {
+      if (isFunctionLike(inner) || ts.isMethodDeclaration(inner) || ts.isClassExpression(inner) || ts.isGetAccessor(inner) || ts.isSetAccessor(inner)) found = true
+      ts.forEachChild(inner, visit)
+    }
+    visit(node)
+    return found
+  }
+
+  for (const statement of source.statements) {
+    if (ts.isExportAssignment(statement)) surface.unreadable.push('the module has a default or assignment export')
+    if (ts.isExportDeclaration(statement)) surface.unreadable.push(`the module exports through a clause: ${statement.getText(source)}`)
+    if (!isExported(statement)) continue
+    if ((ts.getModifiers(statement as ts.HasModifiers) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
+      surface.unreadable.push('the module has a default export')
+    }
+    if (ts.isFunctionDeclaration(statement)) {
+      const name = statement.name?.text ?? '<anonymous>'
+      surface.callables.push(name)
+      parameters(name, statement)
+    } else if (ts.isClassDeclaration(statement)) {
+      const name = statement.name?.text ?? '<anonymous>'
+      surface.callables.push(name)
+      for (const member of statement.members) {
+        if (ts.isConstructorDeclaration(member)) parameters(`${name}.constructor`, member)
+        else if (ts.isMethodDeclaration(member) || ts.isSetAccessor(member)) parameters(`${name}.${member.name.getText(source)}`, member)
+        else if (ts.isPropertyDeclaration(member) && member.initializer && containsFunction(member.initializer)) {
+          surface.unreadable.push(`${name}.${member.name.getText(source)}: a property holds a function`)
+        }
+      }
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        const name = declaration.name.getText(source)
+        if (declaration.initializer && isFunctionLike(declaration.initializer)) {
+          surface.callables.push(name)
+          parameters(name, declaration.initializer)
+        } else {
+          surface.values.push(name)
+          if (declaration.initializer && containsFunction(declaration.initializer)) surface.unreadable.push(`${name}: an exported value holds a function`)
+          if (declaration.type) classify(declaration.type, `${name}(value)`, new Set(), new Set())
+        }
+      }
+    }
+  }
+  surface.callables.sort()
+  surface.values.sort()
+  surface.functionInputs.sort()
+  return surface
+}
+
+/** The two places a caller hands the gate a function. */
+const GATE_FUNCTION_INPUTS = [`${GATED_WRITE}(options.joins)`, `${GATED_WRITE}(write)`]
+
+describe('the gate module takes a function from its caller in two places only', () => {
+  it('among everything it exports, a parameter of function type is `write` or `options.joins` of the gated write', () => {
+    const surface = surfaceOf(GATE_SOURCE)
+    expect(surface.unreadable).toEqual([])
+    expect(surface.functionInputs).toEqual(GATE_FUNCTION_INPUTS)
+    expect(surface.callables).toEqual([
+      'DirectoryRoutingGateBusyError',
+      'DirectoryRoutingGateUnavailableError',
+      'PullSourceGateRowMovedError',
+      'asPullSourceGateFailure',
+      GATED_WRITE,
+      GATED_CLEAR,
+    ])
+    expect(surface.values).toEqual([
+      'DIRECTORY_ROUTING_GATE_BUSY_CODE',
+      'DIRECTORY_ROUTING_GATE_BUSY_MESSAGE',
+      'DIRECTORY_ROUTING_GATE_UNAVAILABLE_CODE',
+      'DIRECTORY_ROUTING_GATE_UNAVAILABLE_MESSAGE',
+      'PULL_SOURCE_GATE_BUSY_SQLSTATES',
+      'PULL_SOURCE_GATE_LOCK_TIMEOUT',
+      'PULL_SOURCE_GATE_STATEMENT_TIMEOUT',
+    ])
+  })
+
+  it('the function that opens a gate transaction is private to the module and is the only one that takes a transaction body', () => {
+    const source = parse(GATE_MODULE, GATE_SOURCE)
+    const opener = source.statements.filter((statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'runPullSourceGateTransaction')
+    expect(opener).toHaveLength(1)
+    expect(isExported(opener[0])).toBe(false)
+    // The transaction of the database module is opened in that function and nowhere else.
+    const opens: string[] = []
+    const visit = (node: ts.Node, owner: string): void => {
+      const name = ts.isFunctionDeclaration(node) && node.name ? node.name.text : owner
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'transaction') opens.push(name)
+      ts.forEachChild(node, (child) => visit(child, name))
+    }
+    visit(source, '<module>')
+    expect(opens).toEqual(['runPullSourceGateTransaction'])
+  })
+
+  const FURTHER_INPUTS: ReadonlyArray<{ form: string; edit: (text: string) => string; expected: RegExp }> = [
+    {
+      form: 'a row-lock function among the write options',
+      edit: (text) => edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  lockTarget?: (client: PullSourceGateClient) => Promise<string | null>\n'),
+      expected: /runGatedPullSourceWrite\(options\.lockTarget\)/,
+    },
+    {
+      form: 'a method among the write options',
+      edit: (text) => edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  before?(client: PullSourceGateClient): Promise<void>\n'),
+      expected: /runGatedPullSourceWrite\(options\.before\)/,
+    },
+    {
+      form: 'the transaction opener exported',
+      edit: (text) => edited(text, 'async function runPullSourceGateTransaction<T>(', 'export async function runPullSourceGateTransaction<T>('),
+      expected: /runPullSourceGateTransaction\(body\)/,
+    },
+    {
+      form: 'a transaction body handed to the policy clear',
+      edit: (text) => edited(text, 'export async function runGatedRoutingPolicyClear(orgId: string, purpose: string)', 'export async function runGatedRoutingPolicyClear(orgId: string, purpose: string, after?: (client: PullSourceGateClient) => Promise<void>)'),
+      expected: /runGatedRoutingPolicyClear\(after\)/,
+    },
+    {
+      form: 'a function behind a type alias',
+      edit: (text) => `${edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  hook?: GateHook\n')}\ntype GateHook = { run: (() => void) | null }\n`,
+      expected: /runGatedPullSourceWrite\(options\.hook\.run\)/,
+    },
+    {
+      form: 'a function behind an interface the options extend',
+      edit: (text) => `${edited(text, 'export interface PullSourceWriteGateOptions {', 'export interface PullSourceWriteGateOptions extends GateHooks {')}\ninterface GateHooks { onLocked?: Array<() => void> }\n`,
+      expected: /runGatedPullSourceWrite\(options\.onLocked\)/,
+    },
+    {
+      form: 'a further exported function that takes a callback',
+      edit: (text) => `${text}\nexport const withGate = async (orgId: string, work: () => Promise<void>): Promise<void> => runPullSourceGateTransaction(orgId, work)\n`,
+      expected: /withGate\(work\)/,
+    },
+    {
+      form: 'a callback in a class constructor',
+      edit: (text) => `${text}\nexport class GateHandle { constructor(readonly run: Function) {} }\n`,
+      expected: /GateHandle\.constructor\(run\)/,
+    },
+  ]
+  for (const { form, edit, expected } of FURTHER_INPUTS) {
+    it(`positive control (${form}) is a third function input`, () => {
+      const surface = surfaceOf(edit(GATE_SOURCE))
+      expect(surface.functionInputs).not.toEqual(GATE_FUNCTION_INPUTS)
+      expect(surface.functionInputs.join('\n')).toMatch(expected)
+    })
+  }
+
+  const UNREADABLE: ReadonlyArray<{ form: string; edit: (text: string) => string; expected: RegExp }> = [
+    { form: 'a type declared in another module', edit: (text) => edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  hook?: ForeignHook\n'), expected: /options\.hook\): type ForeignHook is not declared in the module/ },
+    { form: 'the type any', edit: (text) => edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  hook?: any\n'), expected: /options\.hook\): type AnyKeyword is not read/ },
+    { form: 'the type object', edit: (text) => edited(text, '  lockRowId?: string\n', '  lockRowId?: string\n  hook?: object\n'), expected: /options\.hook\): type ObjectKeyword is not read/ },
+    { form: 'a bare type parameter', edit: (text) => `${text}\nexport function withAnything<W>(orgId: string, work: W): W { return work }\n`, expected: /withAnything\(work\): a bare type parameter W can be a function/ },
+    { form: 'a parameter without a type', edit: (text) => `${text}\nexport function withUntyped(work = () => undefined) { return work }\n`, expected: /withUntyped\(work\): no type annotation/ },
+    { form: 'a destructured parameter', edit: (text) => `${text}\nexport function withParts({ work }: { work: () => void }) { return work }\n`, expected: /the parameter is destructured/ },
+    { form: 'an exported object that holds a function', edit: (text) => `${text}\nexport const gate = { run: (work: () => void) => work() }\n`, expected: /gate: an exported value holds a function/ },
+    { form: 'an export clause', edit: (text) => `${text}\nexport { runPullSourceGateTransaction }\n`, expected: /the module exports through a clause/ },
+    { form: 'a default export', edit: (text) => `${text}\nexport default runPullSourceGateTransaction\n`, expected: /default or assignment export/ },
+  ]
+  for (const { form, edit, expected } of UNREADABLE) {
+    it(`positive control (${form}) is reported as unreadable`, () => {
+      expect(surfaceOf(edit(GATE_SOURCE)).unreadable.join('\n')).toMatch(expected)
+    })
+  }
+})
+
+// ── 3. the functions each call site hands over ─────────────────────────────────────────────────────
+
+const WRITE_OPTION_KEYS = ['lockRowId', 'joins', 'env'] as const
+const SQL_START = new RegExp(`^\\s*(?:INSERT\\s+INTO|UPDATE)\\s+${TABLE}(?![A-Za-z0-9_])`, 'i')
+/** What a write statement may not contain: a row-lock clause, an advisory-lock call, a table lock, a second statement. */
+const SQL_FORBIDDEN: ReadonlyArray<{ what: string; pattern: RegExp }> = [
+  { what: 'a row-lock clause', pattern: /\bFOR\s+(?:NO\s+KEY\s+UPDATE|UPDATE|KEY\s+SHARE|SHARE)\b/i },
+  { what: 'an advisory-lock call', pattern: /pg_(?:try_)?advisory/i },
+  { what: 'a table lock', pattern: /\bLOCK\s+TABLE\b/i },
+  { what: 'a second statement', pattern: /;/ },
+]
+
+interface CallSite { path: string; line: number; callee: string; owner: string }
+
+function ownerOf(node: ts.Node): string {
+  for (let cur: ts.Node | undefined = node.parent; cur; cur = cur.parent) {
+    if (ts.isFunctionDeclaration(cur) && cur.name) return cur.name.text
+    if (ts.isMethodDeclaration(cur) && ts.isIdentifier(cur.name)) return cur.name.text
+  }
+  return '<module>'
+}
+
+const unwrap = (node: ts.Expression): ts.Expression => {
+  let cur = node
+  while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur) || ts.isSatisfiesExpression(cur)) cur = cur.expression
+  return cur
+}
+
+/**
+ * The function an argument is: written in place, or the initializer of a `const` declared in a scope that
+ * encloses the call (a `const` cannot be assigned again). Anything else is not resolved.
+ */
+function resolveFunction(argument: ts.Expression, source: ts.SourceFile): ts.ArrowFunction | ts.FunctionExpression | string {
+  const expression = unwrap(argument)
+  if (isFunctionLike(expression)) return expression
+  if (!ts.isIdentifier(expression)) return `${ts.SyntaxKind[expression.kind]} is not a function written in the call or a constant of the calling function`
+  const name = expression.text
+  for (let scope: ts.Node | undefined = argument.parent; scope; scope = scope.parent) {
+    // A parameter of an enclosing function shadows any outer constant of the same name.
+    if (ts.isFunctionLike(scope) && scope.parameters.some((parameter) => parameter.name.getText(source) === name)) return `${name} is a parameter, not a function written here`
+    const statements = ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) ? scope.statements : undefined
+    if (!statements) continue
+    for (const statement of statements) {
+      if (ts.isFunctionDeclaration(statement) && statement.name?.text === name) return `${name} is a function declaration, not a constant holding a function expression`
+      if (!ts.isVariableStatement(statement)) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+        if (!(statement.declarationList.flags & ts.NodeFlags.Const)) return `${name} is not declared with const`
+        const initializer = declaration.initializer ? unwrap(declaration.initializer) : undefined
+        if (!initializer || !isFunctionLike(initializer)) return `${name} is not initialised with a function expression`
+        return initializer
+      }
+    }
+  }
+  return `${name} is not declared in a scope around the call`
+}
+
+const plainParameters = (fn: ts.ArrowFunction | ts.FunctionExpression, max: number): string[] | string => {
+  if (fn.parameters.length > max) return `takes ${fn.parameters.length} parameters`
+  const names: string[] = []
+  for (const parameter of fn.parameters) {
+    if (!ts.isIdentifier(parameter.name) || parameter.initializer || parameter.dotDotDotToken) return 'has a parameter that is not a plain name'
+    names.push(parameter.name.text)
+  }
+  return names
+}
+
+/** The single expression a function returns, or why it has none. */
+function soleExpression(fn: ts.ArrowFunction | ts.FunctionExpression): ts.Expression | string {
+  if ((ts.getModifiers(fn) ?? []).length > 0 || fn.asteriskToken) return 'is async or a generator'
+  if (!ts.isBlock(fn.body)) return unwrap(fn.body)
+  if (fn.body.statements.length !== 1) return `has ${fn.body.statements.length} statements`
+  const only = fn.body.statements[0]
+  if (!ts.isReturnStatement(only) || !only.expression) return 'does not consist of one return'
+  return unwrap(only.expression)
+}
+
+const isLiteralText = (node: ts.Node): node is ts.StringLiteral | ts.NoSubstitutionTemplateLiteral => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+const isMemberOf = (node: ts.Expression, object: string | undefined, member: string): boolean =>
+  object !== undefined && ts.isPropertyAccessExpression(node) && !node.questionDotToken && ts.isIdentifier(node.expression) && node.expression.text === object && node.name.text === member
+
+/** Whether `name` is a `const` declared outside `fn`, in a scope around it, that does not hold a function. */
+function isOuterConstant(node: ts.Expression, fn: ts.Node, own: readonly string[]): boolean {
+  if (!ts.isIdentifier(node) || own.includes(node.text)) return false
+  for (let scope: ts.Node | undefined = fn.parent; scope; scope = scope.parent) {
+    if (ts.isFunctionLike(scope) && scope.parameters.some((parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === node.text)) return false
+    const statements = ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope) ? scope.statements : undefined
+    for (const statement of statements ?? []) {
+      if (ts.isFunctionDeclaration(statement) && statement.name?.text === node.text) return false
+      if (!ts.isVariableStatement(statement)) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || declaration.name.text !== node.text) continue
+        if (!(statement.declarationList.flags & ts.NodeFlags.Const) || !declaration.initializer) return false
+        const initializer = unwrap(declaration.initializer)
+        return !isFunctionLike(initializer) && !ts.isClassExpression(initializer)
+      }
+    }
+  }
+  return false
+}
+
+/** Why a function is not a `write` of the allowed shape; empty when it is. */
+function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): string[] {
+  const names = plainParameters(fn, 2)
+  if (typeof names === 'string') return [`write ${names}`]
+  const [client, context] = names
+  const body = soleExpression(fn)
+  if (typeof body === 'string') return [`write ${body}`]
+  if (!ts.isCallExpression(body) || body.questionDotToken || !isMemberOf(body.expression, client, 'query')) {
+    return ['write is not one call of query on the connection it is given']
+  }
+  if (body.arguments.length < 1 || body.arguments.length > 2) return [`write passes ${body.arguments.length} arguments to query`]
+  const problems: string[] = []
+
+  const sqlText = (node: ts.Expression): void => {
+    if (!isLiteralText(node)) {
+      problems.push(`the statement is not a complete literal (${ts.SyntaxKind[node.kind]})`)
+      return
+    }
+    if (!SQL_START.test(node.text)) problems.push(`the statement does not start with an INSERT into, or an UPDATE of, ${TABLE}`)
+    for (const { what, pattern } of SQL_FORBIDDEN) if (pattern.test(node.text)) problems.push(`the statement holds ${what}`)
+  }
+  const sql = unwrap(body.arguments[0])
+  if (ts.isConditionalExpression(sql)) {
+    if (!isMemberOf(unwrap(sql.condition), context, 'gated')) problems.push('the statement is chosen by something other than context.gated')
+    sqlText(unwrap(sql.whenTrue))
+    sqlText(unwrap(sql.whenFalse))
+  } else {
+    sqlText(sql)
+  }
+
+  const constant = (node: ts.Expression): boolean => isOuterConstant(node, fn, names)
+  const parameterList = (node: ts.Expression): void => {
+    if (constant(node)) return
+    if (ts.isArrayLiteralExpression(node)) {
+      for (const element of node.elements) {
+        const ok = ts.isSpreadElement(element) ? constant(unwrap(element.expression)) : constant(element) || isMemberOf(element, context, 'lockedStatus')
+        if (!ok) problems.push(`a parameter is computed inside write (${ts.SyntaxKind[element.kind]})`)
+      }
+      return
+    }
+    problems.push(`the parameters are not a constant computed before the call (${ts.SyntaxKind[node.kind]})`)
+  }
+  if (body.arguments.length === 2) {
+    const params = unwrap(body.arguments[1])
+    if (ts.isConditionalExpression(params)) {
+      if (!isMemberOf(unwrap(params.condition), context, 'gated')) problems.push('the parameters are chosen by something other than context.gated')
+      parameterList(unwrap(params.whenTrue))
+      parameterList(unwrap(params.whenFalse))
+    } else {
+      parameterList(params)
+    }
+  }
+  return problems
+}
+
+const JOINS_OPERATORS = new Set([
+  ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
+])
+
+/** Why a function is not a `joins` of the allowed shape; empty when it is. */
+function joinsShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): string[] {
+  const names = plainParameters(fn, 1)
+  if (typeof names === 'string') return [`joins ${names}`]
+  const body = soleExpression(fn)
+  if (typeof body === 'string') return [`joins ${body}`]
+  const problems: string[] = []
+  const check = (node: ts.Expression): void => {
+    const expression = unwrap(node)
+    if (ts.isIdentifier(expression)) {
+      if (!names.includes(expression.text)) problems.push(`joins reads ${expression.text}`)
+    } else if (isLiteralText(expression) || ts.isNumericLiteral(expression)
+      || expression.kind === ts.SyntaxKind.TrueKeyword || expression.kind === ts.SyntaxKind.FalseKeyword || expression.kind === ts.SyntaxKind.NullKeyword) {
+      // a literal
+    } else if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+      check(expression.operand)
+    } else if (ts.isBinaryExpression(expression) && JOINS_OPERATORS.has(expression.operatorToken.kind)) {
+      check(expression.left)
+      check(expression.right)
+    } else if (ts.isConditionalExpression(expression)) {
+      check(expression.condition)
+      check(expression.whenTrue)
+      check(expression.whenFalse)
+    } else {
+      problems.push(`joins contains ${ts.SyntaxKind[expression.kind]}`)
+    }
+  }
+  check(body)
+  return problems
+}
+
+interface GateUse { sites: CallSite[]; problems: string[] }
+
+/** Every use of the gate's two entry functions in the given files, and what is wrong with each. */
+function gateUse(files: SourceFile[]): GateUse {
+  const sites: CallSite[] = []
+  const problems: string[] = []
+  for (const file of files) {
+    if (!file.text.includes(GATED_WRITE) && !file.text.includes(GATED_CLEAR)) continue
+    const source = parse(file.path, file.text)
+    const at = (node: ts.Node): string => `${file.path}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`
+    const visit = (node: ts.Node): void => {
+      const named = ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null
+      if (named === GATED_WRITE || named === GATED_CLEAR) {
+        const parent = node.parent
+        const isCall = ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node
+        const isPlainImport = ts.isIdentifier(node) && ts.isImportSpecifier(parent) && parent.name === node && parent.propertyName === undefined
+        const isDeclaration = file.path === GATE_MODULE && ts.isIdentifier(node) && ts.isFunctionDeclaration(parent) && parent.name === node
+        if (isCall) {
+          sites.push({ path: file.path, line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1, callee: named, owner: ownerOf(node) })
+          for (const problem of callProblems(parent, named, source)) problems.push(`${at(node)} ${problem}`)
+        } else if (!isPlainImport && !isDeclaration) {
+          problems.push(`${at(node)} uses ${named} other than by importing it under its own name and calling it`)
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+  }
+  return { sites, problems }
+}
+
+function callProblems(call: ts.CallExpression, callee: string, source: ts.SourceFile): string[] {
+  if (call.arguments.some((argument) => ts.isSpreadElement(argument))) return ['spreads its arguments']
+  if (callee === GATED_CLEAR) {
+    return call.arguments.length === 2 && !call.arguments.some((argument) => isFunctionLike(unwrap(argument)))
+      ? []
+      : ['is not a policy clear of an organisation and a purpose']
+  }
+  if (call.arguments.length < 2 || call.arguments.length > 3) return [`passes ${call.arguments.length} arguments`]
+  const problems: string[] = []
+  const write = resolveFunction(call.arguments[1], source)
+  if (typeof write === 'string') problems.push(`write: ${write}`)
+  else problems.push(...writeShapeProblems(write))
+  if (call.arguments.length === 3) {
+    const options = unwrap(call.arguments[2])
+    if (!ts.isObjectLiteralExpression(options)) return [...problems, 'options are not an object literal']
+    for (const property of options.properties) {
+      const key = property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ? property.name.text : null
+      if (key === null) {
+        problems.push('options hold a spread or a computed key')
+        continue
+      }
+      if (!(WRITE_OPTION_KEYS as readonly string[]).includes(key)) {
+        problems.push(`options hold the unknown key ${key}`)
+        continue
+      }
+      if (!ts.isPropertyAssignment(property)) {
+        problems.push(`options hold ${key} in a form other than key: value`)
+        continue
+      }
+      if (key !== 'joins') {
+        if (isFunctionLike(unwrap(property.initializer))) problems.push(`options.${key} is a function`)
+        continue
+      }
+      const joins = resolveFunction(property.initializer, source)
+      if (typeof joins === 'string') problems.push(`joins: ${joins}`)
+      else problems.push(...joinsShapeProblems(joins))
+    }
+  }
+  return problems
+}
+
+/** A caller module around one call of the gated write, for the controls below. */
+function callerWith(write: string, options?: string, prelude = ''): SourceFile[] {
+  const text = [
+    "import { runGatedPullSourceWrite, type PullSourceGateClient, type PullSourceWriteContext } from '../directory/pull-source-write-gate'",
+    "import { lockUsersForAccessGraphWrite } from '../directory/access-graph-mutex'",
+    "import { enterAuthorizationInputTransaction, withAuthorizationInputTransaction } from '../rbac/authorization-input-lock'",
+    "import { pool, query, transaction } from '../db/pg'",
+    'declare const plan: never',
+    'declare const target: never',
+    'declare const userIds: string[]',
+    'async function lockThenWrite(client: PullSourceGateClient) { await lockUsersForAccessGraphWrite(client as never, userIds); return client.query(`UPDATE directory_integrations SET name = $1`, []) }',
+    'async function lockOnSecondConnection() { return transaction((other) => lockUsersForAccessGraphWrite(other as never, userIds)) }',
+    'async function enterIndirectly() { return withAuthorizationInputTransaction(plan, async () => 1) }',
+    'export async function syntheticEntry(injected: (client: PullSourceGateClient) => Promise<unknown>) {',
+    '  const params: unknown[] = [1]',
+    '  let rebound = (client: PullSourceGateClient) => client.query(`UPDATE directory_integrations SET name = $1`, params)',
+    prelude,
+    `  return runGatedPullSourceWrite(target, ${write}${options === undefined ? '' : `, ${options}`})`,
+    '}',
+  ].join('\n')
+  return [{ path: 'directory/synthetic-entry.ts', text }]
+}
+
+const INSERT = '`INSERT INTO directory_integrations (org_id) VALUES ($1) RETURNING id`'
+const UPDATE = '`UPDATE directory_integrations SET name = $1 WHERE id = $2`'
+
+describe('every function handed to the gate has an allowed shape', () => {
+  it('production source calls the gated write twice and the policy clear once, and each call passes', () => {
+    const use = gateUse(SOURCE)
+    expect(SOURCE.length).toBeGreaterThan(100)
+    expect(use.sites.map((site) => `${site.path}:${site.owner}:${site.callee}`).sort()).toEqual([
+      `${SYNC}:createDirectoryIntegration:${GATED_WRITE}`,
+      `${SYNC}:updateDirectoryIntegration:${GATED_WRITE}`,
+      `${ROUTING_POLICY_ROUTE}:${'adminDirectoryRoutingPolicyRouter'}:${GATED_CLEAR}`,
+    ].sort())
+    expect(use.problems).toEqual([])
+  })
+
+  it('the two production writes are read as the functions they are: one statement each, on the connection they are given', () => {
+    const file = SOURCE.find((entry) => entry.path === SYNC)!
+    const source = parse(file.path, file.text)
+    const found: Array<{ owner: string; sql: string[]; joins: boolean }> = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === GATED_WRITE) {
+        const write = resolveFunction(node.arguments[1], source)
+        expect(typeof write).not.toBe('string')
+        const body = soleExpression(write as ts.ArrowFunction)
+        const sql: string[] = []
+        const collect = (inner: ts.Node): void => {
+          if (isLiteralText(inner)) sql.push(inner.text.trim().split(/\s+/).slice(0, 3).join(' '))
+          ts.forEachChild(inner, collect)
+        }
+        collect(body as ts.Expression)
+        found.push({ owner: ownerOf(node), sql, joins: node.arguments.length === 3 && node.arguments[2].getText(source).includes('joins:') })
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    expect(found).toEqual([
+      { owner: 'createDirectoryIntegration', sql: ['INSERT INTO directory_integrations'], joins: false },
+      { owner: 'updateDirectoryIntegration', sql: ['UPDATE directory_integrations SET', 'UPDATE directory_integrations SET'], joins: true },
+    ])
+  })
+
+  const ALLOWED: ReadonlyArray<{ form: string; write: string; options?: string; prelude?: string }> = [
+    { form: 'an insert written in the call', write: `(client) => client.query(${INSERT}, params)` },
+    { form: 'an update held in a constant of the calling function', write: 'update', prelude: `  const update = (client: PullSourceGateClient) => client.query(${UPDATE}, params)` },
+    { form: 'a function expression with one return', write: `function (client) { return client.query(${UPDATE}, params) }` },
+    { form: 'a statement without parameters', write: `(client) => client.query(${INSERT})` },
+    {
+      form: 'a statement and parameters chosen by context.gated, with the locked status last',
+      write: `(client, context) => client.query(context.gated ? ${UPDATE} : ${INSERT}, context.gated ? [...params, context.lockedStatus] : params)`,
+    },
+    { form: 'a double-quoted literal', write: '(client) => client.query("UPDATE directory_integrations SET name = $1", params)' },
+    { form: 'a judgement over the locked status', write: `(client) => client.query(${UPDATE}, params)`, options: "{ lockRowId: 'id', joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active' }" },
+    { form: 'a judgement that is a constant answer', write: `(client) => client.query(${UPDATE}, params)`, options: '{ joins: () => false, env: process.env }' },
+    { form: 'a judgement held in a constant', write: `(client) => client.query(${UPDATE}, params)`, options: '{ joins: judge }', prelude: "  const judge = (status: string | null) => (status === 'paused' ? true : !status)" },
+  ]
+  for (const { form, write, options, prelude } of ALLOWED) {
+    it(`control (${form}) passes`, () => {
+      const use = gateUse(callerWith(write, options, prelude))
+      expect(use.sites).toHaveLength(1)
+      expect(use.problems).toEqual([])
+    })
+  }
+
+  const REFUSED_WRITES: ReadonlyArray<{ form: string; write: string; prelude?: string; expected: RegExp }> = [
+    // The five ways a caller's function could take an authorization-input lock.
+    { form: 'an authorization-input entry point called in the body', write: `async (client) => { await withAuthorizationInputTransaction(plan, async () => 1); return client.query(${UPDATE}, params) }`, expected: /write is async or a generator/ },
+    { form: 'the takeover entry point on the gate connection', write: `(client) => enterAuthorizationInputTransaction(client as never, plan, [], async () => client.query(${UPDATE}, params))`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a user-row lock helper called in the body', write: `(client) => { lockUsersForAccessGraphWrite(client as never, userIds); return client.query(${UPDATE}, params) }`, expected: /write has 2 statements/ },
+    { form: 'an entry point reached through another function', write: '() => enterIndirectly()', expected: /write is not one call of query on the connection it is given/ },
+    { form: 'an entry point on a second connection', write: `(client) => transaction((other) => other.query(${UPDATE}, params))`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a lock helper reached through another function, on the gate connection', write: '(client) => lockThenWrite(client)', expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a lock helper reached through another function, on a second connection', write: '() => lockOnSecondConnection()', expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a named function that locks first', write: 'lockThenWrite', expected: /write: lockThenWrite is a function declaration/ },
+    // Statements on anything but the connection the gate hands over.
+    { form: 'the pool instead of the gate connection', write: `() => query(${UPDATE}, params)`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a pool object', write: `() => pool.query(${UPDATE}, params)`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'the second parameter used as the connection', write: `(client, context) => (context as never as PullSourceGateClient).query(${UPDATE}, params)`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'another method of the connection', write: `(client) => (client as never as { release: (sql: string) => Promise<unknown> }).release(${UPDATE})`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'an element access', write: `(client) => client['query'](${UPDATE}, params)`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'an optional call', write: `(client) => client?.query(${UPDATE}, params)`, expected: /write is not one call of query on the connection it is given/ },
+    // More than the one statement.
+    { form: 'two statements', write: `(client) => Promise.all([client.query(${UPDATE}, params), client.query(${INSERT}, params)])`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'a statement then a mapping', write: `(client) => client.query(${UPDATE}, params).then((result) => result.rows[0])`, expected: /write is not one call of query on the connection it is given/ },
+    { form: 'an awaited statement', write: `async (client) => (await client.query(${UPDATE}, params)).rows`, expected: /write is async or a generator/ },
+    { form: 'an async function', write: `async (client) => client.query(${UPDATE}, params)`, expected: /write is async or a generator/ },
+    { form: 'a body with a declaration', write: `(client) => { const sql = ${UPDATE}; return client.query(sql, params) }`, expected: /write has 2 statements/ },
+    { form: 'a body that returns nothing', write: `(client) => { void client.query(${UPDATE}, params) }`, expected: /write does not consist of one return/ },
+    { form: 'a third argument to query', write: `(client) => client.query(${UPDATE}, params, 1)`, expected: /write passes 3 arguments to query/ },
+    { form: 'three parameters', write: `(client, context, extra) => client.query(${UPDATE}, params)`, expected: /write takes 3 parameters/ },
+    { form: 'a destructured parameter', write: `({ query: run }) => run(${UPDATE}, params)`, expected: /write has a parameter that is not a plain name/ },
+    { form: 'a default parameter', write: `(client, context = { gated: false, lockedStatus: null, joined: false }) => client.query(${UPDATE}, params)`, expected: /write has a parameter that is not a plain name/ },
+    // The statement text.
+    { form: 'a row-lock read', write: '(client) => client.query(`SELECT id FROM directory_integrations WHERE id = $1 FOR UPDATE`, params)', expected: /the statement does not start with an INSERT into, or an UPDATE of, directory_integrations[\s\S]*the statement holds a row-lock clause/ },
+    { form: 'an update with a FOR SHARE subquery', write: '(client) => client.query(`UPDATE directory_integrations SET name = (SELECT name FROM users WHERE id = $1 FOR SHARE)`, params)', expected: /the statement holds a row-lock clause/ },
+    { form: 'an update with a FOR NO KEY UPDATE subquery', write: '(client) => client.query(`UPDATE directory_integrations SET name = (SELECT name FROM users WHERE id = $1 for no key update)`, params)', expected: /the statement holds a row-lock clause/ },
+    { form: 'an insert that takes an advisory lock', write: '(client) => client.query(`INSERT INTO directory_integrations (org_id) SELECT $1 FROM (SELECT pg_advisory_xact_lock(1)) AS held`, params)', expected: /the statement holds an advisory-lock call/ },
+    { form: 'a second statement', write: '(client) => client.query(`UPDATE directory_integrations SET name = $1; SELECT 1`, params)', expected: /the statement holds a second statement/ },
+    { form: 'a table lock', write: '(client) => client.query(`UPDATE directory_integrations SET name = $1 /* then */ ; LOCK TABLE users`, params)', expected: /the statement holds a table lock/ },
+    { form: 'another table', write: '(client) => client.query(`UPDATE users SET name = $1`, params)', expected: /the statement does not start with an INSERT into, or an UPDATE of, directory_integrations/ },
+    { form: 'a table whose name only starts the same', write: '(client) => client.query(`UPDATE directory_integrations_archive SET name = $1`, params)', expected: /the statement does not start with/ },
+    { form: 'a delete', write: '(client) => client.query(`DELETE FROM directory_integrations WHERE id = $1`, params)', expected: /the statement does not start with/ },
+    { form: 'a CTE in front', write: '(client) => client.query(`WITH held AS (SELECT 1) UPDATE directory_integrations SET name = $1`, params)', expected: /the statement does not start with/ },
+    { form: 'a template with a substitution', write: '(client, context) => client.query(`UPDATE directory_integrations SET name = $1${context.gated ? " AND status = $2" : ""}`, params)', expected: /the statement is not a complete literal \(TemplateExpression\)/ },
+    { form: 'a concatenated statement', write: "(client) => client.query('UPDATE directory_integrations ' + 'SET name = $1', params)", expected: /the statement is not a complete literal \(BinaryExpression\)/ },
+    { form: 'a statement held in a name', write: '(client) => client.query(sql, params)', prelude: `  const sql = ${UPDATE}`, expected: /the statement is not a complete literal \(Identifier\)/ },
+    { form: 'a statement chosen by something else', write: `(client, context) => client.query(context.joined ? ${UPDATE} : ${INSERT}, params)`, expected: /the statement is chosen by something other than context\.gated/ },
+    { form: 'one branch that is not an integration write', write: `(client, context) => client.query(context.gated ? ${UPDATE} : \`SELECT 1\`, params)`, expected: /the statement does not start with/ },
+    // The parameters.
+    { form: 'parameters built in the body', write: `(client) => client.query(${UPDATE}, [JSON.stringify(userIds)])`, expected: /a parameter is computed inside write \(CallExpression\)/ },
+    { form: 'parameters returned by a call', write: `(client) => client.query(${UPDATE}, userIds.slice())`, expected: /the parameters are not a constant computed before the call \(CallExpression\)/ },
+    { form: 'a parameter read off the context other than the locked status', write: `(client, context) => client.query(${UPDATE}, [...params, context.joined])`, expected: /a parameter is computed inside write \(PropertyAccessExpression\)/ },
+    { form: 'a function among the parameters', write: `(client) => client.query(${UPDATE}, [lockThenWrite])`, expected: /a parameter is computed inside write \(Identifier\)/ },
+    { form: 'parameters that are a parameter of the calling function', write: `(client) => client.query(${UPDATE}, injected as never)`, expected: /the parameters are not a constant computed before the call/ },
+    { form: 'parameters chosen by something else', write: `(client, context) => client.query(${UPDATE}, context.joined ? params : params)`, expected: /the parameters are chosen by something other than context\.gated/ },
+    // A function the guard cannot see.
+    { form: 'a parameter of the calling function', write: 'injected', expected: /write: injected is a parameter, not a function written here/ },
+    { form: 'an imported function', write: 'query as never', expected: /write: query is not declared in a scope around the call/ },
+    { form: 'a let binding', write: 'rebound', expected: /write: rebound is not declared with const/ },
+    { form: 'a var binding', write: 'hoisted', prelude: `  var hoisted = (client: PullSourceGateClient) => client.query(${UPDATE}, params)`, expected: /write: hoisted is not declared with const/ },
+    { form: 'a constant that holds a call result', write: 'made', prelude: '  const made = ((): never => lockThenWrite as never)()', expected: /write: made is not initialised with a function expression/ },
+    { form: 'a member of an object', write: 'writers.update', prelude: `  const writers = { update: (client: PullSourceGateClient) => client.query(${UPDATE}, params) }`, expected: /write: PropertyAccessExpression is not a function written in the call/ },
+    { form: 'a bound function', write: 'lockThenWrite.bind(null)', expected: /write: CallExpression is not a function written in the call/ },
+    { form: 'a conditional between two functions', write: `userIds.length ? lockThenWrite : (client: PullSourceGateClient) => client.query(${UPDATE}, params)`, expected: /write: ConditionalExpression is not a function written in the call/ },
+  ]
+  for (const { form, write, prelude, expected } of REFUSED_WRITES) {
+    it(`positive control, write (${form}) fails`, () => {
+      const use = gateUse(callerWith(write, undefined, prelude))
+      expect(use.sites).toHaveLength(1)
+      expect(use.problems.join('\n')).toMatch(expected)
+      for (const problem of use.problems) expect(problem).toContain('directory/synthetic-entry.ts:')
+    })
+  }
+
+  const REFUSED_OPTIONS: ReadonlyArray<{ form: string; options: string; prelude?: string; expected: RegExp }> = [
+    { form: 'a judgement that calls an entry point', options: '{ joins: () => { void withAuthorizationInputTransaction(plan, async () => 1); return true } }', expected: /joins has 2 statements/ },
+    { form: 'a judgement that calls a function', options: '{ joins: (status) => userIds.includes(String(status)) }', expected: /joins contains CallExpression/ },
+    { form: 'a judgement that calls a method of its parameter', options: "{ joins: (status) => status?.startsWith('a') === true }", expected: /joins contains CallExpression/ },
+    { form: 'a judgement that reads a property', options: '{ joins: (status) => status?.length === 6 }', expected: /joins contains PropertyAccessExpression/ },
+    { form: 'a judgement that awaits', options: '{ joins: (async (status: string | null) => (await enterIndirectly()) === 1) as never }', expected: /joins is async or a generator/ },
+    { form: 'a judgement that reads an outer name', options: '{ joins: (status) => status === String }', expected: /joins reads String/ },
+    { form: 'a judgement that reads undefined by name', options: '{ joins: (status) => status !== undefined }', expected: /joins reads undefined/ },
+    { form: 'a judgement with a template', options: '{ joins: (status) => `${status}` === "paused" }', expected: /joins contains TemplateExpression/ },
+    { form: 'a judgement that constructs', options: '{ joins: (status) => new Boolean(status) as never }', expected: /joins contains NewExpression/ },
+    { form: 'a judgement that assigns', options: '{ joins: (status) => (userIds.length = 0) === 0 }', expected: /joins contains BinaryExpression/ },
+    { form: 'a judgement with two parameters', options: '{ joins: ((status: string | null, extra: unknown) => status === extra) as never }', expected: /joins takes 2 parameters/ },
+    { form: 'a judgement the guard cannot see', options: '{ joins: injected as never }', expected: /joins: injected is a parameter, not a function written here/ },
+    { form: 'a judgement written as a method', options: '{ joins() { return true } }', expected: /options hold joins in a form other than key: value/ },
+    { form: 'a judgement in shorthand', options: '{ joins }', prelude: '  const joins = () => true', expected: /options hold joins in a form other than key: value/ },
+    { form: 'spread options', options: '{ ...extra }', prelude: '  const extra = { joins: () => true }', expected: /options hold a spread or a computed key/ },
+    { form: 'a computed key', options: "{ ['joins']: () => true }", expected: /options hold a spread or a computed key/ },
+    { form: 'an unknown key', options: '{ lockTarget: async () => null } as never', expected: /options hold the unknown key lockTarget/ },
+    { form: 'a function under a data key', options: '{ lockRowId: (() => "id") as never }', expected: /options\.lockRowId is a function/ },
+    { form: 'options held in a name', options: 'extra', prelude: '  const extra = { joins: () => true }', expected: /options are not an object literal/ },
+  ]
+  for (const { form, options, prelude, expected } of REFUSED_OPTIONS) {
+    it(`positive control, options (${form}) fails`, () => {
+      const use = gateUse(callerWith(`(client) => client.query(${UPDATE}, params)`, options, prelude))
+      expect(use.sites).toHaveLength(1)
+      expect(use.problems.join('\n')).toMatch(expected)
+    })
+  }
+
+  const HIDDEN_CALLS: ReadonlyArray<{ form: string; code: string; expected: RegExp }> = [
+    { form: 'the gated write under another name', code: "import { runGatedPullSourceWrite as gated } from '../directory/pull-source-write-gate'\nexport const hidden0 = gated", expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
+    { form: 'the gated write bound to a constant', code: 'declare function runGatedPullSourceWrite(...a: unknown[]): unknown\nexport const hidden1 = runGatedPullSourceWrite', expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
+    { form: 'the gated write read by its name as a string', code: "declare const gateModule: Record<string, unknown>\nexport const hidden2 = gateModule['runGatedPullSourceWrite']", expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
+    { form: 'the gated write re-exported', code: "export { runGatedPullSourceWrite } from '../directory/pull-source-write-gate'", expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
+    { form: 'spread arguments', code: 'declare function runGatedPullSourceWrite(...a: unknown[]): unknown\ndeclare const args: unknown[]\nexport const hidden3 = () => runGatedPullSourceWrite(...args)', expected: /spreads its arguments/ },
+    { form: 'the policy clear handed a function', code: 'declare function runGatedRoutingPolicyClear(...a: unknown[]): unknown\nexport const hidden4 = () => runGatedRoutingPolicyClear("org", async () => undefined)', expected: /is not a policy clear of an organisation and a purpose/ },
+    { form: 'the policy clear under another name', code: "import { runGatedRoutingPolicyClear as clear } from '../directory/pull-source-write-gate'\nexport const hidden5 = clear", expected: /uses runGatedRoutingPolicyClear other than by importing it under its own name and calling it/ },
+  ]
+  for (const { form, code, expected } of HIDDEN_CALLS) {
+    it(`positive control (${form}) fails wherever it is added`, () => {
+      for (const path of ['routes/admin-directory.ts', 'directory/controlled-handover.ts', 'services/ApprovalDirectoryOrg.ts']) {
+        expect(SOURCE.some((file) => file.path === path), path).toBe(true)
+        const problems = gateUse(SOURCE.map((file) => (file.path === path ? { ...file, text: `${file.text}\n${code}\n` } : file))).problems.join('\n')
+        expect(problems, path).toMatch(expected)
+        expect(problems, path).toContain(`${path}:`)
+      }
+      // A JavaScript source file is read the same way.
+      const javascript = code.split('\n').filter((line) => !line.startsWith('declare ')).join('\n')
+      expect(gateUse([...SOURCE, { path: 'legacy/hidden.js', text: javascript }]).problems.join('\n')).toMatch(expected)
+    })
+  }
+
+  it('positive control: each production write turned into a function that does more fails', () => {
+    const sync = SOURCE.find((file) => file.path === SYNC)!
+    const withSync = (text: string): SourceFile[] => SOURCE.map((file) => (file.path === SYNC ? { ...file, text } : file))
+    // The create statement with its parameters built in the function again.
+    const inlineParams = edited(sync.text, '`,\n    insertParams,\n  )', '`,\n    [...insertParams, normalizeStoredSecretValue(normalized.appSecret)],\n  )')
+    expect(gateUse(withSync(inlineParams)).problems.join('\n')).toMatch(/a parameter is computed inside write \(CallExpression\)/)
+    // The save preceded by a user-row lock on the gate connection.
+    const lockFirst = edited(
+      sync.text,
+      'const update = (client: PullSourceGateClient, context: PullSourceWriteContext) => client.query(',
+      'const update = async (client: PullSourceGateClient, context: PullSourceWriteContext) => (await lockUsersForAccessGraphWrite(client as never, [integrationId]), client).query(',
+    )
+    expect(gateUse(withSync(lockFirst)).problems.join('\n')).toMatch(/write is async or a generator/)
+    // The judgement reading the status from the row read before the transaction.
+    const staleJudgement = edited(sync.text, "joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',", "joins: () => current.status !== 'active',")
+    expect(gateUse(withSync(staleJudgement)).problems.join('\n')).toMatch(/joins contains PropertyAccessExpression/)
+  })
+})
