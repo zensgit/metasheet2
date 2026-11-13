@@ -21,11 +21,14 @@
  *         in one pair only, both halves together or neither: SQL as `context.gated ? literal : literal`
  *         with PARAMS as `context.gated ? [...C, context.lockedStatus] : C`. C is one constant, the
  *         same in both lists, whose initial value is an array literal. The locked status stands once,
- *         last, and in the gated list alone. The highest `$n` of the gated text is one above that of
- *         the other text, and every `$n` of the two texts is a parameter: neither text holds a
- *         comment, a quote, a `$` inside a name or a `$` that no number follows. Written any other
- *         way, the pair fails, and so does `context.lockedStatus` in parameters the pair does not
- *         choose.
+ *         last, and in the gated list alone. Each text names its parameters from `$1` up with none
+ *         left out, and the highest `$n` of the gated text is one above that of the other text: the
+ *         other text names `$1` to `$m` and the gated text `$1` to `$m+1`, each of them and no other.
+ *         Every `$n` of the two texts is a parameter: neither text holds a comment, a quote, a `$`
+ *         inside a name or a `$` that no number follows. `context` is the second parameter of the
+ *         function itself, under whatever name: `.gated` or `.lockedStatus` of any other object, the
+ *         first parameter included, is not the pair. Written any other way, the pair fails, and so
+ *         does `context.lockedStatus` in parameters the pair does not choose.
  *       - `joins`: `(lockedStatus) => expression` over its own parameter and literals, with `===`, `!==`,
  *         `&&`, `||`, `??`, `!` and `?:`. No call, no `await`, no other name.
  *     The function must be visible: written in the call, or held in a name. A name is read the way the
@@ -611,6 +614,8 @@ function notAConstant(node: ts.Expression, spread = false): string {
 
 /** The highest `$n` a statement text names; 0 when it names none. */
 const highestPlaceholder = (text: string): number => Math.max(0, ...(text.match(/\$\d+/g) ?? []).map((name) => Number(name.slice(1))))
+/** The numbers of the `$n` a statement text names, each number once, lowest first. */
+const namedParameters = (text: string): number[] => [...new Set((text.match(/\$\d+/g) ?? []).map((name) => Number(name.slice(1))))].sort((a, b) => a - b)
 /**
  * Where a `$n` in a statement text is not a parameter of the statement: in a comment, in a quoted text
  * or a quoted name, in a name that is not quoted, in a dollar-quoted text. A text that holds none of
@@ -664,6 +669,18 @@ function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): strin
         if (text !== null && pattern.test(text)) problems.push(`the statement ${where} a gate transaction holds ${what}, where a $n is not a parameter`)
       }
     }
+    // Each text names its parameters from $1 up with none left out. With the comparison below, the text
+    // outside a gate transaction names $1 to $m and the text inside one $1 to $m+1: the one parameter
+    // more is a number the other text does not name, and no number is skipped or named in its place.
+    const numbering = (where: 'inside' | 'outside', text: string | null): void => {
+      if (text === null) return
+      const named = namedParameters(text)
+      if (named.includes(0) || named.length !== highestPlaceholder(text)) {
+        problems.push(`the statement ${where} a gate transaction names ${named.map((n) => `$${n}`).join(', ')}, which is not $1 up to the highest of them with none left out`)
+      }
+    }
+    numbering('inside', gated)
+    numbering('outside', plain)
     // The gated text takes the locked status as one parameter more, after the parameters of the other text.
     if (gated !== null && plain !== null && highestPlaceholder(gated) !== highestPlaceholder(plain) + 1) {
       problems.push(`the statement inside a gate transaction does not name exactly one parameter more than the statement outside one ($${highestPlaceholder(gated)} against $${highestPlaceholder(plain)})`)
@@ -924,6 +941,17 @@ describe('every function handed to the gate has an allowed shape', () => {
       form: 'the pair with parameters against a cast, a bracket and an operator',
       write: '(client, context) => client.query(context.gated ? `UPDATE directory_integrations SET name = $1::text WHERE id IN ($2) AND status=$3` : `UPDATE directory_integrations SET name = $1::text WHERE id IN ($2)`, context.gated ? [...params, context.lockedStatus] : params)',
     },
+    // A text that names no parameter leaves no number out.
+    {
+      form: 'the pair whose text outside a gate transaction names no parameter',
+      write: '(client, context) => client.query(context.gated ? `UPDATE directory_integrations SET name = NULL WHERE status = $1` : `UPDATE directory_integrations SET name = NULL`, context.gated ? [...none, context.lockedStatus] : none)',
+      prelude: '  const none: unknown[] = []',
+    },
+    // The pair is read off the second parameter of the function, whatever the two parameters are called.
+    {
+      form: 'the pair read off the second parameter under another name',
+      write: `(connection, gate) => connection.query(gate.gated ? ${GATED_UPDATE} : ${UPDATE}, gate.gated ? [...params, gate.lockedStatus] : params)`,
+    },
     { form: 'constants written in a list, one of them spread', write: `(client) => client.query(${UPDATE}, [...params, extra])`, prelude: '  const extra = 2' },
     { form: 'a double-quoted literal', write: '(client) => client.query("UPDATE directory_integrations SET name = $1", params)' },
     { form: 'a judgement over the locked status', write: `(client) => client.query(${UPDATE}, params)`, options: "{ lockRowId: 'id', joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active' }" },
@@ -1040,6 +1068,9 @@ describe('every function handed to the gate has an allowed shape', () => {
   const NO_STATUS_LAST = 'the parameters inside a gate transaction do not end with context.lockedStatus'
   const notOneMore = (gated: number, plain: number): string => `the statement inside a gate transaction does not name exactly one parameter more than the statement outside one ($${gated} against $${plain})`
   const holds = (where: 'inside' | 'outside', what: string): string => `the statement ${where} a gate transaction holds ${what}, where a $n is not a parameter`
+  const numbered = (where: 'inside' | 'outside', ...named: number[]): string => `the statement ${where} a gate transaction names ${named.map((n) => `$${n}`).join(', ')}, which is not $1 up to the highest of them with none left out`
+  /** The numbers 1 to `highest`. */
+  const upTo = (highest: number): number[] => Array.from({ length: highest }, (_, index) => index + 1)
   /** The pair with more at the end of the text inside a gate transaction, which otherwise names $1 and $2. */
   const gatedEnding = (ending: string): string => paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $2' + ending + '` : ' + UPDATE, PAIRED_PARAMS)
   /** The pair with a column of the text inside a gate transaction under another name; the text names $1 and $2. */
@@ -1049,6 +1080,8 @@ describe('every function handed to the gate has an allowed shape', () => {
   const plainNotAlone = (kind: string): string => `the parameters outside a gate transaction are not a constant on its own (${kind})`
   const notBuiltOn = (why: string): string => `the parameters chosen by context.gated are not built on a list computed before the call: ${why}`
   const OTHER = '  const other: unknown[] = [2]'
+  /** An object of the calling function with the two members the pair reads off `context`. */
+  const FLAGS = "  const flags = { gated: true, lockedStatus: 'active' }"
 
   it('control (the pair, as the controls below start from it) passes', () => {
     const use = gateUse(callerWith(paired(PAIRED_SQL, PAIRED_PARAMS), undefined, OTHER))
@@ -1082,6 +1115,24 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'the parameters chosen by a comparison of context.gated', write: paired(PAIRED_SQL, 'context.gated === true ? [...params, context.lockedStatus] : params'), problems: [PARAMS_NOT_BY_GATED] },
     { form: 'the statement chosen by the negation of context.gated', write: paired(`!context.gated ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [SQL_NOT_BY_GATED] },
     { form: 'the statement chosen by another member of context', write: paired(`context.joined ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [SQL_NOT_BY_GATED] },
+    // What is read: the second parameter of the function. The same members of any other object are not the pair.
+    { form: 'the statement chosen by .gated of an object that is not context', write: paired(`flags.gated ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), prelude: FLAGS, problems: [SQL_NOT_BY_GATED] },
+    { form: 'the parameters chosen by .gated of an object that is not context', write: paired(PAIRED_SQL, 'flags.gated ? [...params, context.lockedStatus] : params'), prelude: FLAGS, problems: [PARAMS_NOT_BY_GATED] },
+    { form: '.lockedStatus of an object that is not context last', write: paired(PAIRED_SQL, 'context.gated ? [...params, flags.lockedStatus] : params'), prelude: FLAGS, problems: [NO_STATUS_LAST] },
+    { form: 'the statement chosen by .gated of the connection', write: paired(`client.gated ? ${GATED_UPDATE} : ${UPDATE}`, PAIRED_PARAMS), problems: [SQL_NOT_BY_GATED] },
+    { form: 'the parameters chosen by .gated of the connection', write: paired(PAIRED_SQL, 'client.gated ? [...params, context.lockedStatus] : params'), problems: [PARAMS_NOT_BY_GATED] },
+    { form: '.lockedStatus of the connection last', write: paired(PAIRED_SQL, 'context.gated ? [...params, client.lockedStatus] : params'), problems: [NO_STATUS_LAST] },
+    {
+      form: 'a function of one parameter that reads the pair off a context of the calling function',
+      write: `(client) => client.query(${PAIRED_SQL}, ${PAIRED_PARAMS})`,
+      prelude: "  const context = { gated: true, lockedStatus: 'active' }",
+      problems: [SQL_NOT_BY_GATED, PARAMS_NOT_BY_GATED, NO_STATUS_LAST],
+    },
+    {
+      form: 'a function of one parameter that reads the pair off the connection',
+      write: `(client) => client.query(client.gated ? ${GATED_UPDATE} : ${UPDATE}, client.gated ? [...params, client.lockedStatus] : params)`,
+      problems: [SQL_NOT_BY_GATED, PARAMS_NOT_BY_GATED, NO_STATUS_LAST],
+    },
     // The constant the two lists are built on.
     { form: 'a constant that holds a call result', write: paired(PAIRED_SQL, 'context.gated ? [...copied, context.lockedStatus] : copied'), prelude: '  const copied = userIds.slice()', problems: [notBuiltOn('copied is spread and its initial value is not an array literal')] },
     { form: 'a constant that is an object with its own iteration', write: paired(PAIRED_SQL, 'context.gated ? [...iterable, context.lockedStatus] : iterable'), prelude: '  const iterable = { *[Symbol.iterator]() { yield userIds } }', problems: [notBuiltOn('iterable is spread and its initial value is not an array literal')] },
@@ -1101,6 +1152,39 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'one text that is not an integration write', write: paired(`context.gated ? ${GATED_UPDATE} : \`SELECT $1, $2\``, PAIRED_PARAMS), problems: ['the statement does not start with an INSERT into, or an UPDATE of, directory_integrations'] },
     { form: 'one text with a row-lock clause', write: paired('context.gated ? `UPDATE directory_integrations SET name = (SELECT name FROM users WHERE id = $1 FOR SHARE) WHERE id = $2 AND status = $3` : ' + UPDATE, PAIRED_PARAMS), problems: ['the statement holds a row-lock clause'] },
     { form: 'a choice inside a choice', write: paired(`context.gated ? (context.joined ? ${GATED_UPDATE} : ${GATED_UPDATE}) : ${UPDATE}`, PAIRED_PARAMS), problems: ['the statement is not a complete literal (ConditionalExpression)'] },
+    // The numbers the two texts name. In each control below but the last, the highest `$n` inside a gate
+    // transaction is one above the highest outside one, and a number is left out all the same.
+    {
+      form: 'the status guard in the text outside a gate transaction, the text inside one numbered one higher',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $4` : ' + GATED_UPDATE, PAIRED_PARAMS),
+      problems: [numbered('inside', 1, 4)],
+    },
+    {
+      form: 'the status guard in the text outside a gate transaction, the text inside one with a higher parameter that guards nothing',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $2 AND $4::text IS NOT NULL` : ' + GATED_UPDATE, PAIRED_PARAMS),
+      problems: [numbered('inside', 1, 2, 4)],
+    },
+    { form: 'a number left out inside a gate transaction', write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $3` : ' + UPDATE, PAIRED_PARAMS), problems: [numbered('inside', 1, 3)] },
+    {
+      form: 'a number left out outside a gate transaction',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $1, corp_id = $2 WHERE id = $3 AND status = $4` : `UPDATE directory_integrations SET name = $1 WHERE id = $3`', PAIRED_PARAMS),
+      problems: [numbered('outside', 1, 3)],
+    },
+    {
+      form: 'a parameter numbered zero in place of the first',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $2 WHERE id = $3 AND status = $0` : ' + UPDATE, PAIRED_PARAMS),
+      problems: [numbered('inside', 0, 2, 3)],
+    },
+    {
+      form: 'a number left out in each of the two texts',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $3 AND status = $5` : `UPDATE directory_integrations SET name = $2 WHERE id = $4`', PAIRED_PARAMS),
+      problems: [numbered('inside', 1, 3, 5), numbered('outside', 2, 4)],
+    },
+    {
+      form: 'a number left out and the highest parameter not one above',
+      write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $3` : `UPDATE directory_integrations SET name = $1 WHERE id = $2 AND status = $3`', PAIRED_PARAMS),
+      problems: [numbered('inside', 1, 3), notOneMore(3, 3)],
+    },
     // A `$n` that is not a parameter of its text. Counted as one, each of the texts below would pass:
     // the highest `$n` inside a gate transaction is one above the highest outside one.
     { form: 'the one parameter more named in a line comment and nowhere else', write: gatedEnding(' -- AND status = $3'), problems: [holds('inside', 'a line comment')] },
@@ -1108,7 +1192,7 @@ describe('every function handed to the gate has an allowed shape', () => {
     {
       form: 'the two texts the other way round, the one inside a gate transaction with a comment that names a higher parameter',
       write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $2 /* $4 */` : ' + GATED_UPDATE, PAIRED_PARAMS),
-      problems: [holds('inside', 'a block comment')],
+      problems: [holds('inside', 'a block comment'), numbered('inside', 1, 2, 4)],
     },
     { form: 'the one parameter more named in a quoted text and nowhere else', write: gatedEnding(" AND name <> '$3'"), problems: [holds('inside', 'a single quote')] },
     { form: 'the one parameter more named in a quoted name and nowhere else', write: gatedColumn('"$3"'), problems: [holds('inside', 'a double quote')] },
@@ -1131,7 +1215,7 @@ describe('every function handed to the gate has an allowed shape', () => {
     {
       form: 'a parameter of the text outside a gate transaction named in a comment and nowhere else',
       write: paired('context.gated ? `UPDATE directory_integrations SET name = $1 WHERE id = $2 AND status = $4` : `UPDATE directory_integrations SET name = $1 WHERE id = $2 /* $3 */`', PAIRED_PARAMS),
-      problems: [holds('outside', 'a block comment')],
+      problems: [holds('outside', 'a block comment'), numbered('inside', 1, 2, 4)],
     },
     {
       form: 'a quoted text in the text outside a gate transaction',
@@ -1343,7 +1427,18 @@ describe('every function handed to the gate has an allowed shape', () => {
       ' AND corp_id = $11 AND status = $12\n',
     )
     expect(guardMovedOut.indexOf(' AND corp_id = $11 /* $13 */\n')).toBeLessThan(guardMovedOut.indexOf(' AND corp_id = $11 AND status = $12\n'))
-    expect(problemsOf(guardMovedOut)).toEqual([holds('inside', 'a block comment')])
+    expect(problemsOf(guardMovedOut)).toEqual([holds('inside', 'a block comment'), numbered('inside', ...upTo(11), 13)])
+    // The same two texts with no comment: the guard in the text outside a gate transaction, and the text
+    // inside one numbered so that its highest parameter is still one above.
+    const guardMovedOutRenumbered = edited(
+      edited(sync.text, ' AND corp_id = $11 AND status = $12\n', ' AND corp_id = $13\n'),
+      ' AND corp_id = $11\n',
+      ' AND corp_id = $11 AND status = $12\n',
+    )
+    expect(guardMovedOutRenumbered.indexOf(' AND corp_id = $13\n')).toBeLessThan(guardMovedOutRenumbered.indexOf(' AND corp_id = $11 AND status = $12\n'))
+    expect(problemsOf(guardMovedOutRenumbered)).toEqual([numbered('inside', ...upTo(10), 13)])
+    // The text inside a gate transaction without the comparison that takes the eleventh parameter.
+    expect(problemsOf(edited(sync.text, ' AND corp_id = $11 AND status = $12\n', ' AND status = $12\n'))).toEqual([numbered('inside', ...upTo(10), 12)])
   })
 
   it('positive control: each production write turned into a function that does more fails', () => {
