@@ -47,9 +47,12 @@ import { isSelectableConditionOrVisibilityDependencyType } from '../src/approval
 //             exact-equality census style as cleanly as a dedicated positive/negative pair does.
 
 // MS-5 expectation table — mirrors the backend MS-4 table's boundary (detail/record-link/
-// date_range/explanation excluded; attachment is EXCLUDED here too, unlike the backend's
-// DETAIL_LEAF_FIELD_TYPES — the FE list is the 8-member explicit array documented at
-// detailField.ts:20-24, deliberately narrower than the backend's flag-gated 9-member set).
+// date_range/explanation excluded; attachment is excluded here too, via the FE's 8-member
+// explicit array at detailField.ts:26-34). CORRECTION (approval-detail-leaf-attachment-pin-
+// 20260904): this was previously "deliberately narrower than the backend's flag-gated 9-member
+// set" — the backend set now excludes attachment UNCONDITIONALLY too, so both sides are the SAME
+// 8-member set; see packages/core-backend/tests/unit/approval-detail-leaf-set-mirror.test.ts for
+// the cross-package equality pin.
 const MS5_DETAIL_LEAF_ADMITTED: Readonly<Record<string, boolean>> = {
   text: true,
   textarea: true,
