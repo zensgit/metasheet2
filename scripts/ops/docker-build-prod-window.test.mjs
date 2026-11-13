@@ -65,7 +65,9 @@ function findBash5() {
   return candidates.find((candidate) => bashMajor(candidate) >= 4) ?? null
 }
 const BASH = findBash5()
-const SKIP = BASH ? false : 'no bash with BASH_VERSINFO[0] >= 4 found (set HARNESS_BASH)'
+// Skipped only off Linux (a macOS machine without a newer bash); on Linux (CI) a missing bash >= 4
+// is a failure, not a silent skip.
+const SKIP = BASH || process.platform === 'linux' ? false : 'no bash with BASH_VERSINFO[0] >= 4 found (set HARNESS_BASH)'
 const which = (name) => spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim()
 const REAL = { flock: which('flock'), setsid: which('setsid'), timeout: which('timeout'), tar: which('tar') }
 const TAR_IS_GNU = /GNU tar/.test(spawnSync(REAL.tar || 'tar', ['--version'], { encoding: 'utf8' }).stdout ?? '')
@@ -98,31 +100,65 @@ const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // processes' environments). And the step runs as the leader of its own process group, while
 // the window leads its own session: every process left in one of those groups (`ps -o pgid`)
 // is a leaked window, helper or follower.
-function taggedPids(world) {
+//
+// A process group id is a pid, and pids are reused. world.groups maps each registered group id
+// to its leader as seen at registration ("<start time>|<command line>"), or to null once the
+// leader is gone. A live leader that does not match is another process that got the same pid:
+// that group is dropped and never killed. A group seen empty is dropped too; while a group has
+// members its id cannot be given to a new process.
+function processTable() {
+  const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat=,lstart=,command='], { encoding: 'utf8' }).stdout ?? ''
+  const rows = []
+  for (const line of listing.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/)
+    // Zombies are dead and only wait for their parent to reap them.
+    if (m && !m[3].startsWith('Z')) rows.push({ pid: Number(m[1]), pgid: Number(m[2]), identity: `${m[4].replace(/\s+/g, ' ')}|${m[5]}` })
+  }
+  return rows
+}
+function identityOf(pid, table = processTable()) {
+  return table.find((row) => row.pid === pid)?.identity ?? null
+}
+// Registers a process group of this scenario; `expect` (a RegExp) must match the command line of
+// a live leader, or the group is not registered (a window pid read late from window.pid).
+function trackGroup(world, pid, expect = null) {
+  if (!(pid > 1) || world.groups.has(pid)) return
+  const identity = identityOf(pid)
+  if (identity !== null && expect && !expect.test(identity.slice(identity.indexOf('|') + 1))) return
+  world.groups.set(pid, identity)
+}
+function scanTagged(world) {
+  const found = new Map()
   const needle = `H_TAG=${world.tag}`
-  const pids = new Set()
+  const table = processTable()
   if (process.platform === 'linux') {
     for (const entry of readdirSync('/proc')) {
       if (!/^\d+$/.test(entry)) continue
       try {
-        if (readFileSync(`/proc/${entry}/environ`, 'latin1').split('\0').includes(needle)) pids.add(Number(entry))
+        if (readFileSync(`/proc/${entry}/environ`, 'latin1').split('\0').includes(needle)) found.set(Number(entry), identityOf(Number(entry), table))
       } catch {}
     }
   }
-  const groups = new Set(world.pgids ?? [])
-  if (groups.size > 0) {
-    const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat='], { encoding: 'utf8' }).stdout ?? ''
-    for (const line of listing.split('\n')) {
-      const [pid, pgid, stat] = line.trim().split(/\s+/)
-      // Zombies are dead and only wait for their parent to reap them.
-      if (groups.has(Number(pgid)) && !String(stat).startsWith('Z')) pids.add(Number(pid))
-    }
+  for (const [pgid, leader] of [...world.groups]) {
+    const live = identityOf(pgid, table)
+    if (live !== null && live !== leader) { world.groups.delete(pgid); continue }
+    if (live === null) world.groups.set(pgid, null)
+    const members = table.filter((row) => row.pgid === pgid)
+    if (members.length === 0) { world.groups.delete(pgid); continue }
+    for (const row of members) found.set(row.pid, row.identity)
   }
-  pids.delete(process.pid)
-  return [...pids]
+  found.delete(process.pid)
+  return found
 }
+function taggedPids(world) {
+  return [...scanTagged(world).keys()]
+}
+// SIGKILL only a process that is still the one the scan found (same start time and command).
 function killTagged(world) {
-  for (const pid of taggedPids(world)) {
+  const found = scanTagged(world)
+  const table = processTable()
+  for (const [pid, identity] of found) {
+    if (identity === null || identityOf(pid, table) !== identity) continue
     try { process.kill(pid, 'SIGKILL') } catch {}
   }
 }
@@ -143,7 +179,7 @@ function addWindowGroups(world) {
   if (!existsSync(runs)) return
   for (const entry of readdirSync(runs)) {
     const pid = Number((readIf(path.join(runs, entry, 'window.pid')) ?? '').trim())
-    if (pid > 1) world.pgids.add(pid)
+    trackGroup(world, pid, /\bwindow\.sh\b/)
   }
 }
 
@@ -164,7 +200,7 @@ function makeWorld(t, options = {}) {
   const tmpBase = realpathSync(os.tmpdir())
   const root = realpathSync(mkdtempSync(path.join(tmpBase, 'deploy-window-')))
   const tag = `${path.basename(root)}-${process.pid}`
-  const world = { root, tag, holders: [], pgids: new Set(), absent: new Set(options.absentTools ?? []) }
+  const world = { root, tag, holders: [], groups: new Map(), absent: new Set(options.absentTools ?? []) }
   t.after(() => {
     for (const holder of world.holders) { try { holder.kill('SIGKILL') } catch {} }
     if (world.windowHome) addWindowGroups(world)
@@ -399,7 +435,7 @@ async function runWindow(t, world, options = {}) {
     else assert.equal(resolved[i], path.join(world.bin, name), `${name} must resolve to the test double`)
   }
   const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
-    cwd: world.work, env, detached: true, onSpawn: (child) => world.pgids.add(child.pid),
+    cwd: world.work, env, detached: true, onSpawn: (child) => trackGroup(world, child.pid),
   })
   if (options.waitForRc) {
     for (let i = 0; i < 1200 && !existsSync(path.join(runDir, 'rc')); i += 1) await sleepMs(100)
@@ -645,7 +681,7 @@ async function runStatus(world, runId, runText = STATUS_RUN) {
   const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', runText], {
     cwd: dir,
     detached: true,
-    onSpawn: (child) => world.pgids.add(child.pid),
+    onSpawn: (child) => trackGroup(world, child.pid),
     env: {
       PATH: world.PATH, HOME: world.runnerHome, LANG: 'C', LC_ALL: 'C', TMPDIR: path.join(world.root, 'tmp'),
       GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: '1',
@@ -714,6 +750,10 @@ async function checkPublicOutputs(world, r, { drill = 'none', reachedInplay = tr
 
 // ---------- scenarios ----------
 const CONCURRENCY = Number(process.env.HARNESS_CONCURRENCY) || Math.max(2, Math.min(6, os.availableParallelism?.() ?? os.cpus().length))
+
+it('a bash with BASH_VERSINFO[0] >= 4 is available (required on Linux)', { skip: SKIP }, () => {
+  assert.ok(BASH, 'no bash >= 4 found: install one or set HARNESS_BASH')
+})
 
 describe('production deploy window: remote_deploy step run against test doubles', { concurrency: CONCURRENCY, skip: SKIP }, () => {
   const scenario = (name, fn) => it(name, { timeout: 300_000 }, fn)
@@ -991,7 +1031,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const result = await run(BASH, ['--noprofile', '--norc', '-e', '-o', 'pipefail', script], {
       cwd: world.work,
       detached: true,
-      onSpawn: (child) => world.pgids.add(child.pid),
+      onSpawn: (child) => trackGroup(world, child.pid),
       env: {
         PATH: world.PATH, HOME: world.runnerHome, LANG: 'C', TMPDIR: path.join(world.root, 'tmp'), GITHUB_OUTPUT: output,
         DEPLOY_HOST: 'deploy-host', DEPLOY_USER: 'deploy', DEPLOY_SSH_KEY_B64: Buffer.from('k\n').toString('base64'),
@@ -1572,7 +1612,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const child = spawn(BASH, ['-c', '/bin/sleep 30 & echo $!; wait'], {
       env: { PATH: process.env.PATH, H_TAG: world.tag }, detached: true, stdio: ['ignore', 'pipe', 'ignore'],
     })
-    world.pgids.add(child.pid)
+    trackGroup(world, child.pid)
     const grandchild = Number(await new Promise((resolve) => child.stdout.once('data', (chunk) => resolve(String(chunk).trim()))))
     try {
       assert.ok(taggedPids(world).includes(grandchild), 'the grandchild is found')
@@ -1586,6 +1626,27 @@ describe('production deploy window: remote_deploy step run against test doubles'
       assert.deepEqual(left, [], 'the detector kills what it reports')
     } finally {
       try { process.kill(-child.pid, 'SIGKILL') } catch {}
+    }
+  })
+
+  it('the leak detector leaves alone a process group whose leader is not the one it registered (reused pid)', async (t) => {
+    const world = makeWorld(t)
+    // An unrelated group leader, not tagged: stands for a process that got a registered pid again.
+    const other = spawn('/bin/sleep', ['30'], { env: { PATH: process.env.PATH }, detached: true, stdio: 'ignore' })
+    try {
+      await sleepMs(200)
+      trackGroup(world, other.pid, /\bwindow\.sh\b/)
+      assert.ok(!world.groups.has(other.pid), 'a late-read window pid whose command is not the window is not registered')
+      world.groups.set(other.pid, 'Thu Jan  1 00:00:00 1970|bash window.sh')
+      assert.deepEqual(taggedPids(world), [], 'a group with a different leader is not reported')
+      assert.ok(!world.groups.has(other.pid), 'and is dropped')
+      world.groups.set(other.pid, 'Thu Jan  1 00:00:00 1970|bash window.sh')
+      killTagged(world)
+      await sleepMs(200)
+      assert.equal(other.exitCode, null, 'the unrelated process was not killed')
+      assert.equal(other.signalCode, null, 'the unrelated process was not killed')
+    } finally {
+      try { process.kill(other.pid, 'SIGKILL') } catch {}
     }
   })
 
