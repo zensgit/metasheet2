@@ -26,6 +26,7 @@ on:
       - 'scripts/ops/attendance-preflight.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin-skipped-codes.test.mjs'
       - 'scripts/ops/multitable-onprem-bootstrap-admin.ps1'
       - 'scripts/ops/attendance-onprem-package-verify.sh'
       - 'docker/app.env.example'
@@ -42,6 +43,7 @@ on:
       - 'scripts/ops/attendance-preflight.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin-skipped-codes.test.mjs'
       - 'scripts/ops/multitable-onprem-bootstrap-admin.ps1'
       - 'scripts/ops/attendance-onprem-package-verify.sh'
       - 'docker/app.env.example'
@@ -69,3 +71,8 @@ jobs:
       # stub, loopback HTTP stand-in for the backend; the .ps1 cases run under the runner's pwsh.
       - name: Run hermetic fresh-install local org bootstrap tests (sh + ps1)
         run: node --test scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs
+      # The bootstrap admin's direct grant skips codes the permission catalogue does not have; both
+      # twins print those codes from one read-only query (non-fatal, exit status unchanged).
+      # Hermetic: psql stub, VERIFY_LOGIN=0; the .ps1 cases run under the runner's pwsh.
+      - name: Run hermetic bootstrap direct-grant skipped-codes report tests (sh + ps1)
+        run: node --test scripts/ops/attendance-onprem-bootstrap-admin-skipped-codes.test.mjs
