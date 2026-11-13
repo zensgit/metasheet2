@@ -269,6 +269,9 @@ describe('scan controls', () => {
     ['query builder call with its method name as a template in brackets', 'const x = db[`insertInto`](\'public.user_permissions\').values({})', 'user_permissions|INSERT'],
     ['a table after a substituted schema', 'const x = `DELETE FROM ${schema}.user_roles WHERE user_id = $1`', 'user_roles|DELETE'],
     ['a lower-case write after a substituted schema', 'const x = `update "${schema}"."users" set role = $1`', 'users|UPDATE'],
+    ['TRUNCATE past an item in another schema', "const x = 'TRUNCATE audit_logs, other.thing, user_roles'", 'user_roles|TRUNCATE'],
+    ['TRUNCATE of a scanned name that directly follows the verb, with a dot after it', "const x = 'TRUNCATE users.archive'", 'users|TRUNCATE'],
+    ['DELETE of a scanned name that directly follows the verb, with a dot after it', "const x = 'DELETE FROM user_roles.archive'", 'user_roles|DELETE'],
     ['TRUNCATE after an item that is not a plain name', 'const x = \'TRUNCATE "audit log", role_permissions\'', 'role_permissions|TRUNCATE'],
     ['TRUNCATE after a substituted item', 'const x = `TRUNCATE ${table}, user_permissions`', 'user_permissions|TRUNCATE'],
     ['TRUNCATE of a table after a substituted schema', 'const x = `TRUNCATE audit_logs, ${schema}.user_roles`', 'user_roles|TRUNCATE'],
@@ -323,6 +326,7 @@ describe('scan controls', () => {
     ['a name of three parts none of which is a scanned table', "const x = 'INSERT INTO smoke_db.dbo.smoke_probe (id) VALUES (1)'"],
     ['a copy out of a name of three parts', "const x = 'COPY metasheet.public.users TO STDOUT'"],
     ['a TRUNCATE item in another schema', "const x = 'TRUNCATE audit_logs, app.user_roles'"],
+    ['a later TRUNCATE item whose schema is spelled like a scanned table', "const x = 'TRUNCATE audit_logs, users.archive'"],
   ]
   for (const [name, replacement] of negatives) {
     it(`NEGATIVE CONTROL — ${name} is not counted`, () => {

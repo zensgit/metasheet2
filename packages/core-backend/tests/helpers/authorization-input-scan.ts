@@ -27,7 +27,8 @@
  * substitution is a dynamic target. A `users` INSERT whose `ON CONFLICT … DO UPDATE SET` clause names
  * an input column counts as an additional `users` UPDATE. A TRUNCATE names a list, which is read
  * item by item from the verb: each scanned table it names is counted wherever it stands, past an
- * item in another schema and past an item that is not a plain name.
+ * item in another schema and past an item that is not a plain name. The name that directly follows
+ * a write verb is counted when it is a scanned table even with a dot after it.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -234,6 +235,7 @@ export function matchText(file: string, text: string, line: number, basePosition
   for (const match of text.matchAll(TRUNCATE_HEAD)) {
     const index = match.index ?? 0
     let cursor = index + match[0].length
+    let first = true
     for (;;) {
       const item = TRUNCATE_ITEM.exec(text.slice(cursor))
       if (!item) break
@@ -242,12 +244,16 @@ export function matchText(file: string, text: string, line: number, basePosition
         if (isUnreadMultiPartName(parts)) dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'multi_part_name', expression: shown(`${match[0]}${item[1]}`) })
       } else {
         // An item in another schema is passed over; a substituted schema leaves the table as written.
+        // The name that directly follows the verb is counted when it is a scanned table even with a
+        // dot after it, as it is after the other verbs: a schema spelled like a scanned table is
+        // read as that table.
         const inPublic = parts.length === 1 || parts[0] === 'public' || parts[0] === SUBSTITUTION
-        const table = parts[parts.length - 1]
-        if (inPublic && SCANNED_TABLES.has(table)) writes.push({ file, line: lineAt(index), position: positionAt(index), table, verb: 'TRUNCATE', form: 'sql' })
+        const table = inPublic ? parts[parts.length - 1] : first ? parts[0] : null
+        if (table !== null && SCANNED_TABLES.has(table)) writes.push({ file, line: lineAt(index), position: positionAt(index), table, verb: 'TRUNCATE', form: 'sql' })
       }
       if (item[2] === undefined) break
       cursor += item[0].length
+      first = false
     }
   }
   for (const match of text.matchAll(DYNAMIC_WRITE)) {
