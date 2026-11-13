@@ -1283,6 +1283,127 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
     }
   }, 20_000)
 
+  // ── R-69 I6d (owner-approved 2026-11-13, item 3): the SAVING user's own live integration read authority ──────────
+  //
+  // No seam: the save gate's own predicate (integrationRunFinishedCreatorAuthorized → resolveIntegrationRunPrincipal-
+  // OnTransaction in a committed READ COMMITTED transaction of the production pool, plus an integration read code),
+  // now asked about the ACTING user too, in the binding tenant. `integration` is admission-controlled, so a read code
+  // granted by a role counts only with an enabled `integration` admission row. Every rule is created through the real
+  // createRule on its own sheet and deleted by that sheet in `finally` (the trigger CHECK `down` below refuses while
+  // any integration.run_finished rule exists).
+  const RF_ALERT = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
+  const rfRoleOf = (userId: string) => `role_rfed_${userId}`
+  async function seedRfUser(userId: string, codes: string[], admitIntegration: boolean): Promise<void> {
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [userId, `${userId}@example.test`, 'rfed'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [userId, TENANT])
+    for (const code of codes) {
+      await q(`INSERT INTO permissions (code, name) SELECT $1::varchar, $1::varchar WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE code = $1::varchar)`, [code])
+    }
+    await q(`INSERT INTO roles (id, name) VALUES ($1, $1)`, [rfRoleOf(userId)])
+    for (const code of codes) await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)`, [rfRoleOf(userId), code])
+    await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, [userId, rfRoleOf(userId)])
+    if (admitIntegration) await q(`INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'integration', true)`, [userId])
+  }
+  async function dropRfUsers(userIds: string[]): Promise<void> {
+    for (const userId of userIds) {
+      for (const [table, column] of [['user_namespace_admissions', 'user_id'], ['user_roles', 'user_id'], ['user_permissions', 'user_id'], ['user_orgs', 'user_id'], ['users', 'id']]) {
+        await q(`DELETE FROM ${table} WHERE ${column} = $1`, [userId]).catch(() => undefined)
+      }
+      await q(`DELETE FROM role_permissions WHERE role_id = $1`, [rfRoleOf(userId)]).catch(() => undefined)
+      await q(`DELETE FROM roles WHERE id = $1`, [rfRoleOf(userId)]).catch(() => undefined)
+    }
+  }
+  const rfRow = async (ruleId: string) => (await q(`SELECT name, enabled, trigger_type, trigger_config, action_type, action_config, created_by FROM automation_rules WHERE id = $1`, [ruleId])).rows[0] as Record<string, unknown>
+  const rfRefusal = (work: Promise<unknown>) => work.then(() => null, (error: unknown) => error as Error)
+  const expectRfEditorRefusal = (error: Error | null, label: string, needles: string[]) => {
+    expect(error, `${label}: must be refused`).toBeInstanceOf(AutomationRuleValidationError)
+    expect((error as AutomationRuleValidationError).code, `${label}: refused by «${error?.message}»`).toBe('INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED')
+    for (const needle of needles) expect(error!.message, label).not.toContain(needle)
+  }
+
+  test('RF editor authority (real DB): an editor who manages automation but holds NO integration read code cannot switch on, retype into or edit an enabled run_finished rule (refused, row unchanged) but can switch it off', async () => {
+    const creatorId = `svcrfa_${RUN}`
+    /** workflow:write only — manages automation (B1's job authority), no integration read code. */
+    const plainEditor = `edrfaplain_${RUN}`
+    /** integration:read through a role but NO `integration` admission: the code is dropped, so no read authority. */
+    const unadmittedEditor = `edrfanoadm_${RUN}`
+    const sheet = `sheet_rfa_${RUN}`
+    const users = [creatorId, plainEditor, unadmittedEditor]
+    await seedRfUser(creatorId, ['workflow:write', 'integration:read'], true)
+    await seedRfUser(plainEditor, ['workflow:write'], false)
+    await seedRfUser(unadmittedEditor, ['workflow:write', 'integration:read'], false)
+    const needles = [...users, TENANT, sheet]
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    /** Every rule created here: its schedule registration (an enabled cron rule registers one) is undone in `finally`. */
+    const created: string[] = []
+    try {
+      // positive control first, no seam: the creator (read code + admission) creates an enabled alert rule and a schedule rule
+      const alert = await service.createRule(sheet, { name: `rfa_alert_${RUN}`, triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'] }, actionType: 'send_dingtalk_group_message', actionConfig: RF_ALERT, createdBy: creatorId } as never)
+      created.push(alert.id)
+      const schedule = await service.createRule(sheet, { name: `rfa_sched_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }, actionType: 'send_dingtalk_group_message', actionConfig: RF_ALERT, createdBy: creatorId } as never)
+      created.push(schedule.id)
+      const alertBefore = await rfRow(alert.id)
+      expect(alertBefore).toMatchObject({ enabled: true, trigger_type: 'integration.run_finished', trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: { principalId: creatorId, tenantId: TENANT } }, created_by: creatorId })
+      // (c) a statuses edit / a send-action edit of the ENABLED rule: refused for both editors, the row unchanged
+      for (const actor of [plainEditor, unadmittedEditor]) {
+        const who = actor === plainEditor ? 'plain' : 'unadmitted'
+        expectRfEditorRefusal(await rfRefusal(service.updateRule(alert.id, sheet, { triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed', 'skipped'] } }, actor)), `statuses by ${who}`, needles)
+        expectRfEditorRefusal(await rfRefusal(service.updateRule(alert.id, sheet, { actionConfig: { ...RF_ALERT, titleTemplate: '{{run.reason}}' } }, actor)), `action by ${who}`, needles)
+      }
+      expect(await rfRow(alert.id)).toEqual(alertBefore)
+      // (d) … the plain editor CAN switch it off; (b) switching it back on is refused (and by an unknown user too)
+      expect((await service.setRuleEnabled(alert.id, sheet, false, plainEditor))?.enabled).toBe(false)
+      for (const actor of [plainEditor, `nobody_${RUN}`]) {
+        expectRfEditorRefusal(await rfRefusal(service.setRuleEnabled(alert.id, sheet, true, actor)), `enable by ${actor === plainEditor ? 'plain' : 'unknown'}`, [...needles, `nobody_${RUN}`])
+      }
+      expect((await rfRow(alert.id)).enabled).toBe(false)
+      // (a) retyping the creator's enabled schedule rule into a run_finished rule: refused, the row unchanged
+      const scheduleBefore = await rfRow(schedule.id)
+      expectRfEditorRefusal(await rfRefusal(service.updateRule(schedule.id, sheet, { triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' } } }, plainEditor)), 'retype', needles)
+      expect(await rfRow(schedule.id)).toEqual(scheduleBefore)
+    } finally {
+      for (const id of created) service.unregisterSchedule(id)
+      await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+      await dropRfUsers(users)
+    }
+  }, 30_000)
+
+  test('RF editor authority (real DB): an editor WITH the read authority (role + admission) can switch on, retype and edit — the binding stays the creator\'s; revoking the code is seen on the next save', async () => {
+    const creatorId = `svcrfb_${RUN}`
+    const okEditor = `edrfbok_${RUN}`
+    const sheet = `sheet_rfb_${RUN}`
+    const users = [creatorId, okEditor]
+    await seedRfUser(creatorId, ['workflow:write', 'integration:read'], true)
+    await seedRfUser(okEditor, ['workflow:write', 'integration:read'], true)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const stamped = (statuses: string[]) => ({ job: { kind: 'stock_prep_pull' }, statuses, binding: { principalId: creatorId, tenantId: TENANT } })
+    /** Every rule created here: its schedule registration (an enabled cron rule registers one) is undone in `finally`. */
+    const created: string[] = []
+    try {
+      const alert = await service.createRule(sheet, { name: `rfb_alert_${RUN}`, triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'] }, actionType: 'send_dingtalk_group_message', actionConfig: RF_ALERT, enabled: false, createdBy: creatorId } as never)
+      created.push(alert.id)
+      const schedule = await service.createRule(sheet, { name: `rfb_sched_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }, actionType: 'send_dingtalk_group_message', actionConfig: RF_ALERT, createdBy: creatorId } as never)
+      created.push(schedule.id)
+      // (g) switch on, then a statuses edit (bringing the editor's own binding: dropped)
+      expect((await service.setRuleEnabled(alert.id, sheet, true, okEditor))?.enabled).toBe(true)
+      expect(await service.updateRule(alert.id, sheet, { triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed', 'skipped'], binding: { principalId: okEditor, tenantId: `${TENANT}_far` } } }, okEditor)).not.toBeNull()
+      const alertRow = await rfRow(alert.id)
+      expect(alertRow).toMatchObject({ enabled: true, trigger_config: stamped(['failed', 'skipped']), created_by: creatorId })
+      expect(JSON.stringify(alertRow)).not.toContain(okEditor)
+      // (g) retype the enabled schedule rule into a run_finished rule
+      expect(await service.updateRule(schedule.id, sheet, { triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['held'] } }, okEditor)).not.toBeNull()
+      expect(await rfRow(schedule.id)).toMatchObject({ enabled: true, trigger_type: 'integration.run_finished', trigger_config: stamped(['held']), created_by: creatorId })
+      // live, every save: once the editor's read code is revoked, its next save of the enabled rule is refused
+      await q(`DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'integration:read'`, [rfRoleOf(okEditor)])
+      expectRfEditorRefusal(await rfRefusal(service.updateRule(alert.id, sheet, { name: `rfb_alert_${RUN}_renamed` }, okEditor)), 'after revoke', [...users, TENANT, sheet])
+      expect(await rfRow(alert.id)).toEqual(alertRow)
+    } finally {
+      for (const id of created) service.unregisterSchedule(id)
+      await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+      await dropRfUsers(users)
+    }
+  }, 30_000)
+
   test('trigger CHECK migration: up admits the type; down REFUSES while a rule uses it, then restores the prior set; up again', async () => {
     await expect(runFinishedTriggerDown(db as never)).rejects.toThrow(/still use trigger_type 'integration.run_finished'/)
     await q(`DELETE FROM automation_rules WHERE id = $1`, [RULE])

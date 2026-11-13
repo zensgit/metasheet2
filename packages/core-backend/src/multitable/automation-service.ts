@@ -220,6 +220,9 @@ export type AutomationRuleValidationCode =
   // R-69 B1: an enabled job rule saved by a user without the job authority, or whose authority could not be checked
   // (a 400 like every other save refusal; see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE below).
   | typeof RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE
+  // R-69 I6d (B1's run_finished sibling): an enabled integration.run_finished rule saved by a user without the
+  // integration read authority, or whose authority could not be checked (a 400; see the constant below).
+  | typeof INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -255,6 +258,35 @@ export const RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE =
   'an enabled run_integration_job rule can only be saved by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); the rule was not saved'
 export const RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE =
   'run_integration_job: the saving user\'s job authority could not be checked; the rule was not saved'
+
+/**
+ * R-69 I6d — B1's sibling for integration.run_finished rules, owner-approved 2026-11-13 (item 3 of that day's
+ * proposal, answered 「3」). T-LAYER DEFAULT (direction ruled by the owner 2026-11-13; this exact wording is a T-layer
+ * elaboration the owner can veto, decision register R-92, 11-13 note):
+ *
+ *   "When a save (create or update, including setRuleEnabled) leaves a rule whose trigger is integration.run_finished
+ *   AND that is enabled after the write, the acting user must pass the SAME live check the run_finished save gate
+ *   applies to the creator (integrationRunFinishedCreatorAuthorized, or whatever that predicate is named; reuse it,
+ *   with principalId = the acting user and tenantId = the rule's binding tenant). A missing acting user is refused.
+ *   No check when the write leaves the rule disabled or moves the trigger away from integration.run_finished. The
+ *   binding principal stays the stored creator."
+ *
+ * (The predicate is AutomationService.integrationRunFinishedCreatorAuthorized, reused unchanged.)
+ * Why: an update re-stamps the trigger binding from the rule's STORED creator and the save gate checked only that
+ * creator, so someone who may manage the sheet's automations but cannot read integration results could retype a rule
+ * into an alert rule, switch one on, or change the statuses / the send action of an enabled one — and it fired under
+ * the creator's read authority.
+ * A SIBLING code, not B1's: B1's names the job authority (run_integration_job); this one is a different authority (the
+ * integration read codes) on a different rule kind, and a client or a log line must not read one as the other. A 400
+ * like every other save refusal (the routes' existing mapping; only RUN_ACTION_DISABLED is a 403). ONE fixed,
+ * values-free message: the reused predicate folds "not held" and "could not be read" into one `false` (fail closed),
+ * so the message names both. On create the gate's own creator check IS this check (the route passes the request user
+ * as createdBy), so a refused create keeps the gate's message. Implemented by
+ * AutomationService.assertIntegrationRunFinishedEditorAuthority.
+ */
+export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE = 'INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED'
+export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_MESSAGE =
+  'an enabled integration.run_finished rule can only be saved by a user who holds the integration read authority themself (active, a member of the rule\'s tenant, able to manage automation, holding integration:read or above or stock-prep:read); it is not held or could not be checked, so the rule was not saved'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -1985,6 +2017,10 @@ export class AutomationService {
       actionConfig,
       actions,
     })
+    // R-69 I6d (see INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE): no second call here. On create the acting user
+    // IS the creator, and assertIntegrationRunFinishedRuleAtSave above already ran the same predicate on that same
+    // principal in that same binding tenant (for every create, enabled or not); a second read could never be the one
+    // that refuses. A refused create therefore carries the gate's own message.
 
     const row = {
       id: ruleId,
@@ -2152,6 +2188,9 @@ export class AutomationService {
     // written even if the caller did not send that column itself.
     let runIntegrationJobConfigRewrite: Record<string, unknown> | undefined
     let runIntegrationJobActionsRewrite: AutomationAction[] | null | undefined
+    // R-69 I6d: the binding tenant the run_finished save gate stamped on THIS attempt; null when the resulting rule's
+    // trigger is not integration.run_finished (then the acting-user check before the write has nothing to judge).
+    let runFinishedBindingTenantId: string | null = null
     // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
     // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
     // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
@@ -2461,6 +2500,8 @@ export class AutomationService {
       if (runFinishedUpdateConfig) {
         updates.trigger_config = JSON.stringify(runFinishedUpdateConfig)
         if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
+        // The gate built this binding itself, from the stored creator's single active tenant (never a request field).
+        runFinishedBindingTenantId = (runFinishedUpdateConfig.binding as { tenantId: string }).tenantId
       }
       // FWB activation: the same fail-closed save gate for every resulting shape of a partial update.
       const fwbUpdateError = await this.validateFwbActionAtSave(
@@ -2611,6 +2652,19 @@ export class AutomationService {
       actionType: resultingShape.actionType,
       actionConfig: resultingShape.actionConfig,
       actions: resultingShape.actions,
+    })
+    // R-69 I6d (T-layer default, see INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE): a write that leaves an ENABLED
+    // integration.run_finished rule needs the ACTING user's own live integration read authority — whatever this PATCH
+    // touches (statuses, the send action, a rename, the on/off switch; setRuleEnabled routes through here). Same
+    // `enabled` as B1's (incoming ?? `boundRule`); the rule kind and its binding tenant are what the run_finished save
+    // gate decided and stamped on THIS attempt (its snapshot differs from `boundRule` only when the row changed in
+    // between, and then the UPDATE below matches nothing and the next attempt judges again). After B1's check: a rule
+    // is never both kinds (that gate refuses run_integration_job on a run_finished rule), so at most one of the two
+    // reads runs, and a pass of one never skips the other.
+    await this.assertIntegrationRunFinishedEditorAuthority({
+      actorId: authoringActorId,
+      enabledAfterWrite: input.enabled !== undefined ? input.enabled : boundRule.enabled !== false,
+      bindingTenantId: runFinishedBindingTenantId,
     })
 
     // F1: the row version moves strictly forward with every write, in the statement that writes it (see updateRule).
@@ -3415,6 +3469,8 @@ export class AutomationService {
    *     run_integration_job — so "run finished → rule → run again" cannot be authored);
    *   - creator bound to exactly one active tenant, and — live — active, able to manage automation and able to
    *     read integration results (integration:* or stock-prep:read).
+   * The ACTING user of an update is judged separately, last before the write, by the same predicate
+   * (assertIntegrationRunFinishedEditorAuthority, R-69 I6d); on create the acting user is this creator.
    */
   private async assertIntegrationRunFinishedRuleAtSave(input: {
     triggerType: string
@@ -3490,6 +3546,32 @@ export class AutomationService {
     }
     if (resolution.ok === false) return false
     return resolution.user.roles.includes('admin') || resolution.user.permissions.some((code) => INTEGRATION_RUN_FINISHED_READ_CODES.has(code))
+  }
+
+  /**
+   * R-69 I6d — the T-layer default stated at INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE (update path; on create
+   * the gate's creator check is this check). The caller hands in the rule's RESULTING state: whether it is enabled
+   * after the write, and the binding tenant the run_finished save gate stamped on this attempt (null: the resulting
+   * trigger is not integration.run_finished). In order:
+   *   - disabled after the write, or not a run_finished rule after it → nothing to do;
+   *   - no acting user (absent, empty or blank) → refused, before any read;
+   *   - the save gate's own predicate, integrationRunFinishedCreatorAuthorized, unchanged and run its way (a committed
+   *     READ COMMITTED transaction of the production pool; any failure is `false`), with principalId = the acting user
+   *     exactly as the route authenticated it and tenantId = that binding tenant → `false` refuses. Never a pass by
+   *     default.
+   * The binding principal is not touched: it stays the stored creator, whom the gate checked on this attempt and the
+   * dispatch re-checks on every fire.
+   */
+  private async assertIntegrationRunFinishedEditorAuthority(input: {
+    actorId: string | null | undefined
+    enabledAfterWrite: boolean
+    bindingTenantId: string | null
+  }): Promise<void> {
+    if (!input.enabledAfterWrite || input.bindingTenantId === null) return
+    const refused = () => new AutomationRuleValidationError(INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_MESSAGE, INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE)
+    const actorId = typeof input.actorId === 'string' && input.actorId.trim().length > 0 ? input.actorId : null
+    if (actorId === null) throw refused()
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: actorId, tenantId: input.bindingTenantId }))) throw refused()
   }
 
   /** Test seam for the durable leg's enqueue transaction (production: a pool transaction). */
