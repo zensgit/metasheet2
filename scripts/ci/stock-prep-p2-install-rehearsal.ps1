@@ -123,7 +123,9 @@ function Invoke-CmdLine {
   }
   Remove-Item -LiteralPath $codeFile -Force -ErrorAction SilentlyContinue
   $stdout = @()
-  if (Test-Path -LiteralPath $outFile) { $stdout = @(Get-Content -LiteralPath $outFile) }
+  # ReadAllLines gives plain strings; Get-Content strings carry PSPath/PSDrive/PSProvider notes, which
+  # Windows PowerShell 5.1 ConvertTo-Json walks deeply enough to stall the harness.
+  if (Test-Path -LiteralPath $outFile) { $stdout = @([System.IO.File]::ReadAllLines($outFile)) }
   $stderr = ''
   if (Test-Path -LiteralPath $errFile) { $stderr = [string](Get-Content -LiteralPath $errFile -Raw) }
   Remove-Item -LiteralPath $cmdFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
@@ -458,7 +460,7 @@ function Get-TreeMap {
 
 function Write-Json {
   param([object]$Value, [string]$Path)
-  $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
+  $Value | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
 function Read-Json {
@@ -470,7 +472,7 @@ function Read-Json {
 function Get-OperatorTail {
   param([string]$Log, [int]$Count = 14)
   if (-not (Test-Path -LiteralPath $Log)) { return @() }
-  $lines = @(Get-Content -LiteralPath $Log | Where-Object {
+  $lines = @([System.IO.File]::ReadAllLines($Log) | Where-Object {
       $_ -match '^\[multitable-onprem-(apply-package|deploy-launcher|deploy-bootstrap)\]'
     })
   $tail = @($lines | Select-Object -Last $Count)
