@@ -3,10 +3,10 @@
     <header class="delegation-page__header">
       <div>
         <h1>管理范围</h1>
-        <p data-testid="scope-explanation">部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集；不同命名空间不合并。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
+        <p data-testid="scope-explanation">部门范围可以选择是否包含下级部门。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集；不同命名空间不合并。平台管理员配置管理范围；委派管理员只能给允许的成员分配允许的角色。插件使用准入不是管理委派的前提。</p>
       </div>
       <div class="delegation-page__actions">
-        <router-link class="delegation-page__link" to="/admin/users">成员与授权</router-link>
+        <router-link v-if="summary?.isPlatformAdmin === true" class="delegation-page__link" to="/admin/users">成员与授权</router-link>
         <input
           v-model.trim="search"
           class="delegation-page__input"
@@ -15,7 +15,7 @@
           aria-label="搜索邮箱、姓名或用户 ID"
           @keyup.enter="void loadUsers()"
         />
-        <button class="delegation-page__button" type="button" :disabled="loading" @click="void loadUsers()">
+        <button class="delegation-page__button" type="button" @click="void loadUsers()">
           {{ loading ? '加载中...' : '查询' }}
         </button>
       </div>
@@ -24,6 +24,13 @@
     <p v-if="status" class="delegation-page__status" :class="{ 'delegation-page__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+
+    <DelegationConfirmationPanel
+      v-if="pendingConfirmation"
+      :confirmation="pendingConfirmation"
+      @confirm="void submitDelegationConfirmation($event)"
+      @cancel="pendingConfirmation = null"
+    />
 
     <section class="delegation-page__panel">
       <div class="delegation-page__chips">
@@ -44,6 +51,7 @@
             <strong>{{ scope.namespace }}</strong>
             <span>{{ scope.integrationName }}</span>
             <p>{{ scope.departmentFullPath || scope.departmentName }}</p>
+            <p data-testid="department-scope-choice">{{ departmentScopeChoiceLabel(scope.includeChildren) }}</p>
           </article>
         </div>
         <div v-if="summary.groupAssignments.length > 0" class="delegation-page__scope-list">
@@ -65,23 +73,30 @@
     <div class="delegation-page__layout">
       <aside class="delegation-page__panel">
         <h2>成员</h2>
-        <div v-if="users.length === 0" class="delegation-page__empty">暂无成员</div>
+        <div v-if="usersForbidden" class="delegation-page__empty" data-testid="delegation-users-forbidden">当前账号没有可管理的范围。</div>
+        <div v-else-if="users.length === 0" class="delegation-page__empty">暂无成员</div>
         <button
           v-for="user in users"
           :key="user.id"
           class="delegation-page__user"
-          :class="{ 'delegation-page__user--active': selectedUserId === user.id }"
+          :class="{
+            'delegation-page__user--active': selectedUserId === user.id && user.selectable !== false,
+            'delegation-page__user--disabled': user.selectable === false,
+          }"
+          :disabled="user.selectable === false"
+          :data-testid="user.selectable === false ? 'delegation-user-disabled' : undefined"
           type="button"
           @click="void selectUser(user.id)"
         >
-          <strong>{{ user.name || user.email }}</strong>
-          <span>{{ user.email }}</span>
-          <small>{{ user.role }} · {{ user.is_active ? '启用' : '停用' }}</small>
+          <strong>{{ candidatePrimaryLabel(user) }}</strong>
+          <span v-if="candidateEmail(user)">{{ candidateEmail(user) }}</span>
+          <small v-if="user.selectable !== false">{{ candidateMeta(user) }}</small>
+          <small v-else :data-testid="`delegation-disabled-reason-${user.id}`">{{ candidateDisabledReason(user) }}</small>
         </button>
       </aside>
 
       <section class="delegation-page__panel delegation-page__panel--detail">
-        <template v-if="selectedAccess">
+        <template v-if="selectedAccess && !selectedUserDisabled">
           <div class="delegation-page__detail-head">
             <div>
               <h2>{{ selectedAccess.user.name || selectedAccess.user.email }}</h2>
@@ -128,11 +143,12 @@
                   </span>
                 </div>
                 <p>只有角色和开通状态同时满足，插件才算真正可用。</p>
+                <p v-if="!namespaceIsManaged(admission.namespace)" data-testid="admission-namespace-locked">当前命名空间不在可管理范围内</p>
                 <div class="delegation-page__role-actions">
-                  <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
+                  <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || admission.enabled || !namespaceIsManaged(admission.namespace)" @click="openAdmissionConfirmation(admission)">
                     开通插件使用
                   </button>
-                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
+                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !admission.enabled || !namespaceIsManaged(admission.namespace)" @click="void updateNamespaceAdmission(admission, false)">
                     关闭插件使用
                   </button>
                 </div>
@@ -158,7 +174,7 @@
                   {{ roleTitle(role) }} ({{ role.id }})
                 </option>
               </select>
-              <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || !selectedRoleId" @click="void updateRole('assign')">
+              <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || !selectedRoleId || !roleActionAllowed(selectedRoleId, 'assign')" @click="openGrantConfirmation()">
                 分配角色
               </button>
             </div>
@@ -169,7 +185,7 @@
                   {{ revocableRoleLabel(roleId) }}
                 </option>
               </select>
-              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !selectedRevokeRoleId" @click="void updateRole('unassign')">
+              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !selectedRevokeRoleId || !roleActionAllowed(selectedRevokeRoleId, 'unassign')" @click="openRevokeConfirmation()">
                 撤销角色
               </button>
             </div>
@@ -181,7 +197,7 @@
               <article v-for="role in selectedAccess.roleCatalog" :key="role.id" class="delegation-page__role-card">
                 <strong>{{ roleTitle(role) }}</strong>
                 <span class="delegation-page__code">{{ role.id }}</span>
-                <p class="delegation-page__code">{{ role.permissions.join(', ') || '无权限映射' }}</p>
+                <p class="delegation-page__code">{{ rolePermissionLabel(role) }}</p>
               </article>
             </div>
           </div>
@@ -276,7 +292,7 @@
 
           <div v-if="summary?.isPlatformAdmin && selectedScopeConfig" class="delegation-page__section">
             <h3>插件管理员范围配置</h3>
-            <p class="delegation-page__hint">平台管理员配置管理范围。部门范围包含该部门及其下级。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。委派管理员只能给允许的成员分配允许的角色。</p>
+            <p class="delegation-page__hint">平台管理员配置管理范围。部门范围可以选择是否包含下级部门。成员集是共享成员组。同一命名空间内，部门范围与共享成员组取并集。委派管理员只能给允许的成员分配允许的角色。</p>
             <div v-if="selectedScopeConfig.adminNamespaces.length === 0" class="delegation-page__empty">
               该成员尚未持有任何插件管理员角色。
             </div>
@@ -306,10 +322,22 @@
                     {{ department.integrationName }} / {{ department.departmentFullPath || department.departmentName }}
                   </option>
                 </select>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedDepartmentId" @click="void updateScope('assign')">
+                <label class="delegation-page__check">
+                  <input
+                    data-testid="scope-include-children"
+                    type="checkbox"
+                    :checked="includeChildren"
+                    :disabled="exactDepartmentChoiceLocked(includeChildren)"
+                    @change="onIncludeChildrenChange($event, 'scope')"
+                  />
+                  包含下级部门
+                </label>
+                <span data-testid="scope-include-children-value">{{ departmentScopeChoiceLabel(includeChildren) }}</span>
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !memberWritesReady || !selectedScopeNamespace || !selectedDepartmentId || directExactAssignBlocked" @click="void updateScope('assign')">
                   添加部门范围
                 </button>
               </div>
+              <p v-if="!exactDepartmentWritesEnabled" class="delegation-page__hint" data-testid="exact-department-unavailable">{{ exactDepartmentUnavailableText }}</p>
               <div class="delegation-page__role-actions">
                 <select v-model="selectedAudienceGroupId" class="delegation-page__input">
                   <option value="">请选择平台成员集</option>
@@ -326,6 +354,7 @@
                   <strong>{{ scope.namespace }}</strong>
                   <span>{{ scope.integrationName }}</span>
                   <p>{{ scope.departmentFullPath || scope.departmentName }}</p>
+                  <p data-testid="department-scope-choice">{{ departmentScopeChoiceLabel(scope.includeChildren) }}</p>
                   <button
                     class="delegation-page__button delegation-page__button--danger"
                     type="button"
@@ -400,12 +429,13 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length"
+                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length || exactDepartmentApplyBlocked"
                 @click="void applyTemplate()"
               >
                 覆盖应用到当前命名空间
               </button>
             </div>
+            <p v-if="exactDepartmentApplyBlocked" class="delegation-page__hint" data-testid="exact-department-apply-unavailable">{{ exactDepartmentApplyUnavailableText }}</p>
 
             <template v-if="selectedTemplate">
               <div class="delegation-page__role-actions">
@@ -415,10 +445,22 @@
                     {{ department.integrationName }} / {{ department.departmentFullPath || department.departmentName }}
                   </option>
                 </select>
-                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedTemplateDepartmentId" @click="void updateTemplateDepartment('assign')">
+                <label class="delegation-page__check">
+                  <input
+                    data-testid="template-include-children"
+                    type="checkbox"
+                    :checked="templateIncludeChildren"
+                    :disabled="exactDepartmentChoiceLocked(templateIncludeChildren)"
+                    @change="onIncludeChildrenChange($event, 'template')"
+                  />
+                  包含下级部门
+                </label>
+                <span data-testid="template-include-children-value">{{ departmentScopeChoiceLabel(templateIncludeChildren) }}</span>
+                <button class="delegation-page__button" type="button" :disabled="scopeBusy || !selectedTemplateDepartmentId || templateExactAssignBlocked" @click="void updateTemplateDepartment('assign')">
                   添加模板部门
                 </button>
               </div>
+              <p v-if="!exactDepartmentWritesEnabled" class="delegation-page__hint" data-testid="exact-department-unavailable">{{ exactDepartmentUnavailableText }}</p>
               <div class="delegation-page__role-actions">
                 <select v-model="selectedTemplateMemberGroupId" class="delegation-page__input">
                   <option value="">选择成员集加入模板</option>
@@ -436,6 +478,7 @@
                   <strong>{{ selectedTemplate.name }}</strong>
                   <span>{{ department.integrationName }}</span>
                   <p>{{ department.departmentFullPath || department.departmentName }}</p>
+                  <p data-testid="department-scope-choice">{{ departmentScopeChoiceLabel(department.includeChildren) }}</p>
                   <button
                     class="delegation-page__button delegation-page__button--danger"
                     type="button"
@@ -480,8 +523,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
+import DelegationConfirmationPanel from './DelegationConfirmationPanel.vue'
+import {
+  delegationConfirmationStillValid,
+  openDelegationConfirmation,
+  PLATFORM_ADMIN_REVOKE_PHRASE,
+  PLATFORM_ADMIN_ROLE_ID,
+  readCatalogExpectedUpdatedAt,
+  type DelegationConfirmation,
+  type DelegationPermissionListing,
+} from './delegationConfirmation'
 import { presentRoleTitle } from './builtinCatalogPresentation'
 
 type ManagedUser = {
@@ -492,10 +545,22 @@ type ManagedUser = {
   is_active: boolean
 }
 
+type SelectableCandidate = ManagedUser & { selectable: true }
+
+type DisabledCandidate = {
+  id: string
+  name: string | null
+  selectable: false
+  disabledReason: string
+}
+
+type UserCandidate = SelectableCandidate | DisabledCandidate
+
 type RoleCatalogItem = {
   id: string
   name: string
-  permissions: string[]
+  permissions?: unknown
+  updatedAt?: string
 }
 
 type ScopeAssignment = {
@@ -510,6 +575,7 @@ type ScopeAssignment = {
   departmentName: string
   departmentFullPath: string | null
   departmentActive: boolean
+  includeChildren?: boolean
 }
 
 type GroupAssignment = {
@@ -531,6 +597,7 @@ type DepartmentCatalogItem = {
   departmentName: string
   departmentFullPath: string | null
   departmentActive: boolean
+  includeChildren?: boolean
 }
 
 type MemberGroupSummary = {
@@ -567,6 +634,7 @@ type DelegationSummary = {
   actorId: string
   isPlatformAdmin: boolean
   delegableNamespaces: string[]
+  exactDepartmentScopeAvailable?: unknown
   roleCatalog: RoleCatalogItem[]
   scopeAssignments: ScopeAssignment[]
   groupAssignments: GroupAssignment[]
@@ -584,6 +652,7 @@ type DelegatedUserAccess = {
   roles: string[]
   delegableRoles: string[]
   namespaceAdmissions: NamespaceAdmission[]
+  manageableNamespaces?: string[]
 }
 
 type NamespaceAdmission = {
@@ -632,7 +701,12 @@ const templateDescription = ref('')
 const memberGroupSearch = ref('')
 const memberGroupName = ref('')
 const memberGroupDescription = ref('')
-const users = ref<ManagedUser[]>([])
+const users = ref<UserCandidate[]>([])
+const usersForbidden = ref(false)
+const includeChildren = ref(true)
+const templateIncludeChildren = ref(true)
+const exactDepartmentBlocked = ref(false)
+const pendingConfirmation = ref<DelegationConfirmation | null>(null)
 const departments = ref<DepartmentCatalogItem[]>([])
 const templates = ref<ScopeTemplateSummary[]>([])
 const memberGroups = ref<MemberGroupSummary[]>([])
@@ -664,6 +738,43 @@ const memberWritesReady = computed(() => {
   return true
 })
 
+const selectedUserDisabled = computed(() => {
+  const row = users.value.find((user) => user.id === selectedUserId.value)
+  return row?.selectable === false
+})
+
+const EXACT_DEPARTMENT_DISABLED_CODE = 'DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'
+const exactDepartmentUnavailableText = '当前不能新建仅本部门的范围。新的部门范围需要包含下级部门。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以移除。'
+const exactDepartmentApplyUnavailableText = '这个模板含有仅本部门的范围，当前不能覆盖应用。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以从模板中移除。'
+
+const exactDepartmentWritesEnabled = computed(() => (
+  summary.value?.exactDepartmentScopeAvailable === true && exactDepartmentBlocked.value === false
+))
+const directExactAssignBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && includeChildren.value !== true
+))
+const templateExactAssignBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && templateIncludeChildren.value !== true
+))
+const exactDepartmentApplyBlocked = computed(() => (
+  !exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)
+))
+
+watch(selectedUserId, (userId) => {
+  const pending = pendingConfirmation.value
+  if (pending && pending.targetUserId !== userId) pendingConfirmation.value = null
+})
+
+watch(selectedRoleId, (roleId) => {
+  const pending = pendingConfirmation.value
+  if (pending?.kind === 'grant' && pending.roleId !== roleId) pendingConfirmation.value = null
+})
+
+watch(selectedRevokeRoleId, (roleId) => {
+  const pending = pendingConfirmation.value
+  if (pending?.kind === 'revoke' && pending.roleId !== roleId) pendingConfirmation.value = null
+})
+
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
   status.value = message
   statusTone.value = tone
@@ -675,8 +786,207 @@ function readLocationUserId(): string {
 }
 
 let delegationAccessGeneration = 0
+let usersRequestGeneration = 0
+let summaryRequestGeneration = 0
 const initialPinnedUserId = readLocationUserId()
 let pinnedUserPending = initialPinnedUserId.length > 0
+
+function departmentScopeChoiceLabel(value: unknown): string {
+  if (value === true) return '包含下级部门'
+  if (value === false) return '仅本部门'
+  return '未返回是否包含下级'
+}
+
+function templateContainsExactDepartment(template: ScopeTemplateDetail | null): boolean {
+  if (!template || !Array.isArray(template.departments)) return false
+  return template.departments.some((department) => department.includeChildren === false)
+}
+
+function exactDepartmentChoiceLocked(checked: boolean): boolean {
+  return !exactDepartmentWritesEnabled.value && checked === true
+}
+
+function noteExactDepartmentDisabledByServer(): void {
+  exactDepartmentBlocked.value = true
+  summaryRequestGeneration += 1
+}
+
+function isExactDepartmentDisabledResponse(response: { status?: number }, payload: Record<string, unknown>): boolean {
+  if (response.status !== 403) return false
+  const error = payload.error
+  if (!error || typeof error !== 'object') return false
+  return (error as { code?: unknown }).code === EXACT_DEPARTMENT_DISABLED_CODE
+}
+
+function onIncludeChildrenChange(event: Event, target: 'scope' | 'template'): void {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) return
+  const current = target === 'scope' ? includeChildren.value : templateIncludeChildren.value
+  if (!input.checked && !exactDepartmentWritesEnabled.value) {
+    input.checked = current
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
+  if (target === 'scope') includeChildren.value = input.checked
+  else templateIncludeChildren.value = input.checked
+}
+
+function candidatePrimaryLabel(user: UserCandidate): string {
+  if (user.selectable === false) return user.name || user.id
+  return user.name || user.email
+}
+
+function candidateEmail(user: UserCandidate): string {
+  return user.selectable === false ? '' : user.email
+}
+
+function candidateMeta(user: UserCandidate): string {
+  if (user.selectable === false) return ''
+  return `${user.role} · ${user.is_active ? '启用' : '停用'}`
+}
+
+const OUT_OF_MANAGEMENT_SCOPE_CODE = 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'
+const OUT_OF_MANAGEMENT_SCOPE_REASON = '这个人不在您可管理的部门或成员组里。'
+
+function candidateDisabledReason(user: UserCandidate): string {
+  if (user.selectable !== false) return ''
+  const reason = user.disabledReason.trim()
+  if (reason === OUT_OF_MANAGEMENT_SCOPE_CODE) return OUT_OF_MANAGEMENT_SCOPE_REASON
+  return reason ? user.disabledReason : ''
+}
+
+function normalizeUserCandidate(raw: unknown): UserCandidate | null {
+  if (!raw || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  if (typeof record.id !== 'string' || !record.id) return null
+  const name = typeof record.name === 'string' ? record.name : null
+  if ('selectable' in record && typeof record.selectable !== 'boolean') {
+    return {
+      id: record.id,
+      name,
+      selectable: false,
+      disabledReason: '成员标记无效',
+    }
+  }
+  if (record.selectable === false) {
+    return {
+      id: record.id,
+      name,
+      selectable: false,
+      disabledReason: typeof record.disabledReason === 'string' ? record.disabledReason : '',
+    }
+  }
+  return {
+    id: record.id,
+    email: typeof record.email === 'string' ? record.email : '',
+    name,
+    role: typeof record.role === 'string' ? record.role : '',
+    is_active: record.is_active !== false,
+    selectable: true,
+  }
+}
+
+function permissionListingFor(role: RoleCatalogItem | undefined): { permissions: string[]; permissionListing: DelegationPermissionListing } {
+  if (!role || !Array.isArray(role.permissions)) return { permissions: [], permissionListing: 'unknown' }
+  const permissions = role.permissions.filter((code): code is string => typeof code === 'string' && code.trim().length > 0)
+  if (role.permissions.length === 0) return { permissions: [], permissionListing: 'empty' }
+  if (permissions.length === 0) return { permissions: [], permissionListing: 'unknown' }
+  return { permissions, permissionListing: 'listed' }
+}
+
+function rolePermissionLabel(role: RoleCatalogItem): string {
+  const listing = permissionListingFor(role)
+  if (listing.permissionListing === 'empty') return '无权限映射'
+  if (listing.permissionListing === 'unknown') return '目录未提供权限码'
+  return listing.permissions.join(', ')
+}
+
+function namespaceIsManaged(namespace: string): boolean {
+  if (selectedAccess.value?.isPlatformAdmin === true) return true
+  const managed = selectedAccess.value?.manageableNamespaces
+  if (!Array.isArray(managed)) return false
+  return managed.includes(namespace)
+}
+
+function roleActionAllowed(roleId: string, action: 'assign' | 'unassign'): boolean {
+  const access = selectedAccess.value
+  if (!access || !roleId) return false
+  if (action === 'unassign') {
+    return Array.isArray(access.delegableRoles) && access.delegableRoles.includes(roleId)
+  }
+  const role = Array.isArray(access.roleCatalog)
+    ? access.roleCatalog.find((candidate) => candidate.id === roleId)
+    : undefined
+  if (!role) return false
+  if (access.isPlatformAdmin === true) return true
+  return Array.isArray(role.permissions)
+}
+
+function assignmentEchoesIncludeChildren(
+  assignments: unknown,
+  directoryDepartmentId: string,
+  requested: boolean,
+  namespace?: string,
+): boolean {
+  if (!Array.isArray(assignments)) return false
+  const match = assignments.find((item) => {
+    if (!item || typeof item !== 'object') return false
+    const record = item as { directoryDepartmentId?: unknown; namespace?: unknown }
+    if (record.directoryDepartmentId !== directoryDepartmentId) return false
+    // Template departments are not namespaced. Direct scopes repeat one department across namespaces.
+    return namespace === undefined || record.namespace === namespace
+  }) as { includeChildren?: unknown } | undefined
+  return match?.includeChildren === requested
+}
+
+function readNamespaceAdmissionList(value: unknown): NamespaceAdmission[] | null {
+  if (!Array.isArray(value)) return null
+  return value.map((item) => {
+    const record = item as Record<string, unknown>
+    return {
+      namespace: typeof record.namespace === 'string' ? record.namespace : '',
+      enabled: record.enabled === true,
+      effective: typeof record.effective === 'boolean' ? record.effective : record.enabled === true && record.hasRole === true,
+      hasRole: record.hasRole === true || record.has_role === true,
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : typeof record.updated_at === 'string' ? record.updated_at : null,
+    }
+  }).filter((item) => item.namespace)
+}
+
+function admissionRecordTargetsUser(data: unknown, userId: string): boolean {
+  if (!data || typeof data !== 'object') return false
+  if (!('user' in data)) return true
+  const user = (data as { user?: unknown }).user
+  if (!user || typeof user !== 'object') return false
+  return (user as { id?: unknown }).id === userId
+}
+
+function targetLabelFor(user: ManagedUser): string {
+  return user.name || user.email || user.id
+}
+
+function invalidateSelection(): void {
+  delegationAccessGeneration += 1
+  selectedUserId.value = ''
+  selectedAccess.value = null
+  selectedScopeConfig.value = null
+  selectedRoleId.value = ''
+  selectedRevokeRoleId.value = ''
+  selectedDepartmentId.value = ''
+  selectedAudienceGroupId.value = ''
+  pendingConfirmation.value = null
+}
+
+function clearUnpinnedSelection(): void {
+  selectedUserId.value = ''
+  selectedAccess.value = null
+  selectedScopeConfig.value = null
+  selectedRoleId.value = ''
+  selectedRevokeRoleId.value = ''
+  selectedDepartmentId.value = ''
+  selectedAudienceGroupId.value = ''
+  pendingConfirmation.value = null
+}
 
 function roleTitle(role: { id: string; name: string }): string {
   return presentRoleTitle(role)
@@ -702,12 +1012,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
 }
 
 async function loadSummary(): Promise<void> {
+  const requestGeneration = ++summaryRequestGeneration
   const response = await apiFetch('/api/admin/role-delegation/summary')
   const payload = await readJson(response)
+  if (requestGeneration !== summaryRequestGeneration) return
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载角色委派摘要失败'))
   }
   summary.value = payload.data as DelegationSummary
+  exactDepartmentBlocked.value = false
 }
 
 async function loadDepartments(): Promise<void> {
@@ -881,17 +1194,39 @@ async function updateTemplateDepartment(action: 'assign' | 'unassign', directory
   if (!summary.value?.isPlatformAdmin || !selectedTemplateId.value) return
   const departmentId = directoryDepartmentId || selectedTemplateDepartmentId.value
   if (!departmentId) return
+  if (action === 'assign' && templateIncludeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
   scopeBusy.value = true
   try {
+    const requestedIncludeChildren = templateIncludeChildren.value === true
+    const templateDepartmentBody: { directoryDepartmentId: string; includeChildren?: boolean } = {
+      directoryDepartmentId: departmentId,
+    }
+    if (action === 'assign') templateDepartmentBody.includeChildren = requestedIncludeChildren
     const response = await apiFetch(`/api/admin/role-delegation/scope-templates/${encodeURIComponent(selectedTemplateId.value)}/departments/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ directoryDepartmentId: departmentId }),
+      body: JSON.stringify(templateDepartmentBody),
     })
     const payload = await readJson(response)
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      throw new Error(exactDepartmentUnavailableText)
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新模板部门失败'))
     }
-    selectedTemplate.value = (payload.data as { item: ScopeTemplateDetail }).item
+    const templateItem = (payload.data as { item?: ScopeTemplateDetail } | undefined)?.item
+    if (action === 'assign' && !assignmentEchoesIncludeChildren(templateItem?.departments, departmentId, requestedIncludeChildren)) {
+      setStatus('返回的是否包含下级与提交不一致', 'error')
+      return
+    }
+    if (!templateItem) {
+      setStatus('更新模板部门失败', 'error')
+      return
+    }
+    selectedTemplate.value = templateItem
     if (action === 'assign') {
       selectedTemplateDepartmentId.value = ''
       setStatus('模板部门已添加')
@@ -935,53 +1270,88 @@ async function updateTemplateMemberGroup(action: 'assign' | 'unassign', groupId?
   }
 }
 
-async function loadUsers(): Promise<void> {
+async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> {
+  const reselectPinned = options?.reselectPinned !== false
+  const requestGeneration = ++usersRequestGeneration
   loading.value = true
   try {
     const params = new URLSearchParams()
     if (search.value) params.set('q', search.value)
-    const response = await apiFetch(`/api/admin/role-delegation/users${params.size ? `?${params.toString()}` : ''}`)
+    params.set('includeIneligible', 'true')
+    const response = await apiFetch(`/api/admin/role-delegation/users?${params.toString()}`)
     const payload = await readJson(response)
+    if (requestGeneration !== usersRequestGeneration) return
+    if (response.status === 403) {
+      users.value = []
+      usersForbidden.value = true
+      pinnedUserPending = false
+      invalidateSelection()
+      setStatus('当前账号没有可管理的范围。', 'error')
+      return
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员失败'))
     }
 
-    const data = payload.data as { items?: ManagedUser[] } | undefined
-    users.value = Array.isArray(data?.items) ? data.items : []
-    if (pinnedUserPending) {
+    usersForbidden.value = false
+    const data = payload.data as { items?: unknown[] } | undefined
+    const items = Array.isArray(data?.items) ? data.items : []
+    users.value = items.map((item) => normalizeUserCandidate(item)).filter((item): item is UserCandidate => item !== null)
+    if (reselectPinned && pinnedUserPending) {
       const pinned = initialPinnedUserId
       pinnedUserPending = false
+      const pinnedRow = users.value.find((user) => user.id === pinned)
+      if (pinnedRow?.selectable === false) return
       await selectUser(pinned)
       return
     }
-    // An explicitly linked member is independent of the paginated search results.
-    // Refresh its access instead of silently replacing it with the first listed user.
+    // A linked member stays selected when this page does not list them.
+    // The access read is optional; a disabled row still drops the link.
     if (selectedUserId.value && selectedUserId.value === initialPinnedUserId) {
-      await selectUser(selectedUserId.value)
+      const pinnedRow = users.value.find((user) => user.id === selectedUserId.value)
+      if (pinnedRow?.selectable === false) {
+        invalidateSelection()
+        return
+      }
+      if (reselectPinned) await selectUser(selectedUserId.value)
       return
     }
-    const selectedStillExists = users.value.some((user) => user.id === selectedUserId.value)
-    if (selectedUserId.value && !selectedStillExists) {
-      selectedUserId.value = ''
-      selectedAccess.value = null
-      selectedScopeConfig.value = null
-      selectedRoleId.value = ''
-      selectedRevokeRoleId.value = ''
-      selectedDepartmentId.value = ''
-      selectedAudienceGroupId.value = ''
+    if (!selectedUserId.value && initialPinnedUserId) {
+      const pinnedRow = users.value.find((user) => user.id === initialPinnedUserId)
+      if (pinnedRow?.selectable === false) return
     }
-    if (!selectedUserId.value && users.value.length > 0) {
-      await selectUser(users.value[0].id)
+    const selectedRow = users.value.find((user) => user.id === selectedUserId.value)
+    if (selectedUserId.value && selectedRow?.selectable === false) {
+      invalidateSelection()
+      return
+    }
+    if (selectedUserId.value && !selectedRow) {
+      clearUnpinnedSelection()
+    } else if (selectedUserId.value && selectedRow) {
+      return
+    }
+    if (!selectedUserId.value) {
+      const firstSelectable = users.value.find((user) => user.selectable !== false)
+      if (firstSelectable) await selectUser(firstSelectable.id)
     }
   } catch (error) {
+    if (requestGeneration !== usersRequestGeneration) return
     setStatus(error instanceof Error ? error.message : '加载成员失败', 'error')
   } finally {
-    loading.value = false
+    if (requestGeneration === usersRequestGeneration) loading.value = false
   }
 }
 
-async function selectUser(userId: string): Promise<void> {
+function listedCandidateDisabled(userId: string): boolean {
+  return users.value.some((user) => user.id === userId && user.selectable === false)
+}
+
+type OwnedSelection = { applied: boolean, generation: number | null }
+
+async function selectUser(userId: string): Promise<OwnedSelection> {
+  if (listedCandidateDisabled(userId)) return { applied: false, generation: null }
   const generation = ++delegationAccessGeneration
+  pendingConfirmation.value = null
   selectedAccess.value = null
   selectedScopeConfig.value = null
   selectedRoleId.value = ''
@@ -992,32 +1362,57 @@ async function selectUser(userId: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
-    if (!delegationReadStillCurrent(generation, userId)) return
+    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+    if (listedCandidateDisabled(userId)) {
+      selectedAccess.value = null
+      selectedScopeConfig.value = null
+      if (selectedUserId.value === userId) selectedUserId.value = ''
+      return { applied: false, generation }
+    }
+    if (response.status === 403) {
+      selectedAccess.value = null
+      selectedScopeConfig.value = null
+      const deniedMessage = (payload.error as Record<string, unknown> | undefined)?.message
+      setStatus(typeof deniedMessage === 'string' && deniedMessage ? deniedMessage : '无权查看该成员的委派权限', 'error')
+      return { applied: false, generation }
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员委派权限失败'))
     }
     if (!readSubjectMatches(payload, userId)) {
       setStatus('加载成员委派权限失败', 'error')
-      return
+      return { applied: false, generation }
     }
 
     selectedAccess.value = payload.data as DelegatedUserAccess
-    if (summary.value?.isPlatformAdmin) {
-      await loadScopeConfig(userId)
-    } else if (delegationReadStillCurrent(generation, userId)) {
+    if (listedCandidateDisabled(userId) || !delegationReadStillCurrent(generation, userId)) {
+      selectedAccess.value = null
       selectedScopeConfig.value = null
+      if (selectedUserId.value === userId) selectedUserId.value = ''
+      return { applied: false, generation }
     }
+    if (summary.value?.isPlatformAdmin) {
+      const scopeResult = await loadScopeConfig(userId)
+      if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+      return { applied: scopeResult === 'ok', generation }
+    }
+    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+    selectedScopeConfig.value = null
+    return { applied: true, generation }
   } catch (error) {
-    if (!delegationReadStillCurrent(generation, userId)) return
+    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
     selectedAccess.value = null
     selectedScopeConfig.value = null
     setStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
+    return { applied: false, generation }
   }
 }
 
 async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
   const targetUserId = selectedUserId.value
+  const generation = delegationAccessGeneration
   if (!targetUserId || !memberWritesReady.value) return
+  const successMessage = enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`
   busy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
@@ -1025,60 +1420,77 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
       body: JSON.stringify({ enabled }),
     })
     const payload = await readJson(response)
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存插件使用准入失败'))
     }
-    if (selectedUserId.value !== targetUserId || selectedAccess.value?.user.id !== targetUserId) return
-
-    const data = payload.data as Record<string, unknown> | undefined
-    if (data?.namespaceAdmissions !== undefined && selectedAccess.value) {
-      selectedAccess.value = {
-        ...selectedAccess.value,
-        ...(data as DelegatedUserAccess),
-        namespaceAdmissions: Array.isArray(data.namespaceAdmissions)
-          ? data.namespaceAdmissions.map((item) => {
-              const record = item as Record<string, unknown>
-              return {
-                namespace: String(record.namespace || ''),
-                enabled: record.enabled === true,
-                effective: typeof record.effective === 'boolean' ? record.effective : record.enabled === true && record.hasRole === true,
-                hasRole: record.hasRole === true || record.has_role === true,
-                updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : typeof record.updated_at === 'string' ? record.updated_at : null,
-              } as NamespaceAdmission
-            }).filter((item) => item.namespace)
-          : selectedAccess.value.namespaceAdmissions,
-      }
-    } else if (selectedUserId.value === targetUserId) {
-      await selectUser(selectedUserId.value)
+    if (!admissionRecordTargetsUser(payload.data, targetUserId) || selectedAccess.value?.user.id !== targetUserId) {
+      setStatus('保存插件使用准入失败', 'error')
+      return
     }
-    setStatus(enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`)
+
+    const data = payload.data as Record<string, unknown>
+    if ('namespaceAdmissions' in data) {
+      const admissions = readNamespaceAdmissionList(data.namespaceAdmissions)
+      const echoed = admissions?.find((item) => item.namespace === admission.namespace)
+      if (!admissions || !echoed || echoed.enabled !== enabled) {
+        setStatus('保存插件使用准入失败', 'error')
+        return
+      }
+      const currentAccess = selectedAccess.value
+      if (!delegationReadStillCurrent(generation, targetUserId) || !currentAccess) return
+      selectedAccess.value = {
+        ...currentAccess,
+        namespaceAdmissions: admissions,
+      }
+      setStatus(successMessage)
+      return
+    }
+
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    const refreshed = await selectUser(targetUserId)
+    if (!refreshed.applied || selectedUserId.value !== targetUserId || selectedAccess.value?.user.id !== targetUserId) return
+    const echoed = selectedAccess.value.namespaceAdmissions?.find((item) => item.namespace === admission.namespace)
+    if (!echoed || echoed.enabled !== enabled) {
+      setStatus('保存插件使用准入失败', 'error')
+      return
+    }
+    setStatus(successMessage)
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(error instanceof Error ? error.message : '保存插件使用准入失败', 'error')
   } finally {
     busy.value = false
   }
 }
 
-async function loadScopeConfig(userId: string): Promise<void> {
-  if (!summary.value?.isPlatformAdmin) return
+async function loadScopeConfig(userId: string): Promise<'ok' | 'denied' | 'stale' | 'mismatch'> {
+  if (!summary.value?.isPlatformAdmin) return 'ok'
   const generation = delegationAccessGeneration
 
   const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/scopes`)
   const payload = await readJson(response)
-  if (!delegationReadStillCurrent(generation, userId)) return
+  if (!delegationReadStillCurrent(generation, userId)) return 'stale'
+  if (response.status === 403) {
+    selectedScopeConfig.value = null
+    setStatus('无权查看该成员的管理范围', 'error')
+    return 'denied'
+  }
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理员范围失败'))
   }
-  if (!delegationReadStillCurrent(generation, userId)) return
+  if (!delegationReadStillCurrent(generation, userId)) return 'stale'
   if (!readSubjectMatches(payload, userId)) {
+    selectedScopeConfig.value = null
     setStatus('加载管理员范围失败', 'error')
-    return
+    return 'mismatch'
   }
 
   selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
   if (!selectedScopeConfig.value.adminNamespaces.includes(selectedScopeNamespace.value)) {
     selectedScopeNamespace.value = selectedScopeConfig.value.adminNamespaces[0] || ''
   }
+  return 'ok'
 }
 
 /** A revocable role id, named from the assignable catalog when it is there (it may not be). */
@@ -1087,22 +1499,124 @@ function revocableRoleLabel(roleId: string): string {
   return role ? `${roleTitle(role)} (${role.id})` : roleId
 }
 
-async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
-  // Assign picks from the assignable catalog, revoke from the server's revocable list.
-  const roleId = action === 'assign' ? selectedRoleId.value : selectedRevokeRoleId.value
+function openGrantConfirmation(): void {
   const targetUserId = selectedUserId.value
+  const roleId = selectedRoleId.value
+  const access = selectedAccess.value
+  if (!targetUserId || !roleId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
+  if (!roleActionAllowed(roleId, 'assign')) return
+  const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
+  if (!role) {
+    setStatus('角色目录中没有该角色，不能分配', 'error')
+    return
+  }
+  const listing = permissionListingFor(role)
+  pendingConfirmation.value = openDelegationConfirmation({
+    kind: 'grant',
+    targetUserId,
+    targetLabel: targetLabelFor(access.user),
+    roleId: role.id,
+    roleTitle: roleTitle(role),
+    permissions: listing.permissions,
+    permissionListing: listing.permissionListing,
+    namespace: null,
+    expectedUpdatedAt: readCatalogExpectedUpdatedAt(role),
+  })
+}
+
+function openRevokeConfirmation(): void {
+  const targetUserId = selectedUserId.value
+  const roleId = selectedRevokeRoleId.value
+  const access = selectedAccess.value
+  if (!targetUserId || !roleId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
+  if (!roleActionAllowed(roleId, 'unassign')) return
+  const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
+  const listing = permissionListingFor(role)
+  pendingConfirmation.value = openDelegationConfirmation({
+    kind: 'revoke',
+    targetUserId,
+    targetLabel: targetLabelFor(access.user),
+    roleId,
+    roleTitle: role ? roleTitle(role) : roleId,
+    permissions: listing.permissions,
+    permissionListing: listing.permissionListing,
+    namespace: null,
+    expectedUpdatedAt: null,
+  })
+}
+
+function openAdmissionConfirmation(admission: NamespaceAdmission): void {
+  const targetUserId = selectedUserId.value
+  const access = selectedAccess.value
+  if (!targetUserId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
+  if (!namespaceIsManaged(admission.namespace) || admission.enabled) return
+  pendingConfirmation.value = openDelegationConfirmation({
+    kind: 'admission-enable',
+    targetUserId,
+    targetLabel: targetLabelFor(access.user),
+    roleId: null,
+    roleTitle: null,
+    permissions: [],
+    permissionListing: 'unknown',
+    namespace: admission.namespace,
+    expectedUpdatedAt: null,
+  })
+}
+
+async function submitDelegationConfirmation(typedText: string): Promise<void> {
+  const confirmation = pendingConfirmation.value
+  if (!confirmation) return
+  if (
+    confirmation.kind === 'revoke'
+    && confirmation.roleId === PLATFORM_ADMIN_ROLE_ID
+    && typedText.trim() !== PLATFORM_ADMIN_REVOKE_PHRASE
+  ) return
+  const currentRoleId = confirmation.kind === 'grant'
+    ? selectedRoleId.value
+    : confirmation.kind === 'revoke'
+      ? selectedRevokeRoleId.value
+      : null
+  const admissionStillPresent = confirmation.kind === 'admission-enable'
+    && selectedAccess.value?.namespaceAdmissions?.some((item) => item.namespace === confirmation.namespace) === true
+  if (!delegationConfirmationStillValid(confirmation, {
+    targetUserId: selectedUserId.value,
+    roleId: currentRoleId,
+    namespace: admissionStillPresent ? confirmation.namespace : null,
+  })) {
+    pendingConfirmation.value = null
+    return
+  }
+  pendingConfirmation.value = null
+  if (confirmation.kind === 'admission-enable') {
+    const admission = selectedAccess.value?.namespaceAdmissions.find((item) => item.namespace === confirmation.namespace)
+    if (!admission || !namespaceIsManaged(admission.namespace)) return
+    await updateNamespaceAdmission(admission, true)
+    return
+  }
+  await updateRole(confirmation.kind === 'grant' ? 'assign' : 'unassign', confirmation)
+}
+
+async function updateRole(action: 'assign' | 'unassign', confirmation?: DelegationConfirmation | null): Promise<void> {
+  // Assign picks from the assignable catalog, revoke from the server's revocable list.
+  const roleId = confirmation?.roleId || (action === 'assign' ? selectedRoleId.value : selectedRevokeRoleId.value)
+  const targetUserId = selectedUserId.value
+  const generation = delegationAccessGeneration
   if (!targetUserId || !roleId || !memberWritesReady.value) return
+  if (!roleActionAllowed(roleId, action)) return
+  const body: { roleId: string; expectedUpdatedAt?: string } = { roleId }
+  if (action === 'assign' && confirmation?.expectedUpdatedAt) body.expectedUpdatedAt = confirmation.expectedUpdatedAt
   busy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/roles/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ roleId }),
+      body: JSON.stringify(body),
     })
     const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (response.status === 409 || !response.ok || payload.ok !== true) {
+      // Last-admin and stale catalog version stay refusals. Do not post another body.
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存委派角色失败'))
     }
-    if (selectedUserId.value !== targetUserId) return
     if (!readSubjectMatches(payload, targetUserId)) {
       setStatus('保存委派角色失败', 'error')
       return
@@ -1113,48 +1627,119 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
       selectedRevokeRoleId.value = ''
     }
     if (summary.value?.isPlatformAdmin) {
-      await loadScopeConfig(targetUserId)
+      selectedScopeConfig.value = null
+      try {
+        const scopeResult = await loadScopeConfig(targetUserId)
+        // A scope reload that lost the member generation is not a successful role write.
+        if (!delegationReadStillCurrent(generation, targetUserId) || scopeResult !== 'ok') return
+      } catch (scopeError) {
+        if (!delegationReadStillCurrent(generation, targetUserId)) return
+        selectedScopeConfig.value = null
+        setStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
+        return
+      }
     }
-    if (selectedUserId.value !== targetUserId) return
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(error instanceof Error ? error.message : '保存委派角色失败', 'error')
   } finally {
     busy.value = false
   }
 }
 
+async function refreshAfterScopeWrite(targetUserId: string, successMessage: string, operationGeneration: number): Promise<void> {
+  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  await loadSummary()
+  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  // The list reload must not spend the access read this write owns.
+  await loadUsers({ reselectPinned: false })
+  if (usersForbidden.value) return
+  const candidate = users.value.find((user) => user.id === targetUserId)
+  // Disabled is a denial. A linked member missing from this search page is not.
+  if (candidate?.selectable === false) {
+    const stillCurrent = delegationReadStillCurrent(operationGeneration, targetUserId)
+    if (stillCurrent) invalidateSelection()
+    const clearedWithoutReplacement = selectedUserId.value === '' && delegationAccessGeneration === operationGeneration + 1
+    if (stillCurrent || clearedWithoutReplacement) setStatus('该成员已不在可管理范围内', 'error')
+    return
+  }
+  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  if (!candidate && targetUserId !== initialPinnedUserId) {
+    invalidateSelection()
+    setStatus('该成员已不在可管理范围内', 'error')
+    return
+  }
+  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  const ownedGeneration = operationGeneration + 1
+  const selected = await selectUser(targetUserId)
+  if (!selected.applied || selected.generation !== ownedGeneration) return
+  if (usersForbidden.value || selectedUserId.value !== targetUserId || !selectedAccess.value) return
+  if (summary.value?.isPlatformAdmin && selectedScopeConfig.value?.user.id !== targetUserId) return
+  setStatus(successMessage)
+}
+
 async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignment): Promise<void> {
   const targetUserId = selectedUserId.value
+  const generation = delegationAccessGeneration
   if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : scope?.namespace || ''
   const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
   if (!namespace || !directoryDepartmentId) return
+  if (action === 'assign' && includeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
+    setStatus(exactDepartmentUnavailableText, 'error')
+    return
+  }
 
   scopeBusy.value = true
   try {
+    const requestedIncludeChildren = includeChildren.value === true
+    const scopeBody: { namespace: string; directoryDepartmentId: string; includeChildren?: boolean } = {
+      namespace,
+      directoryDepartmentId,
+    }
+    if (action === 'assign') scopeBody.includeChildren = requestedIncludeChildren
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scopes/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ namespace, directoryDepartmentId }),
+      body: JSON.stringify(scopeBody),
     })
     const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      if (!delegationReadStillCurrent(generation, targetUserId)) return
+      throw new Error(exactDepartmentUnavailableText)
+    }
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (response.status === 403 || !response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
     }
-    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+    if (!readSubjectMatches(payload, targetUserId)) {
       setStatus('保存管理员范围失败', 'error')
+      return
+    }
+    if (
+      action === 'assign'
+      && !assignmentEchoesIncludeChildren(
+        (payload.data as { scopeAssignments?: unknown } | undefined)?.scopeAssignments,
+        directoryDepartmentId,
+        requestedIncludeChildren,
+        namespace,
+      )
+    ) {
+      setStatus('返回的是否包含下级与提交不一致', 'error')
       return
     }
 
     selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
-    if (action === 'assign') {
-      selectedDepartmentId.value = ''
-      setStatus('插件管理员部门范围已添加')
-    } else {
-      setStatus('插件管理员部门范围已移除')
-    }
-    await loadSummary()
+    if (action === 'assign') selectedDepartmentId.value = ''
+    await refreshAfterScopeWrite(
+      targetUserId,
+      action === 'assign' ? '插件管理员部门范围已添加' : '插件管理员部门范围已移除',
+      generation,
+    )
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(error instanceof Error ? error.message : '保存管理员范围失败', 'error')
   } finally {
     scopeBusy.value = false
@@ -1163,6 +1748,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
 
 async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: GroupAssignment): Promise<void> {
   const targetUserId = selectedUserId.value
+  const generation = delegationAccessGeneration
   if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : assignment?.namespace || ''
   const groupId = action === 'assign' ? selectedAudienceGroupId.value : assignment?.groupId || ''
@@ -1175,22 +1761,23 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
       body: JSON.stringify({ namespace, groupId }),
     })
     const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (response.status === 403 || !response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集范围失败'))
     }
-    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+    if (!readSubjectMatches(payload, targetUserId)) {
       setStatus('保存成员集范围失败', 'error')
       return
     }
     selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
-    if (action === 'assign') {
-      selectedAudienceGroupId.value = ''
-      setStatus('插件管理员成员集范围已添加')
-    } else {
-      setStatus('插件管理员成员集范围已移除')
-    }
-    await loadSummary()
+    if (action === 'assign') selectedAudienceGroupId.value = ''
+    await refreshAfterScopeWrite(
+      targetUserId,
+      action === 'assign' ? '插件管理员成员集范围已添加' : '插件管理员成员集范围已移除',
+      generation,
+    )
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(error instanceof Error ? error.message : '保存成员集范围失败', 'error')
   } finally {
     scopeBusy.value = false
@@ -1240,6 +1827,10 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 async function applyTemplate(): Promise<void> {
   const targetUserId = selectedUserId.value
   if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
+  if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
+    setStatus(exactDepartmentApplyUnavailableText, 'error')
+    return
+  }
   scopeBusy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-templates/apply`, {
@@ -1251,6 +1842,10 @@ async function applyTemplate(): Promise<void> {
       }),
     })
     const payload = await readJson(response)
+    if (isExactDepartmentDisabledResponse(response, payload)) {
+      noteExactDepartmentDisabledByServer()
+      throw new Error(exactDepartmentApplyUnavailableText)
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }
@@ -1285,10 +1880,18 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.delegation-page,
+.delegation-page * {
+  box-sizing: border-box;
+}
+
 .delegation-page {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   padding: 24px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .delegation-page__header,
@@ -1328,13 +1931,42 @@ onMounted(async () => {
 
 .delegation-page__layout {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 320px minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
+}
+
+.delegation-page > *,
+.delegation-page__layout > *,
+.delegation-page__header,
+.delegation-page__header > *,
+.delegation-page__actions,
+.delegation-page__actions > *,
+.delegation-page__detail-head,
+.delegation-page__detail-head > *,
+.delegation-page__role-actions,
+.delegation-page__role-actions > *,
+.delegation-page__chips,
+.delegation-page__chips > *,
+.delegation-page__role-list,
+.delegation-page__role-list > *,
+.delegation-page__scope-list,
+.delegation-page__scope-list > *,
+.delegation-page__panel,
+.delegation-page__section,
+.delegation-page__user,
+.delegation-page__user > *,
+.delegation-page__role-card,
+.delegation-page__role-card > *,
+.delegation-page__scope-card,
+.delegation-page__scope-card > * {
+  min-width: 0;
 }
 
 .delegation-page__panel {
   display: grid;
   gap: 12px;
+  max-width: 100%;
   padding: 16px;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -1349,6 +1981,7 @@ onMounted(async () => {
   display: grid;
   gap: 4px;
   width: 100%;
+  max-width: 100%;
   text-align: left;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
@@ -1362,8 +1995,22 @@ onMounted(async () => {
   background: #eff6ff;
 }
 
+.delegation-page__user--disabled {
+  color: #6b7280;
+  background: #f3f4f6;
+  cursor: not-allowed;
+}
+
+.delegation-page__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+}
+
 .delegation-page__input {
-  min-width: 240px;
+  min-width: 0;
+  max-width: 100%;
   height: 38px;
   border: 1px solid #d1d5db;
   border-radius: 8px;
@@ -1372,8 +2019,12 @@ onMounted(async () => {
 
 .delegation-page__button,
 .delegation-page__link {
-  height: 38px;
+  height: auto;
+  min-height: 38px;
+  max-width: 100%;
   border-radius: 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .delegation-page__button {
@@ -1432,9 +2083,23 @@ onMounted(async () => {
   overflow-wrap: anywhere;
 }
 
+.delegation-page__user strong,
+.delegation-page__user span,
+.delegation-page__user small,
+.delegation-page__header h1,
+.delegation-page__header p,
+.delegation-page__panel h2,
+.delegation-page__section h3,
+.delegation-page__detail-head h2,
+.delegation-page__detail-head p,
+.delegation-page__status,
+.delegation-page__hint,
+.delegation-page__empty,
 .delegation-page__code,
+.delegation-page__role-card strong,
 .delegation-page__role-card span,
 .delegation-page__role-card p,
+.delegation-page__scope-card strong,
 .delegation-page__scope-card span,
 .delegation-page__scope-card p {
   min-width: 0;
@@ -1454,6 +2119,7 @@ onMounted(async () => {
 
 .delegation-page__role-card {
   width: min(320px, 100%);
+  max-width: 100%;
   display: grid;
   gap: 4px;
   padding: 12px;
@@ -1469,6 +2135,7 @@ onMounted(async () => {
 
 .delegation-page__scope-card {
   width: min(320px, 100%);
+  max-width: 100%;
   display: grid;
   gap: 4px;
   padding: 12px;
@@ -1478,25 +2145,24 @@ onMounted(async () => {
 }
 
 @media (max-width: 960px) {
-  .delegation-page__layout,
-  .delegation-page__header {
-    display: grid;
-    grid-template-columns: 1fr;
+  .delegation-page__layout {
+    grid-template-columns: minmax(0, 1fr);
   }
-}
 
-@media (max-width: 480px) {
   .delegation-page__header,
-  .delegation-page__actions {
-    display: flex;
+  .delegation-page__detail-head,
+  .delegation-page__actions,
+  .delegation-page__role-actions {
     flex-direction: column;
     align-items: stretch;
-    width: 100%;
+    max-width: 100%;
   }
 
-  .delegation-page__actions > .delegation-page__input,
+  .delegation-page__input,
   .delegation-page__actions > .delegation-page__button,
-  .delegation-page__actions > .delegation-page__link {
+  .delegation-page__actions > .delegation-page__link,
+  .delegation-page__role-actions > .delegation-page__button,
+  .delegation-page__role-actions > .delegation-page__link {
     width: 100%;
     min-width: 0;
     max-width: 100%;

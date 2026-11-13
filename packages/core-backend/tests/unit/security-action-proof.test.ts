@@ -587,6 +587,28 @@ describe('password comparison and the second transaction', () => {
     expect(runner.statements.some((s) => s.key === 'insertIssued' || s.key === 'insertFailed')).toBe(false)
   })
 
+  it.each([
+    [false, true],
+    [true, false],
+  ] as const)('refuses STATE_CHANGED when include_children flips %s -> %s between the two reads and does not insert an issued proof', async (from, to) => {
+    const dept = 'dept-include-children'
+    const initial = privilegeRow({ id: USER, department_scopes: [['stock-prep', dept, from]] })
+    const flipped = privilegeRow({ id: USER, department_scopes: [['stock-prep', dept, to]] })
+    const before = await assessSecurityActionPrivilege(privilegeHarness(privilegeFixture({ rows: [initial] })).executor, USER)
+    const after = await assessSecurityActionPrivilege(privilegeHarness(privilegeFixture({ rows: [flipped] })).executor, USER)
+    expect(before.privilegeClass).toBe('high')
+    expect(after.privilegeClass).toBe('high')
+    expect(before.reasons).toEqual(['delegated_admin_scope'])
+    expect(after.reasons).toEqual(['delegated_admin_scope'])
+    expect(before.witness).not.toBe(after.witness)
+    const { service, runner } = serviceWith({
+      state: defaultState({ privilege: initial }),
+      options: { before: { advisoryLock: (current) => { current.privilege = flipped } } },
+    })
+    await expectRefusal(service.issue(contextFor(), verifyRequest({ purpose: 'external_identity_unbind' })), 'SECURITY_ACTION_STATE_CHANGED')
+    expect(runner.statements.some((statement) => statement.key === 'insertIssued')).toBe(false)
+  })
+
   it('refuses with 409 STATE_CHANGED when the target witness changed between the two reads', async () => {
     let calls = 0
     const { service, runner } = serviceWith({ resolvers: { external_identity_unbind: async () => ({ ok: true, kind: 'identity_revision', witness: (++calls === 1 ? 'a' : 'b').repeat(64) }) } })
@@ -812,6 +834,31 @@ describe('consumption decisions', () => {
       if (code) await expectRefusal(service.consume(client, context, consumeInput()), code)
       else await expect(service.consume(client, context, consumeInput())).resolves.toBeTruthy()
     }
+  })
+
+  it.each([
+    [false, true],
+    [true, false],
+  ] as const)('refuses PROOF_STALE when a stored witness for include_children %s is consumed after it became %s, and runs no consume SQL', async (issuedFlag, currentFlag) => {
+    const dept = 'dept-include-children'
+    const issuedPrivilege = privilegeRow({ id: USER, department_scopes: [['stock-prep', dept, issuedFlag]] })
+    const currentPrivilege = privilegeRow({ id: USER, department_scopes: [['stock-prep', dept, currentFlag]] })
+    const issuedWitness = await privilegeWitnessFor(issuedPrivilege)
+    const currentWitness = await privilegeWitnessFor(currentPrivilege)
+    expect(issuedWitness).not.toBe(currentWitness)
+    const state = await consumableState(
+      { privilege: currentPrivilege },
+      { privilege_witness: issuedWitness, privilege_class: 'high' },
+    )
+    expect(state.account?.access_generation).toBe('3')
+    expect(state.proof?.access_generation).toBe('3')
+    const { service } = serviceWith({ state })
+    const { client, statements } = fakeClient(state)
+    await expectRefusal(service.consume(client, contextFor(), consumeInput()), 'SECURITY_ACTION_PROOF_STALE')
+    expect(statements.some((statement) => statement.key === 'consume')).toBe(false)
+    expect(SECURITY_ACTION_SQL.consume).not.toContain('privilege_witness')
+    expect(SECURITY_ACTION_SQL.supersede).not.toContain('privilege_witness')
+    expect(SOURCE).toContain('row.privilege_witness !== privilege.witness')
   })
 
   it('refuses a bind proof with HIGH when the privilege witness changed and the user is now high', async () => {

@@ -1,3 +1,10 @@
+import {
+  readPermissionExceptionInheritedRoles,
+  type PermissionExceptionInheritedRole,
+} from './permissionExceptionSources'
+
+export type { PermissionExceptionInheritedRole }
+
 export type PermissionActionTone = 'info' | 'error'
 
 export type UserPermissionInspection = {
@@ -15,6 +22,7 @@ export type UserPermissionInspection = {
   effectiveKnown: boolean
   degraded: boolean
   subjectMatched: boolean
+  inheritedRoles: PermissionExceptionInheritedRole[] | null
 }
 
 export type PermissionWriteInput = {
@@ -85,6 +93,7 @@ function unreadInspection(userId: string, subjectMatched = false): UserPermissio
     effectiveKnown: false,
     degraded: true,
     subjectMatched,
+    inheritedRoles: null,
   }
 }
 
@@ -149,6 +158,7 @@ export function readUserPermissionInspection(
     effectiveKnown,
     degraded: false,
     subjectMatched: true,
+    inheritedRoles: sourceKnown ? readPermissionExceptionInheritedRoles(payload.inheritedRoles) : null,
   }
 }
 

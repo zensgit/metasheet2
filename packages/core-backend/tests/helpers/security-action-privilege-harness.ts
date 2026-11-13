@@ -81,6 +81,20 @@ export function privilegeFixture(overrides: Partial<PrivilegeFixture> = {}): Pri
   }
 }
 
+/**
+ * The department-scope aggregate must project `include_children` as the third tuple element.
+ * Naming the table is not enough: a fixture triple is returned only when this projection is present.
+ * Otherwise the boolean is dropped, so a mocked triple cannot hide an omitted column.
+ */
+export const DEPARTMENT_SCOPE_PROJECTION = /jsonb_build_array\(\s*s\.namespace\s*,\s*s\.directory_department_id::text\s*,\s*s\.include_children\s*\)/
+
+function departmentScopesForStatement(sql: string, value: unknown): unknown {
+  if (!statementNamesTable(sql, 'delegated_role_admin_scopes')) return []
+  if (DEPARTMENT_SCOPE_PROJECTION.test(sql)) return value
+  if (!Array.isArray(value)) return value
+  return value.map((item) => (Array.isArray(item) ? item.slice(0, 2) : item))
+}
+
 const COLUMN_SOURCE_TABLE: Record<keyof PrivilegeRow, string> = {
   id: 'users',
   is_admin: 'users',
@@ -105,6 +119,8 @@ function answerRow(sql: string, row: PrivilegeRow): Record<string, unknown> {
     if (table === 'users') {
       if (!statementNamesTable(sql, 'users')) throw new Error('Unexpected query')
       answered[column] = row[column]
+    } else if (column === 'department_scopes') {
+      answered[column] = departmentScopesForStatement(sql, row[column])
     } else {
       answered[column] = statementNamesTable(sql, table) ? row[column] : []
     }

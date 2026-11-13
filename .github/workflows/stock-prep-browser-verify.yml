@@ -99,6 +99,7 @@ jobs:
                 apps/web/src/components/layout/PageHeader.vue|\
                 apps/web/src/components/status/EmptyState.vue|\
                 apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/adminAccessCapabilities.ts|\
                 apps/web/src/composables/useLocale.ts|\
                 apps/web/src/composables/useMobileViewport.ts|\
                 apps/web/src/composables/authPrincipal.ts|\

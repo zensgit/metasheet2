@@ -2,6 +2,7 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
+import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
 import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
@@ -89,6 +90,15 @@ import {
   handleAdminUserBatchUpdate,
 } from './admin-user-batch'
 import {
+  DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED,
+  describeIncludeChildren,
+  isDelegatedScopeExactDepartmentEnabled,
+  readIncludeChildrenIntent,
+  resolveDelegatedIncludeChildrenWrite,
+  type IncludeChildrenIntent,
+  type IncludeChildrenSemantics,
+} from '../admin/delegated-scope-rollout'
+import {
   assertPlatformActorAuthority,
   lockSharedAccessSubjects,
   PlatformActorAuthorityLost,
@@ -166,6 +176,32 @@ class RoleRowMissingError extends Error {
   constructor() {
     super('Role not found')
     this.name = 'RoleRowMissingError'
+  }
+}
+
+class RoleModifiedError extends Error {
+  readonly code = 'ROLE_MODIFIED'
+  constructor() {
+    super('This role changed since it was loaded; reload it and re-apply the change')
+    this.name = 'RoleModifiedError'
+  }
+}
+
+class ExpectedUpdatedAtInvalidError extends Error {
+  readonly code = 'EXPECTED_UPDATED_AT_INVALID'
+  constructor() {
+    super('expectedUpdatedAt must be a non-empty ISO 8601 timestamp (omit the field to skip the concurrency check)')
+    this.name = 'ExpectedUpdatedAtInvalidError'
+  }
+}
+
+class AdmissionNamespacesRequestError extends Error {
+  constructor(
+    readonly code: 'ADMISSION_NAMESPACES_INVALID' | 'NAMESPACE_NOT_SUPPORTED' | 'ADMISSION_NAMESPACE_NOT_DERIVED',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'AdmissionNamespacesRequestError'
   }
 }
 
@@ -344,6 +380,7 @@ type DelegatedRoleCatalogRow = {
   id: string
   name: string
   permissions: string[] | null
+  updated_at?: string | Date | null
 }
 
 type DelegatedScopeAssignmentRow = {
@@ -351,6 +388,7 @@ type DelegatedScopeAssignmentRow = {
   admin_user_id: string
   namespace: string
   directory_department_id: string
+  include_children?: boolean | null
   created_by: string | null
   created_at: string
   updated_at: string
@@ -391,6 +429,7 @@ type DelegatedScopeTemplateRow = {
 type DelegatedScopeTemplateDepartmentRow = {
   template_id: string
   directory_department_id: string
+  include_children?: boolean | null
   integration_id: string
   integration_name: string
   provider: string
@@ -470,6 +509,13 @@ type CreateUserRequestBody = {
   roleId?: string
   presetId?: string
   isActive?: boolean
+  /**
+   * Namespaces to enable on create. Omitted or empty enables nothing.
+   * Attendance is still persisted disabled, because a missing row bootstraps
+   * on login. Each listed value must be supported and derived from the
+   * selected role and preset.
+   */
+  admissionNamespaces?: unknown
 }
 
 type AttendanceOnboardingResponse = {
@@ -710,9 +756,134 @@ function requireWritableTarget(
   return target
 }
 
-async function lockRoleRowForShare(client: AccessGraphTransactionClient, roleId: string): Promise<boolean> {
-  const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+function toEpochMillis(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const STRICT_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/
+
+/**
+ * Optional concurrency token. Only an absent or undefined field skips the
+ * compare and keeps the no-token FOR SHARE statement. A present value must be
+ * a non-empty ISO timestamp string; null and '' are malformed. A supplied
+ * token compared with a null stored timestamp is a mismatch.
+ */
+function readOptionalExpectedUpdatedAt(body: unknown): number | null {
+  if (!body || typeof body !== 'object') return null
+  if (!Object.prototype.hasOwnProperty.call(body, 'expectedUpdatedAt')) return null
+  const raw = (body as { expectedUpdatedAt?: unknown }).expectedUpdatedAt
+  if (raw === undefined) return null
+  if (typeof raw !== 'string') throw new ExpectedUpdatedAtInvalidError()
+  const trimmed = raw.trim()
+  if (!trimmed || !STRICT_ISO_TIMESTAMP.test(trimmed)) throw new ExpectedUpdatedAtInvalidError()
+  const parsed = Date.parse(trimmed)
+  if (!Number.isFinite(parsed)) throw new ExpectedUpdatedAtInvalidError()
+  return parsed
+}
+
+type TemplateStatementClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: ReadonlyArray<Record<string, unknown>> }>
+}
+
+function storedIncludeChildren(value: unknown): boolean | null {
+  if (value === true || value === false) return value
+  return null
+}
+
+function exactDepartmentDisabled(res: Response) {
+  return jsonError(
+    res,
+    403,
+    DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED,
+    'Exact department scope is disabled',
+  )
+}
+
+function includeChildrenAuditFields(stored: boolean | null): {
+  includeChildrenSemantics: IncludeChildrenSemantics
+  includeChildren?: boolean
+} {
+  const includeChildrenSemantics = describeIncludeChildren(stored)
+  if (stored === null) return { includeChildrenSemantics }
+  return { includeChildrenSemantics, includeChildren: stored }
+}
+
+/**
+ * Parent-row lock shared by template department edits, member-group edits, and apply.
+ * Call it only after any access-subject locks. It waits, then the caller re-reads.
+ * It does not compare updated_at, so it serializes edits without lost-update detection.
+ */
+async function lockDelegatedScopeTemplate(client: TemplateStatementClient, templateId: string): Promise<boolean> {
+  const locked = await client.query(
+    `SELECT id
+     FROM delegated_role_scope_templates
+     WHERE id = $1
+     FOR UPDATE`,
+    [templateId],
+  )
   return locked.rows.length > 0
+}
+
+async function readStoredScopeIncludeChildren(
+  client: TemplateStatementClient,
+  userId: string,
+  namespace: string,
+  directoryDepartmentId: string,
+): Promise<boolean | null> {
+  const current = await client.query(
+    `SELECT include_children
+     FROM delegated_role_admin_scopes
+     WHERE admin_user_id = $1
+       AND namespace = $2
+       AND directory_department_id = $3`,
+    [userId, namespace, directoryDepartmentId],
+  )
+  if (!current.rows.length) return null
+  return storedIncludeChildren(current.rows[0]?.include_children)
+}
+
+async function readStoredTemplateIncludeChildren(
+  client: TemplateStatementClient,
+  templateId: string,
+  directoryDepartmentId: string,
+): Promise<boolean | null> {
+  const current = await client.query(
+    `SELECT include_children
+     FROM delegated_role_scope_template_departments
+     WHERE template_id = $1
+       AND directory_department_id = $2`,
+    [templateId, directoryDepartmentId],
+  )
+  if (!current.rows.length) return null
+  return storedIncludeChildren(current.rows[0]?.include_children)
+}
+
+function refuseExplicitExactDepartment(res: Response, action: string, intent: IncludeChildrenIntent): boolean {
+  if (action !== 'assign' || intent.kind !== 'explicit' || intent.value !== false) return false
+  if (isDelegatedScopeExactDepartmentEnabled()) return false
+  exactDepartmentDisabled(res)
+  return true
+}
+
+async function lockRoleRowForShare(
+  client: AccessGraphTransactionClient,
+  roleId: string,
+  expectedUpdatedAt: number | null = null,
+): Promise<boolean> {
+  if (expectedUpdatedAt === null) {
+    const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+    return locked.rows.length > 0
+  }
+  const locked = await client.query(
+    'SELECT id, updated_at FROM roles WHERE id = $1 FOR SHARE',
+    [roleId],
+  )
+  if (!locked.rows.length) return false
+  const stored = toEpochMillis(locked.rows[0]?.updated_at)
+  if (stored === null || stored !== expectedUpdatedAt) throw new RoleModifiedError()
+  return true
 }
 
 async function recheckDelegatedAuthority(
@@ -764,17 +935,90 @@ async function fetchRoleCatalog() {
      ORDER BY r.id ASC`,
   )
 
-  return result.rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
-    memberCount: Number(row.member_count || 0),
-    // Additive field: the role editor echoes it back as `expectedUpdatedAt` so a stale tab
-    // cannot silently replay a grid that has since been revoked (routes/roles.ts).
-    updatedAt: row.updated_at instanceof Date
-      ? row.updated_at.toISOString()
-      : (row.updated_at ?? null),
-  }))
+  return result.rows.map((row) => {
+    const permissions = Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : []
+    return {
+      id: row.id,
+      name: row.name,
+      permissions,
+      admissionNamespaces: deriveGrantNamespaces({ roleId: row.id, permissionCodes: permissions }),
+      memberCount: Number(row.member_count || 0),
+      // Additive field: the role editor echoes it back as `expectedUpdatedAt` so a stale tab
+      // cannot silently replay a grid that has since been revoked (routes/roles.ts).
+      updatedAt: row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : (row.updated_at ?? null),
+    }
+  })
+}
+
+type LiveAccountAuthority = {
+  found: boolean
+  operable: boolean
+  role: string | null
+}
+
+/**
+ * Read-only account facts for capability display.
+ * Predicates match assertPlatformActorAuthority: the row exists, is active,
+ * activation_status is 'activated', and neither deleted_at nor purged_at is set.
+ * This SELECT does not lock the row and is not a write authorization.
+ */
+async function readLiveAccountAuthority(userId: string): Promise<LiveAccountAuthority> {
+  const result = await query<{
+    role: string | null
+    is_active: boolean | null
+    activation_status: string | null
+    deleted_at: string | null
+    purged_at: string | null
+  }>(
+    `SELECT role,
+            COALESCE(is_active, TRUE) AS is_active,
+            activation_status,
+            (to_jsonb(users) ->> 'deleted_at') AS deleted_at,
+            (to_jsonb(users) ->> 'purged_at') AS purged_at
+       FROM users
+      WHERE id = $1::text`,
+    [userId],
+  )
+  const row = result.rows[0]
+  if (!row) return { found: false, operable: false, role: null }
+  const deleted = row.deleted_at != null && String(row.deleted_at).length > 0
+  const purged = row.purged_at != null && String(row.purged_at).length > 0
+  const operable = !deleted && !purged && row.is_active === true && row.activation_status === 'activated'
+  return {
+    found: true,
+    operable,
+    role: row.role == null ? null : String(row.role),
+  }
+}
+
+function parseExplicitAdmissionNamespaces(value: unknown): string[] | AdmissionNamespacesRequestError {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    return new AdmissionNamespacesRequestError(
+      'ADMISSION_NAMESPACES_INVALID',
+      'admissionNamespaces must be an array of namespace strings',
+    )
+  }
+  const namespaces: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      return new AdmissionNamespacesRequestError(
+        'ADMISSION_NAMESPACES_INVALID',
+        'admissionNamespaces must be an array of namespace strings',
+      )
+    }
+    const namespace = normalizeNamespace(item)
+    if (!namespace) {
+      return new AdmissionNamespacesRequestError(
+        'ADMISSION_NAMESPACES_INVALID',
+        'admissionNamespaces must be an array of namespace strings',
+      )
+    }
+    if (!namespaces.includes(namespace)) namespaces.push(namespace)
+  }
+  return namespaces.sort()
 }
 
 async function fetchUserAccessSnapshot(userId: string) {
@@ -1423,15 +1667,18 @@ async function fetchDelegatedRoleCatalogRows(namespaces?: string[]) {
       `SELECT
           r.id,
           r.name,
+          r.updated_at,
           COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions
        FROM roles r
        LEFT JOIN role_permissions rp ON rp.role_id = r.id
        WHERE EXISTS (
          SELECT 1
          FROM unnest($1::text[]) AS namespace
-         WHERE r.id = namespace OR r.id LIKE namespace || '\_%' ESCAPE '\'
+         -- Literal '_' separator in the cooked SQL text. A single backslash in this template would be dropped.
+         WHERE r.id = namespace
+            OR starts_with(r.id, namespace || '_')
        )
-       GROUP BY r.id, r.name
+       GROUP BY r.id, r.name, r.updated_at
        ORDER BY r.id ASC`,
       [namespaces],
     )
@@ -1439,10 +1686,11 @@ async function fetchDelegatedRoleCatalogRows(namespaces?: string[]) {
       `SELECT
           r.id,
           r.name,
+          r.updated_at,
           COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions
        FROM roles r
        LEFT JOIN role_permissions rp ON rp.role_id = r.id
-       GROUP BY r.id, r.name
+       GROUP BY r.id, r.name, r.updated_at
        ORDER BY r.id ASC`,
     )
 
@@ -1450,6 +1698,9 @@ async function fetchDelegatedRoleCatalogRows(namespaces?: string[]) {
     id: row.id,
     name: row.name,
     permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
+    updatedAt: row.updated_at instanceof Date
+      ? row.updated_at.toISOString()
+      : (row.updated_at ?? null),
   }))
 }
 
@@ -1463,6 +1714,7 @@ async function fetchDelegatedScopeAssignments(adminUserId: string, namespaces?: 
           s.admin_user_id,
           s.namespace,
           s.directory_department_id,
+          s.include_children,
           s.created_by,
           s.created_at,
           s.updated_at,
@@ -1488,6 +1740,7 @@ async function fetchDelegatedScopeAssignments(adminUserId: string, namespaces?: 
           s.admin_user_id,
           s.namespace,
           s.directory_department_id,
+          s.include_children,
           s.created_by,
           s.created_at,
           s.updated_at,
@@ -1512,6 +1765,7 @@ async function fetchDelegatedScopeAssignments(adminUserId: string, namespaces?: 
     adminUserId: row.admin_user_id,
     namespace: row.namespace,
     directoryDepartmentId: row.directory_department_id,
+    includeChildren: row.include_children !== false,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1818,11 +2072,12 @@ async function fetchDelegatedScopeTemplates(search = '') {
   }))
 }
 
-async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
-  const result = await query<DelegatedScopeTemplateDepartmentRow>(
+async function fetchDelegatedScopeTemplateDepartments(templateId: string, reader: TemplateStatementClient = { query }) {
+  const result = await reader.query(
     `SELECT
         td.template_id,
         d.id AS directory_department_id,
+        td.include_children,
         d.integration_id,
         i.name AS integration_name,
         i.provider,
@@ -1838,9 +2093,11 @@ async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
      ORDER BY i.name ASC, COALESCE(d.full_path, d.name) ASC`,
     [templateId],
   )
+  const rows = result.rows as DelegatedScopeTemplateDepartmentRow[]
 
-  return result.rows.map((row) => ({
+  return rows.map((row) => ({
     directoryDepartmentId: row.directory_department_id,
+    includeChildren: row.include_children !== false,
     integrationId: row.integration_id,
     integrationName: row.integration_name,
     provider: row.provider,
@@ -1852,8 +2109,8 @@ async function fetchDelegatedScopeTemplateDepartments(templateId: string) {
   }))
 }
 
-async function fetchDelegatedScopeTemplateMemberGroups(templateId: string) {
-  const result = await query<DelegatedScopeTemplateMemberGroupRow>(
+async function fetchDelegatedScopeTemplateMemberGroups(templateId: string, reader: TemplateStatementClient = { query }) {
+  const result = await reader.query(
     `SELECT
         tg.template_id,
         g.id AS group_id,
@@ -1868,8 +2125,9 @@ async function fetchDelegatedScopeTemplateMemberGroups(templateId: string) {
      ORDER BY g.name ASC`,
     [templateId],
   )
+  const rows = result.rows as DelegatedScopeTemplateMemberGroupRow[]
 
-  return result.rows.map((row) => ({
+  return rows.map((row) => ({
     id: row.group_id,
     name: row.group_name,
     description: row.group_description,
@@ -2008,23 +2266,28 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
 
   const countSql = `
     WITH RECURSIVE seed_departments AS (
-      SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+      SELECT d.id,
+             d.integration_id,
+             d.external_department_id,
+             bool_or(COALESCE(s.include_children, TRUE)) AS include_children
       FROM delegated_role_admin_scopes s
       JOIN directory_departments d ON d.id = s.directory_department_id
       WHERE s.admin_user_id = $1
         AND s.namespace = ANY($2::text[])
         AND d.is_active = true
+      GROUP BY d.id, d.integration_id, d.external_department_id
     ),
     allowed_departments AS (
-      SELECT id, integration_id, external_department_id
+      SELECT id, integration_id, external_department_id, include_children
       FROM seed_departments
       UNION
-      SELECT child.id, child.integration_id, child.external_department_id
+      SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
       FROM directory_departments child
       JOIN allowed_departments parent
         ON child.integration_id = parent.integration_id
        AND child.external_parent_department_id = parent.external_department_id
-      WHERE child.is_active = true
+      WHERE parent.include_children IS TRUE
+        AND child.is_active = true
     ),
     allowed_groups AS (
       SELECT DISTINCT gscope.group_id
@@ -2063,23 +2326,28 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
 
   const listSql = `
     WITH RECURSIVE seed_departments AS (
-      SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+      SELECT d.id,
+             d.integration_id,
+             d.external_department_id,
+             bool_or(COALESCE(s.include_children, TRUE)) AS include_children
       FROM delegated_role_admin_scopes s
       JOIN directory_departments d ON d.id = s.directory_department_id
       WHERE s.admin_user_id = $1
         AND s.namespace = ANY($2::text[])
         AND d.is_active = true
+      GROUP BY d.id, d.integration_id, d.external_department_id
     ),
     allowed_departments AS (
-      SELECT id, integration_id, external_department_id
+      SELECT id, integration_id, external_department_id, include_children
       FROM seed_departments
       UNION
-      SELECT child.id, child.integration_id, child.external_department_id
+      SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
       FROM directory_departments child
       JOIN allowed_departments parent
         ON child.integration_id = parent.integration_id
        AND child.external_parent_department_id = parent.external_department_id
-      WHERE child.is_active = true
+      WHERE parent.include_children IS TRUE
+        AND child.is_active = true
     ),
     allowed_groups AS (
       SELECT DISTINCT gscope.group_id
@@ -2167,23 +2435,28 @@ async function isUserWithinDelegatedScope(
 
   const result = await runQuery(
     `WITH RECURSIVE seed_departments AS (
-        SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+        SELECT d.id,
+               d.integration_id,
+               d.external_department_id,
+               bool_or(COALESCE(s.include_children, TRUE)) AS include_children
         FROM delegated_role_admin_scopes s
         JOIN directory_departments d ON d.id = s.directory_department_id
         WHERE s.admin_user_id = $1
           AND s.namespace = ANY($2::text[])
           AND d.is_active = true
+        GROUP BY d.id, d.integration_id, d.external_department_id
       ),
       allowed_departments AS (
-        SELECT id, integration_id, external_department_id
+        SELECT id, integration_id, external_department_id, include_children
         FROM seed_departments
         UNION
-        SELECT child.id, child.integration_id, child.external_department_id
+        SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
         FROM directory_departments child
         JOIN allowed_departments parent
          ON child.integration_id = parent.integration_id
          AND child.external_parent_department_id = parent.external_department_id
-        WHERE child.is_active = true
+        WHERE parent.include_children IS TRUE
+          AND child.is_active = true
       ),
       allowed_groups AS (
         SELECT DISTINCT gscope.group_id
@@ -2218,6 +2491,262 @@ async function isUserWithinDelegatedScope(
 
 function deriveVisibleDelegatedMemberGroupIds(groupAssignments: Array<{ groupId: string }>): string[] {
   return Array.from(new Set(groupAssignments.map((assignment) => assignment.groupId).filter(Boolean))).sort()
+}
+
+/**
+ * One delegable namespace is already proved by the combined scope check.
+ * Skip the per-namespace query so the single-namespace access once-chain stays put.
+ * Zero namespaces returns the empty list without a query.
+ */
+async function resolveManageableNamespaces(
+  actorId: string,
+  delegableNamespaces: string[],
+  userId: string,
+): Promise<string[]> {
+  if (delegableNamespaces.length <= 1) return [...delegableNamespaces]
+  const manageable: string[] = []
+  for (const namespace of delegableNamespaces) {
+    if (await isUserWithinDelegatedScope(actorId, [namespace], userId)) manageable.push(namespace)
+  }
+  return manageable
+}
+
+function deriveManageableNamespacesFromCatalog(roleIds: string[]): string[] {
+  return Array.from(new Set(
+    roleIds
+      .map((roleId) => deriveDelegatedAdminNamespace(roleId))
+      .filter((namespace): namespace is string => Boolean(namespace)),
+  )).sort()
+}
+
+async function loadTargetRoleCatalog(
+  delegation: { actorId: string, isPlatformAdmin: boolean, delegableNamespaces: string[] },
+  userId: string,
+) {
+  const scopedNamespaces = delegation.isPlatformAdmin
+    ? undefined
+    : await resolveManageableNamespaces(delegation.actorId, delegation.delegableNamespaces, userId)
+  const catalogs = await fetchDelegatedRoleCatalogs(scopedNamespaces)
+  return {
+    roleCatalog: catalogs.assignable,
+    revocable: catalogs.revocable,
+    manageableNamespaces: delegation.isPlatformAdmin
+      ? deriveManageableNamespacesFromCatalog(catalogs.assignable.map((role) => role.id))
+      : scopedNamespaces ?? [],
+  }
+}
+
+const INELIGIBLE_DELEGATION_REASON = 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'
+
+function readAuthenticatedTenantId(req: Request): string | null {
+  // JWT claim only. Middleware copies x-tenant-id onto req.user.tenantId when the
+  // token has no tenant; that header is not proof of a tenant-wide grey catalogue.
+  const tenantId = req.authenticatedTenantId
+  if (typeof tenantId !== 'string') return null
+  const trimmed = tenantId.trim()
+  return trimmed || null
+}
+
+async function resolveActorOrgId(actorId: string, tenantId: string | null): Promise<string | null> {
+  if (tenantId) {
+    const membership = await query<{ org_id: string }>(
+      `SELECT uo.org_id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.user_id = $1
+         AND uo.org_id = $2
+         AND uo.is_active IS TRUE
+         AND u.is_active IS TRUE
+         AND u.deleted_at IS NULL
+         AND u.purged_at IS NULL
+       LIMIT 1`,
+      [actorId, tenantId],
+    )
+    return membership.rows[0]?.org_id ?? null
+  }
+  const memberships = await query<{ org_id: string }>(
+    `SELECT uo.org_id
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.is_active IS TRUE
+       AND u.is_active IS TRUE
+       AND u.deleted_at IS NULL
+       AND u.purged_at IS NULL`,
+    [actorId],
+  )
+  if (memberships.rows.length !== 1) return null
+  return memberships.rows[0]?.org_id ?? null
+}
+
+type IneligibleDelegationUser = {
+  id: string
+  name: string
+  selectable: false
+  disabledReason: string
+}
+
+const GREY_SUGGESTION_MAX = 100
+
+/**
+ * Opt-in grey suggestions. Bound is the actor's scope integration org via
+ * user_orgs, never user_tenants. Member-only scopes and an unprovable org
+ * return nothing.
+ *
+ * Exclusion mirrors fetchScopedDelegationUsers / isUserWithinDelegatedScope:
+ * authority_seeds are every configured active scope department, with no
+ * org, provider, status, or corp proof. A user authorized through any of
+ * those links or member groups is omitted, including a second account that
+ * sits in the validated org.
+ *
+ * Candidate rows stay on the proof-filtered walk. The statement returns at
+ * most pageSize rows and never more than 100. Search still applies. These
+ * are bounded suggestions, not the complete out-of-scope directory.
+ */
+async function fetchIneligibleDelegationUsers(
+  actorId: string,
+  namespaces: string[],
+  tenantId: string | null,
+  search: string,
+  pageSize: number,
+): Promise<IneligibleDelegationUser[]> {
+  if (namespaces.length === 0) return []
+  const orgId = await resolveActorOrgId(actorId, tenantId)
+  if (!orgId) return []
+  const term = search ? `%${search}%` : null
+  const suggestionLimit = Math.min(
+    GREY_SUGGESTION_MAX,
+    Math.max(1, Math.floor(pageSize) || 1),
+  )
+  const result = await query<{ id: string, name: string | null }>(
+    `WITH RECURSIVE authority_seeds AS (
+        SELECT d.id,
+               d.integration_id,
+               d.external_department_id,
+               bool_or(COALESCE(s.include_children, TRUE)) AS include_children
+        FROM delegated_role_admin_scopes s
+        JOIN directory_departments d ON d.id = s.directory_department_id
+        WHERE s.admin_user_id = $1
+          AND s.namespace = ANY($2::text[])
+          AND d.is_active = true
+        GROUP BY d.id, d.integration_id, d.external_department_id
+      ),
+      authority_departments AS (
+        SELECT id, integration_id, external_department_id, include_children
+        FROM authority_seeds
+        UNION
+        SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
+        FROM directory_departments child
+        JOIN authority_departments parent
+          ON child.integration_id = parent.integration_id
+         AND child.external_parent_department_id = parent.external_department_id
+        WHERE parent.include_children IS TRUE
+          AND child.is_active = true
+      ),
+      authorized_users AS (
+        SELECT l.local_user_id AS id
+        FROM directory_account_links l
+        JOIN directory_accounts auth_account
+          ON auth_account.id = l.directory_account_id
+         AND auth_account.is_active = true
+        JOIN directory_account_departments auth_ad
+          ON auth_ad.directory_account_id = auth_account.id
+        JOIN authority_departments scoped
+          ON scoped.id = auth_ad.directory_department_id
+        WHERE l.link_status = 'linked'
+        UNION
+        SELECT gm.user_id AS id
+        FROM platform_member_group_members gm
+        JOIN delegated_role_admin_member_groups gscope
+          ON gscope.group_id = gm.group_id
+         AND gscope.admin_user_id = $1
+         AND gscope.namespace = ANY($2::text[])
+      ),
+      scope_seeds AS (
+        SELECT d.id,
+               d.integration_id,
+               d.external_department_id,
+               bool_or(COALESCE(s.include_children, TRUE)) AS include_children
+        FROM delegated_role_admin_scopes s
+        JOIN directory_departments d ON d.id = s.directory_department_id
+        JOIN directory_integrations i ON i.id = d.integration_id
+        WHERE s.admin_user_id = $1
+          AND s.namespace = ANY($2::text[])
+          AND d.is_active = true
+          AND d.provider = i.provider
+          AND i.org_id = $3
+          AND i.status = 'active'
+          AND NULLIF(BTRIM(i.provider), '') IS NOT NULL
+          AND i.corp_id IS NOT NULL
+        GROUP BY d.id, d.integration_id, d.external_department_id
+      ),
+      allowed_departments AS (
+        SELECT id, integration_id, external_department_id, include_children
+        FROM scope_seeds
+        UNION
+        SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
+        FROM directory_departments child
+        JOIN allowed_departments parent
+          ON child.integration_id = parent.integration_id
+         AND child.external_parent_department_id = parent.external_department_id
+        WHERE parent.include_children IS TRUE
+          AND child.is_active = true
+      )
+      SELECT DISTINCT u.id, u.name
+      FROM scope_seeds seed
+      JOIN directory_integrations i
+        ON i.id = seed.integration_id
+       AND i.org_id = $3
+       AND i.status = 'active'
+       AND i.corp_id IS NOT NULL
+      JOIN users actor_user
+        ON actor_user.id = $1
+       AND actor_user.purged_at IS NULL
+      JOIN user_orgs actor_org
+        ON actor_org.user_id = $1
+       AND actor_org.org_id = i.org_id
+       AND actor_org.is_active IS TRUE
+      JOIN directory_departments d
+        ON d.integration_id = i.id
+       AND d.provider = i.provider
+       AND d.is_active = true
+      JOIN directory_account_departments ad
+        ON ad.directory_department_id = d.id
+      JOIN directory_accounts a
+        ON a.id = ad.directory_account_id
+       AND a.is_active = true
+       AND a.integration_id = i.id
+       AND a.provider = i.provider
+       AND a.corp_id IS NOT NULL
+       AND a.corp_id = i.corp_id
+      JOIN directory_account_links l
+        ON l.directory_account_id = a.id
+       AND l.link_status = 'linked'
+      JOIN users u
+        ON u.id = l.local_user_id
+       AND u.is_active IS TRUE
+       AND u.deleted_at IS NULL
+       AND u.purged_at IS NULL
+      JOIN user_orgs target_org
+        ON target_org.user_id = u.id
+       AND target_org.org_id = i.org_id
+       AND target_org.is_active IS TRUE
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM authorized_users auth_user
+        WHERE auth_user.id = u.id
+      )
+      AND ($4::text IS NULL OR u.name ILIKE $4 OR u.id ILIKE $4)
+      ORDER BY u.name ASC, u.id ASC
+      LIMIT $5`,
+    [actorId, namespaces, orgId, term, suggestionLimit],
+  )
+  return result.rows.filter((row) => row.id).map((row) => ({
+    id: row.id,
+    name: typeof row.name === 'string' ? row.name : '',
+    selectable: false as const,
+    disabledReason: INELIGIBLE_DELEGATION_REASON,
+  }))
 }
 
 function deriveMatchingNamespacesForRole(roleId: string, namespaces: string[]): string[] {
@@ -2812,6 +3341,46 @@ export function adminUsersRouter(): Router {
     await handleAdminUserBatchDelete(req, res, adminUserId)
   })
 
+  // Display contract only. Write routes still use ensurePlatformAdmin, which may
+  // accept a token precheck. This response does not. hasLegacyAdminClaim and the
+  // is_admin flag are not live authority. A missing row answers 200 with every
+  // flag false, because test-mode auth can synthesize a user that has no row.
+  // A live inactive, pending, recycled, or purged account is 401.
+  // canManagePermissions is the live user_roles admin membership only.
+  // users.role = admin without that membership is a platform admin for scope,
+  // and is not permission management.
+  r.get('/api/admin/access-capabilities', authenticate, async (req: Request, res: Response) => {
+    const userId = getRequestUserId(req)
+    if (!userId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+
+    try {
+      const account = await readLiveAccountAuthority(userId)
+      if (!account.found) {
+        return jsonOk(res, {
+          isPlatformAdmin: false,
+          canManageScope: false,
+          canManagePermissions: false,
+          delegableNamespaces: [],
+        })
+      }
+      if (!account.operable) {
+        return jsonError(res, 401, 'UNAUTHENTICATED', 'Account is not active')
+      }
+      const roleIds = await fetchUserRoleIds(userId)
+      const isRbacPlatformAdmin = roleIds.includes(PLATFORM_ADMIN_ROLE_ID)
+      const isPlatformAdmin = account.role === PLATFORM_ADMIN_ROLE_ID || isRbacPlatformAdmin
+      const delegableNamespaces = isPlatformAdmin ? [] : deriveDelegableNamespaces(roleIds)
+      return jsonOk(res, {
+        isPlatformAdmin,
+        canManageScope: isPlatformAdmin || delegableNamespaces.length > 0,
+        canManagePermissions: isRbacPlatformAdmin,
+        delegableNamespaces,
+      })
+    } catch (error) {
+      return sendAdminUsersServerFailure(req, res, 'ACCESS_CAPABILITIES_FAILED', 'Failed to read access capabilities', error)
+    }
+  })
+
   r.get('/api/admin/role-delegation/summary', authenticate, async (req: Request, res: Response) => {
     const delegation = await ensureRoleDelegationAdmin(req, res)
     if (!delegation) return
@@ -2832,6 +3401,7 @@ export function adminUsersRouter(): Router {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        exactDepartmentScopeAvailable: isDelegatedScopeExactDepartmentEnabled(),
         roleCatalog,
         scopeAssignments,
         groupAssignments,
@@ -3026,6 +3596,11 @@ export function adminUsersRouter(): Router {
       const directoryDepartmentId = String(req.body?.directoryDepartmentId || '').trim()
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
       if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
+      const includeChildrenIntent = action === 'assign' ? readIncludeChildrenIntent(req.body) : { kind: 'omitted' as const }
+      if (includeChildrenIntent.kind === 'invalid') {
+        return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
+      }
+      if (refuseExplicitExactDepartment(res, action, includeChildrenIntent)) return
 
       const templateExists = await query<{ id: string }>(
         'SELECT id FROM delegated_role_scope_templates WHERE id = $1 LIMIT 1',
@@ -3047,30 +3622,56 @@ export function adminUsersRouter(): Router {
         if (!department.rows.length) {
           return jsonError(res, 404, 'DIRECTORY_DEPARTMENT_NOT_FOUND', 'Directory department not found')
         }
-        await query(
-          `INSERT INTO delegated_role_scope_template_departments (
-             template_id, directory_department_id, created_at
-           )
-           VALUES ($1, $2, NOW())
-           ON CONFLICT DO NOTHING`,
-          [templateId, directoryDepartmentId],
-        )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_scope_template_departments
-           WHERE template_id = $1
-             AND directory_department_id = $2`,
-          [templateId, directoryDepartmentId],
-        )
       }
 
-      await query(
-        `UPDATE delegated_role_scope_templates
-         SET updated_by = $2,
-             updated_at = NOW()
-         WHERE id = $1`,
-        [templateId, adminUserId],
-      )
+      const written = await transaction(async (client) => {
+        // updated_by references users.id. Lock the actor before the template,
+        // matching apply, so the later FK check cannot invert that lock order.
+        const subjects = await lockSharedAccessSubjects(client, [adminUserId])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return { missing: true as const }
+        const stored = await readStoredTemplateIncludeChildren(client, templateId, directoryDepartmentId)
+        let persisted: boolean | null = null
+        if (action === 'assign') {
+          const decision = resolveDelegatedIncludeChildrenWrite({
+            intent: includeChildrenIntent,
+            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
+            exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
+          })
+          if (decision.outcome === 'refuse') return { missing: false as const, refused: true as const }
+          persisted = decision.includeChildren
+          await client.query(
+            `INSERT INTO delegated_role_scope_template_departments (
+               template_id, directory_department_id, include_children, created_at
+             )
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (template_id, directory_department_id)
+             DO UPDATE SET include_children = EXCLUDED.include_children`,
+            [templateId, directoryDepartmentId, persisted],
+          )
+        } else {
+          persisted = stored
+          await client.query(
+            `DELETE FROM delegated_role_scope_template_departments
+             WHERE template_id = $1
+               AND directory_department_id = $2`,
+            [templateId, directoryDepartmentId],
+          )
+        }
+        await client.query(
+          `UPDATE delegated_role_scope_templates
+           SET updated_by = $2,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [templateId, adminUserId],
+        )
+        return { missing: false as const, refused: false as const, persisted }
+      })
+      if (written.missing) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (written.refused) return exactDepartmentDisabled(res)
 
       const item = await fetchDelegatedScopeTemplateDetail(templateId)
       await auditLog({
@@ -3082,6 +3683,7 @@ export function adminUsersRouter(): Router {
         meta: {
           templateId,
           directoryDepartmentId,
+          ...includeChildrenAuditFields(written.persisted),
         },
       })
 
@@ -3122,31 +3724,40 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 404, 'PLATFORM_MEMBER_GROUP_NOT_FOUND', 'Platform member group not found')
       }
 
-      if (action === 'assign') {
-        await query(
-          `INSERT INTO delegated_role_scope_template_member_groups (
-             template_id, group_id, created_at
-           )
-           VALUES ($1, $2, NOW())
-           ON CONFLICT DO NOTHING`,
-          [templateId, groupId],
+      const linked = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [adminUserId])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return false
+        if (action === 'assign') {
+          await client.query(
+            `INSERT INTO delegated_role_scope_template_member_groups (
+               template_id, group_id, created_at
+             )
+             VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING`,
+            [templateId, groupId],
+          )
+        } else {
+          await client.query(
+            `DELETE FROM delegated_role_scope_template_member_groups
+             WHERE template_id = $1
+               AND group_id = $2`,
+            [templateId, groupId],
+          )
+        }
+        await client.query(
+          `UPDATE delegated_role_scope_templates
+           SET updated_by = $2,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [templateId, adminUserId],
         )
-      } else {
-        await query(
-          `DELETE FROM delegated_role_scope_template_member_groups
-           WHERE template_id = $1
-             AND group_id = $2`,
-          [templateId, groupId],
-        )
+        return true
+      })
+      if (!linked) {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
       }
-
-      await query(
-        `UPDATE delegated_role_scope_templates
-         SET updated_by = $2,
-             updated_at = NOW()
-         WHERE id = $1`,
-        [templateId, adminUserId],
-      )
 
       const item = await fetchDelegatedScopeTemplateDetail(templateId)
       await auditLog({
@@ -3212,6 +3823,11 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
       if (!directoryDepartmentId) return jsonError(res, 400, 'DIRECTORY_DEPARTMENT_REQUIRED', 'directoryDepartmentId is required')
+      const includeChildrenIntent = action === 'assign' ? readIncludeChildrenIntent(req.body) : { kind: 'omitted' as const }
+      if (includeChildrenIntent.kind === 'invalid') {
+        return jsonError(res, 400, 'INCLUDE_CHILDREN_INVALID', 'includeChildren must be a boolean')
+      }
+      if (refuseExplicitExactDepartment(res, action, includeChildrenIntent)) return
 
       const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
@@ -3244,34 +3860,43 @@ export function adminUsersRouter(): Router {
         await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (action === 'assign' && !adminNamespaces.includes(namespace)) {
-          return { refused: true as const, adminNamespaces }
+          return { refused: 'namespace' as const, adminNamespaces }
         }
+        const stored = await readStoredScopeIncludeChildren(client, userId, namespace, directoryDepartmentId)
         if (action === 'assign') {
+          const decision = resolveDelegatedIncludeChildrenWrite({
+            intent: includeChildrenIntent,
+            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
+            exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
+          })
+          if (decision.outcome === 'refuse') return { refused: 'exact' as const, adminNamespaces }
           await client.query(
             `INSERT INTO delegated_role_admin_scopes (
-               admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+               admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
              ON CONFLICT (admin_user_id, namespace, directory_department_id)
              DO UPDATE SET
+               include_children = EXCLUDED.include_children,
                created_by = EXCLUDED.created_by,
                updated_at = NOW()`,
-            [userId, namespace, directoryDepartmentId, adminUserId],
+            [userId, namespace, directoryDepartmentId, decision.includeChildren, adminUserId],
           )
-        } else {
-          await client.query(
-            `DELETE FROM delegated_role_admin_scopes
-             WHERE admin_user_id = $1
-               AND namespace = $2
-               AND directory_department_id = $3`,
-            [userId, namespace, directoryDepartmentId],
-          )
+          return { refused: false as const, adminNamespaces, persisted: decision.includeChildren }
         }
-        return { refused: false as const, adminNamespaces }
+        await client.query(
+          `DELETE FROM delegated_role_admin_scopes
+           WHERE admin_user_id = $1
+             AND namespace = $2
+             AND directory_department_id = $3`,
+          [userId, namespace, directoryDepartmentId],
+        )
+        return { refused: false as const, adminNamespaces, persisted: stored }
       })
-      if (locked.refused) {
+      if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
+      if (locked.refused === 'exact') return exactDepartmentDisabled(res)
       const adminNamespaces = locked.adminNamespaces
 
       await auditLog({
@@ -3284,6 +3909,7 @@ export function adminUsersRouter(): Router {
           userId,
           namespace,
           directoryDepartmentId,
+          ...includeChildrenAuditFields(locked.persisted),
         },
       })
 
@@ -3479,20 +4105,15 @@ export function adminUsersRouter(): Router {
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
       if (!['replace', 'merge'].includes(mode)) return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
 
-      const [profile, roleIds, template] = await Promise.all([
+      const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
         fetchUserRoleIds(userId),
-        fetchDelegatedScopeTemplateDetail(templateId),
       ])
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
-      if (!template) return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
 
       const previewNamespaces = deriveDelegableNamespaces(roleIds)
       if (!previewNamespaces.includes(namespace)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
-      }
-      if (template.departments.length === 0 && template.memberGroups.length === 0) {
-        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
       }
 
       const locked = await transaction(async (client) => {
@@ -3501,7 +4122,22 @@ export function adminUsersRouter(): Router {
         await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
         if (!adminNamespaces.includes(namespace)) {
-          return { refused: true as const, adminNamespaces }
+          return { refused: 'namespace' as const, adminNamespaces }
+        }
+        // Access-subject locks are already held. The parent lock then makes this
+        // the snapshot that is gated and written. A pre-transaction read is not used.
+        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
+        if (!templateHeld) return { refused: 'missing-template' as const, adminNamespaces }
+        const departments = await fetchDelegatedScopeTemplateDepartments(templateId, client)
+        const memberGroups = await fetchDelegatedScopeTemplateMemberGroups(templateId, client)
+        if (departments.length === 0 && memberGroups.length === 0) {
+          return { refused: 'empty' as const, adminNamespaces }
+        }
+        if (
+          !isDelegatedScopeExactDepartmentEnabled()
+          && departments.some((department) => department.includeChildren === false)
+        ) {
+          return { refused: 'exact' as const, adminNamespaces }
         }
         if (mode === 'replace') {
           await client.query(
@@ -3517,20 +4153,21 @@ export function adminUsersRouter(): Router {
             [userId, namespace],
           )
         }
-        for (const department of template.departments) {
+        for (const department of departments) {
           await client.query(
             `INSERT INTO delegated_role_admin_scopes (
-               admin_user_id, namespace, directory_department_id, created_by, created_at, updated_at
+               admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
              ON CONFLICT (admin_user_id, namespace, directory_department_id)
              DO UPDATE SET
+               include_children = EXCLUDED.include_children,
                created_by = EXCLUDED.created_by,
                updated_at = NOW()`,
-            [userId, namespace, department.directoryDepartmentId, adminUserId],
+            [userId, namespace, department.directoryDepartmentId, department.includeChildren, adminUserId],
           )
         }
-        for (const group of template.memberGroups) {
+        for (const group of memberGroups) {
           await client.query(
             `INSERT INTO delegated_role_admin_member_groups (
                admin_user_id, namespace, group_id, created_by, created_at, updated_at
@@ -3543,11 +4180,18 @@ export function adminUsersRouter(): Router {
             [userId, namespace, group.id, adminUserId],
           )
         }
-        return { refused: false as const, adminNamespaces }
+        return { refused: false as const, adminNamespaces, departments, memberGroups }
       })
-      if (locked.refused) {
+      if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
+      if (locked.refused === 'missing-template') {
+        return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (locked.refused === 'empty') {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')
+      }
+      if (locked.refused === 'exact') return exactDepartmentDisabled(res)
       const adminNamespaces = locked.adminNamespaces
 
       const [scopeAssignments, groupAssignments] = await Promise.all([
@@ -3565,8 +4209,13 @@ export function adminUsersRouter(): Router {
           namespace,
           templateId,
           mode,
-          departmentCount: template.departments.length,
-          memberGroupCount: template.memberGroups.length,
+          departmentCount: locked.departments.length,
+          memberGroupCount: locked.memberGroups.length,
+          includeChildrenSemantics: locked.departments.map((department) => ({
+            directoryDepartmentId: department.directoryDepartmentId,
+            includeChildren: department.includeChildren,
+            semantics: describeIncludeChildren(department.includeChildren),
+          })),
         },
       })
 
@@ -3588,6 +4237,7 @@ export function adminUsersRouter(): Router {
 
     try {
       const q = String(req.query.q || '').trim()
+      const includeIneligible = String(req.query.includeIneligible || '') === 'true'
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
@@ -3626,8 +4276,32 @@ export function adminUsersRouter(): Router {
           fetchScopedDelegationUsers(delegation.actorId, delegation.delegableNamespaces, q, pageSize, offset),
         ])
 
+      // Platform admin already lists the directory. The flag does not add grey rows
+      // or a selectable marker there. A grey-query failure keeps the authorized page.
+      let items: Array<AdminUserProfile & { selectable?: true } | IneligibleDelegationUser> = scopedList.items
+      if (includeIneligible && !delegation.isPlatformAdmin) {
+        const authorized = scopedList.items.map((item) => ({ ...item, selectable: true as const }))
+        items = authorized
+        // Member-only scopes have no department integration to prove. Leave the
+        // authorized page alone instead of guessing a directory bound.
+        if (scopeAssignments.length > 0) {
+          try {
+            const grey = await fetchIneligibleDelegationUsers(
+              delegation.actorId,
+              delegation.delegableNamespaces,
+              readAuthenticatedTenantId(req),
+              q,
+              pageSize,
+            )
+            items = [...authorized, ...grey]
+          } catch {
+            items = authorized
+          }
+        }
+      }
+
       return jsonOk(res, {
-        items: scopedList.items,
+        items,
         page,
         pageSize,
         total: scopedList.total,
@@ -3679,14 +4353,13 @@ export function adminUsersRouter(): Router {
       ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
-        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
-      )
+      const { roleCatalog, revocable, manageableNamespaces } = await loadTargetRoleCatalog(delegation, userId)
 
       return jsonOk(res, {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        manageableNamespaces,
         scopeAssignments,
         groupAssignments,
         roleCatalog,
@@ -3808,6 +4481,18 @@ export function adminUsersRouter(): Router {
       const roleId = String(req.body?.roleId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!roleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'roleId is required')
+      // Unassign ignores expectedUpdatedAt. Assign compares it under the role share.
+      let expectedUpdatedAt: number | null = null
+      if (action === 'assign') {
+        try {
+          expectedUpdatedAt = readOptionalExpectedUpdatedAt(req.body)
+        } catch (error) {
+          if (error instanceof ExpectedUpdatedAtInvalidError) {
+            return jsonError(res, 400, error.code, error.message)
+          }
+          throw error
+        }
+      }
 
       const [profile, roleRow] = await Promise.all([
         fetchUserProfile(userId),
@@ -3865,7 +4550,11 @@ export function adminUsersRouter(): Router {
           }
           // Role share before subject locks. INSERT user_roles takes a key share on roles,
           // and a platform unassign still removes an orphan membership when the row is gone.
-          const roleHeld = await lockRoleRowForShare(client, roleId)
+          const roleHeld = await lockRoleRowForShare(
+            client,
+            roleId,
+            action === 'assign' ? expectedUpdatedAt : null,
+          )
           if (!roleHeld && !(action === 'unassign' && delegation.isPlatformAdmin)) {
             if (delegation.isPlatformAdmin) throw new RoleRowMissingError()
             throw new DelegatedRoleRefusal('ROLE_NOT_FOUND')
@@ -3966,14 +4655,13 @@ export function adminUsersRouter(): Router {
           delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
         ),
       ])
-      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
-        delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
-      )
+      const { roleCatalog, revocable, manageableNamespaces } = await loadTargetRoleCatalog(delegation, userId)
 
       return jsonOk(res, {
         actorId: delegation.actorId,
         isPlatformAdmin: delegation.isPlatformAdmin,
         delegableNamespaces: delegation.delegableNamespaces,
+        manageableNamespaces,
         scopeAssignments,
         groupAssignments,
         roleCatalog,
@@ -3987,6 +4675,10 @@ export function adminUsersRouter(): Router {
         delegableRoles: filterRoleIdsToCatalog(snapshot?.roles ?? [], revocable),
       })
     } catch (error) {
+      // Stale assign token. Not a delegated-role refusal, so it is not audited as one.
+      if (error instanceof RoleModifiedError) {
+        return jsonError(res, 409, 'ROLE_MODIFIED', error.message, { retryable: true })
+      }
       // A boundary refusal is a permission outcome, so it answers with its own status and code
       // rather than reaching the generic handler below. The route's pre-check and the boundary
       // do not compute the same set — the boundary drops namespaces that are not
@@ -4109,10 +4801,19 @@ export function adminUsersRouter(): Router {
     if (!adminUserId) return
 
     const mode = String(req.query.mode || '').trim()
-    const items = listAccessPresets().filter((preset) => !mode || preset.productMode === mode)
+    const items = listAccessPresets()
+      .filter((preset) => !mode || preset.productMode === mode)
+      .map((preset) => ({
+        ...preset,
+        admissionNamespaces: deriveGrantNamespaces({
+          roleId: preset.roleId,
+          permissionCodes: preset.permissions,
+        }),
+      }))
 
     return jsonOk(res, {
       items,
+      capabilities: { explicitNamespaceAdmission: true },
       actorId: adminUserId,
     })
   })
@@ -4433,6 +5134,10 @@ export function adminUsersRouter(): Router {
       const requestedPassword = typeof body.password === 'string' ? body.password.trim() : ''
       const mustChangePassword = requestedPassword.length === 0
       const directPermissions = Array.from(new Set(preset?.permissions || []))
+      const parsedAdmissionNamespaces = parseExplicitAdmissionNamespaces(body.admissionNamespaces)
+      if (parsedAdmissionNamespaces instanceof AdmissionNamespacesRequestError) {
+        return jsonError(res, 400, parsedAdmissionNamespaces.code, parsedAdmissionNamespaces.message)
+      }
 
       if (!cleanName || (!cleanEmail && !cleanUsername && !cleanMobile)) {
         return jsonError(res, 400, 'USER_FIELDS_REQUIRED', 'name and at least one account identifier (email, username, or mobile) are required')
@@ -4505,10 +5210,42 @@ export function adminUsersRouter(): Router {
         }
       }
 
+      let rolePermissionCodes: string[] = []
       if (roleId) {
-        const roleRow = await query<{ id: string }>('SELECT id FROM roles WHERE id = $1', [roleId])
+        const roleRow = await query<{ id: string; permissions?: unknown }>(
+          `SELECT r.id,
+                  COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions
+             FROM roles r
+             LEFT JOIN role_permissions rp ON rp.role_id = r.id
+            WHERE r.id = $1
+            GROUP BY r.id`,
+          [roleId],
+        )
         if (!roleRow.rows.length) {
           return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+        }
+        const storedCodes = roleRow.rows[0]?.permissions
+        rolePermissionCodes = Array.isArray(storedCodes)
+          ? storedCodes.filter((code): code is string => typeof code === 'string' && code.trim().length > 0)
+          : []
+      }
+      if (parsedAdmissionNamespaces.length > 0) {
+        const derivedNamespaces = deriveGrantNamespaces({
+          roleId,
+          permissionCodes: [...directPermissions, ...rolePermissionCodes],
+        })
+        for (const namespace of parsedAdmissionNamespaces) {
+          if (!isNamespaceAdmissionControlledResource(namespace)) {
+            return jsonError(res, 400, 'NAMESPACE_NOT_SUPPORTED', 'namespace is not managed by plugin admission controls')
+          }
+          if (!derivedNamespaces.includes(namespace)) {
+            return jsonError(
+              res,
+              400,
+              'ADMISSION_NAMESPACE_NOT_DERIVED',
+              'admissionNamespaces must be derived from the selected role and preset',
+            )
+          }
         }
       }
 
@@ -4710,23 +5447,28 @@ export function adminUsersRouter(): Router {
           })
         }
 
-        // Namespace admission is the second half of a namespace-scoped grant: without an
-        // enabled row the permission codes written just below are filtered out of every
-        // effective-permission read, so a delegated role provisioned here would carry a role
-        // id and permission rows that resolve to nothing. Enable exactly the namespaces the
-        // grant derives, in this same transaction, so the two halves cannot diverge.
-        //
-        // Derived from the role id and the permission codes actually being granted — not
-        // from a list of namespaces to special-case. Grants that touch no
-        // admission-controlled resource derive an empty list and write nothing.
-        const grantedNamespaces = deriveGrantNamespaces({ roleId, permissionCodes: directPermissions })
-        if (grantedNamespaces.length > 0) {
+        // The list was checked before this transaction: each namespace is supported
+        // and derived from the selected role id, its stored permission codes, and
+        // the preset codes. Only those explicit namespaces are enabled. A missing
+        // attendance row is not an opt-out — login bootstraps it — so an unchecked
+        // attendance admission is persisted disabled, including presets that do not
+        // derive attendance.
+        if (parsedAdmissionNamespaces.length > 0) {
           await grantNamespaceAdmissions(client, {
             userId,
-            namespaces: grantedNamespaces,
+            namespaces: parsedAdmissionNamespaces,
             actorId: adminUserId,
             source: 'admin_create',
           })
+        }
+        if (!parsedAdmissionNamespaces.includes(ATTENDANCE_SELF_SERVICE_NAMESPACE)) {
+          await writeUserNamespaceAdmission({
+            userId,
+            namespace: ATTENDANCE_SELF_SERVICE_NAMESPACE,
+            enabled: false,
+            actorId: adminUserId,
+            source: 'admin_create',
+          }, client)
         }
 
         if (directPermissions.length > 0) {
@@ -5432,6 +6174,15 @@ export function adminUsersRouter(): Router {
       const roleId = String(req.body?.roleId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!roleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'roleId is required')
+      let expectedUpdatedAt: number | null
+      try {
+        expectedUpdatedAt = readOptionalExpectedUpdatedAt(req.body)
+      } catch (error) {
+        if (error instanceof ExpectedUpdatedAtInvalidError) {
+          return jsonError(res, 400, error.code, error.message)
+        }
+        throw error
+      }
 
       const [roleRow, profile] = await Promise.all([
         query<{ id: string }>('SELECT id FROM roles WHERE id = $1', [roleId]),
@@ -5442,7 +6193,7 @@ export function adminUsersRouter(): Router {
 
       // Role share, then actor and target locks, then the membership and legacy profile.
       const membership = await transaction(async (client) => {
-        if (!await lockRoleRowForShare(client, roleId)) throw new RoleRowMissingError()
+        if (!await lockRoleRowForShare(client, roleId, expectedUpdatedAt)) throw new RoleRowMissingError()
         const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
         requireWritableTarget(subjects, userId)
         await assertPlatformActorAuthority(client, subjects.get(adminUserId))
@@ -5489,6 +6240,9 @@ export function adminUsersRouter(): Router {
         membershipChanged: (membership?.rowCount ?? 0) > 0,
       })
     } catch (error) {
+      if (error instanceof RoleModifiedError) {
+        return jsonError(res, 409, 'ROLE_MODIFIED', error.message, { retryable: true })
+      }
       if (sendIfRecoveryAuthorityBusy(res, error)) return
       return sendAdminUsersServerFailure(req, res, 'ROLE_ASSIGN_FAILED', 'Failed to assign role', error)
     }
