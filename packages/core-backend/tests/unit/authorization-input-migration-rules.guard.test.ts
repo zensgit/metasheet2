@@ -762,6 +762,82 @@ describe('targets that are read item by item or not at all', () => {
     expect(check(unlocked('WITH w AS (SELECT user_id FROM user_roles) INSERT INTO audit_y SELECT user_id FROM w')).problems).toEqual([])
   })
 
+  it('a word spelled like a write verb before the INTO of a SELECT does not make it the INTO of a write: the name it creates is read all the same', () => {
+    const under = ['unreadable SELECT INTO: creates a table under an input table name']
+    const unread = ['unreadable SELECT INTO: creates a table whose name is not readable']
+    const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+    const tagged = (statement: string) => up('await sql`' + statement + '`.execute(db)')
+    // A column label or a column spelled insert or merge, with AS and bare, alone and after WITH or EXPLAIN.
+    const labelled = [
+      'SELECT 1 AS insert INTO TEMP users FROM staging',
+      'SELECT 1 AS insert INTO TABLE users FROM staging',
+      'SELECT 1 AS merge INTO UNLOGGED user_roles FROM staging',
+      'SELECT insert INTO TEMP users FROM staging',
+      'SELECT staging.merge INTO LOCAL TEMP role_permissions FROM staging',
+      'WITH a AS (SELECT 1) SELECT (1) insert INTO TEMP users FROM a',
+      'WITH a AS (SELECT 1) SELECT 1 AS insert INTO TEMP users FROM a',
+      'EXPLAIN ANALYZE SELECT 1 AS insert INTO TEMP users FROM staging',
+      'DO $$ BEGIN SELECT 1 AS insert INTO TEMP users FROM staging; END $$',
+    ]
+    for (const statement of labelled) {
+      const result = check(unlocked(statement))
+      expect(result.verdicts.map((line) => line.verdict), statement).toEqual(['unreadable'])
+      expect(result.problems, statement).toEqual(under)
+    }
+    expect(check('SELECT 1 AS insert INTO TEMP users FROM staging;\n', NEW_SQL).problems).toEqual(under)
+    // A name that is not read after such a word is refused, and no registered dynamic target stands for it.
+    const created = [
+      'SELECT id AS insert INTO ${sql.id(t)} FROM users',
+      'SELECT 1 AS insert INTO TEMP ${sql.id(s)}.users FROM staging',
+      'SELECT 1 AS insert INTO TEMP pub${sql.raw(x)}.users FROM staging',
+      'SELECT 1 AS merge INTO TEMP ${sql.id(t)} FROM users',
+      'SELECT id insert INTO ${sql.table(name)} FROM users',
+      'WITH a AS (SELECT 1) SELECT id AS insert INTO ${sql.id(t)} FROM users',
+      'EXPLAIN SELECT id AS merge INTO ${sql.table(name)} FROM users',
+    ]
+    for (const statement of created) {
+      expect(checkNewMigration(NEW_TS, tagged(statement), true, []).problems, statement).toEqual(unread)
+      expect(checkNewMigration(NEW_TS, tagged(statement), true, [cover]).problems, statement).toEqual(unread)
+    }
+    // Into a name that is read and is no input table it stays a read, in a statement and in a block.
+    expect(check(unlocked('SELECT 1 AS insert INTO audit_copy FROM users')).problems).toEqual([])
+    expect(check(unlocked('SELECT id AS merge INTO TEMP audit_copy FROM users')).problems).toEqual([])
+    expect(check(unlocked('DO $$ DECLARE n int; BEGIN SELECT count(*) AS insert INTO n FROM user_roles; END $$')).problems).toEqual([])
+  })
+
+  it('only the INTO directly after the verb INSERT or MERGE of the statement after WITH or EXPLAIN names the target of a write; that INTO and every later one are read for a name', () => {
+    const under = ['unreadable SELECT INTO: creates a table under an input table name']
+    const unread = ['unreadable SELECT INTO: creates a table whose name is not readable']
+    const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+    const tagged = (statement: string) => up('await sql`' + statement + '`.execute(db)')
+    // The verb is found past the options of an EXPLAIN and past the queries of a WITH, whatever they hold; MERGE counts like INSERT.
+    const writes = [
+      'EXPLAIN (ANALYZE, BUFFERS) INSERT INTO ${sql.table(name)} SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT 1 AS insert) INSERT INTO ${sql.table(name)} SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT user_id FROM user_roles) MERGE INTO ${sql.table(name)} m USING w ON m.user_id = w.user_id WHEN MATCHED THEN DELETE',
+      'WITH RECURSIVE w(n) AS (SELECT 1) MERGE INTO ${sql.table(name)} m USING users u ON m.id = u.id WHEN MATCHED THEN DELETE',
+    ]
+    for (const statement of writes) {
+      expect(checkNewMigration(NEW_TS, tagged(statement), true, [cover]).problems, statement).toEqual([])
+      expect(checkNewMigration(NEW_TS, tagged(statement), true, []).problems, statement).toEqual([`unreadable ${statement.split(' ')[0]}: dynamic write target`])
+    }
+    expect(check(unlocked('WITH w AS (SELECT user_id FROM user_roles) MERGE INTO audit_y a USING w ON a.user_id = w.user_id WHEN NOT MATCHED THEN INSERT (user_id) VALUES (w.user_id)')).problems).toEqual([])
+    // The INTO of the write is still read for a name it can read, past the words that may precede the name SELECT INTO creates.
+    for (const statement of ['EXPLAIN INSERT INTO TEMP users SELECT user_id FROM user_roles', 'WITH w AS (SELECT user_id FROM user_roles) MERGE INTO UNLOGGED users u USING w ON u.id = w.user_id WHEN MATCHED THEN DELETE']) {
+      expect(check(unlocked(statement)).problems, statement).toEqual(under)
+    }
+    // An INTO after the one of the write is read like the INTO of a SELECT.
+    for (const statement of ['WITH a AS (SELECT 1) INSERT INTO audit_x SELECT 1 INTO TEMP users FROM staging', 'EXPLAIN INSERT INTO audit_x SELECT 1 AS insert INTO TEMP user_roles FROM staging']) {
+      expect(check(unlocked(statement)).problems, statement).toEqual(under)
+    }
+    expect(checkNewMigration(NEW_TS, tagged('WITH w AS (SELECT user_id FROM user_roles) INSERT INTO ${sql.table(name)} SELECT user_id INTO ${sql.table(other)} FROM w'), true, [cover]).problems).toEqual(unread)
+    // The verb is the first verb word outside parentheses: a WITH query named like one is taken for it, and the statement is refused rather than read as a write.
+    for (const name of ['insert', 'merge', 'update', 'delete', 'values']) {
+      const statement = `WITH ${name} AS (SELECT user_id FROM user_roles) INSERT INTO \${sql.table(name)} SELECT user_id FROM ${name}`
+      expect(checkNewMigration(NEW_TS, tagged(statement), true, [cover]).problems, statement).toEqual(unread)
+    }
+  })
+
   it('a TRUNCATE list is read from the verb: an input table after an item that is not a plain name is a write the scan reports, and requires the lock block', () => {
     const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
     for (const statement of ['TRUNCATE "audit log", role_permissions', 'TRUNCATE TABLE ONLY "audit log" *, public.user_permissions CASCADE']) {

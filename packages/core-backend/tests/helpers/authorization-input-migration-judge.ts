@@ -1067,17 +1067,21 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (hidden !== null) return push(head, 'unreadable', hidden, { inputWrite: headWritesInput() })
   // 5. By the kind of the outermost statement.
   if (READ_KINDS.includes(head)) {
-    // `SELECT … INTO <table>` creates the table it names, so the name must be read. The INTO of an
-    // INSERT or a MERGE names the target of that write, which is read above.
-    let into = topLevelKeyword(tokens, 1, tokens.length, 'INTO')
-    while (into >= 0 && isKeyword(tokens[into - 1], 'INSERT', 'MERGE')) into = topLevelKeyword(tokens, into + 1, tokens.length, 'INTO')
-    if (into >= 0) {
+    // `SELECT … INTO <table>` creates the table it names, so the name must be read, at every INTO
+    // of the statement. A word spelled like a write verb before an INTO does not make it the INTO
+    // of a write: the statement that follows WITH or EXPLAIN is a write only when its verb, the
+    // first verb word outside parentheses, is INSERT or MERGE. The INTO directly after that verb
+    // names the target of the write, not a table the statement creates: it alone is spared the
+    // refusal of a name that is not read, and is read like any other INTO otherwise.
+    const verb = head === 'WITH' || head === 'EXPLAIN' ? topLevelKeyword(tokens, 1, tokens.length, 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'VALUES', 'TABLE') : -1
+    const targetInto = verb >= 0 && isKeyword(tokens[verb], 'INSERT', 'MERGE') ? verb + 1 : -1
+    for (let into = topLevelKeyword(tokens, 1, tokens.length, 'INTO'); into >= 0; into = topLevelKeyword(tokens, into + 1, tokens.length, 'INTO')) {
       let at = into + 1
       while (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) at += 1
       const created = tableAt(tokens, at)
       if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
       if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
-      if (created === null) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
+      if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
     }
     return push(head, 'safe', '')
   }
