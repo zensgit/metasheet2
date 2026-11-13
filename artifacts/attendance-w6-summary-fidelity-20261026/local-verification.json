@@ -1,0 +1,165 @@
+{
+  "dependencyHead": "9a8d2ec5cb70a9eeda634e1a01e21718cbc063a7",
+  "scope": "new summary presentation only; gate OFF unchanged; not whole parent acceptance",
+  "actualPassed": {
+    "new-presentation-and-details": {
+      "passed": 102
+    },
+    "affected-W6-neighbors": {
+      "passed": 116
+    },
+    "frontend-registration-guards": {
+      "passed": 39
+    },
+    "backend-lane-guards": {
+      "passed": 63
+    }
+  },
+  "fourMutations": {
+    "matchingFailed": 4,
+    "filteredPerCase": 7,
+    "filteredNotPassed": true,
+    "sourceRestored": true
+  },
+  "browser": {
+    "syntheticOnly": true,
+    "phases": [
+      {
+        "phase": "baseline-OFF",
+        "proofSHA256": "9276e75bf38d490829049d373ff96afda04e28cb251837554362bbd5dcb02d0c",
+        "sourceChecks": [
+          {
+            "phase": "before",
+            "sourcePhase": "baseline",
+            "count": 924,
+            "matches": true
+          },
+          {
+            "phase": "after",
+            "sourcePhase": "baseline",
+            "count": 924,
+            "matches": true
+          }
+        ],
+        "snapshots": 6,
+        "actualMain": true,
+        "writes": 0,
+        "external": 0,
+        "pageErrors": 0
+      },
+      {
+        "phase": "candidate-OFF",
+        "proofSHA256": "02c6019ad529c7a46645218a7354aeee2863e1956e6dab4653fe39a264f18be2",
+        "sourceChecks": [
+          {
+            "phase": "before",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          },
+          {
+            "phase": "after",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          }
+        ],
+        "snapshots": 6,
+        "actualMain": true,
+        "writes": 0,
+        "external": 0,
+        "pageErrors": 0
+      },
+      {
+        "phase": "candidate-ON1440",
+        "proofSHA256": "92fe38a7ea0e5ba11f5d6378b105a27c909c2ec7c7c601619370c4ed293622f0",
+        "sourceChecks": [
+          {
+            "phase": "before",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          },
+          {
+            "phase": "after",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          }
+        ],
+        "snapshots": 3,
+        "actualMain": true,
+        "writes": 0,
+        "external": 0,
+        "pageErrors": 0
+      },
+      {
+        "phase": "candidate-ON768",
+        "proofSHA256": "ab84633e27b06f08fe8685917a81b2ec6ee94c6ba697c6bea6cd070aa345d593",
+        "sourceChecks": [
+          {
+            "phase": "before",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          },
+          {
+            "phase": "after",
+            "sourcePhase": "candidate",
+            "count": 924,
+            "matches": true
+          }
+        ],
+        "snapshots": 3,
+        "actualMain": true,
+        "writes": 0,
+        "external": 0,
+        "pageErrors": 0
+      }
+    ],
+    "OFFDOMSnapshotsByteEqual": 6,
+    "OFFRequestMultisetEqual": true,
+    "ONWidthsLocales": [
+      [
+        1440,
+        "en"
+      ],
+      [
+        768,
+        "zh-CN"
+      ]
+    ],
+    "authoritativeRows": 7,
+    "existingDetailFields": 7,
+    "aggregateGETsPerON": 2,
+    "writes": 0,
+    "providerIO": 0,
+    "pageErrors": 0,
+    "mobileNotRepeated": true,
+    "humanAT": false
+  },
+  "quality": {
+    "scopedLintExit": 0,
+    "validateAllExit": 0,
+    "buildExit": 0,
+    "AVFullFileClean": false,
+    "AVDiagnosticsBaseAndCurrent": [
+      17,
+      17
+    ],
+    "introduced": 0
+  },
+  "reproduction": {
+    "matchingOriginalReds": 6,
+    "originalControlsAcrossPhases": 2,
+    "selectorHarnessFailureRetained": true
+  },
+  "screenshots": {
+    "candidate-ON1440-on-authoritative-details.png": "7d356d9e3e1b1e85863ec305e80ca6ca92330e3bbd6c04556c5080ff457ba960",
+    "candidate-ON1440-on-dirty-rule-reference-versus-saved-policy.png": "4f01cb259a548eb1bc3b01571270772ba741972ed0e7093fcf71e319a95a74d7",
+    "candidate-ON1440-on-punch-configuration-reference.png": "28aafaa5e8e3b953e0a0b26597d93454b1c5ff97c7513aa98790fbef7b7394f6",
+    "candidate-ON768-on-authoritative-details.png": "b2366163aa1c8767ed859041f763c220c9bd56f5f42286daaab567d4bb554c64",
+    "candidate-ON768-on-dirty-rule-reference-versus-saved-policy.png": "ffe0c02ead5961aa27e8a12de7144401d61aedb21a5cd3419cea7c791512bb9e",
+    "candidate-ON768-on-punch-configuration-reference.png": "6f4659640a2cbb801261a56f2749a743af4a3283c28e927de01742db2d8b9a72"
+  }
+}
