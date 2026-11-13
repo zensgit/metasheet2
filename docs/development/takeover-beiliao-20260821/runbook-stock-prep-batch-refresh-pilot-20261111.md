@@ -118,9 +118,9 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 ### 1.3 维护窗口内
 
 1. 停定时拉取任务，通知拉取人员窗口内不要拉。**装的包带 #6778 时，定时任务一直停到 §1.4a 第 4 步对每个未归档的已登记项目都做完为止**；在那之前不要告诉拉取人员窗口已结束（§1.4a 末尾说明为什么）。
-2. **用这个 Release 自带的 deploy-bootstrap 装包，run-migrations 填 `1`**（owner 2026-11-13 裁定，「按建议执行」，R-91 ㊿；命令与装 R81、R83、R84 时相同，只换包）。不用 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`。
+2. **用这个 Release 自带的 deploy-bootstrap 装包，run-migrations 填 `1`**（owner 2026-11-13 裁定，「按建议执行」，R-91 ㊿；命令与装 R81、R83 时相同，只换包；R84 的装机单也按它写）。不用 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`。
    - **命令。** `<包名>-deploy-bootstrap.bat <包.zip> <安装根目录> <install-deps> <run-migrations>`，参数按位置给，**第 4 个 run-migrations 填 `1`**；install-deps 不能填 `0`，`RunMigrations 1` 要求 `InstallDeps` 不为 `0`（`scripts/ops/multitable-onprem-deploy-launcher.ps1:20-21`）。安装根目录显式写上：不写时它取当前目录（`scripts/ops/multitable-onprem-package-build.sh:389-390`）。在现场机本地窗口或远程桌面里跑，不要挂在 SSH 会话上。
-   - **它是什么。** 它和包在同一次打包里生成，`SHA256SUMS` 钉住它：`.ps1` 是包内启动器的拷贝（`multitable-onprem-package-build.sh:380`），`.bat` 把四个参数传给它（`:383-402`）。启动器把包解到临时目录，再调用**包内**的 apply 助手（`multitable-onprem-deploy-launcher.ps1` 文首说明）。apply 助手在 `RunMigrations` 不为 `0` 时，执行安装根目录下的 `packages\core-backend\dist\src\db\migrate.js`（`scripts/ops/multitable-onprem-apply-package.ps1:1276-1284`）。
+   - **它是什么。** 它和包在同一次打包里生成，`SHA256SUMS` 钉住它（`multitable-onprem-package-build.sh:810-813`）：`.ps1` 是包内启动器的拷贝（`multitable-onprem-package-build.sh:380`），`.bat` 把四个参数传给它（`:383-402`）。启动器把包解到临时目录，再调用**包内**的 apply 助手（`multitable-onprem-deploy-launcher.ps1` 文首说明）。apply 助手在 `RunMigrations` 不为 `0` 时，执行安装根目录下的 `packages\core-backend\dist\src\db\migrate.js`（`scripts/ops/multitable-onprem-apply-package.ps1:1276-1284`）。
    - **成功的样子。** 退出码 0，最后一行是 `apply exit=0`（`.bat` 打印的标记，`multitable-onprem-package-build.sh:401`）。
    - **这条路径的两点限制（读代码得出，没有在现场形状的机器上跑过）：**
      - **迁移之前不停后端。** apply 助手先覆盖文件，再跑迁移，最后才重启（`multitable-onprem-apply-package.ps1:1167-1304`：覆盖在 `:1167-1180`，迁移在 `:1276-1284`，重启在 `:1294-1305`）。apply 助手、启动器（`multitable-onprem-deploy-launcher.ps1:42-43`：不调用 PM2）和 deploy-bootstrap 的生成代码（`multitable-onprem-package-build.sh:380-402`）里都没有停后端的一步。所以迁移跑的时候，旧后端还在服务。
@@ -129,7 +129,7 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
      - 窗口内**没有用户使用系统**，不只是不拉取；
      - 装包之前，先把回退用的旧 Release（现场是 R84 就是 `onprem-r84`，是 R83 就是 `onprem-r83`）连同它自己的 deploy-bootstrap 下载好，并核对 sha256；
      - 装包失败（退出码不是 0，或最后一行不是 `apply exit=0`）就**停下，报 owner**。不要重跑，不要自己处理。由 owner 决定是否按 §7 用旧包、`RunMigrations 0` 装回；
-     - 数据库照旧先手工做一次完整备份：deploy-bootstrap 不备份数据库。
+     - 数据库照旧先手工做一次完整备份：deploy-bootstrap 不备份数据库（apply 助手和启动器里都没有 `pg_dump` 一类的步骤，读代码得出）。
 3. deploy-bootstrap 跑完、后端起来后做 §1.4。不通过就停下报 owner，由 owner 决定是否按 §7 回退；不要在现场改库或改代码。
 
 ### 1.4 装后核对
