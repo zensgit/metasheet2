@@ -275,6 +275,15 @@ describe('scan controls', () => {
     ['TRUNCATE after an item that is not a plain name', 'const x = \'TRUNCATE "audit log", role_permissions\'', 'role_permissions|TRUNCATE'],
     ['TRUNCATE after a substituted item', 'const x = `TRUNCATE ${table}, user_permissions`', 'user_permissions|TRUNCATE'],
     ['TRUNCATE of a table after a substituted schema', 'const x = `TRUNCATE audit_logs, ${schema}.user_roles`', 'user_roles|TRUNCATE'],
+    ['a table after a schema written as text against a substitution', 'const x = `INSERT INTO tenant_${id}.user_roles (user_id) VALUES ($1)`', 'user_roles|INSERT'],
+    ['a table after a schema written as a substitution against text', 'const x = `DELETE FROM ${prefix}lic.user_permissions WHERE user_id = $1`', 'user_permissions|DELETE'],
+    ['a table after a schema written as two substitutions', 'const x = `UPDATE ${a}${b}.users SET is_admin = TRUE`', 'users|UPDATE'],
+    ['a table after a schema concatenated from text and an operand', "const x = 'DELETE FROM tenant_' + id + '.role_permissions'", 'role_permissions|DELETE'],
+    ['a scanned name with a substitution written against it', 'const x = `DELETE FROM user_roles${where}`', 'user_roles|DELETE'],
+    ['TRUNCATE after an item written in pieces', 'const x = `TRUNCATE audit_${suffix}, user_permissions`', 'user_permissions|TRUNCATE'],
+    ['TRUNCATE of a table after a schema written in pieces', 'const x = `TRUNCATE audit_logs, tenant_${id}.user_roles`', 'user_roles|TRUNCATE'],
+    ['TRUNCATE of a scanned name with a substitution written against it, later in the list', 'const x = `TRUNCATE audit_logs, users${suffix}`', 'users|TRUNCATE'],
+    ['TRUNCATE of a scanned name that a schema in pieces begins with, later in the list', 'const x = `TRUNCATE audit_logs, users${suffix}.archive`', 'users|TRUNCATE'],
   ]
   for (const [name, replacement, expected] of positives) {
     it(`POSITIVE CONTROL — ${name} is counted`, () => {
@@ -297,6 +306,11 @@ describe('scan controls', () => {
     ['a quoted name of three parts on a cascade parent', 'const x = \'UPDATE "my db"."public"."roles" SET id = $1\'', 'multi_part_name'],
     ['a name of three parts with a substituted part', 'const x = `INSERT INTO metasheet.public.${table} (id) VALUES ($1)`', 'multi_part_name'],
     ['a name of three parts in a TRUNCATE list', "const x = 'TRUNCATE audit_logs, metasheet.public.user_roles'", 'multi_part_name'],
+    ['text against a substitution after a verb', 'const x = `INSERT INTO user_${suffix} (user_id, role_id) VALUES ($1, $2)`', 'template_substitution'],
+    ['text against a substitution after a verb and the usual schema', 'const x = `UPDATE public.user${suffix} SET is_admin = TRUE`', 'template_substitution'],
+    ['text against a substitution as the first item of a TRUNCATE list', 'const x = `TRUNCATE TABLE user_${suffix}`', 'template_substitution'],
+    ['text against a concatenation operand after a verb', "const x = 'DELETE FROM user_' + suffix", 'concatenation'],
+    ['a name of three parts with a part written in pieces', 'const x = `DELETE FROM metasheet.pub${suffix}.user_roles`', 'multi_part_name'],
   ]
   for (const [name, replacement, form] of dynamicPositives) {
     it(`POSITIVE CONTROL — ${name} is a dynamic target`, () => {
@@ -327,6 +341,10 @@ describe('scan controls', () => {
     ['a copy out of a name of three parts', "const x = 'COPY metasheet.public.users TO STDOUT'"],
     ['a TRUNCATE item in another schema', "const x = 'TRUNCATE audit_logs, app.user_roles'"],
     ['a later TRUNCATE item whose schema is spelled like a scanned table', "const x = 'TRUNCATE audit_logs, users.archive'"],
+    ['text against a substitution after a non-verb', 'const x = `SELECT * FROM user_${suffix}`'],
+    ['a lower-case prose verb before text against a substitution', 'const x = `update row_${count} of the list`'],
+    ['a substitution after white space behind the table of a write', 'const x = `DELETE FROM sessions ${where}`'],
+    ['a later TRUNCATE item written in pieces that names no scanned table', 'const x = `TRUNCATE audit_logs, user_${suffix}`'],
   ]
   for (const [name, replacement] of negatives) {
     it(`NEGATIVE CONTROL — ${name} is not counted`, () => {

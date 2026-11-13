@@ -22,13 +22,20 @@
  * written after a substituted schema is read as the table it names: the write is counted, and the
  * substitution stays a dynamic target.
  *
+ * A name part written in pieces, identifier characters and substitutions against one another with
+ * no white space between, spells one name that is not known. After a write verb it is a dynamic
+ * target, like a substitution alone; as a schema it is a substituted schema. A scanned table name
+ * with a substitution written against it is still counted as that table, and is a dynamic target
+ * as well.
+ *
  * A `users` UPDATE counts as an input write only when its SET clause names `role`, `is_admin` or
  * `permissions` (bare, quoted or inside a tuple assignment); a SET clause that contains a
  * substitution is a dynamic target. A `users` INSERT whose `ON CONFLICT … DO UPDATE SET` clause names
  * an input column counts as an additional `users` UPDATE. A TRUNCATE names a list, which is read
  * item by item from the verb: each scanned table it names is counted wherever it stands, past an
- * item in another schema and past an item that is not a plain name. The name that directly follows
- * a write verb is counted when it is a scanned table even with a dot after it.
+ * item in another schema, past an item that is not a plain name and past an item written in
+ * pieces. The name that directly follows a write verb is counted when it is a scanned table even
+ * with a dot after it.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -80,16 +87,19 @@ const VERB = '(INSERT\\s+INTO|DELETE\\s+FROM|UPDATE|TRUNCATE(?:\\s+TABLE)?|MERGE
 const SCHEMA = '(?:"?public"?\\s*\\.\\s*)?'
 const TABLE = `(?:ONLY\\s+)?${SCHEMA}("?)([A-Za-z_][A-Za-z0-9_]*)\\2`
 const LITERAL_WRITE = new RegExp(`\\b${VERB}\\s+${TABLE}(?![A-Za-z0-9_])`, 'gi')
-/** One part of a qualified name: a bare identifier, a double-quoted identifier, or a substitution. */
-const NAME_PART = `(?:[A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")*"|${SUBSTITUTION})`
+/** A name part written in pieces: identifier characters and substitutions against one another, at least one substitution among them. */
+const PIECES = `[A-Za-z0-9_${SUBSTITUTION}]*${SUBSTITUTION}[A-Za-z0-9_${SUBSTITUTION}]*`
+/** One part of a qualified name: pieces around a substitution, a bare identifier, or a double-quoted identifier. */
+const NAME_PART = `(?:${PIECES}|[A-Za-z_][A-Za-z0-9_]*|"(?:[^"]|"")*")`
 /** A write verb followed by a name of three or more parts (group 2). */
 const MULTI_PART_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?(${NAME_PART}(?:\\s*\\.\\s*${NAME_PART}){2,})`, 'gi')
-/** A write verb followed by a substituted schema and the table it qualifies (group 3). */
-const SUBSTITUTED_SCHEMA_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?"?${SUBSTITUTION}"?\\s*\\.\\s*("?)([A-Za-z_][A-Za-z0-9_]*)\\2(?![A-Za-z0-9_])`, 'gi')
+/** A write verb followed by a substituted schema, alone or with pieces written against it, and the table it qualifies (group 3). */
+const SUBSTITUTED_SCHEMA_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?(?:"?${SUBSTITUTION}"?|${PIECES})\\s*\\.\\s*("?)([A-Za-z_][A-Za-z0-9_]*)\\2(?![A-Za-z0-9_])`, 'gi')
 const TRUNCATE_HEAD = /\bTRUNCATE(?:\s+TABLE)?\s+/gi
 /** The next item of a TRUNCATE list: an optional ONLY, the name with all its parts (group 1), a descendant mark, and the comma when the list goes on (group 2). */
 const TRUNCATE_ITEM = new RegExp(`^\\s*(?:ONLY\\s+)?(${NAME_PART}(?:\\s*\\.\\s*${NAME_PART})*)\\s*\\*?\\s*(,)?`, 'i')
-const DYNAMIC_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?${SCHEMA}"?${SUBSTITUTION}`, 'g')
+/** A write verb followed by a target that begins with a substitution, or with pieces written against one. */
+const DYNAMIC_WRITE = new RegExp(`\\b${VERB}\\s+(?:ONLY\\s+)?${SCHEMA}"?[A-Za-z0-9_]*${SUBSTITUTION}`, 'g')
 export const QUERY_BUILDER_WRITERS: ReadonlyMap<string, WriteVerb> = new Map([['insertInto', 'INSERT'], ['updateTable', 'UPDATE'], ['deleteFrom', 'DELETE'], ['mergeInto', 'MERGE'], ['replaceInto', 'INSERT']])
 const INPUT_COLUMN = `(?:${USERS_INPUT_COLUMNS.join('|')})`
 /** `role =`, `"role" =`, or a tuple assignment `(…, role, …) =`. */
@@ -99,20 +109,25 @@ const UPSERT_UPDATE = /\bON\s+CONFLICT\b[\s\S]{0,200}?\bDO\s+UPDATE\s+SET\b/i
 /** The dynamic forms the scan reports. */
 export const SCANNED_DYNAMIC_FORMS: readonly DynamicForm[] = ['template_substitution', 'concatenation', 'query_builder_non_literal', 'users_update_dynamic_set', 'multi_part_name']
 
-/** The parts of a qualified name: quotes removed and case folded; a substituted part is the substitution marker. */
-function nameParts(name: string): string[] {
-  const parts: string[] = []
+/**
+ * One part of a qualified name. `name`: quotes removed and case folded; for a part written in
+ * pieces, the piece it begins with (empty when it begins with a substitution).
+ */
+type NamePart = Readonly<{ name: string; substituted: boolean }>
+
+function nameParts(name: string): NamePart[] {
+  const parts: NamePart[] = []
   for (const match of name.matchAll(new RegExp(NAME_PART, 'g'))) {
     const part = match[0]
-    if (part.includes(SUBSTITUTION)) parts.push(SUBSTITUTION)
-    else parts.push((part.startsWith('"') ? part.slice(1, -1).replace(/""/g, '"') : part).toLowerCase())
+    if (part.includes(SUBSTITUTION)) parts.push({ name: (/^[A-Za-z_][A-Za-z0-9_]*/.exec(part)?.[0] ?? '').toLowerCase(), substituted: true })
+    else parts.push({ name: (part.startsWith('"') ? part.slice(1, -1).replace(/""/g, '"') : part).toLowerCase(), substituted: false })
   }
   return parts
 }
 
 /** A name of three or more parts that may stand for a scanned table: one of its parts is such a name, or is not known. */
-function isUnreadMultiPartName(parts: readonly string[]): boolean {
-  return parts.length >= 3 && parts.some((part) => part === SUBSTITUTION || SCANNED_TABLES.has(part))
+function isUnreadMultiPartName(parts: readonly NamePart[]): boolean {
+  return parts.length >= 3 && parts.some((part) => part.substituted || SCANNED_TABLES.has(part.name))
 }
 
 const BARE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -243,13 +258,15 @@ export function matchText(file: string, text: string, line: number, basePosition
       if (parts.length >= 3) {
         if (isUnreadMultiPartName(parts)) dynamic.push({ file, line: lineAt(index), position: positionAt(index), form: 'multi_part_name', expression: shown(`${match[0]}${item[1]}`) })
       } else {
-        // An item in another schema is passed over; a substituted schema leaves the table as written.
-        // The name that directly follows the verb is counted when it is a scanned table even with a
-        // dot after it, as it is after the other verbs: a schema spelled like a scanned table is
-        // read as that table.
-        const inPublic = parts.length === 1 || parts[0] === 'public' || parts[0] === SUBSTITUTION
-        const table = inPublic ? parts[parts.length - 1] : first ? parts[0] : null
-        if (table !== null && SCANNED_TABLES.has(table)) writes.push({ file, line: lineAt(index), position: positionAt(index), table, verb: 'TRUNCATE', form: 'sql' })
+        // An item in another schema is passed over; a substituted schema, alone or with pieces written
+        // against it, leaves the table as written. The name that directly follows the verb is counted
+        // when it is a scanned table even with a dot after it, as it is after the other verbs: a
+        // schema spelled like a scanned table is read as that table. So is the scanned table name a
+        // substituted schema begins with, wherever the item stands.
+        const inPublic = parts.length === 1 || (parts[0].name === 'public' && !parts[0].substituted) || parts[0].substituted
+        const table = inPublic ? parts[parts.length - 1].name : first ? parts[0].name : null
+        const counted = [table, parts.length === 2 && parts[0].substituted ? parts[0].name : null].filter((name): name is string => name !== null && SCANNED_TABLES.has(name))
+        for (const name of new Set(counted)) writes.push({ file, line: lineAt(index), position: positionAt(index), table: name, verb: 'TRUNCATE', form: 'sql' })
       }
       if (item[2] === undefined) break
       cursor += item[0].length

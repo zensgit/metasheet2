@@ -1130,6 +1130,62 @@ describe('a name written in pieces, text against a substitution or a constant of
     expect(check(constant, historical, false).problems).toEqual(['missing world lock try form', `unreadable UPDATE: ${UNREAD}`])
   })
 
+  it('a write after a schema written that way is one the scan reports: it is judged as a write of the table it names, in every file', () => {
+    const MEMBERSHIP = 'writes user_roles: a migration does not change memberships; use the contract entry or the maintenance tool'
+    const writes: Array<[string, string, string[]]> = [
+      ["INSERT INTO pub${x}.user_roles (user_id, role_id) VALUES ('u1', 'admin')", 'INSERT', [MEMBERSHIP]],
+      ['UPDATE tenant_${x}.users SET is_admin = TRUE', 'UPDATE', ['sets is_admin']],
+      ["INSERT INTO app_${x}.user_permissions (user_id, permission_code) VALUES ('u1', 'users:write')", 'INSERT', ['grants class-raising code users:write']],
+      ["INSERT INTO ${a}${b}.role_permissions (role_id, permission_code) VALUES ('viewer', 'users:write')", 'INSERT', ['grants class-raising code users:write']],
+      ["DELETE FROM ${x}lic.role_permissions WHERE role_id = 'x'", 'DELETE', []],
+    ]
+    for (const [statement, head, problems] of writes) {
+      const withLock = lockedCode(line(statement))
+      expect(checkNewMigration(NEW_TS, withLock, true, [cover]).problems, statement).toEqual(problems)
+      expect(checkNewMigration(NEW_TS, withLock, true, []).problems, statement).toEqual([`unreadable ${head}: dynamic write target`, ...problems])
+      const without = checkNewMigration(NEW_TS, up(line(statement)), true, [cover])
+      expect(without.problems, statement).toEqual(['missing world lock try form', ...problems])
+      expect(without.inputWrites, statement).toBe(1)
+      expect(check(up(line(statement)), historical, false).problems, statement).toEqual(['missing world lock try form', ...problems])
+      expect(check(lockedCode(line(statement)), historical, false).problems, statement).toEqual(problems)
+    }
+    // An update of an account that the scan does not count is judged by its assignments all the same.
+    const uncounted = lockedCode(line("UPDATE tenant_${x}.users SET note = 'moved from ldap', role = 'admin'"))
+    expect(checkNewMigration(NEW_TS, uncounted, true, [cover]).problems).toEqual(['assigns class-raising role admin'])
+    // The key of a cascade parent written that way is refused.
+    expect(checkNewMigration(NEW_TS, up(line("UPDATE tenant_${x}.roles SET id = 'ops_admin'")), true, [cover]).problems).toEqual(['unreadable UPDATE: assigns a key column of roles'])
+    // Inside another statement, and further down a TRUNCATE list, the write is not judged by the rule of its table.
+    const nested = lockedCode(line('WITH w AS (DELETE FROM pub${x}.role_permissions RETURNING 1) SELECT 1 FROM w'))
+    expect(checkNewMigration(NEW_TS, nested, true, [cover]).problems).toEqual(['unreadable WITH: DELETE after a substituted schema inside another statement'])
+    expect(check(lockedCode(line('TRUNCATE audit_y, pub${x}.user_roles'))).problems).toEqual([MEMBERSHIP, `unreadable TRUNCATE: ${UNREAD}`])
+    // With a third part the name is not read at all, and no exemption covers it.
+    const threeParts = lockedCode(line('INSERT INTO db.pub${x}.user_roles (user_id) VALUES (1)'))
+    expect(checkNewMigration(NEW_TS, threeParts, true, [cover]).problems).toEqual(['unreadable INSERT: write target has more than two parts'])
+  })
+
+  it('a table written that way is a dynamic target the scan reports: refused without an exemption, set aside with one unless its pieces spell an input table', () => {
+    const targets: Array<[string, string]> = [
+      ["INSERT INTO user_${x} (user_id, role_id) VALUES ('u1', 'admin')", 'INSERT'],
+      ['UPDATE user${x} SET is_admin = TRUE', 'UPDATE'],
+      ['DELETE FROM public.user_${x} WHERE user_id = 1', 'DELETE'],
+      ['TRUNCATE user_${x}', 'TRUNCATE'],
+    ]
+    for (const [statement, head] of targets) {
+      expect(check(up(line(statement))).problems, statement).toEqual([`unreadable ${head}: dynamic write target`])
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, [cover]).problems, statement).toEqual([])
+    }
+    // A scanned table name with a substitution written against it is a write of that table and a dynamic target as well.
+    const counted = line('DELETE FROM role_permissions${x}')
+    expect(check(lockedCode(counted)).problems).toEqual(['unreadable DELETE: dynamic write target'])
+    expect(checkNewMigration(NEW_TS, lockedCode(counted), true, [cover]).problems).toEqual([])
+    expect(checkNewMigration(NEW_TS, up(counted), true, [cover]).problems).toEqual(['missing world lock try form'])
+    // A TRUNCATE list is read past a first item in pieces.
+    const list = up(line('TRUNCATE user_${x}, role_permissions'))
+    expect(checkNewMigration(NEW_TS, list, true, [cover]).problems).toEqual(['missing world lock try form'])
+    expect(checkNewMigration(NEW_TS, list, true, [cover]).inputWrites).toBe(1)
+    expect(check(list, historical, false).problems).toEqual(['missing world lock try form'])
+  })
+
   it('text against a constant of the file is pieces as well; a constant that stands alone is read as the name it holds', () => {
     const pieces = lockedCode("const P = 'pub'", line('UPDATE ${P}x.users SET is_admin = TRUE'))
     expect(check(pieces).problems).toEqual([`unreadable UPDATE: ${UNREAD}`])
