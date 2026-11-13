@@ -23,6 +23,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, computed, type App as VueApp, type Component } from 'vue'
 import type { HistoryBatchDetail, HistoryBatchSummary, MetaDeletedRecord } from '../src/multitable/types'
+import { deepLinkLocateHint } from '../src/multitable/utils/workbench-labels'
 
 function stubComponent(name: string) {
   return defineComponent({ name, render() { return h('div', { [`data-stub-${name}`]: 'true' }) } })
@@ -97,7 +98,7 @@ vi.mock('../src/composables/useAuth', () => ({
     getAccessSnapshot: () => ({ userId: 'user_1', isAdmin: false, permissions: [] }),
   }),
 }))
-const { mockShowError, mockShowSuccess } = vi.hoisted(() => ({ mockShowError: vi.fn(), mockShowSuccess: vi.fn() }))
+const { mockShowError, mockShowSuccess, mockShow } = vi.hoisted(() => ({ mockShowError: vi.fn(), mockShowSuccess: vi.fn(), mockShow: vi.fn() }))
 vi.mock('../src/composables/useToast', () => ({
   useToast: () => ({ showSuccess: mockShowSuccess, showError: mockShowError }),
 }))
@@ -126,7 +127,8 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
   default: defineComponent({
     name: 'MetaToast',
     setup(_, { expose }) {
-      expose({ showError: mockShowError, showSuccess: mockShowSuccess })
+      // show：定位记录时表格里没能定位到这一行的轻提示（客户问题 2026-10-27 4b）走的是 show(message, 'info')。
+      expose({ showError: mockShowError, showSuccess: mockShowSuccess, show: mockShow })
       return () => h('div', { 'data-stub-MetaToast': 'true' })
     },
   }),
@@ -366,7 +368,9 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     expect(workbenchMock.selectSheet).not.toHaveBeenCalled() // same sheet — no switch
   })
 
-  it('PR-C off-page record: resolveDeepLink fetches it via getRecord (no toast on success)', async () => {
+  // 客户问题 2026-10-27（4b）以后，历史中心的跳转也会在表格里定位这一行：这张表的行已全部加载、里面没有它，
+  // 所以除了打开详情，还会出一条 info 轻提示（不是错误提示）。
+  it('PR-C off-page record: resolveDeepLink fetches it via getRecord (no error toast; one info locate hint)', async () => {
     gridMock.rows.value = [] // rec_1 is NOT loaded → deep-link fetch path
     workbenchMock.client.getRecord.mockResolvedValue({
       record: { id: 'rec_1', version: 2, data: { fld_1: 'New' } },
@@ -379,6 +383,10 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     expect(container!.querySelector('[data-test="hist-filter-field"]')).toBeNull()
     expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_1', expect.anything())
     expect(mockShowError).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(mockShow).toHaveBeenCalledTimes(1))
+    const [message, type] = mockShow.mock.calls[0]
+    expect([deepLinkLocateHint('absent', 0, true), deepLinkLocateHint('absent', 0, false)]).toContain(message)
+    expect(type).toBe('info')
   })
 
   it('PR-C gone/denied record: getRecord failure surfaces the existing not-found toast', async () => {
@@ -389,6 +397,8 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     await flushUi()
     expect(mockShowError).toHaveBeenCalledTimes(1)
     expect(String(mockShowError.mock.calls[0][0])).toContain('Record not found')
+    // 取不到记录时只出「未找到记录」，不再叠加定位轻提示。
+    expect(mockShow).not.toHaveBeenCalled()
   })
 
   it('PR-C cross-sheet: switches the active sheet BEFORE locating (all-tables mode)', async () => {
