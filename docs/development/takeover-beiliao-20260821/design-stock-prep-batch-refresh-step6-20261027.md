@@ -72,6 +72,12 @@
 - **B-21 S6-9。** 只在 S6-1、S6-2、S6-3、S6-5、S6-6、S6-8（以及 S6-4，除非延后）各自在冻结头上评审并合入、就绪 ≥ v5 之后翻转。正向一腿需要内存中打开 BI 开关，并有一张已装 BI、历史已解析的合成表；G9 覆盖 S9X-01、U07 演练，以及包括 BI 管理路由在内的 U03。只随 main 基线包发布，永不进 R 线。
 - **B-22 回退停止条件（S6-1 #6835 修正第 1 轮；取代正文 §7.5「Pre-rollback stop-condition queries」里那条新的停止条件）。** 正文写的是「最新结算主体为 `verified_closed` 且未被 `settled_execution_id` 指名」；只计 `verified_closed` 会漏掉排在透明关闭之后的未结算 `succeeded` 主体：旧构建按原始最新执行把该项目派生为 已完成，查询却答 0。改为：按 `started_at` 取每个 sheet / project 的最新结算主体，计 `e.settlement_subject AND e.status IN ('succeeded', 'verified_closed') AND e.id IS DISTINCT FROM s.settled_execution_id`（要求为零；措辞以迁移 106 头注释为准，R-91 ⑳）。S6-2 的 S9R-U07 必须把「未结算主体之上的透明关闭」（transparent close over an unsettled subject）列为一类使该查询非零的产物；S6-8 的回退运行手册 B.7 按同一条件写。
 
+### 2026-11-13 补充：U07 旧构建演练的判据（取代正文 §7.5「U07 evidence」里 G9 回退演练那一句，即 220bd80ab 上的 :673）
+
+- **那一句不成立。** 它要求旧构建「preview / apply / export refused where the queries say so; no ADD or INACTIVE written」。这和 §7.5 第二条矛盾：第二条已写明，旧构建把 `verified_closed` 的最新执行派生为 已完成，只有正式导出 C2 的摘要比对能接住。2026-11-13 开发机预演（一次性库，合成数据，候选 6a23319cd）也看到同样的结果：旧构建和候选在每个产物项目上回答相同，两个构建都达不到那一句的字面判据（R-91 ㊾）。
+- **改为：** U07 的保护是 §7.5 第三条的操作停止规则（阻断查询全部为 0 才回退），C2 兜底（B-22；正文风险第 7 条）。演练判据只写在一处：`scripts/ops/stock-prep-g9-frozen-candidate.mjs --old-build-drill` 第 3–5 步。要点是：两个构建上，留着未结算产物的项目导出都被拒；B-22 形状上，旧构建过 C1，在 C2 被拒；旧构建不写候选不会写的行；清掉产物之后，旧构建和候选回答相同。
+- 演练要在第二个包的冻结候选上重跑。原因（推断）：Y8 改了机器列（B-4），旧构建和候选的机器带一旦不同，C2 会在清掉之后仍拒绝已结算的项目。
+
 ### N-INTEGRATION：与集成线的配对（不等待）
 
 集成线在开的 Draft（#6764、#6769、#6782、#6789、#6793、#6795、Y8 #6778）都会碰到第 6 步的文件。不等它们（R-69 仍 OPEN，Y8 由 owner 把关）；后合并的一方负责 rebase 并重算 s6a pins。配对：S6-1 ↔ #6778（AW 字段带；XI-02 加机器回写列）；S6-2 / S6-4 / S6-5 / S6-6 ↔ #6769 一叠（http-routes；在 G-06 之下，新处理函数只读那六个请求字段）；S6-6 ↔ flag manifest；S6-3 / S6-4 ↔ web 令牌文件；S6-7 ↔ #6778 的 pairing；S6-8 ↔ #6778 的运行手册。自动化试运行是 §3.9 第 14 行多出的一个并发对账调用方（同一代码路径）。
