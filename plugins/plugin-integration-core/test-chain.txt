@@ -81,6 +81,7 @@ node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
 node __tests__/stock-preparation-project-sheet-repair-columns.test.cjs
+node __tests__/stock-preparation-template-issue-confirm-spec-columns.test.cjs
 node __tests__/stock-preparation-sheet-census.test.cjs
 node __tests__/stock-preparation-component-ruling-store.test.cjs
 node __tests__/stock-preparation-remnant-acknowledgement.test.cjs
@@ -106,6 +107,9 @@ node __tests__/stock-preparation-change-plan-store.test.cjs
 node __tests__/stock-preparation-execution-intent.test.cjs
 node __tests__/stock-preparation-execution-recovery.test.cjs
 node __tests__/stock-preparation-execution-recovery-routes.test.cjs
+node __tests__/stock-preparation-sheet-repair.test.cjs
+node __tests__/stock-preparation-sheet-repair-store.test.cjs
+node __tests__/stock-preparation-sheet-repair-routes.test.cjs
 node __tests__/stock-preparation-change-plan-planner.test.cjs
 node __tests__/stock-preparation-change-plan-lanes.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs

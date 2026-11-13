@@ -56,6 +56,10 @@ const REMNANT_ACKNOWLEDGEMENT_ERROR_CODES = Object.freeze({
   REQUEST_INVALID: 'STOCK_PREP_SHEET_CENSUS_REQUEST_INVALID',
   NOT_PRESENT: 'STOCK_PREP_REMNANT_NOT_PRESENT',
   PACK_UNREADABLE: 'STOCK_PREP_SHEET_CENSUS_PACK_UNREADABLE',
+  // S6-5b: the single-project census on a sheet that lost a key column (409), or whose key columns the database could
+  // not be asked about (503). The tenant-wide row answers incomplete / field_missing (resp. rows_unreadable) instead.
+  FIELD_MISSING: 'STOCK_PREP_SHEET_CENSUS_FIELD_MISSING',
+  FIELDS_UNREADABLE: 'STOCK_PREP_SHEET_CENSUS_FIELDS_UNREADABLE',
 })
 
 // Why ONE row of the tenant-wide census has no counts (closed; the R-line pack's `status=incomplete reason=` twin).
@@ -66,6 +70,8 @@ const CENSUS_INCOMPLETE_REASONS = Object.freeze([
   'rows_unreadable',
   'rows_too_large',
   'pack_unreadable',
+  // S6-5b: a census key column (SHEET_CENSUS_KEY_FIELD_IDS) is absent from the sheet — the pack's own token.
+  'field_missing',
 ])
 const GOVERNED_TOKENS = Object.freeze(['pilot', 'protected', 'none', 'unreadable'])
 
