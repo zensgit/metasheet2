@@ -1819,10 +1819,14 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
         : 'DingTalk authentication failed'
 
+    // Policy refusals carry their stable code (status unchanged) so the callback page can show
+    // fixed guidance instead of the message; the set of codes is pinned in auth-login-routes.test.ts.
     return res.status(statusCode).json({
       success: false,
       error: message,
-      ...(error instanceof DingTalkActivationIntentError ? { code: error.code } : {}),
+      ...(error instanceof DingTalkActivationIntentError || error instanceof DingTalkLoginPolicyError
+        ? { code: error.code }
+        : {}),
     })
   }
 })

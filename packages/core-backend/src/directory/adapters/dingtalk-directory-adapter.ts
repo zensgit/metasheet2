@@ -61,11 +61,14 @@ export function buildDirectoryIntegrationTestWarnings(result: {
     && result.rootDepartmentDirectUserCountWithAccessLimit === result.rootDepartmentDirectUserCount
     && result.rootDepartmentDirectUserHasMoreWithAccessLimit === result.rootDepartmentDirectUserHasMore
   ) {
-    warnings.push('开启“包含访问受限成员”后返回结果没有变化，说明当前问题不是受限成员过滤导致的。')
+    warnings.push('开启“包含访问受限成员”后，根部门抽样的成员数量与分页标记没有变化；仅凭这一点不能判断成员偏少的原因。')
   }
 
   return warnings
 }
+
+/** Says what the sampled reads cover and what they do not; every summary's next action ends with it. */
+const SAMPLED_SCOPE_NOTE = '本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。'
 
 export function buildDirectoryIntegrationDiagnosticSummary(result: {
   departmentSampleCount: number
@@ -80,7 +83,7 @@ export function buildDirectoryIntegrationDiagnosticSummary(result: {
     return {
       code: 'scope_or_root_misconfigured',
       title: '通讯录范围或根部门疑似配置不当',
-      nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+      nextAction: `请按预期的同步范围核对应用通讯录权限范围与根部门 ID；正常的叶子部门或小范围目录也可能出现此结果。${SAMPLED_SCOPE_NOTE}`,
     }
   }
 
@@ -88,15 +91,28 @@ export function buildDirectoryIntegrationDiagnosticSummary(result: {
     return {
       code: 'no_child_departments',
       title: '根部门未返回子部门',
-      nextAction: '如企业通讯录确有部门层级，请检查应用通讯录可见范围配置。',
+      nextAction: `如企业通讯录确有部门层级，请检查应用通讯录可见范围配置。${SAMPLED_SCOPE_NOTE}`,
     }
   }
 
   return {
     code: 'healthy',
-    title: '通讯录连通正常',
-    nextAction: '通讯录范围正常，可执行目录同步。',
+    title: '部门与成员列表抽样读取成功',
+    nextAction: SAMPLED_SCOPE_NOTE,
   }
+}
+
+/**
+ * The connection probe's own summary adjustments; the shared builder above (also used by the manual
+ * run's diagnostic sample, which reads no member detail) never produces `member_detail_unverified`.
+ */
+const PROBE_DETAIL_READ_TITLE = '部门、成员列表与一名成员详情抽样读取成功'
+const PROBE_DETAIL_UNVERIFIED_WARNING =
+  '没有普通可见成员样本，成员详情权限未验证；不能据此确认目录同步或扫码登录可用。'
+const PROBE_DETAIL_UNVERIFIED_SUMMARY: DirectoryIntegrationDiagnosticSummary = {
+  code: 'member_detail_unverified',
+  title: '成员详情权限未验证',
+  nextAction: `部门与成员列表抽样读取成功，但没有普通可见成员样本可供读取详情，成员详情权限未验证；不能据此确认目录同步或扫码登录可用。${SAMPLED_SCOPE_NOTE}`,
 }
 
 export async function sampleRootDepartmentDiagnostics(
@@ -160,7 +176,13 @@ export async function sampleRootDepartmentDiagnostics(
   }
 }
 
-/** The provider part of a connection test: five client calls, then the diagnostics, summary and warnings. */
+/**
+ * The provider part of a connection test: five list reads, then one logical member-detail read of an
+ * ordinary visible sample member (the first child-department sample, else the ordinary root sample;
+ * never the access-limited sample), then the diagnostics, summary and warnings. The transport's own
+ * retries are not extra logical reads. A failing detail read rejects the probe like any other read.
+ * The detail answer is read for access only; none of its values enter the result or the logs.
+ */
 export async function probeDingTalkDirectory(
   normalized: NormalizedDirectoryIntegrationInput,
 ): Promise<DirectoryIntegrationProbeResult> {
@@ -201,6 +223,11 @@ export async function probeDingTalkDirectory(
     },
   )
 
+  const detailSample = users[0] ?? rootUsers.users[0]
+  if (detailSample) {
+    await getDingTalkUserDetail(accessToken, detailSample.userId, { baseUrl: normalized.baseUrl ?? undefined })
+  }
+
   const diagnostics = {
     rootDepartmentChildCount: departments.length,
     rootDepartmentDirectUserCount: rootUsers.users.length,
@@ -211,25 +238,36 @@ export async function probeDingTalkDirectory(
     sampledRootDepartmentUsersWithAccessLimit: rootUsersWithAccessLimit.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
   }
 
+  const sharedSummary = buildDirectoryIntegrationDiagnosticSummary({
+    departmentSampleCount: departments.length,
+    rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
+    rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
+  })
+  let summary = sharedSummary
+  if (sharedSummary.code === 'healthy') {
+    summary = detailSample
+      ? { code: sharedSummary.code, title: PROBE_DETAIL_READ_TITLE, nextAction: sharedSummary.nextAction }
+      : { ...PROBE_DETAIL_UNVERIFIED_SUMMARY }
+  }
+
+  const warnings = buildDirectoryIntegrationTestWarnings({
+    rootDepartmentId: normalized.rootDepartmentId,
+    departmentSampleCount: departments.length,
+    rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
+    rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
+    rootDepartmentDirectUserCountWithAccessLimit: diagnostics.rootDepartmentDirectUserCountWithAccessLimit,
+    rootDepartmentDirectUserHasMoreWithAccessLimit: diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit,
+  })
+  if (!detailSample) warnings.push(PROBE_DETAIL_UNVERIFIED_WARNING)
+
   return {
     departmentSampleCount: departments.length,
     sampledDepartments: departments.slice(0, 5).map((department) => ({ id: department.id, name: department.name })),
     userSampleCount: users.length,
     sampledUsers: users.slice(0, 5).map((user) => ({ userId: user.userId, name: user.name })),
     diagnostics,
-    summary: buildDirectoryIntegrationDiagnosticSummary({
-      departmentSampleCount: departments.length,
-      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
-      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
-    }),
-    warnings: buildDirectoryIntegrationTestWarnings({
-      rootDepartmentId: normalized.rootDepartmentId,
-      departmentSampleCount: departments.length,
-      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
-      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
-      rootDepartmentDirectUserCountWithAccessLimit: diagnostics.rootDepartmentDirectUserCountWithAccessLimit,
-      rootDepartmentDirectUserHasMoreWithAccessLimit: diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit,
-    }),
+    summary,
+    warnings,
   }
 }
 
