@@ -29,7 +29,7 @@
 1. **R83 已装，开关是关的，owner 已接受它为回退底线。** `app.env` 里没有 `STOCK_PREP_PULL_BATCH_ENABLED` 这一行（探查 `SITE_ENV key=STOCK_PREP_PULL_BATCH_ENABLED app_env_lines=0`）。装包时 `RunMigrations 1`，迁移 105 已跑。回退底线见 §8。
 2. **现场探查已跑完，结果已读过。** `probe.log` 最后一行 `PROBE_RESULT … status=complete`，`site-env.log` 最后一行 `SITE_ENV_RESULT status=complete keys=5`。按探查手册 §4 做出一份逐表的装机前置清单，内容包括：补锁、视图、列位置、暂停清单、历史拉取次数的两种口径。客户反映的那个项目必须是 `kind=project`。如果它只在 env 表或复制表上，就停下来，先让 owner 决定。
 3. **项目表开关是精确的 `true`**（`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED`）。否则装机路由一律 404。
-4. **PLM 列补锁（批复后做）。** 探查显示 `plm_lock=none` 或 `partial`，或者 dry_run 的 `plmLock.unmarked > 0` / `plmLock.missing > 0` 时，装机会被拒（409 `STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED`）。补锁走已有的修复路由：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>"}`（修复腿会给这张表的 `plm_system` 列标上人工只读）。它和装机写在**同一份** O-BI-1 批复里，拿到「同意」之后才调用。后果要写进批复：补锁以后，这张表普通的「新建记录」入口被隐藏（R70 行为）；大家改用「+ 新增人工补充行」加行，前提是这张表的「允许人工补充行」是允许，默认就是允许（R-68）。窗口里用 `GET /api/integration/stock-preparation/projects/<项目号>/target/manual-rows` 核对这个开关：`policy` 是 `allowed`（`policySource` 为 `default` 或 `set`）。如果是 `disabled`，批复里要写明补锁后这张表不能再加行。`plmLock.missing > 0`（表上缺模板 PLM 列）要先补列，补列不是这个路由的事，要先停下报开发机。
+4. **PLM 列补锁（批复后做）。** 探查显示 `plm_lock=none` 或 `partial`，或者 dry_run 的 `plmLock.unmarked > 0` / `plmLock.missing > 0` 时，装机会被拒（409 `STOCK_PREP_PULL_BATCH_PLM_LOCK_REQUIRED`）。补锁走已有的修复路由：`POST /api/integration/stock-preparation/options/sync`，请求体 `{"projectNo": "<项目号>"}`（修复腿会给这张表的 `plm_system` 列标上人工只读）。它和装机写在**同一份** O-BI-1 批复里，拿到「同意」之后才调用。后果要写进批复：补锁以后，这张表普通的「新建记录」入口被隐藏（R70 行为）；大家改用「+ 新增人工补充行」加行，前提是这张表的「允许人工补充行」是允许，默认就是允许（R-68）。窗口里用 `GET /api/integration/stock-preparation/projects/<项目号>/target/manual-rows` 核对这个开关：`policy` 是 `allowed`（`policySource` 为 `default` 或 `set`）。如果是 `disabled`，批复里要写明补锁后这张表不能再加行。`plmLock.missing > 0`（表上缺模板 PLM 列）时：先发 `{"projectNo": "<项目号>", "dryRun": true}`，读 `columns.wouldAddFieldIds` / `refusedFieldIds`，写进 O-BI-1；批复后发 `{"projectNo": "<项目号>", "addMissingColumns": true}`（建列时 INSERT 就带锁，按 R-89 追加到最右，界面无法撤销），再做窗口内 dry_run。只有出现 `refusedFieldIds`、或者缺口不是模板列时，才停下报开发机。补列和补锁走同一个路由，需要平台管理员（`role:admin`）或 `integration:admin`；只有 `stock-prep:admin` 的会话会被拒（403）。这一段适用于带 #6768 / #6778 的版本；R83 不带这两个 PR，R83 分支上的手册仍是「先停下报开发机」。
 5. **暂停定时拉取，告诉拉取人员窗口内不要拉（批复后做）。** 暂停每日计划任务（`scripts/ops/stock-preparation-scheduled-pull.mjs` 所在的那条任务），并在群里通知拉取人员。BI-2 之后，定时拉取遇到正在装机的表，会记成 `skipped_pull_batch_installing`（不算失败）。这只是兜底，不能代替暂停。
 6. **批量回填前的暂停清单。** 探查报出的 `automation_rules>0`、`webhooks_active>0`、`writer_pipelines_active>0`，以及按建行来源统计的 `_automation>0` / `_public_form>0`，逐条列出来写进批复，拿到「同意」之后、窗口内 dry_run 之前暂停，窗口结束后恢复（设计 §8.9）。回填走插件记录路径，本身不触发订阅者。暂停是为了防止窗口内有别的写入方在这张表上建行。
 
@@ -85,7 +85,7 @@ Invoke-RestMethod -Method Post -Uri "$env:MS_API/api/integration/stock-preparati
 
 ### 第 1b 步　「同意」之后：补锁、暂停，再跑一次窗口内 dry_run
 
-1. 补锁（§1 第 4 条，`POST …/options/sync`）。
+1. 补锁（§1 第 4 条，`POST …/options/sync`）。`plmLock.missing > 0` 时改发 `{"projectNo": "<项目号>", "addMissingColumns": true}`：同一次调用先补列（INSERT 就带锁，按 R-89 追加到最右），再补选项和锁；批复里要已写明 `columns.wouldAddFieldIds`（§1 第 4 条）。需要平台管理员（`role:admin`）或 `integration:admin`。
 2. 暂停定时拉取，通知拉取人员；暂停 §1 第 6 条列出的自动化规则、webhook 和管道。
 3. 再跑一次 dry_run，带同一个 G。这时必须 `plmLock.unmarked = 0`、`missing = 0`，`refusals` 里除了 `placement_required` 以外什么都没有。
 4. 它的 `planDigest` 必须**等于批复里的那个**。不相等（批复后又有人拉了、改了设置等），就不装：看清变了什么，按新的 dry_run 重新填 O-BI-1，重新批复。

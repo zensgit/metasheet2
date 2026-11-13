@@ -22,7 +22,8 @@ import type { ManualCellWrite } from '../src/multitable/composables/useMultitabl
 //   W-08 复制为新行: asks, POST /records/:recordId/manual-copy, opens the new row;
 //   W-09 the grid's route resolver (patchCell / undo / redo) and the grid props;
 //   W-10 the drawer: the fillable columns of a manual row are lifted; its saves go one at a time, each carrying the version
-//        the previous step returned (ADR §3.4 「第二步必须带第一步返回的 version」);
+//        the previous step returned (ADR §3.4 「第二步必须带第一步返回的 version」), also on a row it shows as a copy (a
+//        realtime-merged copy of a row on the page, or a new row opened off the page);
 //   W-11 the three in-place entries with the REAL toolbar and grid fed the workbench's own props (fix round 2, R74's
 //        footer kept): in `allowed` the toolbar, inline-row and footer places hold 「+ 新增人工补充行」 and open the
 //        dialog, never a generic create; lock_missing / disabled: no entry in any of them; an ordinary sheet keeps
@@ -112,6 +113,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { useMultitableSheetRealtime } from '../src/multitable/composables/useMultitableSheetRealtime'
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
@@ -614,6 +616,150 @@ describe('W-10 the drawer on a manual row', () => {
     const onPatch = await selectThen('rec_wb_plm', 'rec_wb_manual')
     await onPatch(F.notes, 'late', 'rec_wb_plm')
     expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_plm', F.notes, 'late', 5]])
+  })
+
+  // The drawer can show a manual row as a copy (`deepLinkedRecord`): a realtime-merged copy of a row on the page, or a
+  // new row that is not on the loaded page (ADR §8 B3.3: 新增人工补充行 opens it through `getRecord`). The grid's own
+  // one-at-a-time sending does not chain a copy's saves (a merged copy is sent unchained, a record off the page is never
+  // chained), so the drawer's own rule above must hold there too: two quick saves (two ArrowUp presses on 总用量, or ADR
+  // §3.4's two steps) both store, the second with the version the first returned.
+  describe('a manual row shown as a copy', () => {
+    /** The grid's `patchCell` and the server, by the real `patchCell`'s rule: a record's writes go one at a time, the
+     *  version chained only for a record on the page and only without `chainVersion: false`; the server takes a write
+     *  only at its current version and moves it one on, and `onCommitted` gets the new version. */
+    function strictServer(versions: Record<string, number>) {
+      const stored: Record<string, Record<string, unknown>> = {}
+      const sent: Array<[string, unknown, number]> = []
+      const advanced = new Map<string, number>()
+      const tails = new Map<string, Promise<unknown>>()
+      gridMock.patchCell.mockImplementation((recordId: string, fieldId: string, value: unknown, version: number, options?: { chainVersion?: boolean; onCommitted?: (v: number) => void }) => {
+        const inPage = gridMock.rows.value.some((r: { id: string }) => r.id === recordId)
+        const run = (tails.get(recordId) ?? Promise.resolve()).then(async () => {
+          let expected = version
+          if (inPage && options?.chainVersion !== false) {
+            for (let next = advanced.get(`${recordId}@${expected}`); next !== undefined; next = advanced.get(`${recordId}@${expected}`)) expected = next
+          }
+          sent.push([fieldId, value, expected])
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          if (expected !== versions[recordId]) {
+            return { recordId, fieldId, attemptedValue: value, status: 409, code: 'VERSION_CONFLICT', message: 'Changed elsewhere' }
+          }
+          versions[recordId] += 1
+          advanced.set(`${recordId}@${expected}`, versions[recordId])
+          ;(stored[recordId] ??= {})[fieldId] = value
+          const row = gridMock.rows.value.find((r: { id: string }) => r.id === recordId)
+          if (row) row.version = versions[recordId]
+          options?.onCommitted?.(versions[recordId])
+          return null
+        })
+        tails.set(recordId, run.then(() => undefined, () => undefined))
+        return run
+      })
+      return { stored, sent }
+    }
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+      await flushUi()
+    }
+    const shownRecord = () => captured.MetaRecordInspector!.record as { id: string; version: number; data: Record<string, unknown> }
+    const onPatch = () => captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown) => Promise<void>
+
+    async function mergedCopyOfManualRow(): Promise<void> {
+      await mount('grid', withBlock())
+      await (captured.MetaGridTable!.onSelectRecord as (id: string) => Promise<void>)('rec_wb_manual')
+      await flushUi()
+      gridMock.mergeRemoteRecord = vi.fn(() => true)
+      workbenchMock.client.getRecord.mockResolvedValue({
+        record: { id: 'rec_wb_manual', version: 3, data: { ...ROWS()[0].data, [F.total]: 5 } }, rowActions: MANUAL_ACTIONS,
+        linkSummaries: {}, attachmentSummaries: {}, fieldPermissions: {}, viewPermissions: {},
+        commentsScope: { targetType: 'meta_record', targetId: 'rec_wb_manual', containerType: 'meta_sheet', containerId: 'sheet_wb' },
+      })
+      const realtime = vi.mocked(useMultitableSheetRealtime).mock.calls.at(-1)![0] as unknown as { mergeRemoteRecord: (id: string) => Promise<boolean> }
+      await realtime.mergeRemoteRecord('rec_wb_manual')
+      await flushUi()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_wb_manual')
+      expect(shownRecord().id).toBe('rec_wb_manual')
+      expect(shownRecord()).not.toBe(row) // a copy
+    }
+
+    async function newManualRowOffThePage(): Promise<void> {
+      useLocale().setLocale('zh-CN')
+      await mount('grid', withBlock())
+      await openFromToolbarEntry()
+      workbenchMock.client.createManualRow.mockResolvedValue({ record: { id: 'rec_wb_new', version: 1, data: {} } })
+      workbenchMock.client.getRecord.mockResolvedValue({
+        record: { id: 'rec_wb_new', version: 1, data: { [F.name]: 'Synthetic manual part', [F.total]: 5 } }, rowActions: MANUAL_ACTIONS,
+      })
+      const input = (fieldId: string) => document.body.querySelector<HTMLInputElement>(`[data-manual-row-field="${fieldId}"] input`)
+      for (const [fieldId, value] of [[F.name, 'Synthetic manual part'], [F.total, '5']] as const) {
+        input(fieldId)!.value = value
+        input(fieldId)!.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('[data-action="manual-row-dialog-submit"]')!.click()
+      await flushUi(10)
+      expect(gridMock.rows.value.some((r: { id: string }) => r.id === 'rec_wb_new')).toBe(false)
+      expect(shownRecord().id).toBe('rec_wb_new')
+    }
+
+    it('a merged copy of a row on the page: two quick saves of 总用量 (5 → 6 → 7) store 7, the second sent with the version the first returned', async () => {
+      await mergedCopyOfManualRow()
+      const { stored, sent } = strictServer({ rec_wb_manual: 3 })
+      await Promise.all([onPatch()(F.total, 6), onPatch()(F.total, 7)])
+      await settle()
+      expect(sent).toEqual([[F.total, 6, 3], [F.total, 7, 4]])
+      expect(stored.rec_wb_manual).toEqual({ [F.total]: 7 })
+      expect(shownRecord()).toMatchObject({ version: 5, data: { [F.total]: 7 } })
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a merged copy of a row on the page: ADR §3.4\'s two steps (规格 by the manual route, then 备注 by /patch) both store', async () => {
+      await mergedCopyOfManualRow()
+      const { stored, sent } = strictServer({ rec_wb_manual: 3 })
+      await Promise.all([onPatch()(F.spec, 'SPEC-B'), onPatch()(F.notes, 'note')])
+      await settle()
+      expect(sent).toEqual([[F.spec, 'SPEC-B', 3], [F.notes, 'note', 4]])
+      expect(stored.rec_wb_manual).toEqual({ [F.spec]: 'SPEC-B', [F.notes]: 'note' })
+      expect(shownRecord()).toMatchObject({ version: 5, data: { [F.spec]: 'SPEC-B', [F.notes]: 'note' } })
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a new row opened off the page (ADR §8 B3.3): two quick saves of 总用量 (5 → 6 → 7) store 7, the second sent with the version the first returned', async () => {
+      await newManualRowOffThePage()
+      const { stored, sent } = strictServer({ rec_wb_new: 1 })
+      await Promise.all([onPatch()(F.total, 6), onPatch()(F.total, 7)])
+      await settle()
+      expect(sent).toEqual([[F.total, 6, 1], [F.total, 7, 2]])
+      expect(stored.rec_wb_new).toEqual({ [F.total]: 7 })
+      expect(shownRecord()).toMatchObject({ version: 3, data: { [F.total]: 7 } })
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a save on a merged copy of a row on the page is sent unchained, as on any record, and takes the version returned; on the row itself it may be chained', async () => {
+      // Unchained: a grid write of the row still out does not carry the copy's save past a value the copy did not show
+      // (it conflicts, as on main). The drawer's own steps never overlap, so they need no chain.
+      await mergedCopyOfManualRow()
+      await onPatch()(F.total, 6)
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.total, 6, 3, { onCommitted: expect.any(Function), chainVersion: false }]])
+      gridMock.patchCell.mockClear()
+      unmount()
+      await mount('grid', withBlock())
+      await (captured.MetaGridTable!.onSelectRecord as (id: string) => Promise<void>)('rec_wb_manual')
+      await flushUi()
+      await onPatch()(F.total, 6)
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.total, 6, 3, { onCommitted: expect.any(Function) }]])
+    })
+
+    it('a new row opened off the page: ADR §3.4\'s two steps (规格, then 备注) both store', async () => {
+      await newManualRowOffThePage()
+      const { stored, sent } = strictServer({ rec_wb_new: 1 })
+      await Promise.all([onPatch()(F.spec, 'SPEC-B'), onPatch()(F.notes, 'note')])
+      await settle()
+      expect(sent).toEqual([[F.spec, 'SPEC-B', 1], [F.notes, 'note', 2]])
+      expect(stored.rec_wb_new).toEqual({ [F.spec]: 'SPEC-B', [F.notes]: 'note' })
+      expect(shownRecord()).toMatchObject({ version: 3, data: { [F.spec]: 'SPEC-B', [F.notes]: 'note' } })
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
   })
 })
 
