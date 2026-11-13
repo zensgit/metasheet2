@@ -132,28 +132,33 @@ never any other backend).
   `window.pid`: `kill -TERM "$(cat "$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/window.pid")"`.
   It takes the same branch as an abort for the phase it is in (before the stop: 70; after
   the stop and before the commit: per `pre_commit_abort`; during the migration: the one-off
-  is killed and the ledger decides; after the commit: 73 or 74). It acts once the current
-  foreground step returns; a wait for a background job (pull, copy-out, dump, its reads,
-  the migration) returns at once. Steps with a time limit: every docker and compose call
-  except the two `docker image inspect` digest reads after the pull and the
-  `docker compose` / `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
+  is killed and the ledger decides; after the commit: 73 or 74). While the window waits
+  for a background job (the pull, the app-data copy-out, the dump and its two reads, the
+  migration), the TERM acts at once: the job is stopped (the migration one-off is killed
+  and the ledger decides). Otherwise it acts once the current foreground step returns.
+  Steps with a time limit: every docker and compose call except the two
+  `docker image inspect` digest reads after the pull and the `docker compose` /
+  `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
   request unless the step sets less); the deploy checkout's `git fetch` (300 s); each host
-  check (400 s). Steps without one: local file work (`git checkout` / `git merge` in the
-  deploy directory, the env-file writes, listing and hashing the run directory's files)
-  and `scripts/ops/attendance-preflight.sh`. Once the exit branch has started, the window
-  ignores further TERM signals and ends by those limits. If a TERM has no visible effect
-  within 20 minutes (the longest single limit, the dump, with the default
-  `DEPLOY_BACKUP_TIMEOUT_S`), the owner decides. Never send KILL: the window then ends
-  without its exit branch, `state` stays unfinished, no `rc` file is written and
-  production stays in whatever phase it was.
+  check (400 s). The longest foreground limit is 600 s (copying the app data into, or
+  reading it back from, the new backend). Steps without a limit: local file work
+  (`git checkout` / `git merge` in the deploy directory, the env-file writes, listing and
+  hashing the run directory's files) and `scripts/ops/attendance-preflight.sh`. The exit
+  branch starts with a `raw_rc=` line in `window.log`; from then on the window ignores
+  further TERM signals and ends by the same limits (restarting the old version can take
+  up to about 30 minutes: host check, `docker start`, the old-version checks). If no
+  `raw_rc=` line appears within 10 minutes of the TERM, the owner decides. Never send
+  KILL: the window then ends without its exit branch, `state` stays unfinished, no `rc`
+  file is written and production stays in whatever phase it was.
 - Users see connection refused on the public port from the web stop to the web start
   (stop, drain, dump, dump verification, migration, backend start). There is no
   maintenance page; open tabs must be refreshed afterwards.
 - The dispatcher stays on call until the window's final `outcome=` line, or, after a
   runner timeout, 255 or 76, until the host `state` shows a terminal phase.
 - The `remote_deploy` step is limited to 285 minutes and the `deploy` job to 330. The
-  window's own time limits add up to about 259 minutes with the default tunables (every
-  limited step at its limit); raised tunables can exceed the step limit. A runner timeout
+  window's own time limits add up to about 259 minutes with the default tunables, one
+  host check per phase and every limited step at its limit; raised tunables or more host
+  checks can exceed the step limit. A runner timeout
   ends only the log follower: the window finishes its branch on the host, and the
   read-only status step (or `state` on the host) shows where it ended.
 

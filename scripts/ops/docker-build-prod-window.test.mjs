@@ -107,19 +107,36 @@ const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // is a leaked window, helper or follower.
 //
 // A process group id is a pid, and pids are reused. world.groups maps each registered group id
-// to its leader as seen at registration ("<start time>|<command line>"), or to null once the
-// leader is gone. A live leader that does not match is another process that got the same pid:
+// to its leader as seen at registration ({ start, command }), or to null once the leader is
+// gone. A live leader that is not the same process is another process that got the same pid:
 // that group is dropped and never killed. A group seen empty is dropped too; while a group has
-// members its id cannot be given to a new process.
+// members its id cannot be given to a new process. The start time is the exact start tick from
+// /proc on Linux; elsewhere ps's lstart (whole seconds, compared with a one-second tolerance).
+function linuxStartTick(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'latin1')
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19])
+  } catch {
+    return null
+  }
+}
 function processTable() {
   const listing = spawnSync('ps', ['-A', '-o', 'pid=,pgid=,stat=,lstart=,command='], { encoding: 'utf8' }).stdout ?? ''
   const rows = []
   for (const line of listing.split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/)
     // Zombies are dead and only wait for their parent to reap them.
-    if (m && !m[3].startsWith('Z')) rows.push({ pid: Number(m[1]), pgid: Number(m[2]), identity: `${m[4].replace(/\s+/g, ' ')}|${m[5]}` })
+    if (!m || m[3].startsWith('Z')) continue
+    const pid = Number(m[1])
+    const start = process.platform === 'linux' ? linuxStartTick(pid) : Date.parse(m[4]) / 1000
+    if (start === null || Number.isNaN(start)) continue
+    rows.push({ pid, pgid: Number(m[2]), identity: { start, command: m[5] } })
   }
   return rows
+}
+function sameProcess(a, b) {
+  if (!a || !b || a.command !== b.command) return false
+  return process.platform === 'linux' ? a.start === b.start : Math.abs(a.start - b.start) <= 1
 }
 function identityOf(pid, table = processTable()) {
   return table.find((row) => row.pid === pid)?.identity ?? null
@@ -129,7 +146,7 @@ function identityOf(pid, table = processTable()) {
 function trackGroup(world, pid, expect = null) {
   if (!(pid > 1) || world.groups.has(pid)) return
   const identity = identityOf(pid)
-  if (identity !== null && expect && !expect.test(identity.slice(identity.indexOf('|') + 1))) return
+  if (identity !== null && expect && !expect.test(identity.command)) return
   world.groups.set(pid, identity)
 }
 function scanTagged(world) {
@@ -146,7 +163,7 @@ function scanTagged(world) {
   }
   for (const [pgid, leader] of [...world.groups]) {
     const live = identityOf(pgid, table)
-    if (live !== null && live !== leader) { world.groups.delete(pgid); continue }
+    if (live !== null && !sameProcess(live, leader)) { world.groups.delete(pgid); continue }
     if (live === null) world.groups.set(pgid, null)
     const members = table.filter((row) => row.pgid === pgid)
     if (members.length === 0) { world.groups.delete(pgid); continue }
@@ -163,7 +180,7 @@ function killTagged(world) {
   const found = scanTagged(world)
   const table = processTable()
   for (const [pid, identity] of found) {
-    if (identity === null || identityOf(pid, table) !== identity) continue
+    if (!sameProcess(identityOf(pid, table), identity)) continue
     try { process.kill(pid, 'SIGKILL') } catch {}
   }
 }
@@ -847,6 +864,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['directory sync with a fresh heartbeat', {}, { H_SYNC_LIVE: '1' }],
     ['young queued import job', {}, { H_IMPORT_BUSY: '1' }],
     ['host file drift from the dispatched commit', {}, { H_GIT_DRIFT: '1' }],
+    ['the deploy checkout\'s git fetch fails', {}, { H_GIT_FETCH_RC: '128' }, { controls: [['git-sync.out', `${SHA_OLD_SHORT}..aaaaaaa`]] }],
     ['host re-validation: restore_proof unselected on a deploy', {}, { RESTORE_PROOF: 'unselected' }],
     ['host re-validation: pre_commit_abort unselected on a deploy', {}, { PRE_COMMIT_ABORT: 'unselected' }],
     ['host re-validation: drill_fail_stage=smoke', {}, { DRILL_FAIL_STAGE: 'smoke' }],
@@ -870,6 +888,12 @@ describe('production deploy window: remote_deploy step run against test doubles'
         assert.ok(!any(r, isPull), 'refused before the pull')
       }
       if (env.H_DF_FREE_KB) assert.ok(!any(r, isPull), 'refused before the pull')
+      if (env.H_GIT_FETCH_RC) {
+        assert.match(r.deployLog, /^\[deploy-window\]\[error\] git_sync=fail step=fetch \(output in the run directory on the host\)$/m)
+        assert.doesNotMatch(r.deployLog, /git_sync=ok/)
+        assert.ok(!r.calls.some((call) => call.kind === 'git' && /^(checkout|merge) /.test(call.args)), 'nothing after the failed fetch')
+        assert.ok(!any(r, isPull), 'refused before the pull')
+      }
     })
   }
 
@@ -1698,10 +1722,19 @@ describe('production deploy window: remote_deploy step run against test doubles'
       await sleepMs(200)
       trackGroup(world, other.pid, /\bwindow\.sh\b/)
       assert.ok(!world.groups.has(other.pid), 'a late-read window pid whose command is not the window is not registered')
-      world.groups.set(other.pid, 'Thu Jan  1 00:00:00 1970|bash window.sh')
-      assert.deepEqual(taggedPids(world), [], 'a group with a different leader is not reported')
-      assert.ok(!world.groups.has(other.pid), 'and is dropped')
-      world.groups.set(other.pid, 'Thu Jan  1 00:00:00 1970|bash window.sh')
+      // The same command line with an earlier start time, and a different command line with the
+      // same start time: both are another process.
+      const live = identityOf(other.pid)
+      assert.ok(live, 'the unrelated process is listed')
+      for (const stale of [{ ...live, start: live.start - 3600 }, { ...live, command: 'bash window.sh' }]) {
+        world.groups.set(other.pid, stale)
+        assert.deepEqual(taggedPids(world), [], 'a group with a different leader is not reported')
+        assert.ok(!world.groups.has(other.pid), 'and is dropped')
+      }
+      // Control: registered as itself, the group is reported.
+      world.groups.set(other.pid, live)
+      assert.deepEqual(taggedPids(world), [other.pid], 'control: the same leader is reported')
+      world.groups.set(other.pid, { ...live, start: live.start - 3600 })
       killTagged(world)
       await sleepMs(200)
       assert.equal(other.exitCode, null, 'the unrelated process was not killed')

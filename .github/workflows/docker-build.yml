@@ -301,8 +301,9 @@ jobs:
         id: remote_deploy
         if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}
         continue-on-error: true
-        # The window's own time limits add up to about 259 minutes with the default tunables (every
-        # bounded step at its limit); the runbook says what a runner timeout means.
+        # The window's own time limits add up to about 259 minutes with the default tunables, one
+        # host check per phase and every bounded step at its limit; the runbook says what a
+        # runner timeout means.
         timeout-minutes: 285
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
