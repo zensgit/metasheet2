@@ -499,6 +499,12 @@ const RERUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
   SHEET_DELETED: 'runs.rerunError.sheetDeleted',
   // 客户反馈 2026-09-24 #3 final review F2: item 4 of the enumeration below (normally mirrored, never sent).
   TARGET_RECORD_MISSING_NOT_RETRYABLE: 'runs.rerunError.targetRecordMissing',
+  // R-69 I6d r7 (R1 / R2): items 12-15 of the enumeration below — an integration execution whose run-time gates
+  // no longer hold, or a re-running admin without the authority in the rule's tenant.
+  INTEGRATION_RUN_EVENT_DISABLED: 'runs.rerunError.integrationRunEventDisabled',
+  INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED: 'runs.rerunError.integrationRunFinishedCreatorUnauthorized',
+  INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED: 'runs.rerunError.integrationRunFinishedRetryUnauthorized',
+  RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED: 'runs.rerunError.runIntegrationJobRetryUnauthorized',
   // Round-2 B5 — the route guard's 403 body is `{ error: 'AccessDenied', code: 'ADMIN_REQUIRED',
   // message: '<English>' }` (routes/automation.ts:793 requireAdminRole). The SHARED normalizer
   // (multitable/api/client.ts normalizeApiErrorPayload) only reads a top-level `code` when `error`
@@ -572,6 +578,15 @@ function mapRerunError(err: unknown): string {
  *      `SHEET_DELETED_CODE`) — the rule's sheet is soft-deleted. Sheet state is not on the run
  *      view, and the sheet can be deleted between list and click. Nothing runs or is recorded and the
  *      first-retry marker is not spent, so the same re-run works once the sheet is restored.
+ *  12. 409 INTEGRATION_RUN_EVENT_DISABLED  R-69 I6d r7, R1 — an integration.run_finished execution while
+ *      INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is not 'true' (a deployment switch, not on the run view).
+ *  13. 409 INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED  R1 — the rule's binding no longer names its
+ *      creator and the run's tenant, or the creator lost the integration read authority (a live server read).
+ *  14. 409 INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED  R1 — the re-running admin lacks the integration read
+ *      authority in the rule's tenant (a live server read; `isAdmin` says nothing about a tenant).
+ *  15. 409 RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED  R2 — the re-running admin lacks the job authority in the
+ *      rule's tenant, or it could not be checked (a live server read).
+ *      12-15: nothing runs or is recorded and the first-retry marker is not spent.
  *  (400 CONFIRM_SIDE_EFFECTS_REQUIRED is not a row property — this client always sends the flag;
  *   403 ADMIN_REQUIRED is mirrored by `isAdmin`, an approximation — see the B4 disclosure.)
  */

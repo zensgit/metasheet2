@@ -45,6 +45,10 @@
  *     two row versions.
  *   - R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — the job behind or before another action is
  *     refused on the real createRule / updateRule (no row, no change).
+ *   - R-69 I6d r7 (R1–R3, owner-approved 2026-11-13): an admin retry of a job execution (R2) or of a run_finished
+ *     execution (R1: switch, creator, retrying user) is refused on real auth and execution rows before the first-retry
+ *     marker and before executeRule; { enabled: false } alone switches off a run_finished rule whose creator lost its
+ *     read code (R3), while a switch-off with a rename is still refused by the save gate.
  *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
@@ -664,6 +668,63 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
       expect((await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [sheet])).rows).toHaveLength(2)
     } finally {
       for (const id of [plain.id, jobRule.id]) service.unregisterSchedule(id)
+      await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+    }
+  }, 30_000)
+
+  // ── R-69 I6d r7, R2 (owner-approved 2026-11-13, 「按建议」): an admin retry of a job execution needs the RETRYING
+  // user's own live job authority — B1's predicate, no seam, on real auth rows and real execution rows. A refusal comes
+  // before the one-shot first-retry marker (first_retry_attempted_at stays NULL) and before executeRule.
+  test('R-69 I6d r7 R2: an admin retry of a run_integration_job execution by a user WITHOUT the job authority is refused (nothing re-run, the first-retry marker unspent); a user WITH it re-runs it', async () => {
+    const creatorId = `svcr2_${RUN}`
+    /** An active member of TENANT with no automation capability (the predicate: principal_unauthorized). */
+    const plainAdmin = `edr2plain_${RUN}`
+    /** An active member of TENANT holding workflow:write (a role). */
+    const okAdmin = `edr2ok_${RUN}`
+    const project = `PR2-${RUN}`
+    const sheet = `sheetr2_${RUN}`
+    for (const userId of [creatorId, plainAdmin, okAdmin]) {
+      await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [userId, `${userId}@example.test`, 'r2'])
+      await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [userId, TENANT])
+    }
+    for (const userId of [creatorId, okAdmin]) await grantAutomationCapability(userId)
+    await registerRuleSheet(sheet, TENANT, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const jobConfig = { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' }, timeoutMs: 60_000 }
+    const jobRule = await service.createRule(sheet, { name: `r2job_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }, actionType: 'run_integration_job', actionConfig: jobConfig, createdBy: creatorId } as never)
+    const original = `axe_r2_${RUN}`
+    try {
+      const stored = (await service.getRule(jobRule.id))!
+      await service.logs.record({
+        id: original, ruleId: jobRule.id, triggeredBy: 'schedule', triggeredAt: new Date().toISOString(), status: 'failed',
+        steps: [{ actionType: 'run_integration_job', status: 'failed', error: 'synthetic' }],
+        sheetId: sheet, triggerEvent: { sheetId: sheet, recordId: '', data: {}, actorId: null, _triggeredBy: 'schedule' }, ruleSnapshot: toExecutorRule(stored),
+      } as never)
+      // the run itself is stubbed from the start (the executor, its port and its lease are not this gate): a retry that
+      // got through would answer { execution } here instead of the refusal
+      const executeRule = vi.spyOn(service, 'executeRule').mockResolvedValue({ id: `axe_r2next_${RUN}`, ruleId: jobRule.id, triggeredBy: 'schedule', triggeredAt: new Date().toISOString(), status: 'success', steps: [] } as never)
+      const nothingRan = async (label: string) => {
+        expect(executeRule, label).not.toHaveBeenCalled()
+        expect((await q(`SELECT 1 FROM multitable_automation_executions WHERE rerun_of_execution_id = $1`, [original])).rows, label).toHaveLength(0)
+        expect((await q(`SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1`, [original])).rows[0], label).toEqual({ first_retry_attempted_at: null })
+      }
+      for (const actor of [plainAdmin, `nobody_${RUN}`]) {
+        const refusal = await service.retryExecution(original, actor)
+        expect(refusal, actor).toEqual({
+          status: 409,
+          code: 'RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED',
+          message: 'a run_integration_job execution can only be re-run by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); nothing was re-run',
+        })
+        await nothingRan(actor === plainAdmin ? 'plain' : 'unknown')
+      }
+      // the positive control on the same rows: the retrying user WITH the job authority re-runs it and the marker is spent
+      expect(await service.retryExecution(original, okAdmin)).toHaveProperty('execution')
+      expect(executeRule).toHaveBeenCalledTimes(1)
+      expect(executeRule.mock.calls[0][2]).toMatchObject({ rerunOfExecutionId: original, initiatedBy: okAdmin })
+      expect((await q(`SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1`, [original])).rows[0].first_retry_attempted_at).not.toBeNull()
+    } finally {
+      service.unregisterSchedule(jobRule.id)
+      await q(`DELETE FROM multitable_automation_executions WHERE id = $1`, [original]).catch(() => undefined)
       await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
     }
   }, 30_000)
@@ -1399,6 +1460,90 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
       expect(await rfRow(alert.id)).toEqual(alertRow)
     } finally {
       for (const id of created) service.unregisterSchedule(id)
+      await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
+      await dropRfUsers(users)
+    }
+  }, 30_000)
+
+  // ── R-69 I6d r7, R1 + R3 (owner-approved 2026-11-13, 「按建议」), no seam, real auth / admission / execution rows ──
+  //
+  // R1: an admin retry of a run_finished execution re-reads the event switch, re-checks the binding and the creator
+  // exactly as dispatch does, then needs the RETRYING user's own read authority in the binding tenant. A refusal comes
+  // before the one-shot first-retry marker (first_retry_attempted_at stays NULL) and before executeRule.
+  // R3: { enabled: false } alone switches the rule off although its creator lost the authority; any other edit still
+  // runs the full gate (refused by it here).
+  test('RF r7 R1 + R3 (real DB): a retry is refused for an actor without the read code, with the switch off, and once the creator lost the code (nothing re-run, marker unspent); the rule can still be switched off; an actor WITH the code re-runs it', async () => {
+    const creatorId = `svcrfr_${RUN}`
+    const plainAdmin = `edrfrplain_${RUN}`
+    const okAdmin = `edrfrok_${RUN}`
+    const sheet = `sheet_rfr_${RUN}`
+    const users = [creatorId, plainAdmin, okAdmin]
+    await seedRfUser(creatorId, ['workflow:write', 'integration:read'], true)
+    await seedRfUser(plainAdmin, ['workflow:write'], false)
+    await seedRfUser(okAdmin, ['workflow:write', 'integration:read'], true)
+    const needles = [...users, TENANT, sheet]
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const stamped = { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: { principalId: creatorId, tenantId: TENANT } }
+    const original = `axe_rfr_${RUN}`
+    const created: string[] = []
+    try {
+      const alert = await service.createRule(sheet, { name: `rfr_alert_${RUN}`, triggerType: 'integration.run_finished', triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'] }, actionType: 'send_dingtalk_group_message', actionConfig: RF_ALERT, createdBy: creatorId } as never)
+      created.push(alert.id)
+      const stored = (await service.getRule(alert.id))!
+      expect(stored.trigger_config).toEqual(stamped)
+      // a FAILED execution of it, as dispatch records one: the record-less payload with the run, the rule as it ran
+      await service.logs.record({
+        id: original, ruleId: alert.id, triggeredBy: 'event', triggeredAt: new Date().toISOString(), status: 'failed',
+        steps: [{ actionType: 'send_dingtalk_group_message', status: 'failed', error: 'synthetic' }],
+        sheetId: sheet,
+        triggerEvent: {
+          sheetId: sheet, recordId: '', data: {}, actorId: null, _automationDepth: 0, eventId: `evt_rfr_${RUN}`, eventType: 'integration.run_finished', occurredAt: new Date().toISOString(),
+          run: { eventId: `evt_rfr_${RUN}`, occurredAt: new Date().toISOString(), job: { kind: 'stock_prep_pull', projectNo: RF_PROJECT }, status: 'failed', canApply: false, counts: { read: 0, cleaned: 0, written: 0, failed: 1, add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }, durationMs: 5, attempts: 1, triggeredBy: 'automation' },
+        },
+        ruleSnapshot: toExecutorRule(stored),
+      } as never)
+      // the run itself is stubbed from the start (the alert send is not this gate): a retry that got through would
+      // answer { execution } here instead of the refusal
+      const executeRule = vi.spyOn(service, 'executeRule').mockResolvedValue({ id: `axe_rfrnext_${RUN}`, ruleId: alert.id, triggeredBy: 'event', triggeredAt: new Date().toISOString(), status: 'success', steps: [] } as never)
+      const refusedWith = async (work: Promise<unknown>, code: string, label: string) => {
+        const result = await work as { status?: number; code?: string; message?: string }
+        expect(result, label).toMatchObject({ status: 409, code })
+        for (const needle of needles) expect(result.message, label).not.toContain(needle)
+        expect(executeRule, label).not.toHaveBeenCalled()
+        expect((await q(`SELECT 1 FROM multitable_automation_executions WHERE rerun_of_execution_id = $1`, [original])).rows, label).toHaveLength(0)
+        expect((await q(`SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1`, [original])).rows[0], label).toEqual({ first_retry_attempted_at: null })
+      }
+      // (c) the retrying user manages automation but holds no integration read code
+      await refusedWith(service.retryExecution(original, plainAdmin), 'INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED', 'actor without the read code')
+      // (a) the event switch is off — read on the retry itself
+      process.env[EVENT_FLAG] = 'false'
+      try {
+        await refusedWith(service.retryExecution(original, okAdmin), 'INTEGRATION_RUN_EVENT_DISABLED', 'switch off')
+      } finally {
+        process.env[EVENT_FLAG] = 'true'
+      }
+      // (b) the creator loses its read code: refused although the retrying user holds one
+      await q(`DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'integration:read'`, [rfRoleOf(creatorId)])
+      await refusedWith(service.retryExecution(original, okAdmin), 'INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED', 'creator lost the code')
+      // R3: with that creator, a switch-off TOGETHER with a rename still runs the gate and is refused by it …
+      const control = await rfRefusal(service.updateRule(alert.id, sheet, { enabled: false, name: `rfr_alert_${RUN}_renamed` }, okAdmin))
+      expect(control).toBeInstanceOf(AutomationRuleValidationError)
+      expect(control!.message).toMatch(/require the creator to be active, to manage automation and to hold integration:read/)
+      expect(await rfRow(alert.id)).toMatchObject({ name: `rfr_alert_${RUN}`, enabled: true })
+      // … while { enabled: false } alone is saved, even by the user without the read code, the binding untouched
+      expect((await service.setRuleEnabled(alert.id, sheet, false, plainAdmin))?.enabled).toBe(false)
+      expect(await rfRow(alert.id)).toMatchObject({ name: `rfr_alert_${RUN}`, enabled: false, trigger_config: stamped, created_by: creatorId })
+      // the positive control: the creator's code back, the rule switched on by a user WITH the code, who re-runs it
+      // and the marker is spent
+      await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'integration:read')`, [rfRoleOf(creatorId)])
+      expect((await service.setRuleEnabled(alert.id, sheet, true, okAdmin))?.enabled).toBe(true)
+      expect(await service.retryExecution(original, okAdmin)).toHaveProperty('execution')
+      expect(executeRule).toHaveBeenCalledTimes(1)
+      expect(executeRule.mock.calls[0][2]).toMatchObject({ rerunOfExecutionId: original, initiatedBy: okAdmin })
+      expect((await q(`SELECT first_retry_attempted_at FROM multitable_automation_executions WHERE id = $1`, [original])).rows[0].first_retry_attempted_at).not.toBeNull()
+    } finally {
+      for (const id of created) service.unregisterSchedule(id)
+      await q(`DELETE FROM multitable_automation_executions WHERE id = $1`, [original]).catch(() => undefined)
       await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
       await dropRfUsers(users)
     }

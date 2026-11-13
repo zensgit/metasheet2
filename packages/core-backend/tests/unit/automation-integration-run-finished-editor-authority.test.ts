@@ -358,7 +358,9 @@ describe('RF editor authority — what stays allowed', () => {
     expect(h.writes).toHaveLength(3)
     // the binding stays the creator's
     expect(triggerColumn(h.writes[2].values)).toEqual({ job: { kind: 'stock_prep_pull' }, statuses: ['held'], binding: BINDING })
-    expect(authority.asked).toEqual([BINDING, BINDING, BINDING])
+    // R-69 I6d r7, R3: the two switch-offs ({ enabled: false } alone) skip the save gate, so only the statuses edit
+    // (which still runs the full gate) reads the creator
+    expect(authority.asked).toEqual([BINDING])
   })
 
   it('(d) retyping into a run_finished rule AND leaving it disabled in the same PATCH is saved, stamped with the creator\'s binding; switching it on afterwards is the save that needs the authority', async () => {
@@ -430,7 +432,8 @@ describe('RF editor authority — what stays allowed', () => {
     expect(await h.patch({ triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['skipped'] } }, EDITOR_OK)).not.toBeNull()
     expect(h.writes).toHaveLength(4)
     expect(triggerColumn(h.writes[3].values)).toEqual({ job: { kind: 'stock_prep_pull' }, statuses: ['skipped'], binding: BINDING })
-    expect(authority.asked).toEqual([...gateThenActor(EDITOR_OK), BINDING, ...gateThenActor(EDITOR_OK), ...gateThenActor(EDITOR_OK)])
+    // (R-69 I6d r7, R3: the switch-off in between reads nothing)
+    expect(authority.asked).toEqual([...gateThenActor(EDITOR_OK), ...gateThenActor(EDITOR_OK), ...gateThenActor(EDITOR_OK)])
     expectEveryAuthorityReadCommitted()
   })
 

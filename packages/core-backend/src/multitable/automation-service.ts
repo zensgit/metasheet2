@@ -288,6 +288,88 @@ export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE = 'INTEGRATION_RU
 export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_MESSAGE =
   'an enabled integration.run_finished rule can only be saved by a user who holds the integration read authority themself (active, a member of the rule\'s tenant, able to manage automation, holding integration:read or above or stock-prep:read); it is not held or could not be checked, so the rule was not saved'
 
+/**
+ * R-69 I6d, r7 adversarial review findings 1–3 — owner-approved 2026-11-13 (「按建议」: fix 1–3). T-LAYER DEFAULT
+ * (direction ruled by the owner 2026-11-13; this exact wording is a T-layer elaboration the owner can veto, decision
+ * register R-92, 11-13 note):
+ *
+ *   R1, retry of a run_finished execution:
+ *     - re-read INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (exact 'true');
+ *     - re-check binding == stored creator and the creator's live authority, exactly as dispatch does;
+ *     - the retrying actor must pass integrationRunFinishedCreatorAuthorized for the binding tenant.
+ *     Any failure refuses the retry before anything is sent. Reuse the dispatch predicates; do not redefine them.
+ *   R2, retry of a run_integration_job execution: the retrying actor must pass resolveIntegrationRunPrincipalOnTransaction
+ *     for the binding tenant (the B1 predicate, run like B1 with the READ COMMITTED transaction). Failure refuses the
+ *     retry before any intent claim, lease or port call.
+ *   R3: a write whose ONLY effect is to switch an integration.run_finished rule off (enabled:false, no other field) is
+ *     accepted without the save gate's creator authority check. Any other edit still runs the full gate.
+ *
+ * Why (R1, R2): POST /automation-executions/:id/retry is gated by requireAdminRole only — a GLOBAL role that says
+ * nothing about the rule's tenant — and retryExecution checked only that the rule is present + enabled and that its
+ * action fingerprint is unchanged before executeRule. A run_finished retry re-sent the stored run with the event switch
+ * off, a binding that no longer named the creator, or a creator who had lost authority (dispatch refuses all three); a
+ * job retry ran the job under the creator's binding (the executor checks that principal, never the retrying admin).
+ * Why (R3): PATCH { enabled: false } re-ran the run_finished save gate on the STORED creator, so a rule whose creator
+ * lost authority could not be switched off. (Job rules do not have that problem: a switch-only write never reaches the
+ * job save gate, and B1's acting-user check does not run on a write that leaves the rule disabled.)
+ * Refusals are the retry lane's own `{ status, code, message }` shape, 409 like its other refusals after the lookup:
+ * nothing is recorded, nothing is sent, and the one-shot first-retry marker is not spent. The codes are SIBLINGS of the
+ * save-path codes, not those codes (the save messages say "the rule was not saved"; a retry saves nothing):
+ * INTEGRATION_RUN_EVENT_DISABLED, INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED, INTEGRATION_RUN_FINISHED_RETRY_
+ * UNAUTHORIZED (the retrying actor), RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED (the retrying actor; B1's two messages).
+ * A retry whose CURRENT rule and STORED trigger event disagree about being integration.run_finished is RULE_CHANGED.
+ * Fixed, values-free messages. Implemented in AutomationService.retryExecution and updateRuleOnce.
+ */
+export const INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE =
+  'integration.run_finished is disabled on this deployment (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is not \'true\'); nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED_MESSAGE =
+  'the rule\'s integration.run_finished binding no longer names its creator and the tenant of the original run, or the creator is no longer active, able to manage automation and holding integration:read (or above) or stock-prep:read; nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED_MESSAGE =
+  'an integration.run_finished execution can only be re-run by a user who holds the integration read authority themself (active, a member of the rule\'s tenant, able to manage automation, holding integration:read or above or stock-prep:read); it is not held or could not be checked, so nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_KIND_CHANGED_MESSAGE = 'Rule trigger changed since the original execution; cannot retry safely'
+export const RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED_MESSAGE =
+  'a run_integration_job execution can only be re-run by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); nothing was re-run'
+export const RUN_INTEGRATION_JOB_RETRY_AUTHORITY_UNAVAILABLE_MESSAGE =
+  'run_integration_job: the retrying user\'s job authority could not be checked; nothing was re-run'
+
+/**
+ * R-69 I6d r7, R3 (stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE): true only for `{ enabled: false }` with every
+ * other field of the update absent. Any other key that carries a value — today's fields or one added later — makes it
+ * an ordinary edit (fail closed: the full gate runs).
+ */
+function isSwitchOffOnlyUpdate(input: UpdateRuleInput): boolean {
+  return input.enabled === false && Object.entries(input).every(([key, value]) => key === 'enabled' || value === undefined)
+}
+
+/**
+ * The binding check of dispatchIntegrationRunFinished (R-69 1c), shared with the admin retry (R-69 I6d r7, R1) so it
+ * is defined once: the rule's stamped trigger binding names the rule's STORED creator and `tenantId` (on dispatch the
+ * route's tenant; on a retry the tenant the original run was dispatched for). Returns that creator, or null.
+ */
+function integrationRunFinishedBoundCreator(rule: AutomationRule, tenantId: string): string | null {
+  const config = (rule.trigger_config ?? {}) as Record<string, unknown>
+  const binding = (config.binding ?? {}) as Record<string, unknown>
+  if (binding.principalId !== rule.created_by || binding.tenantId !== tenantId || typeof rule.created_by !== 'string') return null
+  return rule.created_by
+}
+
+/**
+ * R-69 I6d r7, R1: the tenant an integration.run_finished execution was dispatched for. The stored event carries no
+ * tenant (the route never reaches the payload), but the execution's rule snapshot is the rule as it ran, and dispatch
+ * ran it only after matching its binding tenant to the route's. Null when the snapshot is not such a rule (no snapshot,
+ * another trigger, no stamped tenant) — the retry is then refused, never judged against a guessed tenant.
+ */
+function integrationRunFinishedRunTenantId(ruleSnapshot: unknown): string | null {
+  if (!isRecord(ruleSnapshot)) return null
+  const trigger = ruleSnapshot.trigger
+  if (!isRecord(trigger) || trigger.type !== INTEGRATION_RUN_FINISHED_TRIGGER) return null
+  const config = trigger.config
+  if (!isRecord(config)) return null
+  const binding = config.binding
+  if (!isRecord(binding)) return null
+  return typeof binding.tenantId === 'string' && binding.tenantId.length > 0 ? binding.tenantId : null
+}
+
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
 
@@ -2489,7 +2571,13 @@ export class AutomationService {
       }
       // R-69 1c: the RESULTING integration.run_finished rule passes the same save gate on every write shape, and
       // its binding is re-stamped from the STORED creator and persisted whichever columns the caller sent.
-      const runFinishedUpdateConfig = await this.assertIntegrationRunFinishedRuleAtSave({
+      // R-69 I6d r7, R3 (T-layer default, stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE): EXCEPT a
+      // write whose only effect is to switch the rule off ({ enabled: false }, no other field) — it changes no shape,
+      // re-stamps nothing, and leaves a rule that never fires (dispatch loads enabled rules only), so it does not run
+      // this gate: a rule whose creator lost its authority or its tenant can always be switched off. Any other edit
+      // (enabled: false WITH another field, enabled: true, a rename …) runs the full gate as before. The acting-user
+      // check before the write does not run either way for it (the rule is disabled after the write).
+      const runFinishedUpdateConfig = isSwitchOffOnlyUpdate(input) ? null : await this.assertIntegrationRunFinishedRuleAtSave({
         triggerType: nextTriggerType,
         triggerConfig: nextTriggerConfig,
         actionType: nextActionType,
@@ -3400,26 +3488,46 @@ export class AutomationService {
     actions: AutomationAction[] | null
   }): Promise<void> {
     if (!input.enabledAfterWrite) return
-    const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, null)
-    if (occurrences.length === 0 && error === null) return
-    const unauthorized = () => new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
-    const unavailable = () => new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+    const verdict = await this.runIntegrationJobActorVerdict(input.actorId, input, 'save')
+    if (verdict === 'unauthorized') throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+    if (verdict === 'unavailable') throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+  }
+
+  /**
+   * B1's acting-user judgement of a rule's action shape, without the save's "enabled after the write" gate: shared by
+   * the save (assertRunIntegrationJobEditorAuthority, B1) and the admin retry (retryExecution, R-69 I6d r7 R2), so the
+   * predicate, the way it is run and the binding-tenant read are defined once. In order:
+   *   - no run_integration_job anywhere in the shape (top level or nested) → 'no_job';
+   *   - no acting user → 'unauthorized';
+   *   - the binding tenant from the shape's own stamped binding (every top-level occurrence must parse with the
+   *     executor's re-parse, all naming ONE tenant; a nested occurrence has no binding read here) → else 'unavailable';
+   *   - the predicate itself (readRunIntegrationJobEditorAuthority: READ COMMITTED transaction), principalId = the acting
+   *     user, tenantId = that tenant: ok → 'authorized'; principal_unauthorized → 'unauthorized'; anything else →
+   *     'unavailable'. Never a pass by default.
+   */
+  private async runIntegrationJobActorVerdict(
+    actorIdInput: string | null | undefined,
+    shape: { actionType: string; actionConfig: Record<string, unknown> | null; actions: AutomationAction[] | null },
+    purpose: 'save' | 'retry',
+  ): Promise<'no_job' | 'authorized' | 'unauthorized' | 'unavailable'> {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(shape.actionType, shape.actionConfig, shape.actions, null)
+    if (occurrences.length === 0 && error === null) return 'no_job'
     // The acting user exactly as the route authenticated it (never trimmed into another id).
-    const actorId = typeof input.actorId === 'string' && input.actorId.trim().length > 0 ? input.actorId : null
-    if (actorId === null) throw unauthorized()
+    const actorId = typeof actorIdInput === 'string' && actorIdInput.trim().length > 0 ? actorIdInput : null
+    if (actorId === null) return 'unauthorized'
     // `error` other than the sole-action refusal is the nested one: a binding inside a branch is not read here.
-    if (error !== null && error !== RUN_INTEGRATION_JOB_NOT_SOLE_ERROR) throw unavailable()
+    if (error !== null && error !== RUN_INTEGRATION_JOB_NOT_SOLE_ERROR) return 'unavailable'
     const tenantIds = new Set<string>()
     for (const occurrence of occurrences) {
       const persisted = parsePersistedRunIntegrationJobConfig(occurrence.config)
-      if (!persisted) throw unavailable()
+      if (!persisted) return 'unavailable'
       tenantIds.add(persisted.binding.tenantId)
     }
-    if (tenantIds.size !== 1) throw unavailable()
+    if (tenantIds.size !== 1) return 'unavailable'
     const [tenantId] = [...tenantIds]
-    const resolution = await this.readRunIntegrationJobEditorAuthority({ principalId: actorId, tenantId })
-    if (resolution.ok === true) return
-    throw resolution.reason === 'principal_unauthorized' ? unauthorized() : unavailable()
+    const resolution = await this.readRunIntegrationJobEditorAuthority({ principalId: actorId, tenantId }, purpose)
+    if (resolution.ok === true) return 'authorized'
+    return resolution.reason === 'principal_unauthorized' ? 'unauthorized' : 'unavailable'
   }
 
   /** Test seam: replaces the live acting-user authority read of assertRunIntegrationJobEditorAuthority. */
@@ -3435,7 +3543,7 @@ export class AutomationService {
    * it commits (the same accepted revoke-after-commit window). Any throw is authority_unavailable (fail closed); the
    * log line is values-free (the error's class / code only — never its message, never the ids).
    */
-  private async readRunIntegrationJobEditorAuthority(binding: { principalId: string; tenantId: string }): Promise<IntegrationRunPrincipalResolution> {
+  private async readRunIntegrationJobEditorAuthority(binding: { principalId: string; tenantId: string }, purpose: 'save' | 'retry' = 'save'): Promise<IntegrationRunPrincipalResolution> {
     try {
       if (this.runIntegrationJobEditorAuthorityResolver) return await this.runIntegrationJobEditorAuthorityResolver(binding)
       return await poolManager.get().transaction(async ({ query }) => {
@@ -3448,7 +3556,9 @@ export class AutomationService {
         }, binding)
       })
     } catch (error) {
-      logger.warn('run_integration_job save: the acting user\'s live authority could not be read; the rule was not saved', describeLookupError(error))
+      logger.warn(purpose === 'retry'
+        ? 'run_integration_job retry: the retrying user\'s live authority could not be read; nothing was re-run'
+        : 'run_integration_job save: the acting user\'s live authority could not be read; the rule was not saved', describeLookupError(error))
       return { ok: false, reason: 'authority_unavailable' }
     }
   }
@@ -3574,6 +3684,34 @@ export class AutomationService {
     if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: actorId, tenantId: input.bindingTenantId }))) throw refused()
   }
 
+  /**
+   * R-69 I6d r7, R1 — the T-layer default stated at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE, after its switch leg
+   * (read by the caller, which also compares the kinds). The dispatch checks on the CURRENT rule the retry would run,
+   * then the retrying actor, all in the tenant the original run was dispatched for. In order:
+   *   - that tenant: the execution's rule snapshot (integrationRunFinishedRunTenantId); unreadable → 'creator';
+   *   - the binding names the stored creator and that tenant (integrationRunFinishedBoundCreator — dispatch's own
+   *     check, the run's tenant standing in for the route's) → else 'creator';
+   *   - the creator's live authority (integrationRunFinishedCreatorAuthorized, as dispatch asks it) → else 'creator';
+   *   - the retrying actor: absent / empty / blank → 'actor', before any read; then the same predicate with
+   *     principalId = the actor exactly as the route authenticated it → false → 'actor'.
+   * Never a pass by default (the predicate is false on any failure).
+   */
+  private async integrationRunFinishedRetryVerdict(
+    rule: AutomationRule,
+    original: AutomationExecution,
+    actorIdInput: string | null | undefined,
+  ): Promise<'ok' | 'creator' | 'actor'> {
+    const runTenantId = integrationRunFinishedRunTenantId(original.ruleSnapshot)
+    if (runTenantId === null) return 'creator'
+    const creatorId = integrationRunFinishedBoundCreator(rule, runTenantId)
+    if (creatorId === null) return 'creator'
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: creatorId, tenantId: runTenantId }))) return 'creator'
+    const actorId = typeof actorIdInput === 'string' && actorIdInput.trim().length > 0 ? actorIdInput : null
+    if (actorId === null) return 'actor'
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: actorId, tenantId: runTenantId }))) return 'actor'
+    return 'ok'
+  }
+
   /** Test seam for the durable leg's enqueue transaction (production: a pool transaction). */
   private integrationRunEventEnqueue: ((input: { eventId: string; payload: unknown; automationDepth: number }) => Promise<void>) | null = null
 
@@ -3659,12 +3797,13 @@ export class AutomationService {
       if (job.pipelineId !== undefined && job.pipelineId !== event.job.pipelineId) continue
       if (job.actionId !== undefined && job.actionId !== event.job.actionId) continue
       if (!integrationRunFinishedConfiguredStatuses(config).has(event.status)) continue
-      const binding = (config.binding ?? {}) as Record<string, unknown>
-      if (binding.principalId !== rule.created_by || binding.tenantId !== route.tenantId || typeof rule.created_by !== 'string') {
+      // (The binding check is shared with the admin retry, R-69 I6d r7 R1: integrationRunFinishedBoundCreator.)
+      const creatorId = integrationRunFinishedBoundCreator(rule, route.tenantId)
+      if (creatorId === null) {
         logger.warn(`integration.run_finished rule ${rule.id} skipped: binding does not match its creator`)
         continue
       }
-      if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: rule.created_by, tenantId: route.tenantId }))) {
+      if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: creatorId, tenantId: route.tenantId }))) {
         logger.warn(`integration.run_finished rule ${rule.id} skipped: creator not authorized at fire time`)
         continue
       }
@@ -4585,6 +4724,48 @@ export class AutomationService {
     // execution id. Fail-OPEN on a failed lookup, like every other lane in this file.
     if (!(await this.ruleSheetLive(rule, 'automation.retry', { executionId: original.id }))) {
       return { status: 409, code: SHEET_DELETED_CODE, message: RETRY_SHEET_DELETED_MESSAGE }
+    }
+    // R-69 I6d r7 (T-layer default; the rules R1 / R2 are stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_
+    // MESSAGE): an integration execution is re-run only when the run-time gates still hold AND the retrying admin holds
+    // the authority themself — the route's requireAdminRole is a GLOBAL role and says nothing about the rule's tenant.
+    // After the rule / fingerprint / sheet gates (they write nothing) and BEFORE the one-shot first-retry marker below
+    // (a refused attempt must not spend it) and executeRule: nothing is sent, claimed, leased or called. Answered like
+    // every other refusal on this lane (a coded 409, nothing recorded). The two kinds are judged independently and in a
+    // fixed order (R1, then R2): a pass of one never skips the other.
+    // R1 — integration.run_finished. The CURRENT rule (what would run) and the STORED trigger event (what would be
+    // replayed) must agree that this is one: the action fingerprint above does not cover the trigger, so a rule retyped
+    // since the run would otherwise replay a stored run with no binding to check, or an empty payload into an alert.
+    const ruleIsRunFinished = rule.trigger_type === INTEGRATION_RUN_FINISHED_TRIGGER
+    const eventIsRunFinished = isRecord(original.triggerEvent) && original.triggerEvent.eventType === INTEGRATION_RUN_FINISHED_EVENT_TYPE
+    if (ruleIsRunFinished || eventIsRunFinished) {
+      // The switch, re-read here exactly as dispatch reads it on every event (exact literal 'true').
+      if (!isIntegrationAutomationRunEventEnabled()) {
+        return { status: 409, code: 'INTEGRATION_RUN_EVENT_DISABLED', message: INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE }
+      }
+      if (ruleIsRunFinished !== eventIsRunFinished) {
+        return { status: 409, code: 'RULE_CHANGED', message: INTEGRATION_RUN_FINISHED_RETRY_KIND_CHANGED_MESSAGE }
+      }
+      const runFinishedVerdict = await this.integrationRunFinishedRetryVerdict(rule, original, initiatedBy)
+      if (runFinishedVerdict === 'creator') {
+        return { status: 409, code: 'INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED', message: INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED_MESSAGE }
+      }
+      if (runFinishedVerdict === 'actor') {
+        return { status: 409, code: 'INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED', message: INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED_MESSAGE }
+      }
+    }
+    // R2 — run_integration_job anywhere in the CURRENT rule's actions: B1's acting-user judgement (the executor's
+    // predicate on a READ COMMITTED transaction, in the rule's stamped binding tenant), with the retrying admin as the
+    // acting user. The bound creator stays the executor's to check on the run itself.
+    const jobRetryVerdict = await this.runIntegrationJobActorVerdict(initiatedBy, {
+      actionType: rule.action_type,
+      actionConfig: (rule.action_config ?? null) as Record<string, unknown> | null,
+      actions: rule.actions ?? null,
+    }, 'retry')
+    if (jobRetryVerdict === 'unauthorized') {
+      return { status: 409, code: 'RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED', message: RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED_MESSAGE }
+    }
+    if (jobRetryVerdict === 'unavailable') {
+      return { status: 409, code: 'RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED', message: RUN_INTEGRATION_JOB_RETRY_AUTHORITY_UNAVAILABLE_MESSAGE }
     }
     const firstRetryAttempt = await claimFirstAutomationRetryAttempt(this.queryFn, rootExecutionId)
     const isGenuinelyFirstRetry = firstRetryAttempt && original.rerunOfExecutionId == null

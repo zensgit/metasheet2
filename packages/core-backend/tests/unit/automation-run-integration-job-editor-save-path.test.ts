@@ -917,7 +917,9 @@ describe('integration.run_finished: each of these update shapes re-stamps the tr
   it.each([
     ['a trigger edit whose body names another tenant', { triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed', 'skipped'], binding: { principalId: 'editor_2', tenantId: 'tenant_foreign' } } }],
     ['a rename', { name: 'renamed' }],
-    ['an on/off switch', { enabled: false }],
+    // (R-69 I6d r7, R3: the switch OFF alone no longer runs the gate — its own case below; switching ON does)
+    ['an on switch', { enabled: true }],
+    ['an off switch together with a rename', { enabled: false, name: 'renamed' }],
     ['an action edit', { actionConfig: { ...ALERT_ACTION, titleTemplate: '{{run.reason}}' } }],
     ['an execution-mode edit', { executionMode: null }],
   ])('%s: the written trigger_config carries the creator\'s single tenant, never the planted or the posted one', async (_label, body) => {
@@ -942,5 +944,35 @@ describe('integration.run_finished: each of these update shapes re-stamps the tr
     expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
     expect(refusal!.message).toMatch(/integration\.run_finished rules need a creator bound to exactly one active tenant/)
     expect(h.writes).toHaveLength(0)
+  })
+})
+
+// R-69 I6d r7, R3 (owner-approved 2026-11-13): a write whose ONLY effect is to switch an integration.run_finished rule
+// off skips the run_finished save gate, so it re-stamps nothing; the rule cannot fire while off, and switching it on runs
+// the full gate (and the re-stamp) again.
+describe('integration.run_finished: the switch OFF alone re-stamps nothing; the switch ON re-stamps (R-69 I6d r7, R3)', () => {
+  const ALERT_ACTION = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
+  const plantedAlertRule = () => ({
+    id: 'atr_rf', sheet_id: 'sheet_not_a_project_sheet', created_by: CREATOR,
+    trigger_type: 'integration.run_finished', trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: CLIENT_BINDING },
+    action_type: 'send_dingtalk_group_message', action_config: ALERT_ACTION, actions: null,
+  })
+  function alertService() {
+    const h = makeService()
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    return h
+  }
+
+  it('the switch OFF alone (R-69 I6d r7, R3) writes only `enabled`: the planted binding is not re-stamped while the rule cannot fire (dispatch loads enabled rules only), and switching it back ON re-stamps it', async () => {
+    const h = alertService()
+    h.seed(plantedAlertRule())
+    expect((await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ enabled: false }), 'editor_2'))?.enabled).toBe(false)
+    expect(h.writes).toHaveLength(1)
+    expect(Object.keys(h.writes[0].values).sort()).toEqual(['enabled', 'updated_at'])
+    expect(h.rules.get('atr_rf')!.enabled).toBe(false)
+    expect((await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ enabled: true }), 'editor_2'))?.enabled).toBe(true)
+    expect(h.writes).toHaveLength(2)
+    expect((JSON.parse(String(h.writes[1].values.trigger_config)) as { binding: unknown }).binding).toEqual(SERVER_BINDING)
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('tenant_foreign')
   })
 })
