@@ -3625,6 +3625,10 @@ export function adminUsersRouter(): Router {
       }
 
       const written = await transaction(async (client) => {
+        // updated_by references users.id. Lock the actor before the template,
+        // matching apply, so the later FK check cannot invert that lock order.
+        const subjects = await lockSharedAccessSubjects(client, [adminUserId])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
         if (!templateHeld) return { missing: true as const }
         const stored = await readStoredTemplateIncludeChildren(client, templateId, directoryDepartmentId)
@@ -3721,6 +3725,8 @@ export function adminUsersRouter(): Router {
       }
 
       const linked = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [adminUserId])
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
         const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
         if (!templateHeld) return false
         if (action === 'assign') {

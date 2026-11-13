@@ -1,6 +1,6 @@
 # Permission management UX verification — 2026-11-12
 
-Base: `7e7e8d73a5eea36027cd9d1a9305c3fada602530`. Local verification uses synthetic data only. No production host or customer data has been used. GitHub CI and the current merge base must also be checked before merging.
+Original base: `7e7e8d73a5eea36027cd9d1a9305c3fada602530`. The follow-up was synchronized with main `220bd80ab62fc7e6b3b40b7d4263a712d9a09405` on 2026-11-13. Local verification uses synthetic data only. No production host or customer data has been used. GitHub CI and the current merge base must also be checked before merging.
 
 ## Behavior and boundaries
 
@@ -28,6 +28,8 @@ A matching success receipt is followed by source readback. Same-code direct or i
 
 The changed count/list, target/write checks, stock-preparation member query and privilege witness must all honor the flag. The witness hashes strict `[namespace, departmentId, boolean]` tuples with a new domain, invalidating older proofs when the flag changes.
 
+Template department/member-group edits and application serialize on the template parent row. Application reads departments and groups through the same transaction client after taking that lock. Editors take admission and actor-row locks first, then recheck live actor authority, then lock the template; this matches application and avoids an inverse lock through the `updated_by` user foreign key. Child edits and the template header update commit together. These locks give a consistent applied snapshot; they do not reject a stale browser preview using an optimistic version check. Scope audit records identify the actual stored, removed or applied `includeChildren` values.
+
 Optional grey candidates expose only `id`, `name`, `selectable:false` and `disabledReason`. Expansion requires proven active organization membership and a matching active integration/provider/corp directory chain. Untrusted tenant headers, ambiguous organizations, member-only scopes or failed proof do not expand the directory. Per-target `manageableNamespaces` filters delegated role choices.
 
 Grey suggestions are bounded to the requested page size, at most 100; search can narrow them. Already-authorized users are excluded across all configured scope links and groups, including multiple accounts and users on other authorized-list pages. The suggestions are not a complete directory of out-of-scope people.
@@ -44,11 +46,13 @@ The switch is local to each API process; keep its value consistent across all wr
 
 The privilege-witness domain is v2. Outstanding v1 confirmations can fail during a rolling upgrade and must be restarted after the relevant processes are upgraded. The patch does not accept v1 witnesses as a compatibility fallback, rewrite stored proofs, or enable production privilege-proof prerequisites. Typed browser confirmation is an accidental-action safeguard, not a replacement for the server's live authority checks and last-platform-admin protection.
 
-## Verification record
+## Original verification record
+
+This section records the original patch through head `0ce8f3d5c918aabe50a33909e42728dd595423a3`. Its 504 / 709 / 172 totals are historical evidence, not a claim that those complete lists were rerun for the rollout-gate follow-up. That head's GitHub checks subsequently completed: 73 passed, one conditional Strict E2E skip, zero failures. Follow-up evidence must be evaluated separately at its own head and main.
 
 Database tests use isolated synthetic PostgreSQL with RBAC bypass and token trust disabled before imports. Credentials and host values are excluded from published evidence.
 
-| Slice | Current evidence |
+| Slice | Original patch evidence |
 | --- | --- |
 | Frontend behavior | Independent 18 files / 504 unique tests passed, zero skipped. The combined run passed 501 tests; after the final upload-race fix, all 3 affected member/confirmation files passed 185 tests, including 3 added regressions. The untouched scope/navigation, checker and role slices remain 210, 59 and 50 tests respectively. |
 | Backend unit behavior | Independent 13 files / 706 tests passed; after the catalog SQL correction, the affected 3 files / 222 tests passed, including one new regression. The final legacy-revoke file passed 11 tests, including two added non-marker error cases. The combined unique total for these 13 files is 709 tests. |
@@ -74,7 +78,23 @@ Dedicated real-database CI slices are registered in `.github/workflows/admin-use
 
 The component harness loads the real App stylesheet and initializes auth/capabilities through production code and actual APIs. An earlier standalone run omitted that reset and misleadingly clipped the member drawer; that run is not the final layout evidence. Navigation tests mount the actual application entry point. Test servers and database containers are local and disposable.
 
-## Screenshots
+## Follow-up verification — 2026-11-13
+
+The rollout and legacy-authority follow-up was implemented by Grok 4.7 and independently checked by Codex. After synchronizing main `220bd80ab62fc7e6b3b40b7d4263a712d9a09405`, one fresh read-only review found a template-editor/apply lock inversion through the `updated_by` foreign key. Actual PostgreSQL reproduced the two-way blocking graph and SQLSTATE `40P01`; the unchanged-`updated_by` control had no cycle. Both transactions were rolled back and fixture residue was zero. This reproduction used the production SQL sequence and real migrated schema; it was not an HTTP test.
+
+The follow-up Grok session could not connect after eight retries. Codex made the narrow correction to both template editors and added regression tests. The final HTTP tests hold the actor row, observe the editor waiting, acquire the template with `NOWAIT`, start concurrent apply, then require both requests to succeed and read back the stored owner and scope. Removing the two editor actor locks makes both new tests fail with `55P03` at the `NOWAIT` assertion. The original runtime file was restored byte-for-byte; all 2,642 recorded source files matched the successful run after restoration. The 32 tests filtered out of that mutation run are not counted as passes.
+
+- PostgreSQL: legacy 14/14 and admin 34/34 passed, zero skipped. The current synthetic databases have 475 migrations, including main's SQL 108. The legacy run uses the current AuthService/session-token-kind rules; inactive or pending actors are refused at authentication with 401, while a raw-role-only administrator reaches the writer and receives 403. A live RBAC-only administrator succeeds; removing the actor's RBAC admin role while it waits refuses the write without side effects.
+- Scope tests exercise unset, `1`, `TRUE` and whitespace flag values at all three sinks, both apply modes, unchanged target state on refusal, exact `true` activation, existing false reads and omitted-value preservation while OFF, explicit true and unassign, and committed/rolled-back template edits while apply waits.
+- Frontend: five files / 215 tests passed, zero skipped, including actual installed-router guards for canonical paths, case/trailing-slash aliases, exception refusal, allowed controls and unrelated prefixes. Scope component tests cover absent/malformed capability, OFF/ON controls, preserved exact scopes and stale-server 403 handling.
+- Backend units and registration: seven files / 395 unique tests passed. The initial 391-test run was followed by the complete affected admin-route file, 164/164, after the lock correction; the other six files were unchanged. Final verification kept all 94 recorded source/test/config hashes unchanged. Temporary Vitest wrappers inherited repository configuration, redirected caches/reports and omitted unrelated backend fixture-deleting setup/teardown; the unchanged Linux CI commands remain a separate required gate.
+- Flag manifest: all 74 unmodified tests passed against 2,824 tracked files exported byte-for-byte from Git blobs. The native CRLF working copy passed 73/74; its sole failure is the existing attendance-plugin LF-only source regex. The repository assertion was not changed. The required web-lane registration guards passed 68 tests, with 646 distinct registered tokens and no accidental Playwright collection.
+- Validation: 13 plugin manifests passed; `pnpm lint` passed. Additional ESLint covered all 38 changed frontend source/test files (zero errors, 32 fixture warnings) and ten backend runtime files (zero errors). Both backend type-check projects and all four frontend projects passed. This follows the `validate:all` plugin/lint/type chain, but uses per-project `vue-tsc --noEmit --incremental --tsBuildInfoFile <temporary path>` instead of build mode to keep generated caches in temporary storage; it is not an unchanged invocation of `pnpm validate:all`.
+- Browser: OFF and ON ran in separate Vitest processes, four scenarios each, zero skipped. Actual APIs/DB proved capability values, preservation and removal of an existing false row, an OFF explicit-true write and an ON false write. The actual App rejected management-route case/trailing-slash variants for a real non-admin session. A separate scenario used a real administrator and deliberately threw in the policy via a temporary in-memory Vite transform; a positive fault counter proved the real `main.ts` catch was exercised. This is explicitly fault injection, not an unmodified production bundle. Desktop and 390px captures passed horizontal-overflow assertions and were visually inspected. All eight browser-tracked source hashes were unchanged; the scope view harness loads actual App CSS/auth/capabilities but remains an isolated view.
+
+These are focused follow-up checks. The complete historical 504 / 709 / 172 lists were not rerun as a single unchanged campaign. The migration rollback code was not changed in this follow-up; its five real-database scenarios remain original-patch evidence. No mixed-version production fleet or real customer environment was exercised. The process-local flag cannot detect old readers and must remain OFF until every reader is upgraded. v1 confirmation interruption and the lack of template preview-version rejection remain explicit limitations.
+
+## Original screenshots
 
 These are unedited browser captures with synthetic accounts. The component captures carry an isolation caption; only the navigation capture mounts the complete App shell. No temporary passwords or invitation URLs are included.
 

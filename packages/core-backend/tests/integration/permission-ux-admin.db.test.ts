@@ -1025,6 +1025,66 @@ describe('permission UX admin through production routes and real PostgreSQL', ()
     }
   })
 
+  it.each(['departments', 'member-groups'])('%s edits lock the actor before the template and serialize with apply across updated_by owners', async (kind) => {
+    const a = await audience()
+    const otherAdminId = await seedUser({ role: 'admin', roles: ['admin'] })
+    const templateId = await template(a.directory.parentId)
+    await query('UPDATE delegated_role_scope_templates SET updated_by = $2 WHERE id = $1', [templateId, otherAdminId])
+    const groupId = randomUUID()
+    ownedGroups.push(groupId)
+    await query('INSERT INTO platform_member_groups(id, name) VALUES ($1, $2)', [groupId, `${prefix}-${groupId}`])
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    let edit: Promise<Response> | undefined
+    let apply: Promise<Response> | undefined
+    await blocker.connect()
+    await blocker.query('BEGIN')
+    try {
+      const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [platformId])
+      edit = Promise.resolve(post(platformId, `/api/admin/role-delegation/scope-templates/${templateId}/${kind}/assign`,
+        kind === 'departments'
+          ? { directoryDepartmentId: a.directory.childId, includeChildren: true }
+          : { groupId },
+      ))
+      await waitUntilBlocked(pid)
+      const waiting = await query<{ pid: number }>(
+        'SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))',
+        [pid],
+      )
+      expect(waiting.rows).toHaveLength(1)
+      // The old editor held this row while its updated_by FK waited for our user
+      // lock. NOWAIT is the negative witness: old order raises 55P03 here.
+      await blocker.query('SELECT id FROM delegated_role_scope_templates WHERE id = $1 FOR UPDATE NOWAIT', [templateId])
+      apply = Promise.resolve(post(platformId, `/api/admin/role-delegation/users/${a.actorId}/scope-templates/apply`, {
+        namespace: 'stock-prep', templateId, mode: 'replace',
+      }))
+      // Apply must wait on the editor's admission lock, not acquire the actor
+      // and wait for an already-held template in the opposite order.
+      await waitUntilBlocked(waiting.rows[0].pid)
+      await blocker.query('COMMIT')
+      const [edited, applied] = await Promise.all([edit, apply])
+      edit = undefined
+      apply = undefined
+      expectStatus(edited, 200)
+      expectStatus(applied, 200)
+      expect((await query('SELECT updated_by FROM delegated_role_scope_templates WHERE id = $1', [templateId])).rows)
+        .toEqual([{ updated_by: platformId }])
+      const expectedDepartments = kind === 'departments'
+        ? [a.directory.parentId, a.directory.childId].sort()
+        : [a.directory.parentId]
+      expect(await scopeBits(a.actorId)).toEqual(expectedDepartments.map(id => ({
+        namespace: 'stock-prep', directory_department_id: id, include_children: true,
+      })))
+      expect((await query(
+        'SELECT group_id::text FROM delegated_role_admin_member_groups WHERE admin_user_id = $1', [a.actorId],
+      )).rows).toEqual(kind === 'member-groups' ? [{ group_id: groupId }] : [])
+    } finally {
+      await blocker.query('ROLLBACK')
+      await Promise.allSettled([edit, apply].filter((pending): pending is Promise<Response> => pending !== undefined))
+      await blocker.end()
+    }
+  })
+
   it('apply persists the exact department committed while it waited for the parent lock', async () => {
     const a = await audience()
     const templateId = await template(a.directory.parentId)

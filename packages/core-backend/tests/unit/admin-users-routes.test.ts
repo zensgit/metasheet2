@@ -2725,6 +2725,8 @@ describe('admin-users routes', () => {
     pgMocks.query
       .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'dept-1' }] })
+      .mockResolvedValueOnce(lockedUserResult('admin-1', 'admin'))
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'template-1' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -6052,7 +6054,7 @@ describe('admin-users routes', () => {
     expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))).toBe(false)
   })
 
-  function mockDelegatedScopeReads(options: { storedScope?: boolean | null; templateDepartment?: boolean | null } = {}): void {
+  function mockDelegatedScopeReads(options: { storedScope?: boolean | null; templateDepartment?: boolean | null; actorInactive?: boolean } = {}): void {
     const storedScope = options.storedScope === undefined ? null : options.storedScope
     const templateDepartment = options.templateDepartment === undefined ? null : options.templateDepartment
     rbacMocks.isAdmin.mockResolvedValue(true)
@@ -6063,7 +6065,9 @@ describe('admin-users routes', () => {
       }
       if (statement.includes('FOR UPDATE')) {
         const id = String(params?.[0] ?? '')
-        return lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+        const result = lockedUserResult(id, id === 'admin-1' ? 'admin' : 'user')
+        if (id === 'admin-1' && options.actorInactive) result.rows[0].is_active = false
+        return result
       }
       if (statement.includes('FROM user_roles')) return { rows: [{ role_id: 'crm_admin' }] }
       if (statement.includes('FROM users')) {
@@ -6072,6 +6076,7 @@ describe('admin-users routes', () => {
       if (statement.includes('FROM directory_departments') && !statement.includes('delegated_role_scope_template_departments')) {
         return { rows: [{ id: 'dept-1' }] }
       }
+      if (statement.includes('FROM platform_member_groups')) return { rows: [{ id: 'group-1' }] }
       if (statement.includes('SELECT include_children') && statement.includes('delegated_role_admin_scopes')) {
         return storedScope === null ? { rows: [] } : { rows: [{ include_children: storedScope }] }
       }
@@ -6103,6 +6108,37 @@ describe('admin-users routes', () => {
         || sql.includes('DELETE FROM delegated_role_admin_member_groups')
       ))
   }
+
+  it.each(['departments', 'member-groups'])('locks the actor before the template for %s edits', async (kind) => {
+    mockDelegatedScopeReads()
+    const response = await invokeRoute('post', `/api/admin/role-delegation/scope-templates/:templateId/${kind}/:action(assign|unassign)`, {
+      params: { templateId: 'template-1', action: 'assign' },
+      body: kind === 'departments' ? { directoryDepartmentId: 'dept-1', includeChildren: true } : { groupId: 'group-1' },
+    })
+    expect(response.statusCode).toBe(200)
+    const calls = pgMocks.query.mock.calls
+    const userLock = calls.findIndex(([sql]) => String(sql).includes('FROM users') && String(sql).includes('FOR UPDATE'))
+    const templateLock = calls.findIndex(([sql]) => String(sql).includes('FROM delegated_role_scope_templates') && String(sql).includes('FOR UPDATE'))
+    expect(userLock).toBeGreaterThanOrEqual(0)
+    expect(templateLock).toBeGreaterThan(userLock)
+    expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), 'admin-1')
+    expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mock.invocationCallOrder[0])
+      .toBeLessThan(pgMocks.query.mock.invocationCallOrder[userLock])
+    const header = calls.findIndex(([sql]) => String(sql).includes('UPDATE delegated_role_scope_templates'))
+    expect(header).toBeGreaterThan(templateLock)
+  })
+
+  it.each(['departments', 'member-groups'])('refuses %s edits if the locked actor is no longer active', async (kind) => {
+    mockDelegatedScopeReads({ actorInactive: true })
+    const response = await invokeRoute('post', `/api/admin/role-delegation/scope-templates/:templateId/${kind}/:action(assign|unassign)`, {
+      params: { templateId: 'template-1', action: 'assign' },
+      body: kind === 'departments' ? { directoryDepartmentId: 'dept-1', includeChildren: true } : { groupId: 'group-1' },
+    })
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('FORBIDDEN')
+    expect(pgMocks.query.mock.calls.some(([sql]) => /(?:INSERT|DELETE|UPDATE)\s+(?:INTO\s+|FROM\s+)?delegated_role_scope_template/.test(String(sql)))).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
 
   function stubExactDepartmentFlag(value: string | undefined): void {
     if (value === undefined) vi.unstubAllEnvs()
