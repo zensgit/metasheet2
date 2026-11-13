@@ -916,6 +916,10 @@ describe('every function handed to the gate has an allowed shape', () => {
       expected: /a parameter is computed inside write \(SpreadElement\): copied is spread and its initial value is not an array literal/,
     },
     { form: 'parameters held in a constant that has no initial value', write: `(client) => client.query(${UPDATE}, plan)`, expected: /the parameters are not a constant computed before the call \(Identifier\): plan has no initial value/ },
+    { form: 'parameters that are an import', write: `(client) => client.query(${UPDATE}, pool as never)`, expected: /the parameters are not a constant computed before the call \(Identifier\): pool is an import/ },
+    { form: 'a spread of an import', write: `(client, context) => client.query(${UPDATE}, [...(pool as never as unknown[]), context.lockedStatus])`, expected: /a parameter is computed inside write \(SpreadElement\): pool is an import/ },
+    { form: 'parameters that are declared nowhere', write: `(client) => client.query(${UPDATE}, undeclaredParams)`, expected: /the parameters are not a constant computed before the call \(Identifier\): undeclaredParams does not resolve to a declaration/ },
+    { form: 'a spread of a name that is declared nowhere', write: `(client, context) => client.query(${UPDATE}, [...undeclaredParams, context.lockedStatus])`, expected: /a parameter is computed inside write \(SpreadElement\): undeclaredParams does not resolve to a declaration/ },
     { form: 'parameters chosen by something else', write: `(client, context) => client.query(${UPDATE}, context.joined ? params : params)`, expected: /the parameters are chosen by something other than context\.gated/ },
     // A function the guard cannot see.
     { form: 'a parameter of the calling function', write: 'injected', expected: /write: injected is a parameter, not a function written here/ },
@@ -950,6 +954,8 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a judgement that assigns', options: '{ joins: (status) => (userIds.length = 0) === 0 }', expected: /joins contains BinaryExpression/ },
     { form: 'a judgement with two parameters', options: '{ joins: ((status: string | null, extra: unknown) => status === extra) as never }', expected: /joins takes 2 parameters/ },
     { form: 'a judgement the guard cannot see', options: '{ joins: injected as never }', expected: /joins: injected is a parameter, not a function written here/ },
+    { form: 'a judgement that is an import', options: '{ joins: query as never }', expected: /joins: query is an import/ },
+    { form: 'a judgement that is declared nowhere', options: '{ joins: undeclaredJudge }', expected: /joins: undeclaredJudge does not resolve to a declaration/ },
     { form: 'a judgement written as a method', options: '{ joins() { return true } }', expected: /options hold joins in a form other than key: value/ },
     { form: 'a judgement in shorthand', options: '{ joins }', prelude: '  const joins = () => true', expected: /options hold joins in a form other than key: value/ },
     { form: 'spread options', options: '{ ...extra }', prelude: '  const extra = { joins: () => true }', expected: /options hold a spread or a computed key/ },
@@ -1018,6 +1024,7 @@ describe('every function handed to the gate has an allowed shape', () => {
       entry: (name, passing, call) => `export async function entry(flag: boolean) {\n  if (flag) {\n    var ${name} = ${passing}\n  }\n  return ${call}\n}`,
     },
     { form: 'a let, with an initial value that would pass', bound: 'is not declared with const', entry: (name, passing, call) => `export async function entry() {\n  let ${name} = ${passing}\n  return ${call}\n}` },
+    { form: 'a using declaration, with an initial value that would pass', bound: 'is not declared with const', entry: (name, passing, call) => `export async function entry() {\n  using ${name} = ${passing}\n  return ${call}\n}` },
     { form: 'an await using declaration, with an initial value that would pass', bound: 'is not declared with const', entry: (name, passing, call) => `export async function entry() {\n  await using ${name} = ${passing}\n  return ${call}\n}` },
     { form: 'a function declaration', bound: 'is a function declaration', entry: (name, _passing, call) => `export async function entry() {\n  function ${name}() { return undefined }\n  return ${call}\n}` },
     { form: 'the name of a function expression around the call', bound: 'is not bound by a const statement (FunctionExpression)', entry: (name, _passing, call) => `export const entry = async function ${name}() {\n  return ${call}\n}` },
@@ -1040,6 +1047,24 @@ describe('every function handed to the gate has an allowed shape', () => {
       })
     }
   }
+
+  it('a JavaScript source is read the same way: the nearer binding is the one judged', () => {
+    const script = (parameters: string): SourceFile[] => [{
+      path: 'legacy/synthetic-named.js',
+      text: [
+        "import { runGatedPullSourceWrite } from '../directory/pull-source-write-gate'",
+        'const params = [1]',
+        `const update = (client) => client.query(${UPDATE}, params)`,
+        `export async function entry(${parameters}) {`,
+        '  return runGatedPullSourceWrite(target, update)',
+        '}',
+      ].join('\n'),
+    }]
+    const plain = gateUse(script('target'))
+    expect(plain.sites).toHaveLength(1)
+    expect(plain.problems).toEqual([])
+    expect(gateUse(script('target, { update }')).problems).toEqual(['legacy/synthetic-named.js:5 write: update is bound by a destructured parameter'])
+  })
 
   const HIDDEN_CALLS: ReadonlyArray<{ form: string; code: string; expected: RegExp }> = [
     { form: 'the gated write under another name', code: "import { runGatedPullSourceWrite as gated } from '../directory/pull-source-write-gate'\nexport const hidden0 = gated", expected: /uses runGatedPullSourceWrite other than by importing it under its own name and calling it/ },
