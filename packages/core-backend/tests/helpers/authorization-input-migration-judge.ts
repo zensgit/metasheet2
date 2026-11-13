@@ -1082,6 +1082,8 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
         const created = tableAt(tokens, at)
         if (created !== null && INPUTS.has(created.name)) return push('SELECT INTO', 'unreadable', 'creates a table under an input table name', { table: created.name })
         if (created === null && multiPartNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name has more than two parts')
+        // A name written in pieces is refused at the INTO of a write as well: no verdict stands for it.
+        if (created === null && piecedNameAt(tokens, at)) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
         if (isKeyword(tokens[at], 'LOCAL', 'GLOBAL', 'TEMP', 'TEMPORARY', 'UNLOGGED', 'TABLE', 'STRICT')) continue
         if (created === null && into !== targetInto) return push('SELECT INTO', 'unreadable', 'creates a table whose name is not readable')
         break

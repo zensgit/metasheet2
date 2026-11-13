@@ -866,6 +866,29 @@ describe('targets that are read item by item or not at all', () => {
     expect(check(unlocked('SELECT id INTO GLOBAL TEMPORARY TABLE app.audit_copy FROM users')).problems).toEqual([])
   })
 
+  it('a name written in pieces after the INTO of a write is refused: it is not read, and no registered dynamic target stands for it', () => {
+    const unread = ['unreadable SELECT INTO: creates a table whose name is not readable']
+    const cover: AuthorizationInputDynamicExemption = { id: 'T-1', file: NEW_TS, form: 'template_substitution', count: 1, reachableTables: ['audit_x'], reason: 'case' }
+    const line = (statement: string) => 'await sql`' + statement + '`.execute(db)'
+    const pieces = [
+      'EXPLAIN INSERT INTO TEMP users${sql.raw(x)} SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT user_id FROM user_roles) MERGE INTO UNLOGGED app.user_roles${sql.raw(x)} m USING w ON m.user_id = w.user_id WHEN MATCHED THEN DELETE',
+      'EXPLAIN INSERT INTO TABLE audit_x${sql.raw(x)} SELECT user_id FROM user_roles',
+      'WITH w AS (SELECT user_id FROM user_roles) INSERT INTO TEMP ${sql.raw(x)}_copy SELECT user_id FROM w',
+    ]
+    for (const statement of pieces) {
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, []).problems, statement).toEqual(unread)
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, [cover]).problems, statement).toEqual(unread)
+    }
+    // Text against a constant of the file is pieces as well.
+    expect(check(up("const K = 'x'", line('EXPLAIN INSERT INTO TEMP users${K} SELECT user_id FROM user_roles'))).problems).toEqual(unread)
+    // A target that is one substitution, alone or as schema and table, stays the dynamic target of the write.
+    for (const statement of ['EXPLAIN INSERT INTO ${sql.id(schema)}.${sql.id(name)} SELECT user_id FROM user_roles', 'EXPLAIN INSERT INTO ${sql.id(schema)}.audit_x SELECT user_id FROM user_roles']) {
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, [cover]).problems, statement).toEqual([])
+      expect(checkNewMigration(NEW_TS, up(line(statement)), true, []).problems, statement).toEqual(['unreadable EXPLAIN: dynamic write target'])
+    }
+  })
+
   it('a TRUNCATE list is read from the verb: an input table after an item that is not a plain name is a write the scan reports, and requires the lock block', () => {
     const historical = historicalMigrationFiles().find((file) => file.endsWith('.ts'))!
     for (const statement of ['TRUNCATE "audit log", role_permissions', 'TRUNCATE TABLE ONLY "audit log" *, public.user_permissions CASCADE']) {
