@@ -226,6 +226,18 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
   })
 
+  it('chainVersion: false sends the version given: a write made on the version before the first answer conflicts, one after it is stored', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1, { chainVersion: false })
+    const second = grid.patchCell('r1', 'f2', 'y', 1, { chainVersion: false })
+    await server.answerAll()
+    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 1])
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    const third = grid.patchCell('r1', 'f2', 'y', 2, { chainVersion: false })
+    await server.answerAll()
+    expect(await third).toBeNull()
+  })
+
   it('a write made after the first answer reads the version it returned, and goes as given', async () => {
     const { grid, server } = await setup([r1()])
     void grid.patchCell('r1', 'f_qty', 6, row(grid).version)
@@ -406,6 +418,47 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     const third = grid.patchCell('r1', 'f3', 'z', row(grid).version)
     await server.answerAll()
     expect(await third).toBeNull()
+  })
+
+  it('own write, another user\'s change (merged), own write, all in one queue; a reload that read before all of them lands while the last is out: the row keeps its version, so a write made on it conflicts', async () => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    void grid.patchCell('r1', 'f3', 'k2', 1) // waits; goes at 2 once the first is answered
+    await server.answer()
+    const stored = server.stored.get('r1')!
+    // Another user's change lands first (version 3), and their merge reaches the grid.
+    stored.version = 3
+    stored.data.f2 = 'theirs'
+    grid.mergeRemoteRecord({ id: 'r1', version: 3, data: { ...stored.data } })
+    void grid.patchCell('r1', 'f_qty', 6, row(grid).version) // made on version 3 while the second is out
+    await server.answer()
+    // A reload that read version 1 lands while the third is out.
+    grid.rows.value = [r1()]
+    await server.answerAll()
+    expect(row(grid).version).toBe(1)
+    const next = grid.patchCell('r1', 'f2', 'mine', row(grid).version)
+    await server.answerAll()
+    expect(await next).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(server.stored.get('r1')!.data.f2).toBe('theirs')
+  })
+
+  it.each([
+    ['another field', 'f2', 'a', 'f1', 'b', { f2: 'a', f1: 'a' }],
+    ['the same field', 'f1', 'b', 'f1', 'c', { f1: 'b' }],
+  ] as const)('two writes made with the record off the page (%s), the page\'s rows landing while the second waits; the second rejected: the row shows the stored value, never an empty one', async (_name, field1, value1, field2, value2, shownAfter) => {
+    const server = strictServer([r1(), r2()], ['r2'])
+    const grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId: ref('view_1'), client: new MultitableApiClient({ fetchFn: server.fetchFn }) })
+    await grid.loadViewData(0)
+    expect(grid.rows.value.map((record) => record.id)).toEqual(['r2'])
+    void grid.patchCell('r1', field1, value1, 1)
+    const second = grid.patchCell('r1', field2, value2, 1) // made on version 1, off the page: sent as given
+    // The page's rows land, now holding r1 (read before the first write was stored).
+    grid.rows.value = [r1(), r2()]
+    await server.answer()
+    expect(row(grid).data[field2]).toBe(value2)
+    await server.answerAll()
+    expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(row(grid).data).toMatchObject(shownAfter)
   })
 
   it('a row reloaded after the write was stored and another user moved the record on keeps its newer version: the next write made on it is stored', async () => {

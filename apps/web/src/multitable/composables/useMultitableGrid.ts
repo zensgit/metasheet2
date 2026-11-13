@@ -144,6 +144,8 @@ interface QueuedCellWrite {
    *  one replaced unsent: the write rolls back to it, and is undone to it. */
   oldValue: unknown
   oldLinkSummaries: LinkedRecordSummary[] | undefined
+  /** The row this write's value was last put on while it waited (see `showWaiting` in `patchCell`). */
+  shownOn?: MetaRecord
   /** Starts the write's turn, or ends it unsent. */
   wake: (turn: 'send' | typeof CELL_WRITE_SUPERSEDED) => void
 }
@@ -1513,6 +1515,9 @@ export function useMultitableGrid(opts: {
       nextLinkSummaries?: LinkedRecordSummary[]
       /** Told the record's version the server returned for THIS write. */
       onCommitted?: (version: number) => void
+      /** false: send the version given, never one of this record's own accepted writes returned (the caller's
+       *  copy of the record takes a write only once it is accepted, as an off-page one does). */
+      chainVersion?: boolean
     },
   ): Promise<GridPatchFailure | typeof CELL_WRITE_SUPERSEDED | null> {
     if (rangePending) return {
@@ -1575,13 +1580,21 @@ export function useMultitableGrid(opts: {
     const showWaiting = () => {
       const live = rows.value.find((r) => r.id === recordId)
       for (const queued of turns.waiting) {
-        if (live) live.data[queued.fieldId] = queued.value
+        if (live) {
+          // A write made with the record off the page has no value of a row to roll back to: the first time it is
+          // shown on a row (the record came onto the page meanwhile), that row's own value is it.
+          if (!queued.inPage && queued.shownOn !== live) {
+            queued.oldValue = live.data[queued.fieldId]
+            queued.shownOn = live
+          }
+          live.data[queued.fieldId] = queued.value
+        }
         if (queued.nextLinkSummaries) setLinkSummaries(recordId, queued.fieldId, queued.nextLinkSummaries)
       }
     }
 
     let expectedVersion = version
-    if (write.inPage) {
+    if (write.inPage && options?.chainVersion !== false) {
       for (let next = turns.advanced.get(expectedVersion); next !== undefined; next = turns.advanced.get(expectedVersion)) {
         expectedVersion = next
       }
@@ -1603,6 +1616,13 @@ export function useMultitableGrid(opts: {
       const liveVersion = live?.version
       applyPatchResult(result)
       showWaiting()
+      // A waiting write of this cell now rolls back to this write's value, which is stored (for one made on the row
+      // that is already so; one made with the record off the page took the value of the row it was first shown on).
+      for (const queued of turns.waiting) {
+        if (queued.fieldId !== fieldId) continue
+        queued.oldValue = value
+        queued.oldLinkSummaries = nextLinkSummaries ?? write.oldLinkSummaries
+      }
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null

@@ -754,15 +754,16 @@ describe('W-10 the drawer on a manual row', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
-    it('on the page a save is the grid row\'s, with no option, also after a realtime merge; off the page it is the copy\'s, which takes the version returned', async () => {
+    it('on the page a save is the grid row\'s (chained by the grid), also after a realtime merge; off the page it is the copy\'s, sent as given', async () => {
       await mergedCopyOfManualRow()
       await onPatch()(F.total, 6)
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.total, 6, 3]])
+      // The version returned is asked for, for the copy the drawer holds.
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.total, 6, 3, { onCommitted: expect.any(Function) }]])
       gridMock.patchCell.mockClear()
       unmount()
       await newManualRowOffThePage()
       await onPatch()(F.total, 6)
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_new', F.total, 6, 1, { onCommitted: expect.any(Function) }]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_new', F.total, 6, 1, { onCommitted: expect.any(Function), chainVersion: false }]])
     })
 
     it('a new row opened off the page: ADR §3.4\'s two steps (规格, then 备注) both store', async () => {
@@ -1044,7 +1045,117 @@ describe('W-10R the drawer on the REAL grid composable (a stand-in server checks
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 
-  it('a new manual row comes onto the page, moved on by another user, while its first step is out: the next step waits for it and goes with the row\'s version; the copy moves one version on, not to the version returned', async () => {
+  async function rowComesOntoThePage(id: string): Promise<void> {
+    server.state.page.push(id)
+    await realtime().reloadCurrentSheetPage()
+    await flushUi()
+    expect(row(id)).toBeTruthy()
+  }
+  async function rowLeavesThePage(id: string): Promise<void> {
+    server.state.page = server.state.page.filter((each) => each !== id)
+    await realtime().reloadCurrentSheetPage()
+    await flushUi()
+    expect(row(id)).toBeUndefined()
+  }
+
+  it('a new manual row: drawer 6 (out), drawer 7 (held); the row comes onto the page; a grid edit of the cell to 9 (the newest): the grid\'s 9 is stored and the held 7, made on the copy, conflicts (as on main)', async () => {
+    await newRowOffThePage()
+    const all = [onPatch()(F.total, 6)]
+    await step()
+    all.push(onPatch()(F.total, 7))
+    await step()
+    await rowComesOntoThePage('rec_wb_new')
+    all.push(gridEdit('rec_wb_new', F.total, 9))
+    await step()
+    await server.answerAll()
+    await Promise.all(all)
+    expect(writes()).toEqual([[F.total, 6, 1, 'stored v2'], [F.total, 9, 2, 'stored v3'], [F.total, 7, 2, 'VERSION_CONFLICT']])
+    expect(server.stored.get('rec_wb_new')!.data[F.total]).toBe(9)
+    expect(realGrid.conflict.value).toMatchObject({ fieldId: F.total, attemptedValue: 7 })
+  })
+
+  it('after a realtime merge of a manual row on the page: a drawer save (out); the row leaves the page; a second save, made on the copy, waits for the first and goes with the version it returned; then a third', async () => {
+    await afterMerge()
+    const all = [onPatch()(F.total, 6)]
+    await step()
+    await rowLeavesThePage('rec_wb_manual')
+    expect(shown()!.id).toBe('rec_wb_manual')
+    all.push(onPatch()(F.total, 7))
+    await step()
+    await server.answerAll()
+    await Promise.all(all)
+    const third = onPatch()(F.total, 8)
+    await step()
+    await server.answerAll()
+    await third
+    expect(writes()).toEqual([[F.total, 6, 3, 'stored v4'], [F.total, 7, 4, 'stored v5'], [F.total, 8, 5, 'stored v6']])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('after a realtime merge of a manual row: a drawer save is stored, and another merge that read it lands before its answer: the copy keeps that merge\'s version (not one more), so later saves on the page and on the copy store', async () => {
+    await afterMerge()
+    const first = onPatch()(F.total, 6)
+    await step()
+    server.store()
+    await realtime().mergeRemoteRecord('rec_wb_manual')
+    await flushUi()
+    await server.release()
+    await first
+    const onPage = onPatch()(F.total, 7)
+    await step()
+    await server.answerAll()
+    await onPage
+    await rowLeavesThePage('rec_wb_manual')
+    expect(shown()).toMatchObject({ id: 'rec_wb_manual', version: 5, data: { [F.total]: 7 } })
+    const onCopy = onPatch()(F.total, 8)
+    await step()
+    await server.answerAll()
+    await onCopy
+    expect(writes()).toEqual([[F.total, 6, 3, 'stored v4'], [F.total, 7, 4, 'stored v5'], [F.total, 8, 5, 'stored v6']])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('after a realtime merge of a manual row: a grid edit of 备注 is stored, then a drawer save on the row: the copy, which lacks the grid edit, keeps its version; off the page a save of 备注 on it conflicts, not stored over the grid edit', async () => {
+    await afterMerge()
+    const edit = gridEdit('rec_wb_manual', F.notes, 'g')
+    await step()
+    await server.answerAll()
+    await edit
+    const save = onPatch()(F.total, 6)
+    await step()
+    await server.answerAll()
+    await save
+    await rowLeavesThePage('rec_wb_manual')
+    expect(shown()).toMatchObject({ id: 'rec_wb_manual', version: 3 })
+    const onCopy = onPatch()(F.notes, 'mine')
+    await step()
+    await server.answerAll()
+    await onCopy
+    expect(writes()).toEqual([[F.notes, 'g', 3, 'stored v4'], [F.total, 6, 4, 'stored v5'], [F.notes, 'mine', 3, 'VERSION_CONFLICT']])
+    expect(server.stored.get('rec_wb_manual')!.data[F.notes]).toBe('g')
+  })
+
+  it.each([['kanban', 'MetaKanbanView'], ['calendar', 'MetaCalendarView']])('a %s view: after a realtime merge of the record shown the drawer shows the grid\'s row, and two quick saves both store', async (viewType, stub) => {
+    await mount(viewType, withBlock())
+    await vi.waitFor(() => expect(realGrid.rows.value).toHaveLength(2))
+    await flushUi()
+    getRecordFromServer()
+    await (captured[stub]!.onSelectRecord as (id: string) => Promise<void>)('rec_wb_plm')
+    await flushUi()
+    await realtime().mergeRemoteRecord('rec_wb_plm')
+    await flushUi()
+    expect(shown()).toBe(row('rec_wb_plm'))
+    const all = [onPatch()(F.notes, 'a')]
+    await step()
+    all.push(onPatch()(F.notes, 'b'))
+    await step()
+    await server.answerAll()
+    await Promise.all(all)
+    expect(writes()).toEqual([[F.notes, 'a', 5, 'stored v6'], [F.notes, 'b', 6, 'stored v7']])
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a new manual row comes onto the page, moved on by another user, while its first step is out: the next step, made on the copy, is sent on it as given and conflicts (as on main); the copy never claims a version past its data', async () => {
     await newRowOffThePage()
     const first = onPatch()(F.total, 6)
     await step()
@@ -1062,13 +1173,13 @@ describe('W-10R the drawer on the REAL grid composable (a stand-in server checks
     await server.release()
     await server.answerAll()
     await Promise.all([first, second])
-    expect(writes()).toEqual([[F.total, 6, 1, 'stored v2'], [F.total, 7, 3, 'stored v4']])
-    // Off the page again, the drawer shows the copy: it never had 'theirs', so it must not claim version 4.
+    expect(writes()).toEqual([[F.total, 6, 1, 'stored v2'], [F.total, 7, 2, 'VERSION_CONFLICT']])
+    // Off the page again, the drawer shows the copy: the first step's version, never 'theirs' (v3) without its data.
     server.state.page = server.state.page.filter((id) => id !== 'rec_wb_new')
     await realtime().reloadCurrentSheetPage()
     await flushUi()
     expect(row('rec_wb_new')).toBeUndefined()
-    expect(shown()).toMatchObject({ id: 'rec_wb_new', version: 3, data: { [F.total]: 7 } })
+    expect(shown()).toMatchObject({ id: 'rec_wb_new', version: 2, data: { [F.total]: 6 } })
   })
 })
 

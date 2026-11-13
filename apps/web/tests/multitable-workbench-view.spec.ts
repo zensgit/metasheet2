@@ -5399,12 +5399,15 @@ describe('MultitableWorkbench view wiring', () => {
         return failureFor(fieldId, message, failure)
       })
     }
+    /** The grid accepts the next save, telling the version it moved the record to, as the real `patchCell` does. */
     function acceptNextPatch() {
-      gridMock.patchCell.mockImplementation(async () => {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, _fieldId: string, _value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
         gridMock.error.value = null
+        options?.onCommitted?.(version + 1)
         return null
       })
     }
+    const COPY_SAVE = { onCommitted: expect.any(Function), chainVersion: false }
 
     it('422 with fieldErrors → NO toast, inline error under that field (no success toast either)', async () => {
       await openRec1()
@@ -5564,11 +5567,12 @@ describe('MultitableWorkbench view wiring', () => {
     function heldPatches(row: { data: Record<string, unknown> } | null) {
       const answers: Array<(failure: unknown) => void> = []
       const calls: Array<[string, unknown, number]> = []
-      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number) => {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
         calls.push([fieldId, value, version])
         if (row) row.data[fieldId] = value
         const failure = await new Promise((resolve) => { answers.push(resolve) })
         gridMock.error.value = null
+        if (!failure) options?.onCommitted?.(version + 1)
         return failure
       })
       return { answers, calls }
@@ -5584,7 +5588,8 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version])
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
     })
 
     it('a record opened by its link before the page\'s rows came: the drawer shows its copy until the rows hold the record, then the grid\'s row, whose saves the grid chains', async () => {
@@ -5603,7 +5608,8 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version])
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
     })
 
     it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
@@ -5827,7 +5833,7 @@ describe('MultitableWorkbench view wiring', () => {
       host.recordId = 'rec_far'
       await flushUi(8)
       expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4, COPY_SAVE]])
       expect(document.activeElement).toBe(field)
     })
 
@@ -6071,7 +6077,7 @@ describe('MultitableWorkbench view wiring', () => {
       await patchFor('rec_remote')
       // version 4, plus one for the delete that ended while rec_2 was shown
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
     })
 
@@ -6097,8 +6103,8 @@ describe('MultitableWorkbench view wiring', () => {
       await patchFor('rec_remote')
       await patchFor('rec_remote')
       expect(gridMock.patchCell.mock.calls).toEqual([
-        ['rec_remote', 'fld_files', ['att_2'], 4],
-        ['rec_remote', 'fld_files', ['att_2'], 5],
+        ['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE],
+        ['rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE],
       ])
     })
 
@@ -6110,7 +6116,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
       acceptNextPatch()
       await patchFor('rec_remote')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
     })
 
     // --- a remove that ended after the drawer moved on also names the ids it took out ---
@@ -6157,7 +6163,7 @@ describe('MultitableWorkbench view wiring', () => {
       await openRemoteThenRec2(['att_1', 'att_2', 'att_3'])
       acceptNextPatch()
       await patchRemovedFor('rec_remote')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4, COPY_SAVE]])
     })
 
     // In the app the delete comes first, and it takes the id out of the deep-linked copy: the rebuild then has
