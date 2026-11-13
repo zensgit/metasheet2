@@ -521,8 +521,9 @@ const emit = defineEmits<{
   /** `recordId`: the record an attachment write was made on. The panel is reused across records, and the write
    *  can end after the drawer moved to another one. `removed`: for a remove or clear-all that ended after that, the
    *  ids it took out (the value is built from the list it started from; the workbench takes them out of the
-   *  record's list as it is now instead). */
-  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[]): void
+   *  record's list as it is now instead). `added`: for an upload that adds to the list, the ids it added (the
+   *  workbench adds them to the record's list as it is now, which may hold an attachment added meanwhile). */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]): void
   (e: 'comment-field', field: MetaField): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'open-person-picker', field: MetaField): void
@@ -1088,7 +1089,10 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
       if (shown()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds], recordId)
+    // An upload that adds to the list names the ids it added (`added` above); one that replaces the list is the
+    // new list as it is.
+    if (replaceExisting) emit('patch', fieldId, newIds, recordId)
+    else emit('patch', fieldId, [...existing, ...newIds], recordId, undefined, newIds)
   } catch (error: any) {
     if (shown()) setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {

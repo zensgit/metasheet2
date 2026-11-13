@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { useMultitableGrid } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
@@ -715,5 +715,118 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(grid.rows.value.map((record) => record.id)).toEqual(['r2'])
     expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
     expect(grid.conflict.value).toBeNull()
+  })
+
+  // --- the count of writes not yet answered (the workbench's leave-page prompts read it) ---
+
+  it('pendingCellWriteCount: a write counts from its call, while it waits and while it is out, until it is answered or replaced unsent by a newer write of its cell', async () => {
+    const { grid, server } = await setup([r1()])
+    const seen: number[] = []
+    watch(grid.pendingCellWriteCount, (count) => { seen.push(count) }, { flush: 'sync' })
+    expect(grid.pendingCellWriteCount.value).toBe(0)
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    // Out.
+    expect(grid.pendingCellWriteCount.value).toBe(1)
+    const replaced = grid.patchCell('r1', 'f2', 'y', 1)
+    // Waiting behind the first.
+    expect(grid.pendingCellWriteCount.value).toBe(2)
+    await server.tick()
+    expect(grid.pendingCellWriteCount.value).toBe(2)
+    void grid.patchCell('r1', 'f2', 'z', 1)
+    expect(await replaced).toBe(CELL_WRITE_SUPERSEDED)
+    // The replaced write no longer counts; the newer one waits in its place.
+    expect(grid.pendingCellWriteCount.value).toBe(2)
+    await server.answer()
+    // The first is answered; the newer one is out.
+    expect(server.sent.map((change) => change.value)).toEqual(['b', 'z'])
+    expect(grid.pendingCellWriteCount.value).toBe(1)
+    await server.answerAll()
+    expect(grid.pendingCellWriteCount.value).toBe(0)
+    // Reactive: every step was seen.
+    expect(seen).toEqual([1, 2, 3, 2, 1, 0])
+  })
+
+  it('pendingCellWriteCount: a rejected write is answered too', async () => {
+    const { grid, server } = await setup([r1()], { reject: () => true })
+    const write = grid.patchCell('r1', 'f1', 'b', 1)
+    expect(grid.pendingCellWriteCount.value).toBe(1)
+    await server.answerAll()
+    expect(await write).toMatchObject({ code: 'VALIDATION_ERROR' })
+    expect(grid.pendingCellWriteCount.value).toBe(0)
+  })
+
+  // --- retryConflict answers for itself: what its own write returned, not the shared `conflict` / `error` ---
+
+  /** Someone else moved r1 on, so the first write of f1 conflicts; `alsoOut` puts a write of f2 behind it, which is
+   *  out once the conflict is raised. */
+  async function conflictOnTitle(options: ServerOptions = {}, alsoOut = true) {
+    const context = await setup([r1()], options)
+    context.server.stored.get('r1')!.version = 2
+    const first = context.grid.patchCell('r1', 'f1', 'b', 1)
+    const other = alsoOut ? context.grid.patchCell('r1', 'f2', 'y', 1) : null
+    await context.server.answer()
+    expect(await first).toMatchObject({ fieldId: 'f1', code: 'VERSION_CONFLICT' })
+    expect(context.grid.conflict.value).toMatchObject({ recordId: 'r1', fieldId: 'f1', attemptedValue: 'b', serverVersion: 2 })
+    return { ...context, other }
+  }
+
+  it('a retry that waits behind a failing write of the record, and is then stored, returns true (the shared error is that write\'s)', async () => {
+    const { grid, server, other } = await conflictOnTitle({ reject: (change) => change.fieldId === 'f2' })
+    // The retry reloads the row (version 2), then waits its turn behind the write of f2, which is out.
+    const retry = grid.retryConflict()
+    await server.tick()
+    expect(server.sent.map((change) => change.fieldId)).toEqual(['f1', 'f2'])
+    await server.answer()
+    expect(await other).toMatchObject({ fieldId: 'f2', code: 'VALIDATION_ERROR' })
+    await server.answerAll()
+    expect(await retry).toBe(true)
+    expect(grid.error.value).toBe('Rejected')
+    expect(server.sent.map((change) => [change.fieldId, change.value, change.expectedVersion])).toEqual([['f1', 'b', 1], ['f2', 'y', 1], ['f1', 'b', 2]])
+    expect(server.stored.get('r1')).toEqual({ version: 3, data: expect.objectContaining({ f1: 'b', f2: 'x' }) })
+  })
+
+  it('a retry replaced unsent by a newer write of its cell returns false: it was not stored, and the newer write answers for the cell', async () => {
+    const { grid, server } = await conflictOnTitle()
+    const retry = grid.retryConflict()
+    await server.tick()
+    // The retry waits behind the write of f2; the cell is written again.
+    const newer = grid.patchCell('r1', 'f1', 'c', row(grid).version)
+    expect(await retry).toBe(false)
+    await server.answerAll()
+    expect(await newer).toBeNull()
+    expect(server.sent.map((change) => [change.fieldId, change.value])).toEqual([['f1', 'b'], ['f2', 'y'], ['f1', 'c']])
+    expect(server.stored.get('r1')!.data.f1).toBe('c')
+  })
+
+  it('a retry that is rejected returns its own failure, with its message', async () => {
+    const { grid, server } = await conflictOnTitle({}, false)
+    const retry = grid.retryConflict()
+    await server.tick()
+    expect(server.sent.map((change) => change.expectedVersion)).toEqual([1, 2])
+    // Changed again before the retry is stored.
+    server.stored.get('r1')!.version = 3
+    await server.answerAll()
+    expect(await retry).toMatchObject({ recordId: 'r1', fieldId: 'f1', code: 'VERSION_CONFLICT', message: 'Changed elsewhere' })
+    expect(grid.conflict.value).toMatchObject({ fieldId: 'f1', attemptedValue: 'b', serverVersion: 3 })
+    expect(server.stored.get('r1')!.data.f1).toBe('a')
+  })
+
+  it('a retry whose record is no longer on the page returns that message (no request is made); with no conflict there is nothing to retry', async () => {
+    const { grid, server } = await setup([r1()])
+    expect(await grid.retryConflict()).toBe(false)
+    grid.conflict.value = { recordId: 'r_gone', fieldId: 'f1', attemptedValue: 'b', message: 'Changed elsewhere' }
+    const result = await grid.retryConflict()
+    expect(typeof grid.error.value).toBe('string')
+    expect(result).toEqual({ message: grid.error.value })
+    expect(server.sent).toEqual([])
+  })
+
+  it('a retry the grid refuses locally (the row cannot be edited; no request is made) returns that refusal', async () => {
+    const { grid, server } = await setup([r1()])
+    grid.rowActionOverrides.value = { r1: { canEdit: false, canDelete: false, canComment: false } }
+    grid.conflict.value = { recordId: 'r1', fieldId: 'f1', attemptedValue: 'b', message: 'Changed elsewhere', serverVersion: 1 }
+    expect(await grid.retryConflict()).toEqual({ message: 'Record editing is not allowed for this row.' })
+    expect(server.sent).toEqual([])
+    expect(grid.pendingCellWriteCount.value).toBe(0)
   })
 })
