@@ -459,7 +459,10 @@ export default defineConfig({
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/authorization-input-serialization.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,
-      // users-locking functions, cascading foreign keys) against the migrated schema.
+      // users-locking functions, cascading foreign keys, the default expressions of the three
+      // users columns the classifier reads, views and materialized views over an input table, the
+      // list of foreign keys whose child is an input table, and tables that inherit from an input
+      // table or are a partition of one) against the migrated schema.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
       // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
       // tests/unit/authorization-input-lock.test.ts, the position by
