@@ -987,6 +987,18 @@ async function registerExternalSystem(token, systemId, tenantId) {
   if (!connection.ok) {
     return { status: connection.status, ok: false, body: null, code: '<not-run>', ...connectionResult }
   }
+  // Observed, not inferred: is the Connection a LIVE row in data_sources? The binding's connection_id
+  // FK points at data_sources(live_id), and the flag-ON restart reloads Connections from this table, so
+  // a 201 that left no row here is a Connection that exists only in the serving process's memory. Read
+  // over the application pool (DATABASE_URL), as a count only. Values-free: one boolean.
+  try {
+    connectionResult.connectionPersisted = await withApplicationPool(async (pool) => {
+      const res = await pool.query('SELECT count(*)::int AS n FROM data_sources WHERE live_id = $1', [connectionId])
+      return res.rows[0] && res.rows[0].n === 1
+    })
+  } catch {
+    connectionResult.connectionPersisted = 'unknown'
+  }
   const res = await requestJson('/api/integration/external-systems', {
     method: 'POST',
     token,
@@ -1690,9 +1702,10 @@ async function attemptS6ARealRun() {
       const baseToken = await getDevToken()
       const registered = await registerExternalSystem(baseToken, systemId)
       S.s6aConnectionRegistered = registered.connectionOk ? 'PASS' : 'FAIL'
+      S.s6aConnectionPersisted = String(registered.connectionPersisted ?? 'NOT_RUN')
       registeredOk = must('S6-A: external system registered', registered.ok,
         `connectionHttp=${registered.connectionStatus} connectionCode=${registered.connectionCode} `
-        + `http=${registered.status} code=${registered.code}`)
+        + `connectionPersisted=${S.s6aConnectionPersisted} http=${registered.status} code=${registered.code}`)
       // Diagnostic (Step 1 discipline applied to this next layer, not a guess): the run-time re-resolves
       // this SAME binding from the DB (externalSystemRegistry.getExternalSystemForSealedSnapshot) and,
       // since #5452, takes its credentials from the canonical Connection it names, never from the row.
@@ -2177,6 +2190,7 @@ async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, a
       const registered = await registerExternalSystem(baseToken, systemId, tenantId)
       registeredOk = must(`${label}: external system registered`, registered.ok,
         `connectionHttp=${registered.connectionStatus} connectionCode=${registered.connectionCode} `
+        + `connectionPersisted=${String(registered.connectionPersisted ?? 'NOT_RUN')} `
         + `http=${registered.status} code=${registered.code}`)
       if (registeredOk) {
         const fetched = await requestJson(`/api/integration/external-systems/${encodeURIComponent(systemId)}`,
