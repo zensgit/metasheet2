@@ -764,8 +764,9 @@ export const TASKS_FMT_ZH = {
   /** G2-core (design §4.1): placed tasks the status filter leaves out; moves still count them. */
   groupsHiddenByFilter: (count: number): string => `另有 ${count} 项已分组任务不在当前状态筛选中，未显示`,
   groupsHiddenBySearch: (count: number): string => `另有 ${count} 项已分组任务不在当前搜索结果中，未显示`,
-  /** The task list read stopped short of its total (the server sends the latest-updated page only). */
-  listTruncated: (shown: number, total: number): string => `共 ${total} 条任务，只显示最近更新的 ${shown} 条；可用状态筛选或搜索查找其余任务`,
+  /** The task list read stopped short of its total (the server sends the latest-updated page only, under the status
+   *  filter too, so only a title search reaches the others). */
+  listTruncated: (shown: number, total: number): string => `共 ${total} 条任务，只显示最近更新的 ${shown} 条；可按标题搜索查找其余任务`,
 }
 
 export type TasksFmt = typeof TASKS_FMT_ZH
@@ -800,7 +801,7 @@ export const TASKS_FMT_EN: { [K in keyof TasksFmt]: (...args: Parameters<TasksFm
     count === 1
       ? '1 grouped task is outside the status filter and not shown'
       : `${count} grouped tasks are outside the status filter and not shown`,
-  listTruncated: (shown, total) => `Showing the ${shown} most recently updated of ${total} tasks. Filter by status or search to find the others.`,
+  listTruncated: (shown, total) => `Showing the ${shown} most recently updated of ${total} tasks. Search by title to find the others.`,
 }
 
 /** Contract error code -> key of the plain-string table. Codes the M4 surfaces read with a
