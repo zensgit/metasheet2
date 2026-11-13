@@ -645,6 +645,7 @@
       :visible="recordLinkPickerVisible"
       :base-id="recordLinkPickerBaseId"
       :sheet-id="recordLinkPickerSheetId"
+      :display-field-ids="recordLinkPickerDisplayFieldIds"
       :current-record-id="recordLinkPickerCurrentId"
       @close="recordLinkPickerVisible = false"
       @confirm="onRecordLinkPicked"
@@ -715,6 +716,7 @@ import {
   parseRecordLinkValue,
   recordLinkBaseId,
   recordLinkSheetId,
+  recordLinkDisplayFieldIds,
 } from '../../approvals/recordLinkField'
 import ApprovalRecordLinkPicker from '../../approvals/components/ApprovalRecordLinkPicker.vue'
 import {
@@ -1585,6 +1587,11 @@ const recordLinkPickerBaseId = computed(() => {
 const recordLinkPickerSheetId = computed(() => {
   const field = recordLinkPickerField.value
   return field ? recordLinkSheetId(field) : ''
+})
+
+const recordLinkPickerDisplayFieldIds = computed<string[]>(() => {
+  const field = recordLinkPickerField.value
+  return field ? recordLinkDisplayFieldIds(field) : []
 })
 
 const recordLinkPickerCurrentId = computed<string | null>(() => {

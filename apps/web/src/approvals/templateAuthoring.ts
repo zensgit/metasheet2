@@ -36,7 +36,12 @@ import {
   validateDetailColumnsDraft,
   type DetailColumnDraft,
 } from './detailField'
-import { validateRecordLinkPinAgainstLoadedCatalog, visibilityReferenceBaseFieldId } from './recordLinkField'
+import {
+  RECORD_LINK_MAX_DISPLAY_FIELDS,
+  recordLinkDisplayFieldIdsFromProps,
+  validateRecordLinkPinAgainstLoadedCatalog,
+  visibilityReferenceBaseFieldId,
+} from './recordLinkField'
 import {
   conditionStoredValuePreview,
   conditionStoredValueNoteShown,
@@ -199,6 +204,12 @@ export interface FieldAuthoringDraft {
    */
   recordLinkBaseId: string
   recordLinkSheetId: string
+  /**
+   * Optional display columns for the filler's record picker (field ids of the pinned sheet, at
+   * most RECORD_LINK_MAX_DISPLAY_FIELDS, in display order). Empty = automatic label (props key
+   * omitted at build). Cleared whenever the target base or sheet changes.
+   */
+  recordLinkDisplayFieldIds: string[]
   /**
    * L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): formatted-number display
    * props. Meaningful only when `type === 'number'`. Props on the EXISTING `number` type — NOT a
@@ -468,6 +479,7 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
+    recordLinkDisplayFieldIds: [],
     numberCurrencySymbol: '',
     numberThousandsSeparator: false,
     numberUppercaseCny: false,
@@ -971,6 +983,7 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
     recordLinkBaseId: field.type === 'record-link' && typeof props.baseId === 'string' ? props.baseId : '',
     recordLinkSheetId: field.type === 'record-link' && typeof props.sheetId === 'string' ? props.sheetId : '',
+    recordLinkDisplayFieldIds: field.type === 'record-link' ? recordLinkDisplayFieldIdsFromProps(props) : [],
     // L8-C: typeof-guarded per key — a malformed stored value (wrong type) hydrates to the "unset"
     // default rather than throwing or coercing (mirrors numberFieldProps.ts's per-key discipline).
     // The backend now type-validates these three keys at publish (ApprovalProductService.ts), so a
@@ -2001,14 +2014,19 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         delete next.minRows
         delete next.maxRows
       }
-      // FWB-0 Layer 2: record-link props are exactly { baseId, sheetId } (OpenAPI
-      // RecordLinkFieldProps additionalProperties:false). Never spread original.props —
-      // retyping text→record-link (or any other type→record-link) must not resurrect
-      // stale unrelated keys (options-era displayField, etc.).
+      // FWB-0 Layer 2: record-link props are exactly { baseId, sheetId } plus the optional
+      // displayFieldIds (OpenAPI RecordLinkFieldProps additionalProperties:false). Never spread
+      // original.props — retyping text→record-link (or any other type→record-link) must not
+      // resurrect stale unrelated keys (options-era displayField, etc.). An empty display-column
+      // list omits the key, so an unconfigured field keeps the exact two-key shape.
       if (field.type === 'record-link') {
+        const displayFieldIds = recordLinkDisplayFieldIdsFromProps({
+          displayFieldIds: field.recordLinkDisplayFieldIds,
+        })
         next.props = {
           baseId: field.recordLinkBaseId.trim(),
           sheetId: field.recordLinkSheetId.trim(),
+          ...(displayFieldIds.length > 0 ? { displayFieldIds } : {}),
         }
       } else if (field.type === 'number') {
         // L8-C (§1.3): editor is authoritative for the three NEW display keys only — preserve
@@ -2084,6 +2102,7 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         const props = { ...next.props } as Record<string, unknown>
         delete props.baseId
         delete props.sheetId
+        delete props.displayFieldIds
         delete props.currencySymbol
         delete props.thousandsSeparator
         delete props.uppercaseCny
@@ -2626,6 +2645,15 @@ export function validateTemplateFormFields(
         // a minimal-mode caller simply never passes a loaded catalog and this branch never runs.
         const pinError = validateRecordLinkPinAgainstLoadedCatalog(field, recordLinkCatalog)
         if (pinError) errors.push(pinError)
+      }
+      const displayFieldIds = field.recordLinkDisplayFieldIds.map((id) => id.trim()).filter(Boolean)
+      if (
+        displayFieldIds.length > RECORD_LINK_MAX_DISPLAY_FIELDS
+        || new Set(displayFieldIds).size !== displayFieldIds.length
+      ) {
+        // Human label only (never the field id), same as the pin-mismatch copy.
+        const displayLabel = field.label.trim() || '该字段'
+        errors.push(`字段 ${displayLabel}（关联记录）显示列最多 ${RECORD_LINK_MAX_DISPLAY_FIELDS} 个且不能重复`)
       }
     }
     if (field.type === 'user') {

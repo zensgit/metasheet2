@@ -144,10 +144,12 @@ vi.mock('../src/approvals/api', () => ({
 // that contains a record-link field ever reaches it, so every other test in this file is unaffected.
 const listBasesSpy = vi.fn()
 const listSheetsSpy = vi.fn()
+const listFieldsSpy = vi.fn()
 vi.mock('../src/multitable/api/client', () => ({
   multitableClient: {
     listBases: (...args: unknown[]) => listBasesSpy(...args),
     listSheets: (...args: unknown[]) => listSheetsSpy(...args),
+    listFields: (...args: unknown[]) => listFieldsSpy(...args),
   },
 }))
 
@@ -5351,6 +5353,9 @@ describe('TemplateAuthoringView', () => {
         approvalCanvasV2.value = true
         listBasesSpy.mockReset()
         listSheetsSpy.mockReset()
+        // Picking a sheet loads its column list; default to an empty, successful list.
+        listFieldsSpy.mockReset()
+        listFieldsSpy.mockResolvedValue({ fields: [] })
         listBasesSpy.mockResolvedValue({
           bases: [
             { id: 'base_alpha', name: '销售空间' },
@@ -5433,6 +5438,87 @@ describe('TemplateAuthoringView', () => {
         }
         const linkField = payload.formSchema.fields.find((entry) => entry.type === 'record-link')
         expect(linkField?.props).toEqual({ baseId: 'base_alpha', sheetId: 'sheet_alpha_1' })
+      })
+
+      it('display columns: the view loads the target sheet columns once, the inspector picks them by name, and 保存草稿 pins displayFieldIds', async () => {
+        listFieldsSpy.mockReset()
+        listFieldsSpy.mockResolvedValue({
+          fields: [
+            { id: 'fld_project', name: '项目号', type: 'string' },
+            { id: 'fld_dwg', name: '图号', type: 'string' },
+            { id: 'fld_name', name: '名称', type: 'string' },
+            { id: 'fld_calc', name: '公式', type: 'formula' },
+          ],
+        })
+        await mountView()
+        setInput('approval-template-name', '关联物料审批')
+        await flushUi()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+        await flushUi()
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(1)
+        expect(listFieldsSpy).toHaveBeenCalledWith('sheet_alpha_1')
+        // Only text / number / single-select columns are offered, by name.
+        expect(optionTexts('approval-form-field-inspector-record-link-display-0')).toEqual([
+          '自动（默认规则）',
+          '项目号',
+          '图号',
+          '名称',
+        ])
+        await changeSelect('approval-form-field-inspector-record-link-display-0', 'fld_dwg')
+        await changeSelect('approval-form-field-inspector-record-link-display-1', 'fld_name')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = createTemplateSpy.mock.calls[0][0] as {
+          formSchema: { fields: Array<{ type: string; props?: unknown }> }
+        }
+        const linkField = payload.formSchema.fields.find((entry) => entry.type === 'record-link')
+        expect(linkField?.props).toEqual({
+          baseId: 'base_alpha',
+          sheetId: 'sheet_alpha_1',
+          displayFieldIds: ['fld_dwg', 'fld_name'],
+        })
+      })
+
+      it('display columns: a failed column load shows 重试 in the inspector; retry reloads through the view and the columns appear', async () => {
+        listFieldsSpy.mockReset()
+        listFieldsSpy.mockRejectedValueOnce(new Error('columns unavailable'))
+        listFieldsSpy.mockResolvedValue({
+          fields: [
+            { id: 'fld_dwg', name: '图号', type: 'string' },
+            { id: 'fld_name', name: '名称', type: 'string' },
+          ],
+        })
+        await mountView()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+        await flushUi()
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(1)
+        const error = byTestId('approval-form-field-inspector-record-link-display-error')
+        expect(error?.textContent).toContain('目标表的列加载失败，请重试')
+        expect(optionTexts('approval-form-field-inspector-record-link-display-0')).toEqual(['自动（默认规则）'])
+
+        byTestId<HTMLButtonElement>('approval-form-field-inspector-record-link-display-retry')!.click()
+        await flushUi()
+        await flushUi()
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(2)
+        expect(listFieldsSpy).toHaveBeenLastCalledWith('sheet_alpha_1')
+        expect(byTestId('approval-form-field-inspector-record-link-display-error')).toBeNull()
+        expect(optionTexts('approval-form-field-inspector-record-link-display-0')).toEqual([
+          '自动（默认规则）',
+          '图号',
+          '名称',
+        ])
       })
 
       it('retyping an existing field INTO record-link in the inspector reaches the same pickers (no configuration dead-end)', async () => {
@@ -5529,6 +5615,172 @@ describe('TemplateAuthoringView', () => {
         expect(listBasesSpy).toHaveBeenCalledTimes(2)
         expect(byTestId('approval-form-field-inspector-record-link-catalog-error')).toBeNull()
         expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间'])
+      })
+    })
+
+    describe('record-link display columns in the legacy inline editor (Designer 2.0 off)', () => {
+      const BASE_SELECT = 'approval-record-link-base-select'
+      const SHEET_SELECT = 'approval-record-link-sheet-select'
+      const DISPLAY_SELECT = (slot: number) => `approval-record-link-display-select-${slot}`
+
+      beforeEach(() => {
+        approvalCanvasV2.value = false
+        listBasesSpy.mockReset()
+        listSheetsSpy.mockReset()
+        listFieldsSpy.mockReset()
+        listBasesSpy.mockResolvedValue({
+          bases: [
+            { id: 'base_alpha', name: '销售空间' },
+            { id: 'base_beta', name: '客服空间' },
+          ],
+        })
+        listSheetsSpy.mockResolvedValue({
+          sheets: [
+            { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+            { id: 'sheet_alpha_2', name: '合同表', baseId: 'base_alpha' },
+            { id: 'sheet_beta_1', name: '工单表', baseId: 'base_beta' },
+          ],
+        })
+        listFieldsSpy.mockImplementation(async (sheetId: string) => {
+          if (sheetId === 'sheet_alpha_1') {
+            return {
+              fields: [
+                { id: 'fld_project', name: '项目号', type: 'string' },
+                { id: 'fld_dwg', name: '图号', type: 'string' },
+                { id: 'fld_name', name: '名称', type: 'string' },
+                { id: 'fld_calc', name: '公式', type: 'formula' },
+              ],
+            }
+          }
+          return {
+            fields: [
+              { id: 'fld_contract', name: '合同号', type: 'string' },
+              { id: 'fld_amount', name: '金额', type: 'number' },
+            ],
+          }
+        })
+      })
+
+      function byTestId<T extends HTMLElement = HTMLElement>(testid: string): T | null {
+        return container!.querySelector(`[data-testid="${testid}"]`) as T | null
+      }
+
+      function optionTexts(testid: string): string[] {
+        const select = byTestId<HTMLSelectElement>(testid)
+        return select ? Array.from(select.options).map((option) => option.textContent?.trim() ?? '') : []
+      }
+
+      function modelValue(testid: string): unknown {
+        const select = byTestId<HTMLSelectElement>(testid)
+        expect(select, `${testid} must be rendered`).not.toBeNull()
+        return JSON.parse(select!.getAttribute('data-model-value') ?? 'null')
+      }
+
+      async function changeSelect(testid: string, value: string): Promise<void> {
+        const select = byTestId<HTMLSelectElement>(testid)
+        expect(select, `${testid} must be rendered`).not.toBeNull()
+        select!.value = value
+        select!.dispatchEvent(new Event('change', { bubbles: true }))
+        await flushUi()
+      }
+
+      async function addRecordLinkPinnedTo(baseId: string, sheetId: string): Promise<void> {
+        byTestId('approval-field-palette-record-link')!.click()
+        await flushUi()
+        await changeSelect(BASE_SELECT, baseId)
+        await changeSelect(SHEET_SELECT, sheetId)
+        await flushUi()
+      }
+
+      it('two picked columns reach the saved props; changing the sheet or the base clears them', async () => {
+        await mountView()
+        expect(byTestId('approval-form-designer-v2')).toBeNull()
+        setInput('approval-template-name', '关联物料审批')
+        await flushUi()
+        await addRecordLinkPinnedTo('base_alpha', 'sheet_alpha_1')
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(1)
+        expect(listFieldsSpy).toHaveBeenCalledWith('sheet_alpha_1')
+        // Text / number / single-select columns only, by name.
+        expect(optionTexts(DISPLAY_SELECT(0))).toEqual(['项目号', '图号', '名称'])
+        expect(byTestId(DISPLAY_SELECT(1))).toBeNull()
+        await changeSelect(DISPLAY_SELECT(0), 'fld_dwg')
+        // A column already used in another slot is not offered again.
+        expect(optionTexts(DISPLAY_SELECT(1))).toEqual(['项目号', '名称'])
+        await changeSelect(DISPLAY_SELECT(1), 'fld_name')
+        expect(modelValue(DISPLAY_SELECT(0))).toBe('fld_dwg')
+        expect(modelValue(DISPLAY_SELECT(1))).toBe('fld_name')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = createTemplateSpy.mock.calls[0][0] as {
+          formSchema: { fields: Array<{ type: string; props?: unknown }> }
+        }
+        expect(payload.formSchema.fields.find((entry) => entry.type === 'record-link')?.props).toEqual({
+          baseId: 'base_alpha',
+          sheetId: 'sheet_alpha_1',
+          displayFieldIds: ['fld_dwg', 'fld_name'],
+        })
+
+        // Another sheet in the same base: the columns belonged to the old sheet and are cleared.
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_2')
+        await flushUi()
+        expect(listFieldsSpy).toHaveBeenLastCalledWith('sheet_alpha_2')
+        expect(modelValue(DISPLAY_SELECT(0))).toBeNull()
+        expect(byTestId(DISPLAY_SELECT(1))).toBeNull()
+        expect(optionTexts(DISPLAY_SELECT(0))).toEqual(['合同号', '金额'])
+
+        // Pick one again, then move to another base: the sheet and its columns are both cleared.
+        await changeSelect(DISPLAY_SELECT(0), 'fld_contract')
+        expect(modelValue(DISPLAY_SELECT(0))).toBe('fld_contract')
+        await changeSelect(BASE_SELECT, 'base_beta')
+        expect(byTestId('approval-record-link-display-config')).toBeNull()
+        await changeSelect(SHEET_SELECT, 'sheet_beta_1')
+        await flushUi()
+        expect(modelValue(DISPLAY_SELECT(0))).toBeNull()
+        expect(byTestId(DISPLAY_SELECT(1))).toBeNull()
+
+        // The next save carries the two-key props only.
+        const saveCallsBefore = createTemplateSpy.mock.calls.length + updateTemplateSpy.mock.calls.length
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(createTemplateSpy.mock.calls.length + updateTemplateSpy.mock.calls.length).toBe(saveCallsBefore + 1)
+        const nextPayload = (updateTemplateSpy.mock.calls.at(-1)?.[1] ?? createTemplateSpy.mock.calls.at(-1)?.[0]) as {
+          formSchema: { fields: Array<{ type: string; props?: unknown }> }
+        }
+        expect(nextPayload.formSchema.fields.find((entry) => entry.type === 'record-link')?.props).toEqual({
+          baseId: 'base_beta',
+          sheetId: 'sheet_beta_1',
+        })
+      })
+
+      it('a failed column load shows 重试; retry reloads through the view and the columns appear', async () => {
+        listFieldsSpy.mockReset()
+        listFieldsSpy.mockRejectedValueOnce(new Error('columns unavailable'))
+        listFieldsSpy.mockResolvedValue({
+          fields: [
+            { id: 'fld_dwg', name: '图号', type: 'string' },
+            { id: 'fld_name', name: '名称', type: 'string' },
+          ],
+        })
+        await mountView()
+        await addRecordLinkPinnedTo('base_alpha', 'sheet_alpha_1')
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(1)
+        expect(byTestId('approval-record-link-display-error')?.textContent).toContain('目标表的列加载失败，请重试')
+        expect(optionTexts(DISPLAY_SELECT(0))).toEqual([])
+
+        byTestId<HTMLButtonElement>('approval-record-link-display-retry')!.click()
+        await flushUi()
+        await flushUi()
+
+        expect(listFieldsSpy).toHaveBeenCalledTimes(2)
+        expect(listFieldsSpy).toHaveBeenLastCalledWith('sheet_alpha_1')
+        expect(byTestId('approval-record-link-display-error')).toBeNull()
+        expect(optionTexts(DISPLAY_SELECT(0))).toEqual(['图号', '名称'])
       })
     })
   })

@@ -21472,6 +21472,8 @@ export interface components {
              *     Must be non-blank after trim — whitespace-only is invalid.
              */
             sheetId: string;
+            /** @description Display columns; first is the label. */
+            displayFieldIds?: string[];
         };
         DepartmentFieldProps: {
             /** @enum {string} */
@@ -23577,6 +23579,8 @@ export interface operations {
                 sheetId: string;
                 /** @description Optional case-insensitive search against the effective display label. */
                 search?: string;
+                /** @description Comma-separated display field ids. */
+                displayFieldIds?: string;
                 limit?: number;
                 offset?: number;
             };
@@ -23598,6 +23602,8 @@ export interface operations {
                             id: string;
                             /** @description Human label from visible source fields, or a generic placeholder. */
                             display: string;
+                            /** @description Other display column values, joined. */
+                            subtitle?: string;
                         }[];
                         page: {
                             limit: number;

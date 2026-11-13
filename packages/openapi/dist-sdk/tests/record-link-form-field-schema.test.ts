@@ -22,6 +22,10 @@ describe('OpenAPI record-link FormField schemas (generated JSON)', () => {
           pattern?: string
           enum?: string[]
           $ref?: string
+          minItems?: number
+          maxItems?: number
+          uniqueItems?: boolean
+          items?: { type?: string; minLength?: number; pattern?: string }
         }>
         required?: string[]
         oneOf?: Array<{ $ref?: string }>
@@ -49,6 +53,22 @@ describe('OpenAPI record-link FormField schemas (generated JSON)', () => {
       expect(re.test('base-1'), `${pin} accepts id`).toBe(true)
       expect(re.test('a'), `${pin} accepts single non-ws`).toBe(true)
     }
+  })
+
+  it('RecordLinkFieldProps: optional displayFieldIds is 1-3 distinct non-blank ids; pins stay the only required keys', () => {
+    const props = schemas.RecordLinkFieldProps
+    expect(Object.keys(props?.properties ?? {}).sort()).toEqual(['baseId', 'displayFieldIds', 'sheetId'])
+    expect(props?.required).toEqual(['baseId', 'sheetId'])
+    const cols = props?.properties?.displayFieldIds
+    expect(cols?.type).toBe('array')
+    expect(cols?.minItems).toBe(1)
+    expect(cols?.maxItems).toBe(3)
+    expect(cols?.uniqueItems).toBe(true)
+    expect(cols?.items?.type).toBe('string')
+    expect(cols?.items?.minLength).toBeGreaterThanOrEqual(1)
+    const re = new RegExp(cols!.items!.pattern!)
+    expect(re.test('   ')).toBe(false)
+    expect(re.test('fld_1')).toBe(true)
   })
 
   it('FormFieldRecordLink: additionalProperties false; no columns; props ref RecordLinkFieldProps', () => {
