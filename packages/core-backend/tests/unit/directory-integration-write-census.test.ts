@@ -24,13 +24,15 @@
  * read.
  *
  * Two further closed censuses use the same population and scanner:
- *  - statements that write `org_directory_routing_policy`: the two inserts of a policy set, and the one
- *    delete, which runs inside a pull-source gate transaction (under the organisation lock, after the
- *    source count). No other statement inserts, updates or deletes a policy row.
- *  - holders of the organisation lock: the lock statement is built in the gate module only, and the two
- *    functions that open a gate transaction are called from the listed call sites only. The modules are
- *    reached through named imports, so a caller cannot be hidden behind a namespace, a re-export or a
- *    runtime `require`.
+ *  - statements that write `org_directory_routing_policy`: the two inserts of a policy set, in the route,
+ *    and the one delete, which the gate module issues inside a pull-source gate transaction (under the
+ *    organisation lock, after the source count). No other statement inserts, updates or deletes a policy
+ *    row.
+ *  - holders of the organisation lock: the lock statement is built in the gate module only; the function
+ *    that opens a gate transaction is called inside the gate module only; and the two functions the gate
+ *    module offers are called from the listed call sites only. The modules are reached through named
+ *    imports, so a caller cannot be hidden behind a namespace, a re-export or a runtime `require`, and a
+ *    lock name is not bound to another name inside the module that defines it either.
  */
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -43,7 +45,9 @@ const SRC_ROOT = join(__dirname, '../../src')
 const TABLE = 'directory_integrations'
 const POLICY_TABLE = 'org_directory_routing_policy'
 const GATE_FUNCTION = 'runGatedPullSourceWrite'
+/** Private to the gate module: opens a gate transaction and runs its second argument under the organisation lock. */
 const GATE_TRANSACTION_FUNCTION = 'runPullSourceGateTransaction'
+const GATE_CLEAR_FUNCTION = 'runGatedRoutingPolicyClear'
 /** The functions that run their second argument inside a gate transaction, under the organisation lock. */
 const GATE_ENTRY_FUNCTIONS = [GATE_FUNCTION, GATE_TRANSACTION_FUNCTION] as const
 /** Columns whose value decides whether a row is an active pull source of an organisation, and of which one. */
@@ -77,7 +81,10 @@ const CARD = 'integrations/dingtalk/approval-card-config.ts'
 
 const CLASSIFIED: readonly Classification[] = [
   { path: SYNC, owner: 'createDirectoryIntegration', kind: 'insert', contains: 'VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())', via: 'gate' },
-  { path: SYNC, owner: 'updateDirectoryIntegration', kind: 'update-source-columns', contains: 'WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11', via: 'gate' },
+  // The save is one statement in two complete texts: with the locked-status guard inside a gate
+  // transaction, and without it outside one.
+  { path: SYNC, owner: 'updateDirectoryIntegration', kind: 'update-source-columns', contains: 'WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11 AND status = $12\n', via: 'gate' },
+  { path: SYNC, owner: 'updateDirectoryIntegration', kind: 'update-source-columns', contains: 'WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11\n', via: 'gate' },
   {
     path: SYNC, owner: 'getOrCreateLocalIntegrationInTransaction', kind: 'update-source-columns',
     contains: "SET status = 'active', updated_at = NOW()", via: 'local-anchor',
@@ -391,7 +398,7 @@ describe('census of statements that write directory_integrations', () => {
     expect(members).toHaveLength(CLASSIFIED.length)
     const byKind = (kind: WriteKind) => members.filter((member) => member.kind === kind).length
     expect({ insert: byKind('insert'), delete: byKind('delete'), source: byKind('update-source-columns'), other: byKind('update-other-columns'), builder: byKind('query-builder') })
-      .toEqual({ insert: 2, delete: 0, source: 2, other: 8, builder: 0 })
+      .toEqual({ insert: 2, delete: 0, source: 3, other: 8, builder: 0 })
   })
 
   it('the statements that decide an organisation\'s pull sources are the two gated writes and the local anchor', () => {
@@ -400,9 +407,19 @@ describe('census of statements that write directory_integrations', () => {
       'createDirectoryIntegration:insert:gate',
       'getOrCreateLocalIntegrationInTransaction:insert:direct',
       'getOrCreateLocalIntegrationInTransaction:update-source-columns:direct',
+      // The save, in its two texts; both sit in the one function handed to the gate.
+      'updateDirectoryIntegration:update-source-columns:gate',
       'updateDirectoryIntegration:update-source-columns:gate',
     ])
     expect(deciding.every((member) => member.path === SYNC)).toBe(true)
+  })
+
+  it('the two texts of the save differ by the locked-status guard and nothing else', () => {
+    const texts = population(SOURCE).filter((member) => member.owner === 'updateDirectoryIntegration' && member.kind === 'update-source-columns').map((member) => member.text)
+    expect(texts).toHaveLength(2)
+    const [guarded, plain] = texts[0].includes('AND status = $12') ? texts : [texts[1], texts[0]]
+    expect(plain).not.toContain('$12')
+    expect(guarded.replace(' AND status = $12', '')).toBe(plain)
   })
 
   it('the gate module itself writes no statement on the table', () => {
@@ -547,13 +564,15 @@ describe('census of statements that write directory_integrations', () => {
 
 const ROUTING_POLICY_ROUTE = 'routes/admin-directory-routing-policy.ts'
 const ROUTING_POLICY_ROUTER = 'adminDirectoryRoutingPolicyRouter'
+/** The module that issues the delete of a policy clear: the gate module, in its own gate transaction. */
+const POLICY_CLEAR_MODULE = 'directory/pull-source-write-gate.ts'
 
 /**
  * Every statement in source that inserts, updates or deletes a policy row. `inGateTransaction` says
  * whether the statement must sit in the callback handed to the gate transaction function.
  */
 const POLICY_CLASSIFIED: ReadonlyArray<{ path: string; owner: string; kind: WriteKind; contains: string; inGateTransaction: boolean }> = [
-  { path: ROUTING_POLICY_ROUTE, owner: ROUTING_POLICY_ROUTER, kind: 'delete', contains: 'DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2', inGateTransaction: true },
+  { path: POLICY_CLEAR_MODULE, owner: GATE_CLEAR_FUNCTION, kind: 'delete', contains: 'DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2', inGateTransaction: true },
   { path: ROUTING_POLICY_ROUTE, owner: ROUTING_POLICY_ROUTER, kind: 'insert', contains: 'ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq DO NOTHING', inGateTransaction: false },
   {
     path: ROUTING_POLICY_ROUTE, owner: ROUTING_POLICY_ROUTER, kind: 'insert',
@@ -590,25 +609,29 @@ describe('census of statements that write org_directory_routing_policy', () => {
     const members = population(SOURCE, POLICY_TABLE)
     expect(policyCensus(SOURCE)).toEqual([])
     expect(members.map((member) => `${member.path}:${member.owner}:${member.kind}:${member.passedTo ?? 'direct'}`).sort()).toEqual([
-      `${ROUTING_POLICY_ROUTE}:${ROUTING_POLICY_ROUTER}:delete:${GATE_TRANSACTION_FUNCTION}`,
+      `${POLICY_CLEAR_MODULE}:${GATE_CLEAR_FUNCTION}:delete:${GATE_TRANSACTION_FUNCTION}`,
       `${ROUTING_POLICY_ROUTE}:${ROUTING_POLICY_ROUTER}:insert:direct`,
       `${ROUTING_POLICY_ROUTE}:${ROUTING_POLICY_ROUTER}:insert:direct`,
     ])
   })
 
-  it('the delete follows the source count and the refusal inside the same callback', () => {
-    const route = SOURCE.find((file) => file.path === ROUTING_POLICY_ROUTE)
-    expect(route).toBeDefined()
-    const source = ts.createSourceFile(ROUTING_POLICY_ROUTE, route!.text, ts.ScriptTarget.Latest, true)
+  it('the delete follows the source count and the refusal inside the same gate transaction body', () => {
+    const gate = SOURCE.find((file) => file.path === POLICY_CLEAR_MODULE)
+    expect(gate).toBeDefined()
+    const source = ts.createSourceFile(POLICY_CLEAR_MODULE, gate!.text, ts.ScriptTarget.Latest, true)
     const bodies: string[] = []
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === GATE_TRANSACTION_FUNCTION) {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === GATE_TRANSACTION_FUNCTION && ownerOf(node) === GATE_CLEAR_FUNCTION) {
         bodies.push(node.arguments[1]?.getText(source) ?? '')
       }
       ts.forEachChild(node, visit)
     }
     visit(source)
+    // The clear opens one gate transaction, and the route that asks for a clear issues no statement of it.
     expect(bodies).toHaveLength(1)
+    const route = SOURCE.find((file) => file.path === ROUTING_POLICY_ROUTE)
+    expect(route!.text).toContain(`await ${GATE_CLEAR_FUNCTION}(orgId, purpose)`)
+    expect(route!.text).not.toMatch(/DELETE\s+FROM/i)
     const body = bodies[0]
     const count = body.indexOf('countActivePullSources(')
     const refusal = body.indexOf("if (activeSources >= PULL_SOURCE_THRESHOLD) return { kind: 'blocked' }")
@@ -642,24 +665,31 @@ describe('census of statements that write org_directory_routing_policy', () => {
   }
 
   it('positive control: the delete taken out of the gate transaction, or a second delete inside it, fails the census', () => {
-    const outside = withText(SOURCE, ROUTING_POLICY_ROUTE, (text) => edited(
+    const outside = withText(SOURCE, POLICY_CLEAR_MODULE, (text) => edited(
       text,
-      'const outcome = await runPullSourceGateTransaction<ClearOutcome>(orgId, async (client) => {',
-      'const outcome = await transaction<ClearOutcome>(async (client) => {',
+      'return runPullSourceGateTransaction<RoutingPolicyClearOutcome>(orgId, async (client) => {',
+      'return transaction<RoutingPolicyClearOutcome>(async (client) => {',
     ))
-    expect(policyCensus(outside).join('\n')).toContain(`(delete in ${ROUTING_POLICY_ROUTER}) is not in the callback of ${GATE_TRANSACTION_FUNCTION}`)
-    const second = withText(SOURCE, ROUTING_POLICY_ROUTE, (text) => edited(
+    expect(policyCensus(outside).join('\n')).toContain(`(delete in ${GATE_CLEAR_FUNCTION}) is not in the callback of ${GATE_TRANSACTION_FUNCTION}`)
+    const second = withText(SOURCE, POLICY_CLEAR_MODULE, (text) => edited(
       text,
-      "          if (typeof previous !== 'string') return { kind: 'absent' }\n",
-      "          if (typeof previous !== 'string') return { kind: 'absent' }\n          await client.query(`DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2`, [orgId, purpose])\n",
+      "    if (typeof previous !== 'string') return { kind: 'absent' }\n",
+      "    if (typeof previous !== 'string') return { kind: 'absent' }\n    await client.query(`DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2`, [orgId, purpose])\n",
     ))
     expect(policyCensus(second).join('\n')).toContain('matches 2 statements')
-    const insertInGate = withText(SOURCE, ROUTING_POLICY_ROUTE, (text) => edited(
+    const insertInGate = withText(SOURCE, POLICY_CLEAR_MODULE, (text) => edited(
       text,
-      "          if (typeof previous !== 'string') return { kind: 'absent' }\n",
-      "          if (typeof previous !== 'string') return { kind: 'absent' }\n          await client.query(`INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq DO NOTHING`, [orgId, purpose, previous])\n",
+      "    if (typeof previous !== 'string') return { kind: 'absent' }\n",
+      "    if (typeof previous !== 'string') return { kind: 'absent' }\n    await client.query(`INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq DO NOTHING`, [orgId, purpose, previous])\n",
     ))
-    expect(policyCensus(insertInGate).join('\n')).toMatch(/is in a gate callback it is not classified for|matches 2 statements/)
+    expect(policyCensus(insertInGate).join('\n')).toMatch(/is not classified exactly once/)
+    // The delete back in the route, outside any gate transaction.
+    const inRoute = withText(SOURCE, ROUTING_POLICY_ROUTE, (text) => edited(
+      text,
+      `        const outcome = await ${GATE_CLEAR_FUNCTION}(orgId, purpose)\n`,
+      `        const outcome = await ${GATE_CLEAR_FUNCTION}(orgId, purpose)\n        await query(\`DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2\`, [orgId, purpose])\n`,
+    ))
+    expect(policyCensus(inRoute).join('\n')).toContain(`(delete in ${ROUTING_POLICY_ROUTER}) is not classified exactly once`)
   })
 
   it('db/migrations holds statements on the table that the scanner sees', () => {
@@ -678,14 +708,19 @@ const LOCK_MODULES = [RULE_MODULE, GATE_MODULE] as const
 
 /**
  * The names through which the organisation lock can be taken, the module that defines each, and every
- * call site: file → number of direct calls. A call site in the defining module is listed too.
+ * call site: file → number of direct calls. A call site in the defining module is listed too. `reads` is
+ * how often the defining module itself names it other than to declare it or call it; anything above that
+ * number is the name being bound to another one.
  */
-const LOCK_NAMES: Readonly<Record<string, { definedIn: string; calls: Readonly<Record<string, number>> }>> = {
-  directoryOrgLockSql: { definedIn: RULE_MODULE, calls: { [GATE_MODULE]: 1 } },
-  directoryOrgLockKey: { definedIn: RULE_MODULE, calls: {} },
-  DIRECTORY_ORG_LOCK_KEY_PREFIX: { definedIn: RULE_MODULE, calls: {} },
-  [GATE_TRANSACTION_FUNCTION]: { definedIn: GATE_MODULE, calls: { [GATE_MODULE]: 1, [ROUTING_POLICY_ROUTE]: 1 } },
-  [GATE_FUNCTION]: { definedIn: GATE_MODULE, calls: { [SYNC]: 2 } },
+const LOCK_NAMES: Readonly<Record<string, { definedIn: string; calls: Readonly<Record<string, number>>; reads: number }>> = {
+  directoryOrgLockSql: { definedIn: RULE_MODULE, calls: { [GATE_MODULE]: 1 }, reads: 0 },
+  directoryOrgLockKey: { definedIn: RULE_MODULE, calls: {}, reads: 0 },
+  // The key helper and the lock statement builder each interpolate the prefix once.
+  DIRECTORY_ORG_LOCK_KEY_PREFIX: { definedIn: RULE_MODULE, calls: {}, reads: 2 },
+  // Private to the gate module: one call per kind of gate transaction (a gated write, a policy clear).
+  [GATE_TRANSACTION_FUNCTION]: { definedIn: GATE_MODULE, calls: { [GATE_MODULE]: 2 }, reads: 0 },
+  [GATE_FUNCTION]: { definedIn: GATE_MODULE, calls: { [SYNC]: 2 }, reads: 0 },
+  [GATE_CLEAR_FUNCTION]: { definedIn: GATE_MODULE, calls: { [ROUTING_POLICY_ROUTE]: 1 }, reads: 0 },
 }
 
 const LOCK_NAME_SET: ReadonlySet<string> = new Set(Object.keys(LOCK_NAMES))
@@ -696,6 +731,7 @@ const isLockModuleSpecifier = (specifier: string): boolean => /(^|\/)pull-source
 function lockHolderCensus(files: SourceFile[]): string[] {
   const offences: string[] = []
   const calls = new Map<string, Map<string, number>>([...LOCK_NAME_SET].map((name) => [name, new Map()]))
+  const reads = new Map<string, number>([...LOCK_NAME_SET].map((name) => [name, 0]))
   for (const file of files) {
     if (!file.text.includes('pull-source-') && ![...LOCK_NAME_SET].some((name) => file.text.includes(name))) continue
     const source = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true)
@@ -726,22 +762,31 @@ function lockHolderCensus(files: SourceFile[]): string[] {
         const parent = node.parent
         const isCall = ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node
         const isPlainImport = ts.isIdentifier(node) && ts.isImportSpecifier(parent) && parent.name === node && parent.propertyName === undefined
+        // The declaration that defines the name, in the module that defines it.
+        const isDefinition = file.path === LOCK_NAMES[named].definedIn && ts.isIdentifier(node)
+          && (ts.isFunctionDeclaration(parent) || ts.isVariableDeclaration(parent)) && parent.name === node
+          && parent.getSourceFile().statements.some((statement) => statement === parent || (ts.isVariableStatement(statement) && statement.declarationList === parent.parent))
         if (isCall) {
           const perFile = calls.get(named)!
           perFile.set(file.path, (perFile.get(file.path) ?? 0) + 1)
-        } else if (file.path !== LOCK_NAMES[named].definedIn && !isPlainImport) {
-          offences.push(`${at(node)} uses ${named} other than by importing it under its own name and calling it`)
+        } else if (file.path !== LOCK_NAMES[named].definedIn) {
+          if (!isPlainImport) offences.push(`${at(node)} uses ${named} other than by importing it under its own name and calling it`)
+        } else if (!isDefinition) {
+          reads.set(named, reads.get(named)! + 1)
         }
       }
       ts.forEachChild(node, visit)
     }
     visit(source)
   }
-  for (const [name, { calls: expected }] of Object.entries(LOCK_NAMES)) {
+  for (const [name, { definedIn, calls: expected, reads: expectedReads }] of Object.entries(LOCK_NAMES)) {
     const found = Object.fromEntries([...calls.get(name)!.entries()].sort())
     const wanted = Object.fromEntries(Object.entries(expected).sort())
     if (JSON.stringify(found) !== JSON.stringify(wanted)) {
       offences.push(`${name} is called from ${JSON.stringify(found)}, expected ${JSON.stringify(wanted)}`)
+    }
+    if (reads.get(name) !== expectedReads) {
+      offences.push(`${name} is named ${reads.get(name)} time(s) in ${definedIn} other than to declare or call it, expected ${expectedReads}`)
     }
   }
   return offences
@@ -776,6 +821,16 @@ describe('census of holders of the organisation lock', () => {
       form: 'a direct call of the gated write function',
       code: "declare function runGatedPullSourceWrite(target: unknown, write: () => Promise<unknown>): Promise<unknown>\nexport const syntheticHolder2 = () => runGatedPullSourceWrite({}, async () => undefined)",
       expected: /runGatedPullSourceWrite is called from /,
+    },
+    {
+      form: 'a direct call of the policy clear',
+      code: "declare function runGatedRoutingPolicyClear(orgId: string, purpose: string): Promise<unknown>\nexport const syntheticHolder12 = () => runGatedRoutingPolicyClear('org', 'approval_routing')",
+      expected: /runGatedRoutingPolicyClear is called from /,
+    },
+    {
+      form: 'the policy clear bound to another name',
+      code: "import { runGatedRoutingPolicyClear as _unused13 } from '../directory/pull-source-write-gate'\nexport const syntheticHolder13 = _unused13",
+      expected: /uses runGatedRoutingPolicyClear other than by importing it under its own name and calling it/,
     },
     {
       form: 'a direct call of the lock statement builder',
@@ -849,9 +904,72 @@ describe('census of holders of the organisation lock', () => {
   it('positive control: a call removed from a listed call site fails the census', () => {
     const removed = withText(SOURCE, ROUTING_POLICY_ROUTE, (text) => edited(
       text,
-      'const outcome = await runPullSourceGateTransaction<ClearOutcome>(orgId, async (client) => {',
-      'const outcome = await transaction<ClearOutcome>(async (client) => {',
+      `const outcome = await ${GATE_CLEAR_FUNCTION}(orgId, purpose)`,
+      "const outcome = await Promise.resolve({ kind: 'absent' as const })",
     ))
-    expect(lockHolderCensus(removed).join('\n')).toContain(`${GATE_TRANSACTION_FUNCTION} is called from {"${GATE_MODULE}":1}`)
+    expect(lockHolderCensus(removed).join('\n')).toContain(`${GATE_CLEAR_FUNCTION} is called from {}`)
+    const withoutTransaction = withText(SOURCE, GATE_MODULE, (text) => edited(
+      text,
+      'return runPullSourceGateTransaction<RoutingPolicyClearOutcome>(orgId, async (client) => {',
+      'return transaction<RoutingPolicyClearOutcome>(async (client) => {',
+    ))
+    expect(lockHolderCensus(withoutTransaction).join('\n')).toContain(`${GATE_TRANSACTION_FUNCTION} is called from {"${GATE_MODULE}":1}`)
+  })
+
+  const BOUND_IN_DEFINING_MODULE: ReadonlyArray<{ form: string; path: string; code: string; expected: string }> = [
+    {
+      form: 'the transaction opener exported under another name',
+      path: GATE_MODULE,
+      code: 'export const openGate = runPullSourceGateTransaction',
+      expected: `${GATE_TRANSACTION_FUNCTION} is named 1 time(s) in ${GATE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the transaction opener in an export clause',
+      path: GATE_MODULE,
+      code: 'export { runPullSourceGateTransaction as openGate }',
+      expected: `${GATE_TRANSACTION_FUNCTION} is named 1 time(s) in ${GATE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the transaction opener held in an exported object',
+      path: GATE_MODULE,
+      code: 'export const gate = { open: runPullSourceGateTransaction }',
+      expected: `${GATE_TRANSACTION_FUNCTION} is named 1 time(s) in ${GATE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the gated write under another name',
+      path: GATE_MODULE,
+      code: 'export const writeGated = runGatedPullSourceWrite',
+      expected: `${GATE_FUNCTION} is named 1 time(s) in ${GATE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the lock statement builder under another name',
+      path: RULE_MODULE,
+      code: 'export const lockSql = directoryOrgLockSql',
+      expected: `directoryOrgLockSql is named 1 time(s) in ${RULE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the lock key helper under another name',
+      path: RULE_MODULE,
+      code: 'export const lockKey = directoryOrgLockKey',
+      expected: `directoryOrgLockKey is named 1 time(s) in ${RULE_MODULE} other than to declare or call it, expected 0`,
+    },
+    {
+      form: 'the lock key prefix copied into another constant',
+      path: RULE_MODULE,
+      code: 'export const ORG_LOCK_PREFIX = DIRECTORY_ORG_LOCK_KEY_PREFIX',
+      expected: `DIRECTORY_ORG_LOCK_KEY_PREFIX is named 3 time(s) in ${RULE_MODULE} other than to declare or call it, expected 2`,
+    },
+  ]
+  for (const { form, path, code, expected } of BOUND_IN_DEFINING_MODULE) {
+    it(`positive control (${form}): a lock name bound to another name in the module that defines it fails the census`, () => {
+      expect(lockHolderCensus(withText(SOURCE, path, (text) => `${text}\n${code}\n`)).join('\n')).toContain(expected)
+    })
+  }
+
+  it('positive control: a further call of a lock name inside the module that defines it fails the census', () => {
+    const third = withText(SOURCE, GATE_MODULE, (text) => `${text}\nexport const openForOrg = (orgId: string) => runPullSourceGateTransaction(orgId, async () => undefined)\n`)
+    expect(lockHolderCensus(third).join('\n')).toContain(`${GATE_TRANSACTION_FUNCTION} is called from {"${GATE_MODULE}":3}`)
+    const secondLock = withText(SOURCE, RULE_MODULE, (text) => `${text}\nexport const lockNow = (client: { query: (sql: string) => unknown }) => client.query(directoryOrgLockSql())\n`)
+    expect(lockHolderCensus(secondLock).join('\n')).toContain('directoryOrgLockSql is called from')
   })
 })

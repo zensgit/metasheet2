@@ -3,8 +3,18 @@
  * remove the organisation's approval-routing policy, is decided and carried out.
  *
  * Invariants of this module:
- *  - It depends on the pull-source rule module and the database module only. It does not import the
- *    directory sync module, so that module (and any provider entry) can call it without a cycle.
+ *  - It imports the pull-source rule module, the database module and the pull-source gate marker
+ *    module, and nothing else. It does not import the directory sync module, so that module (and any
+ *    provider entry) can call it without a cycle.
+ *  - A caller hands it two kinds of function and no other: the `write` of a gated write, and `joins`,
+ *    the judgement made under the locks from the status the gate read. Every other statement of a gate
+ *    transaction is issued by this module's own code: the row lock, the organisation lock, the policy
+ *    and source reads, and the whole body of a policy clear. No function of this module takes a
+ *    transaction body from its caller.
+ *  - A gate transaction holds the organisation lock, which is outside the authorization-input lock
+ *    order. The whole transaction therefore runs inside `runInsidePullSourceGate`: both
+ *    authorization-input entry points refuse, before any statement, when they are reached from `write`
+ *    or `joins`, on this connection or on another.
  *  - A gated write and the check that allows it run on one connection, in one transaction: the `write`
  *    callback receives the connection this module opened and no other.
  *  - Every gate transaction pins READ COMMITTED as its first statement, bounds lock waits and statement
@@ -19,10 +29,13 @@
  *  - The switch is read on every call. `enforce: 'always'` does not read it.
  */
 import { query as poolQuery, transaction } from '../db/pg'
+import { runInsidePullSourceGate } from './pull-source-gate-context'
 import {
   APPROVAL_ROUTING_POLICY_EXISTS_SQL,
   DirectoryRoutingPolicyRequiredError,
+  PULL_SOURCE_THRESHOLD,
   PullSourceCountUnavailableError,
+  countActivePullSources,
   countOtherActivePullSources,
   directoryOrgLockSql,
   isApprovalRoutingRequirePolicyEnabled,
@@ -78,6 +91,18 @@ export class DirectoryRoutingGateUnavailableError extends Error {
   }
 }
 
+/**
+ * The row a gated write changes was read, under its lock, in another organisation than the one the gate
+ * was opened for. The transaction ends before the organisation lock is taken and nothing is written. The
+ * caller decides what its own entry answers; this sentence is not a response body.
+ */
+export class PullSourceGateRowMovedError extends Error {
+  constructor() {
+    super('The row of a gated directory source write belongs to another organisation')
+    this.name = 'PullSourceGateRowMovedError'
+  }
+}
+
 function sqlStateOf(error: unknown): string | null {
   if (!error || typeof error !== 'object') return null
   const code = (error as { code?: unknown }).code
@@ -99,26 +124,43 @@ export function asPullSourceGateFailure(error: unknown): unknown {
   return error
 }
 
-export interface PullSourceGateTransactionOptions<L> {
-  /**
-   * Runs before the organisation lock is taken: lock the row the write changes (`FOR UPDATE`) and return
-   * what was read under that lock. The returned value is handed to the transaction body.
-   */
-  lockTarget?: (client: PullSourceGateClient) => Promise<L>
+/** The row a gate transaction locks before the organisation lock: the one its write changes. */
+interface GateRow {
+  integrationId: string
+  provider: string
+}
+
+/**
+ * Locks the row a gated write changes and returns the status read under that lock (null when the row is
+ * gone). The organisation lock that follows is keyed by the organisation the caller read before the
+ * lock, so a row that no longer belongs to it ends the transaction.
+ */
+async function lockGateRow(client: PullSourceGateClient, orgId: string, row: GateRow): Promise<string | null> {
+  const locked = await client.query(
+    `SELECT org_id, status
+       FROM directory_integrations
+      WHERE id = $1 AND provider = $2
+        FOR UPDATE`,
+    [row.integrationId, row.provider],
+  )
+  const found = locked.rows[0]
+  if (!found) return null
+  if (found.org_id !== orgId) throw new PullSourceGateRowMovedError()
+  return String(found.status)
 }
 
 /**
  * Runs `body` in a gate transaction for one organisation: READ COMMITTED, bounded waits, the optional
- * row lock, then the organisation lock, then `body`. Used by every writer that takes the organisation
- * lock: a write that may add a pull source, and the removal of the approval-routing policy.
+ * row lock, then the organisation lock, then `body`, all with the pull-source gate marker set. Private to
+ * this module: the two bodies it runs are the ones below.
  */
-export async function runPullSourceGateTransaction<T, L = undefined>(
+async function runPullSourceGateTransaction<T>(
   orgId: string,
-  body: (client: PullSourceGateClient, locked: L) => Promise<T>,
-  options: PullSourceGateTransactionOptions<L> = {},
+  body: (client: PullSourceGateClient, lockedStatus: string | null) => Promise<T>,
+  row?: GateRow,
 ): Promise<T> {
   try {
-    return await transaction(async (client) => {
+    return await runInsidePullSourceGate(() => transaction(async (client) => {
       // First statement: under a higher default isolation level the snapshot would otherwise be taken by
       // the lock statement itself, before the lock is granted, and the reads below would not see what a
       // concurrent holder committed.
@@ -126,10 +168,10 @@ export async function runPullSourceGateTransaction<T, L = undefined>(
       // SET LOCAL only: a session-level setting would stay on the pooled connection.
       await client.query(`SET LOCAL lock_timeout = '${PULL_SOURCE_GATE_LOCK_TIMEOUT}'`)
       await client.query(`SET LOCAL statement_timeout = '${PULL_SOURCE_GATE_STATEMENT_TIMEOUT}'`)
-      const locked = options.lockTarget ? await options.lockTarget(client) : (undefined as L)
+      const lockedStatus = row ? await lockGateRow(client, orgId, row) : null
       await client.query(directoryOrgLockSql('$1'), [orgId])
-      return body(client, locked)
-    })
+      return body(client, lockedStatus)
+    }))
   } catch (error) {
     throw asPullSourceGateFailure(error)
   }
@@ -146,21 +188,29 @@ export interface PullSourceWriteTarget {
   enforce: 'flagged' | 'always'
 }
 
-export interface PullSourceWriteContext<L> {
+export interface PullSourceWriteContext {
   /** True when the write runs inside a gate transaction, under the organisation lock. */
   gated: boolean
-  /** What `lockTarget` read under the row lock; undefined when the write is not gated or has no row to lock. */
-  locked: L | undefined
+  /**
+   * The status the gate read from the row under its lock. Null when the write is not gated, when it has
+   * no row to lock, and when the row is gone.
+   */
+  lockedStatus: string | null
   /** True when the gate checked this write as one that adds a pull source, and allowed it. */
   joined: boolean
 }
 
-export interface PullSourceWriteGateOptions<L> extends PullSourceGateTransactionOptions<L> {
+export interface PullSourceWriteGateOptions {
   /**
-   * Whether the write adds a pull source, decided from the row read under the lock. Without it the write
-   * is treated as adding one. It is called inside the gate transaction, after both locks are held.
+   * The id of the row the write changes, for a write that changes an existing row of the target's
+   * provider. The gate locks it (`FOR UPDATE`) before the organisation lock and reads its status.
    */
-  joins?: (locked: L) => boolean
+  lockRowId?: string
+  /**
+   * Whether the write adds a pull source, decided from the status read under the row lock. Without it the
+   * write is treated as adding one. It is called inside the gate transaction, after both locks are held.
+   */
+  joins?: (lockedStatus: string | null) => boolean
   env?: NodeJS.ProcessEnv
 }
 
@@ -198,24 +248,65 @@ async function assertPullSourceMayJoin(client: PullSourceGateClient, target: Pul
  * `enforce: 'flagged'` with the switch off: `write` runs as it did before the rule, on the pool, with no
  * transaction, no lock and no policy read. Otherwise `write` runs inside a gate transaction, after the
  * check above has allowed it (or after `joins` said the write adds no source).
+ *
+ * `write` is one statement on the connection it is given: an INSERT into, or an UPDATE of, the
+ * integration table, with its parameters computed before the call. What follows the statement (reading
+ * the returned row, deciding what an empty result means) belongs to the caller, after this function
+ * returns.
  */
-export async function runGatedPullSourceWrite<T, L = undefined>(
+export async function runGatedPullSourceWrite<T>(
   target: PullSourceWriteTarget,
-  write: (client: PullSourceGateClient, context: PullSourceWriteContext<L>) => Promise<T>,
-  options: PullSourceWriteGateOptions<L> = {},
+  write: (client: PullSourceGateClient, context: PullSourceWriteContext) => Promise<T>,
+  options: PullSourceWriteGateOptions = {},
 ): Promise<PullSourceWriteOutcome<T>> {
   if (target.enforce === 'flagged' && !isApprovalRoutingRequirePolicyEnabled(options.env)) {
-    const result = await write({ query: poolQuery }, { gated: false, locked: undefined, joined: false })
+    const result = await write({ query: poolQuery }, { gated: false, lockedStatus: null, joined: false })
     return { result, gated: false, joined: false }
   }
-  return runPullSourceGateTransaction<PullSourceWriteOutcome<T>, L>(
+  return runPullSourceGateTransaction<PullSourceWriteOutcome<T>>(
     target.orgId,
-    async (client, locked) => {
-      const joined = options.joins ? options.joins(locked) : true
+    async (client, lockedStatus) => {
+      const joined = options.joins ? options.joins(lockedStatus) : true
       if (joined) await assertPullSourceMayJoin(client, target)
-      const result = await write(client, { gated: true, locked, joined })
+      const result = await write(client, { gated: true, lockedStatus, joined })
       return { result, gated: true, joined }
     },
-    { lockTarget: options.lockTarget },
+    options.lockRowId === undefined ? undefined : { integrationId: options.lockRowId, provider: target.provider },
   )
+}
+
+/** What a policy clear did: no policy row, refused, or removed (with the canonical it pointed at). */
+export type RoutingPolicyClearOutcome =
+  | { kind: 'absent' }
+  | { kind: 'blocked' }
+  | { kind: 'cleared'; previous: string }
+
+/**
+ * Removes the organisation's routing policy for one purpose, in a gate transaction: organisation lock,
+ * then the policy row, then the source count, then the delete. The same lock serialises it against every
+ * write that adds a pull source, so "two or more active pull sources and no policy" cannot be reached by
+ * removing the policy. The rule does not read the approval-routing switch.
+ *  - no policy row: `absent`, whatever the source count;
+ *  - two or more active pull sources: `blocked`, the row stays;
+ *  - otherwise the row is deleted: `cleared`.
+ */
+export async function runGatedRoutingPolicyClear(orgId: string, purpose: string): Promise<RoutingPolicyClearOutcome> {
+  return runPullSourceGateTransaction<RoutingPolicyClearOutcome>(orgId, async (client) => {
+    const existing = await client.query(
+      `SELECT canonical_integration_id::text AS canonical_integration_id
+         FROM org_directory_routing_policy
+        WHERE org_id = $1 AND purpose = $2
+          FOR UPDATE`,
+      [orgId, purpose],
+    )
+    const previous = existing.rows[0]?.canonical_integration_id
+    if (typeof previous !== 'string') return { kind: 'absent' }
+    const activeSources = await countActivePullSources((sql, params) => client.query(sql, params), orgId)
+    if (activeSources >= PULL_SOURCE_THRESHOLD) return { kind: 'blocked' }
+    await client.query(
+      `DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2`,
+      [orgId, purpose],
+    )
+    return { kind: 'cleared', previous }
+  })
 }

@@ -2,8 +2,11 @@
  * Pull-source write gate (src/directory/pull-source-write-gate.ts) and the routing-policy PATCH that
  * uses it, without a database: the database module is replaced by a scripted connection that records
  * every statement, so what is pinned here is which statements a gate transaction issues, in which order,
- * and what each outcome becomes. What PostgreSQL does with those statements (locks, isolation, waits) is
- * pinned by tests/integration/directory-pull-source-gate.db.test.ts.
+ * and what each outcome becomes: the row lock and the policy clear are the gate module's own statements,
+ * and the whole transaction runs with the pull-source gate marker set, so an authorization-input entry
+ * point reached from the write or from the judgement refuses before any statement. What PostgreSQL does
+ * with those statements (locks, isolation, waits) is pinned by
+ * tests/integration/directory-pull-source-gate.db.test.ts.
  */
 import type { Request, Response } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -31,16 +34,22 @@ import {
   PullSourceCountUnavailableError,
   directoryOrgLockSql,
 } from '../../src/directory/pull-source-rule'
+import { isInsidePullSourceGate } from '../../src/directory/pull-source-gate-context'
 import {
   DIRECTORY_ROUTING_GATE_BUSY_MESSAGE,
   DIRECTORY_ROUTING_GATE_UNAVAILABLE_MESSAGE,
   DirectoryRoutingGateBusyError,
   DirectoryRoutingGateUnavailableError,
   PULL_SOURCE_GATE_BUSY_SQLSTATES,
+  PullSourceGateRowMovedError,
   runGatedPullSourceWrite,
-  runPullSourceGateTransaction,
+  runGatedRoutingPolicyClear,
   type PullSourceGateClient,
 } from '../../src/directory/pull-source-write-gate'
+import {
+  enterAuthorizationInputTransaction,
+  withAuthorizationInputTransaction,
+} from '../../src/rbac/authorization-input-lock'
 import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-directory-routing-policy'
 
 const RC = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
@@ -49,7 +58,9 @@ const STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '25s'"
 const ORG_LOCK = directoryOrgLockSql('$1')
 const PREAMBLE = [RC, LOCK_TIMEOUT, STATEMENT_TIMEOUT]
 const WRITE = 'INSERT INTO t VALUES (1)'
-const ROW_LOCK = 'SELECT status FROM t WHERE id = $1 FOR UPDATE'
+/** The row lock is the gate's own statement; a case recognises it and answers it. */
+const ROW_LOCK = /^SELECT org_id, status\s+FROM directory_integrations\s+WHERE id = \$1 AND provider = \$2\s+FOR UPDATE$/
+const isRowLock = (sql: string): boolean => ROW_LOCK.test(sql)
 
 type Rows = Array<Record<string, unknown>>
 type Script = (sql: string, params: unknown[] | undefined) => Rows | Error | undefined
@@ -57,16 +68,19 @@ type Script = (sql: string, params: unknown[] | undefined) => Rows | Error | und
 /** A gate connection that records every statement and answers from `script` (no rows by default). */
 function scriptedConnection(script: Script = () => undefined) {
   const statements: Array<{ sql: string; params: unknown[] | undefined }> = []
+  /** Whether the pull-source gate marker was set when each statement was issued. */
+  const marked: boolean[] = []
   const client: PullSourceGateClient = {
     query: async (sql, params) => {
       statements.push({ sql, params })
+      marked.push(isInsidePullSourceGate())
       const answer = script(sql, params)
       if (answer instanceof Error) throw answer
       return { rows: answer ?? [] }
     },
   }
   pgMocks.transaction.mockImplementation(async (handler: (c: PullSourceGateClient) => Promise<unknown>) => handler(client))
-  return { statements, texts: () => statements.map((s) => s.sql) }
+  return { statements, marked, texts: () => statements.map((s) => s.sql) }
 }
 
 const sqlStateError = (code: string): Error => Object.assign(new Error(`driver text ${code} org-secret-1`), { code })
@@ -96,7 +110,7 @@ describe('a legacy entry while the switch is off', () => {
         { env: value === undefined ? {} : { APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: value } },
       )
       expect(outcome).toEqual({ result: { rows: [{ id: 'row-1' }] }, gated: false, joined: false })
-      expect(contexts).toEqual([{ gated: false, locked: undefined, joined: false }])
+      expect(contexts).toEqual([{ gated: false, lockedStatus: null, joined: false }])
       expect(pgMocks.transaction).not.toHaveBeenCalled()
       expect(pgMocks.query.mock.calls).toEqual([[WRITE, ['p']]])
     })
@@ -159,14 +173,15 @@ describe('a gated write', () => {
     expect(connection.texts()).toEqual([...PREAMBLE, ORG_LOCK, WRITE])
   })
 
-  it('locks the row first, then the organisation, and decides the join from what the row lock read', async () => {
+  it('locks the row itself, first, then the organisation, and decides the join from the status the row lock read', async () => {
     const connection = scriptedConnection((sql) => {
-      if (sql === ROW_LOCK) return [{ status: 'paused' }]
+      if (isRowLock(sql)) return [{ org_id: 'org-1', status: 'paused' }]
       if (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return [{ other_source_count: 0 }]
       return undefined
     })
     const seen: unknown[] = []
-    const outcome = await runGatedPullSourceWrite<unknown, { status: string }>(
+    const judged: unknown[] = []
+    const outcome = await runGatedPullSourceWrite(
       { ...TARGET, enforce: 'flagged' },
       async (client, context) => {
         seen.push(context)
@@ -174,35 +189,220 @@ describe('a gated write', () => {
       },
       {
         env: ON,
-        lockTarget: async (client) => (await client.query(ROW_LOCK, ['row-1'])).rows[0] as { status: string },
-        joins: (locked) => locked.status !== 'active',
+        lockRowId: 'row-1',
+        joins: (lockedStatus) => {
+          judged.push(lockedStatus)
+          return lockedStatus !== 'active'
+        },
       },
     )
     expect(outcome).toMatchObject({ gated: true, joined: true })
-    expect(seen).toEqual([{ gated: true, locked: { status: 'paused' }, joined: true }])
-    expect(connection.texts()).toEqual([
-      ...PREAMBLE, ROW_LOCK, ORG_LOCK, APPROVAL_ROUTING_POLICY_EXISTS_SQL, COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, WRITE,
-    ])
+    expect(judged).toEqual(['paused'])
+    expect(seen).toEqual([{ gated: true, lockedStatus: 'paused', joined: true }])
+    const texts = connection.texts()
+    expect(texts.slice(0, 3)).toEqual(PREAMBLE)
+    expect(isRowLock(texts[3])).toBe(true)
+    // The row is looked up by its id and the target's provider.
+    expect(connection.statements[3].params).toEqual(['row-1', 'dingtalk'])
+    expect(texts.slice(4)).toEqual([ORG_LOCK, APPROVAL_ROUTING_POLICY_EXISTS_SQL, COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, WRITE])
   })
 
   it('a write that adds no source keeps both locks and skips the check', async () => {
     const connection = scriptedConnection((sql) => {
-      if (sql === ROW_LOCK) return [{ status: 'active' }]
+      if (isRowLock(sql)) return [{ org_id: 'org-1', status: 'active' }]
       // Would refuse if the check ran.
       if (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return [{ other_source_count: 3 }]
       return undefined
     })
-    const outcome = await runGatedPullSourceWrite<unknown, { status: string }>(
+    const outcome = await runGatedPullSourceWrite(
       { ...TARGET, enforce: 'flagged' },
       (client) => client.query(WRITE),
+      { env: ON, lockRowId: 'row-1', joins: (lockedStatus) => lockedStatus !== 'active' },
+    )
+    expect(outcome).toMatchObject({ gated: true, joined: false })
+    const texts = connection.texts()
+    expect(isRowLock(texts[3])).toBe(true)
+    expect(texts.slice(4)).toEqual([ORG_LOCK, WRITE])
+  })
+
+  it('a row that is gone is read as no status: the judgement and the write both receive null', async () => {
+    const connection = scriptedConnection()
+    const seen: unknown[] = []
+    const judged: unknown[] = []
+    const outcome = await runGatedPullSourceWrite(
+      { ...TARGET, enforce: 'flagged' },
+      async (client, context) => {
+        seen.push(context)
+        return client.query(WRITE)
+      },
       {
         env: ON,
-        lockTarget: async (client) => (await client.query(ROW_LOCK, ['row-1'])).rows[0] as { status: string },
-        joins: (locked) => locked.status !== 'active',
+        lockRowId: 'row-1',
+        joins: (lockedStatus) => {
+          judged.push(lockedStatus)
+          return lockedStatus !== null && lockedStatus !== 'active'
+        },
       },
     )
     expect(outcome).toMatchObject({ gated: true, joined: false })
-    expect(connection.texts()).toEqual([...PREAMBLE, ROW_LOCK, ORG_LOCK, WRITE])
+    expect(judged).toEqual([null])
+    expect(seen).toEqual([{ gated: true, lockedStatus: null, joined: false }])
+    expect(connection.texts().slice(4)).toEqual([ORG_LOCK, WRITE])
+  })
+
+  it('a row read in another organisation ends the transaction before the organisation lock: nothing is judged or written', async () => {
+    const connection = scriptedConnection((sql) => (isRowLock(sql) ? [{ org_id: 'org-2', status: 'paused' }] : undefined))
+    const write = vi.fn()
+    const joins = vi.fn(() => true)
+    const failure = await failureOf(runGatedPullSourceWrite({ ...TARGET, enforce: 'flagged' }, write, { env: ON, lockRowId: 'row-1', joins }))
+    expect(failure).toBeInstanceOf(PullSourceGateRowMovedError)
+    // The sentence carries no organisation id and no row id.
+    expect((failure as Error).message).not.toMatch(/org-1|org-2|row-1/)
+    expect(write).not.toHaveBeenCalled()
+    expect(joins).not.toHaveBeenCalled()
+    const texts = connection.texts()
+    expect(texts).toHaveLength(4)
+    expect(isRowLock(texts[3])).toBe(true)
+    expect(texts).not.toContain(ORG_LOCK)
+  })
+
+  it('without a row to lock no row statement is issued, and the judgement receives null', async () => {
+    const connection = scriptedConnection()
+    const judged: unknown[] = []
+    await runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, (client) => client.query(WRITE), {
+      joins: (lockedStatus) => {
+        judged.push(lockedStatus)
+        return false
+      },
+    })
+    expect(judged).toEqual([null])
+    expect(connection.texts()).toEqual([...PREAMBLE, ORG_LOCK, WRITE])
+  })
+})
+
+describe('a gate transaction runs with the pull-source gate marker set', () => {
+  /** Both authorization-input entry points, each with a transaction stand-in that records its statements. */
+  function authorizationInputEntries() {
+    const statements: string[] = []
+    const client = {
+      query: async (sql: string) => {
+        statements.push(sql)
+        return { rows: [], rowCount: null }
+      },
+    }
+    const runner = async <T>(handler: (c: typeof client) => Promise<T>): Promise<T> => {
+      statements.push('BEGIN')
+      return handler(client)
+    }
+    const selfBuilt = () => withAuthorizationInputTransaction({ intent: 'GRANT_ROLE', userIds: ['u1'] }, async () => 'entered', { transaction: runner as never })
+    const takeover = () => enterAuthorizationInputTransaction(client as never, { intent: 'PROJECTION_GRANT', caller: 'directory_sync' }, ['isolation_pin'], async () => 'entered')
+    return { statements, selfBuilt, takeover }
+  }
+  const REFUSED = { code: 'AUTHORIZATION_INPUT_PLAN_INVALID', reason: 'inside_pull_source_gate' }
+
+  it('every statement of a gated write, the judgement and the write see the marker; it is clear before and after', async () => {
+    const connection = scriptedConnection((sql) => {
+      if (isRowLock(sql)) return [{ org_id: 'org-1', status: 'paused' }]
+      if (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return [{ other_source_count: 0 }]
+      return undefined
+    })
+    const seen: Record<string, boolean> = {}
+    expect(isInsidePullSourceGate()).toBe(false)
+    await runGatedPullSourceWrite(
+      { ...TARGET, enforce: 'always' },
+      async (client) => {
+        seen.write = isInsidePullSourceGate()
+        // The marker follows the asynchronous call chain.
+        await new Promise((resolve) => setImmediate(resolve))
+        seen.writeLater = isInsidePullSourceGate()
+        return client.query(WRITE)
+      },
+      {
+        lockRowId: 'row-1',
+        joins: () => {
+          seen.joins = isInsidePullSourceGate()
+          return true
+        },
+      },
+    )
+    expect(seen).toEqual({ joins: true, write: true, writeLater: true })
+    expect(connection.texts()).toHaveLength(8)
+    expect(connection.marked).toEqual(connection.texts().map(() => true))
+    expect(isInsidePullSourceGate()).toBe(false)
+  })
+
+  it('both authorization-input entry points refuse before any statement when the write reaches them', async () => {
+    const connection = scriptedConnection((sql) => (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL ? [{ other_source_count: 0 }] : undefined))
+    for (const entry of ['selfBuilt', 'takeover'] as const) {
+      const entries = authorizationInputEntries()
+      // Reached directly, and through another function on a connection of its own.
+      const indirect = async () => entries[entry]()
+      for (const reach of [entries[entry], indirect]) {
+        const failure = await failureOf(runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, async () => reach()))
+        expect(failure, entry).toMatchObject(REFUSED)
+      }
+      expect(entries.statements, entry).toEqual([])
+    }
+    // The gate transaction issued its own statements and nothing else: the refused write added none.
+    expect(connection.texts().filter((sql) => sql === WRITE)).toEqual([])
+  })
+
+  it('both authorization-input entry points refuse before any statement when the judgement reaches them', async () => {
+    scriptedConnection((sql) => (isRowLock(sql) ? [{ org_id: 'org-1', status: 'paused' }] : undefined))
+    for (const entry of ['selfBuilt', 'takeover'] as const) {
+      const entries = authorizationInputEntries()
+      const refusals: unknown[] = []
+      const write = vi.fn()
+      const outcome = runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, write, {
+        lockRowId: 'row-1',
+        joins: () => {
+          // The judgement is synchronous; what it started is observed after the gate has ended.
+          refusals.push(failureOf(entries[entry]()))
+          return false
+        },
+      })
+      await outcome
+      expect(await refusals[0], entry).toMatchObject(REFUSED)
+      expect(entries.statements, entry).toEqual([])
+    }
+  })
+
+  it('a policy clear runs with the marker set from its first statement to its last', async () => {
+    const connection = scriptedConnection((sql) => {
+      if (isPolicyRead(sql)) return [{ canonical_integration_id: OTHER_ID }]
+      if (sql === COUNT_ACTIVE_PULL_SOURCES_SQL) return [{ pull_source_count: 1 }]
+      return undefined
+    })
+    await expect(runGatedRoutingPolicyClear('org-1', 'approval_routing')).resolves.toEqual({ kind: 'cleared', previous: OTHER_ID })
+    expect(connection.texts()).toHaveLength(7)
+    expect(connection.marked).toEqual(connection.texts().map(() => true))
+    expect(isInsidePullSourceGate()).toBe(false)
+  })
+
+  it('a write that is not gated runs without the marker: it holds no organisation lock', async () => {
+    pgMocks.query.mockResolvedValue({ rows: [] })
+    const entries = authorizationInputEntries()
+    const seen: boolean[] = []
+    const failure = await failureOf(runGatedPullSourceWrite(
+      { ...TARGET, enforce: 'flagged' },
+      async () => {
+        seen.push(isInsidePullSourceGate())
+        return entries.selfBuilt()
+      },
+      { env: {} },
+    ))
+    expect(seen).toEqual([false])
+    // The entry point was not refused for the marker: it opened its transaction. (What its stand-in
+    // connection answers afterwards is not the subject here.)
+    expect(entries.statements[0]).toBe('BEGIN')
+    if (failure !== null) expect(failure).not.toMatchObject({ reason: 'inside_pull_source_gate' })
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  it('the marker is clear again after a gate transaction that failed', async () => {
+    scriptedConnection((sql) => (sql === ORG_LOCK ? sqlStateError('55P03') : undefined))
+    await failureOf(runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, (client) => client.query(WRITE)))
+    expect(isInsidePullSourceGate()).toBe(false)
   })
 })
 
@@ -217,17 +417,16 @@ describe('a gate transaction that cannot finish', () => {
         const error = sqlStateError(code)
         const connection = scriptedConnection((sql) => {
           if (stage === 'organisation lock' && sql === ORG_LOCK) return error
-          if (stage === 'row lock' && sql === ROW_LOCK) return error
+          if (stage === 'row lock' && isRowLock(sql)) return error
           if (stage === 'count' && sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return error
           if (stage === 'write' && sql === WRITE) return error
+          if (isRowLock(sql)) return [{ org_id: 'org-1', status: 'paused' }]
           if (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return [{ other_source_count: 0 }]
           return undefined
         })
         if (stage === 'commit') pgMocks.transaction.mockRejectedValue(error)
         const failure = await failureOf(
-          runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, (client) => client.query(WRITE), {
-            lockTarget: async (client) => { await client.query(ROW_LOCK) },
-          }),
+          runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, (client) => client.query(WRITE), { lockRowId: 'row-1' }),
         )
         expect(failure).toBeInstanceOf(DirectoryRoutingGateBusyError)
         expect((failure as DirectoryRoutingGateBusyError).sqlState).toBe(code)
@@ -235,8 +434,14 @@ describe('a gate transaction that cannot finish', () => {
         expect((failure as Error).message).toBe(DIRECTORY_ROUTING_GATE_BUSY_MESSAGE)
         expect((failure as Error).message).not.toContain('org-secret-1')
         // Nothing follows the failed statement: in particular no read and no write without the lock.
-        if (stage === 'organisation lock') expect(connection.texts()).toEqual([...PREAMBLE, ROW_LOCK, ORG_LOCK])
-        if (stage === 'row lock') expect(connection.texts()).toEqual([...PREAMBLE, ROW_LOCK])
+        if (stage === 'organisation lock') {
+          expect(connection.texts()).toHaveLength(5)
+          expect(connection.texts()[4]).toBe(ORG_LOCK)
+        }
+        if (stage === 'row lock') {
+          expect(connection.texts()).toHaveLength(4)
+          expect(isRowLock(connection.texts()[3])).toBe(true)
+        }
       })
     }
   }
@@ -261,21 +466,59 @@ describe('a gate transaction that cannot finish', () => {
     expect(await failureOf(runGatedPullSourceWrite({ ...TARGET, enforce: 'always' }, (client) => client.query(WRITE)))).toBe(unique)
     const plain = new Error('boom')
     scriptedConnection((sql) => (sql === ORG_LOCK ? plain : undefined))
-    expect(await failureOf(runPullSourceGateTransaction('org-1', async () => 1))).toBe(plain)
+    expect(await failureOf(runGatedRoutingPolicyClear('org-1', 'approval_routing'))).toBe(plain)
   })
+})
 
-  it('the bare transaction has the same preamble, lock and mapping', async () => {
-    const connection = scriptedConnection()
-    await expect(runPullSourceGateTransaction('org-9', async (client) => (await client.query('SELECT 1')).rows.length)).resolves.toBe(0)
+describe('a policy clear, called on the gate module', () => {
+  it('has the same preamble and lock as a gated write, then the policy row, the source count and the delete', async () => {
+    const connection = scriptedConnection((sql) => {
+      if (isPolicyRead(sql)) return [{ canonical_integration_id: OTHER_ID }]
+      if (sql === COUNT_ACTIVE_PULL_SOURCES_SQL) return [{ pull_source_count: 1 }]
+      return undefined
+    })
+    await expect(runGatedRoutingPolicyClear('org-9', 'approval_routing')).resolves.toEqual({ kind: 'cleared', previous: OTHER_ID })
     expect(connection.statements.slice(0, 4)).toEqual([
       { sql: RC, params: undefined },
       { sql: LOCK_TIMEOUT, params: undefined },
       { sql: STATEMENT_TIMEOUT, params: undefined },
       { sql: ORG_LOCK, params: ['org-9'] },
     ])
-    scriptedConnection()
-    const failure = await failureOf(runPullSourceGateTransaction('org-9', async () => { throw new PullSourceCountUnavailableError('org-9') }))
-    expect(failure).toBeInstanceOf(DirectoryRoutingGateUnavailableError)
+    expect(isPolicyRead(connection.texts()[4])).toBe(true)
+    expect(connection.statements[4].params).toEqual(['org-9', 'approval_routing'])
+    expect(connection.statements[5]).toEqual({ sql: COUNT_ACTIVE_PULL_SOURCES_SQL, params: ['org-9'] })
+    expect(connection.statements[6]).toEqual({
+      sql: 'DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2',
+      params: ['org-9', 'approval_routing'],
+    })
+    expect(connection.texts()).toHaveLength(7)
+    expect(pgMocks.query).not.toHaveBeenCalled()
+  })
+
+  it('no policy row is absent without a count; two or more sources is blocked without a delete', async () => {
+    const absent = scriptedConnection((sql) => (sql === COUNT_ACTIVE_PULL_SOURCES_SQL ? [{ pull_source_count: 9 }] : undefined))
+    await expect(runGatedRoutingPolicyClear('org-9', 'approval_routing')).resolves.toEqual({ kind: 'absent' })
+    expect(absent.texts()).toHaveLength(5)
+    for (const count of [2, 3]) {
+      const blocked = scriptedConnection((sql) => {
+        if (isPolicyRead(sql)) return [{ canonical_integration_id: OTHER_ID }]
+        if (sql === COUNT_ACTIVE_PULL_SOURCES_SQL) return [{ pull_source_count: count }]
+        return undefined
+      })
+      await expect(runGatedRoutingPolicyClear('org-9', 'approval_routing')).resolves.toEqual({ kind: 'blocked' })
+      expect(blocked.texts()).toHaveLength(6)
+      expect(blocked.texts().some((sql) => /DELETE/i.test(sql))).toBe(false)
+    }
+  })
+
+  it('an unreadable count is unavailable and a lost lock race is busy, with no delete', async () => {
+    const unreadable = scriptedConnection((sql) => (isPolicyRead(sql) ? [{ canonical_integration_id: OTHER_ID }] : undefined))
+    const unavailable = await failureOf(runGatedRoutingPolicyClear('org-9', 'approval_routing'))
+    expect(unavailable).toBeInstanceOf(DirectoryRoutingGateUnavailableError)
+    expect(unavailable).not.toBeInstanceOf(PullSourceCountUnavailableError)
+    expect(unreadable.texts().some((sql) => /DELETE/i.test(sql))).toBe(false)
+    scriptedConnection((sql) => (sql === ORG_LOCK ? sqlStateError('40P01') : undefined))
+    expect(await failureOf(runGatedRoutingPolicyClear('org-9', 'approval_routing'))).toBeInstanceOf(DirectoryRoutingGateBusyError)
   })
 })
 

@@ -516,15 +516,37 @@ describe('the write gate takes the organisation lock from this module', () => {
     expect(gateCode).not.toMatch(/hashtext/i)
   })
 
-  it('depends on the rule module and the database module only', () => {
+  it('depends on the rule module, the database module and the gate marker module only', () => {
     const imported = ts.preProcessFile(gateSource, true, true).importedFiles.map((file) => file.fileName).sort()
-    expect(imported).toEqual(['../db/pg', './pull-source-rule'])
+    expect(imported).toEqual(['../db/pg', './pull-source-gate-context', './pull-source-rule'])
   })
 
   it('takes its counts and its policy probe from this module', () => {
     expect(gateSource).toMatch(/import \{[^}]*\bcountOtherActivePullSources\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateSource).toMatch(/import \{[^}]*\bcountActivePullSources\b[^}]*\} from '\.\/pull-source-rule'/)
     expect(gateSource).toMatch(/import \{[^}]*\bAPPROVAL_ROUTING_POLICY_EXISTS_SQL\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateSource).toMatch(/import \{[^}]*\bPULL_SOURCE_THRESHOLD\b[^}]*\} from '\.\/pull-source-rule'/)
     expect(gateCode).not.toMatch(/count\s*\(/i)
-    expect(gateCode).not.toMatch(/directory_integrations|org_directory_routing_policy/)
+  })
+
+  it('names the two tables in three statements of its own and nowhere else: the row lock, the policy row lock and the policy delete', () => {
+    const source = ts.createSourceFile('gate.ts', gateSource, ts.ScriptTarget.Latest, true)
+    const statements: string[] = []
+    const visit = (node: ts.Node): void => {
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node))
+        && PULL_SOURCE_RULE_TABLES.some((table) => node.getText(source).includes(table))) {
+        statements.push(node.getText(source).slice(1, -1).trim().split(/\s+/).join(' '))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    expect(statements).toEqual([
+      'SELECT org_id, status FROM directory_integrations WHERE id = $1 AND provider = $2 FOR UPDATE',
+      'SELECT canonical_integration_id::text AS canonical_integration_id FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2 FOR UPDATE',
+      'DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2',
+    ])
+    // Outside those literals the code does not spell either table.
+    const withoutLiterals = gateCode.replace(/`[^`]*`/g, '``')
+    expect(withoutLiterals).not.toMatch(/directory_integrations|org_directory_routing_policy/)
   })
 })

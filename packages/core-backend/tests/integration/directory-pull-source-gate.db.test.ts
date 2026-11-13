@@ -15,7 +15,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
  *    is refused whatever the switch says, and a clear with no policy row keeps answering
  *    `cleared: false`.
  *  - Whether a save turns a row active is decided from the status read under the row lock, and the
- *    statement applies only while the row still carries that status.
+ *    statement applies only while the row still carries that status. A row that changed under the save
+ *    (another status, or another organisation) answers the same 409.
+ *  - A gate transaction runs with the pull-source gate marker set: an authorization-input entry point
+ *    reached from the write refuses before any statement, and the gate transaction writes nothing.
  *  - A gate transaction runs under READ COMMITTED with bounded waits, holds the organisation's
  *    advisory lock while it reads and writes, and ends with nothing written when it loses a lock race
  *    (deadlock, lock wait timeout, cancelled statement) or cannot read the source count.
@@ -63,6 +66,7 @@ import { Logger } from '../../src/core/logger'
 import { query, transaction } from '../../src/db/pg'
 import { getOrCreateLocalIntegration } from '../../src/directory/directory-sync'
 import {
+  APPROVAL_ROUTING_POLICY_EXISTS_SQL,
   COUNT_ACTIVE_PULL_SOURCES_SQL,
   COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL,
   DirectoryRoutingPolicyRequiredError,
@@ -77,6 +81,7 @@ import {
   type PullSourceGateClient,
 } from '../../src/directory/pull-source-write-gate'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { enterAuthorizationInputTransaction, withAuthorizationInputTransaction } from '../../src/rbac/authorization-input-lock'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
 import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-directory-routing-policy'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -660,6 +665,80 @@ describeIfDatabase('pull-source write gate (real DB, pool default REPEATABLE REA
     const rowLock = texts.findIndex((sql) => /FROM directory_integrations\s+WHERE id = \$1 AND provider = \$2\s+FOR UPDATE/.test(sql))
     expect(rowLock).toBe(3)
     expect(texts.indexOf(ORG_LOCK)).toBe(4)
+  })
+
+  it('G5d a gated save whose row moved to another organisation before its lock answers the same 409 as a save that matches no row, and takes no organisation lock', async () => {
+    process.env[SWITCH] = 'true'
+    const corpB = corpOf('g5d-y')
+    const a = await seedIntegration(DEFAULT_ORG, corpOf('g5d-x'))
+    const b = await seedIntegration(DEFAULT_ORG, corpB, { status: 'paused' })
+    await seedPolicy(DEFAULT_ORG, a)
+    const elsewhere = newOrg('g5d')
+
+    // The save has read the row in this organisation and is parked before the first statement of its
+    // transaction. Meanwhile the row is moved to another organisation (a committed write).
+    const parked = parkBefore((sql) => sql === RC_PIN)
+    transactions.length = 0
+    const save = updateViaRoute(b, saveBody(corpB, { status: 'active' })).then((res) => res)
+    await parked.reached
+    await query(`UPDATE directory_integrations SET org_id = $2 WHERE id = $1`, [b, elsewhere])
+    parked.release()
+
+    const res = await save
+    expect(res.status).toBe(409)
+    expect(errorOf(res)).toEqual({ code: 'DIRECTORY_UPDATE_FAILED', message: 'Directory configuration changed; reload before saving' })
+    expect(await statusOf(b)).toBe('paused')
+    expect(await auditRows(ACTIVATE_AUDIT)).toHaveLength(0)
+    // The transaction ended at the row lock: it issued no organisation lock statement, and no
+    // organisation lock of either organisation is held afterwards.
+    expect(gateTransactions()).toHaveLength(0)
+    const started = transactions.filter((statements) => statements.some((s) => s.sql === RC_PIN))
+    expect(started).toHaveLength(1)
+    const texts = started[0].map((s) => s.sql)
+    expect(texts).toHaveLength(4)
+    expect(texts[3]).toMatch(/FROM directory_integrations\s+WHERE id = \$1 AND provider = \$2\s+FOR UPDATE/)
+    expect((await advisoryLocks(DEFAULT_ORG)).granted).toEqual([])
+    expect((await advisoryLocks(elsewhere)).granted).toEqual([])
+  })
+
+  it('inside a gate transaction both authorization-input entry points refuse before any statement, on the gate connection and on a connection of their own, and the gate transaction writes nothing', async () => {
+    const REFUSED = { code: 'AUTHORIZATION_INPUT_PLAN_INVALID', reason: 'inside_pull_source_gate' }
+    const reached: string[] = []
+    const entries: Array<{ name: string; enter: (client: PullSourceGateClient) => Promise<unknown> }> = [
+      {
+        name: 'self-built, on a connection of its own',
+        enter: () => withAuthorizationInputTransaction({ intent: 'GRANT_ROLE', userIds: [ADMIN] }, async () => { reached.push('self-built') }),
+      },
+      {
+        name: 'takeover, on the gate connection',
+        enter: (client) => enterAuthorizationInputTransaction(client as never, { intent: 'PROJECTION_GRANT', caller: 'directory_sync' }, ['isolation_pin'], async () => { reached.push('takeover') }),
+      },
+    ]
+    for (const { name, enter } of entries) {
+      const org = newOrg('marker')
+      transactions.length = 0
+      const failure = await runGatedPullSourceWrite(
+        { orgId: org, provider: 'wecom', corpId: corpOf('marker'), enforce: 'always' },
+        async (client) => {
+          await enter(client)
+          return client.query(
+            `INSERT INTO directory_integrations (org_id, provider, name, status, corp_id, config)
+             VALUES ($1, 'wecom', $2, 'active', $3, '{}'::jsonb) RETURNING id::text AS id`,
+            [org, `${NAME_PREFIX} ${nextTag()}`, corpOf('marker')],
+          )
+        },
+      ).then(() => null, (error: unknown) => error)
+      expect(failure, name).toMatchObject(REFUSED)
+      // One pool transaction started, the gate's; it issued its own statements and nothing after them.
+      expect(transactions, name).toHaveLength(1)
+      expect(transactions[0].map((s) => s.sql), name).toEqual([
+        RC_PIN, "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'", ORG_LOCK,
+        APPROVAL_ROUTING_POLICY_EXISTS_SQL, COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL,
+      ])
+      expect(await ourRows(org), name).toHaveLength(0)
+      expect((await advisoryLocks(org)).granted, name).toEqual([])
+    }
+    expect(reached).toEqual([])
   })
 
   it('G6 a policy is not cleared while the organisation has two or more active pull sources; with one it is cleared and audited; with no policy row the answer stays cleared:false', async () => {

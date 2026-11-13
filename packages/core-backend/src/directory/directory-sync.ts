@@ -27,6 +27,7 @@ import {
 import { resolveDirectoryAdapter } from './directory-adapter-registry'
 import './adapters'
 import {
+  PullSourceGateRowMovedError,
   runGatedPullSourceWrite,
   type PullSourceGateClient,
   type PullSourceWriteContext,
@@ -2552,7 +2553,7 @@ export interface DirectoryIntegrationWriteOptions {
 }
 
 /** The context of a write to an integration row that does not go through the pull-source gate. */
-const UNGATED_INTEGRATION_WRITE: PullSourceWriteContext<undefined> = { gated: false, locked: undefined, joined: false }
+const UNGATED_INTEGRATION_WRITE: PullSourceWriteContext = { gated: false, lockedStatus: null, joined: false }
 
 /**
  * Audit row for a pull source that joined an organisation through the gate (a created active row, or a
@@ -2592,6 +2593,38 @@ export async function createDirectoryIntegration(
     memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
     memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
   })
+  // The parameters are computed here, before the statement is handed to the gate: the function the
+  // gate runs is the one statement and nothing else.
+  const insertParams: unknown[] = [
+    DEFAULT_ORG_ID,
+    DEFAULT_PROVIDER,
+    normalized.name,
+    normalized.status,
+    normalized.corpId,
+    JSON.stringify({
+      corpName: normalized.corpName,
+      appName: normalized.appName,
+      appKey: normalized.appKey,
+      appSecret: normalizeStoredSecretValue(normalized.appSecret),
+      workNotificationAgentId: normalized.workNotificationAgentId
+        ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+        : null,
+      rootDepartmentId: normalized.rootDepartmentId,
+      baseUrl: normalized.baseUrl ?? null,
+      pageSize: normalized.pageSize,
+      admissionMode: normalized.admissionMode,
+      admissionDepartmentIds: normalized.admissionDepartmentIds,
+      excludeDepartmentIds: normalized.excludeDepartmentIds,
+      memberGroupSyncMode: normalized.memberGroupSyncMode,
+      memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+    }),
+    Boolean(normalized.syncEnabled),
+    normalized.scheduleCron,
+    normalized.scheduleTimezone,
+    normalized.defaultDeprovisionPolicy,
+  ]
   const insert = (client: PullSourceGateClient) => client.query(
     `INSERT INTO directory_integrations (
        org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
@@ -2600,36 +2633,7 @@ export async function createDirectoryIntegration(
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      DEFAULT_ORG_ID,
-      DEFAULT_PROVIDER,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        corpName: normalized.corpName,
-        appName: normalized.appName,
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      normalized.scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-    ],
+    insertParams,
   )
   // A row created active adds a pull source: it goes through the gate, which runs the statement on the
   // pool exactly as before while the switch is off. A row created in any other status adds none and stays
@@ -2918,32 +2922,6 @@ export class DirectoryConflictError extends Error {
   }
 }
 
-/** What a gated update reads from its row under `FOR UPDATE`, before the organisation lock is taken. */
-type LockedIntegrationStatus = { status: string }
-
-/**
- * Locks the row a gated update changes and returns the status read under that lock (null when the row is
- * gone). The organisation lock that follows is keyed by the organisation read before the lock, so a row
- * that no longer belongs to it is a changed row.
- */
-async function lockIntegrationRowForGatedUpdate(
-  client: PullSourceGateClient,
-  integrationId: string,
-  expectedOrgId: string,
-): Promise<LockedIntegrationStatus | null> {
-  const locked = await client.query(
-    `SELECT org_id, status
-       FROM directory_integrations
-      WHERE id = $1 AND provider = $2
-        FOR UPDATE`,
-    [integrationId, DEFAULT_PROVIDER],
-  )
-  const row = locked.rows[0]
-  if (!row) return null
-  if (row.org_id !== expectedOrgId) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
-  return { status: String(row.status) }
-}
-
 export async function updateDirectoryIntegration(
   integrationId: string,
   input: DirectoryIntegrationInput,
@@ -3048,15 +3026,12 @@ export async function updateDirectoryIntegration(
     current.config === null ? null : JSON.stringify(rawCurrentConfig),
     current.corp_id,
   ]
-  const update = (
-    client: PullSourceGateClient,
-    context: PullSourceWriteContext<LockedIntegrationStatus | null>,
-  ) => {
-    // Inside a gate transaction the statement applies only while the row still carries the status that
-    // was read under its lock, the one the gate decided from. Outside one it is the statement it was.
-    const lockedStatusGuard = context.gated ? ' AND status = $12' : ''
-    return client.query(
-      `UPDATE directory_integrations
+  // One statement, in two complete texts. Inside a gate transaction it applies only while the row still
+  // carries the status that was read under its lock, the one the gate decided from; that status is the
+  // twelfth parameter. Outside one it is the statement it was.
+  const update = (client: PullSourceGateClient, context: PullSourceWriteContext) => client.query(
+    context.gated
+      ? `UPDATE directory_integrations
      SET name = $2,
          status = $3,
          corp_id = $4,
@@ -3066,12 +3041,24 @@ export async function updateDirectoryIntegration(
          schedule_timezone = $8,
          default_deprovision_policy = $9,
          updated_at = NOW()
-     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11${lockedStatusGuard}
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11 AND status = $12
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`
+      : `UPDATE directory_integrations
+     SET name = $2,
+         status = $3,
+         corp_id = $4,
+         config = $5::jsonb,
+         sync_enabled = $6,
+         schedule_cron = $7,
+         schedule_timezone = $8,
+         default_deprovision_policy = $9,
+         updated_at = NOW()
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-      context.gated ? [...updateParams, context.locked?.status ?? null] : updateParams,
-    )
-  }
+    context.gated ? [...updateParams, context.lockedStatus] : updateParams,
+  )
   // A save whose resulting status is active may add a pull source: it goes through the gate, which runs
   // the statement on the pool exactly as before while the switch is off. Inside the gate the row is locked
   // first, and whether the save turns a non-active row active is decided from the status read under that
@@ -3079,16 +3066,21 @@ export async function updateDirectoryIntegration(
   // stays the one statement it was.
   const outcome = await (
     normalized.status === 'active'
-      ? runGatedPullSourceWrite<Awaited<ReturnType<typeof update>>, LockedIntegrationStatus | null>(
+      ? runGatedPullSourceWrite(
         { orgId: current.org_id, provider: current.provider, corpId: normalized.corpId, enforce: 'flagged' },
         update,
         {
-          lockTarget: (client) => lockIntegrationRowForGatedUpdate(client, integrationId, current.org_id),
-          joins: (locked) => locked !== null && locked.status !== 'active',
+          lockRowId: integrationId,
+          joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',
         },
       )
       : update({ query }, UNGATED_INTEGRATION_WRITE).then((result) => ({ result, ...UNGATED_INTEGRATION_WRITE }))
   ).catch((error: unknown) => {
+    // The gate read the row, under its lock, in another organisation than the one read above: the
+    // configuration changed under this save, the same conflict as a save that matches no row.
+    if (error instanceof PullSourceGateRowMovedError) {
+      throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+    }
     throw uniqueViolationAsConflict(error)
   })
 

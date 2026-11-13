@@ -6,13 +6,11 @@ import { ensurePlatformAdmin, sendIfPullSourceGateRefusal } from './admin-direct
 import { query, transaction } from '../db/pg'
 import { readApprovalRoutingStatus, type ApprovalRoutingStatus } from '../directory/approval-routing-status'
 import {
-  PULL_SOURCE_THRESHOLD,
-  countActivePullSources,
   isApprovalRoutingPolicyRequired,
   isApprovalRoutingRequirePolicyEnabled,
   type PullSourceRuleStatus,
 } from '../directory/pull-source-rule'
-import { asPullSourceGateFailure, runPullSourceGateTransaction } from '../directory/pull-source-write-gate'
+import { asPullSourceGateFailure, runGatedRoutingPolicyClear } from '../directory/pull-source-write-gate'
 import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
@@ -246,34 +244,13 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
       const orgId = resolveOrgId(req)
 
       if (canonical === null) {
-        // A clear always runs in a pull-source gate transaction: organisation lock, then the policy row,
-        // then the source count, then the delete. The same lock serialises it against every write that
-        // adds a pull source, so "two or more active pull sources and no policy" cannot be reached by
-        // removing the policy. The rule does not read the approval-routing switch. No policy row keeps
-        // the answer it always had (`cleared: false`), whatever the source count.
-        type ClearOutcome =
-          | { kind: 'absent' }
-          | { kind: 'blocked' }
-          | { kind: 'cleared'; previous: string }
-
-        const outcome = await runPullSourceGateTransaction<ClearOutcome>(orgId, async (client) => {
-          const existing = await client.query(
-            `SELECT canonical_integration_id::text AS canonical_integration_id
-               FROM org_directory_routing_policy
-              WHERE org_id = $1 AND purpose = $2
-                FOR UPDATE`,
-            [orgId, purpose],
-          )
-          const previous = existing.rows[0]?.canonical_integration_id
-          if (typeof previous !== 'string') return { kind: 'absent' }
-          const activeSources = await countActivePullSources((sql, params) => client.query(sql, params), orgId)
-          if (activeSources >= PULL_SOURCE_THRESHOLD) return { kind: 'blocked' }
-          await client.query(
-            `DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2`,
-            [orgId, purpose],
-          )
-          return { kind: 'cleared', previous }
-        })
+        // A clear always runs in a pull-source gate transaction, and the gate module issues every
+        // statement of it: organisation lock, then the policy row, then the source count, then the
+        // delete. The same lock serialises it against every write that adds a pull source, so "two or
+        // more active pull sources and no policy" cannot be reached by removing the policy. The rule
+        // does not read the approval-routing switch. No policy row keeps the answer it always had
+        // (`cleared: false`), whatever the source count.
+        const outcome = await runGatedRoutingPolicyClear(orgId, purpose)
 
         if (outcome.kind === 'blocked') {
           // A refusal is logged values-free and writes no audit row.
