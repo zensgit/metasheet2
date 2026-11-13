@@ -5,10 +5,11 @@
  * runs dynamic SQL that names one; the functions that lock `users` rows are exactly four; every
  * cascading foreign key from an input table points at one of five known parents; the three `users`
  * columns the classifier reads carry their pinned default expressions; no view or materialized view
- * is defined over an input table; and the foreign keys whose child is an input table are a pinned
- * list, each with its update action, delete action and deferrability. Matching is done in
- * TypeScript on catalog text; the database only returns names, definitions, default expressions and
- * constraint attributes.
+ * is defined over an input table; the foreign keys whose child is an input table are a pinned
+ * list, each with its update action, delete action and deferrability; and no table inherits from an
+ * input table or is a partition of one, so a read of an input table returns its own rows only.
+ * Matching is done in TypeScript on catalog text; the database only returns names, definitions,
+ * default expressions and constraint attributes.
  *
  * Each assertion has a positive control created inside a transaction that is rolled back, and the
  * function-body assertion has negative controls for a trigger function that only takes a lease and
@@ -57,6 +58,9 @@ const EXPECTED_USERS_INPUT_DEFAULTS: ReadonlyArray<readonly [column: string, def
 
 /** Views and materialized views defined over an input table, as `schema.view -> table`. */
 const EXPECTED_VIEWS_OVER_INPUTS: readonly string[] = []
+
+/** Tables that inherit from an input table or are a partition of one, as `schema.child -> parent`. */
+const EXPECTED_CHILDREN_OF_INPUTS: readonly string[] = []
 
 type InputForeignKey = Readonly<{ constraint: string; child: string; parent: string; onUpdate: string; onDelete: string; deferrable: boolean; initiallyDeferred: boolean }>
 
@@ -241,6 +245,20 @@ async function inputForeignKeys(run: Runner): Promise<InputForeignKey[]> {
   }))
 }
 
+async function childrenOfInputs(run: Runner): Promise<string[]> {
+  const result = await run(
+    `SELECT cn.nspname AS child_schema, child.relname AS child_name, parent.relname AS parent_name
+       FROM pg_inherits i
+       JOIN pg_class child ON child.oid = i.inhrelid
+       JOIN pg_namespace cn ON cn.oid = child.relnamespace
+       JOIN pg_class parent ON parent.oid = i.inhparent
+       JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+      WHERE pn.nspname = 'public' AND parent.relname = ANY($1::text[])`,
+    [INPUT_TABLES],
+  )
+  return sortedLines(result.rows.map((row) => `${row.child_schema}.${row.child_name} -> ${row.parent_name}`))
+}
+
 describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
   let pool: PgPool
   const run: Runner = async (sql, params) => pool.query(sql, params as never)
@@ -321,6 +339,10 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
     // No membership row is tied to its role row by a foreign key in this schema.
     expect(found.filter((key) => key.child === 'user_roles')).toEqual([])
     expect(found.filter((key) => key.parent === 'roles')).toEqual([])
+  })
+
+  it('9. no table inherits from an input table or is a partition of one', async () => {
+    expect(await childrenOfInputs(run)).toEqual([...EXPECTED_CHILDREN_OF_INPUTS])
   })
 
   describe('positive controls (each created inside a rolled-back transaction)', () => {
@@ -442,6 +464,24 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
         expect(inputForeignKeyDifferences(found)).toEqual(['missing user_permissions_permission_code_fkey', 'unexpected user_permissions_permission_code_fkey'])
       })
       expect(inputForeignKeyDifferences(await inputForeignKeys(run))).toEqual([])
+    })
+  })
+
+  describe('positive control for the inheritance children (inside a rolled-back transaction)', () => {
+    it('a table created as an inheritance child of an input table, and one given an input table as its parent afterwards, are detected by assertion 9; the rows of a child are read through the input table', async () => {
+      await inRolledBackTransaction(async (client, runner) => {
+        await client.query('CREATE TABLE ais1_census_members () INHERITS (user_roles)')
+        expect(await childrenOfInputs(runner)).toEqual(['public.ais1_census_members -> user_roles'])
+        await client.query('CREATE TABLE ais1_census_grants (LIKE role_permissions INCLUDING CONSTRAINTS)')
+        expect(await childrenOfInputs(runner)).toEqual(['public.ais1_census_members -> user_roles'])
+        await client.query('ALTER TABLE ais1_census_grants INHERIT role_permissions')
+        expect(await childrenOfInputs(runner)).toEqual(['public.ais1_census_grants -> role_permissions', 'public.ais1_census_members -> user_roles'])
+        // A row of the child is a row of every plain read of the parent, and of none that names the parent ONLY.
+        await client.query("INSERT INTO ais1_census_members (user_id, role_id) VALUES ('ais1-census-user', 'ais1-census-role')")
+        expect((await runner("SELECT role_id FROM user_roles WHERE user_id = 'ais1-census-user'")).rows.map((row) => String(row.role_id))).toEqual(['ais1-census-role'])
+        expect((await runner("SELECT role_id FROM ONLY user_roles WHERE user_id = 'ais1-census-user'")).rows).toEqual([])
+      })
+      expect(await childrenOfInputs(run)).toEqual([...EXPECTED_CHILDREN_OF_INPUTS])
     })
   })
 
