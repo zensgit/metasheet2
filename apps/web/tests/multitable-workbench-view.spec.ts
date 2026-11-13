@@ -6162,6 +6162,48 @@ describe('MultitableWorkbench view wiring', () => {
       expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_far', version: 9, data: { fld_title: 'Far' } })
     })
 
+    it('a reload with the caret in a changed drawer field: the write the unload flushes is counted, so the leave prompt is shown', async () => {
+      await openRec1()
+      // The grid counts a write from its call on (synchronously), as the real patchCell does.
+      let answer: () => void = () => {}
+      gridMock.patchCell.mockImplementation((_r: string, _f: string, _v: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
+        gridMock.pendingCellWriteCount.value += 1
+        return new Promise((resolve) => {
+          answer = () => { gridMock.pendingCellWriteCount.value -= 1; options?.onCommitted?.(version + 1); resolve(null) }
+        })
+      })
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed'
+      const event = fireBeforeUnload()
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(event.defaultPrevented).toBe(true)
+      answer()
+      await flushUi()
+      expect(fireBeforeUnload().defaultPrevented).toBe(false)
+    })
+
+    it('a same-record refresh of a deep-linked record that has a draft does not ask the discard prompt, and refreshes the copy (control)', async () => {
+      await openRemoteWithCommentDraft()
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 5, data: { fld_title: 'Remote v5' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      gridMock.retryConflict.mockResolvedValue(true)
+      gridMock.conflict.value = { recordId: 'rec_remote', fieldId: 'fld_title', attemptedValue: 'x', message: 'Row changed elsewhere', serverVersion: 5 }
+      await flushUi()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      try {
+        container!.querySelector<HTMLButtonElement>('.mt-workbench__conflict-btn--primary')!.click()
+        await flushUi(8)
+        expect(confirmSpy).not.toHaveBeenCalled()
+        expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 5, data: { fld_title: 'Remote v5' } })
+      } finally {
+        confirmSpy.mockRestore()
+      }
+    })
+
     it('a declined discard prompt keeps the record: the focused field is committed to it and gets the focus back', async () => {
       await openRec1()
       container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
