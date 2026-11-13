@@ -17,7 +17,8 @@
  *         literal (or `context.gated ? literal : literal`) that starts with an INSERT into, or an UPDATE
  *         of, the integration table and holds no row-lock clause, no advisory-lock call and no second
  *         statement. PARAMS is a constant computed before the call (or, under `context.gated`, that
- *         constant followed by `context.lockedStatus`).
+ *         constant followed by `context.lockedStatus`). A constant spread into a list is one whose
+ *         initial value is an array literal, so the spread iterates an array.
  *       - `joins`: `(lockedStatus) => expression` over its own parameter and literals, with `===`, `!==`,
  *         `&&`, `||`, `??`, `!` and `?:`. No call, no `await`, no other name.
  *     The function must be visible: written in the call, or held in a name. A name is read the way the
@@ -587,15 +588,17 @@ const isMemberOf = (node: ts.Expression, object: string | undefined, member: str
 
 /**
  * Why an expression is not a constant computed before the call; empty when it is one: a name bound by
- * exactly one `const` statement whose initial value is not a function.
+ * exactly one `const` statement whose initial value is not a function. A constant that is spread is
+ * iterated inside the function, so its initial value must be an array literal.
  */
-function notAConstant(node: ts.Expression): string {
+function notAConstant(node: ts.Expression, spread = false): string {
   if (!ts.isIdentifier(node)) return 'it is not a name'
   const bound = constStatementOf(node)
   if (typeof bound === 'string') return `${node.text} ${bound}`
   const initializer = bound.initializer ? unwrap(bound.initializer) : undefined
   if (!initializer) return `${node.text} has no initial value`
   if (isFunctionLike(initializer) || ts.isClassExpression(initializer)) return `${node.text} holds a function`
+  if (spread && !ts.isArrayLiteralExpression(initializer)) return `${node.text} is spread and its initial value is not an array literal`
   return ''
 }
 
@@ -635,7 +638,7 @@ function writeShapeProblems(fn: ts.ArrowFunction | ts.FunctionExpression): strin
     if (ts.isArrayLiteralExpression(node)) {
       for (const element of node.elements) {
         if (!ts.isSpreadElement(element) && isMemberOf(element, context, 'lockedStatus')) continue
-        const why = notAConstant(ts.isSpreadElement(element) ? unwrap(element.expression) : element)
+        const why = ts.isSpreadElement(element) ? notAConstant(unwrap(element.expression), true) : notAConstant(element)
         if (why) problems.push(`a parameter is computed inside write (${ts.SyntaxKind[element.kind]}): ${why}`)
       }
       return
@@ -900,6 +903,18 @@ describe('every function handed to the gate has an allowed shape', () => {
     { form: 'a function among the parameters', write: `(client) => client.query(${UPDATE}, [lockThenWrite])`, expected: /a parameter is computed inside write \(Identifier\)/ },
     { form: 'parameters that are a parameter of the calling function', write: `(client) => client.query(${UPDATE}, injected as never)`, expected: /the parameters are not a constant computed before the call/ },
     { form: 'a constant among the parameters that holds a function', write: `(client) => client.query(${UPDATE}, [holder])`, prelude: '  const holder = () => userIds', expected: /a parameter is computed inside write \(Identifier\): holder holds a function/ },
+    {
+      form: 'a spread of a constant that is an object with its own iteration',
+      write: `(client, context) => client.query(${UPDATE}, [...iterable, context.lockedStatus])`,
+      prelude: '  const iterable = { *[Symbol.iterator]() { yield userIds } }',
+      expected: /a parameter is computed inside write \(SpreadElement\): iterable is spread and its initial value is not an array literal/,
+    },
+    {
+      form: 'a spread of a constant that holds a call result',
+      write: `(client, context) => client.query(${UPDATE}, [...copied, context.lockedStatus])`,
+      prelude: '  const copied = userIds.slice()',
+      expected: /a parameter is computed inside write \(SpreadElement\): copied is spread and its initial value is not an array literal/,
+    },
     { form: 'parameters held in a constant that has no initial value', write: `(client) => client.query(${UPDATE}, plan)`, expected: /the parameters are not a constant computed before the call \(Identifier\): plan has no initial value/ },
     { form: 'parameters chosen by something else', write: `(client, context) => client.query(${UPDATE}, context.joined ? params : params)`, expected: /the parameters are chosen by something other than context\.gated/ },
     // A function the guard cannot see.
