@@ -25,6 +25,15 @@
  * The statement-kind layer applies to every statement that mentions an input table, has a dynamic
  * write target, or writes a cascade parent. The caller decides for which files it is enforced.
  *
+ * A table that inherits from an input table, or is a partition of one, is read with it: creating a
+ * table that way, or adding or removing such a tie on another table, is `unreadable`. A foreign-key
+ * reference and a copied definition (`LIKE`) only refer to the input table.
+ *
+ * A query-builder write of a cascade parent has no assignment list to read. It is accepted as a
+ * DELETE, or as an INSERT whose chain of calls is its values, a returning clause, a conflict clause
+ * that does nothing, and at the end the call that runs it; an UPDATE, a MERGE and any other INSERT
+ * are `unreadable`.
+ *
  * A write target that cannot be read is a dynamic target: a substituted or concatenated table, a
  * query-builder table argument that is not a plain name, a helper table argument that is neither a
  * literal nor a constant of the file, and a dynamically executed statement that is not one literal.
@@ -601,6 +610,40 @@ function alterActionProblem(table: string, action: readonly Token[]): string | n
   return `${action.slice(0, 2).map((token) => token.text).join(' ')} is not on the list of safe sub-actions`
 }
 
+/**
+ * A table that inherits from an input table, or is a partition of one, is read with it: its rows
+ * are rows of the input table. Tying a table to an input table this way is not a reference to it.
+ */
+function hierarchyParentProblem(parent: { name: string } | null, clause: string): string | null {
+  if (parent === null) return `${clause} names a table that is not readable`
+  return INPUTS.has(parent.name) ? `${clause} names the input table ${parent.name}` : null
+}
+
+/** The `INHERITS (…)` list and the `PARTITION OF` parent of a CREATE TABLE, read from `from`, the token after the created table's name: why one of them is not accepted, or null. */
+function createdHierarchyProblem(tokens: readonly Token[], from: number): string | null {
+  for (let i = from; i < tokens.length; i += 1) {
+    if (isKeyword(tokens[i], 'INHERITS') && isOp(tokens[i + 1], '(')) {
+      for (const item of splitTopLevel(tokens, i + 2, groupEnd(tokens, i + 1) - 1)) {
+        const problem = hierarchyParentProblem(tableAt(item, 0), 'INHERITS')
+        if (problem !== null) return problem
+      }
+    }
+    if (isKeyword(tokens[i], 'PARTITION') && isKeyword(tokens[i + 1], 'OF')) {
+      const problem = hierarchyParentProblem(tableAt(tokens, i + 2), 'PARTITION OF')
+      if (problem !== null) return problem
+    }
+  }
+  return null
+}
+
+/** One sub-action of `ALTER TABLE <another table>` that adds or removes an inheritance parent or a partition: why it is not accepted, or null. */
+function hierarchyActionProblem(action: readonly Token[]): string | null {
+  if (isKeyword(action[0], 'INHERIT')) return hierarchyParentProblem(tableAt(action, 1), 'INHERIT')
+  if (isKeyword(action[0], 'NO') && isKeyword(action[1], 'INHERIT')) return hierarchyParentProblem(tableAt(action, 2), 'NO INHERIT')
+  if (isKeyword(action[0], 'ATTACH', 'DETACH') && isKeyword(action[1], 'PARTITION')) return hierarchyParentProblem(tableAt(action, 2), `${action[0].value} PARTITION`)
+  return null
+}
+
 /** The key-column problem of a write on a cascade parent, or null. `tokens` begins at the write's verb. */
 function parentKeyProblem(table: string, verb: string, tokens: readonly Token[]): string | null {
   const keys = AUTHORIZATION_INPUT_MIGRATION_PARENT_KEY_COLUMNS[table] ?? []
@@ -830,9 +873,12 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     if (target === null) return push('ALTER TABLE', 'unreadable', 'table is not readable')
     const actions = splitTopLevel(tokens, target.next, tokens.length)
     if (!INPUTS.has(target.name)) {
-      // Another table: only a rename onto an input table's name is not a plain reference.
+      // Another table: a rename onto an input table's name, and a sub-action that ties the table to
+      // an input table by inheritance or as a partition, are not plain references.
       const renamed = actions.some((action) => isKeyword(action[0], 'RENAME') && isKeyword(action[1], 'TO') && INPUTS.has(nameOf(action[2]) ?? ''))
-      return renamed ? push('ALTER TABLE', 'unreadable', 'renames a table to an input table name') : push('ALTER TABLE', 'safe', '')
+      if (renamed) return push('ALTER TABLE', 'unreadable', 'renames a table to an input table name')
+      const tied = actions.map((action) => hierarchyActionProblem(action)).find((found) => found !== null)
+      return tied ? push('ALTER TABLE', 'unreadable', tied) : push('ALTER TABLE', 'safe', '')
     }
     const problem = actions.map((action) => alterActionProblem(target.name, action)).find((found) => found !== null)
     return problem ? push('ALTER TABLE', 'unreadable', problem, { table: target.name }) : push('ALTER TABLE', 'safe', '', { table: target.name })
@@ -849,7 +895,10 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       const end = head === 'DROP' ? tokens.length : at + 3
       const names = head === 'DROP' ? splitTopLevel(tokens, at, end).map((part) => tableAt(part, 0)?.name ?? null) : [tableAt(tokens, at)?.name ?? null]
       if (names.some((name) => name === null)) return push(`${head} TABLE`, 'unreadable', 'table is not readable')
-      return names.some((name) => INPUTS.has(name as string)) ? push(`${head} TABLE`, 'unreadable', `${head === 'CREATE' ? 'creates' : 'drops'} an input table`) : push(`${head} TABLE`, 'safe', '')
+      if (names.some((name) => INPUTS.has(name as string))) return push(`${head} TABLE`, 'unreadable', `${head === 'CREATE' ? 'creates' : 'drops'} an input table`)
+      // A table created under an input table, by inheritance or as a partition, is more than a reference to it.
+      const tied = head === 'CREATE' ? createdHierarchyProblem(tokens, tableAt(tokens, at)?.next ?? tokens.length) : null
+      return tied ? push(`${head} TABLE`, 'unreadable', tied) : push(`${head} TABLE`, 'safe', '')
     }
     if (head === 'CREATE' && (OBJECT_KINDS.includes(object) || materialized)) return push(`CREATE ${materialized ? 'MATERIALIZED VIEW' : object}`, 'unreadable', 'defines an object over an input table')
     return push(`${head} ${object}`.trim(), 'unreadable', 'statement kind is not on the safe list')
@@ -872,6 +921,10 @@ const BARE_TABLE = /^(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)$/
 const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const ARRAY_METHODS = ['map', 'every', 'some', 'forEach']
 const HELPER_MODULE_SPECIFIER = './_patterns'
+/** Query-builder methods a plain INSERT is chained from, methods that name a conflict target, and methods that run the built statement. */
+const BUILDER_PLAIN_INSERT_LINKS = ['values', 'returning', 'returningAll']
+const BUILDER_CONFLICT_TARGETS = ['column', 'columns', 'constraint']
+const BUILDER_RUNNERS = ['execute', 'executeTakeFirst', 'executeTakeFirstOrThrow']
 
 const stringOf = (node: ts.Node | undefined): string | null => (node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : null)
 
@@ -1051,6 +1104,46 @@ function judgeSource(file: string, source: string, sink: Sink): void {
     return true
   }
 
+  /** A conflict clause that changes no row: an inline callback that only names the conflict target and does nothing. */
+  const conflictClauseDoesNothing = (call: ts.CallExpression): boolean => {
+    const callback = call.arguments.length === 1 ? call.arguments[0] : undefined
+    if (callback === undefined || !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) return false
+    let doesNothing = false
+    let closed = true
+    const walk = (inner: ts.Node) => {
+      if (ts.isCallExpression(inner)) {
+        const method = ts.isPropertyAccessExpression(inner.expression) ? inner.expression.name.text : null
+        if (method === 'doNothing') doesNothing = true
+        else if (method === null || !BUILDER_CONFLICT_TARGETS.includes(method)) closed = false
+      }
+      ts.forEachChild(inner, walk)
+    }
+    walk(callback.body)
+    return closed && doesNothing
+  }
+  /**
+   * Why a query-builder INSERT is not a plain insert, or null. The chain of calls that begins at
+   * `call` is read link by link: the links of a plain insert, a conflict clause that does nothing,
+   * and the call that runs it, which is its last link. Any other link may carry an assignment list
+   * that has no text, and so may whatever is added to a chain that is not run where it is built.
+   */
+  const builderInsertProblem = (call: ts.CallExpression): string | null => {
+    const chain: Array<{ method: string; call: ts.CallExpression }> = []
+    let current = call
+    for (;;) {
+      const access = current.parent
+      if (!ts.isPropertyAccessExpression(access) || !ts.isCallExpression(access.parent) || access.parent.expression !== access) break
+      current = access.parent
+      chain.push({ method: access.name.text, call: current })
+    }
+    const unread = chain.some((link) => {
+      if (link.method === 'onConflict') return !conflictClauseDoesNothing(link.call)
+      return !BUILDER_PLAIN_INSERT_LINKS.includes(link.method) && !BUILDER_RUNNERS.includes(link.method)
+    })
+    if (unread) return 'has no assignment list'
+    return chain.length > 0 && BUILDER_RUNNERS.includes(chain[chain.length - 1].method) ? null : 'does not end in the call that runs it'
+  }
+
   const isPlus = (node: ts.Node): node is ts.BinaryExpression => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
   const literalOf = (expression: ts.Expression): string | null => stringOf(expression)
   const judgeText = (text: string, folds: string[], node: ts.Node, concatenated = false) => judgeSqlText(file, { text, folds, concatenated }, lineOf(node), sink)
@@ -1078,7 +1171,8 @@ function judgeSource(file: string, source: string, sink: Sink): void {
         return
       }
       // A query-builder write has no statement text: on an input table it is never readable, and
-      // on a cascade parent an UPDATE or a MERGE has no assignment list to read.
+      // on a cascade parent an UPDATE or a MERGE has no assignment list to read. An INSERT of a
+      // cascade parent is accepted only as a plain insert, read to the call that runs it.
       if (ts.isPropertyAccessExpression(node.expression) && QUERY_BUILDER_WRITERS.has(node.expression.name.text) && node.arguments.length > 0) {
         const verb = QUERY_BUILDER_WRITERS.get(node.expression.name.text)!
         const first = node.arguments[0]
@@ -1098,6 +1192,9 @@ function judgeSource(file: string, source: string, sink: Sink): void {
               sink.judgments.push({ line: lineOf(node), kind: verb, verdict: outcome.verdict, detail: outcome.detail, inputWrite: true, table, forbiddenTable: outcome.forbiddenTable })
             } else if (verb === 'UPDATE' || verb === 'MERGE') {
               sink.judgments.push({ line: lineOf(node), kind: verb, verdict: 'unreadable', detail: `${verb} on ${table} through a query builder has no assignment list`, inputWrite: false, table })
+            } else if (verb === 'INSERT') {
+              const problem = builderInsertProblem(node)
+              if (problem !== null) sink.judgments.push({ line: lineOf(node), kind: verb, verdict: 'unreadable', detail: `${verb} on ${table} through a query builder ${problem}`, inputWrite: false, table })
             }
           }
           consumed.add(first)

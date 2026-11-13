@@ -443,6 +443,130 @@ describe('query-builder writes', () => {
     // In a file that is not new the parent write is not judged.
     expect(check(up(builder("db.updateTable('roles').set({ id: 'x' })")), historicalMigrationFiles().find((file) => file.endsWith('.ts'))!, false).problems).toEqual([])
   })
+
+  describe('an insert of a cascade parent', () => {
+    const noAssignmentList = (table: string) => [`unreadable INSERT: INSERT on ${table} through a query builder has no assignment list`]
+    const PERMISSION = "db.insertInto('permissions').values({ code: 'reports:manage', name: 'x' })"
+    const ROLE = "db.insertInto('roles').values({ id: 'ops_lead', name: 'x' })"
+
+    const upserts: Array<[string, string, string]> = [
+      ['an upsert action that sets the key it conflicts on', `${PERMISSION}.onConflict((oc) => oc.column('code').doUpdateSet({ code: 'reports:admin' }))`, 'permissions'],
+      ['an upsert action that sets the key on a conflict over another column', `${PERMISSION}.onConflict((oc) => oc.column('name').doUpdateSet({ code: 'reports:admin' }))`, 'permissions'],
+      ['an upsert action that sets the key of a role', `${ROLE}.onConflict((oc) => oc.column('name').doUpdateSet({ id: 'ops_admin' }))`, 'roles'],
+      ['an upsert action that sets another column', `${PERMISSION}.onConflict((oc) => oc.column('code').doUpdateSet({ name: 'y' }))`, 'permissions'],
+      ['an upsert action built from the excluded row, on a table named with a schema', "db.insertInto('public.roles').values(rows).onConflict((oc) => oc.constraint('roles_pkey').doUpdateSet((eb) => ({ id: eb.ref('excluded.id') })))", 'roles'],
+      ['an upsert action in one branch of the conflict clause', `${PERMISSION}.onConflict((oc) => (keep ? oc.doNothing() : oc.column('code').doUpdateSet({ code: 'reports:admin' })))`, 'permissions'],
+      ['a conflict clause that is not an inline callback', `${PERMISSION}.onConflict(onPermissionConflict)`, 'permissions'],
+      ['a conflict clause whose callback calls anything but a conflict target and doNothing', `${PERMISSION}.onConflict((oc) => finish(oc.column('code')).doNothing())`, 'permissions'],
+      ['a conflict clause that does not end in doNothing', `${PERMISSION}.onConflict((oc) => oc.column('code'))`, 'permissions'],
+      ['an upsert action called on the insert itself', `${PERMISSION}.doUpdateSet({ code: 'reports:admin' })`, 'permissions'],
+      ['an upsert action of another dialect', `${PERMISSION}.onDuplicateKeyUpdate({ code: 'reports:admin' })`, 'permissions'],
+      ['an upsert action added under a condition', `${PERMISSION}.$if(flag, (qb) => qb.onConflict((oc) => oc.column('code').doUpdateSet({ code: 'reports:admin' })))`, 'permissions'],
+      ['a call that receives the builder', `${PERMISSION}.$call(addUpsert)`, 'permissions'],
+      ['a conflict clause written as text at the end of the statement', PERMISSION + '.modifyEnd(sql`on conflict (code) do update set code = excluded.code`)', 'permissions'],
+      ['rows taken from a query', "db.insertInto('permissions').columns(['code', 'name']).expression((eb) => eb.selectFrom('staging').select(['code', 'name']))", 'permissions'],
+      ['a link after the call that runs it', `${PERMISSION}.execute().then(report)`, 'permissions'],
+    ]
+    for (const [name, call, table] of upserts) {
+      it(`${name} has no assignment list to read`, () => {
+        const result = check(up(builder(call)))
+        expect(result.verdicts).toEqual([{ verdict: 'unreadable', kind: 'INSERT', detail: `INSERT on ${table} through a query builder has no assignment list`, table, value: undefined }])
+        expect(result.problems).toEqual(noAssignmentList(table))
+      })
+    }
+
+    const plain: Array<[string, string]> = [
+      ['no conflict clause', PERMISSION],
+      ['a conflict clause that does nothing', `${PERMISSION}.onConflict((oc) => oc.doNothing())`],
+      ['a conflict clause that names one column and does nothing', `${PERMISSION}.onConflict((oc) => oc.column('code').doNothing())`],
+      ['a conflict clause that names several columns and does nothing', `${ROLE}.onConflict((oc) => oc.columns(['id']).doNothing())`],
+      ['a conflict clause that names a constraint and does nothing, written as a function', `${ROLE}.onConflict(function (oc) { return oc.constraint('roles_pkey').doNothing() })`],
+      ['a returning clause', `${PERMISSION}.returning('code')`],
+      ['a clause that returns every column', `${PERMISSION}.returningAll()`],
+    ]
+    for (const [name, call] of plain) {
+      it(`${name} leaves it a plain insert, accepted without the lock block`, () => {
+        expect(check(up(builder(call))).problems).toEqual([])
+      })
+    }
+
+    it('is read to the call that runs it: a chain that ends anywhere else is refused, whatever is added to it later', () => {
+      const notRun = ['unreadable INSERT: INSERT on permissions through a query builder does not end in the call that runs it']
+      expect(check(up(`const pending = ${PERMISSION}`, "await pending.onConflict((oc) => oc.column('code').doUpdateSet({ code: 'reports:admin' })).execute()")).problems).toEqual(notRun)
+      expect(check(up(`const pending = ${PERMISSION}.onConflict((oc) => oc.doNothing())`, 'await pending.execute()')).problems).toEqual(notRun)
+      expect(check(up(`await run(${PERMISSION})`)).problems).toEqual(notRun)
+      expect(check(up(`await (${PERMISSION}).execute()`)).problems).toEqual(notRun)
+      expect(check(up("const pending = db.insertInto('permissions')", 'await pending.execute()')).problems).toEqual(notRun)
+      for (const runner of ['execute', 'executeTakeFirst', 'executeTakeFirstOrThrow']) expect(check(up(`await ${PERMISSION}.${runner}()`)).problems).toEqual([])
+      // A link that is not read is reported as such wherever the chain ends.
+      expect(check(up(`const pending = ${PERMISSION}.onConflict((oc) => oc.column('code').doUpdateSet({ code: 'reports:admin' }))`)).problems).toEqual(noAssignmentList('permissions'))
+      expect(check(up(`const compiled = ${PERMISSION}.compile()`)).problems).toEqual(noAssignmentList('permissions'))
+    })
+
+    it('is judged in a new file only, and an upsert on any other table is not judged by this rule', () => {
+      const upsert = `${PERMISSION}.onConflict((oc) => oc.column('code').doUpdateSet({ code: 'reports:admin' }))`
+      expect(check(up(builder(upsert)), historicalMigrationFiles().find((file) => file.endsWith('.ts'))!, false).problems).toEqual([])
+      expect(check(up(builder("db.insertInto('audit_x').values({ id: 'a' }).onConflict((oc) => oc.column('id').doUpdateSet({ note: 'x' }))"))).problems).toEqual([])
+      // On an input table a query-builder write has no statement text at all.
+      expect(check(lockedCode(builder("db.insertInto('users').values({ id: 'u1' }).onConflict((oc) => oc.column('id').doUpdateSet({ id: 'u2' }))"))).problems).toEqual(['unreadable INSERT: INSERT on users through a query builder has no statement text'])
+    })
+
+    it('the same upsert written as statement text is refused by its assignment list', () => {
+      expect(check(unlocked("INSERT INTO permissions (code, name) VALUES ('reports:manage', 'x') ON CONFLICT (name) DO UPDATE SET code = 'reports:admin'")).problems).toEqual(['unreadable INSERT: assigns a key column of permissions'])
+      expect(check(unlocked("INSERT INTO permissions (code, name) VALUES ('reports:manage', 'x') ON CONFLICT (code) DO UPDATE SET name = 'y'")).problems).toEqual([])
+    })
+  })
+})
+
+describe('a table tied to an input table by inheritance or as a partition', () => {
+  const red: Array<[string, string, string]> = [
+    ['a table created as an inheritance child of the memberships, and then written', unlocked('CREATE TABLE user_roles_archive () INHERITS (user_roles)', "INSERT INTO user_roles_archive (user_id, role_id) VALUES ('u1', 'admin')"), 'unreadable CREATE TABLE: INHERITS names the input table user_roles'],
+    ['a table made an inheritance child of the memberships after it is created, and then written', unlocked('CREATE TABLE audit_x (user_id text, role_id text)', 'ALTER TABLE audit_x INHERIT user_roles', "INSERT INTO audit_x (user_id, role_id) VALUES ('u1', 'admin')"), 'unreadable ALTER TABLE: INHERIT names the input table user_roles'],
+    ['a table created as an inheritance child of the accounts, and then written', unlocked('CREATE TABLE users_shadow () INHERITS (users)', "INSERT INTO users_shadow (id, role, is_admin) VALUES ('u9', 'admin', TRUE)"), 'unreadable CREATE TABLE: INHERITS names the input table users'],
+    ['an inheritance child of the role grants, with IF NOT EXISTS, a schema and quotes', unlocked('CREATE TABLE IF NOT EXISTS rp_extra () INHERITS ("public"."ROLE_PERMISSIONS")'), 'unreadable CREATE TABLE: INHERITS names the input table role_permissions'],
+    ['a temporary inheritance child', unlocked('CREATE TEMP TABLE scratch_members () INHERITS (user_roles)'), 'unreadable CREATE TABLE: INHERITS names the input table user_roles'],
+    ['an unlogged inheritance child with columns of its own', unlocked('CREATE UNLOGGED TABLE extra_grants (note text) INHERITS (user_permissions) WITH (fillfactor = 90)'), 'unreadable CREATE TABLE: INHERITS names the input table user_permissions'],
+    ['an input table named second in the inheritance list', unlocked('CREATE TABLE audit_y () INHERITS (audit_base, public.user_namespace_admissions)'), 'unreadable CREATE TABLE: INHERITS names the input table user_namespace_admissions'],
+    ['an inheritance list with an item that is not a name, in a statement that refers to an input table', up('await sql`CREATE TABLE audit_y (user_id text REFERENCES users(id)) INHERITS (${base})`.execute(db)'), 'unreadable CREATE TABLE: INHERITS names a table that is not readable'],
+    ['a table created as a partition of an input table', unlocked("CREATE TABLE user_roles_2027 PARTITION OF user_roles FOR VALUES IN ('a')"), 'unreadable CREATE TABLE: PARTITION OF names the input table user_roles'],
+    ['a default partition of an input table named with a schema', unlocked('CREATE TABLE IF NOT EXISTS users_rest PARTITION OF public.users DEFAULT'), 'unreadable CREATE TABLE: PARTITION OF names the input table users'],
+    ['IF EXISTS, ONLY and a schema around an added inheritance parent', unlocked('ALTER TABLE IF EXISTS ONLY audit_x INHERIT public.users'), 'unreadable ALTER TABLE: INHERIT names the input table users'],
+    ['an inheritance parent added among other sub-actions', unlocked('ALTER TABLE audit_x ADD COLUMN note text, INHERIT "delegated_role_admin_scopes"'), 'unreadable ALTER TABLE: INHERIT names the input table delegated_role_admin_scopes'],
+    ['an inheritance parent removed', unlocked('ALTER TABLE audit_x NO INHERIT user_roles'), 'unreadable ALTER TABLE: NO INHERIT names the input table user_roles'],
+    ['an input table attached to another table as a partition', unlocked("ALTER TABLE audit_x ATTACH PARTITION user_roles FOR VALUES IN ('a', 'b')"), 'unreadable ALTER TABLE: ATTACH PARTITION names the input table user_roles'],
+    ['an input table detached from another table', unlocked('ALTER TABLE audit_x DETACH PARTITION public.role_permissions'), 'unreadable ALTER TABLE: DETACH PARTITION names the input table role_permissions'],
+    ['a table attached to an input table as a partition', unlocked("ALTER TABLE user_roles ATTACH PARTITION audit_x FOR VALUES IN ('a')"), 'unreadable ALTER TABLE: ATTACH PARTITION is not on the list of safe sub-actions'],
+    ['an inheritance parent given to an input table', unlocked('ALTER TABLE user_roles INHERIT audit_base'), 'unreadable ALTER TABLE: INHERIT audit_base is not on the list of safe sub-actions'],
+    ['an inheritance child created inside a block', unlocked('DO $$ BEGIN CREATE TABLE IF NOT EXISTS members_archive () INHERITS (user_roles); END $$'), 'unreadable CREATE TABLE: INHERITS names the input table user_roles'],
+    ['an inheritance child created by a statement a block runs from one literal', unlocked("DO $$ BEGIN EXECUTE 'CREATE TABLE members_archive () INHERITS (user_roles)'; END $$"), 'unreadable CREATE TABLE: INHERITS names the input table user_roles'],
+  ]
+  for (const [name, source, problem] of red) {
+    it(`${name} is unreadable`, () => {
+      const result = check(source)
+      expect(result.verdicts.map((line) => line.verdict)).toEqual(['unreadable'])
+      expect(result.problems).toEqual([problem])
+    })
+  }
+
+  it('the same rule reads a `.sql` migration', () => {
+    const source = "CREATE TABLE rp_extra () INHERITS (role_permissions);\nINSERT INTO rp_extra (role_id, permission_code) VALUES ('viewer', 'users:write');\n"
+    expect(check(source, NEW_SQL).problems).toEqual(['unreadable CREATE TABLE: INHERITS names the input table role_permissions'])
+    expect(check("ALTER TABLE audit_x INHERIT user_roles;\n", NEW_SQL).problems).toEqual(['unreadable ALTER TABLE: INHERIT names the input table user_roles'])
+  })
+
+  const green: Array<[string, string]> = [
+    ['a definition copied from an input table', unlocked('CREATE TABLE user_roles_staging (LIKE user_roles INCLUDING ALL)')],
+    ['a foreign key to an input table on an inheritance child of another table', unlocked('CREATE TABLE audit_y (user_id text REFERENCES users(id)) INHERITS (audit_base)')],
+    ['a foreign key to an input table on a partitioned table', unlocked('CREATE TABLE audit_y (user_id text REFERENCES users(id)) PARTITION BY LIST (user_id)')],
+    ['a partition of another table whose bound spells an input table name', unlocked("CREATE TABLE audit_users PARTITION OF audit_logs FOR VALUES IN ('users')")],
+    ['an inheritance parent that is another table, beside a foreign key to an input table', unlocked('ALTER TABLE audit_x INHERIT audit_base, ADD CONSTRAINT audit_x_user_fkey FOREIGN KEY (user_id) REFERENCES users(id)')],
+    ['a partition of another table attached with a bound that spells an input table name', unlocked("ALTER TABLE audit_logs ATTACH PARTITION audit_2027 FOR VALUES IN ('user_roles')")],
+  ]
+  for (const [name, source] of green) {
+    it(`${name} only refers to the input table: accepted without the lock block`, () => {
+      expect(check(source).problems).toEqual([])
+    })
+  }
 })
 
 describe('targets that are read item by item or not at all', () => {
