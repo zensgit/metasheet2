@@ -1319,6 +1319,9 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+
+/** The drawer asks for the version the server returns on every save (`patchCell`'s `onCommitted`). */
+const ROW_SAVE = { onCommitted: expect.any(Function) }
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
 import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
@@ -5413,7 +5416,7 @@ describe('MultitableWorkbench view wiring', () => {
       await openRec1()
       rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
       await patchTitle()
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1, ROW_SAVE)
       expect(showErrorSpy).not.toHaveBeenCalled()
       expect(showSuccessSpy).not.toHaveBeenCalled()
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
@@ -5805,7 +5808,7 @@ describe('MultitableWorkbench view wiring', () => {
       host.recordId = 'rec_2'
       await flushUi(8)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(document.activeElement).toBe(field)
       expect(field.value).toBe('Beta')
     })
@@ -5856,7 +5859,7 @@ describe('MultitableWorkbench view wiring', () => {
         confirmSpy.mockRestore()
       }
       expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(document.activeElement).toBe(field)
     })
 
@@ -5874,7 +5877,7 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
       await flushUi()
       expect(blurred).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
       expect(document.activeElement).toBe(field)
       // The focus comes back only once the drawer shows rec_2: the field shows rec_2's title, not rec_1's typing.
@@ -5983,7 +5986,7 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchFor('rec_1')
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7, ROW_SAVE)
       expect(gridMock.patchCell.mock.calls.some((call: unknown[]) => call[0] === 'rec_2')).toBe(false)
     })
 
@@ -6008,7 +6011,7 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchFor('rec_2')
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1, ROW_SAVE)
       expect(fieldErrorEl('fld_title')).toBeNull()
       expect(showSuccessSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).not.toHaveBeenCalled()
@@ -6034,7 +6037,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
       acceptNextPatch()
       await patchFor('rec_1')
-      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
     })
 
@@ -6048,7 +6051,7 @@ describe('MultitableWorkbench view wiring', () => {
       inspectorStubAnchor.mockImplementation(answer)
       rejectNextPatch('Stale title rejected', { status: 400, code: 'VALIDATION_ERROR' }) // the failure is rec_1's
       await patchFor('rec_1')
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
       expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
       expect(showErrorSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).toHaveBeenCalledWith('Stale title rejected')
@@ -6133,7 +6136,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[0].version = 7
       acceptNextPatch()
       await patchRemovedFor('rec_1')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7, ROW_SAVE]])
     })
 
     it('a remove naming rec_1 whose list no longer holds the removed id (the server took it out): nothing written, no toast', async () => {
@@ -6156,7 +6159,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: files }
       acceptNextPatch()
       await patchRemovedFor('rec_2')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1, ROW_SAVE]])
     })
 
     it('a remove naming the deep-linked rec_remote (no longer shown): rebuilt from the deep-linked copy minus the removed ids, at its version 4', async () => {
@@ -6195,7 +6198,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[0].version = 7
       acceptNextPatch()
       await patchClearedFor('rec_1')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7, ROW_SAVE]])
     })
 
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
@@ -7368,7 +7371,7 @@ describe('MultitableWorkbench view wiring', () => {
         typeInto(title, 'Renamed')
         clickPatch()
         await flushUi()
-        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1, ROW_SAVE)
         title.focus()
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('Renamed')
@@ -7578,7 +7581,7 @@ describe('MultitableWorkbench view wiring', () => {
         container!.querySelector<HTMLButtonElement>(button)!.click()
         await flushUi()
         expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-        expect(gridMock.patchCell).toHaveBeenCalledWith(...call)
+        expect(gridMock.patchCell).toHaveBeenCalledWith(...call, ROW_SAVE)
         title.focus()
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe(afterUndo)

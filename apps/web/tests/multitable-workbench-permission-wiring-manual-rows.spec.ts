@@ -127,6 +127,9 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+
+/** The drawer asks for the version the server returns on every save (`patchCell`'s `onCommitted`). */
+const ROW_SAVE = { onCommitted: expect.any(Function) }
 import { useMultitableSheetRealtime } from '../src/multitable/composables/useMultitableSheetRealtime'
 
 async function flushUi(cycles = 6): Promise<void> {
@@ -588,7 +591,7 @@ describe('W-10 the drawer on a manual row', () => {
     const first = onPatch(F.spec, 'SPEC-B')
     const second = onPatch(F.notes, 'note')
     await flushUi()
-    expect(calls).toEqual([['rec_wb_manual', F.spec, 'SPEC-B', 3], ['rec_wb_manual', F.notes, 'note', 3]])
+    expect(calls).toEqual([['rec_wb_manual', F.spec, 'SPEC-B', 3, ROW_SAVE], ['rec_wb_manual', F.notes, 'note', 3, ROW_SAVE]])
     releaseFirst()
     await first
     await second
@@ -600,7 +603,7 @@ describe('W-10 the drawer on a manual row', () => {
     await flushUi()
     const onPatch = captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown) => Promise<void>
     await onPatch(F.notes, 'note')
-    expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_plm', F.notes, 'note', 5)
+    expect(gridMock.patchCell).toHaveBeenCalledWith('rec_wb_plm', F.notes, 'note', 5, ROW_SAVE)
   })
 
   // A drawer write that names its record (an attachment write that ended after the drawer moved on) takes that
@@ -619,13 +622,13 @@ describe('W-10 the drawer on a manual row', () => {
   it('the manual row\'s named write after a move to the PLM row goes to the manual row, at its version (the grid picks its route)', async () => {
     const onPatch = await selectThen('rec_wb_manual', 'rec_wb_plm')
     await onPatch(F.notes, 'late', 'rec_wb_manual')
-    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.notes, 'late', 3]])
+    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_manual', F.notes, 'late', 3, ROW_SAVE]])
   })
 
   it('the reverse: the PLM row\'s named write while the manual row is shown is a plain /patch call for the PLM row', async () => {
     const onPatch = await selectThen('rec_wb_plm', 'rec_wb_manual')
     await onPatch(F.notes, 'late', 'rec_wb_plm')
-    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_plm', F.notes, 'late', 5]])
+    expect(gridMock.patchCell.mock.calls).toEqual([['rec_wb_plm', F.notes, 'late', 5, ROW_SAVE]])
   })
 
   // The drawer can hold a copy of a manual row (`deepLinkedRecord`): after a realtime merge of a row on the page, or for
@@ -816,10 +819,7 @@ function versionCheckingServer(records: Array<{ id: string; version: number; dat
             record.version += 1
             record.data[change.fieldId] = change.value
             entry.outcome = `stored v${record.version}`
-            return json({ ok: true, data: {
-              updated: [{ recordId: change.recordId, version: record.version }],
-              ...(manualMatch ? { records: [{ recordId: change.recordId, data: { [change.fieldId]: change.value } }] } : {}),
-            } })
+            return json({ ok: true, data: { updated: [{ recordId: change.recordId, version: record.version }] } })
           },
         })
       })
@@ -874,6 +874,7 @@ describe('W-10R the drawer on the REAL grid composable (a stand-in server checks
     { id: 'rec_wb_manual', version: 3, data: { [F.name]: 'Synthetic part', [F.spec]: 'SPEC-A', [F.notes]: '', [F.total]: 5 } },
     { id: 'rec_wb_plm', version: 5, data: { [F.name]: 'PLM part', [F.spec]: 'SPEC-P', [F.notes]: '' } },
     { id: 'rec_wb_new', version: 1, data: { [F.name]: 'Synthetic manual part', [F.total]: 5 } },
+    { id: 'rec_wb_far', version: 8, data: { [F.name]: 'Far PLM part', [F.notes]: '', [F.code]: ['att_1', 'att_2'] } },
   ]
   const row = (id: string) => realGrid.rows.value.find((r: { id: string }) => r.id === id) as { id: string; version: number; data: Record<string, unknown> } | undefined
   const shown = () => captured.MetaRecordInspector?.record as { id: string; version: number; data: Record<string, unknown> } | null | undefined
@@ -1133,6 +1134,93 @@ describe('W-10R the drawer on the REAL grid composable (a stand-in server checks
     await onCopy
     expect(writes()).toEqual([[F.notes, 'g', 3, 'stored v4'], [F.total, 6, 4, 'stored v5'], [F.notes, 'mine', 3, 'VERSION_CONFLICT']])
     expect(server.stored.get('rec_wb_manual')!.data[F.notes]).toBe('g')
+  })
+
+  /** A record the loaded page does not hold, opened by its link: the drawer shows its copy. */
+  async function openedOffThePage(recordId: string): Promise<void> {
+    workbenchMock = createWorkbenchMock('grid', withBlock())
+    getRecordFromServer()
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component, { recordId }) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await server.tick()
+    await vi.waitFor(() => expect(realGrid.rows.value).toHaveLength(2))
+    await flushUi(10)
+    expect(row(recordId)).toBeUndefined()
+    expect(shown()!.id).toBe(recordId)
+  }
+
+  it('a record off the page: a save is stored, and an attachment removal is stored after it but answered first: the copy takes the save, then the removal, so the removal\'s patch is stored', async () => {
+    await openedOffThePage('rec_wb_far')
+    const save = onPatch()(F.notes, 'a')
+    await step()
+    server.store()
+    workbenchMock.client.deleteAttachment = vi.fn(async () => {
+      const record = server.stored.get('rec_wb_far')!
+      record.version += 1
+      record.data[F.code] = ['att_2']
+      return { deleted: 'att_1' }
+    })
+    const remove = (captured.MetaRecordInspector!['delete-attachment-fn'] as (id: string, context: { recordId: string; fieldId: string }) => Promise<void>)('att_1', { recordId: 'rec_wb_far', fieldId: F.code })
+    await step()
+    await server.release()
+    await save
+    await remove
+    const patch = onPatch()(F.code, ['att_2'])
+    await step()
+    await server.answerAll()
+    await patch
+    expect(writes()).toEqual([[F.notes, 'a', 8, 'stored v9'], [F.code, ['att_2'], 10, 'stored v11']])
+    expect(shown()).toMatchObject({ id: 'rec_wb_far', version: 11, data: { [F.notes]: 'a' } })
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a save on the row, and a realtime merge that read before it was stored lands while it is out (the drawer now holds a copy): the copy takes the save, so once the row leaves the page a save on the copy is stored', async () => {
+    await onTheRow('rec_wb_plm')
+    const first = onPatch()(F.notes, 'a')
+    await step()
+    await realtime().mergeRemoteRecord('rec_wb_plm')
+    await flushUi()
+    await server.answerAll()
+    await first
+    await rowLeavesThePage('rec_wb_plm')
+    expect(shown()).toMatchObject({ id: 'rec_wb_plm', version: 6, data: { [F.notes]: 'a' } })
+    const onCopy = onPatch()(F.notes, 'b')
+    await step()
+    await server.answerAll()
+    await onCopy
+    expect(writes()).toEqual([[F.notes, 'a', 5, 'stored v6'], [F.notes, 'b', 6, 'stored v7']])
+  })
+
+  it('a write named for a record on the page that the drawer holds a copy of (the drawer moved on) goes with the row\'s version, not the older copy\'s', async () => {
+    await afterMerge('rec_wb_plm')
+    const edit = gridEdit('rec_wb_plm', F.spec, 'G')
+    await step()
+    await server.answerAll()
+    await edit
+    await (captured.MetaGridTable!.onSelectRecord as (id: string) => Promise<void>)('rec_wb_manual')
+    await flushUi()
+    const named = (captured.MetaRecordInspector!.onPatch as (fieldId: string, value: unknown, recordId?: string) => Promise<void>)(F.notes, 'late', 'rec_wb_plm')
+    await step()
+    await server.answerAll()
+    await named
+    expect(writes().at(-1)).toEqual([F.notes, 'late', 6, 'stored v7'])
+  })
+
+  it('after a realtime merge of a manual row: a save is stored, another user changes the cell, and a merge reading their change lands before the answer: the copy keeps their value and version', async () => {
+    await afterMerge()
+    const save = onPatch()(F.total, 6)
+    await step()
+    server.store()
+    const record = server.stored.get('rec_wb_manual')!
+    record.version += 1
+    record.data[F.total] = 9
+    await realtime().mergeRemoteRecord('rec_wb_manual')
+    await flushUi()
+    await server.release()
+    await save
+    await rowLeavesThePage('rec_wb_manual')
+    expect(shown()).toMatchObject({ id: 'rec_wb_manual', version: 5, data: { [F.total]: 9 } })
   })
 
   it.each([['kanban', 'MetaKanbanView'], ['calendar', 'MetaCalendarView']])('a %s view: after a realtime merge of the record shown the drawer shows the grid\'s row, and two quick saves both store', async (viewType, stub) => {

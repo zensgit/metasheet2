@@ -3001,7 +3001,11 @@ const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, 
   holdingHistory(() => deleteAttachment(attachmentId, context))
 
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
+  // The record's drawer saves out when the delete is sent were stored before it: the copy takes them (at their
+  // answers) before it takes the delete, which then moves it one version on from theirs.
+  const savesBefore = context?.recordId ? drawerSavesOutOf(context.recordId) : []
   await workbench.client.deleteAttachment(attachmentId)
+  await Promise.allSettled(savesBefore)
   // The deep-linked copy (the reload below refreshes the page's rows only) takes the delete as the server does for
   // an attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on:
   // a later patch of that record starts from it.
@@ -3739,18 +3743,7 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
     await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
     return
   }
-  const save = commitDrawerPatch(record, fieldId, patchValue, false, settleUndo)
-  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    // A manual row's step made after the row left the page waits for this one (see `runManualDrawerPatch`).
-    let saves = manualDrawerSavesOut.get(record.id)
-    if (!saves) manualDrawerSavesOut.set(record.id, (saves = new Set()))
-    saves.add(save)
-    void save.finally(() => {
-      saves!.delete(save)
-      if (saves!.size === 0 && manualDrawerSavesOut.get(record.id) === saves) manualDrawerSavesOut.delete(record.id)
-    })
-  }
-  await save
+  await commitDrawerPatch(record, fieldId, patchValue, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
@@ -3763,9 +3756,24 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
 // sent at the copy's version as given (`commitDrawerPatch`): a row that came onto the page meanwhile may hold a
 // change the step was not made on (another user's, or a grid edit), which it then conflicts with, as on main.
 const manualDrawerWriteTails = new Map<string, Promise<void>>()
-// A manual row's saves made on the page (straight to the grid's queue) that are not answered yet: a step made after
-// the row left the page waits for them, so that it reads the copy they moved on.
-const manualDrawerSavesOut = new Map<string, Set<Promise<void>>>()
+// The drawer's saves of a record that are not answered yet. A manual row's step made after the row left the page waits
+// for them, so that it reads the copy they moved on; so does an attachment delete's update of the copy.
+const drawerSavesOut = new Map<string, Set<Promise<unknown>>>()
+
+function drawerSavesOutOf(recordId: string): Array<Promise<unknown>> {
+  return [...(drawerSavesOut.get(recordId) ?? [])]
+}
+
+function trackDrawerSave(recordId: string, save: Promise<unknown>): void {
+  let saves = drawerSavesOut.get(recordId)
+  if (!saves) drawerSavesOut.set(recordId, (saves = new Set()))
+  saves.add(save)
+  const done = () => {
+    saves!.delete(save)
+    if (saves!.size === 0 && drawerSavesOut.get(recordId) === saves) drawerSavesOut.delete(recordId)
+  }
+  Promise.resolve(save).then(done, done)
+}
 
 // The drawer shows the grid's row of a record that is on the page, also when it holds a copy of it (`deepLinkedRecord`:
 // made by a realtime merge, or by a link applied before the page's rows came): the grid sends that row's saves one at a
@@ -3791,12 +3799,12 @@ function copyFirstRecordById(recordId: string): MetaRecord | null {
 
 async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
   const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
-  const saves = [...(manualDrawerSavesOut.get(recordId) ?? [])]
+  const saves = drawerSavesOutOf(recordId)
   const step = previous.then(async () => {
     await Promise.allSettled(saves)
     // Re-read AFTER the previous step: its returned version is on the copy by now.
     const current = copyFirstRecordById(recordId)
-    if (current) await commitDrawerPatch(current, fieldId, value, true, onCommitted)
+    if (current) await commitDrawerPatch(current, fieldId, value, onCommitted)
   })
   const tail = step.then(() => undefined, () => undefined)
   manualDrawerWriteTails.set(recordId, tail)
@@ -3807,15 +3815,14 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
   }
 }
 
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false, onCommitted?: () => void) {
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, onCommitted?: () => void) {
   const patchOwner = {}
   // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
   // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
   if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
-  // The version the server returned for this save, asked for when the drawer holds a copy of the record (人工补充行 B3:
-  // a manual row's step carries it to the next) — see the copy's update below.
+  // The version the server returned for this save, asked for on every save: a copy of the record made while the save
+  // is out takes it too (see the copy's update below; 人工补充行 B3: a manual row's step carries it to the next).
   const committed: { version: number | null } = { version: null }
-  const holdsCopy = deepLinkedRecord.value?.id === record.id
   // A save made on the copy is sent at the copy's version as given: the grid never chains it past one of the record's
   // own writes the copy does not show (a copy shown with the record on the page: a form view, a held manual step).
   const sentOnCopy = record === deepLinkedRecord.value
@@ -3825,13 +3832,11 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   // toast the second's message and lose its own alert when both rejections landed in one flush.
   // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`), for
   // a record on the page; a copy keeps the version given, and takes a save only once it is accepted.
-  const options = {
-    ...(manualRow || holdsCopy ? { onCommitted: (version: number) => { committed.version = version } } : {}),
+  const write = grid.patchCell(record.id, fieldId, value, record.version, {
+    onCommitted: (version: number) => { committed.version = version },
     ...(sentOnCopy ? { chainVersion: false } : {}),
-  }
-  const write = Object.keys(options).length > 0
-    ? grid.patchCell(record.id, fieldId, value, record.version, options)
-    : grid.patchCell(record.id, fieldId, value, record.version)
+  })
+  trackDrawerSave(record.id, write)
   // The composable's local row-action refusal sets its error before the call returns (an older write of the record
   // that fails while this one waits sets it later, and is not this one's).
   const refusedLocally = grid.error.value

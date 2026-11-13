@@ -461,6 +461,61 @@ describe('useMultitableGrid.patchCell — a record\'s writes go out one at a tim
     expect(row(grid).data).toMatchObject(shownAfter)
   })
 
+  it.each([['rejected'], ['accepted, then undone']] as const)('a write of a cell stored; another user changes the same cell and their merge lands before its answer; a second write of the cell, made on their value (%s): it rolls back, and is undone, to their value', async (how) => {
+    const { grid, server } = await setup([r1()])
+    void grid.patchCell('r1', 'f1', 'b', 1)
+    server.store()
+    const stored = server.stored.get('r1')!
+    stored.version = 3
+    stored.data.f1 = 'theirs'
+    grid.mergeRemoteRecord({ id: 'r1', version: 3, data: { ...stored.data } })
+    const second = grid.patchCell('r1', 'f1', 'c', row(grid).version)
+    if (how === 'rejected') {
+      stored.version = 4 // one more change elsewhere: the second write conflicts
+      stored.data.f2 = 'again'
+    }
+    await server.release()
+    await server.answerAll()
+    if (how === 'rejected') {
+      expect(await second).toMatchObject({ code: 'VERSION_CONFLICT' })
+      expect(row(grid).data.f1).toBe('theirs')
+      return
+    }
+    expect(await second).toBeNull()
+    void grid.undo()
+    await server.answerAll()
+    expect(server.sent.at(-1)).toMatchObject({ fieldId: 'f1', value: 'theirs' })
+    expect(server.stored.get('r1')!.data.f1).toBe('theirs')
+  })
+
+  it('three writes made with the record off the page, the rows landing while two wait; the last two rejected: each cell shows the row\'s own value again', async () => {
+    const server = strictServer([r1(), r2()], ['r2'])
+    const grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId: ref('view_1'), client: new MultitableApiClient({ fetchFn: server.fetchFn }) })
+    await grid.loadViewData(0)
+    const all = [grid.patchCell('r1', 'f2', 'a', 1), grid.patchCell('r1', 'f1', 'b', 1), grid.patchCell('r1', 'f3', 'z', 1)]
+    grid.rows.value = [r1(), r2()]
+    await server.answerAll()
+    expect(await all[1]).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(await all[2]).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(row(grid).data).toMatchObject({ f2: 'a', f1: 'a', f3: 'k' })
+  })
+
+  it('a write sent at a version other than its row\'s (a caller\'s copy, as given) is accepted: the row, older than that version, keeps its own, so a write made on it conflicts', async () => {
+    const { grid, server } = await setup([r1()])
+    const stored = server.stored.get('r1')!
+    // Two changes elsewhere that the row does not show (the caller's copy does).
+    stored.version = 3
+    stored.data.f2 = 'theirs'
+    const first = grid.patchCell('r1', 'f1', 'b', 3, { chainVersion: false })
+    await server.answerAll()
+    expect(await first).toBeNull()
+    expect(row(grid).version).toBe(1)
+    const next = grid.patchCell('r1', 'f2', 'mine', row(grid).version)
+    await server.answerAll()
+    expect(await next).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect(server.stored.get('r1')!.data.f2).toBe('theirs')
+  })
+
   it('a row reloaded after the write was stored and another user moved the record on keeps its newer version: the next write made on it is stored', async () => {
     const { grid, server } = await setup([r1()])
     const only = grid.patchCell('r1', 'f2', 'y', 1)

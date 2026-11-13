@@ -1616,10 +1616,14 @@ export function useMultitableGrid(opts: {
       const liveVersion = live?.version
       applyPatchResult(result)
       showWaiting()
-      // A waiting write of this cell now rolls back to this write's value, which is stored (for one made on the row
-      // that is already so; one made with the record off the page took the value of the row it was first shown on).
+      // A waiting write of this cell now rolls back to this write's value, which is stored (one made with the record
+      // off the page took the value of the row it was first shown on).
+      const returned = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
       for (const queued of turns.waiting) {
         if (queued.fieldId !== fieldId) continue
+        // Not when the row was replaced by one newer than this write: it shows a value stored after this one, which
+        // the waiting write was made on and keeps as its own.
+        if (live && live !== row && typeof liveVersion === 'number' && liveVersion > (returned ?? Infinity)) continue
         queued.oldValue = value
         queued.oldLinkSummaries = nextLinkSummaries ?? write.oldLinkSummaries
       }
@@ -1629,11 +1633,12 @@ export function useMultitableGrid(opts: {
       const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
       if (typeof committedVersion === 'number') {
         if (committedVersion > expectedVersion) turns.advanced.set(expectedVersion, committedVersion)
-        // The row was reloaded or merged meanwhile. It takes this write's version (above) only when it shows the version
-        // this write was sent at, or an older one that only this record's own accepted writes moved on from. Otherwise
-        // it keeps its own: a reload that read before another user's change (and landed after it) must not be given a
-        // version past data it does not show, so a write made on it conflicts; one that read after this write is newer.
-        if (live && live !== row && typeof liveVersion === 'number' && liveVersion !== expectedVersion) {
+        // The row takes this write's version (above) only when it shows the version this write was sent at, or an older
+        // one that only this record's own accepted writes moved on from. Otherwise it keeps its own: a reload that read
+        // before another user's change (and landed after it) must not be given a version past data it does not show, so
+        // a write made on it conflicts; one that read after this write is newer. This holds for the row the write was
+        // made on too, when the write was sent at another version (a caller's copy, sent as given).
+        if (live && typeof liveVersion === 'number' && liveVersion !== expectedVersion) {
           let reached = liveVersion
           for (let next = turns.advanced.get(reached); next !== undefined && reached < expectedVersion; next = turns.advanced.get(reached)) {
             reached = next
