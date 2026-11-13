@@ -775,14 +775,33 @@ describe('FIX B — structured reads are not misclassified as writes', () => {
     expect(String(err.message)).toMatch(/Not connected/)
   })
 
-  it('validation is unchanged: an illegal WHERE identifier is still rejected, not quoted through', async () => {
+  it('validation still rejects a punctuation-bearing WHERE identifier, not quoted through', async () => {
     delete process.env[ENV_KEY]
     const { adapter } = await managerWith(sqlserverConfig('read-illegal'))
-    // The pre-fix `sanitizeIdentifier` threw on these; `quoteSqlServerIdentifier` enforces the SAME
-    // per-segment charset, so quoting must not have widened what is accepted into a statement.
-    for (const bad of ['a b', 'a-b', 'a;b', 'a)b', "a'b", 'a*b']) {
+    // The pre-fix `sanitizeIdentifier` threw on these and `quoteSqlServerIdentifier` still does: no SQL
+    // punctuation, quote, comment starter or operator can be part of a column name.
+    for (const bad of ['a-b', 'a;b', 'a)b', "a'b", 'a*b', 'a/*b', 'a--b']) {
       const err = await asyncRefusal(adapter.select('t_Item', { where: { [bad]: 'x' }, limit: 2 }))
       expect(String(err.message)).toMatch(/Invalid identifier|identifier/i)
+      expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
+    }
+  })
+
+  it('G52: a WHERE key with SPACES or non-ASCII letters is quoted through, not rejected', async () => {
+    // The one row this list deliberately LOST is `'a b'` — a column named with an ordinary space. It
+    // moved from "rejected" to "quoted through" because that refusal was the G52 outage itself: a
+    // customer DBA's `供应商 名称` / `销售 数量` could not be read AT ALL, and the refusal bought nothing.
+    // Injection defence here is the `]`-doubled bracket quoting the helper applies to EVERY segment
+    // (see packages/mssql-readonly-utils/__tests__/identifier-unicode.test.cjs), not the absence of a
+    // space: a space cannot end a delimited identifier, so `[供应商 名称]` is one token to SQL Server and
+    // one token to this gate's own `scanSqlNoise`. The punctuation row above still proves the character
+    // rule did not simply fall open. `Not connected` = the statement built fine and only the fake pool
+    // stopped it, which is the same success signal the qualified-key test above uses.
+    delete process.env[ENV_KEY]
+    const { adapter } = await managerWith(sqlserverConfig('read-unicode'))
+    for (const good of ['a b', '供应商 名称', '物料编码', '销售订单.数量']) {
+      const err = await asyncRefusal(adapter.select('t_Item', { where: { [good]: 'x' }, limit: 2 }))
+      expect(String(err.message), `${good} must build a statement`).toMatch(/Not connected/)
       expect(err.code).not.toBe(OUTBOUND_SQL_WRITE_DISABLED)
     }
   })
