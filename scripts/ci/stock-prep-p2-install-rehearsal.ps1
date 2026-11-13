@@ -1038,8 +1038,8 @@ function Invoke-AssertLeg4 {
     files_left_from_r84 = [int]$j.files.onlyR84_left_in_root
     node_modules_backups_left = [int]$j.node_modules_backups_left
   }
-  $out = [ordered]@{ asserts = $a; observations = $obs }
-  Write-Json -Value $out -Path (Join-Path $Out 'leg4-assert.json')
+  $assertResult = [ordered]@{ asserts = $a; observations = $obs }
+  Write-Json -Value $assertResult -Path (Join-Path $Out 'leg4-assert.json')
   $bad = @($a.Keys | Where-Object { -not $a[$_] })
   foreach ($k in $a.Keys) { Write-H ("assert {0} = {1}" -f $k, $a[$k]) }
   foreach ($k in $obs.Keys) { Write-H ("observe {0} = {1}" -f $k, $obs[$k]) }
@@ -1097,7 +1097,7 @@ function Invoke-Summary {
     if ($j.running_during_migrate.evaluated) { $ran = Format-B $j.running_during_migrate.backend_running_during_migrate }
     $md.Add(('| {0} | {1} | {2} | {3} | {4} | {5}/{6} | {7} | {8} | {9} (restarts {10}) | {11} | {12} |' -f
         $leg, $j.exit_code, $j.wall_s, $j.migrations_executed, $j.kysely_count_after, $j.migrate_list_applied, $j.migrate_list_pending,
-        $j.health_backend_code, (Format-B $j.health_backend_commit_is_expected), $j.after_pm2.status, $j.after_pm2.restarts, $ran, $j.files.onlyR84_left_in_root))
+        $j.health_backend_code, (Format-B $j.health_backend_commit_is_expected), $j.after_pm2.status, $j.after_pm2.restarts, $ran, $(if ($leg -eq 'leg1') { 'n/a' } else { $j.files.onlyR84_left_in_root })))
   }
   $md.Add('')
   $j1 = Read-Json -Path (Join-Path $Out 'leg1.json')
