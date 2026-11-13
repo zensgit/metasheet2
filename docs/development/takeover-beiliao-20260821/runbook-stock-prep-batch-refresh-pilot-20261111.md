@@ -15,7 +15,7 @@
 | 0 | 定下切包用的冻结提交（打标签），并决定**第一个 main 包带不带 S6-9**（见 §7.4：带了以后，回退底线就从「代码保证」降为「操作保证」） | owner（gate 4，G-B8）。**已裁（2026-11-11，R-91 ㉙ ㉚；2026-11-12 由 ㉝ 修订）：试点随基于 main 的客户包发布，分两步：先出 R 线维护版 R84（不带试点、没有迁移、没有新开关），再出第一个 main 包，即试点包，它带 S6-9。** 切包提交本身仍未定 | 否 |
 | 1 | Q-B：同意在 102 / 103 / 104 的私有列里存业务值，并定保留期（102 头注释 `102_create_integration_stock_prep_continuation.sql:41-43`：**部署 102 之前**要批） | owner。**已裁（2026-11-11，R-91 ㉛）：批准，只存在客户自己的库里，随记录保留（按设计行从不删除）** | 否 |
 | 2 | 接受对所有项目生效的行为变化（§2） | owner（G-B9）。**已接受（2026-11-13，owner 原话「接受B5」，R-91 ㊿）：§2 的 10 条（e051316c4 上的文字，到 220bd80ab 未变）** | 否 |
-| 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、包带 #6778 时重新导出 env 绑定并逐项目补列（§1.4a，各自另批）、换定时拉取脚本（§1） | owner（gate 4）。**装包路径已裁（2026-11-13，「按建议执行」，R-91 ㊿）：用这个 Release 自带的 deploy-bootstrap，run-migrations 填 1（§1.3 第 2 步），不用 upgrade-inplace** | 是（迁移，只加表 / 加列） |
+| 3 | 装机窗口：装 main 包（迁移随包一起跑）、核授权、包带 #6778 时重新导出 env 绑定并逐项目补列（§1.4a，各自另批）、换定时拉取脚本（§1） | owner（gate 4）。**装包路径已裁（2026-11-13，「按建议执行」，R-91 ㊿）：用这个 Release 自带的 deploy-bootstrap，run-migrations 填 1（§1.3 第 2 步），不用 upgrade-inplace**；**B1（#6680 严格钉钉通讯录拉取的部署门）有条件豁免（2026-11-13，owner 原话「按建议」，R-91 [52]）：条件见 §1.3 第 4 步** | 是（迁移，只加表 / 加列） |
 | 3a | **打开租户声明开关** `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`（§1.6）。这是**启用试点的前提**：开关关着时，就绪检查 `tenant_claim_required` 不通过，任何项目都启用不了试点（R-91 ㉘，方案 A）。打开之前先确认定时拉取用的令牌绑定了租户（按 §1.6 第 1 步记「是 / 否」和计数） | owner（装机时另批，不随第 3 步的批复） | 是（改 `app.env`、重启） |
 | 4 | 逐表：批次标识装机（另一本手册）→ 普查（§5）→ 需要时客户回答 Q1 / Q3 → 残留确认或修复窗口 → 看就绪 → 启用（§3） | 装机 O-BI-1；普查 O6-3；残留确认 O6-5；修复 O6-6；启用 G-C12 | 装机、确认、修复、启用都写 |
 | 5 | 恢复：哪天一次写入没正常结束，拉取人员在「拉取待确认」页核对并结束（§4）；证明不了时平台管理员按手册结束 | 拉取人员不用另批；按手册结束要工单（O6-7 定谁能做，**未裁**） | 是（插件库） |
@@ -120,6 +120,7 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 1. 停定时拉取任务，通知拉取人员窗口内不要拉。**装的包带 #6778 时，定时任务一直停到 §1.4a 第 4 步对每个未归档的已登记项目都做完为止**；在那之前不要告诉拉取人员窗口已结束（§1.4a 末尾说明为什么）。
 2. **用这个 Release 自带的 deploy-bootstrap 装包，run-migrations 填 `1`**（owner 2026-11-13 裁定，「按建议执行」，R-91 ㊿；命令与装 R81、R83 时相同，只换包；R84 的装机单也按它写）。不用 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`。
    - **命令。** `<包名>-deploy-bootstrap.bat <包.zip> <安装根目录> <install-deps> <run-migrations>`，参数按位置给，**第 4 个 run-migrations 填 `1`**；install-deps 不能填 `0`，`RunMigrations 1` 要求 `InstallDeps` 不为 `0`（`scripts/ops/multitable-onprem-deploy-launcher.ps1:20-21`）。安装根目录显式写上：不写时它取当前目录（`scripts/ops/multitable-onprem-package-build.sh:389-390`）。在现场机本地窗口或远程桌面里跑，不要挂在 SSH 会话上。
+   - **用哪个账号跑（R-91 [52]）。** 用拥有正在运行的 pm2 应用的那个 Windows 账号、同一个 `PM2_HOME` 跑（装 R84 也一样：与装 R81、R83 时同一个账号）。原因：apply 助手跑完迁移以后调用 `attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`（`multitable-onprem-apply-package.ps1:1295-1303`，调用在 `:1301`）。pm2 从没登记过这个应用时，`scripts/ops/attendance-onprem-start-pm2.ps1:393` 的 `pm2 describe … *> $null` 在 `$ErrorActionPreference = 'Stop'`（`:7`）下，Windows PowerShell 5.1 把 pm2 写到标准错误的警告变成终止错误，`Start-Pm2App`（`:395`）不会运行；apply 在迁移**之后**退出 1（`multitable-onprem-apply-package.ps1:1303`），也不还原（见下面第二点限制）。这在 Draft PR #6901 的一次性 Windows 机器上每轮都见证过（pm2 从没登记过应用的情形）。换账号或换 `PM2_HOME` 也会走到这里，是 #6901 按 `attendance-onprem-start-pm2.ps1:219-225` 读出的推断：`PM2_HOME` 没设时取当前账号的 `USERPROFILE\.pm2`，换了账号就换了 pm2 的目录，那里没有登记这个应用。
    - **它是什么。** 它和包在同一次打包里生成，`SHA256SUMS` 钉住它（`multitable-onprem-package-build.sh:810-813`）：`.ps1` 是包内启动器的拷贝（`multitable-onprem-package-build.sh:380`），`.bat` 把四个参数传给它（`:383-402`）。启动器把包解到临时目录，再调用**包内**的 apply 助手（`multitable-onprem-deploy-launcher.ps1` 文首说明）。apply 助手在 `RunMigrations` 不为 `0` 时，执行安装根目录下的 `packages\core-backend\dist\src\db\migrate.js`（`scripts/ops/multitable-onprem-apply-package.ps1:1276-1284`）。
    - **成功的样子。** 退出码 0，最后一行是 `apply exit=0`（`.bat` 打印的标记，`multitable-onprem-package-build.sh:401`）。
    - **这条路径的两点限制（读代码得出，没有在现场形状的机器上跑过）：**
@@ -131,6 +132,8 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
      - 装包失败（退出码不是 0，或最后一行不是 `apply exit=0`）就**停下，报 owner**。不要重跑，不要自己处理。由 owner 决定是否按 §7 用旧包、`RunMigrations 0` 装回；
      - 数据库照旧先手工做一次完整备份：deploy-bootstrap 不备份数据库（apply 助手和启动器里都没有 `pg_dump` 一类的步骤，读代码得出）。
 3. deploy-bootstrap 跑完、后端起来后做 §1.4。不通过就停下报 owner，由 owner 决定是否按 §7 回退；不要在现场改库或改代码。
+4. **B1 的条件：装后不点钉钉通讯录的三个按钮（owner 2026-11-13 有条件豁免 B1，原话「按建议」，R-91 [52]）。** 这个包带 #6680（严格的钉钉通讯录拉取）。它的设计锁要求：带它的标签、包或镜像，在一次真实的只读探测（用预览，不做真同步）通过、或 owner 明确豁免之前不部署（`docs/development/dingtalk-directory-pull-completeness-design-lock-20261101.md:66-96`）。owner 的豁免带一个条件：装上本包以后，**任何人**都不点钉钉通讯录的「同步」「同步预览」「测试连接」，直到另一次由 owner 单独批准的只读预览通过。预览被拒时：不同步，报 owner。
+5. **窗口内的数据库身份（owner 2026-11-13 裁定，原话「按建议」，R-91 [52]）。** 窗口内读库的核对（例如 §1.4 (2)、(3)）用应用自己的连接（`app.env` 里 `DATABASE_URL` 的那个角色），只在只读前导里、只做读取：每段查询的第一行是本手册写好的 `SET default_transaction_read_only = on;`（漏进来的写入答 SQLSTATE 25006，与 `scripts/ops/stock-prep-pull-batch-site-probe-20261107/_preamble.sql` 同一约定）。所有写入都走 HTTP 路由，不在 SQL 会话里写。修现场的只读账号（管理通道、重置口令、授权）是之后另一件事项，本窗口不做。**注意：** §1.4a 第 5 步的补列脚本不走 HTTP 路由，它从 `docker\app.env` 读 `DATABASE_URL`、直接连库（`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs:35`、`:52`），这次裁定没有覆盖它；owner 批准那一步时要点名，没点名就不做。
 
 ### 1.4 装后核对
 
@@ -192,7 +195,7 @@ SELECT (SELECT count(*) FROM integration_stock_prep_continuation)      AS contin
 2. **从切包的同一个提交拷两个脚本。** `scripts/ops/stock-preparation-derive-target-binding.mjs` 和 `scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs` **都不在包里**：打包清单 `REQUIRED_PATHS`（`scripts/ops/multitable-onprem-package-build.sh:47-210`）里没有它们，构建只拷这份清单（`:651-653`）。从切包的同一个提交单独拷到 `<安装根目录>\scripts\ops\`（2026-11-13 起 §1.3 第 2 步不再拷 upgrade-inplace，这两个脚本仍要单独拷），两份拷贝的 SHA-256 记进私有记录。放在这个目录是有原因的：导出脚本从它自己所在的目录往上两级找插件 lib（`stock-preparation-derive-target-binding.mjs:61-63`），放在这里才按**已装的** 35 列模板计算；补列脚本按 `--root` 找已装的 `packages/core-backend/dist`、插件 lib 和 `packages/core-backend/node_modules/pg`（`stock-preparation-sandbox-add-missing-template-fields.cjs:26`、`:44-46`）。`--root` 默认是当前目录，所以要显式传 `--root <安装根目录>`。包本身不带 `node_modules`（`multitable-onprem-package-build.sh:451`），`pg` 用的是装包时在安装根目录装好的那份。
 3. **重新导出 env 绑定（每个部署一次；改生产 `app.env`，owner 批准）。** env 动作 `plm.stock-preparation.pull-bom.v1` 的 `target.fieldIdMap` 非空就要做：装了客户包的部署都是这样，项目表开关开着、关着都要做。为空（`{}`）时跳过。做法按 switch-on 手册附录 C 第 2 步：
    - 离线跑上一步拷来的导出脚本，`--pack` 用原来那份客户包文件，带 `--action-fragment --compact`。只数个数（35 个模板列加上客户包的全部 `ext_` 列），不贴内容。
-   - 备份 `app.env`，把那一项的 `target` 和 `extensionFieldIds` 两个键整体替换，再带 `--update-env` 重启。
+   - 备份 `app.env`，把那一项的 `target` 和 `extensionFieldIds` 两个键整体替换，再重启。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；apply 助手也这样调用它，`multitable-onprem-apply-package.ps1:1301`）：它重新读 `app.env`（找文件 `:35-36`，导入进程环境 `:51`，读键集合 `:79`），再用 `pm2 start … --update-env`（`:344`）或 `pm2 restart … --update-env`（`:378`）。**不照** switch-on 手册附录 C 第 2 步第 4 小步（即它 §2.4 的加键路径）跑裸的 `pm2 restart --update-env`：那是为 pm2-runtime 主机写的。用 §1.3 第 2 步同一个 Windows 账号、同一个 `PM2_HOME` 跑，否则可能走到 `:393` 的首次启动缺陷（§1.3 第 2 步）。
    - 核对：一次作业 GET 或 env dry-run 不再答 422 `fieldMapMode: 'explicit'`。
 4. **逐项目补列（每个未归档的已登记项目一次；这是建列的生产写入，owner 批准）。** 路由 `POST /api/integration/stock-preparation/options/sync`，请求体里带 `projectNo` 就走项目表修复腿（`http-routes.cjs:10739-10753`，修复腿从 `:6134` 起）。前提：
    - 项目表开关必须是精确的 `true`，否则零 IO 答 404（`:6136`、`:6086-6090`）。
@@ -204,7 +207,7 @@ SELECT (SELECT count(*) FROM integration_stock_prep_continuation)      AS contin
    2. **批了再补。** 请求体 `{"projectNo": "<项目号>", "addMissingColumns": true}`（`:6149`）。一次宿主事务里先补列（`:6205`），两列插入时就带人工锁，接在这张表当前最后一列之后（附录 C 第 4 步，R-89）。没有界面上的撤销。回答里 `columns.added` 为 2，`plmColumnLock.missing` 为 0（`:6275`）。
    3. **再发一次同样的请求。** 这次 `columns.added` 为 0（幂等）。然后对这个项目做一次拉取 dry-run，应答 200。
 5. **部署表（env 绑定的那张，不是项目表）。** 用第 2 步拷来的补列脚本：先不带 `--execute` 看计划，再带 `--execute`（用法见脚本头注释 `:12-15`）。它只补列，清不掉第 3 步那道门的 422。
-6. 这些都做完以后，才做 §1.5：换脚本、恢复定时任务、手动触发一次，再告诉拉取人员窗口结束。
+6. 这些都做完以后，才做 §1.5：换脚本、恢复定时任务，再告诉拉取人员窗口结束。**不手动触发定时拉取**（R-91 [52] 的 R-P2-2，与 R84 相同）：QA 第二天早上报告下一次 06:00 的定时运行。
 
 **漏做时的样子。** 下面每一种都是拒绝，什么都不写，补上就好，不需要回退：
 
@@ -233,7 +236,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 @(Select-String -LiteralPath '<试拉脚本路径>' -SimpleMatch -Pattern 'skipped_review_pending').Count
 ```
 
-两次 SHA-256 必须相同，计数应 ≥ 1。然后恢复定时任务（装的包带 #6778 时，先做完 §1.4a 第 4 步），手动触发一次：还没有试点时，每个项目的结果应与升级前相同。
+两次 SHA-256 必须相同，计数应 ≥ 1。然后恢复定时任务（装的包带 #6778 时，先做完 §1.4a 第 4 步）。**不手动触发**（R-91 [52] 的 R-P2-2，与 R84 的装机相同）：QA 第二天早上报告下一次 06:00 的定时运行；还没有试点时，每个项目的结果应与升级前相同。§1.6 (b) 和第 4 步仍写「手动触发一次」：它们属于 §0 第 3a 步（owner 另批），这次没有改；那里的证据怎么取，留到第 3a 步批准时定。
 
 ### 1.6 打开租户声明开关（启用试点的前提；装机时 owner 另批，R-91 ㉘）
 
