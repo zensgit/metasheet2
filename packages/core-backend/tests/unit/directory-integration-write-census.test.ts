@@ -537,8 +537,9 @@ describe('census of statements that write directory_integrations', () => {
       if (file.text.includes(TABLE)) visit(source)
       return bare
     }).map((file) => file.path).sort()
-    // Read-only catalogues: the rule module's table list and the encrypted-store probe's store labels.
-    expect(carriers).toEqual(['directory/pull-source-rule.ts', 'security/encrypted-store-probe.ts'])
+    // Read-only catalogues: the rule module's table list, the authorization-input writer registry's
+    // list of tables a script can reach, and the encrypted-store probe's store labels.
+    expect(carriers).toEqual(['directory/pull-source-rule.ts', 'rbac/authorization-input-writers.ts', 'security/encrypted-store-probe.ts'])
   })
 })
 
