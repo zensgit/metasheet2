@@ -83,6 +83,8 @@ import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
   AutomationScheduler,
+  MIN_SCHEDULE_INTERVAL_MS,
+  intervalMinutesToMs,
   type AutomationSchedulerLeaderOptions,
   type AutomationSchedulerRuntimeOptions,
 } from './automation-scheduler'
@@ -1503,6 +1505,34 @@ export class AutomationService {
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
+        // STORED `enabled` — the SCHEDULED lane, checked at fire start.
+        //
+        // A timer is a per-process snapshot taken at register time, and nothing invalidates it across
+        // processes: with the leader lock off (the default) every process arms its own timers, and with it
+        // on a PATCH / DELETE handled by a non-leader only touches that non-leader's (empty) timer map. So a
+        // rule disabled or deleted through ANOTHER instance kept firing here until this process restarted.
+        // One indexed primary-key read per fire closes that; a missing row (deleted elsewhere) skips too.
+        // Kept a separate read from the liveness check below so `loadSheetLiveness` stays the one definition
+        // of "live" (sheet-liveness.ts). A failed read skips that tick (FAIL-CLOSED: an unconfirmed rule
+        // does not send) and is logged values-free — the error class / SQLSTATE, never the driver text.
+        // The executor is not touched: `simulate` stays DB-free and the other lanes keep their own gates.
+        let storedState: 'enabled' | 'disabled' | 'absent' | 'lookup_failed'
+        let lookupError: ReturnType<typeof describeLookupError> | undefined
+        try {
+          storedState = await this.loadScheduledRuleEnabledState(rule.id)
+        } catch (err) {
+          storedState = 'lookup_failed'
+          lookupError = describeLookupError(err)
+        }
+        if (storedState !== 'enabled') {
+          console.warn('[automation] skipping a scheduled rule that is not enabled in the database', {
+            ruleId: rule.id,
+            sheetId: rule.sheetId,
+            reason: storedState,
+            ...(lookupError ?? {}),
+          })
+          return
+        }
         // SHEET LIVENESS (soft delete) — the SCHEDULED lane.
         //
         // The record-triggered lanes are gated by `loadEnabledRules` below, but a scheduled rule
@@ -1800,7 +1830,10 @@ export class AutomationService {
       execution_mode: executionMode,
     }
 
-    this.registerSchedule(rule)
+    // Same rule as updateRule and the boot loader: only an ENABLED rule gets a timer. Neither
+    // registerSchedule nor AutomationScheduler.register looks at `enabled`, so registering unconditionally
+    // here let a schedule rule CREATED with `enabled: false` fire until the next save or restart.
+    if (rule.enabled) this.registerSchedule(rule)
     return rule
   }
 
@@ -1987,6 +2020,22 @@ export class AutomationService {
         nextTriggerConfig as Record<string, unknown> | null,
       )
       if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
+
+      // schedule.interval: convert intervalMinutes to the stored intervalMs and refuse a period that would
+      // never be armed. Done here, not in parseUpdateRuleInput, because only this block knows the RESULTING
+      // type: a PATCH may omit triggerType (config-only edit of a stored interval rule) or switch to interval
+      // without a config. Overwrites the plain trigger_config set above, as the date_field branch does.
+      // Minutes win only in a config this request SENT. When the config falls back to the STORED one (no
+      // triggerConfig in the PATCH), the read precedence applies: a numeric stored intervalMs is what has been
+      // running, so it stays and a stale stored intervalMinutes is dropped; a minutes-only row still converts.
+      if (nextTriggerType === 'schedule.interval') {
+        let intervalConfig = nextTriggerConfig as Record<string, unknown> | null
+        if (input.triggerConfig === undefined && isRecord(intervalConfig) && typeof intervalConfig.intervalMs === 'number') {
+          const { intervalMinutes: _staleMinutes, ...storedWithoutMinutes } = intervalConfig
+          intervalConfig = storedWithoutMinutes
+        }
+        updates.trigger_config = JSON.stringify(normalizeIntervalTriggerConfigAtSave(nextTriggerType, intervalConfig))
+      }
 
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(
         nextTriggerType,
@@ -2616,8 +2665,10 @@ export class AutomationService {
   async runDateReminderScanNow(ruleId: string): Promise<void> {
     const rule = await this.getRule(ruleId)
     if (!rule) return
-    // A DISABLED rule never fires via the scheduler (registerSchedule gates on enabled); the deterministic
-    // ops/test seam honors the same gate so a disabled rule can't be made to fire through this path.
+    // A DISABLED rule does not fire via the scheduler: createRule / updateRule / the boot loader register only
+    // enabled rules (registerSchedule itself does NOT look at `enabled`), and the scheduled lane re-reads the
+    // stored flag at fire start. This deterministic ops/test seam honors the same gate so a disabled rule
+    // can't be made to fire through this path.
     if (!rule.enabled) return
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
@@ -2801,6 +2852,17 @@ export class AutomationService {
       }
     }
     return null
+  }
+
+  /**
+   * The scheduled lane's fire-start read of the STORED `enabled` flag (see the scheduler callback in the
+   * constructor). `absent` = the row is gone (deleted, possibly through another instance).
+   */
+  private async loadScheduledRuleEnabledState(ruleId: string): Promise<'enabled' | 'disabled' | 'absent'> {
+    const res = await this.queryFn('SELECT enabled FROM automation_rules WHERE id = $1', [ruleId])
+    const row = (res.rows as Array<{ enabled?: unknown } | undefined>)[0]
+    if (!row) return 'absent'
+    return row.enabled === true ? 'enabled' : 'disabled'
   }
 
   /**
@@ -5201,6 +5263,51 @@ export function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
   return Number.isFinite(raw) ? Math.min(Math.max(Math.floor(raw as number), 1), 200) : 50
 }
 
+function describeIntervalValue(value: unknown): string {
+  return typeof value === 'string' ? JSON.stringify(value) : String(value)
+}
+
+/**
+ * schedule.interval SAVE-boundary normaliser. The stored, scheduler-facing field is `intervalMs`; the rule
+ * editor sends `intervalMinutes`. Returns the config to persist, or throws `AutomationRuleValidationError`.
+ * No-op (same object back) for every other trigger type, so cron / date_field / event rules are untouched.
+ *
+ * Write-side precedence: when `intervalMinutes` is present it WINS and any incoming `intervalMs` is
+ * discarded. The editor is its only producer, and an already-loaded older editor bundle sends the stale
+ * stored `intervalMs` next to the minutes the user just typed. A present but invalid `intervalMinutes`
+ * (for example `''` from a cleared input) is refused; it never falls back to that stale `intervalMs`.
+ * The result always carries `intervalMs` and never `intervalMinutes`, so a stored row cannot hold both.
+ * An `intervalMs`-only config (API clients) is returned unchanged when it is valid.
+ *
+ * Refused: a missing, non-number, non-finite, or below-floor period (MIN_SCHEDULE_INTERVAL_MS, the same
+ * floor `AutomationScheduler.register` applies). Before this, such a rule saved and showed as enabled,
+ * and the scheduler only logged "interval too small" and armed nothing.
+ */
+export function normalizeIntervalTriggerConfigAtSave(
+  triggerType: string,
+  triggerConfig: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (triggerType !== 'schedule.interval') return triggerConfig
+  const cfg = isRecord(triggerConfig) ? triggerConfig : {}
+  if (cfg.intervalMinutes !== undefined) {
+    const ms = intervalMinutesToMs(cfg.intervalMinutes)
+    if (ms === null) {
+      throw new AutomationRuleValidationError(
+        `schedule.interval intervalMinutes must be a finite number of minutes, at least ${MIN_SCHEDULE_INTERVAL_MS} ms (got ${describeIntervalValue(cfg.intervalMinutes)})`,
+      )
+    }
+    const { intervalMinutes: _minutes, ...rest } = cfg
+    return { ...rest, intervalMs: ms }
+  }
+  const ms = cfg.intervalMs
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < MIN_SCHEDULE_INTERVAL_MS) {
+    throw new AutomationRuleValidationError(
+      `schedule.interval requires intervalMinutes, or intervalMs as a finite number of at least ${MIN_SCHEDULE_INTERVAL_MS} (got ${describeIntervalValue(ms)})`,
+    )
+  }
+  return cfg
+}
+
 /**
  * Parse a `POST /sheets/:sheetId/automations` request body into a
  * `CreateRuleInput`. Throws `AutomationRuleValidationError` for invalid
@@ -5248,7 +5355,8 @@ export function parseCreateRuleInput(
   return {
     name,
     triggerType,
-    triggerConfig,
+    // schedule.interval: intervalMinutes -> intervalMs, invalid period refused (no-op for other types).
+    triggerConfig: normalizeIntervalTriggerConfigAtSave(triggerType, triggerConfig) ?? {},
     actionType,
     actionConfig,
     enabled,

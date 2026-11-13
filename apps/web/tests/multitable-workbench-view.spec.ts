@@ -40,6 +40,8 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     // The attachment upload / delete the workbench hands the inspector (they hold the grid's undo).
     uploadFn: undefined as ((file: File, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
     deleteAttachmentFn: undefined as ((attachmentId: string, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
+    // The record the drawer shows (the grid's row, or the workbench's copy of it).
+    record: null as { id: string; version: number; data: Record<string, unknown> } | null,
   },
   gridStubSeen: {
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
@@ -646,6 +648,7 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
       inspectorStubSeen.uploadFn = this.$props.uploadFn as typeof inspectorStubSeen.uploadFn
       inspectorStubSeen.deleteAttachmentFn = this.$props.deleteAttachmentFn as typeof inspectorStubSeen.deleteAttachmentFn
+      inspectorStubSeen.record = (this.$props.record as typeof inspectorStubSeen.record) ?? null
       if (inspectorStubRealComments.realInspector) {
         // #5813: stays mounted while hidden, like the real shell at the workbench call site.
         const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
@@ -764,6 +767,15 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             onClick: () => this.$emit('patch', 'fld_title', 'Patched title'),
           },
           'patch-record',
+        ),
+        // A second save of the same field (two saves of one field, the second made while the first is out).
+        h(
+          'button',
+          {
+            'data-patch-record-again': 'fld_title',
+            onClick: () => this.$emit('patch', 'fld_title', 'Second title'),
+          },
+          'patch-record-again',
         ),
         // PR-B2 round 2: a second patchable field so two drawer patches can be in flight at once.
         h(
@@ -1308,7 +1320,8 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, textEntryHost } from '../src/multitable/utils/workbench-undo'
+import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -5515,6 +5528,171 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
+    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`).
+    function mergeAnswer(row: { version: number; data: Record<string, unknown> }, data?: Record<string, unknown>) {
+      workbenchMock.client.getRecord.mockResolvedValue({
+        record: { id: 'rec_1', version: row.version, data: { ...(data ?? row.data) } },
+        linkSummaries: {}, attachmentSummaries: {}, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
+        commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
+      })
+    }
+    function realtimeMerge() {
+      return (useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as { mergeRemoteRecord: (recordId: string) => Promise<boolean> }).mergeRemoteRecord
+    }
+    /** The grid (patchCell): the row shows each save at once; each answer comes when released. */
+    function heldPatches(row: { data: Record<string, unknown> } | null) {
+      const answers: Array<(failure: unknown) => void> = []
+      const calls: Array<[string, unknown, number]> = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number) => {
+        calls.push([fieldId, value, version])
+        if (row) row.data[fieldId] = value
+        const failure = await new Promise((resolve) => { answers.push(resolve) })
+        gridMock.error.value = null
+        return failure
+      })
+      return { answers, calls }
+    }
+
+    it('saves made on a copy of the record shown (kept after a realtime merge, the record on the page) are sent with the copy\'s version, not chained past it', async () => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      expect(inspectorStubSeen.record).not.toBe(row)
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', ATTEMPTED, row.version, { chainVersion: false })
+      // Without a copy (the drawer shows the grid row), the grid chains the version as usual.
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      expect(gridMock.patchCell.mock.calls.at(-1)).toHaveLength(4)
+    })
+
+    it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      const start = inspectorStubSeen.record!.version
+      const versions: number[] = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number) => {
+        versions.push(version)
+        row.data[fieldId] = value
+        await Promise.resolve()
+        row.version += 1 // the grid's applyPatchResult
+        gridMock.error.value = null
+        return null
+      })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      await flushUi()
+      expect(versions).toEqual([start, start + 1])
+    })
+
+    it('a copy gone stale while another record was shown is never given a version past the data it shows: its saves keep conflicting', async () => {
+      await openRec1()
+      const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row0)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      // Another user changes rec_1's status (version 2). The grid merges its row; rec_1 is not shown, so the copy stays.
+      mergeAnswer({ version: 2, data: {} }, { ...row0.data, fld_status: 'theirs' })
+      gridMock.mergeRemoteRecord.mockImplementation((record: { id: string; version: number; data: Record<string, unknown> }) => {
+        gridMock.rows.value = gridMock.rows.value.map((r: { id: string }) => (r.id === record.id ? { ...r, version: record.version, data: { ...record.data } } : r))
+        return true
+      })
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
+      const sent: Array<[string, number]> = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, _value: unknown, version: number) => {
+        sent.push([fieldId, version])
+        if (version !== 2) {
+          gridMock.error.value = 'Changed elsewhere'
+          return failureFor(fieldId, 'Changed elsewhere', { status: 409, code: 'VERSION_CONFLICT' })
+        }
+        gridMock.error.value = null
+        return null
+      })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
+      await flushUi()
+      // A status save made on the status the drawer shows (not 'theirs') is not stored over 'theirs'.
+      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
+      expect(sent).toEqual([['fld_title', 1], ['fld_status', 1]])
+    })
+
+    it.each([
+      ['accepted: the copy takes the save and moves one version on, so the next save carries it', null],
+      ['rejected: the copy never shows the save', 'reject'],
+    ] as const)('the record leaves the page while a save on its copy is out; %s', async (_name, outcome) => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      const versionAtMerge = inspectorStubSeen.record!.version
+      const before = inspectorStubSeen.record!.data.fld_title
+      const { answers, calls } = heldPatches(row)
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      gridMock.rows.value = gridMock.rows.value.filter((r: { id: string }) => r.id !== 'rec_1')
+      await flushUi()
+      answers[0](outcome ? failureFor('fld_title', 'Insufficient permissions', { status: 403, code: 'FORBIDDEN' }) : null)
+      await flushUi()
+      expect(inspectorStubSeen.record?.id).toBe('rec_1')
+      if (outcome) {
+        expect(inspectorStubSeen.record?.data.fld_title).toBe(before)
+        return
+      }
+      expect(inspectorStubSeen.record).toMatchObject({ version: versionAtMerge + 1, data: { fld_title: ATTEMPTED } })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      await flushUi()
+      expect(calls.map((call) => call[2])).toEqual([versionAtMerge, versionAtMerge + 1])
+    })
+
+    it('a save the grid replaced unsent with a newer save of the field (CELL_WRITE_SUPERSEDED) shows nothing and leaves the field\'s inline error alone: the newer save answers for the field', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => CELL_WRITE_SUPERSEDED)
+      await patchTitle()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+    })
+
+    it('an older save of the record that fails while this one waits (the grid\'s shared error set after the call) does not make this one\'s success a local refusal', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        await Promise.resolve()
+        gridMock.error.value = 'Status is not allowed'
+        return null
+      })
+      await patchTitle()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
     it.each([
       ['same-record', 'success'], ['same-record', 'failure'],
       ['another-record', 'success'], ['another-record', 'failure'],
@@ -5571,6 +5749,76 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
+    // Every move to another record commits the drawer's focused field first (releaseDrawerFocus in selectRecord), not
+    // only the drawer's own previous / next: here the record in the address (the browser's back / forward), a
+    // deep link to a record off the page while a deep-linked record is shown, and a declined discard prompt.
+    it('a move through the record in the address commits the focused field to the record it was typed on, and gives it the focus back', async () => {
+      const host = mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      host.recordId = 'rec_2'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(document.activeElement).toBe(field)
+      expect(field.value).toBe('Beta')
+    })
+
+    it('a deep link to a record off the page, while a deep-linked record is shown, commits the focused field to the record shown before it is replaced', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      const host = mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_remote'
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_far', version: 9, data: { fld_title: 'Far' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_far' },
+        linkSummaries: {},
+      })
+      acceptNextPatch()
+      // The far record's comments are still loading: the focus comes back without waiting for them.
+      loadCommentsSpy.mockImplementationOnce(() => new Promise(() => {}))
+      host.recordId = 'rec_far'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(document.activeElement).toBe(field)
+    })
+
+    it('a declined discard prompt keeps the record: the focused field is committed to it and gets the focus back', async () => {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      try {
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      } finally {
+        confirmSpy.mockRestore()
+      }
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(document.activeElement).toBe(field)
+    })
+
     // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
     // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
     // and then gets the focus back, so the chord and Esc go on working.
@@ -5621,11 +5869,19 @@ describe('MultitableWorkbench view wiring', () => {
 
     it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
       await openRec1()
-      container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
-      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
-      await flushUi()
-      expect(container!.querySelector('[data-rec1-only]')).toBeNull()
-      expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+      // a tab panel outside the drawer, before it in the page: never the one that gets the focus
+      const decoy = document.body.insertBefore(document.createElement('div'), document.body.firstChild)
+      decoy.setAttribute('role', 'tabpanel')
+      decoy.tabIndex = 0
+      try {
+        container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(container!.querySelector('[data-rec1-only]')).toBeNull()
+        expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+      } finally {
+        decoy.remove()
+      }
     })
 
     it('a move leaves a focused control outside the drawer alone', async () => {
@@ -6934,6 +7190,33 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
+    it('isWorkbenchGridTarget: a focused drawer tab panel itself is not the grid\'s (Cmd+Z there does nothing); a control in it, a panel elsewhere and the grid are', () => {
+      const drawer = document.body.appendChild(document.createElement('div'))
+      drawer.className = 'meta-record-drawer'
+      const panel = drawer.appendChild(document.createElement('div'))
+      panel.setAttribute('role', 'tabpanel')
+      const button = panel.appendChild(document.createElement('button'))
+      const elsewhere = document.body.appendChild(document.createElement('div'))
+      elsewhere.setAttribute('role', 'tabpanel')
+      const gridRoot = document.body.appendChild(document.createElement('div'))
+      gridRoot.className = 'meta-grid'
+      try {
+        expect(isWorkbenchGridTarget(panel)).toBe(false)
+        expect(isWorkbenchGridTarget(button)).toBe(true)
+        expect(isWorkbenchGridTarget(elsewhere)).toBe(true)
+        expect(isWorkbenchGridTarget(gridRoot)).toBe(true)
+        // Through the module: a chord on the panel does nothing, on the button in it the grid's undo runs.
+        const undo = createWorkbenchUndo({ isInsideWorkbench: () => true, isGridTarget: isWorkbenchGridTarget })
+        const chord = (target: EventTarget) => undo.decide(withProps(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }), { target }))
+        expect(chord(panel)).toBe('swallow')
+        expect(chord(button)).toBe('grid-undo')
+      } finally {
+        drawer.remove()
+        elsewhere.remove()
+        gridRoot.remove()
+      }
+    })
+
     it('classifies text-entry hosts: textarea, editable contenteditable (and a child), text-like inputs; not date/time, select, checkbox', () => {
       const { add, editable } = rig()
       const editor = editable()
@@ -7028,6 +7311,16 @@ describe('MultitableWorkbench view wiring', () => {
         return { drawer, title }
       }
       const clickPatch = () => container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+
+      it('Cmd+Z with the focus on a drawer tab panel itself does nothing; on a button in the drawer the grid\'s undo runs, as before', async () => {
+        await openDrawerWithTitle()
+        const panel = container!.querySelector<HTMLElement>('[data-stub-tabpanel]')!
+        panel.focus()
+        expect(fire(panel, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        const button = container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!
+        button.focus()
+        expect(fire(button, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      })
 
       it('wiring: a drawer commit the server accepted ends the field\'s history (the title, via the primary field); a rejected one is never settled', async () => {
         const { title } = await openDrawerWithTitle()

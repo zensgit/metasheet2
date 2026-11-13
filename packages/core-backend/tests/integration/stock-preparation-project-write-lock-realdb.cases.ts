@@ -1589,6 +1589,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
     const packInstallStoreModule = require(path.join(PLUGIN_LIB, 'stock-preparation-pack-install-store.cjs')) as any
     // Readiness v5 (batch-refresh step 6d-1b): the component ruling ledger store D20's readiness reads.
     const componentRulingStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-component-ruling-store.cjs')) as any
+    // Readiness v7 (batch-refresh S6-5b, R-91): the sheet-repair ledger (migration 108) the open-run check reads.
+    const sheetRepairStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-sheet-repair-store.cjs')) as any
 
     function routeResponse() {
       const res: any = { statusCode: 200, body: null, headers: {} }
@@ -1679,10 +1681,13 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
       const markerBefore = continuationSupport.CONTINUATION_SUPPORT_VERSION
       // 批次标识 BI-1b (readiness v3; register R-65; critic M3): the pull-batch switch for this case only, restored below.
       const pullBatchSwitchBefore = process.env.STOCK_PREP_PULL_BATCH_ENABLED
+      // Readiness v6 (owner ruling 2026-11-11, R-91 option A): the tenant-claim door for this case only, restored below.
+      const tenantClaimBefore = process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
       const STEP4_STUB_TABLES = ['integration_stock_prep_continuation', 'integration_stock_prep_refresh_state']
       const createdStubs: string[] = []
       process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
       process.env.STOCK_PREP_PULL_BATCH_ENABLED = 'true'
+      process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = 'true'
       continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
       const pullBatchStore = pullBatchStoreModule.createStockPreparationPullBatchStore({ db })
       try {
@@ -1747,6 +1752,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           stockPreparationContinuationStore: continuationStoreLib.createStockPreparationContinuationStore({ db }),
           // Readiness v5 (batch-refresh step 6d-1b, R-91): the real component ruling ledger (migration 107; nothing acknowledged).
           stockPreparationComponentRulingStore: componentRulingStoreLib.createStockPreparationComponentRulingStore({ db }),
+          // Readiness v7 (batch-refresh S6-5b, R-91): the real sheet-repair ledger (migration 108; no run of this sheet).
+          stockPreparationSheetRepairStore: sheetRepairStoreLib.createStockPreparationSheetRepairStore({ db }),
         }
         httpRoutes.registerIntegrationRoutes({ context: routeContext, services, logger: { info() {}, warn() {}, error() {} } })
         // GET: every readiness check passes on the really prepared sheet.
@@ -1814,6 +1821,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = envBefore
         if (pullBatchSwitchBefore === undefined) delete process.env.STOCK_PREP_PULL_BATCH_ENABLED
         else process.env.STOCK_PREP_PULL_BATCH_ENABLED = pullBatchSwitchBefore
+        if (tenantClaimBefore === undefined) delete process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED
+        else process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED = tenantClaimBefore
         await q('DELETE FROM integration_stock_prep_pull_batch_sheet WHERE tenant_id = $1', [tenantId]).catch(() => {})
         continuationSupport.CONTINUATION_SUPPORT_VERSION = markerBefore
         for (const table of createdStubs) await q(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
@@ -6137,8 +6146,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         // The six refresh routes (lib/http-routes.cjs stockPreparationRefresh*, lib/stock-preparation-refresh-decisions.cjs)
         // over the production host, lock, registry, audit store and refresh services, and the lock's in-transaction bump
         // (`bumpGenerationWithin`) inside the store's REAL transaction on PostgreSQL. Nested in S3A for its stack and
-        // helpers. The pilot column is SEEDED DIRECTLY (pilot enable is impossible on this build: the readiness marker
-        // CONTINUATION_SUPPORT_VERSION is 0). Synthetic values only.
+        // helpers. The pilot column is SEEDED DIRECTLY (these cases never run the enable route; the readiness marker
+        // CONTINUATION_SUPPORT_VERSION was 0 when they were written and is 1 since S6-9). Synthetic values only.
         //   S4-01 bumpGenerationWithin interleavings: (a) an ABANDONED carry_confirm lease with no execution row is cleared
         //         by the confirm's own transaction (epoch + 1, interruption recorded, the stalled holder LEASE_LOST); (b) a
         //         crashed apply (a `running` execution of a dead lease) refuses the ROUTE confirm RECOVERY_PENDING with the
