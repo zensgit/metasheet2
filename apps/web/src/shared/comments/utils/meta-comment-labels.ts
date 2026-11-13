@@ -12,6 +12,27 @@
 // meta-comment-labels.spec.ts) keep working unchanged.
 
 export type MetaCommentLabelKey =
+  | 'comment.unknownAuthor'
+  | 'inbox.title'
+  | 'inbox.subtitle'
+  | 'inbox.refreshing'
+  | 'inbox.refresh'
+  | 'inbox.total'
+  | 'inbox.loaded'
+  | 'inbox.loading'
+  | 'inbox.empty'
+  | 'inbox.base'
+  | 'inbox.sheet'
+  | 'inbox.row'
+  | 'inbox.view'
+  | 'inbox.field'
+  | 'inbox.mention'
+  | 'inbox.opening'
+  | 'inbox.open'
+  | 'inbox.markRead'
+  | 'inbox.read'
+  | 'inbox.noView'
+  | 'inbox.errorOpen'
   | 'comment.title'
   | 'comment.inbox'
   | 'comment.loading'
@@ -61,6 +82,27 @@ export type MetaCommentLabelKey =
   | 'comment.deletedPlaceholder'
 
 const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string }> = {
+  'comment.unknownAuthor': { en: 'Unknown user', zh: '未知用户' },
+  'inbox.title': { en: 'Multitable Comment Inbox', zh: '多维表格评论收件箱' },
+  'inbox.subtitle': { en: 'Mentions and unread comments from other collaborators.', zh: '来自其他协作者的提及和未读评论。' },
+  'inbox.refreshing': { en: 'Refreshing...', zh: '正在刷新...' },
+  'inbox.refresh': { en: 'Refresh', zh: '刷新' },
+  'inbox.total': { en: 'Total', zh: '总计' },
+  'inbox.loaded': { en: 'Loaded', zh: '已加载' },
+  'inbox.loading': { en: 'Loading comment inbox...', zh: '正在加载评论收件箱...' },
+  'inbox.empty': { en: 'No comments in inbox yet.', zh: '收件箱暂无评论。' },
+  'inbox.base': { en: 'Base', zh: '数据集' },
+  'inbox.sheet': { en: 'Sheet', zh: '数据表' },
+  'inbox.row': { en: 'Row', zh: '记录' },
+  'inbox.view': { en: 'View', zh: '视图' },
+  'inbox.field': { en: 'Field', zh: '字段' },
+  'inbox.mention': { en: 'Mention', zh: '提及' },
+  'inbox.opening': { en: 'Opening...', zh: '正在打开...' },
+  'inbox.open': { en: 'Open', zh: '打开' },
+  'inbox.markRead': { en: 'Mark read', zh: '标记已读' },
+  'inbox.read': { en: 'Read', zh: '已读' },
+  'inbox.noView': { en: 'No multitable view is available for this sheet yet.', zh: '此数据表暂无可用的多维表格视图。' },
+  'inbox.errorOpen': { en: 'Failed to open comment', zh: '打开评论失败' },
   'comment.title': { en: 'Comments', zh: '评论' },
   'comment.inbox': { en: 'Inbox', zh: '收件箱' },
   'comment.loading': { en: 'Loading...', zh: '正在加载...' },
@@ -115,6 +157,10 @@ const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string 
 export function commentLabel(key: MetaCommentLabelKey, isZh: boolean): string {
   const entry = META_COMMENT_LABELS[key]
   return isZh ? entry.zh : entry.en
+}
+
+export function commentAuthorLabel(authorName: string | null | undefined, isZh: boolean): string {
+  return authorName?.trim() || commentLabel('comment.unknownAuthor', isZh)
 }
 
 export function emptyMessage(

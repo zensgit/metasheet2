@@ -637,17 +637,6 @@ const ALLOWLIST: AllowlistEntry[] = [
   ...group('OUT-OF-SCOPE', 'a COMMENT line describing the shared-panel template fallback this file\'s own upstream guard closes -- prose, not a render/assignment site; the scan does not strip comments', [
     ['src/views/approval/ApprovalCommentsPanel.vue', '// `thread.authorName ?? thread.authorId` when this is undefined, which is EXACTLY the raw-id'],
   ]),
-  ...group('OUT-OF-SCOPE', 'mention-candidate label / comment-author label+subtitle fallback to the raw id when displayName/authorName is absent (or, for the subtitle, rendered alongside a differing name) -- legitimate, byte-identical multitable behavior (a real directory-backed name producer); the approval consumer (S3b) discharges the census gate via its OWN upstream guard instead of touching this shared file -- see the group note above and the TIER A entry it names', [
-    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: candidate.displayName?.trim() || candidate.userId.trim(),'],
-    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,'],
-    ['src/shared/comments/components/MetaCommentsPanel.vue', 'subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId : undefined,'],
-  ]),
-  ...group('OUT-OF-SCOPE', 'comment-author drawer/banner render fallback to the raw id when authorName is absent -- legitimate, byte-identical multitable kit-internal behavior (the S3b approval consumer never mounts these particular render paths without its own upstream guard already having supplied a non-empty authorName); newly caught only because this round widened the pattern\'s alternation to include `.authorId`, not because the code changed', [
-    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ thread.authorName ?? thread.authorId }}</span>'],
-    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>'],
-    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return editingBanner(activeEditingComment.value.authorName ?? activeEditingComment.value.authorId, isZh.value)'],
-    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return replyingBanner(activeReplyComment.value.authorName ?? activeReplyComment.value.authorId, isZh.value)'],
-  ]),
   ...group('OUT-OF-SCOPE', 'mention-suggestion autocomplete FILTER comparison (query substring match against label/id) -- a boolean predicate, never rendered to the DOM', [
     ['src/shared/comments/components/MetaCommentComposer.vue', 'return suggestion.label.toLowerCase().includes(query) || suggestion.id.toLowerCase().includes(query)'],
   ]),

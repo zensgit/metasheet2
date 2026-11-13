@@ -239,6 +239,7 @@ export interface CommentCreateInput {
     content: string;
     /** User ID of the comment author. */
     authorId: string;
+  authorName?: string;
     /** Parent comment ID for threading (replies). */
     parentId?: string;
     /**

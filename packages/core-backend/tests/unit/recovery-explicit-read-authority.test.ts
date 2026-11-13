@@ -95,13 +95,24 @@ describe('recovery snapshot wiring through canonical formula masking', () => {
   test.each([
     ['hasFullTableReadAccess', 'maskStoredRecordFieldIds', 5, 'access'],
     ['maskStoredRecordFieldIds', 'resolveTaintedFormulaFieldIds', 4, 'authorityAccess'],
-    ['resolveTaintedFormulaFieldIds', 'resolveForeignFieldReadability', 4, 'authorityAccess'],
+    ['resolveTaintedFormulaFieldIds', 'resolveTaintedComputedFieldIds', 4, 'authorityAccess'],
+    ['resolveTaintedComputedFieldIds', 'resolveForeignFieldReadability', 4, 'authorityAccess'],
+    ['applyLookupRollup', 'resolveTaintedComputedFieldIds', 4, 'authorityAccess'],
     ['resolveForeignFieldReadability', 'resolveSheetCapabilitiesForAccess', 2, 'access'],
     ['resolveForeignFieldReadability', 'resolveBaseReadableForAccess', 2, 'access'],
   ] as const)('%s forwards the exact snapshot to %s', (caller, callee, position, argument) => {
     const calls = callsIn(bodyOf(caller), callee)
     expect(calls).toHaveLength(1)
     expect(calls[0].arguments[position]?.getText(source)).toBe(argument)
+  })
+  test('computed taint core has exactly its two reviewed callers', () => {
+    const calls = callsIn(source, 'resolveTaintedComputedFieldIds')
+    expect(calls).toHaveLength(2)
+    for (const caller of ['resolveTaintedFormulaFieldIds', 'applyLookupRollup']) {
+      const reviewed = callsIn(bodyOf(caller), 'resolveTaintedComputedFieldIds')
+      expect(reviewed).toHaveLength(1)
+      expect(calls).toContain(reviewed[0])
+    }
   })
   test('full-read does not manufacture a request or resolve cached claims', () => {
     const body = bodyOf('hasFullTableReadAccess')

@@ -18,6 +18,7 @@ import {
   classifySelectCellValue,
   normalizeJson,
   normalizeJsonArray,
+  validateDateValue,
   validateLongTextValue,
   validatePersonValue,
   type MultitableField,
@@ -42,7 +43,8 @@ import {
 } from './canonical-sheet-fence'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
-import type { FieldValidationConfig } from './field-validation'
+import { serializeRecordData, type FieldValidationConfig } from './field-validation'
+import { MultitableRecordValidationError } from './record-errors'
 import { loadFieldsForSheet } from './loaders'
 import {
   createYjsInvalidationPostCommitHook,
@@ -200,6 +202,17 @@ export class RecordValidationError extends Error {
     super(message)
     this.name = 'RecordValidationError'
     if (typeof fieldId === 'string' && fieldId.length > 0) this.fieldId = fieldId
+  }
+}
+
+function serializeValidatedRecordData(data: Record<string, unknown>): string {
+  try {
+    return serializeRecordData(data)
+  } catch (error) {
+    if (error instanceof MultitableRecordValidationError) {
+      throw new RecordValidationError(error.message)
+    }
+    throw error
   }
 }
 
@@ -686,6 +699,8 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
 
+    if (!copy) serializeValidatedRecordData(data)
+
     const patch: Record<string, unknown> = {}
     const recordId = `rec_${randomUUID()}`
     // P1#2 REPLACE — build the created-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
@@ -894,7 +909,7 @@ export class RecordService {
           continue
         }
 
-        if (BATCH1_FIELD_TYPES.has(field.type)) {
+        if ((!copy && field.type === 'date') || BATCH1_FIELD_TYPES.has(field.type)) {
           try {
             patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
           } catch (error) {
@@ -962,7 +977,7 @@ export class RecordService {
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
            RETURNING version`,
-          [recordId, sheetId, JSON.stringify(patch), actorId],
+          [recordId, sheetId, serializeValidatedRecordData(patch), actorId],
         )
 
       if (linkUpdates.size > 0) {
@@ -1620,6 +1635,7 @@ export class RecordService {
     if (!capabilities.canEditRecord) {
       throw new RecordPermissionError('Insufficient permissions')
     }
+    serializeValidatedRecordData(data)
     const patchActorId = input.actorId ?? access.userId ?? null
     const linkWriterFencePlan = await prepareLinkWriterFencePlan(
       this.pool.query.bind(this.pool),
@@ -1766,6 +1782,14 @@ export class RecordService {
         }
         continue
       }
+      if (field.type === 'date') {
+        try {
+          patch[fieldId] = validateDateValue(value, fieldId)
+        } catch (error) {
+          fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+        }
+        continue
+      }
       patch[fieldId] = value
     }
 
@@ -1898,7 +1922,7 @@ export class RecordService {
            SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
            WHERE id = $2 AND sheet_id = $3
            RETURNING version`,
-          [JSON.stringify(patch), recordId, sheetId, patchActorId],
+          [serializeValidatedRecordData(patch), recordId, sheetId, patchActorId],
         )
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
         const revisionId = await recordRecordRevision(query, {

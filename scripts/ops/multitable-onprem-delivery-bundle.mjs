@@ -239,6 +239,18 @@ async function main() {
       preflightScript,
       path.join(bundleRootTmp, 'ops', 'multitable-onprem-preflight.sh'),
     ),
+    networkSelfcheckBash: await copyFileIfExists(
+      path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-network-selfcheck.sh'),
+      path.join(bundleRootTmp, 'ops', 'multitable-onprem-network-selfcheck.sh'),
+    ),
+    networkSelfcheckPowerShell: await copyFileIfExists(
+      path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-network-selfcheck.ps1'),
+      path.join(bundleRootTmp, 'ops', 'multitable-onprem-network-selfcheck.ps1'),
+    ),
+    networkSelfcheckRuntime: await copyFileIfExists(
+      path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-network-selfcheck.mjs'),
+      path.join(bundleRootTmp, 'ops', 'multitable-onprem-network-selfcheck.mjs'),
+    ),
     repairHelperScript: await copyFileIfExists(
       repairHelperScript,
       path.join(bundleRootTmp, 'ops', 'multitable-onprem-repair-helper.sh'),
@@ -317,6 +329,9 @@ async function main() {
     `- \`${path.basename(zipVerifyMd)}\`: ${copiedVerifyReports.zipVerifyMd ? 'present' : 'missing'}`,
     '',
     '## Included operator helpers',
+    `- Network selfcheck Bash: ${copiedOperatorArtifacts.networkSelfcheckBash ? 'present' : 'missing'}`,
+    `- Network selfcheck PowerShell: ${copiedOperatorArtifacts.networkSelfcheckPowerShell ? 'present' : 'missing'}`,
+    `- Network selfcheck runtime: ${copiedOperatorArtifacts.networkSelfcheckRuntime ? 'present' : 'missing'}`,
     '',
     `- \`ops/onprem-release-gate-operator-commands.sh\`: ${copiedOperatorArtifacts.onPremGateOperatorCommandScript ? 'present' : 'missing'}`,
     `- \`ops/multitable-onprem-package-install.sh\`: ${copiedOperatorArtifacts.packageInstallScript ? 'present' : 'missing'}`,

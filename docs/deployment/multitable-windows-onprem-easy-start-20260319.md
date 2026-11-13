@@ -171,6 +171,73 @@ scripts/ops/multitable-onprem-healthcheck.sh
 ```
 
 ## 9) Open the app
+### Optional values-free network diagnosis
+
+Gateway requirements (customer-security approval required; not a blanket `/api` WAF exclusion):
+
+| Surface | Required behavior / boundary |
+| --- | --- |
+| GET | Preserve normal JSON reads and typed JSON errors; fixed missing-route GET below tests error transport only. |
+| POST | Preserve ordinary JSON string data, including script-like and SQL-like text; never execute it. |
+| PATCH / PUT | Permit authorized application routes and JSON bodies within application limits; selfcheck does NOT test business writes. |
+| DELETE | Permit native authorized DELETE; existing POST override is a compatibility fallback, not the correct policy substitute. |
+| Errors | Preserve status, JSON error.code and body; do not rewrite to HTML or pad with NUL/other bytes. |
+| WebSocket / socket.io | Preserve the application's upgrade, polling transports and connection lifetimes; not exercised by this script. |
+| XLSX / attachments | Preserve binary bytes and application upload/download limits; do not increase limits beyond the application's configured upper bounds. |
+| Correlation | Privately compare UTC/local time and generated request ID in authorized application/gateway logs; do not publish tokens, hosts or payloads. |
+
+Any exception must be narrow to the approved route/method/content and approved by customer
+security. Do not disable WAF across `/api`, disable authentication, introduce encoding evasions,
+or treat the override fallback as a replacement for correct native-method policy.
+
+The token-required `GET-json404` sends only GET to
+`/api/__multitable_network_selfcheck_reserved__/<random-UUID>` (a diagnostic namespace
+reserved by this client, not a new server route). It passes only on HTTP 404 plus JSON
+`error.code === 'NOT_FOUND'`; 401, HTML/plain 404, wrong code and 200 fail. Missing token
+means SKIP. This is error-envelope transport evidence, NEVER business-operation success.
+An existing server may return default HTML for unknown routes: FAIL can therefore be an
+application-baseline mismatch, not proof of gateway interference. Check that baseline with
+authorized operators before attributing cause; this change does not modify server routing.
+
+Every check includes integer `httpStatus` (0 means no received response or skipped).
+The final `SUMMARY PASS=n FAIL=n SKIP=n` counts displayed checks; selftest counts assertions
+of expected outcomes, not live target successes. Fixed HINT lines recommend private log
+correlation and security-approved narrow review only. SKIP never establishes acceptance.
+
+Only after separate operator authorization for the target, set `MULTITABLE_NETWORK_ORIGIN`
+to the application origin (no path, credentials, query or fragment) and optionally supply
+`MULTITABLE_NETWORK_TOKEN` through a private environment. Never paste credentials into
+commands, tickets or reports; disable shell tracing/transcripts and clear the token afterward.
+Node 20+ must be on PATH. PowerShell entry syntax is compatible with Windows PowerShell 5.1.
+
+Run `bash scripts/ops/multitable-onprem-network-selfcheck.sh` or
+`powershell -NoProfile -File scripts/ops/multitable-onprem-network-selfcheck.ps1`.
+For offline synthetic validation instead, append `--selftest` (Bash) or `-SelfTest`
+(PowerShell); this ignores target environment values and binds only a temporary loopback server.
+
+Checks are GET `/api/health`, authenticated DELETE `/api/method-probe`, and POST to
+that same harmless probe using the already-supported `X-HTTP-Method-Override: DELETE`.
+No business record is read or written. No new backend API or encoding bypass is introduced.
+POST has two separately reported checks: `POST-json-script` sends
+`{"value":"<script>alert(1)</script>"}` and `POST-json-sql` sends `{"value":"' OR 1=1 --"}`,
+both with `Content-Type: application/json`. These are ordinary string data, never executed.
+Each reports its own PASS/FAIL/SKIP; an empty POST does not establish body transport.
+Selftest verifies the received exact wire method, path, headers and body before classifying
+normal JSON, HTML, NUL and connection-reset responses. The live probe does not echo bodies,
+so PASS establishes this request's probe response, not end-to-end body preservation or business acceptance.
+POST passes only with the exact probe JSON (`overridden: true`) and override receipt; JSON 404 is a failure,
+not business success. No unknown endpoint POST is sent. Missing token skips DELETE/POST.
+Redirects are not followed, TLS verification stays enabled, and HTML, NUL, resets,
+wrong JSON shape/status and oversized responses fail closed. Requests time out after five seconds.
+
+Output contains only fixed check labels, PASS/FAIL/SKIP, UTC time, duration and generated UUID
+request IDs; response bodies, server request IDs, addresses and credentials are never printed.
+Exit 1 means failure; exit 0 can include SKIP and is not full acceptance. Selftest PASS means
+the synthetic expected outcome was recognized, including rejection of bad responses.
+This diagnoses transport only, not business correctness, permissions or deployment acceptance.
+For failures, correlate generated IDs in authorized local logs and review the narrow route/method
+policy with the network owner. Never disable the whole-site WAF or add encoding evasions.
+
 
 - Web: `http://<your-server-host>/`
 - Multitable route example: `http://<your-server-host>/multitable`

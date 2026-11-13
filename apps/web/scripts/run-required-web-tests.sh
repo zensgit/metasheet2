@@ -468,8 +468,6 @@
 # tokens for the same tests/multitable/ directory. The multitable-web-guard.yml mirror of this token
 # (the two-point discipline above) is NOT in this commit — .github/** is pushed separately under a
 # workflow-scoped token; until that lands this always-on lane is the only one running the file.
-# Its sibling tests/multitable/export-sheet-client.test.ts remains unwired here (untouched, out of
-# scope for this change).
 #
 # Role delegation page (2026-10-10, #6310 follow-up): `roleDelegationView` — apps/web/tests/
 # roleDelegationView.spec.ts, RoleDelegationView.vue (the delegated-admin role page; its revoke
@@ -1722,6 +1720,7 @@ exec npx vitest run \
   categoryCandidateInput \
   clipboard-no-bare-navigator-clipboard \
   comment-affordance-color-consistency \
+  comment-author-public-form-i18n.spec.ts \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
   data-sources-ui \
@@ -1733,8 +1732,10 @@ exec npx vitest run \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   DirectoryIntegrationIdentityPanel.spec.ts \
   directoryManagementView \
+  export-sheet-client.test.ts \
   featureFlagsApprovalMobile \
   formViewValidation \
+  gateway-diagnostics.spec.ts \
   integrationErrorCodeLabels \
   IntegrationK3WiseSetupView \
   IntegrationPipelineRunSection \
@@ -1845,6 +1846,7 @@ exec npx vitest run \
   multitable-embed-route \
   multitable-export-dialog \
   multitable-external-context-sync \
+  multitable-feedback-defaults.spec.ts \
   multitable-field-config-i18n \
   multitable-field-display-i18n \
   multitable-field-manager \

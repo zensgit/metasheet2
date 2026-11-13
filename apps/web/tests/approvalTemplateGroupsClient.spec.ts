@@ -23,12 +23,7 @@ import {
  * reason: a function with no mock branch has nothing to bypass.
  */
 function jsonResponse(status: number, body: unknown): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-    clone() { return this },
-  } as unknown as Response
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
 const SAMPLE_GROUP = {
@@ -97,7 +92,7 @@ describe('approval template group client (design lock v2.13 §6 phase 1)', () =>
   })
 
   it('archiveApprovalTemplateGroup / unarchiveApprovalTemplateGroup: POST the /:id/(un)archive legs', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { group: SAMPLE_GROUP }))
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse(200, { group: SAMPLE_GROUP }))
     vi.stubGlobal('fetch', fetchMock)
 
     await archiveApprovalTemplateGroup('atg_1')

@@ -28,6 +28,10 @@ function fakeResponse(status: number, jsonImpl: () => Promise<unknown>): Respons
   return { status, json: jsonImpl } as unknown as Response
 }
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
 describe('approvalRequestError', () => {
   // O-8 / F8-1: the status-coded fallback follows the shell locale; these cases pin its zh-CN
   // spelling (the English one is covered at the end of this describe).
@@ -263,12 +267,7 @@ describe('normalizeApprovalHistoryEnvelope (Lock-9 fix round, gate P1-2)', () =>
     // route function stops routing through the normalizer.
     vi.resetModules()
     vi.stubEnv('DEV', false)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => REAL_WIRE_ENVELOPE,
-      clone() { return this },
-    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(REAL_WIRE_ENVELOPE)))
     try {
       const { getApprovalHistory } = await import('../src/approvals/api')
       await expect(getApprovalHistory('apv_1')).resolves.toHaveLength(1)
@@ -474,7 +473,7 @@ describe('exportApprovalsCsv (F3-E1)', () => {
       const fetchMock = vi.fn(async (rawUrl: string) => (
         new URL(rawUrl).searchParams.get('format') === 'csv'
           ? response
-          : { ok: true, status: 200, json: async () => ({ data: [], total: 0 }), clone() { return this } }
+          : jsonResponse({ data: [], total: 0 })
       ))
       vi.resetModules()
       vi.stubEnv('DEV', false)
@@ -521,7 +520,7 @@ describe('exportApprovalsCsv (F3-E1)', () => {
     const fetchMock = vi.fn(async (rawUrl: string) => (
       new URL(rawUrl).searchParams.get('format') === 'csv'
         ? response
-        : { ok: true, status: 200, json: async () => ({ data: [], total: 0 }), clone() { return this } }
+        : jsonResponse({ data: [], total: 0 })
     ))
     vi.resetModules()
     vi.stubEnv('DEV', false)

@@ -2904,7 +2904,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.selectSheet).not.toHaveBeenCalled()
   })
 
-  it('creates a new sheet inside the switched base and syncs into the created sheet context', async () => {
+  it('creates an empty new sheet inside the switched base and syncs into the created sheet context', async () => {
     mountWorkbench()
     await flushUi()
 
@@ -2913,7 +2913,7 @@ describe('MultitableWorkbench view wiring', () => {
       return true
     })
     workbenchMock.client.createSheet.mockResolvedValue({
-      sheet: { id: 'sheet_new', baseId: 'base_sales', name: 'Sheet 2', seeded: true },
+      sheet: { id: 'sheet_new', baseId: 'base_sales', name: 'Sheet 2', seeded: false },
     })
     workbenchMock.syncExternalContext.mockResolvedValue(true)
 
@@ -2925,7 +2925,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.client.createSheet).toHaveBeenCalledWith({
       name: 'Sheet 2',
       baseId: 'base_sales',
-      seed: true,
+      seed: false,
     })
     expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
       baseId: 'base_sales',

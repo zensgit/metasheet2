@@ -154,6 +154,21 @@ Make these explicit:
 
 ## 7. Sign-Off
 
+Network diagnosis evidence (optional, not business acceptance):
+- Collect per-check `httpStatus` and final PASS/FAIL/SKIP summary. `GET-json404` must
+  return typed JSON NOT_FOUND; default application HTML 404 is a baseline FAIL, not proof
+  of gateway interference. Review the explicit gateway requirements matrix in easy-start.
+- Confirm `multitable-onprem-network-selfcheck.{sh,ps1,mjs}` are all present beside each other.
+- Record local `--selftest` / `-SelfTest` outcomes and the actual shell/Node versions separately;
+  PowerShell 7 validation does not establish Windows PowerShell 5.1 runtime acceptance.
+- Live target checks require separate authorization; never attach tokens, addresses or responses.
+- Retain only PASS/FAIL/SKIP, timestamps/durations and generated request IDs. Any SKIP means
+  the associated transport is unverified, even if the process exits zero.
+- A normal JSON 404 cannot establish successful POST business operations. The supplied POST
+  check uses only the existing harmless method probe, with its override receipt validated.
+- Do not recommend whole-site WAF disablement or encoded bypasses; escalate narrow policy review.
+
+
 - Delivery owner:
 - Package version:
 - Release tag:

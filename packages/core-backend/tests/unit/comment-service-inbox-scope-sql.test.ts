@@ -184,6 +184,46 @@ describe('CommentService cross-sheet aggregates apply the inbox scope in SQL (#5
     }
   })
 
+  it.each(['Ada Demo', '  王 Demo  ', '', '  ', null, undefined])('projects only a scoped author name (%s), never a directory or email', async (authorName) => {
+    const row = {
+      id: 'comment-synthetic', spreadsheet_id: 'sheet-fake-a', row_id: 'row-allowed',
+      container_id: 'sheet-fake-a', target_id: 'row-allowed', target_field_id: null,
+      field_id: null, content: 'Synthetic comment', author_id: 'author-synthetic',
+      author_name: authorName, parent_id: null, resolved: false, mentions: [],
+      created_at: '2026-01-01', updated_at: '2026-01-01', unread: true, mentioned: false,
+    }
+    captured.rows.push([{ c: 1 }], [row], [])
+    const comments = await service.getComments('sheet-fake-a', {
+      rowId: 'row-allowed', excludeRowIds: ['row-denied'], limit: 2,
+    })
+    expect(comments.items[0].authorName).toBe(authorName?.trim() || undefined)
+    expect(comments.items[0].authorId).toBe('author-synthetic')
+    const list = captured.queries[1]!
+    expect(list.sql).toContain('u.id::text = "meta_comments"."author_id" and u.is_active = true')
+    expect(list.sql).toContain('select u.name from users as u')
+    expect(list.sql).not.toContain('email')
+    expect(whereOf(list.sql)).toMatch(/"spreadsheet_id" = .* and "row_id" = .* and "row_id" not in/)
+    expect(list.parameters).toEqual(['sheet-fake-a', 'row-allowed', 'row-denied', 2, 0])
+    expect(captured.queries.some((query) => /^select .* from "users"/.test(query.sql))).toBe(false)
+
+    captured.queries.length = 0
+    captured.rows.push([{ c: 1 }], [row])
+    const inbox = await service.getInbox(USER, { limit: 2 }, SCOPE)
+    expect(inbox.items[0]).toMatchObject({ authorId: 'author-synthetic', authorName: authorName?.trim() || undefined })
+    expect(captured.queries).toHaveLength(2)
+    expect(captured.queries[0]!.sql).not.toContain('users')
+    expect(captured.queries[1]!.sql).toContain('u.id::text = "c"."author_id" and u.is_active = true')
+    expect(scopeConjunct(captured.queries[1]!).params).toEqual(SCOPE_PARAMS)
+  })
+
+  it('does not query any author for an unadmitted inbox scope or an empty comment page', async () => {
+    expect(await service.getInbox(USER, {}, { sheetIds: [], rowDenySheets: [] })).toEqual({ items: [], total: 0 })
+    expect(captured.queries).toHaveLength(0)
+    captured.rows.push([{ c: 0 }], [])
+    expect(await service.getComments('sheet-fake-a')).toEqual({ items: [], total: 0 })
+    expect(captured.queries).toHaveLength(2)
+  })
+
   it('a row-deny sheet with NO allowed row still binds as a row-deny sheet (nothing on it is admitted)', async () => {
     captured.rows.push([{ c: 0 }], [])
     await service.getInbox(USER, undefined, {

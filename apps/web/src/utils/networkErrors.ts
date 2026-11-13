@@ -51,6 +51,58 @@
 /** Machine-readable discriminator carried on the thrown error (`error.code`). */
 export const NETWORK_UNAVAILABLE = 'NETWORK_UNAVAILABLE'
 
+export const GATEWAY_INTERFERENCE = 'GATEWAY_INTERFERENCE'
+
+const gatewayDiagnosticMessages = new WeakMap<object, string>()
+
+export function safeGatewayDiagnosticMessage(error: unknown): string | undefined {
+  return error !== null && typeof error === 'object' ? gatewayDiagnosticMessages.get(error) : undefined
+}
+
+export interface GatewayInterferenceError extends Error {
+  code: typeof GATEWAY_INTERFERENCE
+  status: number
+  timestamp: string
+  localTime: string
+  requestId: string
+  requestIdSource: 'request' | 'response' | 'local'
+}
+
+export function safeGatewayRequestId(value: string | null | undefined): string | undefined {
+  if (!value || value.length > 128) return undefined
+  return /^(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|[a-f0-9]{16,128}|(?:req|request|web)[_-][a-z0-9_-]{8,116})$/i.test(value)
+    ? value
+    : undefined
+}
+
+export function createGatewayInterferenceError(
+  status: number,
+  requestId: string,
+  isZh = isZhLocale(),
+  requestIdSource: GatewayInterferenceError['requestIdSource'] = 'local',
+): GatewayInterferenceError {
+  const now = new Date()
+  const timestamp = now.toISOString()
+  const localTime = now.toLocaleString(isZh ? 'zh-CN' : 'en-US', { timeZoneName: 'short', hour12: false })
+  const safeId = safeGatewayRequestId(requestId) ?? 'unavailable'
+  const copy = isZh
+    ? '请求可能被网络安全设备拦截，请联系网络管理员'
+    : 'The request may have been blocked by a network security device. Please contact your network administrator.'
+  const idLabel = requestIdSource === 'local'
+    ? (isZh ? '本地诊断ID' : 'Local diagnostic ID')
+    : (isZh ? '请求ID' : 'Request ID')
+  const error = new Error(`${copy} (${localTime}; ${timestamp}; ${idLabel}: ${safeId})`) as GatewayInterferenceError
+  error.name = 'GatewayInterferenceError'
+  error.code = GATEWAY_INTERFERENCE
+  error.status = status
+  error.timestamp = timestamp
+  error.localTime = localTime
+  error.requestId = safeId
+  error.requestIdSource = requestIdSource
+  gatewayDiagnosticMessages.set(error, error.message)
+  return error
+}
+
 /** Same key `composables/useLocale.ts` reads and persists. */
 const LOCALE_STORAGE_KEY = 'metasheet_locale'
 

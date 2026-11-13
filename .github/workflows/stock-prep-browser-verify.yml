@@ -106,6 +106,7 @@ jobs:
                 apps/web/src/utils/permission-match.ts|\
                 apps/web/src/utils/networkErrors.ts|\
                 apps/web/src/utils/api.ts|\
+                apps/web/src/utils/gatewayDiagnostics.ts|\
                 apps/web/src/utils/delete-fallback.ts|\
                 apps/web/src/utils/explicitSessionOrg.ts|\
                 apps/web/src/utils/uuid.ts|\

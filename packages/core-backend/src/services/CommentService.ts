@@ -36,6 +36,13 @@ function mentionUserLabel(row: { name?: string | null; email?: string | null }):
   return row.name?.trim() || row.email?.trim() || ''
 }
 
+function commentAuthorName(authorIdColumn: string) {
+  return sql<string | null>`(
+    select u.name from users as u
+    where u.id::text = ${sql.ref(authorIdColumn)} and u.is_active = true
+  )`.as('author_name')
+}
+
 /**
  * Server-side emoji allowlist for comment reactions (B6, design-lock §3.2).
  * An emoji is a display token, not a protocol enum, so the palette is validated
@@ -113,6 +120,7 @@ export interface Comment {
   targetFieldId: string | null
   content: string
   authorId: string
+  authorName?: string
   parentId?: string
   resolved: boolean
   createdAt: string
@@ -147,6 +155,7 @@ type CommentRow = {
   container_id: string
   content: string
   author_id: string
+  author_name?: string | null
   parent_id: string | null
   resolved: boolean
   created_at: string | Date
@@ -544,7 +553,7 @@ export class CommentService {
     const totalObj = await query.select(({ fn }) => fn.countAll<number>().as('c')).executeTakeFirst()
     const total = totalObj ? Number((totalObj as { c: string | number }).c) : 0
 
-    const rows = await query.selectAll().orderBy('created_at', 'asc').limit(limit).offset(offset).execute()
+    const rows = await query.selectAll().select(commentAuthorName('meta_comments.author_id')).orderBy('created_at', 'asc').limit(limit).offset(offset).execute()
 
     const items = rows.map((row) => this.mapRowToComment(row))
     // Hydrate emoji reactions (B6). Single grouped query over the page's ids;
@@ -822,6 +831,7 @@ export class CommentService {
         'c.target_field_id',
         'c.content',
         'c.author_id',
+        commentAuthorName('c.author_id'),
         'c.parent_id',
         'c.resolved',
         'c.created_at',
@@ -1471,7 +1481,7 @@ export class CommentService {
   }
 
   private async getComment(id: string): Promise<Comment | undefined> {
-    const row = await db.selectFrom('meta_comments').selectAll().where('id', '=', id).executeTakeFirst()
+    const row = await db.selectFrom('meta_comments').selectAll().select(commentAuthorName('meta_comments.author_id')).where('id', '=', id).executeTakeFirst()
     return row ? this.mapRowToComment(row) : undefined
   }
 
@@ -1492,6 +1502,7 @@ export class CommentService {
       targetFieldId: row.target_field_id ?? null,
       content: row.content,
       authorId: row.author_id,
+      authorName: row.author_name?.trim() || undefined,
       parentId: row.parent_id || undefined,
       resolved: row.resolved,
       createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,

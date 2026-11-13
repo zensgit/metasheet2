@@ -246,6 +246,23 @@ describeIfDatabase('F1 — comments respect row-level read deny (real DB)', () =
     expect(JSON.stringify(deniedRow.body)).not.toContain(deniedContent)
   })
 
+  test('author names resolve only on readable comments and inactive authors have no display fallback ID', async () => {
+    await q("UPDATE users SET name='Synthetic Author', is_active=TRUE WHERE id=$1", [author])
+    try {
+      const readable = await request(actorApp()).get('/api/comments').query({ spreadsheetId: sheetId }).expect(200)
+      expect(readable.body.data.items).toHaveLength(1)
+      expect(readable.body.data.items[0]).toMatchObject({ authorId: author, authorName: 'Synthetic Author' })
+      const denied = await request(actorApp()).get('/api/comments').query({ spreadsheetId: sheetId, rowId: deniedRecordId }).expect(200)
+      expect(JSON.stringify(denied.body)).not.toContain('Synthetic Author')
+      await q('UPDATE users SET is_active=FALSE WHERE id=$1', [author])
+      const inactive = await request(actorApp()).get('/api/comments').query({ spreadsheetId: sheetId }).expect(200)
+      expect(inactive.body.data.items[0].authorId).toBe(author)
+      expect(inactive.body.data.items[0]).not.toHaveProperty('authorName')
+    } finally {
+      await q('UPDATE users SET name=NULL,is_active=TRUE WHERE id=$1', [author])
+    }
+  })
+
   test('summary, presence, and mention-summary exclude row-denied vectors', async () => {
     const summary = await request(actorApp())
       .get('/api/comments/summary')

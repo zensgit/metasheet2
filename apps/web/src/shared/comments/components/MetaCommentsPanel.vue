@@ -73,7 +73,7 @@
           }"
         >
           <div class="meta-comments-drawer__meta">
-            <span class="meta-comments-drawer__author">{{ thread.authorName ?? thread.authorId }}</span>
+            <span class="meta-comments-drawer__author">{{ commentAuthorLabel(thread.authorName, isZh) }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(thread.createdAt) }}</span>
             <span
               v-if="getReplyCount(thread.id) > 0"
@@ -127,7 +127,7 @@
           }"
         >
           <div class="meta-comments-drawer__meta">
-            <span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>
+            <span class="meta-comments-drawer__author">{{ commentAuthorLabel(reply.authorName, isZh) }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(reply.createdAt) }}</span>
             <button
               v-if="canEditComment(reply)"
@@ -200,6 +200,7 @@ import { useLocale } from '../../../composables/useLocale'
 import type { MetaCommentMentionSearch, MetaCommentMentionSelection, MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../normalize'
 import {
+  commentAuthorLabel,
   commentLabel,
   editingBanner,
   emptyMessage as commentEmptyMessage,
@@ -381,12 +382,12 @@ const emptyMessage = computed(() => {
 
 const activeEditingBanner = computed(() => {
   if (!activeEditingComment.value) return ''
-  return editingBanner(activeEditingComment.value.authorName ?? activeEditingComment.value.authorId, isZh.value)
+  return editingBanner(commentAuthorLabel(activeEditingComment.value.authorName, isZh.value), isZh.value)
 })
 
 const activeReplyBanner = computed(() => {
   if (!activeReplyComment.value) return ''
-  return replyingBanner(activeReplyComment.value.authorName ?? activeReplyComment.value.authorId, isZh.value)
+  return replyingBanner(commentAuthorLabel(activeReplyComment.value.authorName, isZh.value), isZh.value)
 })
 
 const composerSubmitKind = computed<'send' | 'save'>(() => (activeEditingComment.value ? 'save' : 'send'))
@@ -405,14 +406,15 @@ const defaultMentionSuggestions = computed<MetaCommentMentionSuggestion[]>(() =>
     .filter((candidate) => typeof candidate.userId === 'string' && candidate.userId.trim().length > 0)
     .map((candidate) => ({
       id: candidate.userId.trim(),
-      label: candidate.displayName?.trim() || candidate.userId.trim(),
+      label: commentAuthorLabel(candidate.displayName, isZh.value),
+      unresolved: !candidate.displayName?.trim(),
       subtitle: candidate.secondaryLabel?.trim() || undefined,
     }))
   const fromAuthors = normalizedComments.value
     .map((comment) => ({
       id: comment.authorId.trim(),
-      label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,
-      subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId : undefined,
+      label: commentAuthorLabel(comment.authorName, isZh.value),
+      unresolved: !comment.authorName?.trim(),
     }))
 
   return [...fromCandidates, ...fromAuthors]

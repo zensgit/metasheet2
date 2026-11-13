@@ -84,6 +84,9 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
+  "scripts/ops/multitable-onprem-network-selfcheck.sh"
+  "scripts/ops/multitable-onprem-network-selfcheck.ps1"
+  "scripts/ops/multitable-onprem-network-selfcheck.mjs"
   "scripts/ops/multitable-onprem-package-verify.sh"
   # The verifier's range-fill provenance check calls this probe beside itself, so it ships with it.
   "scripts/ops/multitable-onprem-web-range-fill-probe.mjs"

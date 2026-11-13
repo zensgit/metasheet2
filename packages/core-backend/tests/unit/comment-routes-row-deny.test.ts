@@ -249,6 +249,7 @@ describe('comments list — edit-time mention labels (#5808)', () => {
   const ownComment = {
     id: 'comment-own',
     authorId: 'actor-row-denied',
+    authorName: 'Synthetic Author',
     mentions: ['u-fake-alpha'],
     mentionLabels: { 'u-fake-alpha': 'Fake Alpha' },
   }
@@ -279,6 +280,7 @@ describe('comments list — edit-time mention labels (#5808)', () => {
       excludeRowIds: ['row-denied'],
     })
     expect(res.body.data.items[0].mentionLabels).toEqual({ 'u-fake-alpha': 'Fake Alpha' })
+    expect(res.body.data.items[0].authorName).toBe('Synthetic Author')
   })
 
   it('never asks for labels on an API-token request', async () => {

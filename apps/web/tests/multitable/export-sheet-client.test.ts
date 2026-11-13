@@ -7,6 +7,7 @@
  * §2a.3 taint masking AFTER the selection (selection narrows, never widens) — these tests assert the
  * REQUEST is shaped correctly (the mask itself is enforced + tested server-side, in the real-DB suite).
  */
+import { Blob as NodeBlob } from 'node:buffer'
 import { describe, expect, it, vi } from 'vitest'
 
 import { MultitableApiClient } from '../../src/multitable/api/client'
@@ -46,11 +47,10 @@ describe('MultitableApiClient.exportSheet — all-rows mask-route request shapin
     expect(url).toContain(`fieldIds=${encodeURIComponent('fld_a,fld_b')}`)
     expect(url).toContain('format=csv')
     expect(filename).toBe('My_Sheet.csv')
-    // The response body is returned as a Blob (the caller hands it to the download helper). Assert it is a
-    // non-empty Blob rather than reading .text() (jsdom's Blob has no usable .text()); end-to-end content is
-    // covered by the real-DB suite.
-    expect(blob).toBeInstanceOf(Blob)
-    expect(blob.size).toBeGreaterThan(0)
+    expect(blob).toBeInstanceOf(NodeBlob)
+    expect(blob.type).toBe('text/csv;charset=utf-8')
+    expect(blob.size).toBe(8)
+    expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual([99, 111, 108, 13, 10, 118, 97, 108])
   })
 
   it('omits fieldIds entirely when the selection is empty (route then exports all permitted columns)', async () => {
@@ -89,7 +89,11 @@ describe('MultitableApiClient.exportSheet — all-rows mask-route request shapin
     )
     const client = new MultitableApiClient({ fetchFn })
 
-    const { filename } = await client.exportSheet({ sheetId: 'sheet_1', format: 'xlsx' })
+    const { blob, filename } = await client.exportSheet({ sheetId: 'sheet_1', format: 'xlsx' })
     expect(filename).toBe('export')
+    expect(blob).toBeInstanceOf(NodeBlob)
+    expect(blob.type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    expect(blob.size).toBe(3)
+    expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual([98, 105, 110])
   })
 })

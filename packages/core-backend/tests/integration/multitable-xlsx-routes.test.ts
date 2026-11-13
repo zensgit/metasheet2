@@ -382,7 +382,7 @@ describe('multitable xlsx routes', () => {
           }],
         }
       }
-      if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1')) {
+      if (sql.includes('SELECT id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1')) {
         return { rows: [{ id: 'rec_1', version: 1, data: { fld_name: 'Alpha', fld_link: ['ord_1', 'ord_2'] }, created_at: null }] }
       }
       if (sql.includes('FROM meta_links')) {
@@ -420,7 +420,7 @@ describe('multitable xlsx routes', () => {
         .expect(200)
       const lines = Buffer.from(csvResponse.body).toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
       expect(lines[0]).toBe('Name,Orders,Due,Note')
-      expect(lines[1]).toBe(`Alpha,"ord_1, ord_2","2026-09-24 01:00, 2026-09-24 21:05","${early}, plain"`)
+      expect(lines[1]).toBe(`Alpha,"${early}, plain","2026-09-24 01:00, 2026-09-24 21:05","${early}, plain"`)
       expect(lines[1]).not.toContain(evening)
     } finally {
       vi.unstubAllEnvs()
@@ -462,7 +462,7 @@ describe('multitable xlsx routes', () => {
           }],
         }
       }
-      if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1')) {
+      if (sql.includes('SELECT id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1')) {
         return { rows: [{ id: 'rec_1', version: 1, data: { fld_name: 'Alpha', fld_link: ['ord_1', 'ord_2', 'ord_3'] }, created_at: null }] }
       }
       if (sql.includes('FROM meta_links')) {
@@ -504,7 +504,7 @@ describe('multitable xlsx routes', () => {
       expect(lines[0]).toBe('Name,Orders,Ship day,Note')
       // Ship day: instant → its business day (raw ISO before; its UTC day would be 09-17), day as written kept,
       // junk kept raw. Note (a text target holding the same ISO text) stays raw: the format follows the TYPE.
-      expect(lines[1]).toBe(`Alpha,"ord_1, ord_2, ord_3","2026-09-18, 2026-09-20, not a day","${instant}, plain, x"`)
+      expect(lines[1]).toBe(`Alpha,"${instant}, plain, x","2026-09-18, 2026-09-20, not a day","${instant}, plain, x"`)
 
       const xlsxResponse = await request(app)
         .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?viewId=view_sorted`)

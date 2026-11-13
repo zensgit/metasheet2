@@ -1859,7 +1859,7 @@ export class MetaSheetServer {
     // "the server honoured my override" from "a hop stripped the header and a same-path POST twin
     // ran instead". Same-origin fetches could read it regardless; cross-origin ones cannot.
     this.app.use(cors({
-      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden'],
+      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden', 'X-Request-ID'],
     }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
@@ -1869,11 +1869,14 @@ export class MetaSheetServer {
     })
 
     // 请求上下文（requestId + trace bridge）
-    this.app.use((req, _res, next) => {
+    this.app.use((req, res, next) => {
       const requestId = isYidaOwnerHttpObservationPath(req.path)
         ? (req.correlationId ?? crypto.randomUUID())
         : (req.headers['x-request-id'] as string) || crypto.randomUUID()
       setLogContext({ requestId })
+      if (typeof requestId === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(requestId)) {
+        res.setHeader('X-Request-ID', requestId)
+      }
       next()
     })
 

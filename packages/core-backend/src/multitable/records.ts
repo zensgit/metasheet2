@@ -11,7 +11,8 @@ import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
 } from './auto-number-service'
-import { validateLongTextValue } from './field-codecs'
+import { validateDateValue, validateLongTextValue } from './field-codecs'
+import { assertNoNulInRecordValue, serializeRecordData } from './field-validation'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { getMultitableRequestMetadataCache } from './request-metadata-cache'
@@ -275,8 +276,9 @@ function normalizeFieldValue(
         throw new MultitableRecordValidationError(`Boolean value must be boolean: ${field.id}`)
       }
       return value
-    case 'string':
     case 'date':
+      return validateDateValue(value, field.id)
+    case 'string':
       if (typeof value !== 'string') {
         throw new MultitableRecordValidationError(`String value must be string: ${field.id}`)
       }
@@ -557,6 +559,7 @@ async function guardRecordNotLockedForPlugin(
 export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
+  assertNoNulInRecordValue(input.changes)
   if (
     input.expectedVersion !== undefined
     && (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
@@ -621,7 +624,7 @@ export async function patchRecord(
     ...patch,
   }
 
-  const updateParams: unknown[] = [JSON.stringify(nextData), input.recordId, input.sheetId]
+  const updateParams: unknown[] = [serializeRecordData(nextData), input.recordId, input.sheetId]
   const versionPredicate = input.expectedVersion === undefined ? '' : ' AND version = $4'
   if (input.expectedVersion !== undefined) updateParams.push(input.expectedVersion)
   const updated = await query(
@@ -711,6 +714,7 @@ export async function patchRecord(
 export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
+  assertNoNulInRecordValue(input.data)
   const query = input.query
   const linkWriterFencePlan = await prepareLinkWriterFencePlan(
     query,
@@ -764,7 +768,7 @@ export async function createRecord(
     `INSERT INTO meta_records (id, sheet_id, data, version)
      VALUES ($1, $2, $3::jsonb, 1)
      RETURNING version`,
-    [recordId, input.sheetId, JSON.stringify(patch)],
+    [recordId, input.sheetId, serializeRecordData(patch)],
   )
 
   // Unlike `patchRecord`'s UPDATE (see the fail-closed comment there), a bare `INSERT ... RETURNING`

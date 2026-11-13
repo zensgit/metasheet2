@@ -302,7 +302,8 @@ function createFakePool() {
       return { rows: [...new Set(live)].map((plm_key) => ({ plm_key })) }
     }
     // GET /view's unpaged listing (no limit / search / sort / filter)
-    if (flat.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
+    if (flat.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')
+      || flat.startsWith('SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
       return { rows: [...records.values()].filter((r) => r.sheet_id === p(0)).map((r) => ({ ...r, locked: false, locked_by: null, locked_at: null })) }
     }
     if (flat.startsWith('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE')) {

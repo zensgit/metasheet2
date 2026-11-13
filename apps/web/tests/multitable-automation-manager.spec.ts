@@ -3305,17 +3305,17 @@ describe('MetaAutomationManager', () => {
   function clientAnsweringTestRun(response: () => Response) {
     const { fetchFn } = mockClient([fakeRule()])
     return new MultitableApiClient({
+      isZh: () => useLocale().isZh.value,
       fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
         ? Promise.resolve(response())
         : fetchFn(url, init)),
     })
   }
 
-  // A gateway / proxy failure carries no code (an nginx HTML page, an empty body): the service is
-  // unavailable, which the button says instead of the generic label.
   const GATEWAY_FAILURES = [
     { name: 'an HTML 502', status: 502, body: '<html><body><h1>502 Bad Gateway</h1></body></html>', contentType: 'text/html', code: undefined },
     { name: 'an empty 503', status: 503, body: '', contentType: 'text/plain', code: undefined },
+    { name: 'an empty 500 without a code', status: 500, body: '', contentType: 'text/plain', code: undefined },
     { name: 'a 504 with an empty object', status: 504, body: '{}', contentType: 'application/json', code: undefined },
     {
       // A blank code is no code.
@@ -3329,26 +3329,36 @@ describe('MetaAutomationManager', () => {
 
   for (const failure of GATEWAY_FAILURES) {
     for (const locale of ['en', 'zh-CN'] as const) {
-      it(`shows the ${locale} service-unavailable label for ${failure.name}`, async () => {
+      it(`shows the ${locale} response-aware failure label for ${failure.name}`, async () => {
         useLocale().setLocale(locale)
+        const isJson = failure.contentType === 'application/json'
         const client = clientAnsweringTestRun(() => new Response(failure.body, {
           status: failure.status,
-          headers: { 'Content-Type': failure.contentType },
+          headers: { 'Content-Type': failure.contentType, 'X-Request-ID': 'req-gateway-diagnostic-safe' },
         }))
         await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
-          name: 'MultitableApiError',
+          name: isJson ? 'MultitableApiError' : 'GatewayInterferenceError',
           status: failure.status,
-          code: failure.code,
+          code: isJson ? failure.code : 'GATEWAY_INTERFERENCE',
         })
 
         const status = await clickTestRun(client)
         const text = status?.textContent ?? ''
-        expect(text).toContain(locale === 'en'
-          ? 'Test run request failed: The service is temporarily unavailable. Try again later.'
-          : '测试运行请求失败：服务暂时不可用，请稍后重试。')
+        if (isJson) {
+          expect(text).toContain(locale === 'en'
+            ? 'Test run request failed: The service is temporarily unavailable. Try again later.'
+            : '测试运行请求失败：服务暂时不可用，请稍后重试。')
+          expect(text).not.toContain(String(failure.status))
+        } else {
+          expect(text).toContain(locale === 'en'
+            ? 'Test run request failed: The request may have been blocked by a network security device. Please contact your network administrator.'
+            : '测试运行请求失败：请求可能被网络安全设备拦截，请联系网络管理员')
+          expect(text).toContain('req-gateway-diagnostic-safe')
+          expect(text).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+          expect(text).not.toContain('GATEWAY_INTERFERENCE')
+        }
         expect(text).not.toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
         expect(text).not.toContain('Bad Gateway')
-        expect(text).not.toContain(String(failure.status))
         expect(status?.getAttribute('data-status')).toBe('failed')
       })
     }
@@ -3356,9 +3366,8 @@ describe('MetaAutomationManager', () => {
 
   const GENERIC_NOT_UNAVAILABLE = [
     {
-      // Only the gateway statuses mean "unavailable": a code-less 500 stays generic.
-      name: 'a 500 without a code',
-      response: () => new Response('', { status: 500 }),
+      name: 'a JSON 500 without a code',
+      response: () => new Response('{}', { status: 500, headers: { 'Content-Type': 'application/json' } }),
     },
     {
       // A code this build does not know stays generic even on a 503.
@@ -3385,7 +3394,7 @@ describe('MetaAutomationManager', () => {
     }
   }
 
-  it('keeps showing a network failure behind the localized prefix', async () => {
+  it('shows a possible gateway failure behind the localized prefix after a successful JSON list read', async () => {
     const { fetchFn } = mockClient([fakeRule()])
     const client = new MultitableApiClient({
       fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
@@ -3393,7 +3402,8 @@ describe('MetaAutomationManager', () => {
         : fetchFn(url, init)),
     })
     const status = await clickTestRun(client)
-    expect(status?.textContent).toContain('Test run request failed: Failed to fetch')
+    expect(status?.textContent).toContain('Test run request failed: The request may have been blocked by a network security device. Please contact your network administrator.')
+    expect(status?.textContent).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
     expect(status?.getAttribute('data-status')).toBe('failed')
   })
 

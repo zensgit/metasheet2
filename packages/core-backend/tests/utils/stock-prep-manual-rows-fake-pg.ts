@@ -327,7 +327,8 @@ export function createManualRowsFakePool() {
       const live = [...records.values()].filter((r) => r.sheet_id === p(0) && keys.has(String(r.data[p(1)] ?? ''))).map((r) => String(r.data[p(1)]))
       return rows([...new Set(live)].map((plm_key) => ({ plm_key })))
     }
-    if (q.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
+    if (q.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')
+      || q.startsWith('SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
       return rows([...records.values()].filter((r) => r.sheet_id === p(0)).sort((a, b) => (a.id < b.id ? -1 : 1)).map(recordRow))
     }
     if (q.startsWith('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE')) return rows(records.has(p(0)) ? [{ '?column?': 1 }] : [])

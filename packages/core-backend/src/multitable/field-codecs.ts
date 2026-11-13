@@ -3,7 +3,8 @@ import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from './field-visibility-rule'
 import { resolveDateTimeFieldTimeZone } from './business-timezone'
-import { parseDateTimeText } from './date-time-wall-clock'
+import { isValidWallClockParts, normalizeDateTimeText, parseDateTimeText } from './date-time-wall-clock'
+import { MultitableRecordValidationError } from './record-errors'
 import { withHumanWriteLockKey } from './human-write-lock'
 import { withManualRowPolicyKey } from './stock-preparation-manual-rows'
 
@@ -1167,10 +1168,31 @@ export function isPersonSingleRecord(property: Record<string, unknown> | undefin
   return property?.limitSingleRecord !== false
 }
 
+export function validateDateValue(value: unknown, fieldId: string): string | null | undefined {
+  if (value === null) return null
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new MultitableRecordValidationError(`Date value must be a string: ${fieldId}`)
+  }
+  const text = normalizeDateTimeText(value)
+  if (!text) return value
+  const match = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2})(?::?(\d{2}))?)?)?$/i.exec(text)
+  if (!match || !isValidWallClockParts({
+    year: Number(match[1]),
+    month: Number(match[3]),
+    day: Number(match[4]),
+    hour: Number(match[5] ?? 0),
+    minute: Number(match[6] ?? 0),
+    second: Number(match[7] ?? 0),
+  }) || Number(match[8] ?? 0) > 23 || Number(match[9] ?? 0) > 59) {
+    throw new MultitableRecordValidationError(`Invalid date: ${fieldId}`)
+  }
+  return value
+}
+
 /**
- * Coerce / validate a value for one of the MF2 batch-1 field types and
- * return the normalized form to persist. Returns the original value if
- * the field type is not in the batch.
+ * Coerce / validate a value for a date or one of the MF2 batch-1 field types and
+ * return the normalized form to persist. Returns the original value otherwise.
  */
 export function coerceBatch1Value(
   fieldType: string,
@@ -1178,6 +1200,7 @@ export function coerceBatch1Value(
   fieldId: string,
   value: unknown,
 ): unknown {
+  if (fieldType === 'date') return validateDateValue(value, fieldId)
   if (fieldType === 'currency') return coerceCurrencyValue(value, fieldId)
   if (fieldType === 'percent') return coercePercentValue(value, fieldId)
   if (fieldType === 'rating') {

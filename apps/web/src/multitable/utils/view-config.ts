@@ -85,15 +85,15 @@ export function resolveCalendarViewConfig(
   fields: MetaField[],
   raw?: Record<string, unknown> | null,
 ): Required<MetaCalendarViewConfig> {
-  const dateCandidateTypes = ['date', 'string', 'number']
-  const dateFieldId = stringOrNull(raw?.dateFieldId) ?? firstFieldId(fields, dateCandidateTypes)
+  const dateFields = fields.filter((field) => field.type === 'date' || field.type === 'dateTime')
+  const dateFieldId = stringOrNull(raw?.dateFieldId) ?? dateFields[0]?.id ?? null
   const endDateFieldId = stringOrNull(raw?.endDateFieldId)
-    ?? firstNonMatchingFieldId(fields, [dateFieldId], dateCandidateTypes)
+    ?? dateFields.find((field) => field.id !== dateFieldId)?.id
     ?? dateFieldId
   return {
     dateFieldId,
     endDateFieldId,
-    titleFieldId: stringOrNull(raw?.titleFieldId) ?? firstNonMatchingFieldId(fields, [dateFieldId, endDateFieldId], ['string']) ?? firstFieldId(fields),
+    titleFieldId: stringOrNull(raw?.titleFieldId) ?? fields.find((field) => field.type === 'string' && field.id !== dateFieldId && field.id !== endDateFieldId)?.id ?? null,
     defaultView: raw?.defaultView === 'week' || raw?.defaultView === 'day' ? raw.defaultView : 'month',
     weekStartsOn: clamp(raw?.weekStartsOn, 0, 1, 0),
   }

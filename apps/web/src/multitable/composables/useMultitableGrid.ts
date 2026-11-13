@@ -1,5 +1,6 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { safeGatewayDiagnosticMessage } from '../../utils/networkErrors'
 import type {
   MetaCapabilityOrigin,
   LinkedRecordSummary,
@@ -573,11 +574,11 @@ export function useMultitableGrid(opts: {
   // #6075 round 3 (S2): called once for EVERY sort/filter write the server rejected — 403 for a viewer without
   // canManageViews, 400 for a hidden-filter mismatch, a network failure — whichever path sent it (应用, header click,
   // 清除筛选, or any reload that flushes staged edits). The load that sent it goes on to read the view and re-syncs the
-  // stored rules over the edit, so without this the edit just vanished. Values-free: the view id only, never the
-  // rules or the server's message. A callback rather than `error`: the write can settle during any other grid call,
+  // stored rules over the edit, so without this the edit just vanished. Values-free: view id and an optional
+  // factory-safe diagnostic, never rules or server prose. A callback rather than `error`: the write can settle during any other grid call,
   // and `error` set then would read as THAT call's failure (e.g. a picker's patchCell), while every loadViewData
   // caller would have to check it. The workbench shows it as a toast.
-  onSortFilterWriteFailed?: (viewId: string) => void
+  onSortFilterWriteFailed?: (viewId: string, diagnosticMessage?: string) => void
   // 人工补充行 B3 (ADR adr-stock-prep-manual-rows-20261030 §3.4, N12): which cells write through
   // PATCH /records/:recordId/manual-fields instead of /patch (the six fillable columns of a manual row; the workbench
   // decides from /context's block, never from the row mark alone). patchCell, undo, redo and the conflict retry all
@@ -1165,7 +1166,7 @@ export function useMultitableGrid(opts: {
     sortFilterBaseline = sent
     try {
       await enqueueSortFilterWrite(viewId, () => persistViewConfig(viewId, input))
-    } catch {
+    } catch (error) {
       // The write failed, so the view still stores `baseline`. Compare-and-set: roll back ONLY while `sent` is
       // still the current generation. A later 应用 (it diffed against `sent`), a load's re-sync, a view switch or a
       // discard have each installed a newer object, and restoring over it would put a stale — possibly another
@@ -1177,7 +1178,9 @@ export function useMultitableGrid(opts: {
         sortFilterBaseline = baseline
         sortFilterDirty.value = true
       }
-      opts.onSortFilterWriteFailed?.(viewId)
+      const diagnosticMessage = safeGatewayDiagnosticMessage(error)
+      if (diagnosticMessage !== undefined) opts.onSortFilterWriteFailed?.(viewId, diagnosticMessage)
+      else opts.onSortFilterWriteFailed?.(viewId)
     }
   }
 

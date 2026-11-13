@@ -217,7 +217,7 @@ describe('MultitableCommentInboxView', () => {
 
     expect(container!.querySelector('.mt-comment-inbox__badge--unread')).toBeNull()
     expect(container!.querySelector('.mt-comment-inbox__stat strong')?.textContent).toBe('0')
-    expect(apiFetchMock).not.toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(apiFetchMock.mock.calls.some(([path]) => path === '/api/comments/c1/read')).toBe(false)
     expect(ioMock).toHaveBeenCalledTimes(1)
   })
 
@@ -234,7 +234,7 @@ describe('MultitableCommentInboxView', () => {
       && container?.querySelector('.mt-comment-inbox__stat strong')?.textContent === '0'
     ))
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST', expectJson: true })
     expect(container!.querySelector('.mt-comment-inbox__badge--unread')).toBeNull()
     expect(container!.querySelector('.mt-comment-inbox__stat strong')?.textContent).toBe('0')
     expect(ioMock).toHaveBeenCalledTimes(1)

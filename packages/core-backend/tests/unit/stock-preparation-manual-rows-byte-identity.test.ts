@@ -165,7 +165,8 @@ async function answer(sql: string, params: unknown[] = []): Promise<{ rows: unkn
     const ids = asIds(params[1])
     return rows(RECORDS.filter((r) => r.sheet_id === params[0] && ids.includes(r.id)).map((r) => ({ id: r.id, created_by: r.created_by })))
   }
-  if (q.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
+  if (q.startsWith('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY')
+    || q.startsWith('SELECT id, version, data, locked, locked_by, locked_at, created_at, updated_at, created_by, modified_by FROM meta_records WHERE sheet_id = $1 ORDER BY')) {
     return rows(RECORDS.filter((r) => r.sheet_id === params[0]).map((r) => ({ id: r.id, version: r.version, data: r.data, locked: false, locked_by: null, locked_at: null })))
   }
   if (q.includes('FROM meta_records') && q.includes('WHERE id = $1')) {
