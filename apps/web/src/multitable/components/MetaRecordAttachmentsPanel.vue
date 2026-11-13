@@ -127,9 +127,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** `recordId` and `removed`: the record the write was made on, and the ids a remove that ended after the drawer
-   *  moved on took out (as in MetaRecordFieldsPanel.vue). */
-  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[]): void
+  /** `recordId`, `removed` and `added`: the record the write was made on, the ids a remove that ended after the
+   *  drawer moved on took out, and the ids an upload added (as in MetaRecordFieldsPanel.vue). */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]): void
 }>()
 
 const { isZh } = useLocale()
@@ -279,7 +279,11 @@ async function onFileSelect(fieldId: string, e: Event) {
       if (shown()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds], recordId)
+    // An upload that adds to the list names the ids it added: the list may have changed while it ran (an attachment
+    // added from elsewhere), and the listener adds them to the list as it is now. One that replaces the list is the
+    // new list as it is.
+    if (replaceExisting) emit('patch', fieldId, newIds, recordId)
+    else emit('patch', fieldId, [...existing, ...newIds], recordId, undefined, newIds)
   } catch (error: any) {
     if (shown()) setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {

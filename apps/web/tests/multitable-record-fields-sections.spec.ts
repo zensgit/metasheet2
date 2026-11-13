@@ -1190,7 +1190,7 @@ describe('inspector patch relay: the record an attachment write was made on', ()
     await flushUi()
     settle(NEW_ATTACHMENT)
     await flushUi()
-    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A']])
+    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
   })
 
   it('attachments tab: the same upload, switched to rec_B before it ends, reaches onPatch as rec_A\'s write', async () => {
@@ -1207,7 +1207,7 @@ describe('inspector patch relay: the record an attachment write was made on', ()
     expect(container.querySelector('.meta-record-attachments-panel')).not.toBeNull()
     settle(NEW_ATTACHMENT)
     await flushUi()
-    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A']])
+    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
   })
 
   it('details tab: a remove that ends after the switch to rec_B reaches onPatch with all four arguments', async () => {

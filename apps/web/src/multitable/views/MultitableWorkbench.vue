@@ -528,8 +528,8 @@
         :person-summaries-by-field="selectedRecordPersonSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
-        :upload-fn="uploadAttachmentFn"
-        :delete-attachment-fn="deleteAttachmentFn"
+        :upload-fn="drawerUploadAttachmentFn"
+        :delete-attachment-fn="drawerDeleteAttachmentFn"
         :ai-shortcut="aiShortcut.state"
         :ai-available="aiAvailable"
         :button-run-pending="buttonRunPending"
@@ -3000,6 +3000,30 @@ const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: 
 const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) =>
   holdingHistory(() => deleteAttachment(attachmentId, context))
 
+// The drawer's own upload and delete. One that fails after the drawer moved to another record has nowhere to show
+// it: the panel's error line belongs to the record shown, and the panel leaves it alone. The failure is toasted here
+// instead, with the generic text (not the server's message, which can carry a file name), and passed on unchanged:
+// the panel's own handling stays as it was, and the shown record's field alerts are not touched. While the record
+// is still shown the panel shows the failure itself, and nothing is toasted.
+async function reportingLateDrawerFailure<T>(
+  recordId: string | undefined,
+  label: 'cell.uploadFailed' | 'cell.removeFailed',
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write()
+  } catch (error) {
+    if (recordId && selectedRecordResolved.value?.id !== recordId) showError(metaCoreLabel(label, isZh.value))
+    throw error
+  }
+}
+
+const drawerUploadAttachmentFn: MetaAttachmentUploadFn = (file: File, context?: MetaAttachmentUploadContext) =>
+  reportingLateDrawerFailure(context?.recordId, 'cell.uploadFailed', () => uploadAttachmentFn(file, context))
+
+const drawerDeleteAttachmentFn: MetaAttachmentDeleteFn = (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  reportingLateDrawerFailure(context?.recordId, 'cell.removeFailed', () => deleteAttachmentFn(attachmentId, context))
+
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
   // The page's rows are reloaded at once: a save made meanwhile goes from the row the delete left.
@@ -3122,12 +3146,14 @@ async function searchCommentMentions(query: string): Promise<MetaCommentMentionS
 // every one of those callers already threads it through this single function. `select-record` from
 // the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
 // the cursor (see `onSelectRecord` below), never this branch.
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null; discardConfirmed?: boolean }) {
   // Every move to another record (the drawer's previous / next, a duplicate, a new record, a deep link, the browser's
   // back / forward) commits the drawer's focused control first, and gives it the focus back after the move, or after
   // a declined discard prompt (the control still shows this record).
   const restoreDrawerFocus = recordId !== selectedRecordId.value ? releaseDrawerFocus() : null
-  if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) {
+  // `discardConfirmed`: the caller has run the discard check for this move already (`resolveDeepLink`, before it
+  // replaces the deep-linked copy), so the prompt is not shown a second time.
+  if (recordId !== selectedRecordId.value && !opts?.discardConfirmed && !confirmDiscardRecordChanges()) {
     void restoreDrawerFocus?.()
     return
   }
@@ -3686,14 +3712,19 @@ async function onReloadConflict() {
 
 async function onRetryConflict() {
   const retried = await grid.retryConflict()
-  if (retried) {
+  if (retried === true) {
     if (selectedRecordId.value) {
       await resolveDeepLink(selectedRecordId.value)
     }
     showSuccess(wb('toast.changeReapplied', isZh.value))
     return
   }
-  if (grid.error.value) showError(grid.error.value)
+  // The retry's own failure, not the grid's shared error (an older save of the record that fails while the retry
+  // waits its turn sets that one). Nothing to show when there was no conflict left to retry, or when a newer save of
+  // the cell replaced the retry unsent: that save answers for the cell.
+  if (retried && typeof retried === 'object') {
+    showError(retried.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+  }
 }
 
 // PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
@@ -3712,7 +3743,7 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[]) {
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]) {
   // An attachment write names the record it was made on: it can end after the drawer moved to another record,
   // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
   // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
@@ -3725,7 +3756,16 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
   // hold an attachment added meanwhile), not the list it started from. With none of them left in it, there is
   // nothing to write.
   let patchValue = value
-  if (removed && !shown) {
+  if (added?.length) {
+    // An upload that adds to the list names the ids it added: they go after the record's list as it is now (each id
+    // once), not after the list the upload started from, which lacks an attachment added to the field while it ran
+    // (from elsewhere, or by an earlier upload of this drawer). Also for the record shown: its list can change
+    // during an upload too. An upload that replaces the list names none, and is written as given.
+    const raw = record.data[fieldId]
+    const next = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    pushUniqueIds(next, added)
+    patchValue = next
+  } else if (removed && !shown) {
     const raw = record.data[fieldId]
     const current = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
     const next = current.filter((id) => !removed.includes(id))
@@ -4062,12 +4102,23 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
-    await grid.patchCell(row.id, fieldId, payload.recordIds, row.version, {
+    // This save's own result, as in `commitDrawerPatch`: the grid's shared error read after the await may be an
+    // older save's (one of the same record that fails while this one waits its turn).
+    const write = grid.patchCell(row.id, fieldId, payload.recordIds, row.version, {
       previousLinkSummaries: previousSummaries,
       nextLinkSummaries: payload.summaries,
     })
-    if (grid.error.value) {
-      showError(grid.error.value)
+    // The composable's local row-action refusal sets its error before the call returns.
+    const refusedLocally = grid.error.value
+    const failure = await write
+    // Replaced before it was sent by a newer save of the same cell, whose answer is the cell's.
+    if (failure === CELL_WRITE_SUPERSEDED) return
+    if (failure) {
+      showError(failure.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+      return
+    }
+    if (refusedLocally) {
+      showError(refusedLocally)
       return
     }
   } else if (selectedRecordResolved.value?.id === recordId) {
@@ -4123,9 +4174,18 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
   const fieldId = personPickerField.value.id
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
-    await grid.patchCell(row.id, fieldId, payload.userIds, row.version)
-    if (grid.error.value) {
-      showError(grid.error.value)
+    // This save's own result (see `onLinkPickerConfirm`).
+    const write = grid.patchCell(row.id, fieldId, payload.userIds, row.version)
+    const refusedLocally = grid.error.value
+    const failure = await write
+    // Replaced unsent by a newer save of the cell: that save's summaries are the cell's, not these.
+    if (failure === CELL_WRITE_SUPERSEDED) return
+    if (failure) {
+      showError(failure.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+      return
+    }
+    if (refusedLocally) {
+      showError(refusedLocally)
       return
     }
     applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
@@ -4962,8 +5022,15 @@ function discardWorkbenchDraftsForExternalContextChange() {
   importAbortController.value = null
 }
 
+// Cell writes the grid has not had an answer for yet (waiting for their record's turn, or out): leaving the page now
+// may lose them. Asked by the leave-page prompts only, and not part of `hasBlockingUnloadState`, which also defers an
+// external context sync. A grid without the count reads as none.
+function pendingCellWrites(): number {
+  return grid.pendingCellWriteCount?.value ?? 0
+}
+
 function confirmPageLeave() {
-  if (formSubmitting.value || importSubmitting.value) {
+  if (formSubmitting.value || importSubmitting.value || pendingCellWrites() > 0) {
     return window.confirm(wb('confirm.pageLeaveBusy', isZh.value))
   }
   if (!hasUnsavedWorkbenchDrafts.value) return true
@@ -5897,7 +5964,8 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   // before the page unloads (#1672). The async PATCH may not finish before a
   // hard reload, but the optimistic update + request are at least issued.
   flushActiveFieldEdit()
-  if (!hasBlockingUnloadState.value) return
+  // Read after the flush: the edit it dispatched is a cell write still out.
+  if (!hasBlockingUnloadState.value && pendingCellWrites() === 0) return
   e.preventDefault()
   e.returnValue = ''
 }
@@ -6214,7 +6282,15 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     })
     // When the record shown is itself deep-linked, the drawer shows another record from here on: commit its focused
     // control first (selectRecord then finds none in the drawer, so the focus comes back from here).
-    const restoreDrawerFocus = recordId !== selectedRecordId.value ? releaseDrawerFocus() : null
+    const moves = recordId !== selectedRecordId.value
+    const restoreDrawerFocus = moves ? releaseDrawerFocus() : null
+    // The copy below is the record the drawer shows when that one is deep-linked too: it is replaced only once the
+    // move is accepted. A declined discard prompt keeps the record shown, with its copy (replaced first, the drawer
+    // was left empty), and the focus goes back to its control. selectRecord is told not to ask again.
+    if (moves && !confirmDiscardRecordChanges()) {
+      void restoreDrawerFocus?.()
+      return
+    }
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
     deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
@@ -6224,7 +6300,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
     // The focus comes back as soon as the drawer shows the record, not after its comments load.
-    const selected = selectRecord(recordId, selectOpts)
+    const selected = selectRecord(recordId, { ...selectOpts, discardConfirmed: true })
     void restoreDrawerFocus?.()
     await selected
   } catch (e: any) {
