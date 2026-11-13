@@ -1319,6 +1319,9 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+
+/** The drawer asks for the version the server returns on every save (`patchCell`'s `onCommitted`). */
+const ROW_SAVE = { onCommitted: expect.any(Function) }
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
 import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
@@ -3175,6 +3178,26 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.client.patchRecords).not.toHaveBeenCalled()
     expect(gridMock.loadViewData).not.toHaveBeenCalled()
     expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
+  })
+
+  it('a form view shows its own record (the form context\'s), not the grid\'s row of it, and submits with its version', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record' } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: 10, data: { fld_title: 'Form record' } }, attachmentSummaries: {} })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    // The grid's page holds rec_1 too, at another version.
+    expect(gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')).toMatchObject({ version: 1 })
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 9 }))
   })
 
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
@@ -5379,18 +5402,21 @@ describe('MultitableWorkbench view wiring', () => {
         return failureFor(fieldId, message, failure)
       })
     }
+    /** The grid accepts the next save, telling the version it moved the record to, as the real `patchCell` does. */
     function acceptNextPatch() {
-      gridMock.patchCell.mockImplementation(async () => {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, _fieldId: string, _value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
         gridMock.error.value = null
+        options?.onCommitted?.(version + 1)
         return null
       })
     }
+    const COPY_SAVE = { onCommitted: expect.any(Function), chainVersion: false }
 
     it('422 with fieldErrors → NO toast, inline error under that field (no success toast either)', async () => {
       await openRec1()
       rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
       await patchTitle()
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1, ROW_SAVE)
       expect(showErrorSpy).not.toHaveBeenCalled()
       expect(showSuccessSpy).not.toHaveBeenCalled()
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
@@ -5528,7 +5554,8 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
-    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`).
+    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`); the drawer
+    // still shows the grid's row while the record is on the page, and the copy only once it leaves the page.
     function mergeAnswer(row: { version: number; data: Record<string, unknown> }, data?: Record<string, unknown>) {
       workbenchMock.client.getRecord.mockResolvedValue({
         record: { id: 'rec_1', version: row.version, data: { ...(data ?? row.data) } },
@@ -5543,33 +5570,49 @@ describe('MultitableWorkbench view wiring', () => {
     function heldPatches(row: { data: Record<string, unknown> } | null) {
       const answers: Array<(failure: unknown) => void> = []
       const calls: Array<[string, unknown, number]> = []
-      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number) => {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
         calls.push([fieldId, value, version])
         if (row) row.data[fieldId] = value
         const failure = await new Promise((resolve) => { answers.push(resolve) })
         gridMock.error.value = null
+        if (!failure) options?.onCommitted?.(version + 1)
         return failure
       })
       return { answers, calls }
     }
 
-    it('saves made on a copy of the record shown (kept after a realtime merge, the record on the page) are sent with the copy\'s version, not chained past it', async () => {
+    it('after a realtime merge of the record shown (on the page) the drawer shows the grid\'s row, not the copy: its saves are the row\'s, which the grid chains', async () => {
       await openRec1()
       const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row)
       await realtimeMerge()('rec_1')
       await flushUi()
-      expect(inspectorStubSeen.record).not.toBe(row)
+      expect(inspectorStubSeen.record).toBe(row)
       gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', ATTEMPTED, row.version, { chainVersion: false })
-      // Without a copy (the drawer shows the grid row), the grid chains the version as usual.
-      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
+    })
+
+    it('a record opened by its link before the page\'s rows came: the drawer shows its copy until the rows hold the record, then the grid\'s row, whose saves the grid chains', async () => {
+      const pageRows = gridMock.rows.value
+      const pageRow = pageRows.find((r: { id: string }) => r.id === 'rec_1')
+      gridMock.rows.value = []
+      mergeAnswer(pageRow)
+      mountWorkbench({ recordId: 'rec_1' })
+      await flushUi(8)
+      expect(workbenchMock.client.getRecord).toHaveBeenCalled()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_1', version: pageRow.version })
+      gridMock.rows.value = pageRows
       await flushUi()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      expect(inspectorStubSeen.record).toBe(row)
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
       await flushUi()
-      expect(gridMock.patchCell.mock.calls.at(-1)).toHaveLength(4)
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
     })
 
     it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
@@ -5595,7 +5638,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(versions).toEqual([start, start + 1])
     })
 
-    it('a copy gone stale while another record was shown is never given a version past the data it shows: its saves keep conflicting', async () => {
+    it('a copy gone stale while another record was shown is not shown again: back on the record, the drawer shows the row, with the other user\'s change and its version', async () => {
       await openRec1()
       const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
       mergeAnswer(row0)
@@ -5613,7 +5656,7 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
       await flushUi()
-      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
+      expect(inspectorStubSeen.record).toMatchObject({ version: 2, data: { fld_status: 'theirs' } })
       const sent: Array<[string, number]> = []
       gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, _value: unknown, version: number) => {
         sent.push([fieldId, version])
@@ -5628,9 +5671,10 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
       await flushUi()
-      // A status save made on the status the drawer shows (not 'theirs') is not stored over 'theirs'.
-      expect(inspectorStubSeen.record).toMatchObject({ version: 1 })
-      expect(sent).toEqual([['fld_title', 1], ['fld_status', 1]])
+      // Both are made on the row, which shows 'theirs' with its version: both are stored (the stand-in does not move
+      // the row's version on; the real grid chains the second).
+      expect(sent).toEqual([['fld_title', 2], ['fld_status', 2]])
+      expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
     it.each([
@@ -5764,7 +5808,7 @@ describe('MultitableWorkbench view wiring', () => {
       host.recordId = 'rec_2'
       await flushUi(8)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(document.activeElement).toBe(field)
       expect(field.value).toBe('Beta')
     })
@@ -5792,7 +5836,7 @@ describe('MultitableWorkbench view wiring', () => {
       host.recordId = 'rec_far'
       await flushUi(8)
       expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4, COPY_SAVE]])
       expect(document.activeElement).toBe(field)
     })
 
@@ -5815,7 +5859,7 @@ describe('MultitableWorkbench view wiring', () => {
         confirmSpy.mockRestore()
       }
       expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(document.activeElement).toBe(field)
     })
 
@@ -5833,7 +5877,7 @@ describe('MultitableWorkbench view wiring', () => {
       container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
       await flushUi()
       expect(blurred).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
       expect(document.activeElement).toBe(field)
       // The focus comes back only once the drawer shows rec_2: the field shows rec_2's title, not rec_1's typing.
@@ -5942,7 +5986,7 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchFor('rec_1')
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7, ROW_SAVE)
       expect(gridMock.patchCell.mock.calls.some((call: unknown[]) => call[0] === 'rec_2')).toBe(false)
     })
 
@@ -5967,7 +6011,7 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchFor('rec_2')
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1, ROW_SAVE)
       expect(fieldErrorEl('fld_title')).toBeNull()
       expect(showSuccessSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).not.toHaveBeenCalled()
@@ -5993,7 +6037,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
       acceptNextPatch()
       await patchFor('rec_1')
-      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
     })
 
@@ -6007,7 +6051,7 @@ describe('MultitableWorkbench view wiring', () => {
       inspectorStubAnchor.mockImplementation(answer)
       rejectNextPatch('Stale title rejected', { status: 400, code: 'VALIDATION_ERROR' }) // the failure is rec_1's
       await patchFor('rec_1')
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
       expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
       expect(showErrorSpy).toHaveBeenCalledTimes(1)
       expect(showErrorSpy).toHaveBeenCalledWith('Stale title rejected')
@@ -6036,7 +6080,7 @@ describe('MultitableWorkbench view wiring', () => {
       await patchFor('rec_remote')
       // version 4, plus one for the delete that ended while rec_2 was shown
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
     })
 
@@ -6062,8 +6106,8 @@ describe('MultitableWorkbench view wiring', () => {
       await patchFor('rec_remote')
       await patchFor('rec_remote')
       expect(gridMock.patchCell.mock.calls).toEqual([
-        ['rec_remote', 'fld_files', ['att_2'], 4],
-        ['rec_remote', 'fld_files', ['att_2'], 5],
+        ['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE],
+        ['rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE],
       ])
     })
 
@@ -6075,7 +6119,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
       acceptNextPatch()
       await patchFor('rec_remote')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
     })
 
     // --- a remove that ended after the drawer moved on also names the ids it took out ---
@@ -6092,7 +6136,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[0].version = 7
       acceptNextPatch()
       await patchRemovedFor('rec_1')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7, ROW_SAVE]])
     })
 
     it('a remove naming rec_1 whose list no longer holds the removed id (the server took it out): nothing written, no toast', async () => {
@@ -6115,14 +6159,14 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: files }
       acceptNextPatch()
       await patchRemovedFor('rec_2')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1, ROW_SAVE]])
     })
 
     it('a remove naming the deep-linked rec_remote (no longer shown): rebuilt from the deep-linked copy minus the removed ids, at its version 4', async () => {
       await openRemoteThenRec2(['att_1', 'att_2', 'att_3'])
       acceptNextPatch()
       await patchRemovedFor('rec_remote')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4, COPY_SAVE]])
     })
 
     // In the app the delete comes first, and it takes the id out of the deep-linked copy: the rebuild then has
@@ -6154,7 +6198,7 @@ describe('MultitableWorkbench view wiring', () => {
       gridMock.rows.value[0].version = 7
       acceptNextPatch()
       await patchClearedFor('rec_1')
-      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7]])
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7, ROW_SAVE]])
     })
 
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
@@ -7327,7 +7371,7 @@ describe('MultitableWorkbench view wiring', () => {
         typeInto(title, 'Renamed')
         clickPatch()
         await flushUi()
-        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1, ROW_SAVE)
         title.focus()
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('Renamed')
@@ -7537,7 +7581,7 @@ describe('MultitableWorkbench view wiring', () => {
         container!.querySelector<HTMLButtonElement>(button)!.click()
         await flushUi()
         expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
-        expect(gridMock.patchCell).toHaveBeenCalledWith(...call)
+        expect(gridMock.patchCell).toHaveBeenCalledWith(...call, ROW_SAVE)
         title.focus()
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe(afterUndo)

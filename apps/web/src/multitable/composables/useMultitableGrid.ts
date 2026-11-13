@@ -144,6 +144,8 @@ interface QueuedCellWrite {
    *  one replaced unsent: the write rolls back to it, and is undone to it. */
   oldValue: unknown
   oldLinkSummaries: LinkedRecordSummary[] | undefined
+  /** The row this write's value was last put on while it waited (see `showWaiting` in `patchCell`). */
+  shownOn?: MetaRecord
   /** Starts the write's turn, or ends it unsent. */
   wake: (turn: 'send' | typeof CELL_WRITE_SUPERSEDED) => void
 }
@@ -1578,7 +1580,15 @@ export function useMultitableGrid(opts: {
     const showWaiting = () => {
       const live = rows.value.find((r) => r.id === recordId)
       for (const queued of turns.waiting) {
-        if (live) live.data[queued.fieldId] = queued.value
+        if (live) {
+          // A write made with the record off the page has no value of a row to roll back to: the first time it is
+          // shown on a row (the record came onto the page meanwhile), that row's own value is it.
+          if (!queued.inPage && queued.shownOn !== live) {
+            queued.oldValue = live.data[queued.fieldId]
+            queued.shownOn = live
+          }
+          live.data[queued.fieldId] = queued.value
+        }
         if (queued.nextLinkSummaries) setLinkSummaries(recordId, queued.fieldId, queued.nextLinkSummaries)
       }
     }
@@ -1606,12 +1616,35 @@ export function useMultitableGrid(opts: {
       const liveVersion = live?.version
       applyPatchResult(result)
       showWaiting()
+      // A waiting write of this cell now rolls back to this write's value, which is stored (one made with the record
+      // off the page took the value of the row it was first shown on).
+      const returned = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
+      for (const queued of turns.waiting) {
+        if (queued.fieldId !== fieldId) continue
+        // Not when the row was replaced by one newer than this write: it shows a value stored after this one, which
+        // the waiting write was made on and keeps as its own.
+        if (live && live !== row && typeof liveVersion === 'number' && liveVersion > (returned ?? Infinity)) continue
+        queued.oldValue = value
+        queued.oldLinkSummaries = nextLinkSummaries ?? write.oldLinkSummaries
+      }
       // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
       // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
       lastBatchId.value = result.batchId ?? null
       const committedVersion = (result.updated ?? []).find((update) => update.recordId === recordId)?.version
       if (typeof committedVersion === 'number') {
         if (committedVersion > expectedVersion) turns.advanced.set(expectedVersion, committedVersion)
+        // The row takes this write's version (above) only when it shows the version this write was sent at, or an older
+        // one that only this record's own accepted writes moved on from. Otherwise it keeps its own: a reload that read
+        // before another user's change (and landed after it) must not be given a version past data it does not show, so
+        // a write made on it conflicts; one that read after this write is newer. This holds for the row the write was
+        // made on too, when the write was sent at another version (a caller's copy, sent as given).
+        if (live && typeof liveVersion === 'number' && liveVersion !== expectedVersion) {
+          let reached = liveVersion
+          for (let next = turns.advanced.get(reached); next !== undefined && reached < expectedVersion; next = turns.advanced.get(reached)) {
+            reached = next
+          }
+          if (reached !== expectedVersion) live.version = liveVersion
+        }
         // The row was reloaded or merged from a version before this write: it shows the value now stored (unless a
         // newer write of the cell waits, which it shows).
         if (live && live !== row && typeof liveVersion === 'number' && liveVersion < committedVersion
