@@ -74,6 +74,33 @@ Harold 同意将 #6849 对齐最新 `origin/main`。分支原基于 `5920de5b2`�
 
 2026-11-11 再对齐：已审并推送的 `438842a9aeb9a8e7b097226fbbd5bf4c024c827c` 在 CI 结束（31 成功、1 条有条件跳过）时，main 又前进到 `48aaac6b4a3e16ac785ae1aee1bf32e85ef441a7`（#6857，2026-11-11 18:09:17 +0800）。本工作树用 `git merge --no-commit --no-ff` 合入该提交，上文历史记录和四文件修复都保留。此后的核验必须使用含该 main 的新合并结果，不能沿用 `438842a9a` 上已经结束的 CI。
 
+### 5. 2026-11-13 只对齐已授权 main `220bd80`（#6849）
+
+上次已测 main 是 `48aaac6b4a3e16ac785ae1aee1bf32e85ef441a7`。本次只做普通合并，合入 `220bd80ab62fc7e6b3b40b7d4263a712d9a09405`（#6894，2026-11-13 14:21:11 +0800）。合并提交 `2a5ca9ac654542d6c2ecde80c89bb20a05c1a659`，父提交是 `dbe3562b62c2d5fd922e0233647920e87099312f` 与 `220bd80ab62fc7e6b3b40b7d4263a712d9a09405`，树是 `ff6549f0b50b6aae067082e2b03ec19dc4bddaa6`。没有 rebase、amend、reset 或 force-push。本节写在该合并之后、推送之前，所以 CI 必须跑在包含本节的最终 head 上。`48aaac6` 上已经结束的 CI 不能当作这次的证据。之后 main 再前进，也不自动再对齐。
+
+`48aaac6..220bd80` 共 21 个提交、145 个文件。四份修复文件都不在这 21 个提交里，合并没有冲突。相对 `220bd80` 的净差异仍是这四份文件；本节只追加在已有核验文档里，不新开范围。员工、审批人清单不变，没有导入员界面，`scripts/ops/attendance-provision-user.sh` 与夹具权限仍不改。
+
+`attendance:admin` 本身授权导入。旧管理员回退清单漏掉 `attendance:import` 是权限清单漂移，不是「用户因此不能导入」的证明。插件在已有管理员访问时把导入放行：`hasAttendanceImportAccess`（`plugins/plugin-attendance/index.cjs:24274-24277`）、`withAttendanceImportPermission`（`25517-25518`）、`withAnyPermission` 的 `attendance:import` 别名（`24236-24243`）。`attendanceLegacyPermissionPayload.spec.ts` 用文件内字面量数组比较五键（`214-225`），不导入、也不动态比较服务端 `ATTENDANCE_ROLE_TEMPLATES` 模块，也不执行 `AttendanceView.vue` 的四个回退处理函数（单人授予 `22512`、单人撤销 `22566`、批量授予 `22702`、批量撤销 `22795`）。
+
+这次区间对执行条件的影响：
+
+- 工作流只改 `.github/workflows/plugin-tests.yml`。安装前多一道必过合同：`node --test scripts/ops/approval-routing-prerequisite-ci-wiring.test.mjs`。`approval-db` 的真实库步骤整文件加入 `session-token-invite-lifecycle.db.test.ts`、`approval-routing-policy-required.db.test.ts`、`approval-routing-policy-required.api.test.ts`。三份都有 `const EXPECT_DB = process.env.EXPECT_DB === '1'`，不是该值时用例 `it.skip`。`attendance-web-guard.yml` 与 `web-tests.yml` 的 YAML 没改。
+- Vitest 只改 `packages/core-backend/vitest.config.ts` 的 `test.exclude`：上述三份被排除出无库作业（`451-452`、`2319`），避免缺库时 skip 变绿。它们只在 `approval-db` 整文件步骤、并且 `EXPECT_DB=1` 时执行。`apps/web` 的 vitest 配置没改。
+- `apps/web/scripts/run-required-web-tests.sh` 与同名 `.tokens` 增加 `multitable-automation-interval-minutes`。`web-tests.yml` 仍调用该脚本，所以 web-tests 会多跑这一份。考勤权限规格和 `attendanceAdminGuide.spec.ts` 的令牌没改。
+- 新增迁移 `packages/core-backend/migrations/108_create_integration_stock_prep_sheet_repair.sql`（修复运行与一次性占用两张表）。`migration-provider.ts` 加载 `packages/core-backend/migrations` 下的 SQL，所以跑 `pnpm --filter @metasheet/core-backend migrate` 的门都会执行 108。这包括 `approval-db`、`runtime-db`、`multitable-db`、`attendance-db` 的 “Run DB migrations”。checkpoint 作业的 YAML 步骤没改，但默认验收会进 `verify-recovery-manual-checkpoint.mts`，该脚本对 fresh 与 replay 各跑一次 migrate（`83-89`），因此 108 进入这次 checkpoint 验收的数据库。
+- drain 证明 `tests/integration/timemachine-private-db-backend-drain.db.test.ts` 不在这次 diff 里。它自己建临时库，文件里不调用 migrate，所以 108 不改变这份 drain SQL。它仍由 checkpoint 作业的 “Run private-db backend drain proof” 执行；缺 `DATABASE_URL` 直接抛错，不是 `EXPECT_DB` skip。
+- `packages/core-backend/src/index.ts`（`e0b5a3c08`，#6898）把 `initializeDataSourceManager` 改成静态导入（`348`、`4502-4505`），避免 tsx 动态导入装出第二份模块。守卫是 `tests/unit/data-source-manager-single-instance.test.ts`。不改考勤路由。
+- `univer-meta.ts` 不在这次 diff 里。
+- 来源 pin `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 只更新两个哈希：`pluginIndex` = `384652d5c87fc39863b32572decd19255e42e34543edd5245cd419687e3720c3`，`pluginHttpRoutes` = `aa6903b2ff5301c7330a6129b1a9a849e2e7eb1542ad3bffe4f42b2acb11f75c`。`test-chain.txt` 增加四条：`stock-preparation-template-issue-confirm-spec-columns.test.cjs`、`stock-preparation-sheet-repair.test.cjs`、`stock-preparation-sheet-repair-store.test.cjs`、`stock-preparation-sheet-repair-routes.test.cjs`。插件测试链会多跑这四条。
+- `scripts/ops/global-history-flag-manifest.mjs` 登记两个默认关闭的开关：`MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED`（只认精确 `'true'`）和 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED`（去空格、不分大小写的 `'true'`）。本 PR 不改、也不打开它们。
+
+推送前在合并后的工作树上跑过这些命令。CI 证据仍以包含本节的最终 head 的作业日志为准，不沿用 `dbe3562` 的 32 项检查。
+
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceLegacyPermissionPayload.spec.ts tests/useAttendanceAdminProvisioning.spec.ts`：2 个文件、14 个测试通过（权限载荷 4，开通组合函数 10；Vitest 1.6.1，847ms）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、9 个测试通过（1.13s）。
+- `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceProvisionRolePermissions.ts tests/attendanceLegacyPermissionPayload.spec.ts --max-warnings=0`：退出码 0。
+- `pnpm --filter @metasheet/web exec vue-tsc -b`：默认堆约 2GB 时进程以 `JavaScript heap out of memory` 中止。同一命令加上 `NODE_OPTIONS=--max-old-space-size=8192` 后退出码 0（约 58s）。这是堆上限，不是类型错误。
+
 ## 2026-10-16 第五轮
 
 三份排查按「现象 → 原因 → 怎么改」写进现有文章，并新增 `troubleshoot`（排查）。
