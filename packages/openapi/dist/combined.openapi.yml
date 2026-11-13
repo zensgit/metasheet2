@@ -6340,6 +6340,8 @@ components:
           additionalProperties: true
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        printable:
+          type: boolean
         columns:
           type: array
           items:
@@ -6377,6 +6379,8 @@ components:
           $ref: '#/components/schemas/DepartmentFieldProps'
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        printable:
+          type: boolean
       required:
         - id
         - type
@@ -6414,6 +6418,8 @@ components:
           $ref: '#/components/schemas/RecordLinkFieldProps'
         visibilityRule:
           $ref: '#/components/schemas/FormFieldVisibilityRule'
+        printable:
+          type: boolean
       required:
         - id
         - type

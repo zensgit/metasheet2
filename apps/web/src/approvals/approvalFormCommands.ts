@@ -312,6 +312,7 @@ export function addFormField(
     label: FIELD_LABELS[fieldType],
     required: false,
     placeholder: '',
+    printable: true,
     optionsText: '',
     visibility: { dependsOnFieldId: '', operator: 'eq', valueText: '' },
     detailColumns:
@@ -682,6 +683,8 @@ export interface FormFieldPropertyPatch {
   readonly label?: string
   readonly required?: boolean
   readonly placeholder?: string
+  /** 参与打印（任意可编辑类型的顶层字段；明细子字段没有这个开关）。 */
+  readonly printable?: boolean
   readonly optionsText?: string
   readonly visibility?: FieldVisibilityDraft
   readonly minRowsText?: string
@@ -798,6 +801,7 @@ export function updateFormFieldProperties(
     ...(patch.placeholder !== undefined
       ? { placeholder: patch.placeholder }
       : {}),
+    ...(patch.printable !== undefined ? { printable: patch.printable } : {}),
     ...(patch.optionsText !== undefined
       ? { optionsText: patch.optionsText }
       : {}),

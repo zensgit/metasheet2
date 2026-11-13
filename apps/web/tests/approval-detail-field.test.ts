@@ -15,6 +15,7 @@ import {
   isDetailCellVisible,
   isDetailField,
   isDetailLeafFieldType,
+  nonPrintableFieldIds,
   parseRowBound,
   pruneHiddenDetailRow,
   pruneHiddenFormDataWithDetail,
@@ -897,5 +898,47 @@ describe('validateDetailRows — en (O-8 / F8-1)', () => {
     const violations = validateDetailRows(schema, { items: [{ amount: 1 }, { amount: undefined }] }, false)
     expect(violations).toEqual(['"Expenses" row 2 is missing "Amount"'])
     expect(violations.join(' ')).not.toMatch(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/)
+  })
+})
+
+describe('nonPrintableFieldIds (参与打印)', () => {
+  it('returns only the top-level fields stored with printable: false', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'reason', type: 'text', label: '事由' },
+        { id: 'amount', type: 'number', label: '金额', printable: false },
+        { id: 'note', type: 'explanation', label: '说明', props: { text: '仅供参考' }, printable: false },
+        { id: 'items', type: 'detail', label: '明细', printable: false, columns: [{ id: 'qty', type: 'number', label: '数量' }] },
+        { id: 'days', type: 'number', label: '天数', printable: true },
+      ],
+    }
+    expect([...nonPrintableFieldIds(schema)].sort()).toEqual(['amount', 'items', 'note'])
+  })
+
+  it('treats a missing key and any non-false value as printable (old templates unchanged)', () => {
+    const schema = {
+      fields: [
+        { id: 'a', type: 'text', label: 'A' },
+        { id: 'b', type: 'text', label: 'B', printable: true },
+        { id: 'c', type: 'text', label: 'C', printable: 'false' },
+        { id: 'd', type: 'text', label: 'D', printable: 0 },
+      ],
+    } as unknown as FormSchema
+    expect(nonPrintableFieldIds(schema).size).toBe(0)
+  })
+
+  it('does not look into detail columns (a column has no switch of its own)', () => {
+    const schema = {
+      fields: [
+        { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'qty', type: 'number', label: '数量', printable: false }] },
+      ],
+    } as unknown as FormSchema
+    expect(nonPrintableFieldIds(schema).size).toBe(0)
+  })
+
+  it('returns an empty set for a missing or malformed schema', () => {
+    expect(nonPrintableFieldIds(null).size).toBe(0)
+    expect(nonPrintableFieldIds(undefined).size).toBe(0)
+    expect(nonPrintableFieldIds({} as FormSchema).size).toBe(0)
   })
 })
