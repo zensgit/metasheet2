@@ -351,7 +351,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from './routes/data-sources'
 import {
   createDataSourcePluginFacade,
   createDataSourceSealedSnapshotConnectionFacade,
@@ -4539,7 +4539,9 @@ export class MetaSheetServer {
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')
-      const { initializeDataSourceManager } = await import('./routes/data-sources')
+      // initializeDataSourceManager comes from the STATIC data-sources import above, never a dynamic one:
+      // under tsx a dynamic import loads a second module instance, so the DB would bind to a manager
+      // the routes and plugin facades never use (guard: tests/unit/data-source-manager-single-instance.test.ts).
       await initializeDataSourceManager(kyselyDbDataSources)
       this.logger.info('DataSourceManager persistence initialized')
     } catch (e) {

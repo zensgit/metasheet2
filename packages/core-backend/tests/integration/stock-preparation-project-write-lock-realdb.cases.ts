@@ -3195,6 +3195,12 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               return n
             },
             pilotExit: () => q('UPDATE integration_stock_prep_project_target SET pilot_enabled_at = NULL, pilot_enabled_by = NULL, pilot_readiness_version = NULL WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo]),
+            // R-71 7.4 PR-4 (S3B-07): re-register the SAME routes over the SAME services with another env action target
+            // (a deployment re-pasting its exported binding). Every other case leaves the target as built.
+            rebindEnvTarget(target: any) {
+              routes.clear()
+              httpRoutesLib.registerIntegrationRoutes({ context: { ...routeContext, config: { ...routeContext.config, stockPreparationTableActions: [{ ...actionConfig, target }] } }, services, logger: { info() {}, warn() {}, error() {} } })
+            },
           }
         }
 
@@ -4352,6 +4358,19 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   BI-R19 (R-65 / R-89) a RIGHT band ensured while the real template-column repair holds the canonical write fence
         //          waits on the fence and lands after the repaired columns and a person column above every known id; re-created
         //          under a person column above EVERY column (known ids included) it lands after that column too
+        //   Y8-C-A (R-89 × R-65) a pre-Y8 sheet (the two Y8 columns missing) with an ext_ column and a person column: the
+        //          Y8 repair route appends the two after both (max + 1 + i, locked); the RIGHT install then lands the band
+        //          after every column — no shared order, no existing column and no non-band cell changed
+        //   Y8-C-B (R-89 × R-65) a pre-Y8 sheet that carries orphan RIGHT band columns (no ledger row): the install dry_run
+        //          refuses exactly plm_lock_required; the repair appends the two AFTER the band (max + 1 + i, inserted
+        //          locked), the band's rows and orders untouched, the lock check missing 0; the dry_run is then a clean
+        //          first install with the placement fixed right, and the install keeps every field row byte-identical
+        //   Y8-C-B2 (R-89 × R-65) a sheet that went through the REAL right install (a resolved ledger row) and then lost the
+        //          two Y8 columns: the dry_run is a noop refusing plm_lock_required + nothing_to_install; the repair appends
+        //          the two after the band; the dry_run is then a noop refusing nothing_to_install only; after a switch-off
+        //          pull the gap pass installs with the placement fixed right, every field row byte-identical
+        //   Y8-C-C (R-89 × R-65, #6828) the repair, THEN a person column, then the RIGHT install: the band lands after the
+        //          person column (the pre-#6828 counter-example — a max over the known ids put the band on its order)
         describe('BI-2 pull-batch install, gap pass and born ready (real Postgres, real lock, real ledger, real host)', () => {
           const pullBatchStoreLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-store.cjs')) as any
           const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
@@ -4751,6 +4770,264 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             expect(gridTop.slice(-3)).toEqual([personTopId, ...bandPhysical])
             const afterTop = await fieldRows()
             for (const [id, text] of settledTop) expect(afterTop.get(id), `meta_fields ${id} byte-identical (leg 2)`).toBe(text)
+          }, 300000)
+
+          // Y8 (R-89) × the band (R-65, #6828), in sequence. Y8's two template columns (issueConfirmDate, projectSpecModel —
+          // the template's last two) reach an existing project sheet only through the REAL repair route (`POST
+          // …/options/sync`, addMissingColumns), inserted locked at the whole-sheet MAX(order) + 1 + i; a RIGHT band takes
+          // the whole-sheet max + 1 / + 2 read under the write fence. These cases inherit the run's fence setting (the
+          // ordering they pin needs no fence; BI-R19 pins the concurrent shape with the fence on).
+          const Y8_COLUMNS = ['issueConfirmDate', 'projectSpecModel']
+          const Y8_REPAIR_PATH = '/api/integration/stock-preparation/options/sync'
+          const y8Sheet = {
+            // Every meta_fields row of the sheet, byte for byte (the row as PostgreSQL serialises it).
+            fieldRows: async (sheetId: string) => new Map<string, string>(
+              (await q('SELECT id, row_to_json(f)::text AS text FROM meta_fields f WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows.map((row: any) => [String(row.id), String(row.text)]),
+            ),
+            orders: async (sheetId: string) => new Map<string, number>(
+              (await q('SELECT id, "order" FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows.map((row: any) => [String(row.id), Number(row.order)]),
+            ),
+            grid: async (sheetId: string) => (await q('SELECT id FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [sheetId])).rows.map((row: any) => String(row.id)),
+            maxOrder: async (sheetId: string) => Number((await q('SELECT MAX("order") AS m FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows[0].m),
+            shared: async (sheetId: string) => (await q('SELECT "order", COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1 GROUP BY "order" HAVING COUNT(*) > 1 ORDER BY "order"', [sheetId])).rows,
+            lockOf: async (sheetId: string, id: string) => (await q('SELECT property FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sheetId, id])).rows[0]?.property?.humanWriteLock ?? null,
+          }
+          const y8Repair = (st: any, body: Record<string, unknown>) => withPull(false, () => callRoute(st.routes, 'POST', Y8_REPAIR_PATH, { user: st.users.admin, body: { projectNo: st.projectNo, ...body }, query: {} }))
+          // A person's column (POST /fields mints a random id — never one of the known ids).
+          const y8PersonColumn = (st: any, id: string, order: number) => q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [id, st.sheetId, 'Person column', 'string', '{}', order])
+          // A first pull (switch off: rows land, no band), then the sheet aged to the pre-Y8 (33-column) template: the two
+          // Y8 columns leave meta_fields; their physical ids are the host's stable ids, so the repair re-creates exactly them.
+          async function y8PreY8Sheet(k: any) {
+            const st = k.st
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            expect(templateIds.slice(-2), 'the Y8 columns are the template tail').toEqual(Y8_COLUMNS)
+            await withPull(false, async () => { st.state.data = CF.firstPullSource(); await k.pull() })
+            const physical = await y8DropColumns(k)
+            const maxAged = await y8Sheet.maxOrder(st.sheetId)
+            expect(maxAged, 'the 33-column template ends at its last index').toBe(templateIds.length - 3)
+            expect((await st.rows()).length, 'the aged sheet carries rows').toBeGreaterThan(0)
+            return { physical, maxAged, band: [k.physical('firstPullBatch'), k.physical('pullBatch')] }
+          }
+          // The two Y8 columns leave meta_fields (their physical ids answered first: the host's stable ids).
+          async function y8DropColumns(k: any): Promise<string[]> {
+            const st = k.st
+            const resolved = await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: Y8_COLUMNS })
+            const physical: string[] = Y8_COLUMNS.map((id) => resolved[id])
+            expect(physical.every((id) => typeof id === 'string')).toBe(true)
+            expect((await q('DELETE FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [st.sheetId, physical])).rowCount).toBe(2)
+            return physical
+          }
+          // The repair's add answer: exactly the two added, and the route's lock pass after the add patched nothing (the
+          // INSERT already carried the lock — S3A-32's (B) shape) and found nothing missing.
+          function y8ExpectAdded(added: any) {
+            expect(added.statusCode, JSON.stringify(added.body)).toBe(200)
+            expect(added.body.data.columns.addedFieldIds).toEqual(Y8_COLUMNS)
+            expect(added.body.data.plmColumnLock, 'inserted locked: the lock pass after the add marks nothing').toMatchObject({ marked: 0, missing: 0 })
+          }
+          // The REAL install route with placement RIGHT (dry_run, then install with its digest), and what every right install
+          // must leave: the band at the whole-sheet max + 1 / + 2, after every other column, no shared order, every
+          // pre-existing meta_fields row byte-identical, exactly the two band rows added, every cell outside the band identical.
+          async function y8InstallRight(k: any, band: string[]) {
+            const st = k.st
+            const fieldsBefore = await y8Sheet.fieldRows(st.sheetId)
+            expect(band.some((id) => fieldsBefore.has(id)), 'precondition: no band yet').toBe(false)
+            const cellsBefore = await k.nonBand()
+            const maxBefore = await y8Sheet.maxOrder(st.sheetId)
+            const dry = await k.post({ mode: 'dry_run', placement: 'right' })
+            expect(dry.statusCode, JSON.stringify(dry.body)).toBe(200)
+            expect(dry.body.data.refusals).toEqual([])
+            expect(dry.body.data, 'a first install, no band yet, the placement asked for').toMatchObject({ run: 'first_install', columns: { pullBatch: false, firstPullBatch: false, placementApplied: false }, settings: { placement: 'right' } })
+            const answer = await k.post({ mode: 'install', approvalRef: 'R-65', planDigest: dry.body.data.planDigest, confirmHistoricalBatchCount: dry.body.data.requires.confirmHistoricalBatchCount.inferred, placement: 'right' })
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect(answer.body.data, 'the install resolved').toMatchObject({ run: 'first_install', resolved: true })
+            expect(answer.body.data.written.cells, 'the install wrote band cells').toBeGreaterThan(0)
+            expect((await k.sheetRow()).band_placement).toBe('right')
+            const orders = await y8Sheet.orders(st.sheetId)
+            expect(band.map((id) => orders.get(id)), 'the band at the whole-sheet max + 1 / + 2').toEqual([maxBefore + 1, maxBefore + 2])
+            expect([...orders].filter(([id]) => !band.includes(id)).every(([, order]) => order < maxBefore + 1), 'the band after every other column').toBe(true)
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order').toEqual([])
+            const after = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsBefore) expect(after.get(id), `meta_fields ${id} byte-identical`).toBe(text)
+            expect([...after.keys()].filter((id) => !fieldsBefore.has(id)).sort()).toEqual([...band].sort())
+            expect(await k.nonBand(), 'every cell outside the band identical').toEqual(cellsBefore)
+          }
+
+          test('Y8-C-A (R-89 × R-65) a pre-Y8 sheet with an ext_ column and a person column: the Y8 repair appends the two after both (max + 1 + i, locked plm_system, nothing else moves); the RIGHT install then lands the band after every column — no shared order, no existing column or non-band cell changed', async () => {
+            const k = await installStack('y8ca')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            // A pack's ext_ column through the real host primitive, then a person's column.
+            await st.multitable.provisioning.ensureMissingObjectFields({ projectId: st.projectId, objectId: st.objectId, fields: [{ id: 'ext_site_note', name: 'Site note', type: 'string', order: maxAged + 1 }] })
+            const extId: string = (await st.multitable.provisioning.resolveExistingObjectFieldIds({ projectId: st.projectId, objectId: st.objectId, fieldIds: ['ext_site_note'] })).ext_site_note
+            expect(typeof extId).toBe('string')
+            const personId = `fld_person_${TOKEN}_y8ca`
+            await y8PersonColumn(st, personId, maxAged + 2)
+            const fieldsAged = await y8Sheet.fieldRows(st.sheetId)
+            const rowsAged = await st.rows()
+
+            const added = await y8Repair(st, { addMissingColumns: true })
+            y8ExpectAdded(added)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the repair appends after the ext_ and the person column: max + 1 + i').toEqual([maxAged + 3, maxAged + 4])
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order after the repair').toEqual([])
+            expect(await Promise.all(physical.map((id) => y8Sheet.lockOf(st.sheetId, id))), 'both locked when the route returns').toEqual(['plm_system', 'plm_system'])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsAged) expect(afterRepair.get(id), `meta_fields ${id} byte-identical across the repair`).toBe(text)
+            expect([...afterRepair.keys()].filter((id) => !fieldsAged.has(id)).sort(), 'the repair adds exactly the two meta_fields rows').toEqual([...physical].sort())
+            expect(sameJson(await st.rows(), rowsAged), 'the repair changes no row').toBe(true)
+
+            await y8InstallRight(k, band)
+            expect((await y8Sheet.grid(st.sheetId)).slice(-6), 'the grid: … ext_, person, the Y8 two, then the band').toEqual([extId, personId, ...physical, ...band])
+          }, 300000)
+
+          test('Y8-C-B (R-89 × R-65) a pre-Y8 sheet that carries orphan RIGHT band columns without a ledger row: the install dry_run refuses exactly plm_lock_required; the Y8 repair appends the two AFTER the band (max + 1 + i, inserted locked plm_system), the band rows and orders untouched, the lock check missing 0; the dry_run is then a clean first install with the placement fixed right, and the install keeps every field row byte-identical', async () => {
+            const installLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-install.cjs')) as any
+            const k = await installStack('y8cb')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            // The band a pre-Y8 install left: the install's own band step (ensureBandColumns, RIGHT) over the real host.
+            // Columns only — this sheet has no pull-batch ledger row.
+            const banded = await installLib.__internals.ensureBandColumns({
+              deps: {
+                provisioning: st.multitable.provisioning,
+                projectId: st.projectId,
+                target: { objectId: st.objectId },
+                band: { fieldIds: { pullBatch: k.physical('pullBatch'), firstPullBatch: k.physical('firstPullBatch') } },
+                knownFieldIds: templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id),
+                bandDescriptors: templatesLib.pullBatchBandFieldDescriptors,
+              },
+              keys: ['pullBatch', 'firstPullBatch'],
+              placement: 'right',
+              locale: 'zh-CN',
+            })
+            expect(banded.added).toBe(2)
+            const bandedOrders = await y8Sheet.orders(st.sheetId)
+            const bandOrders = band.map((id) => bandedOrders.get(id))
+            expect(bandOrders, 'precondition: a right band after the 33-column tail').toEqual([maxAged + 1, maxAged + 2])
+            const fieldsBanded = await y8Sheet.fieldRows(st.sheetId)
+            const rowsBanded = await st.rows()
+
+            const refused = await k.post({ mode: 'dry_run' })
+            expect(refused.statusCode, JSON.stringify(refused.body)).toBe(200)
+            expect(refused.body.data.refusals).toEqual(['plm_lock_required'])
+            expect(refused.body.data.plmLock).toMatchObject({ missing: 2 })
+
+            const added = await y8Repair(st, { addMissingColumns: true })
+            y8ExpectAdded(added)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the Y8 two after the band: max + 1 + i').toEqual([maxAged + 3, maxAged + 4])
+            expect(band.map((id) => repaired.get(id)), 'the band keeps its orders').toEqual(bandOrders)
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order').toEqual([])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsBanded) expect(afterRepair.get(id), `meta_fields ${id} byte-identical (the band rows included)`).toBe(text)
+            expect([...afterRepair.keys()].filter((id) => !fieldsBanded.has(id)).sort()).toEqual([...physical].sort())
+            expect(sameJson(await st.rows(), rowsBanded), 'the repair changes no row').toBe(true)
+            expect(await Promise.all(physical.map((id) => y8Sheet.lockOf(st.sheetId, id))), 'both locked when the route returns').toEqual(['plm_system', 'plm_system'])
+            const check = await y8Repair(st, { dryRun: true })
+            expect(check.statusCode, JSON.stringify(check.body)).toBe(200)
+            expect(check.body.data.plmColumnLock).toMatchObject({ checked: true, unmarked: 0, missing: 0 })
+
+            const fieldsRepaired = await y8Sheet.fieldRows(st.sheetId)
+            const { dry, answer } = await k.install()
+            expect(dry.body.data.refusals).toEqual([])
+            expect(dry.body.data.plmLock).toMatchObject({ missing: 0, unmarked: 0 })
+            expect(dry.body.data, 'no ledger row: a first install over the existing band, its placement a fact').toMatchObject({ run: 'first_install', columns: { pullBatch: true, firstPullBatch: true, placementApplied: true }, requires: { placement: 'fixed' }, settings: { placement: 'right' } })
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect(answer.body.data, 'the install resolved').toMatchObject({ run: 'first_install', resolved: true })
+            expect(answer.body.data.written.cells, 'the install wrote band cells').toBeGreaterThan(0)
+            expect((await k.sheetRow()).band_placement).toBe('right')
+            const installed = await y8Sheet.orders(st.sheetId)
+            expect(band.map((id) => installed.get(id)), 'the install keeps the band where it is').toEqual(bandOrders)
+            expect(physical.map((id) => installed.get(id))).toEqual([maxAged + 3, maxAged + 4])
+            expect(await y8Sheet.shared(st.sheetId)).toEqual([])
+            const afterInstall = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsRepaired) expect(afterInstall.get(id), `meta_fields ${id} byte-identical across the install (the band and the Y8 rows included)`).toBe(text)
+            expect([...afterInstall.keys()].filter((id) => !fieldsRepaired.has(id)), 'the install adds no meta_fields row').toEqual([])
+          }, 300000)
+
+          test('Y8-C-B2 (R-89 × R-65) a sheet that went through the REAL right install (a resolved ledger row), then lost the two Y8 columns: the dry_run is a noop refusing plm_lock_required and nothing_to_install; the Y8 repair appends the two after the band (inserted locked), nothing else changes; the dry_run is then a noop refusing nothing_to_install only; after a switch-off pull the gap pass installs with the placement fixed right and every field row byte-identical', async () => {
+            const k = await installStack('y8cb2')
+            const st = k.st
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            expect(templateIds.slice(-2), 'the Y8 columns are the template tail').toEqual(Y8_COLUMNS)
+            const band = [k.physical('firstPullBatch'), k.physical('pullBatch')]
+            // The full-template sheet, a first pull (switch off), then the REAL right install: the ledger row it resolves is
+            // the one a pre-Y8 install would have left.
+            await withPull(false, async () => { st.state.data = CF.firstPullSource(); await k.pull() })
+            const maxFull = await y8Sheet.maxOrder(st.sheetId)
+            expect(maxFull, 'the full template ends at its last index').toBe(templateIds.length - 1)
+            await y8InstallRight(k, band)
+            expect(await k.sheetRow(), 'a resolved ledger row, the band right').toMatchObject({ history_status: 'backfilled', band_placement: 'right' })
+            const firstInstalled = await y8Sheet.orders(st.sheetId)
+            const bandOrders = band.map((id) => firstInstalled.get(id))
+            expect(bandOrders, 'the band after the full template').toEqual([maxFull + 1, maxFull + 2])
+            // The sheet aged: the two Y8 columns leave meta_fields; the band stays above the hole they leave.
+            const physical = await y8DropColumns(k)
+            expect(await y8Sheet.maxOrder(st.sheetId), 'after the drop the band is the sheet top').toBe(maxFull + 2)
+            const fieldsAged = await y8Sheet.fieldRows(st.sheetId)
+            const rowsAged = await st.rows()
+
+            const refused = await k.post({ mode: 'dry_run' })
+            expect(refused.statusCode, JSON.stringify(refused.body)).toBe(200)
+            expect(refused.body.data, 'every row labelled, the ledger resolved: a noop').toMatchObject({ run: 'noop', requires: { planDigest: null, placement: 'fixed' }, settings: { placement: 'right' } })
+            expect(refused.body.data.refusals).toEqual(['plm_lock_required', 'nothing_to_install'])
+            expect(refused.body.data.plmLock).toMatchObject({ missing: 2 })
+
+            const added = await y8Repair(st, { addMissingColumns: true })
+            y8ExpectAdded(added)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the Y8 two after the band: max + 1 + i').toEqual([maxFull + 3, maxFull + 4])
+            expect(band.map((id) => repaired.get(id)), 'the band keeps its orders').toEqual(bandOrders)
+            expect(await y8Sheet.shared(st.sheetId), 'no two columns share an order').toEqual([])
+            expect(await Promise.all(physical.map((id) => y8Sheet.lockOf(st.sheetId, id))), 'both locked when the route returns').toEqual(['plm_system', 'plm_system'])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsAged) expect(afterRepair.get(id), `meta_fields ${id} byte-identical across the repair (the band rows included)`).toBe(text)
+            expect([...afterRepair.keys()].filter((id) => !fieldsAged.has(id)).sort(), 'the repair adds exactly the two meta_fields rows').toEqual([...physical].sort())
+            expect(sameJson(await st.rows(), rowsAged), 'the repair changes no row').toBe(true)
+
+            const noop = await k.post({ mode: 'dry_run' })
+            expect(noop.statusCode, JSON.stringify(noop.body)).toBe(200)
+            expect(noop.body.data, 'locked again, still nothing to install').toMatchObject({ run: 'noop', requires: { planDigest: null, placement: 'fixed' }, settings: { placement: 'right' } })
+            expect(noop.body.data.refusals).toEqual(['nothing_to_install'])
+            expect(noop.body.data.plmLock).toMatchObject({ missing: 0, unmarked: 0 })
+
+            // A switch-off pull after the repair: its rows land without labels, so the next install is a gap pass over the
+            // existing band — the install leg that actually writes on this sheet.
+            await withPull(false, async () => { st.state.data = CF.secondPullSource(); await k.pull() })
+            const fieldsPulled = await y8Sheet.fieldRows(st.sheetId)
+            const { dry, answer } = await k.install()
+            expect(dry.body.data.refusals).toEqual([])
+            expect(dry.body.data, 'a gap pass over the existing band, the placement fixed right').toMatchObject({ run: 'gap_pass', columns: { pullBatch: true, firstPullBatch: true, placementApplied: true }, requires: { placement: 'fixed' }, settings: { placement: 'right' } })
+            expect(answer.statusCode, JSON.stringify(answer.body)).toBe(200)
+            expect(answer.body.data, 'the gap pass resolved').toMatchObject({ run: 'gap_pass', resolved: true })
+            expect(answer.body.data.written.cells, 'the gap pass wrote band cells').toBeGreaterThan(0)
+            expect(await k.sheetRow()).toMatchObject({ history_status: 'backfilled', band_placement: 'right' })
+            const installed = await y8Sheet.orders(st.sheetId)
+            expect(band.map((id) => installed.get(id)), 'the gap pass keeps the band where it is').toEqual(bandOrders)
+            expect(physical.map((id) => installed.get(id))).toEqual([maxFull + 3, maxFull + 4])
+            expect(await y8Sheet.shared(st.sheetId)).toEqual([])
+            const afterInstall = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsPulled) expect(afterInstall.get(id), `meta_fields ${id} byte-identical across the gap pass`).toBe(text)
+            expect([...afterInstall.keys()].filter((id) => !fieldsPulled.has(id)), 'the gap pass adds no meta_fields row').toEqual([])
+          }, 300000)
+
+          test('Y8-C-C (R-89 × R-65, #6828) the Y8 repair, THEN a person adds a column, then the RIGHT install: the band lands after the person column (a max over the known ids put it on that column\'s order — the pre-#6828 counter-example), no shared order, no existing column or non-band cell changed', async () => {
+            const k = await installStack('y8cc')
+            const st = k.st
+            const { physical, maxAged, band } = await y8PreY8Sheet(k)
+            const fieldsAged = await y8Sheet.fieldRows(st.sheetId)
+            const added = await y8Repair(st, { addMissingColumns: true })
+            y8ExpectAdded(added)
+            const repaired = await y8Sheet.orders(st.sheetId)
+            expect(physical.map((id) => repaired.get(id)), 'the repair appends at max + 1 + i').toEqual([maxAged + 1, maxAged + 2])
+            const afterRepair = await y8Sheet.fieldRows(st.sheetId)
+            for (const [id, text] of fieldsAged) expect(afterRepair.get(id), `meta_fields ${id} byte-identical across the repair`).toBe(text)
+            expect([...afterRepair.keys()].filter((id) => !fieldsAged.has(id)).sort(), 'the repair adds exactly the two meta_fields rows').toEqual([...physical].sort())
+            const personId = `fld_person_${TOKEN}_y8cc`
+            await y8PersonColumn(st, personId, maxAged + 3)
+
+            await y8InstallRight(k, band)
+            expect((await y8Sheet.grid(st.sheetId)).slice(-5), 'the grid: … the Y8 two, the person column, then the band').toEqual([...physical, personId, ...band])
           }, 300000)
         })
 
@@ -5359,6 +5636,10 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //          PR B's code; a registered NOT-governed project => served end to end on the env sheet, 0 step-4 rows.
         //   S3B-06 (R-12, A11 / G1 large) the step-4 tables absent from the store binding (42P01): the four routes 503
         //          STORE_FAILED `continuation` before any source read or existing-row read; nothing written, no bump.
+        //   S3B-07 (R-71 7.4 PR-4, ported from the 備料 review's VY8D-01) switch off, the env table is THE sheet with all
+        //          35 template columns present: a binding whose explicit target.fieldIdMap was exported from the 33-column
+        //          template answers 422 TARGET_SCHEMA_INCOMPLETE `explicit` with exactly the two new columns missing on
+        //          dry-run, export and large start (nothing written); re-bound with the 35-column map, all three served.
         describe('S3B step-4 large lane (real Postgres, real lock, real host)', () => {
           const LARGE_PREFIX = 'stock-preparation:large-bom:'
           // Every large-BOM plugin_kv row of one tenant, key order (the "nothing persisted" fingerprint of a refusal).
@@ -5787,6 +6068,77 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {})
               client.release()
               if (tenantId) await cleanupLarge(tenantId)
+            }
+          }, 300000)
+
+          // R-71 7.4 PR-4: the install step "re-export the env binding after the two-column template upgrade" has a test.
+          // Ported from the 備料 review's read-only reproduction VY8D-01 (its env-table legs e2 / e3): the deployment's env
+          // table keeps all 35 physical columns, so the ONLY thing that differs between the refusal and the served call
+          // is the pasted explicit binding — the 422 below is the binding gate (assertTargetFieldMapCompleteness), never
+          // the db-mode existence check.
+          test('S3B-07 (R-71 7.4 PR-4, VY8D-01) switch OFF, the env table is THE sheet with all 35 template columns present: an action bound with an explicit target.fieldIdMap exported from the 33-column (pre-PR-4) template answers 422 TARGET_SCHEMA_INCOMPLETE fieldMapMode `explicit` with missingFields exactly issueConfirmDate + projectSpecModel on dry-run, export and large start through the REAL routes — no token, no plugin_kv row, the sheet unchanged; re-bound with the 35-column map, dry-run is ready, export 200 and large start 202', async () => {
+            const NEW = ['issueConfirmDate', 'projectSpecModel']
+            const templatesLib = require(path.join(PLUGIN_LIB, 'stock-preparation-templates.cjs')) as any
+            const templateIds: string[] = templatesLib.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field: any) => field.id)
+            const st = await s3aStack('b07', { pilot: false, register: false, switchOn: false })
+            const envSheetId: string = st.envTarget.sheetId
+            const fullEnv = st.envTarget
+            const fullKeys = Object.keys(fullEnv.fieldIdMap || {}).sort()
+            // The 33-column template's export: the same explicit map without the two PR-4 columns.
+            const preFieldIdMap: Record<string, string> = { ...fullEnv.fieldIdMap }
+            for (const id of NEW) delete preFieldIdMap[id]
+            const preEnv = { ...fullEnv, fieldIdMap: preFieldIdMap }
+            const fieldCount = async () => Number((await q('SELECT count(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [envSheetId])).rows[0].n)
+            const refusal = (res: any) => {
+              const error = errorOf(res)
+              const details = error.details || {}
+              return {
+                status: res.statusCode,
+                code: error.code,
+                fieldMapMode: details.fieldMapMode,
+                missingFields: Array.isArray(details.missingFields) ? [...details.missingFields].sort() : details.missingFields,
+              }
+            }
+            try {
+              expect(templateIds).toHaveLength(35)
+              expect(fullKeys).toEqual([...templateIds].sort())
+              expect(Object.keys(preFieldIdMap)).toHaveLength(33)
+              expect(await fieldCount(), 'the env table carries every template column').toBe(35)
+              // Before the upgrade's binding paste: the env table pulled with the full binding.
+              await firstPullApplied(st)
+
+              // The deployment keeps its 33-column explicit binding.
+              st.rebindEnvTarget(preEnv)
+              const main0 = await st.main(envSheetId)
+              const tokens0 = await kvTokens()
+              const kv0 = await largeRows(st.tenantId)
+              const refused = {
+                dryRun: refusal(await st.dryRun()),
+                export: refusal(await st.exportLines()),
+                largeStart: refusal(await st.largeStart()),
+              }
+              const writes = {
+                tokens: (await kvTokens()) - tokens0,
+                kvUnchanged: sameJson(await largeRows(st.tenantId), kv0),
+                mainUnchanged: sameJson(await st.main(envSheetId), main0),
+                fieldCount: await fieldCount(),
+              }
+              console.log(`[S3B-07] ${JSON.stringify({ refused, writes })}`)
+              const explicit422 = { status: 422, code: 'TARGET_SCHEMA_INCOMPLETE', fieldMapMode: 'explicit', missingFields: [...NEW].sort() }
+              expect(refused).toEqual({ dryRun: explicit422, export: explicit422, largeStart: explicit422 })
+              expect(writes).toEqual({ tokens: 0, kvUnchanged: true, mainUnchanged: true, fieldCount: 35 })
+
+              // The install step: the binding re-exported from the 35-column template.
+              st.rebindEnvTarget(fullEnv)
+              const ready = await st.dryRun()
+              expect(ready.statusCode, JSON.stringify(ready.body)).toBe(200)
+              expect(ready.body.data.status).toBe('ready')
+              const exported = await st.exportLines()
+              expect(exported.statusCode, JSON.stringify(exported.body)).toBe(200)
+              const started = await st.largeStart()
+              expect(started.statusCode, JSON.stringify(started.body)).toBe(202)
+            } finally {
+              await cleanupLarge(st.tenantId)
             }
           }, 300000)
         })

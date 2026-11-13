@@ -413,10 +413,16 @@ export function buildSmokeFixture(salt, projectPrefix = 'stockprep-smoke') {
 // Governance-vocabulary fixture for POST /mvp/options/sync — the full closed enum sets the design doc
 // declares for every contract-sourced select field of the 9 frozen MVP tables. These are platform
 // enum literals (design constants), not business values.
+//
+// Every set must carry AT LEAST every value of the product's contract catalog
+// (plugins/plugin-integration-core/lib/stock-preparation-mvp-option-catalog.cjs). Since #5394 the
+// route merges the catalog under a caller set additively and refuses a caller set that would drop a
+// catalog value (422 OPTION_SYNC_CONTRACT_VALUE_REMOVAL_REFUSED). project_status therefore lists
+// all five catalog members, in catalog order; it used to list three.
 export function buildOptionSetsFixture() {
   const set = (values) => values.map((value) => ({ value }))
   return {
-    stock_preparation_project_status_v1: set(['active', 'completed', 'archived']),
+    stock_preparation_project_status_v1: set(['active', 'paused', 'closed', 'archived', 'completed']),
     stock_preparation_snapshot_status_v1: set(['draft', 'active', 'superseded', 'rejected']),
     stock_preparation_bom_line_status_v1: set(['active', 'inactive', 'incomplete']),
     stock_preparation_material_status_v1: set(['active', 'inactive', 'disabled']),

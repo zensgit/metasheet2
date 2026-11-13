@@ -939,6 +939,7 @@ import {
 } from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { CELL_WRITE_SUPERSEDED } from '../utils/cell-write'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
 import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
 import { viewTypeLabel } from '../utils/meta-manager-labels'
@@ -3743,6 +3744,8 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
 // routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
 // a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
 // next one from trying with the version actually stored.
+// (Main's rule, kept as it was: it holds also for a manual row the drawer shows as a copy, on the page or off it,
+// which the grid's own one-at-a-time sending does not chain; see `commitDrawerPatch`.)
 const manualDrawerWriteTails = new Map<string, Promise<void>>()
 
 function drawerRecordById(recordId: string): MetaRecord | null {
@@ -3777,9 +3780,27 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const failure = manualRow
-    ? await grid.patchCell(record.id, fieldId, value, record.version, { onCommitted: (version) => { committed.version = version } })
-    : await grid.patchCell(record.id, fieldId, value, record.version)
+  // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`).
+  // The drawer shows a copy of a record that is on the page too (`deepLinkedRecord`, kept after a realtime merge).
+  // That copy takes a save only once it is accepted, so a save made on it while an earlier one is out carries the
+  // version from before that one: it is sent as given, and conflicts (as on main), rather than being taken as made on
+  // the earlier save. (The grid never chains a record off the page.) A manual row's steps never overlap (above), and
+  // each carries the version the step before returned, so they need no chain.
+  const unchained = deepLinkedRecord.value?.id === record.id && grid.rows.value.some((row) => row.id === record.id)
+  const write = manualRow
+    ? grid.patchCell(record.id, fieldId, value, record.version, {
+      onCommitted: (version) => { committed.version = version },
+      ...(unchained ? { chainVersion: false } : {}),
+    })
+    : unchained
+      ? grid.patchCell(record.id, fieldId, value, record.version, { chainVersion: false })
+      : grid.patchCell(record.id, fieldId, value, record.version)
+  // The composable's local row-action refusal sets its error before the call returns (an older write of the record
+  // that fails while this one waits sets it later, and is not this one's).
+  const refusedLocally = grid.error.value
+  const failure = await write
+  // Replaced before it was sent by a newer save of the same field, whose answer is the field's.
+  if (failure === CELL_WRITE_SUPERSEDED) return
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
   if (failure) {
     // Route by the failure the composable returned for THIS patch — still guarded on record + field
@@ -3819,10 +3840,10 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
     showError(toastText(failure.message))
     return
   }
-  if (grid.error.value) {
+  if (refusedLocally) {
     // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
     // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
-    showError(grid.error.value)
+    showError(refusedLocally)
     return
   }
   onCommitted?.()
@@ -3832,6 +3853,8 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
+      // A manual row's step takes the version the server returned; otherwise the server moves a record one version
+      // per accepted write.
       version: committed.version ?? deepLinkedRecord.value.version + 1,
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
