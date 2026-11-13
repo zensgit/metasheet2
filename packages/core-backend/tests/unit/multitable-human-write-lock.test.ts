@@ -19,8 +19,12 @@
  *       imports the lock module.
  *   L10 `hasHumanWriteLockedRequiredField` (R68): a locked column that its own validation marks required means no
  *       person can create a record on the sheet; `GET /context` reports it as `recordCreateBlockedByLock`.
+ *   L11 (R-71 7.4 PR-4) 发料确认日期 `issueConfirmDate`, the machine write-back DATE column: the plugin's project-sheet
+ *       lock pass marks it, and the host refuses a person write to it with the closed code (the plugin half and the
+ *       host half chained on the real column id and type). Real-DB: stock-preparation-fieldperm-write-gate-realdb PB-03.
  */
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
@@ -284,5 +288,52 @@ describe('L10 hasHumanWriteLockedRequiredField: a locked + required column block
       const row = serializeFieldRow({ id: 'fld', name: 'n', type, property: { ...LOCK, ...REQUIRED }, order: 0 })
       expect(hasHumanWriteLockedRequiredField([row]), type).toBe(true)
     }
+  })
+})
+
+describe('L11 (R-71 7.4 PR-4) 发料确认日期 on a project sheet: the plugin locks it, the host refuses every person write', () => {
+  const requireCjs = createRequire(import.meta.url)
+  const PLUGIN = '../../../../plugins/plugin-integration-core'
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const pluginTargets = requireCjs(`${PLUGIN}/lib/stock-preparation-project-targets.cjs`) as any
+  const pluginTemplates = requireCjs(`${PLUGIN}/lib/stock-preparation-templates.cjs`) as any
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+  const ISSUE = 'issueConfirmDate'
+  const service = new RecordWriteService({} as never, {} as never, {} as never)
+
+  it('the template declares it a plm_system DATE column on the machine write-back list', () => {
+    const field = pluginTemplates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find((f: { id: string }) => f.id === ISSUE)
+    expect(field).toMatchObject({ id: ISSUE, type: 'date', ownership: 'plm_system' })
+    expect([...pluginTemplates.MACHINE_WRITEBACK_FIELD_IDS]).toContain(ISSUE)
+  })
+
+  it('the plugin lock pass marks it; the stored property refuses a person write with FIELD_READONLY_PLM_SYSTEM', async () => {
+    // A host holding the project sheet's date column, unlocked (a sheet the PR-3 repair just added it to).
+    const stored = new Map<string, Record<string, unknown>>([[ISSUE, {}]])
+    const provisioning = {
+      async getObjectField({ fieldId }: { fieldId: string }) {
+        return stored.has(fieldId) ? { id: `fld_${fieldId}`, property: { ...stored.get(fieldId) } } : null
+      },
+      async patchObjectFieldProperty({ fieldId, propertyPatch }: { fieldId: string; propertyPatch: Record<string, unknown> }) {
+        stored.set(fieldId, { ...(stored.get(fieldId) || {}), ...propertyPatch })
+        return { id: `fld_${fieldId}`, property: { ...stored.get(fieldId) } }
+      },
+    }
+    const objectId = pluginTargets.deriveProjectSheetObjectId('tenant_l11', 'PRJ-L11')
+    const marked = await pluginTargets.markProjectSheetPlmSystemColumns({ provisioning, projectId: 'tenant_l11:integration-core', objectId })
+    expect(marked.markedFieldIds).toEqual([ISSUE])
+    // The host's own sanitizer for a date column keeps the lock; the person floor and the derived permission read it.
+    const property = sanitizeFieldProperty('date', stored.get(ISSUE))
+    expect(property.humanWriteLock).toBe('plm_system')
+    expect(isFieldReadOnlyForPeople({ type: 'date', property })).toBe(true)
+    expect(isFieldAlwaysReadOnly({ type: 'date', property })).toBe(false) // the plugin (YiDa write-back) path still writes it
+    const guard = { type: 'date' as const, readOnly: isFieldReadOnlyForPeople({ type: 'date', property }), hidden: false, property }
+    const error = await service.validateChanges({
+      sheetId: 'sheet_l11',
+      changesByRecord: new Map([['rec_1', [{ fieldId: `fld_${ISSUE}`, value: '2026-11-06' }]]]),
+      fieldById: new Map([[`fld_${ISSUE}`, guard]]),
+    }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(RecordFieldForbiddenError)
+    expect(error).toMatchObject({ code: 'FIELD_READONLY_PLM_SYSTEM', fieldId: `fld_${ISSUE}` })
   })
 })
