@@ -1978,7 +1978,7 @@ describe('adminDirectoryRouter', () => {
       summary: {
         code: 'scope_or_root_misconfigured',
         title: '通讯录范围或根部门疑似配置不当',
-        nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+        nextAction: '请按预期的同步范围核对应用通讯录权限范围与根部门 ID；正常的叶子部门或小范围目录也可能出现此结果。本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
       },
       warnings: ['根部门 1 未返回任何子部门。'],
     })
@@ -2012,11 +2012,37 @@ describe('adminDirectoryRouter', () => {
         summary: {
           code: 'scope_or_root_misconfigured',
           title: '通讯录范围或根部门疑似配置不当',
-          nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+          nextAction: '请按预期的同步范围核对应用通讯录权限范围与根部门 ID；正常的叶子部门或小范围目录也可能出现此结果。本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
         },
         warnings: ['根部门 1 未返回任何子部门。'],
       },
     })
+  })
+
+  // The connection probe's member-detail read rejects through the same route catch as any other read:
+  // a DingTalk business rejection keeps only its errcode, any other failure gets the fixed sentence,
+  // and neither is ever reported as a healthy result.
+  it.each([
+    [
+      'a DingTalk business rejection',
+      // errcode 60011 is synthetic (not from the code); the errmsg carries a marker that must not surface.
+      () => new DingTalkBusinessError('Failed to read DingTalk user detail', { errcode: 60011, errmsg: 'MARKER_detail_denied' }),
+      'Failed to test directory integration: DingTalk rejected the request (errcode 60011)',
+    ],
+    [
+      'a plain error',
+      () => new Error('MARKER_detail_denied synthetic failure'),
+      'Failed to test directory integration',
+    ],
+  ])('answers 400 DIRECTORY_TEST_FAILED when the probe rejects with %s', async (_label, makeError, message) => {
+    directoryMocks.testDirectoryIntegration.mockRejectedValue(makeError())
+    const response = await invokeRoute('post', '/integrations/test', {
+      body: { name: 'DingTalk CN', corpId: 'dingcorp', appKey: 'ding-app-key', appSecret: 'synthetic-secret' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({ ok: false, error: { code: 'DIRECTORY_TEST_FAILED', message, details: undefined } })
+    expect(JSON.stringify(response.body)).not.toContain('MARKER_detail_denied')
   })
 
   it('attributes identity metadata to the authenticated admin without scheduling or synchronizing', async () => {

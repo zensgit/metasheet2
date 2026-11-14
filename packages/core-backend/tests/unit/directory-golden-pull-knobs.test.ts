@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * Non-default pull settings reach every provider call: the configured base url on each of the
- * fifteen forwarding sites (department pull, member pull, diagnostic sample, connection test),
+ * sixteen forwarding sites (department pull, member pull, diagnostic sample, connection test),
  * the configured root department id, and the page size of each member read.
  *
  * Harness rules: closed provider-client factory, no database, identifiers carry the `a0g-` prefix.
@@ -124,6 +124,8 @@ describe('non-default pull settings reach every provider call', () => {
       ['token', ROOT, 0, 7, { baseUrl: BASE_URL }],
       ['token', ROOT, 0, 7, { baseUrl: BASE_URL, containAccessLimit: true }],
     ])
+    // then one logical detail read of the ordinary sample member, with the same base url
+    expect(clientMocks.getDingTalkUserDetail.mock.calls).toEqual([['token', MEMBER, { baseUrl: BASE_URL }]])
   })
 
   it('the connection test never reads a page larger than the configured size', async () => {
@@ -161,8 +163,8 @@ describe('non-default pull settings reach every provider call', () => {
     })
 
     const calls = allCalls()
-    // 3 department pull + 3 member pull + 4 sample + 5 connection test
-    expect(calls).toHaveLength(15)
+    // 3 department pull + 3 member pull + 4 sample + 6 connection test (token + 4 list reads + 1 member detail)
+    expect(calls).toHaveLength(16)
     for (const call of calls) expect(optionsOf(call).baseUrl).toBe(BASE_URL)
   })
 })

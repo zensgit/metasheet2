@@ -446,6 +446,12 @@ async function listOperatorProjectDirectory({
   // directory then says the pending counts cannot be trusted, which the FE already renders). Absent
   // (`null`, a direct module caller that did not ask): the confirmation ledger alone, as before PR-5.
   refreshHoldCounts = null,
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): the per-row REFRESH FACTS the route derived for the
+  // registry rows — `{ ready, byProjectNo: Map<projectNo, { refreshBlocked, pendingReviewCount }> }`, where a project
+  // absent from the map is NOT governed (null token, zero reviews) and `ready: false` (the governed index could not be
+  // read) makes every registry row `unreadable`. Projected only on REGISTRY rows (the S3 keys), so the switch-off and
+  // non-union answers stay byte-identical; `null` (governance not wired, or a direct module caller) adds no key.
+  refreshFacts = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
@@ -620,6 +626,22 @@ async function listOperatorProjectDirectory({
       row.archived = registry ? registry.status === 'archived' : null
       row.pulledRowCount = registry && Number.isInteger(registry.rowCount) ? registry.rowCount : null
       row.missingComponentsCount = registry && Number.isInteger(registry.missingComponentsCount) ? registry.missingComponentsCount : null
+      // 8(c): the hold count alone (the union above folds it into pendingDecisionCount), the pending reviews, and the
+      // closed blocked token — null for a not-governed or settled-complete project, never a guessed 「可以导出」.
+      if (refreshFacts) {
+        const facts = rowProjectNo && refreshFacts.byProjectNo instanceof Map ? refreshFacts.byProjectNo.get(rowProjectNo) : undefined
+        row.openRefreshHoldCount = holdCounts && holdCounts.ready && rowProjectNo ? (holdCounts.byProjectNo.get(rowProjectNo) || 0) : null
+        if (refreshFacts.ready !== true) {
+          row.pendingReviewCount = null
+          row.refreshBlocked = 'unreadable'
+        } else if (!facts) {
+          row.pendingReviewCount = 0
+          row.refreshBlocked = null
+        } else {
+          row.pendingReviewCount = Number.isInteger(facts.pendingReviewCount) ? facts.pendingReviewCount : null
+          row.refreshBlocked = typeof facts.refreshBlocked === 'string' ? facts.refreshBlocked : null
+        }
+      }
     }
     return row
   }

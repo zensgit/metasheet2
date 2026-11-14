@@ -1,13 +1,15 @@
 /**
  * Pull-source rule leaf module (src/directory/pull-source-rule.ts).
  *
- * Pins the invariants of the module itself; nothing in the application calls it yet, so there is no
- * behaviour to compare against. No database: statements go through an injected fake `query`.
+ * Pins the invariants of the module itself: what its fragments, statements, helpers and error types
+ * are. What its callers do with them is pinned next to each caller. No database: statements go through
+ * an injected fake `query`.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
+import { APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL, NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL } from '../../src/directory/approval-routing-status'
 import * as leafModule from '../../src/directory/pull-source-rule'
 import {
   APPROVAL_ROUTING_POLICY_EXISTS_SQL,
@@ -28,6 +30,8 @@ import {
   directoryOrgLockKey,
   directoryOrgLockSql,
   isApprovalRoutingPolicyRequired,
+  nonActivePullTypePredicateSql,
+  pullTypePredicateSql,
   isApprovalRoutingRequirePolicyEnabled,
   pullSourceKeySql,
   pullSourcePredicateSql,
@@ -147,6 +151,63 @@ describe('pull-source predicate', () => {
     expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toBe(
       "SELECT 1 AS present FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = 'approval_routing'",
     )
+  })
+})
+
+describe('pull-type fragments', () => {
+  it('the pull-type fragment is the provider condition alone', () => {
+    expect(pullTypePredicateSql('i')).toBe("(i.provider <> 'local')")
+    expect(pullTypePredicateSql()).toBe("(i.provider <> 'local')")
+    expect(pullTypePredicateSql('ri')).toBe("(ri.provider <> 'local')")
+  })
+
+  it('the non-active pull-type fragment is the complement of active within pull type', () => {
+    expect(nonActivePullTypePredicateSql('i')).toBe("(i.provider <> 'local' AND i.status <> 'active')")
+    expect(nonActivePullTypePredicateSql()).toBe("(i.provider <> 'local' AND i.status <> 'active')")
+    expect(nonActivePullTypePredicateSql('ri')).toBe("(ri.provider <> 'local' AND ri.status <> 'active')")
+    // Parenthesised, so a caller can negate or combine either fragment without changing its meaning.
+    expect(`NOT ${nonActivePullTypePredicateSql()}`).toBe("NOT (i.provider <> 'local' AND i.status <> 'active')")
+  })
+
+  it('all three fragments are assembled around one pull-type condition written once', () => {
+    const code = leafSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code.split("provider <> 'local'")).toHaveLength(2)
+    expect(code.split("status <> 'active'")).toHaveLength(2)
+    expect(code.split("status = 'active'")).toHaveLength(2)
+    expect(code.split('pullTypeConditionSql(a)')).toHaveLength(4)
+    for (const alias of ['i', 'x']) {
+      const pullType = pullTypePredicateSql(alias).slice(1, -1)
+      expect(pullSourcePredicateSql(alias)).toBe(`(${pullType} AND ${alias}.status = 'active')`)
+      expect(nonActivePullTypePredicateSql(alias)).toBe(`(${pullType} AND ${alias}.status <> 'active')`)
+    }
+  })
+
+  it('reject an alias that is not a plain identifier', () => {
+    for (const alias of ['', 'a.b', "i; DROP TABLE x", 'I', '1a', 'a b']) {
+      expect(() => pullTypePredicateSql(alias), alias).toThrow(TypeError)
+      expect(() => nonActivePullTypePredicateSql(alias), alias).toThrow(TypeError)
+    }
+  })
+
+  it('the count of linked accounts under non-active pull sources takes its condition from the fragment', () => {
+    const carrier = readFileSync(join(SRC_ROOT, 'directory/approval-routing-status.ts'), 'utf8')
+    expect(carrier).toMatch(/import \{[^}]*\bnonActivePullTypePredicateSql\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(carrier).not.toMatch(/provider\s*<>\s*'local'/)
+    expect(carrier).not.toMatch(/status\s*<>\s*'active'/)
+    expect(carrier).toContain("WHERE i.org_id = $1 AND ${nonActivePullTypePredicateSql('i')}`")
+    expect(NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL).toBe(
+      `SELECT count(DISTINCT a.id)::int AS linked_account_count
+     FROM directory_integrations i
+     JOIN directory_accounts a ON a.integration_id = i.id AND a.is_active = true
+     JOIN directory_account_links dal ON dal.directory_account_id = a.id AND dal.link_status = 'linked'
+    WHERE i.org_id = $1 AND (i.provider <> 'local' AND i.status <> 'active')`,
+    )
+    expect(APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL).toContain("WHERE i.org_id = $1 AND (i.provider <> 'local')")
+    // The key naming the count appears in source only where the count is produced.
+    const carriers = walkTs(SRC_ROOT)
+      .filter((file) => readFileSync(file, 'utf8').includes('nonActivePullSourceLinkedAccountCount'))
+      .map((file) => file.slice(SRC_ROOT.length + 1))
+    expect(carriers).toEqual(['directory/approval-routing-status.ts'])
   })
 })
 

@@ -769,6 +769,87 @@ function anchorOfRow(row, anchorSet) {
   return anchorSet.has(row.plannedMs) ? row.plannedMs : null
 }
 
+// THE 首次 POOL: the rows already labelled when a row is decided, indexed by normalized part id (rule A) and by the
+// path of every predecessor (rule F: active === false), so a match is a lookup, not a scan of the pool (a scan per row
+// is quadratic at the reader's bound). decideFirstPullBatch is order-independent, so the index changes no answer.
+function createHistoryPool() {
+  return { byPart: new Map(), byPath: new Map(), entries: [] }
+}
+
+function poolAdd(pool, entry) {
+  pool.entries.push(entry)
+  if (!pool.byPart.has(entry.partId)) pool.byPart.set(entry.partId, [])
+  pool.byPart.get(entry.partId).push(entry)
+  if (entry.active === false && entry.path) {
+    const key = JSON.stringify(entry.path)
+    if (!pool.byPath.has(key)) pool.byPath.set(key, [])
+    pool.byPath.get(key).push(entry)
+  }
+}
+
+function poolMatches(pool, rule, row) {
+  if (rule === 'material') return row.partId === '' ? [] : (pool.byPart.get(row.partId) || [])
+  if (!row.path) return []
+  let matched = []
+  for (let start = 1; start < row.path.length; start += 1) {
+    const candidates = pool.byPath.get(JSON.stringify(row.path.slice(start)))
+    if (candidates) matched = matched.concat(candidates)
+  }
+  return matched
+}
+
+// The 首次 pool of the rows already labelled (a gap pass's priorRows, an earlier segment's decided rows).
+function priorPoolOf(priorRows) {
+  const pool = createHistoryPool()
+  for (const prior of Array.isArray(priorRows) ? priorRows : []) {
+    if (!isPlainObject(prior)) continue
+    poolAdd(pool, {
+      partId: normalizePartId(prior.partId),
+      path: pathTokensOf(prior.path),
+      active: prior.active,
+      firstPullBatch: cellText(prior.firstPullBatch),
+      createdAt: prior.createdAt === undefined ? null : prior.createdAt,
+    })
+  }
+  return pool
+}
+
+/**
+ * Step 7 over ONE planned segment, shared by the planner and by `pullBatchHistoryAssignments` (so the re-run of a
+ * persisted plan labels exactly as the planning did — the crash-continuation contract is structural, not only
+ * sampled). `clusters` in ascending k, each `{ k, label, members }` of normalized history rows; `unplaced` the rows
+ * no cluster holds (本次 历史批次未知). 首次 of a cluster's row is decided over `pool` (rows of EARLIER clusters and
+ * the prior rows; its own cluster is "this batch"); every unplaced row over the pool after all clusters. Each
+ * cluster's decided rows join `pool` (mutated) once the cluster is done; the unplaced rows join it at the end (an
+ * extension segment planned later sees them as prior rows). `keepFirst` (rule F only, R-65 C12 choice (b)): a Map
+ * recordId -> the 首次 cell a row already carries, kept instead of recomputed (and fed to the pool as such).
+ */
+function labelHistorySegment({ clusters, unplaced, pool, rule, lang, openedAtByLabel, assignments, keepFirst }) {
+  const unknown = PULL_BATCH_UNKNOWN_LABELS[lang]
+  const firstFor = (row, fallback) => {
+    if (keepFirst && keepFirst.has(row.recordId)) return keepFirst.get(row.recordId)
+    const first = decideFirstPullBatch(poolMatches(pool, rule, row), { locale: lang, openedAtByLabel })
+    return first === null ? fallback : first
+  }
+  const entryOf = (row, firstPullBatch) => ({ partId: row.partId, path: row.path, active: row.active, firstPullBatch, createdAt: row.createdMs === null ? null : isoOf(row.createdMs) })
+  for (const cluster of clusters) {
+    const decided = []
+    for (const row of cluster.members) {
+      const firstPullBatch = firstFor(row, cluster.label)
+      assignments.set(row.recordId, { k: cluster.k, pullBatch: cluster.label, firstPullBatch })
+      decided.push(entryOf(row, firstPullBatch))
+    }
+    for (const entry of decided) poolAdd(pool, entry)
+  }
+  const after = []
+  for (const row of unplaced) {
+    const firstPullBatch = firstFor(row, unknown)
+    assignments.set(row.recordId, { k: null, pullBatch: unknown, firstPullBatch })
+    after.push(entryOf(row, firstPullBatch))
+  }
+  for (const entry of after) poolAdd(pool, entry)
+}
+
 /**
  * Plan the history of `rows` (design §8.3).
  *   base          0 at the first install; the ledger's max(batch_no, history_batch_count) in a gap pass
@@ -851,6 +932,9 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
     }
     return cluster
   }
+  // The time cluster of every placed row, indexed once (a linear lookup per row is quadratic at the reader's bound).
+  const timeClusterOf = new Map()
+  for (const cluster of clusters) for (const member of cluster.members) timeClusterOf.set(member, cluster)
   const assignment = new Map()
   const exceptionRows = []
   const placementRows = []
@@ -874,7 +958,7 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
       unplacedRows += 1
       continue
     }
-    const byTime = clusters.find((cluster) => cluster.members.includes(row))
+    const byTime = timeClusterOf.get(row)
     const own = anchorOfRow(row, anchorSet)
     if (own !== null && byTime && byTime.segmentAnchorMs !== own) {
       byTime.members = byTime.members.filter((member) => member !== row)
@@ -923,45 +1007,27 @@ function planPullBatchHistory({ rows, priorRows, gapMinutes, base, coveredUntil,
 
   // Step 7: labels. 本次 = the cluster's inferred label; 首次 by the configured rule, in cluster order, over the rows
   // already labelled (a gap pass's priorRows) and the rows of EARLIER clusters (rows of the same cluster are "this
-  // batch"). Rule F reads each row's CURRENT active state: there is no historical one (R-65 C10).
-  const unknown = PULL_BATCH_UNKNOWN_LABELS[lang]
-  const rule = cfg.firstPullBatchRule
+  // batch"). Rule F reads each row's CURRENT active state: there is no historical one (R-65 C10). The labelling is
+  // the shared `labelHistorySegment`, the same code `pullBatchHistoryAssignments` re-runs from the persisted plan
+  // (the crash-continuation contract, BI-2).
   const openedAtByLabel = openedAtIndex(ledgerBatches)
   for (const cluster of kept) {
     if (!openedAtByLabel.has(cluster.label) || openedAtByLabel.get(cluster.label) < cluster.startMs) openedAtByLabel.set(cluster.label, cluster.startMs)
   }
-  const labelled = []
-  const poolEntry = (entry) => ({
-    partId: normalizePartId(entry.partId),
-    path: pathTokensOf(entry.path),
-    active: entry.active,
-    firstPullBatch: cellText(entry.firstPullBatch),
-    createdAt: entry.createdAt === undefined ? null : entry.createdAt,
-  })
-  for (const prior of Array.isArray(priorRows) ? priorRows : []) if (isPlainObject(prior)) labelled.push(poolEntry(prior))
-  const matchFor = (row, pool) => {
-    if (rule === 'material') return row.partId === '' ? [] : pool.filter((entry) => entry.partId === row.partId)
-    if (!row.path) return []
-    return pool.filter((entry) => entry.active === false && entry.path && isProperSuffix(entry.path, row.path))
-  }
-  const firstFor = (row, fallback) => {
-    const first = decideFirstPullBatch(matchFor(row, labelled), { locale: lang, openedAtByLabel })
-    return first === null ? fallback : first
-  }
+  const labelled = priorPoolOf(priorRows)
   const assignments = new Map()
-  for (const cluster of kept) {
-    const decided = []
-    for (const row of cluster.members) {
-      const firstPullBatch = firstFor(row, cluster.label)
-      assignments.set(row.recordId, { k: cluster.k, pullBatch: cluster.label, firstPullBatch })
-      decided.push({ partId: row.partId, path: row.path, active: row.active, firstPullBatch, createdAt: row.createdMs === null ? null : isoOf(row.createdMs) })
-    }
-    labelled.push(...decided)
-  }
-  for (const row of input) {
-    if (assignments.has(row.recordId)) continue
-    assignments.set(row.recordId, { k: null, pullBatch: unknown, firstPullBatch: firstFor(row, unknown) })
-  }
+  const keptMembers = new Set()
+  for (const cluster of kept) for (const member of cluster.members) keptMembers.add(member)
+  labelHistorySegment({
+    clusters: kept.map((cluster) => ({ k: cluster.k, label: cluster.label, members: cluster.members })),
+    unplaced: input.filter((row) => !keptMembers.has(row)),
+    pool: labelled,
+    rule: cfg.firstPullBatchRule,
+    lang,
+    openedAtByLabel,
+    assignments,
+    keepFirst: null,
+  })
 
   const plan = {
     scheme: PULL_BATCH_HISTORY_SCHEME,
@@ -1074,6 +1140,486 @@ function resolvePullBatchHistoryCount({ plan, historyMode, confirmHistoricalBatc
   })
 }
 
+// ── the per-sheet install (design §8.2-§8.6; BI-2) — pure, portable ─────────────────────────────────────────────
+//
+// THE PERSISTED INSTALL PLAN (`_sheet.history_plan`, the "envelope"). A `planPullBatchHistory` plan (scheme
+// pull-batch-history/v1, so `pullBatchHistoryMembership` and `resolvePullBatchHistoryCount` read it unchanged) plus:
+//   run        'first_install' | 'gap_pass'
+//   segments   [{ base, K, coveredUntil }] — segment 0 is the plan the dry-run showed; each later one an EXTENSION
+//              (design §8.2 I5: rows created after the plan's coveredUntil, planned after it and numbered after it).
+//              The top-level clusters / exceptions / placements / cuts / K / coveredUntil are the FLATTENED union, so
+//              the store's lock rule (every cluster label) and membership read one list.
+//   gapPass    (gap pass only) { rows: [recordId] — THE RUN SET of segment 0, sorted; joins: [{ recordId, label }]; interleaved:
+//              [{ recordId }]; newestOpenedAt } (design §8.6; critic BI-2 C1: a gap pass labels ITS rows only, never the rows
+//              already carrying live labels, whose membership in a gap-cluster interval means nothing)
+//   + the undigested run facts the install records: historyMode, previousHistoryStatus, aborted (and coveredUntil, the
+//   read's clock — MF2).
+// `digest` = `pullBatchInstallPlanDigest(envelope)` (critic C13: never the planner's own digest once a gap pass or an
+// extension is attached).
+//
+// THE RUN SET R (critic C1). First install: every evidence row the plan covers. Gap pass: `gapPass.rows` plus the rows of
+// the extension segments. The fixed-point check, the writes, unknown mode and the resolve's blank check walk R only; the
+// 首次 pool's prior rows are the evidence rows NOT in R, with their cells as read (stable while installing: every lane
+// refuses, and the install never writes them).
+//
+// RE-RUNS NEVER RECOMPUTE (P2-3). `pullBatchHistoryAssignments` re-labels R from the persisted plan through the planner's
+// own labelling code (`labelHistorySegment`), segment by segment, so a crash continuation writes byte-identical labels.
+// RULE F RESIDUAL (critic C12, choice (b), recorded under R-65): under 'predecessor_suffix' a row of R whose 首次 cell
+// is already set KEEPS it (and feeds the pool as such) — today's active state may have moved since the cell was written;
+// rule A ('material') never reads the active state and is fixed-point checked in full.
+const PULL_BATCH_APPROVAL_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$/
+// The planner's record-ref key (stock-preparation-conflict-planner.cjs EXISTING_ROW_RECORD_REF), spelled by its registry
+// key like the created-by key above (critic C2): the reader attaches `{ id, version }` from the record ENVELOPE.
+const EXISTING_ROW_RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+const PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS = Object.freeze(['digest', 'coveredUntil', 'previousHistoryStatus', 'historyMode', 'aborted'])
+const PULL_BATCH_INSTALL_PLAN_RUNS = Object.freeze(['first_install', 'gap_pass'])
+
+function planChanged(reason, extra = {}) {
+  return new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'the persisted pull-batch plan cannot be extended or replaced this way; preview again', { reason, ...extra })
+}
+
+function compareIds(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** The confirmation digest of an install envelope: everything but the undigested run facts (and each segment's clock). */
+function pullBatchInstallPlanDigest(envelope) {
+  if (!isPlainObject(envelope)) throw historyInvalid('plan')
+  const rest = {}
+  for (const key of Object.keys(envelope)) {
+    if (PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS.includes(key)) continue
+    rest[key] = envelope[key]
+  }
+  if (Array.isArray(rest.segments)) rest.segments = rest.segments.map((segment) => ({ base: segment && segment.base, K: segment && segment.K }))
+  return sha256Hex(canonicalJson(rest))
+}
+
+function sealEnvelope(envelope) {
+  const sealed = { ...envelope }
+  delete sealed.digest
+  sealed.digest = pullBatchInstallPlanDigest(sealed)
+  return Object.freeze(sealed)
+}
+
+function envelopeOf(plan, run, extra = {}) {
+  const { digest: _digest, ...rest } = plan
+  return sealEnvelope({ ...rest, run, segments: [{ base: plan.base, K: plan.K, coveredUntil: plan.coveredUntil }], ...extra })
+}
+
+/** A persisted install envelope, or 500 STAMP_INVALID { field: 'plan' } (a caller defect or a corrupt row). */
+function assertInstallEnvelope(plan) {
+  if (!isPlainObject(plan) || plan.scheme !== PULL_BATCH_HISTORY_SCHEME || !PULL_BATCH_INSTALL_PLAN_RUNS.includes(plan.run)
+    || !Array.isArray(plan.clusters) || !Array.isArray(plan.segments) || plan.segments.length === 0
+    || !Number.isSafeInteger(plan.K) || !Number.isSafeInteger(plan.base) || timeMsOf(plan.coveredUntil) === null
+    || !PULL_BATCH_LOCALES.includes(plan.locale)) {
+    throw historyInvalid('plan')
+  }
+  for (const segment of plan.segments) {
+    if (!isPlainObject(segment) || !Number.isSafeInteger(segment.base) || !Number.isSafeInteger(segment.K) || timeMsOf(segment.coveredUntil) === null) throw historyInvalid('plan')
+  }
+  if (plan.run === 'gap_pass' && (!isPlainObject(plan.gapPass) || !Array.isArray(plan.gapPass.rows))) throw historyInvalid('plan')
+  return plan
+}
+
+function configOfPlan(plan) {
+  return { firstPullBatchRule: plan.firstPullBatchRule, labelFormat: plan.labelFormat }
+}
+
+/** First install (design §8.3): every covered evidence row, base 0. Answers the sealed envelope. */
+function planPullBatchFirstInstall({ rows, gapMinutes, coveredUntil, locale, config } = {}) {
+  const { plan } = planPullBatchHistory({ rows, priorRows: [], gapMinutes, base: 0, coveredUntil, locale, config, ledgerBatches: [] })
+  return envelopeOf(plan, 'first_install')
+}
+
+// Joins and interleaved rows of a gap pass are decided over the PRIOR rows only (design §8.6), then join the pool.
+function labelGapPrePhase({ joins, interleaved, byId, pool, rule, lang, openedAtByLabel, assignments, keepFirst }) {
+  const unknown = PULL_BATCH_UNKNOWN_LABELS[lang]
+  const decided = []
+  const decide = (row, pullBatch) => {
+    let firstPullBatch
+    if (keepFirst && keepFirst.has(row.recordId)) firstPullBatch = keepFirst.get(row.recordId)
+    else {
+      const first = decideFirstPullBatch(poolMatches(pool, rule, row), { locale: lang, openedAtByLabel })
+      firstPullBatch = first === null ? pullBatch : first
+    }
+    assignments.set(row.recordId, { k: null, pullBatch, firstPullBatch })
+    decided.push({ partId: row.partId, path: row.path, active: row.active, firstPullBatch, createdAt: row.createdMs === null ? null : isoOf(row.createdMs) })
+  }
+  for (const join of joins) {
+    const row = byId.get(join.recordId)
+    if (row) decide(row, join.label)
+  }
+  for (const entry of interleaved) {
+    const row = byId.get(entry.recordId)
+    if (row) decide(row, unknown)
+  }
+  for (const entry of decided) poolAdd(pool, entry)
+}
+
+/**
+ * Gap pass (design §8.6). `gapRows`: the evidence rows to label (history rows); `priorRows`: every other evidence row
+ * with its cells as read ({ recordId, createdAt, decision, plannedAt, active, partId, path, pullBatch, firstPullBatch }).
+ * base = max(max non-void batch_no, historyBatchCount). EXACT JOIN first: a gap row add-stamped with plan time p joins
+ * the live label L when ≥ 1 prior row is add-stamped with the same p and carries a LIVE 本次, and every such row carries
+ * the same L (two labels for one plan time => no join). Then INTERLEAVED: a remaining gap row created before the newest
+ * non-void batch opened => 本次 历史批次未知. The rest are planned after base. Answers the sealed envelope.
+ */
+function planPullBatchGapPass({ gapRows, priorRows, ledgerBatches, historyBatchCount, gapMinutes, coveredUntil, locale, config } = {}) {
+  const cfg = normalizePullBatchConfig(config)
+  const lang = assertLocale(locale)
+  const input = normalizeHistoryRows(gapRows)
+  const priors = Array.isArray(priorRows) ? priorRows.filter(isPlainObject) : []
+  let maxBatchNo = 0
+  let newestOpenedMs = null
+  for (const batch of Array.isArray(ledgerBatches) ? ledgerBatches : []) {
+    if (!batch || batch.status === 'void') continue
+    if (Number.isSafeInteger(batch.batchNo) && batch.batchNo > maxBatchNo) maxBatchNo = batch.batchNo
+    const openedMs = timeMsOf(batch.openedAt)
+    if (openedMs !== null && (newestOpenedMs === null || openedMs > newestOpenedMs)) newestOpenedMs = openedMs
+  }
+  const floor = historyBatchCount === undefined || historyBatchCount === null ? 0 : historyBatchCount
+  if (!Number.isSafeInteger(floor) || floor < 0) throw historyInvalid('historyBatchCount')
+  const base = Math.max(maxBatchNo, floor)
+  // plan time -> the live 本次 labels of the prior add rows stamped with it
+  const liveByPlanTime = new Map()
+  for (const prior of priors) {
+    if (prior.decision !== 'add') continue
+    const plannedMs = timeMsOf(prior.plannedAt)
+    if (plannedMs === null) continue
+    const parsed = parsePullBatchLabel(prior.pullBatch)
+    if (parsed.kind !== 'live') continue
+    if (!liveByPlanTime.has(plannedMs)) liveByPlanTime.set(plannedMs, new Set())
+    liveByPlanTime.get(plannedMs).add(String(prior.pullBatch).trim())
+  }
+  const joins = []
+  const interleaved = []
+  const rest = []
+  const restSource = []
+  input.forEach((row, index) => {
+    const labels = row.decision === 'add' && row.plannedMs !== null ? liveByPlanTime.get(row.plannedMs) : undefined
+    if (labels && labels.size === 1) {
+      joins.push({ recordId: row.recordId, label: labels.values().next().value })
+      return
+    }
+    if (newestOpenedMs !== null && row.createdMs !== null && row.createdMs < newestOpenedMs) {
+      interleaved.push({ recordId: row.recordId })
+      return
+    }
+    rest.push(row)
+    restSource.push(gapRows[index])
+  })
+  joins.sort((a, b) => compareIds(a.recordId, b.recordId))
+  interleaved.sort((a, b) => compareIds(a.recordId, b.recordId))
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  const pool = priorPoolOf(priors)
+  const preAssignments = new Map()
+  labelGapPrePhase({ joins, interleaved, byId: new Map(input.map((row) => [row.recordId, row])), pool, rule: cfg.firstPullBatchRule, lang, openedAtByLabel, assignments: preAssignments, keepFirst: null })
+  const { plan } = planPullBatchHistory({ rows: restSource, priorRows: pool.entries, gapMinutes, base, coveredUntil, locale: lang, config: cfg, ledgerBatches })
+  return envelopeOf(plan, 'gap_pass', {
+    gapPass: {
+      rows: input.map((row) => row.recordId).sort(compareIds),
+      joins,
+      interleaved,
+      newestOpenedAt: newestOpenedMs === null ? null : isoOf(newestOpenedMs),
+    },
+  })
+}
+
+// Which segment a k belongs to; which segment an unplaced row's createdAt belongs to (null createdAt => segment 0).
+function segmentIndexOfK(segments, k) {
+  for (let index = 0; index < segments.length; index += 1) {
+    if (k > segments[index].base && k <= segments[index].base + segments[index].K) return index
+  }
+  return -1
+}
+
+function segmentIndexOfTime(segments, createdMs) {
+  if (createdMs === null) return 0
+  for (let index = 0; index < segments.length; index += 1) {
+    if (createdMs <= timeMsOf(segments[index].coveredUntil)) return index
+  }
+  return -1
+}
+
+function openedAtOfEnvelope(plan, ledgerBatches) {
+  const openedAtByLabel = openedAtIndex(ledgerBatches)
+  for (const cluster of plan.clusters) {
+    const startMs = timeMsOf(cluster.startAt)
+    if (startMs === null || !nonBlankString(cluster.label)) continue
+    if (!openedAtByLabel.has(cluster.label) || openedAtByLabel.get(cluster.label) < startMs) openedAtByLabel.set(cluster.label, startMs)
+  }
+  return openedAtByLabel
+}
+
+// `pullBatchHistoryMembership` with its lookups indexed once (a find per row is quadratic at the reader's bound);
+// the same answer for every row (the unit suite pins the two equal).
+function membershipIndexOf(plan) {
+  const exceptions = new Map((plan.exceptions || []).map((entry) => [entry.recordId, entry.k]))
+  const placements = new Map((plan.placements || []).map((entry) => [entry.recordId, entry.k]))
+  const coveredMs = timeMsOf(plan.coveredUntil)
+  const intervals = (plan.clusters || [])
+    .filter((cluster) => cluster.timeRows > 0)
+    .map((cluster) => ({ k: cluster.k, startMs: timeMsOf(cluster.startAt), endMs: timeMsOf(cluster.endAt) }))
+  return (recordId, createdMs) => {
+    if (exceptions.has(recordId)) return exceptions.get(recordId)
+    if (placements.has(recordId)) return placements.get(recordId)
+    if (createdMs === null) return null
+    if (createdMs > coveredMs) return 'uncovered'
+    if (plan.degenerate) return null
+    for (const interval of intervals) {
+      if (createdMs >= interval.startMs && createdMs <= interval.endMs) return interval.k
+    }
+    return null
+  }
+}
+
+function runHistoryAssignments({ plan, rows, priorRows, ledgerBatches, keepFirst } = {}) {
+  assertInstallEnvelope(plan)
+  const lang = assertLocale(plan.locale)
+  const rule = normalizePullBatchConfig(configOfPlan(plan)).firstPullBatchRule
+  const keep = keepFirst instanceof Map && rule === 'predecessor_suffix' ? keepFirst : null
+  const input = normalizeHistoryRows(rows)
+  const byId = new Map(input.map((row) => [row.recordId, row]))
+  const openedAtByLabel = openedAtOfEnvelope(plan, ledgerBatches)
+  const pool = priorPoolOf(priorRows)
+  const assignments = new Map()
+  if (plan.run === 'gap_pass') {
+    labelGapPrePhase({ joins: plan.gapPass.joins || [], interleaved: plan.gapPass.interleaved || [], byId, pool, rule, lang, openedAtByLabel, assignments, keepFirst: keep })
+  }
+  const clustersBySegment = plan.segments.map(() => [])
+  const clusterByK = new Map()
+  for (const cluster of plan.clusters.slice().sort((a, b) => a.k - b.k)) {
+    const index = segmentIndexOfK(plan.segments, cluster.k)
+    if (index < 0) throw historyInvalid('plan')
+    const entry = { k: cluster.k, label: cluster.label, members: [] }
+    clustersBySegment[index].push(entry)
+    clusterByK.set(cluster.k, entry)
+  }
+  const unplacedBySegment = plan.segments.map(() => [])
+  const membershipOf = membershipIndexOf(plan)
+  for (const row of input) {
+    if (assignments.has(row.recordId)) continue
+    const k = membershipOf(row.recordId, row.createdMs)
+    if (k === 'uncovered') continue
+    if (k === null) {
+      const index = segmentIndexOfTime(plan.segments, row.createdMs)
+      if (index >= 0) unplacedBySegment[index].push(row)
+      continue
+    }
+    const cluster = clusterByK.get(k)
+    if (!cluster) throw historyInvalid('plan')
+    cluster.members.push(row)
+  }
+  plan.segments.forEach((_segment, index) => {
+    labelHistorySegment({ clusters: clustersBySegment[index], unplaced: unplacedBySegment[index], pool, rule, lang, openedAtByLabel, assignments, keepFirst: keep })
+  })
+  return { assignments, pool }
+}
+
+/**
+ * THE RE-RUN LABELLING (P2-3): Map recordId -> { k, pullBatch, firstPullBatch } for the rows of R, from the PERSISTED
+ * envelope only — 本次 by membership (joins / interleaved first in a gap pass), 首次 by the planner's own labelling, segment
+ * by segment, over `priorRows` (the evidence rows not in R, cells as read) and the decided rows of earlier clusters.
+ * Never reads a RUN stamp (`decision` / `plannedAt`). Contract: for a first install, on the planner's own input, it
+ * deepEquals `planPullBatchHistory(...).assignments`. `keepFirst` (rule F only): see the section header.
+ */
+function pullBatchHistoryAssignments(input = {}) {
+  return runHistoryAssignments(input).assignments
+}
+
+/**
+ * The run set R (critic C1): the record ids of `rows` (evidence, history-shaped) the persisted plan labels. First install:
+ * every row it covers. Gap pass: `gapPass.rows` plus the rows of its extension segments.
+ */
+function pullBatchInstallRunSet({ plan, rows } = {}) {
+  assertInstallEnvelope(plan)
+  const out = new Set()
+  const listed = plan.run === 'gap_pass' ? new Set(plan.gapPass.rows) : null
+  const seg0Ms = timeMsOf(plan.segments[0].coveredUntil)
+  const finalMs = timeMsOf(plan.coveredUntil)
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isPlainObject(row) || !nonBlankString(row.recordId)) continue
+    const recordId = row.recordId.trim()
+    const createdMs = timeMsOf(row.createdAt)
+    if (listed) {
+      if (listed.has(recordId) || (createdMs !== null && createdMs > seg0Ms && createdMs <= finalMs)) out.add(recordId)
+      continue
+    }
+    if (createdMs === null || createdMs <= finalMs) out.add(recordId)
+  }
+  return out
+}
+
+/**
+ * EXTENSION (design §8.2 I5; P2-10): plan `newRows` (evidence rows created after the persisted coveredUntil) after
+ * base + K, with the pool after every existing segment as prior rows (`runRows` = R of the persisted plan, `priorRows`
+ * = the evidence rows not in R), and append it as a new segment. A degenerate side is refused 409 PLAN_CHANGED
+ * `extension_degenerate` (membership of a flattened plan is by time; a degenerate segment has no time intervals).
+ */
+function extendPullBatchHistoryPlan({ persisted, runRows, newRows, priorRows, coveredUntil, ledgerBatches, keepFirst } = {}) {
+  assertInstallEnvelope(persisted)
+  if (persisted.degenerate) throw planChanged('extension_degenerate')
+  const { pool } = runHistoryAssignments({ plan: persisted, rows: runRows, priorRows, ledgerBatches, keepFirst })
+  const pseudoBatches = (Array.isArray(ledgerBatches) ? ledgerBatches.slice() : [])
+    .concat(persisted.clusters.map((cluster) => ({ label: cluster.label, openedAt: cluster.startAt, status: 'closed' })))
+  const base = persisted.base + persisted.K
+  const { plan: ext } = planPullBatchHistory({
+    rows: newRows,
+    priorRows: pool.entries,
+    gapMinutes: persisted.gapMinutes,
+    base,
+    coveredUntil,
+    locale: persisted.locale,
+    config: configOfPlan(persisted),
+    ledgerBatches: pseudoBatches,
+  })
+  if (ext.degenerate) throw planChanged('extension_degenerate')
+  const byRecord = (a, b) => compareIds(a.recordId, b.recordId)
+  const { digest: _digest, ...kept } = persisted
+  return sealEnvelope({
+    ...kept,
+    coveredUntil: ext.coveredUntil,
+    cuts: Array.from(new Set([...persisted.cuts, ...ext.cuts])).sort(),
+    clusters: [...persisted.clusters, ...ext.clusters],
+    exceptions: [...persisted.exceptions, ...ext.exceptions].sort(byRecord),
+    placements: [...(persisted.placements || []), ...(ext.placements || [])].sort(byRecord),
+    unplacedRows: persisted.unplacedRows + ext.unplacedRows,
+    interleavedRows: persisted.interleavedRows + ext.interleavedRows,
+    K: persisted.K + ext.K,
+    segments: [...persisted.segments, { base, K: ext.K, coveredUntil: ext.coveredUntil }],
+  })
+}
+
+/** The inferred ledger rows a resolved inferred-mode install writes: one per cluster (design §8.2 I6). */
+function pullBatchInstallInferredBatches(plan) {
+  assertInstallEnvelope(plan)
+  return plan.clusters
+    .slice()
+    .sort((a, b) => a.k - b.k)
+    .map((cluster) => Object.freeze({
+      batchNo: cluster.k,
+      label: cluster.label,
+      displayDay: pullBatchLabelDay(cluster.startAt),
+      evidence: cluster.evidence,
+      openedAt: cluster.startAt,
+      closedAt: cluster.endAt,
+    }))
+}
+
+/** Every label the plan writes (the store's C7 rule reads the same: each cluster label, 历史批次未知 in both locales). */
+function pullBatchInstallPlanLabels(plan) {
+  assertInstallEnvelope(plan)
+  const labels = new Set(Object.values(PULL_BATCH_UNKNOWN_LABELS))
+  for (const cluster of plan.clusters) if (nonBlankString(cluster.label)) labels.add(cluster.label)
+  return labels
+}
+
+// ── the writer's side input (design §3.4; BI-1b) — portable, so the R-line writer validates the same shape ──────
+
+/**
+ * The writer's `pullBatchStamp` side input, validated BEFORE any IO. `undefined` / `null` => null (the writer is
+ * byte-identical). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch }, firstPullBatchByKey, allocate }`:
+ *   fieldIds             the band's PHYSICAL ids — two distinct non-blank strings, never a key or a value of the
+ *                        target's `fieldIdMap` (a band id mapped onto a template column would overwrite that column);
+ *   firstPullBatchByKey  a Map: idempotency key (non-blank string) -> 首次批次 label (non-blank string) | null ("this
+ *                        batch"); server-held, never answered;
+ *   allocate             the lazily called ledger allocation (an async function).
+ * Anything else is 500 STAMP_INVALID { field } — a caller defect, never a skipped stamp.
+ */
+function normalizePullBatchStamp(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  if (!isPlainObject(value)) throw stampInvalid('pullBatchStamp', 'the pull-batch stamp must be an object')
+  const ids = value.fieldIds
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('fieldIds', 'the pull-batch stamp needs two distinct physical band ids')
+  }
+  const map = isPlainObject(fieldIdMap) ? fieldIdMap : {}
+  const taken = new Set([...Object.keys(map), ...Object.values(map)])
+  if (taken.has(ids.pullBatch) || taken.has(ids.firstPullBatch)) {
+    throw stampInvalid('fieldIds', 'a pull-batch band id must not be a template field of the target')
+  }
+  if (!(value.firstPullBatchByKey instanceof Map)) throw stampInvalid('firstPullBatchByKey', 'the 首次批次 carry must be a Map')
+  for (const [key, label] of value.firstPullBatchByKey) {
+    if (!nonBlankString(key)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry key must be a non-blank string')
+    if (label !== null && !nonBlankString(label)) throw stampInvalid('firstPullBatchByKey', 'a 首次批次 carry label must be null or a non-blank string')
+  }
+  if (typeof value.allocate !== 'function') throw stampInvalid('allocate', 'the pull-batch stamp needs its allocation function')
+  return Object.freeze({
+    fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }),
+    firstPullBatchByKey: value.firstPullBatchByKey,
+    allocate: value.allocate,
+  })
+}
+
+/**
+ * The ledger's allocation answer, checked before a single cell is written: `{ batchId, batchNo, label, joined }`
+ * with a positive batch number and a label the grammar reads as `live`. Anything else is 500 STAMP_INVALID — the
+ * writer never stamps a cell it cannot read back as this run's batch.
+ */
+function assertAllocatedBatch(answer) {
+  if (!isPlainObject(answer)) throw stampInvalid('allocation', 'the pull-batch allocation must answer an object')
+  if (!nonBlankString(answer.batchId)) throw stampInvalid('batchId', 'the pull-batch allocation must answer a batch id')
+  if (!Number.isSafeInteger(answer.batchNo) || answer.batchNo < 1) throw stampInvalid('batchNo', 'the pull-batch allocation must answer a positive batch number')
+  if (typeof answer.label !== 'string' || parsePullBatchLabel(answer.label).kind !== 'live') {
+    throw stampInvalid('label', 'the pull-batch allocation must answer a live batch label')
+  }
+  if (typeof answer.joined !== 'boolean') throw stampInvalid('joined', 'the pull-batch allocation must say whether it joined a batch')
+  return Object.freeze({ batchId: answer.batchId, batchNo: answer.batchNo, label: answer.label, joined: answer.joined })
+}
+
+// ── the reader's strip (design §4.4; BI-1b) — portable, so the R-line reader strips the same way ──────────────────
+
+/**
+ * The reader's `pullBatchBand` option, validated ONCE before the first page. `undefined` / `null` => null (the reader is
+ * byte-identical: no strip, no Symbol). Otherwise a frozen `{ fieldIds: { pullBatch, firstPullBatch } }` — the band's
+ * PHYSICAL ids, two distinct non-blank strings, neither equal to a value of the target's `fieldIdMap` (a band id mapped
+ * onto a template column would delete that column's cell from every row). Anything else is 500 STAMP_INVALID
+ * `{ field: 'pullBatchBand' }` — a caller defect; the routes derive the band so that no request can reach it.
+ */
+function normalizePullBatchReaderBand(value, { fieldIdMap } = {}) {
+  if (value === undefined || value === null) return null
+  const ids = isPlainObject(value) ? value.fieldIds : null
+  if (!isPlainObject(ids) || !nonBlankString(ids.pullBatch) || !nonBlankString(ids.firstPullBatch) || ids.pullBatch === ids.firstPullBatch) {
+    throw stampInvalid('pullBatchBand', 'the reader band needs two distinct physical band ids')
+  }
+  const mapped = new Set(Object.values(isPlainObject(fieldIdMap) ? fieldIdMap : {}))
+  if (mapped.has(ids.pullBatch) || mapped.has(ids.firstPullBatch)) {
+    throw stampInvalid('pullBatchBand', 'a reader band id must not be a mapped template column of the target')
+  }
+  return Object.freeze({ fieldIds: Object.freeze({ pullBatch: ids.pullBatch, firstPullBatch: ids.firstPullBatch }) })
+}
+
+function bandCellOf(row, physical, logical) {
+  if (Object.prototype.hasOwnProperty.call(row, physical)) return row[physical]
+  if (Object.prototype.hasOwnProperty.call(row, logical)) return row[logical]
+  return undefined
+}
+
+/**
+ * The strip (design §4.4): BOTH band cells leave the unmapped reader row — the physical key, and defensively the logical
+ * key (mapFieldName's raw-id fallback, design F9) — onto `EXISTING_ROW_PULL_BATCH`, so stableStringify / JSON / Object.keys
+ * never see them and every digest over reader rows is the digest of a band-less sheet. The Symbol is ENUMERABLE (the
+ * RECORD_REF / CREATED_BY precedent: spreads keep it). `createdAt` / `locked` come from the record ENVELOPE (never from
+ * `data`, so a cell cannot forge them). Mutates and answers `row`. `band` is a normalized reader band.
+ */
+function stripPullBatchBand(row, record, band) {
+  if (!row || typeof row !== 'object' || !band) return row
+  const { pullBatch: pullBatchId, firstPullBatch: firstPullBatchId } = band.fieldIds
+  const pullBatch = cellText(bandCellOf(row, pullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch))
+  const firstPullBatch = cellText(bandCellOf(row, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch))
+  for (const key of [pullBatchId, firstPullBatchId, PULL_BATCH_BAND_FIELD_IDS.pullBatch, PULL_BATCH_BAND_FIELD_IDS.firstPullBatch]) {
+    delete row[key]
+  }
+  const envelope = record && typeof record === 'object' && isPlainObject(record.data) ? record : null
+  row[EXISTING_ROW_PULL_BATCH] = Object.freeze({
+    pullBatch,
+    firstPullBatch,
+    createdAt: envelope && typeof envelope.createdAt === 'string' ? envelope.createdAt : null,
+    locked: Boolean(envelope && envelope.locked === true),
+  })
+  return row
+}
+
 /** Live numbering (design §3.5 step 4, Q-BI-11): max(max non-void batch_no, history_batch_count) + 1. */
 function nextLivePullBatchNo({ maxBatchNo, historyBatchCount } = {}) {
   const max = maxBatchNo === undefined || maxBatchNo === null ? 0 : maxBatchNo
@@ -1086,8 +1632,10 @@ function nextLivePullBatchNo({ maxBatchNo, historyBatchCount } = {}) {
 module.exports = {
   DEFAULT_PULL_BATCH_CONFIG,
   EXISTING_ROW_PULL_BATCH,
+  EXISTING_ROW_RECORD_REF,
   FIRST_PULL_BATCH_RULES,
   MANUAL_ROW_KEY_PREFIX,
+  PULL_BATCH_APPROVAL_REF_PATTERN,
   PULL_BATCH_BAND_FIELD_IDS,
   PULL_BATCH_CLOSED_REASONS,
   PULL_BATCH_CONFIG_KEYS,
@@ -1100,6 +1648,8 @@ module.exports = {
   PULL_BATCH_FIXED_FACTS,
   PULL_BATCH_HISTORY_MODES,
   PULL_BATCH_HISTORY_SCHEME,
+  PULL_BATCH_INSTALL_PLAN_RUNS,
+  PULL_BATCH_INSTALL_PLAN_UNDIGESTED_KEYS,
   PULL_BATCH_LABEL_FORMATS,
   PULL_BATCH_LABEL_KINDS,
   PULL_BATCH_LOCALES,
@@ -1111,25 +1661,38 @@ module.exports = {
   PULL_BATCH_SOURCE_DIGEST_SCHEME,
   PULL_BATCH_UNKNOWN_LABELS,
   StockPreparationPullBatchError,
+  assertAllocatedBatch,
   buildFirstPullBatchByKey,
   countPullBatchGapRows,
+  extendPullBatchHistoryPlan,
   formatPullBatchLabel,
   isPullBatchEvidenceRow,
   isPullBatchGapRow,
   nextLivePullBatchNo,
   normalizePartId,
   normalizePullBatchConfig,
+  normalizePullBatchReaderBand,
+  normalizePullBatchStamp,
   parsePullBatchLabel,
+  planPullBatchFirstInstall,
+  planPullBatchGapPass,
   planPullBatchHistory,
+  pullBatchHistoryAssignments,
   pullBatchHistoryMembership,
   pullBatchHistoryPlanDigest,
+  pullBatchInstallInferredBatches,
+  pullBatchInstallPlanDigest,
+  pullBatchInstallPlanLabels,
+  pullBatchInstallRunSet,
   pullBatchLabelDay,
   pullBatchSourceDigest,
   refusedPullBatchConfigEdits,
   resolvePullBatchHistoryCount,
   rowPullBatchFacts,
+  stripPullBatchBand,
   __internals: {
     EXISTING_ROW_CREATED_BY_KEY,
+    assertInstallEnvelope,
     canonicalJson,
     decideFirstPullBatch,
     isCalendarDay,
@@ -1137,6 +1700,7 @@ module.exports = {
     isPluginRowKey,
     isPersonCreatedRow,
     isProperSuffix,
+    membershipIndexOf,
     pathTokensOf,
     timeMsOf,
   },

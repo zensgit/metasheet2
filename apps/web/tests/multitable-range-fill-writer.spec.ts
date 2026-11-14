@@ -31,7 +31,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-async function setup() {
+async function setup(extra: { holdsHistory?: () => boolean } = {}) {
   const patchFetch = vi.fn(async (_init?: RequestInit): Promise<Response> => response(success))
   const client = new MultitableApiClient({
     fetchFn: vi.fn(async (input: string, init?: RequestInit) => {
@@ -49,7 +49,7 @@ async function setup() {
   const patchRecords = vi.spyOn(client, 'patchRecords')
   const sheetId = ref('s1')
   const viewId = ref('v1')
-  const grid = useMultitableGrid({ sheetId, viewId, client })
+  const grid = useMultitableGrid({ sheetId, viewId, client, ...extra })
   await vi.waitFor(() => expect(grid.loading.value).toBe(false))
   grid.editHistory.value = [
     { recordId: 'r1', fieldId: 'f1', oldValue: 'older', newValue: 'old', version: 4 },
@@ -106,6 +106,23 @@ describe('useMultitableGrid undo/redo while a cell patch is in flight', () => {
       expect(patchRecords, failure).toHaveBeenCalledTimes(2)
       expect(patchRecords.mock.calls[1][0].changes).toEqual([expect.objectContaining({ recordId: 'r1', fieldId: 'f1', value: 'older' })])
     }
+  })
+
+  it('a write held outside patchCell (holdsHistory: an attachment upload or delete) stops undo and redo until it is released', async () => {
+    let held = true
+    const { grid, patchRecords } = await setup({ holdsHistory: () => held })
+    expect(grid.canUndo.value).toBe(true)
+    expect(grid.canRedo.value).toBe(true)
+    await grid.undo()
+    await grid.redo()
+    expect(patchRecords).toHaveBeenCalledTimes(0)
+    expect(grid.historyIndex.value).toBe(0)
+    held = false
+    await grid.undo()
+    expect(patchRecords).toHaveBeenCalledTimes(1)
+    expect(patchRecords.mock.calls[0][0].changes).toEqual([expect.objectContaining({ recordId: 'r1', fieldId: 'f1', value: 'older' })])
+    await grid.redo()
+    expect(patchRecords).toHaveBeenCalledTimes(2)
   })
 
   it('a local refusal (the row cannot be edited; nothing is sent) never holds the guard: undo and redo still run', async () => {

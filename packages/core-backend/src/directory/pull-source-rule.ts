@@ -15,6 +15,9 @@
  * Definitions:
  *  - pull type:   `provider <> 'local'`. An unrecognised provider value counts as pull type.
  *  - active:      `status = 'active'` (exact; any other value is not active). `sync_enabled` is not read.
+ *  - non-active pull type: pull type and `status <> 'active'` (the complement of active within pull type).
+ *                 It is used only to count linked accounts under such integrations in a status view and
+ *                 never takes part in the rule.
  *  - pull source: one active pull-type integration, de-duplicated by `(provider, corp_id)`; several rows
  *                 for the same external enterprise are one source.
  *  - multi-source: an organisation with at least `PULL_SOURCE_THRESHOLD` pull sources.
@@ -53,10 +56,27 @@ function assertSqlAlias(alias: string): string {
   return alias
 }
 
+/** The one place the pull-type condition is written; every fragment below is assembled around it. */
+function pullTypeConditionSql(checkedAlias: string): string {
+  return `${checkedAlias}.provider <> 'local'`
+}
+
+/** WHERE-fragment: the row is a pull-type integration, whatever its status. */
+export function pullTypePredicateSql(alias = 'i'): string {
+  const a = assertSqlAlias(alias)
+  return `(${pullTypeConditionSql(a)})`
+}
+
 /** WHERE-fragment: the row is an active pull-type integration. */
 export function pullSourcePredicateSql(alias = 'i'): string {
   const a = assertSqlAlias(alias)
-  return `(${a}.provider <> 'local' AND ${a}.status = 'active')`
+  return `(${pullTypeConditionSql(a)} AND ${a}.status = 'active')`
+}
+
+/** WHERE-fragment: the row is a pull-type integration that is not active. */
+export function nonActivePullTypePredicateSql(alias = 'i'): string {
+  const a = assertSqlAlias(alias)
+  return `(${pullTypeConditionSql(a)} AND ${a}.status <> 'active')`
 }
 
 /** Expression identifying the external source a row belongs to. */

@@ -139,7 +139,10 @@ vi.mock('../../src/integrations/dingtalk/client', async () => {
   }
 })
 
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/transport'
+import { ACCOUNT_ACTIVATION_INVALID_CODE, ACCOUNT_PENDING_ACTIVATION_CODE } from '../../src/auth/user-activation'
 import { authRouter } from '../../src/routes/auth'
 import express from 'express'
 import request from 'supertest'
@@ -475,6 +478,103 @@ describe('auth login routes', () => {
     }))
     expect(response.statusCode).toBe(200)
     expect((response.body as Record<string, any>).data.features.tasks).toBe(expected)
+  })
+
+  // R-69 1b-iii (I4 verifier F2): the rule editor offers run_integration_job only when the session says
+  // integrationAutomationRunAction=true, which must be exactly when INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is the
+  // literal 'true' (the same predicate as the save gate and the executor's per-trigger check). Login and /me.
+  const RUN_ACTION_FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
+  const RUN_ACTION_FLAG_CASES = [
+    ['unset', undefined, false],
+    ['empty', '', false],
+    ['TRUE', 'TRUE', false],
+    ['1', '1', false],
+    ['leading space', ' true', false],
+    ['trailing space', 'true ', false],
+    ['false', 'false', false],
+    ['exact true', 'true', true],
+  ] as const
+
+  async function withRunActionEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, RUN_ACTION_FLAG)
+    const previous = process.env[RUN_ACTION_FLAG]
+    if (value === undefined) delete process.env[RUN_ACTION_FLAG]
+    else process.env[RUN_ACTION_FLAG] = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env[RUN_ACTION_FLAG] = previous
+      else delete process.env[RUN_ACTION_FLAG]
+    }
+  }
+
+  it.each(RUN_ACTION_FLAG_CASES)('login as an administrator with INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED %s (%j): features.integrationAutomationRunAction is %s', async (_label, value, expected) => {
+    const response = await withRunActionEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.integrationAutomationRunAction).toBe(expected)
+    // Not inferred from role: the administrator's role-derived features are unaffected.
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(RUN_ACTION_FLAG_CASES)('/me for an administrator with INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED %s (%j): features.integrationAutomationRunAction is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withRunActionEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.integrationAutomationRunAction).toBe(expected)
+  })
+
+  // R-69 1c: the rule editor offers integration.run_finished only when the session says
+  // integrationAutomationRunEvent=true, which must be exactly when INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is the
+  // literal 'true' (the same predicate as publish, receipt and dispatch). Login and /me; independent of the action key.
+  const RUN_EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
+
+  async function withRunEventEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, RUN_EVENT_FLAG)
+    const previous = process.env[RUN_EVENT_FLAG]
+    if (value === undefined) delete process.env[RUN_EVENT_FLAG]
+    else process.env[RUN_EVENT_FLAG] = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env[RUN_EVENT_FLAG] = previous
+      else delete process.env[RUN_EVENT_FLAG]
+    }
+  }
+
+  it.each(RUN_ACTION_FLAG_CASES)('login as an administrator with INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED %s (%j): features.integrationAutomationRunEvent is %s', async (_label, value, expected) => {
+    const response = await withRunEventEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.integrationAutomationRunEvent).toBe(expected)
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(RUN_ACTION_FLAG_CASES)('/me for an administrator with INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED %s (%j): features.integrationAutomationRunEvent is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withRunEventEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.integrationAutomationRunEvent).toBe(expected)
   })
 
   it('accepts a generic identifier payload for login', async () => {
@@ -2177,6 +2277,201 @@ describe('auth login routes', () => {
 
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).error).toContain('same email')
+  })
+
+  describe('DingTalk callback refusals keep their stable code', () => {
+    function armLoginRefusal(error: Error) {
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+      dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(error)
+    }
+
+    function expectNoSessionIssued() {
+      expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+      expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+      expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    }
+
+    it.each([
+      ['unlinked_enabled_local_user', 403, 'DingTalk account is not linked to an enabled local user'],
+      ['unlinked_local_user', 403, 'DingTalk account is not linked to a local user'],
+      ['local_user_disabled', 403, 'DingTalk login is disabled for this user'],
+      ['ACCOUNT_PENDING_ACTIVATION', 403, 'Account is pending activation and cannot sign in'],
+      ['ACCOUNT_ACTIVATION_INVALID', 403, 'Account activation status is invalid'],
+      ['grant_required', 403, 'DingTalk login is not enabled for this user'],
+      ['grant_disabled', 403, 'DingTalk login is disabled for this user'],
+      ['identity_ambiguous', 409, 'DingTalk identity matches multiple accounts; configure the intended enterprise'],
+      ['identity_already_bound', 409, 'DingTalk identity is already bound to another local user'],
+      ['identity_mismatch', 409, 'Local user is bound to a different DingTalk identity'],
+      ['repair_identity_mismatch', 409, 'Verified profile does not match the active identity repair'],
+      ['directory_managed_identity', 409, 'Local user is directory-managed for DingTalk. Please contact an administrator.'],
+      ['auto_provision_corp_required', 409, 'An enterprise must be configured before DingTalk auto-provisioning'],
+      ['auto_provision_alias_conflict', 409, 'Refusing to auto-provision DingTalk user because a login identifier is already claimed'],
+      ['grant_state_unavailable', 503, 'Unable to verify DingTalk login authorization; please retry'],
+    ])('a login refusal %s keeps HTTP %i and its code, and issues no session', async (code, statusCode, message) => {
+      armLoginRefusal(new dingtalkOauthMocks.DingTalkLoginPolicyError(message, { statusCode, code }))
+      const response = await invokeRoute('post', '/dingtalk/callback', { body: { code: 'synthetic-code', state: 'synthetic-state' } })
+      expect(response.statusCode).toBe(statusCode)
+      expect(response.body).toEqual({ success: false, error: message, code })
+      expectNoSessionIssued()
+    })
+
+    it('a bind refusal from the identity write keeps 409 and identity_already_bound', async () => {
+      dingtalkOauthMocks.validateState.mockResolvedValue({
+        valid: true, redirectPath: '/settings?dingtalk=bound', intent: 'bind', bindUserId: 'user-1',
+      })
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+      authServiceMocks.verifyToken.mockResolvedValue({ id: 'user-1', email: 'synthetic@example.test', name: 'Synthetic', role: 'user', permissions: [] })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ linked_count: 0 }] })
+      dingtalkOauthMocks.exchangeCodeForDingTalkProfile.mockResolvedValue({ openId: 'open-x', unionId: 'union-x', nick: 'Synthetic', email: 'synthetic@example.test' })
+      dingtalkOauthMocks.bindDingTalkIdentityToUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('DingTalk identity is already bound to another local user', { statusCode: 409, code: 'identity_already_bound' }),
+      )
+      const response = await invokeRoute('post', '/dingtalk/callback', {
+        headers: { authorization: 'Bearer live-token' },
+        body: { code: 'synthetic-code', state: 'synthetic-state' },
+      })
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toEqual({ success: false, error: 'DingTalk identity is already bound to another local user', code: 'identity_already_bound' })
+      expectNoSessionIssued()
+    })
+
+    it('a lost session write after a successful exchange answers 409 authentication_changed', async () => {
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+      dingtalkOauthMocks.exchangeCodeForUser.mockResolvedValue({
+        localUserId: 'user-1', localUserEmail: 'synthetic@example.test', localUserName: 'Synthetic', isNewUser: false,
+        dingtalkUser: { openId: 'open-x', unionId: 'union-x', nick: 'Synthetic', email: 'synthetic@example.test' },
+      })
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      pgMocks.query.mockResolvedValue({ rows: [{ role: 'user', is_active: true, activation_status: 'activated' }] })
+      authServiceMocks.createToken.mockReturnValue('synthetic-token')
+      authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600, sid: 'synthetic-sid', ag: 0 })
+      sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+      const response = await invokeRoute('post', '/dingtalk/callback', { body: { code: 'synthetic-code', state: 'synthetic-state' } })
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toEqual({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+    })
+
+    it.each([
+      ['an upstream request failure', () => new DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {}), 502],
+      ['a DingTalk business rejection', () => new DingTalkBusinessError('rejected', { errcode: 40078 }), 500],
+      ['an unexpected local failure', () => new Error('synthetic local failure'), 500],
+    ])('%s still answers without a code', async (_label, makeError, statusCode) => {
+      armLoginRefusal(makeError())
+      const response = await invokeRoute('post', '/dingtalk/callback', { body: { code: 'synthetic-code', state: 'synthetic-state' } })
+      expect(response.statusCode).toBe(statusCode)
+      expect(response.body).not.toHaveProperty('code')
+      expectNoSessionIssued()
+    })
+
+    it('state, configuration and missing-code refusals still answer without a code', async () => {
+      const missing = await invokeRoute('post', '/dingtalk/callback', { body: { state: 'synthetic-state' } })
+      expect(missing.statusCode).toBe(400)
+      expect(missing.body).toEqual({ success: false, error: 'Missing required parameter: code' })
+
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: false, error: 'Invalid or unknown state parameter' })
+      const badState = await invokeRoute('post', '/dingtalk/callback', { body: { code: 'synthetic-code', state: 'synthetic-state' } })
+      expect(badState.statusCode).toBe(400)
+      expect(badState.body).toEqual({ success: false, error: 'Invalid or unknown state parameter' })
+
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(false)
+      dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue({ configured: false, available: false })
+      const unconfigured = await invokeRoute('post', '/dingtalk/callback', { body: { code: 'synthetic-code', state: 'synthetic-state' } })
+      expect(unconfigured.statusCode).toBe(503)
+      expect(unconfigured.body).not.toHaveProperty('code')
+      expect(dingtalkOauthMocks.exchangeCodeForUser).not.toHaveBeenCalled()
+      expectNoSessionIssued()
+    })
+
+    /**
+     * The top-level `code` values the callback can answer, derived mechanically from the sources:
+     * every literal `code:` of a DingTalk login policy refusal (dingtalk-oauth.ts) plus the two
+     * activation-denial codes it forwards, every activation-intent code and policy code thrown in
+     * routes/auth.ts, and the literal codes of the callback route's own early answers — minus the
+     * codes only another route can reach. This test pins the backend's set: a new code written in
+     * those two source files, in the forms scanned below, fails it until the literal list below is
+     * updated. It scans only those two files.
+     * The next test compares this list with the code list the callback page exports
+     * (apps/web/src/utils/dingtalkLoginErrors.ts, imported as a module), so a code added to or
+     * removed from either side fails until both sides match.
+     */
+    const CALLBACK_TOP_LEVEL_CODES = [
+      'ACCOUNT_ACTIVATION_INVALID',
+      'ACCOUNT_PENDING_ACTIVATION',
+      'activate_admin_required',
+      'activate_commit_incomplete',
+      'activate_failed',
+      'activate_source_ineligible',
+      'activate_state_invalid',
+      'activate_target_not_found',
+      'authentication_changed',
+      'auto_provision_alias_conflict',
+      'auto_provision_corp_required',
+      'auto_provision_email_conflict',
+      'bind_user_mismatch',
+      'directory_managed_conflict',
+      'directory_managed_identity',
+      'grant_disabled',
+      'grant_required',
+      'grant_state_unavailable',
+      'identity_already_bound',
+      'identity_ambiguous',
+      'identity_mismatch',
+      'local_user_disabled',
+      'repair_identity_mismatch',
+      'unlinked_enabled_local_user',
+      'unlinked_local_user',
+    ]
+    /** Policy codes no callback branch reaches: the container login's identity-key refusal. */
+    const OTHER_ROUTE_ONLY_CODES = ['identity_key_unavailable']
+
+    it('pins the set of top-level codes the callback can answer (mirrored by the callback page code table)', () => {
+      const source = (relative: string) => readFileSync(path.join(__dirname, '../../src', relative), 'utf8')
+      const literals = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].map((match) => match[1])
+
+      const oauth = source('auth/dingtalk-oauth.ts')
+      // Every policy refusal names its code: the literal ones plus the forwarded activation denial.
+      const policyCalls = (oauth.match(/\b(?:createPolicyError|new DingTalkLoginPolicyError)\(/g) ?? []).length
+        - 1 /* createPolicyError's own body */ - 1 /* its declaration */
+      const policyCodes = literals(oauth, /\bcode:\s*'([A-Za-z_]+)'/g)
+      expect(policyCodes.length + (oauth.match(/\bcode:\s*denial\.code\b/g) ?? []).length).toBe(policyCalls)
+
+      const routes = source('routes/auth.ts')
+      const callbackStart = routes.indexOf("authRouter.post('/dingtalk/callback'")
+      const callbackEnd = routes.indexOf('authRouter.', callbackStart + 1)
+      expect(callbackStart).toBeGreaterThan(0)
+      const callbackBlock = routes.slice(callbackStart, callbackEnd)
+
+      const derived = new Set([
+        ...policyCodes,
+        ACCOUNT_PENDING_ACTIVATION_CODE,
+        ACCOUNT_ACTIVATION_INVALID_CODE,
+        ...literals(routes, /new DingTalkActivationIntentError\(\s*\d+,\s*'([a-z_]+)'/g),
+        ...literals(routes, /new DingTalkLoginPolicyError\([^)]*?code:\s*'([a-z_]+)'/g),
+        ...literals(callbackBlock, /\bcode:\s*'([a-z_]+)'/g),
+      ])
+      for (const code of OTHER_ROUTE_ONLY_CODES) derived.delete(code)
+      expect([...derived].sort()).toEqual([...CALLBACK_TOP_LEVEL_CODES].sort())
+    })
+
+    /**
+     * Cross-package guard: the callback page's code table (apps/web/src/utils/dingtalkLoginErrors.ts)
+     * exports its keys as DINGTALK_CALLBACK_FAILURE_CODES. The module is imported, so the comparison
+     * uses the table's runtime keys, however they are written.
+     */
+    it('the callback page code table keys equal the backend callback code list', async () => {
+      const page = await import('../../../../apps/web/src/utils/dingtalkLoginErrors')
+      const keys = [...page.DINGTALK_CALLBACK_FAILURE_CODES]
+      expect(keys.length).toBeGreaterThan(0)
+      expect(new Set(keys).size).toBe(keys.length)
+      expect([...keys].sort()).toEqual([...CALLBACK_TOP_LEVEL_CODES].sort())
+    })
   })
 
   describe('E1 POST /dingtalk/container (容器免登)', () => {

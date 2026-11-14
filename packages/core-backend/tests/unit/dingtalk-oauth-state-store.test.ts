@@ -434,9 +434,9 @@ describe('DingTalk OAuth state store', () => {
     })
     vi.mocked(query).mockResolvedValueOnce({ rows: [] } as any)
 
-    await expect(exchangeCodeForUser('auth-code')).rejects.toThrow(
-      'DingTalk account manager@example.com is not linked to a local user',
-    )
+    const refusal = await exchangeCodeForUser('auth-code').catch((caught: unknown) => caught)
+    expect(refusal).toMatchObject({ code: 'unlinked_local_user', message: 'DingTalk account is not linked to a local user' })
+    expect(String((refusal as Error).message)).not.toContain('manager@example.com')
 
     expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
   })

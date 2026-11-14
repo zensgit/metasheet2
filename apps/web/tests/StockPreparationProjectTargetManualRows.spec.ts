@@ -958,7 +958,7 @@ describe('MR-COPY — the sentences', () => {
   })
 
   it('the audit modes: both switch modes read their own line under project_fields_update; the S3 mode keeps the action line; the action table is unchanged', () => {
-    expect(Object.keys(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN.project_fields_update).sort()).toEqual(['manual_rows_allowed', 'manual_rows_disabled'])
+    expect(Object.keys(STOCK_PREP_AUDIT_ACTION_MODE_PLAIN.project_fields_update).sort()).toEqual(['manual_rows_allowed', 'manual_rows_disabled', 'pull_batch_settings_sheet_updated', 'pull_batch_settings_tenant_updated'])
     expect(stockPrepAuditActionPlain('project_fields_update', 'manual_rows_allowed')!.zh).toContain('打开了「允许人工补充行」')
     expect(stockPrepAuditActionPlain('project_fields_update', 'manual_rows_disabled')!.zh).toContain('关闭了「允许人工补充行」')
     expect(stockPrepAuditActionPlain('project_fields_update', 'updated')).toBe(STOCK_PREP_AUDIT_ACTION_PLAIN.project_fields_update)

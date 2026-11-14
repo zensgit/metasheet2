@@ -680,6 +680,19 @@ export function createPluginScopedMultitableApi(
               await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
               return surface.ensureMissingObjectFields({ ...rest, projectId, objectId } as typeof input)
             },
+            // Y7 review MEDIUM-2: the max field order read — exposed iff the host's surface has it (the optional-
+            // capability idiom), and object-scoped like every other read inside the tx (read-once values).
+            ...(typeof surface.readObjectMaxFieldOrder === 'function'
+              ? {
+                  readObjectMaxFieldOrder: async (input: Parameters<NonNullable<MultitableRepairTransactionSurface['readObjectMaxFieldOrder']>>[0]) => {
+                    const projectId = input.projectId
+                    const objectId = input.objectId
+                    assertProjectIdAllowedForPlugin(pluginName, projectId)
+                    await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+                    return surface.readObjectMaxFieldOrder!({ projectId, objectId })
+                  },
+                }
+              : {}),
           }
           return fn(scoped)
         })

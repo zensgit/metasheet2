@@ -1504,7 +1504,76 @@ async function testW9TheFinalReassertTurnsALateLossIntoAStop() {
   )
 }
 
+// Batch-refresh step 6a-1 (S6-1, R-91) — XS-04: the writer marks `writerPhase === 'pre_io'` (with its reason) at EXACTLY
+// the four refusals of WRITER_PRE_IO_REASONS, and on nothing a run stops or throws after its first IO: a fenced stop and
+// a version-fence stop are returned aborts whose error carries no marker; `metadata_scope_incomplete` (after the loop)
+// and the top-level unmarked refusals (a suspended plan) carry none either. The store self-verifies ONLY on the marker.
+async function testXS04ThePreIoMarkerSitsOnExactlyTheFourPreIoRefusals() {
+  assert.deepEqual(__writerExports.WRITER_PRE_IO_REASONS, ['pull_batch_stamp_admission', 'write_fence_required', 'governance_tripwire', 'host_fence_unsupported'])
+  assert.ok(Object.isFrozen(__writerExports.WRITER_PRE_IO_REASONS))
+  const marked = async (input, reason) => {
+    const calls = []
+    const api = createRecordsApi({ existing: seededRowsFor(buildPlan()) })
+    let caught = null
+    try {
+      await applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: fenceCapable(api.recordsApi).api, writeFence: recordingFence(calls), ...input(api) })
+    } catch (error) {
+      caught = error
+    }
+    assert.ok(caught, `${reason}: refused`)
+    assert.equal(caught.writerPhase, 'pre_io', `${reason}: marked`)
+    assert.equal(caught.writerPreIoReason, reason)
+    assert.deepEqual(api.calls, [], `${reason}: no records IO`)
+    assert.deepEqual(calls, [], `${reason}: no fence IO`)
+    return caught
+  }
+  // (1) 批次标识's stamp admission (the writer's one copy, R-65): a malformed stamp is 500 STAMP_INVALID before the fence check.
+  const stamp = await marked(() => ({ pullBatchStamp: { fieldIds: {} } }), 'pull_batch_stamp_admission')
+  assert.equal(stamp.status, 500)
+  // (2) the fence required but absent.
+  await marked(() => ({ writeFence: undefined, writeFenceRequired: true }), 'write_fence_required')
+  // (3) the governance tripwire (its verdict absent).
+  const tripwire = await marked(() => ({ writeFenceRequired: true, governance: undefined }), 'governance_tripwire')
+  assert.equal(tripwire.details.reason, 'governance_absent')
+  // (4) the host cannot honour the fence.
+  await marked((api) => ({ recordsApi: api.recordsApi }), 'host_fence_unsupported')
+  // NOT marked: a fenced stop at the first write (returned abort), a host refusal (returned abort), the post-loop scope
+  // check, and the top-level suspended-plan refusal (deliberately unmarked: fail safe).
+  {
+    const calls = []
+    const api = createRecordsApi({ existing: seededRowsFor(buildPlan()) })
+    const result = await applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: fenceCapable(api.recordsApi).api, writeFence: recordingFence(calls, { throwAt: 1, error: fenceError() }) })
+    assert.equal(result.status, 'aborted')
+    assert.equal(result.abort.error.writerPhase, undefined, 'a fenced stop is never pre_io')
+  }
+  {
+    const calls = []
+    const api = createRecordsApi({ existing: seededRowsFor(buildPlan()) })
+    const result = await applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: fenceCapable(api.recordsApi, { refuseAt: 1 }).api, writeFence: recordingFence(calls) })
+    assert.equal(result.status, 'aborted')
+    assert.equal(result.abort.error.writerPhase, undefined, 'a host refusal is never pre_io')
+  }
+  {
+    const base = createRecordsApi()
+    const skipping = { queryRecords: (input) => base.recordsApi.queryRecords(input), createRecord: (input) => base.recordsApi.createRecord(input), patchRecord: (input) => base.recordsApi.patchRecord(input), async withMetadataCache() {} }
+    await assert.rejects(applyStockPreparationPlan({ permission: 'write', plan: buildPlan(), target: target(), recordsApi: skipping }), (error) => error.details.code === 'metadata_scope_incomplete' && error.writerPhase === undefined)
+  }
+  await assert.rejects(applyStockPreparationPlan({ permission: 'write', plan: { ...buildPlan(), suspended: true }, target: target(), recordsApi: createRecordsApi().recordsApi }), (error) => error.details.code === 'plan_suspended' && error.writerPhase === undefined)
+  // The marker helper refuses a reason outside the closed list (a typo can never mint a new self-verifying site).
+  assert.throws(() => __writerExports.__internals.markWriterPreIo(new Error('x'), 'decision_stop'), /not a writer pre-IO reason/)
+  // Source pin: every marking call sits in applyStockPreparationPlan BEFORE its decision loop.
+  const fs = require('node:fs')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-apply-writer.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const body = source.slice(source.indexOf('async function applyStockPreparationPlan('), source.indexOf('\nfunction admittedPullBatchStampOf('))
+  const loopAt = body.indexOf('const runDecisions = async () =>')
+  const sites = Array.from(body.matchAll(/(?:preIo|markWriterPreIo)\('?([a-z_]+)?/g)).map((match) => [match.index, match[0]])
+  assert.equal(sites.length, 4, JSON.stringify(sites))
+  assert.ok(sites.every(([at]) => at < loopAt), 'every marker sits before the loop')
+  assert.equal((source.match(/markWriterPreIo\(/g) || []).length, 3, 'the helper definition, preIo\'s use and the one direct site only')
+}
+
 async function main() {
+  await testXS04ThePreIoMarkerSitsOnExactlyTheFourPreIoRefusals()
   await testW5EveryHostWriteCarriesTheGuardsHostFence()
   await testW6AHostRefusalStopsTheRunAtThatDecision()
   await testW7AHostWithoutFenceSupportFailsClosedBeforeAnyIo()

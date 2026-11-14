@@ -47,7 +47,7 @@ org_directory_routing_policy
   存在要么整体不存在，无需 pg_constraint 探针；约束形状的钉在 schema 测试里：conname + 列数 +
   `confdeltype='r'` 双腿）。
 
-### 锁 2 — resolver 优先级（默认不变量：无策略 = 字节级现状）
+### 锁 2 — resolver 优先级（默认不变量：无策略 = 字节级现状；多活跃拉取源的限定见本节末）
 
 purpose=`approval_routing` 的解析顺序：
 
@@ -57,18 +57,52 @@ purpose=`approval_routing` 的解析顺序：
    错误（审批路由报「routing policy 指向不可用 integration」），**不**静默回退到猜测。
 2. **策略不存在** ⇒ **legacy 路径字节级不变**（今天的单 provider 行为原样保留）。
    B5 落地当天生产零行为变化 —— staged opt-in 谱系：策略行是显式开关。
+   **限定（见本节末「多活跃拉取源的限定」）：** 开关 `APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED` 为 ON
+   且该 org 的活跃拉取源 ≥2 时，本条不适用，改为 fail-closed。
 
 「never array[0]」的精确含义：**多 integration 歧义只允许由策略消解**；任何代码路径不得以
 数组位置、更新时间、创建时间当决策依据。
 
+**多活跃拉取源的限定（2026-11-11）。** 「策略不存在 ⇒ legacy 字节级不变」在且仅在下面这个子集上
+改为 fail-closed，其余情形继续按上面第 2 条：
+
+- 条件（同时成立）：开关 `APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED` 为 ON（默认 OFF，只认精确
+  `'true'`，每次调用读取）；该 org 的**活跃拉取源** ≥2（`provider <> 'local'` 且
+  `status = 'active'` 的 integration，按 `(provider, corp_id)` 去重；本地目录不计数，同一外部
+  企业的多行算一个源）；该 org 没有 `approval_routing` 策略行；申请人在该 org 有
+  `link_status='linked'` 且 `is_active=true` 的 directory account。
+- 行为：resolver 不选来源，抛 `ApprovalRoutingPolicyError`（`reason='policy_required'`，固定句，
+  不含 org 标识与个数）；消费 org 数据的审批创建得到 422 `APPROVAL_ROUTING_POLICY_REQUIRED`，
+  零实例、零 assignment。结果与 account 的更新时间、创建时间、行序无关。
+- 不变：开关 OFF；活跃拉取源 ≤1（含「本地 + 1 个拉取源」）；受治理（申请人有 linked account 的
+  org 有策略，给定 `orgId` 时只看该 org：策略权威，本检查不运行）；预览覆盖
+  （`overrideCanonicalIntegrationId` 非 undefined）；申请人在该 org 无关联 account（`{}`，不抛）。
+  这些情形的结果与本限定之前相同。开关 OFF、受治理、预览覆盖时，resolver 发出的语句也与本限定
+  之前相同；其余情形（开关 ON、不是预览覆盖、未受治理：活跃拉取源 ≤1，或申请人在该 org 无关联
+  account）resolver 只多发一条结果为空的只读探测，其余语句不变。
+- 只计活跃来源：非活跃（`status <> 'active'`）的拉取型 integration 不计入拉取源，即使它之下仍有
+  `link_status='linked'` 且 `is_active=true` 的 account。「一个活跃拉取源 + 这样的非活跃来源 +
+  无策略」属于活跃拉取源 ≤1，按上面第 2 条的 legacy 路径选取，该路径选取 account 时不看
+  integration 的状态；管理端 GET 的只读块给出这类 account 的数量（见锁 3）。
+- 定义只有一处：拉取型、活跃、拉取源、阈值与开关谓词在
+  `packages/core-backend/src/directory/pull-source-rule.ts`；本文与代码不另写第二份。
+
 ### 锁 3 — 只读切换预览（preview 无副作用）
 
 - `GET /api/admin/directory/routing-policy`（读全 org 策略 + 各 purpose 当前生效源——策略值或
-  "legacy-default"）。
+  "legacy-default"）。`approval_routing` 在锁 2「多活跃拉取源的限定」的条件成立时（开关 ON、活跃
+  拉取源 ≥2、无策略）读作 "policy-required"：此时生效的是 fail-closed，不是 legacy，不得标成
+  legacy。响应另带只读块 `approvalRouting`（开关状态、活跃拉取源数、候选、同企业多行分组、非活跃
+  拉取型来源下已关联的有效账号数；只含计数、布尔、integration id、provider、运维标签与状态），
+  不受开关控制；该块读不到时整块省略，其余字段不变。"policy-required" 的标注只取决于开关与规则
+  判定（活跃拉取源数、策略是否存在）：判定读到之后，块的其余部分读不到时仍省略整块，标注不变。
 - `GET /api/admin/directory/routing-policy/:purpose/preview?candidate=<integrationId>`：
   对**受影响面**（v1 = approval_routing 一个 purpose；报告面覆盖 §6 五 purpose 的骨架）计算
   before/after：现行解析源 vs 候选解析源下的申请人 dept/title/manager 差异样本。
   **只读**：不写策略、不写任何行、不取任何锁；实现层面 preview handler 里没有 UPDATE/INSERT。
+  "policy-required" 状态下预览仍可用：现行解析被该限定拒绝的申请人，其行标 `blocked: true`、
+  `before: null`、`changed: true`，候选腿照常计算；响应 `current.source = "policy-required"`，
+  `blockedCount` 仅在存在 blocked 行时出现。现行腿不改走 legacy 覆盖。
   （Q5 裁决：preview 为纯 GET，**不审计**——as-built handler 即如此。）
 - `PATCH /api/admin/directory/routing-policy/:purpose`：唯一写点。admin-only；values-free 审计
   `directory.routing_policy.set`（resourceId=`${orgId}:${purpose}`，meta 只含 orgId/purpose/
@@ -101,10 +135,14 @@ purpose=`approval_routing` 的解析顺序：
 ## 3. Q1–Q6 owner 裁决（2026-07-17，最终）
 
 - **Q1 无策略语义**：**已裁 = legacy 字节级保留**（零行为变化，策略显式 opt-in）。
+  限定（2026-11-11，见锁 2「多活跃拉取源的限定」）：开关 ON 且活跃拉取源 ≥2 的 org 改为
+  fail-closed；活跃拉取源 ≤1 与开关 OFF 时本条原样有效。
 - **Q2 fallback**：**已裁 = 保留列，v1 不启用**（canonical 坏 ⇒ 响亮 fail-closed，不自动 fallback）。
 - **Q3 `mode` 列**：**已裁 = 不设冗余 mode**（canonical integration 的 provider 即唯一真源）。
 - **Q4 org 解析**：**已裁 = 0 个受治理 org ⇒ legacy；恰 1 个 ⇒ 用该策略；>1 个 ⇒ fail-close**
   （受治理 = requester 有 linked account 的 org 中存在 approval_routing 策略行）。
+  限定（2026-11-11，见锁 2「多活跃拉取源的限定」）：0 个受治理 org 且开关 ON 时先过该限定——
+  申请人所在的任一未受治理 org 活跃拉取源 ≥2 即 fail-closed；给定 `orgId` 时只看该 org。
 - **Q5 preview**：**已裁 = 只读 GET 不审计**；PATCH 才审计。
 - **Q6 B7 sweep 接线**：**已裁 = 成功同步提交后自动 sweep，按 `remoteIntegrationId` 收窄；
   sweep 失败不得误报同步失败（不传染 sync 结果，值无关地记录），同时提供管理端重试入口**。

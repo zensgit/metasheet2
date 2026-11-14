@@ -447,4 +447,28 @@ describe('attendance web guard workflow contract', () => {
       expect(words).toContain(token)
     }
   })
+
+  // DingTalk callback guidance (2026-11-13): the callback page, its fixed-guidance module and its mounted spec sit
+  // next to the directory and login specs already registered here — in push.paths and in the PR classifier (two
+  // occurrences of each path) — and the spec is an exact word of the targeted command AND of the required lane.
+  it('keeps the DingTalk callback page, its guidance module and its spec in both lanes and both classifiers', () => {
+    for (const path of [
+      'apps/web/src/views/DingTalkAuthCallbackView.vue',
+      'apps/web/src/utils/dingtalkLoginErrors.ts',
+      'apps/web/tests/dingtalk-auth-callback.spec.ts',
+    ]) {
+      expect(workflow.split(path)).toHaveLength(3)
+    }
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain('apps/web/tests/dingtalk-auth-callback.spec.ts')
+    expect(targetedRunCommand(workflow).trim().split(/\s+/)).toContain('dingtalk-auth-callback')
+    const required = requiredLaneExecCommand(
+      readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'),
+    ).split(/\s+/)
+    expect(required).toContain('dingtalk-auth-callback')
+    // The directory and login specs already registered here stay registered.
+    for (const token of ['directoryManagementView', 'LoginView']) {
+      expect(targetedRunCommand(workflow).trim().split(/\s+/)).toContain(token)
+    }
+  })
 })

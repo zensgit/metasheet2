@@ -6,10 +6,12 @@ import {
 } from '../../src/db/migrations/zzzz20260720120000_add_write_approval_form_values_automation_action'
 
 describe('write_approval_form_values automation action migration (FWB activation)', () => {
-  it('keeps the latest database action constraint in sync with app-level action types', () => {
-    // This migration widens chk_automation_action_type to the CURRENT ALL_ACTION_TYPES — so a future
-    // action type added to the app without a DB migration trips this drift guard RED.
+  it('keeps this constraint in sync with app-level action types except those added by later migrations', () => {
+    // No longer the LATEST migration (run_integration_job widened the constraint afterwards — see
+    // run-integration-job-automation-action-migration.test.ts for the live "latest in sync" guard).
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['run_integration_job'])
     for (const actionType of ALL_ACTION_TYPES) {
+      if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_FWB).toContain(actionType)
     }
   })

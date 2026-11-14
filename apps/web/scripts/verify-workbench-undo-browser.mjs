@@ -19,9 +19,13 @@ const state = (page) => page.evaluate(() => ({
   composer: window.undoDemo.draft(),
   outside: document.querySelector('#outside').value,
   grid: { ...window.undoDemo.grid },
+  replays: window.undoDemo.replays,
   native: window.undoDemo.native,
 }))
 const saved = (page) => page.evaluate(() => window.undoDemo.patches.slice())
+// Whether the drawer shows the record whose 名称 is `name` within a few seconds (false rather than a timeout).
+const shows = (page, name) => page.waitForFunction((n) => document.querySelector('#drawer_field_fld_name')?.value === n, name, { timeout: 3000 }).then(() => true, () => false)
+const inEditor = (page) => page.waitForFunction(() => !!document.activeElement?.closest('[data-test="rich-longtext-editor"]'), null, { timeout: 1000 }).then(() => true, () => false)
 const leave = (page) => page.locator('#grid-area').click({ position: { x: 5, y: 5 } })
 const onPage = (page) => page.evaluate(() => document.activeElement === document.body)
 async function openComments(page) {
@@ -52,9 +56,9 @@ const SCENARIOS = {
     await page.locator('#drawer_field_fld_name').click(); await page.keyboard.press('End'); await page.keyboard.type('XYZ'); await page.keyboard.press('Enter'); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('value', s.name, 'alphaXYZ'); check('grid', s.grid, { undo: 0, redo: 0 })
   },
-  async 'commit with Enter into the date input, Cmd+Z: the grid undo (undoes the commit)'(page) {
+  async 'commit with Enter into the date input, Cmd+Z: the grid undo (here it replays the grid\'s last cell edit; in the workbench, the commit)'(page) {
     await page.locator('#drawer_field_fld_note').click(); await page.keyboard.press('End'); await page.keyboard.type('Q'); await page.keyboard.press('Enter'); await page.keyboard.press(`${mod}+z`)
-    check('grid', (await state(page)).grid, { undo: 1, redo: 0 })
+    const s = await state(page); check('grid', s.grid, { undo: 1, redo: 0 }); check('replayed to the server', s.replays, 1)
   },
   async 'title: Enter commits and focus goes to the page; Cmd+Z: the grid undo, never the browser undo'(page) {
     const t = page.locator('.meta-record-drawer__title-input'); await t.click(); await page.keyboard.press('End'); await page.keyboard.type(' X'); await page.keyboard.press('Enter'); await page.waitForTimeout(100)
@@ -68,9 +72,11 @@ const SCENARIOS = {
     await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+Shift+z`)
     check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
   },
-  async 'title rewritten by the record (grid undo, a record re-render), Cmd+Z: nothing'(page) {
+  async 'title rewritten by the record (grid undo, a record re-render) after its typing was left, Cmd+Z: nothing'(page) {
     const t = page.locator('.meta-record-drawer__title-input'); await t.click(); await page.keyboard.press('End'); await page.keyboard.type(' T')
+    await leave(page)
     await page.evaluate(() => window.undoDemo.rewrite('fld_title', 'Server value')); await page.waitForTimeout(150)
+    await t.click()
     await page.keyboard.press(`${mod}+z`); await page.keyboard.press(`${mod}+z`)
     const s = await state(page); check('title', s.title, 'Server value'); check('grid', s.grid, { undo: 0, redo: 0 })
   },
@@ -149,9 +155,145 @@ const SCENARIOS = {
     await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
     check('focus on the page while it uploads', await onPage(page), true)
     await page.keyboard.press(`${mod}+z`)
-    check('grid', (await state(page)).grid, { undo: 0, redo: 0 })
+    const s = await state(page); check('grid', s.grid, { undo: 0, redo: 0 }); check('replays', s.replays, 0)
     await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
     check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
+  },
+  async 'an attachment upload, then a press on the grid and Cmd+Z while it uploads: the grid\'s undo is held, nothing is replayed; once it is saved, Cmd+Z there runs it (here it replays the grid\'s last cell edit; in the workbench, the upload)'(page) {
+    const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
+    await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
+    await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
+    const gridArea = page.locator('#grid-area')
+    await gridArea.dispatchEvent('mousedown'); await gridArea.focus()
+    await page.keyboard.press(`${mod}+z`)
+    let s = await state(page); check('grid while it uploads', s.grid, { undo: 1, redo: 0 }); check('replays while it uploads', s.replays, 0)
+    await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
+    await gridArea.focus(); await page.keyboard.press(`${mod}+z`)
+    s = await state(page); check('grid after', s.grid, { undo: 2, redo: 0 }); check('replays after', s.replays, 1)
+  },
+  async 'a press on the drawer\'s details panel itself, Cmd+Z: nothing (not the grid\'s undo), never the browser undo'(page) {
+    const panel = page.locator('[role="tabpanel"][id$="-panel-details"]')
+    await panel.dispatchEvent('mousedown'); await panel.focus()
+    await page.keyboard.press(`${mod}+z`)
+    const s = await state(page); check('grid', s.grid, { undo: 0, redo: 0 }); check('replays', s.replays, 0)
+  },
+  async 'a text box typed in again while its commit is still out: the value the server then accepts does not overwrite the typing, which the next blur saves'(page) {
+    const note = page.locator('#drawer_field_fld_note')
+    await note.click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await leave(page)
+    await note.click(); await page.keyboard.press('End'); await page.keyboard.type('Q')
+    // The first commit is accepted now: the record comes back with it.
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'betaX')); await page.waitForTimeout(100)
+    check('typing kept', await note.inputValue(), 'betaXQ')
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_note')), ['rec_1:fld_note=betaX', 'rec_1:fld_note=betaXQ'])
+  },
+  async 'a number box typed in while the record is redrawn (another field\'s value came back): the typing stays, and the number typed is saved'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('12')
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    check('typing kept', await qty.inputValue(), '12')
+    await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_1:fld_qty=123'])
+  },
+  async 'a number draft it cannot read ("-"), then the next-record chord: the next record\'s box shows its own value, and a number typed there is saved as typed'(page) {
+    await page.evaluate(() => window.undoDemo.setField('rec_2', 'fld_qty', null))
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('-')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    check('the draft is gone', await qty.evaluate((el) => [el.value, el.validity.badInput]), ['', false])
+    await qty.click(); await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_2:fld_qty=3'])
+  },
+  async 'a date typed part by part while the record is redrawn (the day half-typed, then the redraw, then its last digit): the date typed is saved last, and the box keeps it'(page) {
+    const due = page.locator('#drawer_field_fld_due')
+    await due.focus(); await page.keyboard.press('ArrowRight')
+    await page.keyboard.type('0')
+    // the answer to the half-typed day's save: the record comes back without a date
+    await page.evaluate(() => window.undoDemo.setField('rec_1', 'fld_due', '')); await page.waitForTimeout(100)
+    await page.keyboard.type('9'); await leave(page)
+    check('the box', await due.inputValue(), '2031-01-09')
+    check('saved last', (await saved(page)).filter((p) => p.includes('fld_due')).at(-1), 'rec_1:fld_due=2031-01-09')
+  },
+  async 'a date cleared part by part with the keyboard: the empty date is saved'(page) {
+    const due = page.locator('#drawer_field_fld_due')
+    await due.focus()
+    await page.keyboard.press('Backspace'); await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Backspace'); await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('Backspace'); await leave(page)
+    check('the box', await due.inputValue(), '')
+    check('saved last', (await saved(page)).filter((p) => p.includes('fld_due')).at(-1), 'rec_1:fld_due=')
+  },
+  async 'a negative number typed while the record is redrawn ("-", the redraw, then "3"): -3 is saved'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.press('Backspace'); await leave(page)
+    // the server took the empty box: the record comes back without a number
+    await page.evaluate(() => window.undoDemo.setField('rec_1', 'fld_qty', null)); await page.waitForTimeout(100)
+    await qty.click(); await page.keyboard.type('-')
+    await page.evaluate(() => window.undoDemo.rewrite('fld_note', 'from elsewhere')); await page.waitForTimeout(100)
+    await page.keyboard.type('3'); await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), ['rec_1:fld_qty=null', 'rec_1:fld_qty=-3'])
+  },
+  async 'a number box holding a draft it cannot read ("-"), left: nothing is saved, the stored number stays'(page) {
+    const qty = page.locator('#drawer_field_fld_qty')
+    await qty.click(); await page.keyboard.press(`${mod}+a`); await page.keyboard.type('-')
+    check('the box reads empty (badInput)', await qty.evaluate((el) => [el.value, el.validity.badInput]), ['', true])
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_qty')), [])
+  },
+  async 'rich text, the next record ending in an @-mention: after the chord, typing goes after the mention, not into it'(page) {
+    await page.evaluate(() => window.undoDemo.setField('rec_2', 'fld_rich', '<p>hi <span data-mention-id="u_1">@Ann</span></p>'))
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.press('End')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    await page.keyboard.type('Z')
+    check('Z after the mention, the mention unchanged', (await state(page)).rich, '<p>hi <span data-mention-id="u_1" contenteditable="false">@Ann</span>Z</p>')
+  },
+  async 'an attachment upload, then the drawer\'s next-record button while it uploads: the file is saved to the record it was chosen on, never the next one'(page) {
+    const input = page.locator('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), input.click()])
+    await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('x') })
+    await page.waitForFunction(() => document.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]').disabled)
+    await page.locator('button[aria-label="下一条记录"]').click()
+    await page.waitForFunction(() => document.querySelector('#drawer_field_fld_name')?.value === 'gamma')
+    await page.waitForFunction(() => window.undoDemo.patches.some((p) => p.includes('fld_files')))
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_files')), ['rec_1:fld_files=att_1'])
+  },
+  async 'rich text: type, then the next-record chord with the caret still in it: the text is saved to the record it was typed on, the caret stays (at the end), and the chord goes on working'(page) {
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' for A')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    check('caret back in the editor', await inEditor(page), true)
+    check('rec_2 shows its own text', (await state(page)).rich, 'other')
+    await page.keyboard.type('Z')
+    check('typed at the end', (await state(page)).rich, 'otherZ')
+    await page.keyboard.press(`${mod}+Shift+Comma`)
+    check('moved back to rec_1', await shows(page, 'alpha'), true)
+    await leave(page)
+    // Only what was typed is saved: passing through the editor (opening, the moves, leaving) saves nothing.
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_rich')), ['rec_1:fld_rich=rich for A', 'rec_2:fld_rich=otherZ'])
+  },
+  async 'rich text, both records holding the same text: typed on the first, the chord there and back: the next one shows its own text and nothing is saved to it'(page) {
+    await page.evaluate(() => window.undoDemo.setField('rec_2', 'fld_rich', 'rich'))
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' for A')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    check('rec_2 shows its own text', (await state(page)).rich, 'rich')
+    await page.keyboard.press(`${mod}+Shift+Comma`); check('back on rec_1', await shows(page, 'alpha'), true)
+    await page.keyboard.press(`${mod}+Shift+Period`); check('on rec_2 again', await shows(page, 'gamma'), true)
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_rich')), ['rec_1:fld_rich=rich for A'])
+  },
+  async 'rich text, never filled on either record: typed on the first, the chord there and back: nothing is saved to the next one'(page) {
+    await page.evaluate(() => { window.undoDemo.setField('rec_2', 'fld_rich', undefined); window.undoDemo.setField('rec_1', 'fld_rich', undefined) })
+    const ed = page.locator('[data-test="rich-longtext-editor"]'); await ed.click(); await page.keyboard.type('for A')
+    await page.keyboard.press(`${mod}+Shift+Period`)
+    check('moved to rec_2', await shows(page, 'gamma'), true)
+    check('rec_2 shows nothing', (await state(page)).rich, '')
+    await page.keyboard.press(`${mod}+Shift+Comma`); check('back on rec_1', await shows(page, 'alpha'), true)
+    await leave(page)
+    check('saved', (await saved(page)).filter((p) => p.includes('fld_rich')), ['rec_1:fld_rich=for A'])
   },
   async 'a box outside the workbench (a popover): its own typing goes, then nothing; the page itself after it: nothing'(page) {
     await page.locator('#outside').click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await page.keyboard.press(`${mod}+z`)

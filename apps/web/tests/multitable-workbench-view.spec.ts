@@ -37,6 +37,11 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
     // #5795: the server-side mention search the workbench hands the inspector.
     mentionSearch: undefined as ((query: string) => Promise<{ items: unknown[]; requiresQuery: boolean; hasMore: boolean }>) | undefined,
+    // The attachment upload / delete the workbench hands the inspector (they hold the grid's undo).
+    uploadFn: undefined as ((file: File, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
+    deleteAttachmentFn: undefined as ((attachmentId: string, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
+    // The record the drawer shows (the grid's row, or the workbench's copy of it).
+    record: null as { id: string; version: number; data: Record<string, unknown> } | null,
   },
   gridStubSeen: {
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
@@ -129,6 +134,8 @@ function createDeferred<T = void>() {
 
 let workbenchMock: any
 let gridMock: any
+// The options the workbench created its grid with (e.g. `holdsHistory`).
+let gridOptions: any
 let loadCommentsSpy: ReturnType<typeof vi.fn>
 let addCommentSpy: ReturnType<typeof vi.fn>
 let resolveCommentSpy: ReturnType<typeof vi.fn>
@@ -141,7 +148,10 @@ vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
 }))
 
 vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
-  useMultitableGrid: () => gridMock,
+  useMultitableGrid: (options: unknown) => {
+    gridOptions = options
+    return gridMock
+  },
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
@@ -410,7 +420,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
     // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
     // the inspector; tests that need the panel OPEN click the new `data-expand-record` button
     // (mirrors the real grid's row-number icon → `expand-record`).
-    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change', 'set-frozen-rows'],
+    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change', 'set-frozen-rows', 'open-link-picker', 'open-person-picker'],
     render() {
       gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
       gridStubSeen.mentionSearch = this.$props.mentionSearch as typeof gridStubSeen.mentionSearch
@@ -519,6 +529,24 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
           },
           'selection-change',
         ),
+        // A link / person cell of rec_1 opens its picker (the real grid's cell editor → `open-link-picker` /
+        // `open-person-picker`); the picker stubs below confirm.
+        h(
+          'button',
+          {
+            'data-open-link-picker': 'rec_1',
+            onClick: () => this.$emit('open-link-picker', { recordId: 'rec_1', field: { id: 'fld_parts', name: 'Parts', type: 'link' } }),
+          },
+          'open-link-picker',
+        ),
+        h(
+          'button',
+          {
+            'data-open-person-picker': 'rec_1',
+            onClick: () => this.$emit('open-person-picker', { recordId: 'rec_1', field: { id: 'fld_owner', name: 'Owner', type: 'person' } }),
+          },
+          'open-person-picker',
+        ),
       ])
     },
   }),
@@ -585,6 +613,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
       mentionSearch: { type: Function, default: undefined },
+      uploadFn: { type: Function, default: undefined },
+      deleteAttachmentFn: { type: Function, default: undefined },
       // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
       // binding arrives as a typed prop and is rendered below as the same `[data-test=
       // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
@@ -609,6 +639,14 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       // `data-copy-link` button below is this stub's stand-in for that icon.
       'copy-link',
     ],
+    watch: {
+      // The blur-commit field below shows the record's title, but keeps what it shows while it is focused, as the
+      // rich text editor does (its DOM is not rewritten under the caret).
+      record(next: { data?: Record<string, unknown> } | null) {
+        const field = document.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')
+        if (field && document.activeElement !== field) field.value = String(next?.data?.fld_title ?? '')
+      },
+    },
     methods: {
       // PR-B2 round 2: same name/signature as the real component's `defineExpose`d query; reachable
       // through the workbench's `ref="recordInspectorRef"` because Options-API methods sit on the
@@ -626,6 +664,9 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
       inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
       inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
+      inspectorStubSeen.uploadFn = this.$props.uploadFn as typeof inspectorStubSeen.uploadFn
+      inspectorStubSeen.deleteAttachmentFn = this.$props.deleteAttachmentFn as typeof inspectorStubSeen.deleteAttachmentFn
+      inspectorStubSeen.record = (this.$props.record as typeof inspectorStubSeen.record) ?? null
       if (inspectorStubRealComments.realInspector) {
         // #5813: stays mounted while hidden, like the real shell at the workbench call site.
         const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
@@ -707,6 +748,28 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'navigate-record',
         ),
+        // The inspector re-selects the record shown (after a permission change) through the same emit.
+        h(
+          'button',
+          {
+            'data-navigate-record': 'rec_1',
+            onClick: () => this.$emit('navigate', 'rec_1'),
+          },
+          'navigate-record-1',
+        ),
+        // A field that commits on blur, as the drawer's text fields and its rich text editor do, inside the
+        // drawer's root (as every control of the real inspector is).
+        h('div', { class: 'meta-record-drawer' }, [
+          h('input', {
+            'data-blur-commit': 'fld_title',
+            onBlur: (event: FocusEvent) => this.$emit('patch', 'fld_title', (event.target as HTMLInputElement).value),
+          }),
+          // A control only rec_1 shows (a field hidden on another record), and the drawer's open tab.
+          this.record?.id === 'rec_1' ? h('input', { 'data-rec1-only': 'true' }) : null,
+          // An editable surface, as the rich text editor's (jsdom has no isContentEditable: the cell sets it).
+          h('div', { 'data-stub-editable': 'true', contenteditable: 'true', tabindex: 0 }, 'two words'),
+          h('div', { role: 'tabpanel', tabindex: 0, 'data-stub-tabpanel': 'true' }),
+        ]),
         h(
           'button',
           {
@@ -723,6 +786,15 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
           },
           'patch-record',
         ),
+        // A second save of the same field (two saves of one field, the second made while the first is out).
+        h(
+          'button',
+          {
+            'data-patch-record-again': 'fld_title',
+            onClick: () => this.$emit('patch', 'fld_title', 'Second title'),
+          },
+          'patch-record-again',
+        ),
         // PR-B2 round 2: a second patchable field so two drawer patches can be in flight at once.
         h(
           'button',
@@ -731,6 +803,61 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             onClick: () => this.$emit('patch', 'fld_status', 'Patched status'),
           },
           'patch-record-status',
+        ),
+        // An attachment write names the record it was made on (the third argument): it can end after the
+        // drawer moved to another record. One button per named record.
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_title', 'Stale title', 'rec_1'),
+          },
+          'patch-stale',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_2',
+            onClick: () => this.$emit('patch', 'fld_title', 'Named title', 'rec_2'),
+          },
+          'patch-named',
+        ),
+        h(
+          'button',
+          {
+            'data-patch-record-for': 'rec_remote',
+            onClick: () => this.$emit('patch', 'fld_files', ['att_2'], 'rec_remote'),
+          },
+          'patch-remote-files',
+        ),
+        // A remove that ended after the drawer moved on also names the ids it took out (the fourth argument);
+        // the value is the list it started from. One button per named record.
+        ...['rec_1', 'rec_2', 'rec_remote'].map((recordId) => h(
+          'button',
+          {
+            'data-patch-removed-for': recordId,
+            onClick: () => this.$emit('patch', 'fld_files', ['att_stale'], recordId, ['att_1']),
+          },
+          'patch-removed',
+        )),
+        // An upload that adds to the list names the ids it added (the fifth argument); the value is the list it
+        // started from plus those ids. One button per named record.
+        ...['rec_1', 'rec_2', 'rec_remote'].map((recordId) => h(
+          'button',
+          {
+            'data-patch-added-for': recordId,
+            onClick: () => this.$emit('patch', 'fld_files', ['att_stale', 'att_new'], recordId, undefined, ['att_new']),
+          },
+          'patch-added',
+        )),
+        // A clear-all that ended after the drawer moved on: every id it took out goes with it.
+        h(
+          'button',
+          {
+            'data-patch-cleared-for': 'rec_1',
+            onClick: () => this.$emit('patch', 'fld_files', [], 'rec_1', ['att_1', 'att_2']),
+          },
+          'patch-cleared',
         ),
         h(
           'button',
@@ -825,7 +952,47 @@ vi.mock('../src/multitable/components/MetaMentionPopover.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
+// The pickers: while open, one button that confirms a fixed choice (the real pickers emit `confirm` with the ids
+// picked and their summaries). Closed, the link picker is the bare stand-in it was, and the person picker renders
+// nothing.
+vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({
+  default: defineComponent({
+    name: 'MetaLinkPicker',
+    props: { visible: { type: Boolean, default: false } },
+    emits: ['close', 'confirm'],
+    render() {
+      return h('div', { 'data-stub-MetaLinkPicker': 'true' }, this.$props.visible
+        ? [h(
+          'button',
+          {
+            'data-link-picker-confirm': 'true',
+            onClick: () => this.$emit('confirm', { recordIds: ['rec_part_1'], summaries: [{ id: 'rec_part_1', display: 'Part 1' }] }),
+          },
+          'link-picker-confirm',
+        )]
+        : [])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaPersonPicker.vue', () => ({
+  default: defineComponent({
+    name: 'MetaPersonPicker',
+    inheritAttrs: false,
+    props: { visible: { type: Boolean, default: false } },
+    emits: ['close', 'confirm'],
+    render() {
+      if (!this.$props.visible) return null
+      return h('div', { 'data-stub-MetaPersonPicker': 'true' }, [h(
+        'button',
+        {
+          'data-person-picker-confirm': 'true',
+          onClick: () => this.$emit('confirm', { userIds: ['user_jamie'], summaries: [{ id: 'user_jamie', display: 'Jamie' }] }),
+        },
+        'person-picker-confirm',
+      )])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
   default: defineComponent({
     name: 'MetaFieldManager',
@@ -1220,9 +1387,16 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+
+/** The drawer asks for the version the server returns on every save (`patchCell`'s `onCommitted`). */
+const ROW_SAVE = { onCommitted: expect.any(Function) }
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
-import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, textEntryHost } from '../src/multitable/utils/workbench-undo'
+import { CELL_WRITE_SUPERSEDED } from '../src/multitable/utils/cell-write'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget, textEntryHost } from '../src/multitable/utils/workbench-undo'
 import { useLocale } from '../src/composables/useLocale'
+
+/** A save's record, field, value and version (the options a call carries are pinned where they matter). */
+const firstFourArgs = (calls: unknown[][]) => calls.map((call) => call.slice(0, 4))
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -1371,6 +1545,8 @@ function createGridMock() {
     // missing from this mock because, until PR-B2, no test in this file ever drove `onDrawerPatch` to its
     // SUCCESS branch — the stub's `data-patch-record` button existed but was never clicked.
     lastBatchId: ref<string | null>(null),
+    // The composable's count of cell writes not yet answered (the leave-page prompts read it).
+    pendingCellWriteCount: ref(0),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
     toggleFieldVisibility: vi.fn(),
@@ -1445,6 +1621,9 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubSeen.renders = 0
     inspectorStubSeen.fieldLayout = undefined
     inspectorStubSeen.fetchRecord = undefined
+    inspectorStubSeen.uploadFn = undefined
+    inspectorStubSeen.deleteAttachmentFn = undefined
+    gridOptions = undefined
     inspectorStubRealComments.enabled = false
     inspectorStubRealComments.realInspector = false
     gridStubSeen.fetchRecord = undefined
@@ -3074,6 +3253,26 @@ describe('MultitableWorkbench view wiring', () => {
     expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.')
   })
 
+  it('a form view shows its own record (the form context\'s), not the grid\'s row of it, and submits with its version', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record' } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: 10, data: { fld_title: 'Form record' } }, attachmentSummaries: {} })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    // The grid's page holds rec_1 too, at another version.
+    expect(gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')).toMatchObject({ version: 1 })
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 9 }))
+  })
+
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
     workbenchMock.views.value = [
       { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
@@ -4068,6 +4267,73 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(event.defaultPrevented).toBe(true)
     expect(event.returnValue).toBe('')
+  })
+
+  // A cell write the grid has not had an answer for yet (waiting for its record's turn, or out) counts for the
+  // leave-page prompts: the grid's `pendingCellWriteCount`.
+  function fireBeforeUnload(): BeforeUnloadEvent {
+    const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent
+    Object.defineProperty(event, 'returnValue', {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    })
+    window.dispatchEvent(event)
+    return event
+  }
+
+  it('blocks beforeunload while a cell write is not yet answered, and no longer once it is', async () => {
+    mountWorkbench()
+    await flushUi()
+    expect(fireBeforeUnload().defaultPrevented).toBe(false)
+
+    gridMock.pendingCellWriteCount.value = 1
+    const blocked = fireBeforeUnload()
+    expect(blocked.defaultPrevented).toBe(true)
+    expect(blocked.returnValue).toBe('')
+
+    gridMock.pendingCellWriteCount.value = 0
+    expect(fireBeforeUnload().defaultPrevented).toBe(false)
+  })
+
+  it('confirmPageLeave asks the busy confirm while a cell write is not yet answered; with none it lets the page go without asking', async () => {
+    const hostState = mountWorkbench()
+    await flushUi()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      expect(hostState.workbenchRef.confirmPageLeave()).toBe(true)
+      expect(confirmSpy).not.toHaveBeenCalled()
+
+      gridMock.pendingCellWriteCount.value = 2
+      expect(hostState.workbenchRef.confirmPageLeave()).toBe(false)
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(confirmSpy).toHaveBeenCalledWith('Leave the multitable while the current save or import is still running?')
+      confirmSpy.mockReturnValue(true)
+      expect(hostState.workbenchRef.confirmPageLeave()).toBe(true)
+
+      gridMock.pendingCellWriteCount.value = 0
+      confirmSpy.mockClear()
+      expect(hostState.workbenchRef.confirmPageLeave()).toBe(true)
+      expect(confirmSpy).not.toHaveBeenCalled()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  // Control (passes before the change too): the count is the leave-page prompts' only. It is not part of the
+  // blocking state, which also defers an external context sync.
+  it('a cell write not yet answered is not a blocking state for the embed host, and does not defer an external context sync', async () => {
+    const hostState = mountWorkbench()
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    gridMock.pendingCellWriteCount.value = 1
+    expect(hostState.workbenchRef.getEmbedHostState()).toMatchObject({ hasBlockingState: false, blockingReason: null, busy: false })
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_while_writing' },
+    )
+    expect(result.status).not.toBe('deferred')
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
   })
 
   it('shows a mention chip only when unresolved mentions exist', async () => {
@@ -5276,18 +5542,21 @@ describe('MultitableWorkbench view wiring', () => {
         return failureFor(fieldId, message, failure)
       })
     }
+    /** The grid accepts the next save, telling the version it moved the record to, as the real `patchCell` does. */
     function acceptNextPatch() {
-      gridMock.patchCell.mockImplementation(async () => {
+      gridMock.patchCell.mockImplementation(async (_recordId: string, _fieldId: string, _value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
         gridMock.error.value = null
+        options?.onCommitted?.(version + 1)
         return null
       })
     }
+    const COPY_SAVE = { onCommitted: expect.any(Function), chainVersion: false }
 
     it('422 with fieldErrors → NO toast, inline error under that field (no success toast either)', async () => {
       await openRec1()
       rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
       await patchTitle()
-      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', ATTEMPTED, 1, ROW_SAVE)
       expect(showErrorSpy).not.toHaveBeenCalled()
       expect(showSuccessSpy).not.toHaveBeenCalled()
       expect(fieldErrorEl('fld_title')?.textContent).toBe('Title is too long')
@@ -5425,6 +5694,306 @@ describe('MultitableWorkbench view wiring', () => {
       expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
+    // A realtime merge of the open record (on the page) gives the drawer a copy of it (`deepLinkedRecord`); the drawer
+    // still shows the grid's row while the record is on the page, and the copy only once it leaves the page.
+    function mergeAnswer(row: { version: number; data: Record<string, unknown> }, data?: Record<string, unknown>) {
+      workbenchMock.client.getRecord.mockResolvedValue({
+        record: { id: 'rec_1', version: row.version, data: { ...(data ?? row.data) } },
+        linkSummaries: {}, attachmentSummaries: {}, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
+        commentsScope: { targetType: 'meta_record', targetId: 'rec_1', containerType: 'meta_sheet', containerId: 'sheet_orders' },
+      })
+    }
+    function realtimeMerge() {
+      return (useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as { mergeRemoteRecord: (recordId: string) => Promise<boolean> }).mergeRemoteRecord
+    }
+    /** The grid (patchCell): the row shows each save at once; each answer comes when released. */
+    function heldPatches(row: { data: Record<string, unknown> } | null) {
+      const answers: Array<(failure: unknown) => void> = []
+      const calls: Array<[string, unknown, number]> = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
+        calls.push([fieldId, value, version])
+        if (row) row.data[fieldId] = value
+        const failure = await new Promise((resolve) => { answers.push(resolve) })
+        gridMock.error.value = null
+        if (!failure) options?.onCommitted?.(version + 1)
+        return failure
+      })
+      return { answers, calls }
+    }
+
+    it('after a realtime merge of the record shown (on the page) the drawer shows the grid\'s row, not the copy: its saves are the row\'s, which the grid chains', async () => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      expect(inspectorStubSeen.record).toBe(row)
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
+    })
+
+    it('a record opened by its link before the page\'s rows came: the drawer shows its copy until the rows hold the record, then the grid\'s row, whose saves the grid chains', async () => {
+      const pageRows = gridMock.rows.value
+      const pageRow = pageRows.find((r: { id: string }) => r.id === 'rec_1')
+      gridMock.rows.value = []
+      mergeAnswer(pageRow)
+      mountWorkbench({ recordId: 'rec_1' })
+      await flushUi(8)
+      expect(workbenchMock.client.getRecord).toHaveBeenCalled()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_1', version: pageRow.version })
+      gridMock.rows.value = pageRows
+      await flushUi()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      expect(inspectorStubSeen.record).toBe(row)
+      gridMock.patchCell.mockImplementation(async () => { gridMock.error.value = null; return null })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      // Chained by the grid (no `chainVersion: false`); the version returned is asked for, for the copy.
+      expect(gridMock.patchCell.mock.calls.at(-1)).toEqual(['rec_1', 'fld_title', ATTEMPTED, row.version, { onCommitted: expect.any(Function) }])
+    })
+
+    it('a copy of the record shown takes an accepted save and moves one version on, so the next save carries it', async () => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      const start = inspectorStubSeen.record!.version
+      const versions: number[] = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, value: unknown, version: number) => {
+        versions.push(version)
+        row.data[fieldId] = value
+        await Promise.resolve()
+        row.version += 1 // the grid's applyPatchResult
+        gridMock.error.value = null
+        return null
+      })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      await flushUi()
+      expect(versions).toEqual([start, start + 1])
+    })
+
+    it('a copy gone stale while another record was shown is not shown again: back on the record, the drawer shows the row, with the other user\'s change and its version', async () => {
+      await openRec1()
+      const row0 = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row0)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      // Another user changes rec_1's status (version 2). The grid merges its row; rec_1 is not shown, so the copy stays.
+      mergeAnswer({ version: 2, data: {} }, { ...row0.data, fld_status: 'theirs' })
+      gridMock.mergeRemoteRecord.mockImplementation((record: { id: string; version: number; data: Record<string, unknown> }) => {
+        gridMock.rows.value = gridMock.rows.value.map((r: { id: string }) => (r.id === record.id ? { ...r, version: record.version, data: { ...record.data } } : r))
+        return true
+      })
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorStubSeen.record).toMatchObject({ version: 2, data: { fld_status: 'theirs' } })
+      const sent: Array<[string, number]> = []
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string, _value: unknown, version: number) => {
+        sent.push([fieldId, version])
+        if (version !== 2) {
+          gridMock.error.value = 'Changed elsewhere'
+          return failureFor(fieldId, 'Changed elsewhere', { status: 409, code: 'VERSION_CONFLICT' })
+        }
+        gridMock.error.value = null
+        return null
+      })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_status"]')!.click()
+      await flushUi()
+      // Both are made on the row, which shows 'theirs' with its version: both are stored (the stand-in does not move
+      // the row's version on; the real grid chains the second).
+      expect(sent).toEqual([['fld_title', 2], ['fld_status', 2]])
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['accepted: the copy takes the save and moves one version on, so the next save carries it', null],
+      ['rejected: the copy never shows the save', 'reject'],
+    ] as const)('the record leaves the page while a save on its copy is out; %s', async (_name, outcome) => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      const versionAtMerge = inspectorStubSeen.record!.version
+      const before = inspectorStubSeen.record!.data.fld_title
+      const { answers, calls } = heldPatches(row)
+      container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
+      await flushUi()
+      gridMock.rows.value = gridMock.rows.value.filter((r: { id: string }) => r.id !== 'rec_1')
+      await flushUi()
+      answers[0](outcome ? failureFor('fld_title', 'Insufficient permissions', { status: 403, code: 'FORBIDDEN' }) : null)
+      await flushUi()
+      expect(inspectorStubSeen.record?.id).toBe('rec_1')
+      if (outcome) {
+        expect(inspectorStubSeen.record?.data.fld_title).toBe(before)
+        return
+      }
+      expect(inspectorStubSeen.record).toMatchObject({ version: versionAtMerge + 1, data: { fld_title: ATTEMPTED } })
+      container!.querySelector<HTMLButtonElement>('[data-patch-record-again="fld_title"]')!.click()
+      await flushUi()
+      expect(calls.map((call) => call[2])).toEqual([versionAtMerge, versionAtMerge + 1])
+    })
+
+    it('a save the grid replaced unsent with a newer save of the field (CELL_WRITE_SUPERSEDED) shows nothing and leaves the field\'s inline error alone: the newer save answers for the field', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => CELL_WRITE_SUPERSEDED)
+      await patchTitle()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+    })
+
+    it('an older save of the record that fails while this one waits (the grid\'s shared error set after the call) does not make this one\'s success a local refusal', async () => {
+      await openRec1()
+      rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')).toBeTruthy()
+      showErrorSpy.mockClear()
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        await Promise.resolve()
+        gridMock.error.value = 'Status is not allowed'
+        return null
+      })
+      await patchTitle()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(fieldErrorEl('fld_title')).toBeNull()
+    })
+
+    // --- the link and person pickers answer for their own save too (the grid's shared error is not theirs) ---
+
+    type PickerKind = 'link' | 'person'
+    async function openPicker(kind: PickerKind) {
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>(`[data-open-${kind}-picker="rec_1"]`)!.click()
+      await flushUi()
+    }
+    async function confirmPicker(kind: PickerKind) {
+      container!.querySelector<HTMLButtonElement>(`[data-${kind}-picker-confirm="true"]`)!.click()
+      await flushUi()
+    }
+    const pickedPersonSummaries = () => gridMock.personSummaries.value.rec_1?.fld_owner
+
+    it.each(['link', 'person'] as const)('a %s picker save that waits behind a failing save of the record (the grid\'s shared error set after the call) is a success: its toast, no error toast, and a person\'s summaries applied', async (kind) => {
+      await openPicker(kind)
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = null
+        await Promise.resolve()
+        gridMock.error.value = 'Status is not allowed'
+        return null
+      })
+      await confirmPicker(kind)
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell.mock.calls[0].slice(0, 4)).toEqual(kind === 'link'
+        ? ['rec_1', 'fld_parts', ['rec_part_1'], 1]
+        : ['rec_1', 'fld_owner', ['user_jamie'], 1])
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showSuccessSpy).toHaveBeenCalledWith('Linked records updated', undefined)
+      if (kind === 'person') expect(pickedPersonSummaries()).toEqual([{ id: 'user_jamie', display: 'Jamie' }])
+    })
+
+    it.each(['link', 'person'] as const)('a %s picker save the grid replaced unsent with a newer save of the cell (CELL_WRITE_SUPERSEDED) shows nothing, and applies no summaries: the newer save answers for the cell', async (kind) => {
+      await openPicker(kind)
+      gridMock.patchCell.mockImplementation(async () => CELL_WRITE_SUPERSEDED)
+      await confirmPicker(kind)
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(pickedPersonSummaries()).toBeUndefined()
+    })
+
+    it.each(['link', 'person'] as const)('a rejected %s picker save toasts its own failure, not the grid\'s shared error (another save\'s by then)', async (kind) => {
+      await openPicker(kind)
+      gridMock.patchCell.mockImplementation(async (_recordId: string, fieldId: string) => {
+        gridMock.error.value = null
+        await Promise.resolve()
+        gridMock.error.value = 'Status is not allowed'
+        return failureFor(fieldId, 'Not a valid choice', { status: 400, code: 'VALIDATION_ERROR' })
+      })
+      await confirmPicker(kind)
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Not a valid choice')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(pickedPersonSummaries()).toBeUndefined()
+    })
+
+    // Control (passes before the change too): the composable's local refusal sets its error at the call.
+    it.each(['link', 'person'] as const)('a %s picker save the grid refuses locally (no request, its error set at the call) still toasts that refusal', async (kind) => {
+      await openPicker(kind)
+      gridMock.patchCell.mockImplementation(async () => {
+        gridMock.error.value = 'Row editing is blocked'
+        return null
+      })
+      await confirmPicker(kind)
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Row editing is blocked')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+      expect(pickedPersonSummaries()).toBeUndefined()
+    })
+
+    // --- the conflict banner's retry answers for itself too (`retryConflict` returns its own result) ---
+
+    async function retryFromBanner() {
+      mountWorkbench()
+      await flushUi()
+      gridMock.conflict.value = { recordId: 'rec_1', fieldId: 'fld_title', attemptedValue: 'patched', message: 'Row changed elsewhere', serverVersion: 8 }
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('.mt-workbench__conflict-btn--primary')!.click()
+      await flushUi()
+      expect(gridMock.retryConflict).toHaveBeenCalledTimes(1)
+    }
+
+    it('a retry that fails toasts the retry\'s own failure, not the grid\'s shared error', async () => {
+      gridMock.retryConflict.mockImplementation(async () => {
+        gridMock.error.value = 'Status is not allowed'
+        return { message: 'Row changed again' }
+      })
+      await retryFromBanner()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Row changed again')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('a retry a newer save of the cell replaced unsent (false) shows nothing, also while the grid\'s shared error holds another save\'s failure', async () => {
+      gridMock.retryConflict.mockImplementation(async () => {
+        gridMock.error.value = 'Status is not allowed'
+        return false
+      })
+      await retryFromBanner()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('a retry that is stored (true) while the grid\'s shared error holds another save\'s failure is a success', async () => {
+      gridMock.retryConflict.mockImplementation(async () => {
+        gridMock.error.value = 'Status is not allowed'
+        return true
+      })
+      await retryFromBanner()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showSuccessSpy).toHaveBeenCalledWith('Change reapplied', undefined)
+    })
+
     it.each([
       ['same-record', 'success'], ['same-record', 'failure'],
       ['another-record', 'success'], ['another-record', 'failure'],
@@ -5481,6 +6050,276 @@ describe('MultitableWorkbench view wiring', () => {
       }
     })
 
+    // Every move to another record commits the drawer's focused field first (releaseDrawerFocus in selectRecord), not
+    // only the drawer's own previous / next: here the record in the address (the browser's back / forward), a
+    // deep link to a record off the page while a deep-linked record is shown, and a declined discard prompt.
+    it('a move through the record in the address commits the focused field to the record it was typed on, and gives it the focus back', async () => {
+      const host = mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      host.recordId = 'rec_2'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
+      expect(document.activeElement).toBe(field)
+      expect(field.value).toBe('Beta')
+    })
+
+    it('a deep link to a record off the page, while a deep-linked record is shown, commits the focused field to the record shown before it is replaced', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      const host = mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_remote'
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_far', version: 9, data: { fld_title: 'Far' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_far' },
+        linkSummaries: {},
+      })
+      acceptNextPatch()
+      // The far record's comments are still loading: the focus comes back without waiting for them.
+      loadCommentsSpy.mockImplementationOnce(() => new Promise(() => {}))
+      host.recordId = 'rec_far'
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4, COPY_SAVE]])
+      expect(document.activeElement).toBe(field)
+    })
+
+    // A deep link to a record off the page, while the record shown is deep-linked too and has a draft: the copy the
+    // drawer shows is replaced only once the discard prompt is accepted.
+    async function openRemoteWithCommentDraft() {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      const host = mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+      return host
+    }
+    async function deepLinkToFar(host: { recordId?: string }, answer: boolean) {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_far', version: 9, data: { fld_title: 'Far' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_far' },
+        linkSummaries: {},
+      })
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(answer)
+      try {
+        host.recordId = 'rec_far'
+        await flushUi(8)
+        // Asked once, not a second time by the move itself.
+        expect(confirmSpy).toHaveBeenCalledTimes(1)
+        expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      } finally {
+        confirmSpy.mockRestore()
+      }
+    }
+
+    it('a deep link to a record off the page, discard prompt declined: the drawer still shows the deep-linked record it showed, with its copy', async () => {
+      const host = await openRemoteWithCommentDraft()
+      await deepLinkToFar(host, false)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeNull()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } })
+    })
+
+    it('the same with the caret in a field: the field is committed to the record shown, which stays, and gets the focus back', async () => {
+      const host = await openRemoteWithCommentDraft()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_remote'
+      acceptNextPatch()
+      await deepLinkToFar(host, false)
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_remote', 'fld_title', 'typed on rec_remote', 4]])
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', data: { fld_title: 'typed on rec_remote' } })
+      expect(document.activeElement).toBe(field)
+    })
+
+    // Control (passes before the change too): accepted, the drawer moves on.
+    it('a deep link to a record off the page, discard prompt accepted: the drawer shows the new record', async () => {
+      const host = await openRemoteWithCommentDraft()
+      await deepLinkToFar(host, true)
+      expect(container!.querySelector('[data-record-drawer="rec_far"]')).toBeTruthy()
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeNull()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_far', version: 9, data: { fld_title: 'Far' } })
+    })
+
+    it('a reload with the caret in a changed drawer field: the write the unload flushes is counted, so the leave prompt is shown', async () => {
+      await openRec1()
+      // The grid counts a write from its call on (synchronously), as the real patchCell does.
+      let answer: () => void = () => {}
+      gridMock.patchCell.mockImplementation((_r: string, _f: string, _v: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
+        gridMock.pendingCellWriteCount.value += 1
+        return new Promise((resolve) => {
+          answer = () => { gridMock.pendingCellWriteCount.value -= 1; options?.onCommitted?.(version + 1); resolve(null) }
+        })
+      })
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed'
+      const event = fireBeforeUnload()
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(event.defaultPrevented).toBe(true)
+      answer()
+      await flushUi()
+      expect(fireBeforeUnload().defaultPrevented).toBe(false)
+    })
+
+    it('a same-record refresh of a deep-linked record that has a draft does not ask the discard prompt, and refreshes the copy (control)', async () => {
+      await openRemoteWithCommentDraft()
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 5, data: { fld_title: 'Remote v5' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+      })
+      gridMock.retryConflict.mockResolvedValue(true)
+      gridMock.conflict.value = { recordId: 'rec_remote', fieldId: 'fld_title', attemptedValue: 'x', message: 'Row changed elsewhere', serverVersion: 5 }
+      await flushUi()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      try {
+        container!.querySelector<HTMLButtonElement>('.mt-workbench__conflict-btn--primary')!.click()
+        await flushUi(8)
+        expect(confirmSpy).not.toHaveBeenCalled()
+        expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 5, data: { fld_title: 'Remote v5' } })
+      } finally {
+        confirmSpy.mockRestore()
+      }
+    })
+
+    it('a declined discard prompt keeps the record: the focused field is committed to it and gets the focus back', async () => {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+      await flushUi()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      acceptNextPatch()
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      try {
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+      } finally {
+        confirmSpy.mockRestore()
+      }
+      expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
+      expect(document.activeElement).toBe(field)
+    })
+
+    // The drawer's previous / next chord moves on with the caret still in a field (a click in jsdom does not move
+    // the focus either, like the chord): the field is blurred first, so it commits to the record it was typed on,
+    // and then gets the focus back, so the chord and Esc go on working.
+    it('navigating with the caret still in a field commits that field to the record it was typed on, moves on, and gives the focus back', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'typed on rec_1'
+      const blurred = vi.fn()
+      field.addEventListener('blur', blurred)
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(blurred).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_title', 'typed on rec_1', 1, ROW_SAVE]])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(document.activeElement).toBe(field)
+      // The focus comes back only once the drawer shows rec_2: the field shows rec_2's title, not rec_1's typing.
+      expect(field.value).toBe('Beta')
+    })
+
+    it('the focus is not given back when something else took it during the switch', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      const other = container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!
+      field.focus()
+      acceptNextPatch()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      other.focus()
+      await flushUi()
+      expect(document.activeElement).toBe(other)
+    })
+
+    it('a rich text editor gets the focus back with the caret at the end of its text', async () => {
+      await openRec1()
+      const editor = container!.querySelector<HTMLElement>('[data-stub-editable]')!
+      Object.defineProperty(editor, 'isContentEditable', { value: true, configurable: true })
+      editor.focus()
+      document.getSelection()!.collapse(editor, 0)
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(editor)
+      const selection = document.getSelection()!
+      expect(selection.isCollapsed).toBe(true)
+      expect(selection.anchorNode).toBe(editor)
+      expect(selection.anchorOffset).toBe(editor.childNodes.length)
+    })
+
+    it('the focus goes to the drawer\'s open tab when the focused control is gone on the next record', async () => {
+      await openRec1()
+      // a tab panel outside the drawer, before it in the page: never the one that gets the focus
+      const decoy = document.body.insertBefore(document.createElement('div'), document.body.firstChild)
+      decoy.setAttribute('role', 'tabpanel')
+      decoy.tabIndex = 0
+      try {
+        container!.querySelector<HTMLInputElement>('[data-rec1-only]')!.focus()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(container!.querySelector('[data-rec1-only]')).toBeNull()
+        expect(document.activeElement).toBe(container!.querySelector('[data-stub-tabpanel]'))
+      } finally {
+        decoy.remove()
+      }
+    })
+
+    it('a move leaves a focused control outside the drawer alone', async () => {
+      await openRec1()
+      const outside = document.body.appendChild(document.createElement('input'))
+      try {
+        outside.focus()
+        const blurred = vi.fn()
+        outside.addEventListener('blur', blurred)
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+        expect(blurred).not.toHaveBeenCalled()
+        expect(document.activeElement).toBe(outside)
+      } finally {
+        outside.remove()
+      }
+    })
+
+    it('re-selecting the record shown leaves the focused field alone', async () => {
+      await openRec1()
+      const field = container!.querySelector<HTMLInputElement>('[data-blur-commit="fld_title"]')!
+      field.focus()
+      field.value = 'still typing'
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!.click()
+      await flushUi()
+      expect(document.activeElement).toBe(field)
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+    })
+
     it('record change clears inline errors (navigate to another record from the inspector)', async () => {
       await openRec1()
       rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
@@ -5490,6 +6329,325 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
       expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+    })
+
+    // --- a patch that names its record (an attachment write that ended after the drawer moved on) ---
+
+    async function openRec1ThenRec2() {
+      await openRec1()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+    async function patchFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-record-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a patch naming rec_1 while rec_2 is shown goes to rec_1, with rec_1\'s own version, and never to rec_2', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].version = 7 // rec_1 moved on; rec_2 stays at 1
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 7, ROW_SAVE)
+      expect(gridMock.patchCell.mock.calls.some((call: unknown[]) => call[0] === 'rec_2')).toBe(false)
+    })
+
+    it('the edit gate is asked about the named record: rec_1 refused while rec_2 is editable → no patch, the edit-blocked toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rowActionOverrides.value = { rec_1: { canEdit: false, canDelete: false, canComment: false } }
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Record editing is not allowed for this row.') // wb('toast.recordEditBlocked', en)
+      expect(gridMock.resolveRowActions).toHaveBeenCalledWith('rec_1')
+    })
+
+    it('a patch naming the record shown (rec_2) is a plain drawer patch: rec_2 at its version, success toast, and it clears the field\'s inline error', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      gridMock.patchCell.mockClear()
+      acceptNextPatch()
+      await patchFor('rec_2')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_2', 'fld_title', 'Named title', 1, ROW_SAVE)
+      expect(fieldErrorEl('fld_title')).toBeNull()
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('a patch naming a record that is neither in the page nor deep-linked is dropped: no patch, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value = gridMock.rows.value.filter((row: { id: string }) => row.id !== 'rec_1')
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('a named rec_1 patch that succeeds after the switch leaves rec_2\'s inline error on the same field alone', async () => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      acceptNextPatch()
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenLastCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+    })
+
+    // Two answers from the inspector: the real one (it can anchor only on the record it shows), and one that
+    // would anchor anything, so the toast cannot come only from the inspector's answer.
+    it.each([
+      ['answers per record', (recordId: string) => recordId === 'rec_2'],
+      ['would anchor anything', () => true],
+    ])('a named rec_1 patch rejected after the switch (inspector %s) toasts and is never written inline on rec_2', async (_label, answer) => {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation(answer)
+      rejectNextPatch('Stale title rejected', { status: 400, code: 'VALIDATION_ERROR' }) // the failure is rec_1's
+      await patchFor('rec_1')
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Stale title', 1, ROW_SAVE)
+      expect(inspectorStubAnchor).toHaveBeenCalledWith('rec_1', 'fld_title')
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Stale title rejected')
+      expect(container!.querySelector('[data-test="drawer-field-error"]')).toBeNull()
+      gridMock.error.value = null
+    })
+
+    it('an attachment delete on a deep-linked record ends after the drawer moved on: the linked copy still takes the new version, and its later patch carries it', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: ['att_1', 'att_2'] } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'a.txt' }, { id: 'att_2', filename: 'b.txt' }] },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_1')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      // version 4, plus one for the delete that ended while rec_2 was shown
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+      expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE)
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
+    // Deep link to rec_remote (not in the page, version 4), then move the drawer to the page record rec_2.
+    async function openRemoteThenRec2(files: string[] = ['att_1', 'att_2']) {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: files } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: files.map((id) => ({ id, filename: `${id}.txt` })) },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+      await flushUi()
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    }
+
+    it('two named patches for the deep-linked rec_remote after the move: each carries the version the one before left (4, then 5)', async () => {
+      await openRemoteThenRec2()
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([
+        ['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE],
+        ['rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE],
+      ])
+    })
+
+    it('an attachment delete on the page record rec_2 leaves the deep-linked rec_remote copy alone: its later patch carries its own version 4', async () => {
+      await openRemoteThenRec2()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_9' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_9', { recordId: 'rec_2', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
+    })
+
+    // --- a remove that ended after the drawer moved on also names the ids it took out ---
+
+    async function patchRemovedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-removed-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    it('a remove naming rec_1 (no longer shown): rec_1\'s list as it is now minus the removed ids, at rec_1\'s version; the list it started from is not written', async () => {
+      await openRec1ThenRec2()
+      // the delete's reload: att_1 still listed, and att_x added meanwhile; rec_1 moved on, rec_2 stays at 1
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_x'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', ['att_x'], 7, ROW_SAVE]])
+    })
+
+    it('a remove naming rec_1 whose list no longer holds the removed id (the server took it out): nothing written, no toast', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_x'] }
+      acceptNextPatch()
+      await patchRemovedFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).not.toHaveBeenCalled()
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    // While the record is shown the removed ids are ignored: the panel already sent its current list. Both
+    // lists of rec_2 would give another value (or no write) if they were used.
+    it.each([
+      ['still holds att_1', ['att_1', 'att_y']],
+      ['no longer holds att_1', ['att_y']],
+    ])('a remove naming the record shown (rec_2, which %s): the value as given, at rec_2\'s version', async (_label, files) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: files }
+      acceptNextPatch()
+      await patchRemovedFor('rec_2')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_2', 'fld_files', ['att_stale'], 1, ROW_SAVE]])
+    })
+
+    it('a remove naming the deep-linked rec_remote (no longer shown): rebuilt from the deep-linked copy minus the removed ids, at its version 4', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2', 'att_3'])
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2', 'att_3'], 4, COPY_SAVE]])
+    })
+
+    // In the app the delete comes first, and it takes the id out of the deep-linked copy: the rebuild then has
+    // nothing left to take out, and nothing is written.
+    it('a remove naming the deep-linked rec_remote after its delete went through the workbench: nothing written', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2'])
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      acceptNextPatch()
+      await patchRemovedFor('rec_remote')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+    })
+
+    async function patchClearedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-cleared-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    // A late clear-all names every id it took out: all of them come out of the list as it is now, and an
+    // attachment added meanwhile stays.
+    it.each([
+      ['both still listed', ['att_1', 'att_2', 'att_x'], ['att_x']],
+      ['one already taken out', ['att_1', 'att_x'], ['att_x']],
+      ['both still listed, nothing else', ['att_1', 'att_2'], []],
+    ])('a clear-all naming rec_1 (no longer shown), %s: rec_1\'s list as it is now minus every cleared id', async (_label, files, expected) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: files }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchClearedFor('rec_1')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_1', 'fld_files', expected, 7, ROW_SAVE]])
+    })
+
+    // --- an upload that adds to the list names the ids it added: they go after the record's list as it is now ---
+
+    async function patchAddedFor(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-patch-added-for="${recordId}"]`)!.click()
+      await flushUi()
+    }
+
+    // The stub's value is the list the upload started from plus its file (['att_stale', 'att_new']); written as
+    // given, it would drop what the list holds by now.
+    it.each([
+      ['someone else added att_x meanwhile', ['att_1', 'att_x'], ['att_1', 'att_x', 'att_new']],
+      ['it already holds the uploaded id', ['att_1', 'att_new'], ['att_1', 'att_new']],
+      ['it is empty', undefined, ['att_new']],
+    ])('an upload naming rec_1 (no longer shown), whose list changed while it ran (%s): rec_1\'s list as it is now, then the ids it added, at rec_1\'s version', async (_label, files, expected) => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: files }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchAddedFor('rec_1')
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_1', 'fld_files', expected, 7]])
+    })
+
+    it('an upload naming the record shown (rec_2), whose list changed while it ran: also its list as it is now, then the ids it added', async () => {
+      await openRec1ThenRec2()
+      gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: ['att_y'] }
+      acceptNextPatch()
+      await patchAddedFor('rec_2')
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_2', 'fld_files', ['att_y', 'att_new'], 1]])
+      expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('an upload naming the deep-linked rec_remote (no longer shown): the deep-linked copy\'s list, then the ids it added, at its version 4', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2'])
+      acceptNextPatch()
+      await patchAddedFor('rec_remote')
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_remote', 'fld_files', ['att_1', 'att_2', 'att_new'], 4]])
+    })
+
+    // --- the drawer's upload or delete request itself fails after the drawer moved on: a toast, since the panel's
+    // error line is the shown record's ---
+
+    async function rec2WithFieldAlert() {
+      await openRec1ThenRec2()
+      inspectorStubAnchor.mockImplementation((recordId: string) => recordId === 'rec_2')
+      rejectNextPatch('Title too long', { recordId: 'rec_2', status: 400, code: 'VALIDATION_ERROR' })
+      await patchTitle()
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    }
+
+    it('an upload for rec_1 that fails after the drawer moved to rec_2 toasts the generic upload failure (not the server\'s text), passes the failure on, and leaves rec_2\'s field alert alone', async () => {
+      await rec2WithFieldAlert()
+      workbenchMock.client.uploadAttachment = vi.fn(() => Promise.reject(new Error('fake-report.pdf is too large')))
+      await expect(inspectorStubSeen.uploadFn!(new File(['x'], 'fake-report.pdf'), { recordId: 'rec_1', fieldId: 'fld_files' }))
+        .rejects.toThrow('fake-report.pdf is too large')
+      await flushUi()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Failed to upload attachment')
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+      expect(gridMock.patchCell).toHaveBeenCalledTimes(1) // the title patch above; the failed upload patches nothing
+    })
+
+    it('a delete for rec_1 that fails after the drawer moved to rec_2 toasts the generic remove failure, passes the failure on, and leaves rec_2\'s field alert alone', async () => {
+      await rec2WithFieldAlert()
+      workbenchMock.client.deleteAttachment = vi.fn(() => Promise.reject(new Error('att_1 is locked by fake-user')))
+      await expect(inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_1', fieldId: 'fld_files' }))
+        .rejects.toThrow('att_1 is locked by fake-user')
+      await flushUi()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('Failed to remove attachment')
+      expect(fieldErrorEl('fld_title')?.textContent).toBe('Title too long')
+    })
+
+    // Control (passes before the change too): while the record is still shown, the panel shows the failure itself.
+    it('an upload or delete for the record shown (rec_2) that fails is passed on without a toast', async () => {
+      await rec2WithFieldAlert()
+      workbenchMock.client.uploadAttachment = vi.fn(() => Promise.reject(new Error('upload failed')))
+      workbenchMock.client.deleteAttachment = vi.fn(() => Promise.reject(new Error('delete failed')))
+      const context = { recordId: 'rec_2', fieldId: 'fld_files' }
+      await expect(inspectorStubSeen.uploadFn!(new File(['x'], 'a.txt'), context)).rejects.toThrow('upload failed')
+      await expect(inspectorStubSeen.deleteAttachmentFn!('att_1', context)).rejects.toThrow('delete failed')
+      await flushUi()
+      expect(showErrorSpy).not.toHaveBeenCalled()
     })
 
     // --- round 2: the alert must be able to RENDER, or the toast stays (refuter P2: silent failure) ---
@@ -6332,6 +7490,122 @@ describe('MultitableWorkbench view wiring', () => {
       edit(g.el, 'saved more')
       expect(key(g.el, z)).toBe('restored')
       expect(g.el.value).toBe('saved')
+      // a key that changes nothing between an undo made in flight and a redo, before or after the
+      // server accepted: still no step back past the commit
+      const noop = (el: HTMLElement) => el.dispatchEvent(withProps(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }), { inputType: 'deleteContentBackward' }))
+      for (const when of ['before the accept', 'after the accept']) {
+        const q = box()
+        edit(q.el, 'X')
+        pause(2000)
+        edit(q.el, 'XY')
+        const settleQ = undo.beginCommit([q.row])
+        expect(key(q.el, z), when).toBe('restored')
+        expect(q.el.value).toBe('X')
+        if (when === 'after the accept') settleQ()
+        noop(q.el)
+        expect(key(q.el, shiftZ), when).toBe('restored')
+        expect(q.el.value).toBe('XY')
+        if (when === 'before the accept') settleQ()
+        expect(key(q.el, z), when).toBe('swallow')
+        expect(q.el.value, when).toBe('XY')
+      }
+      // two such keys apart (each its own step) between an undo in flight and a redo, and two before a commit
+      const t = box()
+      edit(t.el, 'X')
+      pause(2000)
+      edit(t.el, 'XY')
+      const settleT = undo.beginCommit([t.row])
+      expect(key(t.el, z)).toBe('restored')
+      noop(t.el)
+      pause(2000)
+      noop(t.el)
+      expect(key(t.el, shiftZ)).toBe('restored')
+      settleT()
+      expect(key(t.el, z)).toBe('swallow')
+      expect(t.el.value).toBe('XY')
+      const u = box()
+      edit(u.el, 'X')
+      pause(2000)
+      edit(u.el, 'XY')
+      expect(key(u.el, z)).toBe('restored')
+      noop(u.el)
+      pause(2000)
+      noop(u.el)
+      const settleU = undo.beginCommit([u.row])
+      expect(key(u.el, shiftZ)).toBe('restored')
+      settleU()
+      expect(key(u.el, z)).toBe('restored')
+      expect(u.el.value).toBe('X')
+      // undo, a key that changes nothing, then the commit (of what the box shows), then a redo in flight:
+      // the redo is an edit since the commit, undoable back to the committed text
+      const m = box()
+      edit(m.el, 'X')
+      pause(2000)
+      edit(m.el, 'XY')
+      expect(key(m.el, z)).toBe('restored')
+      noop(m.el)
+      const settleM = undo.beginCommit([m.row])
+      expect(key(m.el, shiftZ)).toBe('restored')
+      expect(m.el.value).toBe('XY')
+      settleM()
+      expect(key(m.el, z)).toBe('restored')
+      expect(m.el.value).toBe('X')
+      expect(key(m.el, z)).toBe('swallow')
+      // two undos, that key, a redo, the commit, then a redo in flight: the same
+      const n = box()
+      edit(n.el, 'X')
+      pause(2000)
+      edit(n.el, 'XY')
+      expect(key(n.el, z)).toBe('restored')
+      expect(key(n.el, z)).toBe('restored')
+      expect(n.el.value).toBe('')
+      noop(n.el)
+      expect(key(n.el, shiftZ)).toBe('restored')
+      expect(n.el.value).toBe('X')
+      const settleN = undo.beginCommit([n.row])
+      expect(key(n.el, shiftZ)).toBe('restored')
+      expect(n.el.value).toBe('XY')
+      settleN()
+      expect(key(n.el, z)).toBe('restored')
+      expect(n.el.value).toBe('X')
+      expect(key(n.el, z)).toBe('swallow')
+      expect(n.el.value).toBe('X')
+      // typed, deleted, typed again (each its own step): an undo drops nothing, each one goes back one step
+      const k1 = box()
+      edit(k1.el, 'a')
+      edit(k1.el, '', 'deleteContentBackward')
+      edit(k1.el, 'a')
+      for (const expected of ['', 'a', '']) {
+        expect(key(k1.el, z)).toBe('restored')
+        expect(k1.el.value).toBe(expected)
+      }
+      expect(key(k1.el, z)).toBe('swallow')
+      // a redo after a key that changed nothing drops that step only: the steps below it stay
+      const k2 = box()
+      edit(k2.el, 'a')
+      pause(2000)
+      edit(k2.el, 'ab')
+      pause(2000)
+      edit(k2.el, 'abc')
+      expect(key(k2.el, z)).toBe('restored')
+      noop(k2.el)
+      expect(key(k2.el, shiftZ)).toBe('restored')
+      expect(k2.el.value).toBe('abc')
+      for (const expected of ['ab', 'a', '']) {
+        expect(key(k2.el, z)).toBe('restored')
+        expect(k2.el.value).toBe(expected)
+      }
+      expect(key(k2.el, z)).toBe('swallow')
+      // the same at a commit that is then rejected (never settled): the steps below it stay
+      const k3 = box()
+      edit(k3.el, 'a')
+      pause(2000)
+      edit(k3.el, 'ab')
+      expect(key(k3.el, z)).toBe('restored')
+      noop(k3.el)
+      undo.beginCommit([k3.row])
+      expect(key(k3.el, z)).toBe('restored')
+      expect(k3.el.value).toBe('')
     })
 
     it('reset drops every control\'s history (the drawer showing another record reuses its controls, maybe with equal content)', () => {
@@ -6364,7 +7638,7 @@ describe('MultitableWorkbench view wiring', () => {
       expect(drawerCommitContainers('fld_missing', null)).toEqual([])
     })
 
-    it('isWorkbenchGridSurface: the grid itself and its cells, the drawer\'s title and fields; not a button, link, menu item or file input there (Send, Resolve, Delete selected, an upload), nor the grid\'s footer and bars or the drawer\'s other panels', () => {
+    it('isWorkbenchGridSurface: the grid itself and its cells, the drawer\'s title and fields; not a button, link, menu item or file input there, or anything inside one (an icon pressed on a focused button), nor the grid\'s footer and bars or the drawer\'s other panels', () => {
       const { add } = rig()
       const host = add(document.createElement('div'))
       host.innerHTML = `
@@ -6373,7 +7647,7 @@ describe('MultitableWorkbench view wiring', () => {
           <table><tbody><tr>
             <td class="meta-grid__check-col"><input data-k="row-check" type="checkbox"></td>
             <td class="meta-grid__cell" data-k="cell"><span data-k="cell-text">v</span></td>
-            <td class="meta-grid__cell"><input data-k="cell-editor"><input type="file" data-k="cell-file"><button data-k="cell-button">x</button></td>
+            <td class="meta-grid__cell"><input data-k="cell-editor"><input type="file" data-k="cell-file"><button data-k="cell-button"><span data-k="cell-button-icon">x</span></button></td>
           </tr></tbody><tfoot><tr><td class="meta-grid__foot-cell"><select data-k="foot-select"></select></td></tr></tfoot></table>
           <div class="meta-grid__pagination"><select data-k="page-size"></select></div>
         </div>
@@ -6384,8 +7658,10 @@ describe('MultitableWorkbench view wiring', () => {
           <div class="meta-record-drawer__body"><button role="tab" data-k="tab">Details</button>
             <div role="tabpanel" tabindex="0" data-k="details-panel">
               <div class="meta-record-drawer__fields"><div class="meta-record-drawer__field">
-                <input data-k="field"><textarea data-k="field-text"></textarea><select data-k="field-select"></select><button data-k="comment-anchor"></button>
-                <a href="#x" data-k="link">link</a><div role="menuitem" data-k="menuitem">m</div><div role="button" data-k="role-button">r</div>
+                <input data-k="field"><textarea data-k="field-text"></textarea><select data-k="field-select"></select>
+                <button data-k="comment-anchor"><span><svg viewBox="0 0 16 16"><path data-k="anchor-path" d="M0 0h16v16H0z"></path></svg></span></button>
+                <a href="#x" data-k="link"><span data-k="link-label">link</span></a><div role="menuitem" data-k="menuitem"><span data-k="menuitem-label">m</span></div>
+                <div role="button" data-k="role-button"><span data-k="role-button-label">r</span></div>
                 <input type="file" data-k="field-file">
               </div></div>
               <div class="meta-record-approval-panel"><span data-k="approval">x</span></div>
@@ -6398,11 +7674,39 @@ describe('MultitableWorkbench view wiring', () => {
       expect(isWorkbenchGridSurface(at('cell-text').firstChild!), 'a text node').toBe(true)
       for (const k of ['grid', 'cell', 'cell-text', 'cell-editor', 'title', 'field', 'field-text', 'field-select']) expect(isWorkbenchGridSurface(at(k)), k).toBe(true)
       for (const k of [
-        'bulk-delete', 'bulk-delete-label', 'row-check', 'cell-file', 'cell-button', 'foot-select', 'page-size',
-        'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'link', 'menuitem', 'role-button', 'field-file', 'approval',
+        'bulk-delete', 'bulk-delete-label', 'row-check', 'cell-file', 'cell-button', 'cell-button-icon', 'foot-select', 'page-size',
+        'drawer', 'next', 'tab', 'details-panel', 'comment-anchor', 'anchor-path', 'link', 'link-label', 'menuitem', 'menuitem-label',
+        'role-button', 'role-button-label', 'field-file', 'approval',
         'comments-panel', 'composer', 'send', 'file', 'drop-zone', 'remove',
       ]) {
         expect(isWorkbenchGridSurface(at(k)), k).toBe(false)
+      }
+    })
+
+    it('isWorkbenchGridTarget: a focused drawer tab panel itself is not the grid\'s (Cmd+Z there does nothing); a control in it, a panel elsewhere and the grid are', () => {
+      const drawer = document.body.appendChild(document.createElement('div'))
+      drawer.className = 'meta-record-drawer'
+      const panel = drawer.appendChild(document.createElement('div'))
+      panel.setAttribute('role', 'tabpanel')
+      const button = panel.appendChild(document.createElement('button'))
+      const elsewhere = document.body.appendChild(document.createElement('div'))
+      elsewhere.setAttribute('role', 'tabpanel')
+      const gridRoot = document.body.appendChild(document.createElement('div'))
+      gridRoot.className = 'meta-grid'
+      try {
+        expect(isWorkbenchGridTarget(panel)).toBe(false)
+        expect(isWorkbenchGridTarget(button)).toBe(true)
+        expect(isWorkbenchGridTarget(elsewhere)).toBe(true)
+        expect(isWorkbenchGridTarget(gridRoot)).toBe(true)
+        // Through the module: a chord on the panel does nothing, on the button in it the grid's undo runs.
+        const undo = createWorkbenchUndo({ isInsideWorkbench: () => true, isGridTarget: isWorkbenchGridTarget })
+        const chord = (target: EventTarget) => undo.decide(withProps(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }), { target }))
+        expect(chord(panel)).toBe('swallow')
+        expect(chord(button)).toBe('grid-undo')
+      } finally {
+        drawer.remove()
+        elsewhere.remove()
+        gridRoot.remove()
       }
     })
 
@@ -6501,12 +7805,22 @@ describe('MultitableWorkbench view wiring', () => {
       }
       const clickPatch = () => container!.querySelector<HTMLButtonElement>('[data-patch-record="fld_title"]')!.click()
 
+      it('Cmd+Z with the focus on a drawer tab panel itself does nothing; on a button in the drawer the grid\'s undo runs, as before', async () => {
+        await openDrawerWithTitle()
+        const panel = container!.querySelector<HTMLElement>('[data-stub-tabpanel]')!
+        panel.focus()
+        expect(fire(panel, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        const button = container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_1"]')!
+        button.focus()
+        expect(fire(button, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 1, redo: 0 })
+      })
+
       it('wiring: a drawer commit the server accepted ends the field\'s history (the title, via the primary field); a rejected one is never settled', async () => {
         const { title } = await openDrawerWithTitle()
         typeInto(title, 'Renamed')
         clickPatch()
         await flushUi()
-        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith('rec_1', 'fld_title', 'Patched title', 1, ROW_SAVE)
         title.focus()
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('Renamed')
@@ -6625,6 +7939,61 @@ describe('MultitableWorkbench view wiring', () => {
           expect(fire(document.body, { key: 'Z', metaKey: true, shiftKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         }
       })
+      it('an attachment upload or delete holds the grid\'s undo and redo until it settles, also when it fails (its patch comes only once it is done)', async () => {
+        mountWorkbench()
+        await flushUi()
+        const held = () => gridOptions.holdsHistory()
+        expect(typeof inspectorStubSeen.uploadFn).toBe('function')
+        expect(typeof inspectorStubSeen.deleteAttachmentFn).toBe('function')
+        expect(held()).toBe(false)
+        const context = { recordId: 'rec_1', fieldId: 'fld_files' }
+        // upload: held while the request is out; released when it lands
+        const upload = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn(() => upload.promise)
+        const uploading = inspectorStubSeen.uploadFn!(new File(['x'], 'a.txt'), context)
+        expect(held()).toBe(true)
+        upload.resolve({ id: 'att_1' })
+        await expect(uploading).resolves.toEqual({ id: 'att_1' })
+        expect(held()).toBe(false)
+        // an upload that fails releases it too
+        const failing = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn(() => failing.promise)
+        const failed = inspectorStubSeen.uploadFn!(new File(['x'], 'b.txt'), context)
+        expect(held()).toBe(true)
+        failing.reject(new Error('upload failed'))
+        await expect(failed).rejects.toThrow('upload failed')
+        expect(held()).toBe(false)
+        // two at once: held until both are done
+        const first = createDeferred<unknown>()
+        const second = createDeferred<unknown>()
+        workbenchMock.client.uploadAttachment = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+        const one = inspectorStubSeen.uploadFn!(new File(['x'], 'c.txt'), context)
+        const two = inspectorStubSeen.uploadFn!(new File(['x'], 'd.txt'), context)
+        first.resolve({ id: 'att_c' })
+        await one
+        expect(held()).toBe(true)
+        second.resolve({ id: 'att_d' })
+        await two
+        expect(held()).toBe(false)
+        // delete: held through the request and the reload after it
+        const removal = createDeferred<unknown>()
+        const reload = createDeferred<void>()
+        workbenchMock.client.deleteAttachment = vi.fn(() => removal.promise)
+        gridMock.loadViewData = vi.fn(() => reload.promise)
+        const deleting = inspectorStubSeen.deleteAttachmentFn!('att_1', context)
+        expect(held()).toBe(true)
+        removal.resolve({ deleted: 'att_1' })
+        await flushUi()
+        expect(gridMock.loadViewData).toHaveBeenCalledTimes(1)
+        expect(held()).toBe(true)
+        reload.resolve()
+        await deleting
+        expect(held()).toBe(false)
+        // a delete that fails releases it too
+        workbenchMock.client.deleteAttachment = vi.fn(() => Promise.reject(new Error('delete failed')))
+        await expect(inspectorStubSeen.deleteAttachmentFn!('att_2', context)).rejects.toThrow('delete failed')
+        expect(held()).toBe(false)
+      })
 
       it('wiring: a local refusal (the row cannot be edited; no server answer) is not a commit: the typing stays undoable', async () => {
         const { title } = await openDrawerWithTitle()
@@ -6639,6 +8008,32 @@ describe('MultitableWorkbench view wiring', () => {
         expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
         expect(title.value).toBe('')
         gridMock.error.value = null
+      })
+
+      // A patch that names a record the drawer no longer shows (an attachment write that ended after a switch)
+      // is not a commit of the controls now on screen: the typing on the record shown stays undoable. The
+      // patch of the record shown (no record named, or the shown one named) still ends it.
+      it.each([
+        ['names rec_1, no longer shown', '[data-patch-record-for="rec_1"]', ['rec_1', 'fld_title', 'Stale title', 1], ''],
+        ['names no record (the one shown)', '[data-patch-record="fld_title"]', ['rec_2', 'fld_title', 'Patched title', 1], 'typed on B'],
+        ['names rec_2, the one shown', '[data-patch-record-for="rec_2"]', ['rec_2', 'fld_title', 'Named title', 1], 'typed on B'],
+      ])('wiring: after a switch to rec_2, an accepted title patch that %s', async (_label, button, call, afterUndo) => {
+        const { title } = await openDrawerWithTitle()
+        container!.querySelector<HTMLButtonElement>('[data-navigate-record="rec_2"]')!.click()
+        await flushUi()
+        const drawer = container!.querySelector('[data-record-drawer="rec_2"]') as HTMLElement
+        expect(drawer).toBeTruthy()
+        // the stand-in control is kept across the switch, as the real reused title input is (inside the drawer)
+        if (!title.isConnected) drawer.appendChild(title)
+        title.focus()
+        typeInto(title, 'typed on B') // after the switch, which drops every history
+        container!.querySelector<HTMLButtonElement>(button)!.click()
+        await flushUi()
+        expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
+        expect(gridMock.patchCell).toHaveBeenCalledWith(...call, ROW_SAVE)
+        title.focus()
+        expect(fire(title, { key: 'z', metaKey: true })).toEqual({ prevented: true, undo: 0, redo: 0 })
+        expect(title.value).toBe(afterUndo)
       })
     })
   })

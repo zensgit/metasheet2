@@ -17,6 +17,12 @@
     <p v-if="state.applyCounts" class="sp-large-bom__counts" data-testid="stock-prep-large-bom-apply-counts">
       {{ appliedCountsSentence }}
     </p>
+    <!-- 批次标识 BI-3 (P-6): how the large pull was recorded, from the last chunk's answer. Absent while the switch is off
+         (no key), for not_installed, and before done. Never 「并入」 here (critic C-3: chunks after the first re-join the
+         job's own batch). -->
+    <p v-if="state.phase === 'done' && largePullBatchText" class="sp-large-bom__counts" data-testid="stock-prep-large-bom-pull-batch">
+      {{ largePullBatchText }}
+    </p>
 
     <button
       v-if="state.phase === 'done'"
@@ -79,6 +85,7 @@ import {
 } from '../../../services/integration/stockPreparation/largeBomPull'
 import { STOCK_PREPARATION_PULL_BOM_ACTION_ID } from '../../../services/integration/stockPreparation/projectSync'
 import type { IntegrationScope } from '../../../services/integration/workbench'
+import { stockPrepPullBatchOutcomeLine } from '../../../services/integration/stockPreparation/pullBatch'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
   stockPrepLargeBomErrorPlain,
@@ -152,6 +159,7 @@ const state = reactive<StockPreparationLargeBomPullState>({
   errorCode: null,
   errorReason: null,
   imported: false,
+  pullBatch: null,
 })
 
 let cancelled = false
@@ -176,6 +184,11 @@ const statusNext = computed<string>(() => {
   if (state.phase === 'failed') return ''
   const plain = stockPrepLargeBomPhasePlain(state.phase)
   return plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : ''
+})
+
+const largePullBatchText = computed<string>(() => {
+  const line = stockPrepPullBatchOutcomeLine(state.pullBatch, { lane: 'large' })
+  return line ? bi(line.zh, line.en) : ''
 })
 
 const appliedCountsSentence = computed<string>(() => {
