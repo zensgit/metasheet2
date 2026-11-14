@@ -61,6 +61,12 @@ if same_existing_dir "$WEB_DIST_SOURCE" "$target"; then
   exit 0
 fi
 
+helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/web-dist-retain-assets.mjs"
+[[ -f "$helper" ]] || die 'Missing web-dist-retain-assets.mjs; use the complete installation package'
+command -v node >/dev/null 2>&1 || die 'Node.js is required for safe web dist publishing'
+# Validate before cp can follow links or copy a target nested under the source.
+node "$helper" validate "$WEB_DIST_SOURCE" "$target"
+
 target_parent="$(dirname "$target")"
 mkdir -p "$target_parent"
 tmp_target="$(mktemp -d "${target_parent}/.web-dist.tmp.XXXXXX")"
@@ -71,6 +77,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp -R "${WEB_DIST_SOURCE}/." "$tmp_target/"
+node "$helper" retain "$target" "$tmp_target"
 rm -rf "$target"
 mv "$tmp_target" "$target"
 trap - EXIT

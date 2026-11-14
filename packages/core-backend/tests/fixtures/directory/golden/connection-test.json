@@ -53,6 +53,14 @@
         }
       ],
       "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u1",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
     }
   ],
   "result": {
@@ -95,8 +103,8 @@
     ],
     "summary": {
       "code": "healthy",
-      "nextAction": "通讯录范围正常，可执行目录同步。",
-      "title": "通讯录连通正常"
+      "nextAction": "本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。",
+      "title": "部门、成员列表与一名成员详情抽样读取成功"
     },
     "userSampleCount": 2,
     "warnings": []

@@ -5,6 +5,8 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminAccess.spec.ts
+adminAuthorizationConfirm.spec.ts
 adminPageContentSearch.spec.ts
 adminUserBatch
 amountAutoSum
@@ -215,6 +217,7 @@ conditional-formatting-dialog-i18n
 data-sources-api-preview
 data-sources-ui
 dataSourcesLoadFailedReseal
+dingtalk-auth-callback
 dingtalk-internal-view-link-warnings
 dingtalk-public-form-link-warnings
 dingtalk-recipient-field-warnings
@@ -228,6 +231,7 @@ featureFlagsApprovalMobile
 formViewValidation
 fwb-rule-authoring
 fwb-rule-authoring-helpers
+guardPolicy.managementScope.spec.ts
 integrationErrorCodeLabels
 IntegrationK3WiseSetupView
 IntegrationPipelineRunSection
@@ -236,6 +240,7 @@ IntegrationStockPrepPanel
 IntegrationWorkbenchView
 lineDerivation
 LoginView.spec.ts
+managementRouteGuardFailClosed.spec.ts
 meta-ai-bulk-labels
 meta-api-error-labels
 meta-api-token-labels
@@ -284,6 +289,7 @@ multitable-alt-view-comment-chip-i18n
 multitable-api-token-manager
 multitable-attachment-editor
 multitable-attachment-list
+multitable-automation-integration-preview
 multitable-automation-interval-minutes
 multitable-automation-manager
 multitable-automation-manager-roundtrip
@@ -368,6 +374,7 @@ multitable-home-view
 multitable-import
 multitable-import-create-fields-plan
 multitable-import-modal
+multitable-integration-run-finished-trigger
 multitable-kanban-view
 multitable-link-picker
 multitable-linked-record-chip
@@ -435,6 +442,7 @@ multitable-richtext-longtext
 multitable-richtext-mention
 multitable-richtext-wiring
 multitable-rollup-aggregation-fe
+multitable-run-integration-job-editor
 multitable-scoped-permissions
 multitable-sheet-cursor-state
 multitable-sheet-permission-manager
@@ -477,16 +485,20 @@ newTodoPill
 pageShell
 parallelBranchRunsView
 permission-match-parity
+permissionChecker.spec.ts
+permissionExceptionSources.spec.ts
 permissionManagementView
 personal-view-client
 platform-app-entry-mismatch-inventory
 platform-app-launcher
 platform-app-shell
+platform-shell-nav.spec.ts
 public-multitable-form
 recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
+roleMemberAuthorization.spec.ts
 roleMembers
 routePreviewErrors
 run-required-web-tests-shape

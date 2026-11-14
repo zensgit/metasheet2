@@ -144,6 +144,12 @@ function adds(plan) {
 // from that ONE array reproduces the PREVIOUS golden byte-for-byte, so every count,
 // every decision and the whole plmSystemFields band are unchanged. The invariant this
 // golden defends — "no carryPolicy input => pre-wiring behaviour" — still holds.
+//
+// RE-PINNED (R-71 ⑦.4 PR-4), same discipline: the template gained `issueConfirmDate` (a
+// machine write-back column, outside the refresh band) and `projectSpecModel` (an empty
+// plm_system column). The ONLY edit to the golden is `projectSpecModel` appended to
+// `summary.plmSystemFields`; with that one entry added the plan deep-equals it, so no
+// decision, record, patch, count or conflictSummary moved and `issueConfirmDate` is absent.
 // ---------------------------------------------------------------------------
 function representativePlanInput() {
   const addRow = row({ componentSourceId: 'PART-ADD' })

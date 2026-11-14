@@ -472,8 +472,12 @@
   "packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts",
   "packages/core-backend/src/db/migrations/zzzz20261104150000_create_task_source_links.ts",
   "packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts",
+  "packages/core-backend/src/db/migrations/zzzz20261106111100_create_automation_job_leases.ts",
+  "packages/core-backend/src/db/migrations/zzzz20261106111300_add_run_integration_job_automation_action.ts",
+  "packages/core-backend/src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type.ts",
   "packages/core-backend/src/db/migrations/zzzz20261106120000_create_security_action_challenges.ts",
   "packages/core-backend/src/db/migrations/zzzz20261106130000_create_directory_integration_capabilities.ts",
   "packages/core-backend/src/db/migrations/zzzz20261107010000_deprovision_effect_provider.ts",
-  "packages/core-backend/src/db/migrations/zzzz20261111093417_create_user_notification_endpoints_preferences.ts"
+  "packages/core-backend/src/db/migrations/zzzz20261111093417_create_user_notification_endpoints_preferences.ts",
+  "packages/core-backend/src/db/migrations/zzzz20261111181500_add_delegated_role_scope_include_children.ts"
 ]

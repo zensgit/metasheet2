@@ -449,6 +449,12 @@ export type AutomationLabelKey =
   | 'runs.rerunError.sheetDeleted'
   // 客户反馈 2026-09-24 #3 final review F2: every step was skipped because the trigger record is gone.
   | 'runs.rerunError.targetRecordMissing'
+  // R-69 I6d r7: an integration execution whose run-time gates no longer hold, or a re-running admin without the
+  // authority in the rule's tenant (retryExecution refusals 12-15).
+  | 'runs.rerunError.integrationRunEventDisabled'
+  | 'runs.rerunError.integrationRunFinishedCreatorUnauthorized'
+  | 'runs.rerunError.integrationRunFinishedRetryUnauthorized'
+  | 'runs.rerunError.runIntegrationJobRetryUnauthorized'
   // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
   // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
   // string would otherwise render verbatim in a zh session.
@@ -841,6 +847,10 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ledgerEvidenceMissing',
   'runs.rerunError.sheetDeleted',
   'runs.rerunError.targetRecordMissing',
+  'runs.rerunError.integrationRunEventDisabled',
+  'runs.rerunError.integrationRunFinishedCreatorUnauthorized',
+  'runs.rerunError.integrationRunFinishedRetryUnauthorized',
+  'runs.rerunError.runIntegrationJobRetryUnauthorized',
   'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
@@ -1432,6 +1442,13 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Every step was skipped because the trigger record no longer exists; re-running cannot change that.',
     zh: '触发记录已不存在，该执行的所有步骤均已跳过，重新执行也不会有任何变化。',
   },
+  'runs.rerunError.integrationRunEventDisabled': { en: 'Integration run-finished triggers are turned off on this deployment; nothing was re-run.', zh: '本部署未开启集成运行完成触发，未重新执行。' },
+  'runs.rerunError.integrationRunFinishedCreatorUnauthorized': {
+    en: "The rule's creator no longer holds the integration read permission, or the rule's binding changed; nothing was re-run.",
+    zh: '规则创建人已无集成读取权限，或规则绑定已变更，未重新执行。',
+  },
+  'runs.rerunError.integrationRunFinishedRetryUnauthorized': { en: "Re-running this execution needs the integration read permission in the rule's tenant.", zh: '重新执行此执行需要你在规则所属租户内具备集成读取权限。' },
+  'runs.rerunError.runIntegrationJobRetryUnauthorized': { en: "Re-running this execution needs the job permission in the rule's tenant, or it could not be checked.", zh: '重新执行此执行需要你在规则所属租户内具备运行任务的权限，或权限无法校验。' },
   'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
@@ -1630,6 +1647,9 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
     case 'write_approval_form_values':
       // Product copy: create-from-approval (FWB-1). Technical action id remains write_approval_form_values.
       return isZh ? '审批数据回写' : 'Write back approval data'
+    case 'run_integration_job':
+      // R-69 1b-iii: dry run only (the save refuses any apply mode).
+      return isZh ? '运行集成任务（仅预演）' : 'Run integration job (dry run)'
     case 'update_field':
       return isZh ? '更新字段值' : 'Update field value'
     default:
@@ -1661,6 +1681,8 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | Unknown
       return isZh ? '当审批完成时' : 'When approval completes'
     case 'approval.task_created':
       return isZh ? '当产生新审批待办时' : 'When an approval task is created'
+    case 'integration.run_finished':
+      return isZh ? '当集成作业运行完成时' : 'When an integration job run finishes'
     case 'field.changed':
       return isZh ? '当字段变化时' : 'When field changed'
     default:

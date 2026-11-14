@@ -1235,12 +1235,13 @@ export type MetaAttachmentDeleteFn = (
 ) => Promise<void>
 
 /** The record drawer's `patch` (MetaRecordFieldsPanel / MetaRecordAttachmentsPanel → MetaRecordInspector → the
- *  workbench): an attachment write names the record it was made on, and a remove or clear-all that ended after
- *  the drawer moved to another record also the ids it took out. Every other edit is (fieldId, value). A listener
- *  writes to the record the third argument names when there is one (not to the record it shows), and with a
- *  fourth takes those ids out of that record's list as it is now: the value is then the list the write started
- *  from. */
-export type MetaDrawerPatchArgs = [fieldId: string, value: unknown, recordId?: string, removed?: string[]]
+ *  workbench): an attachment write names the record it was made on, a remove or clear-all that ended after
+ *  the drawer moved to another record also the ids it took out, and an upload that adds to the list the ids it
+ *  added (an upload that replaces the list names none). Every other edit is (fieldId, value). A listener
+ *  writes to the record the third argument names when there is one (not to the record it shows); with a
+ *  fourth it takes those ids out of that record's list as it is now, and with a fifth it adds those ids to that
+ *  list as it is now: the value is then the list the write started from. */
+export type MetaDrawerPatchArgs = [fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]]
 
 // --- Timeline config ---
 export interface TimelineConfig {
@@ -1329,6 +1330,8 @@ export type AutomationTriggerType =
   | 'form.submitted'
   | 'approval.completed'
   | 'approval.task_created'
+  // R-69 1c: one values-free summary per integration job (dry run only; R-69 OPEN)
+  | 'integration.run_finished'
   // Legacy aliases
   | 'field.changed'
 
@@ -1377,6 +1380,9 @@ export type AutomationActionType =
   | 'parallel_branch'
   // FWB activation: create a new record on the rule sheet from approved form values.
   | 'write_approval_form_values'
+  // R-69 1b-iii: run an integration job (stock-prep pull, DRY RUN ONLY) on a schedule.cron rule; offered only
+  // while the server switch is on (session feature integrationAutomationRunAction). R-69 is OPEN.
+  | 'run_integration_job'
   // Legacy aliases
   | 'notify'
   | 'update_field'

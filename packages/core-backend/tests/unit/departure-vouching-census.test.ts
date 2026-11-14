@@ -33,6 +33,13 @@ const CLASSIFIED: ReadonlyArray<{ path: string; contains: string; category: 'dis
     contains: "l.local_user_id = users.id AND l.link_status = 'linked'",
     category: 'display read',
   },
+  // fetchIneligibleDelegationUsers grey suggestions (admin-users.ts query at the
+  // authority_seeds statement). Display read: NOT EXISTS authorized_users, not a vouch.
+  {
+    path: 'routes/admin-users.ts',
+    contains: 'FROM authorized_users auth_user',
+    category: 'display read',
+  },
   {
     path: 'services/elearning-department-stats.ts',
     contains: 'elearning-department-stats:aggregate',

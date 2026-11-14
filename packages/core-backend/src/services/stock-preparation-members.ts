@@ -566,13 +566,16 @@ function stringList(value: unknown): string[] {
 }
 
 /**
- * The delegated scope, batched: of `userIds`, the ones inside the actor's department tree or member
- * groups FOR `stock-prep`. The SAME recursive shape as admin-users.ts `isUserWithinDelegatedScope`
- * (seed departments → active descendants → linked active accounts; plus member groups), asked for a
- * set instead of one user. The unit suite pins the load-bearing clauses.
+ * The delegated scope, batched: of `userIds`, the ones inside the actor's departments or member
+ * groups FOR `stock-prep`. `delegated_role_admin_scopes.include_children` decides the department
+ * walk. False keeps that exact active department. True also walks active descendants in the same
+ * integration. The walk is a union: a true ancestor still contributes its descendants when a
+ * descendant row is itself false. A department that is not a seed and not under a true seed is not
+ * added. Member groups are unchanged. `loadScopedUserIds` is the only reader; the member-access
+ * refusal and the describe out-of-scope count both use it.
  */
 export const STOCK_PREP_MEMBERS_SCOPED_USERS_SQL = `WITH RECURSIVE seed_departments AS (
-    SELECT DISTINCT d.id, d.integration_id, d.external_department_id
+    SELECT DISTINCT d.id, d.integration_id, d.external_department_id, s.include_children
     FROM delegated_role_admin_scopes s
     JOIN directory_departments d ON d.id = s.directory_department_id
     WHERE s.admin_user_id = $1
@@ -580,15 +583,16 @@ export const STOCK_PREP_MEMBERS_SCOPED_USERS_SQL = `WITH RECURSIVE seed_departme
       AND d.is_active = true
   ),
   allowed_departments AS (
-    SELECT id, integration_id, external_department_id
+    SELECT id, integration_id, external_department_id, include_children
     FROM seed_departments
     UNION
-    SELECT child.id, child.integration_id, child.external_department_id
+    SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
     FROM directory_departments child
     JOIN allowed_departments parent
       ON child.integration_id = parent.integration_id
      AND child.external_parent_department_id = parent.external_department_id
-    WHERE child.is_active = true
+    WHERE parent.include_children IS TRUE
+      AND child.is_active = true
   ),
   allowed_groups AS (
     SELECT DISTINCT gscope.group_id

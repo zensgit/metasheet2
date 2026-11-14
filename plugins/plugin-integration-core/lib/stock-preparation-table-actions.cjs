@@ -170,6 +170,13 @@ const {
   persistManualRowsLastPull,
   summarizeManualSupplement,
 } = require('./stock-preparation-manual-rows.cjs')
+// R-69 1b-i: the optional abort signal / checkpoint of a governed entry (see the module header). With
+// neither passed every helper below is a no-op and this module behaves exactly as before.
+const {
+  governSourceAdapterReads,
+  normalizeGovernedEntryOptions,
+  passGovernedCheckpoint,
+} = require('./governed-entry-checkpoint.cjs')
 // 批次标识 BI-1b (design §4.4, §6.1; register R-65): the reader's band strip (pure module) and the small lane's
 // evaluation (the lanes helper; it requires nothing of this module — the canonical row order is injected).
 const { normalizePullBatchReaderBand, stripPullBatchBand } = require('./stock-preparation-pull-batch.cjs')
@@ -2436,7 +2443,7 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
 // 422 refuses before any source read. For a GOVERNED project it also replaces `installedFieldProperties` and
 // `extFieldMapping` with the strict inputs the handle reads (TD-22): a governed computation plans, verifies,
 // settles and writes with those only.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence, refreshGovernance, pullBatchLane = null }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence, refreshGovernance, governedEntry = null, pullBatchLane = null }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   // 目标表字段存在性 — BEFORE the B2a contract, before the first source row, before any plan. A target
   // whose template/ext columns are gone refuses here (422 TARGET_SCHEMA_INCOMPLETE), so no source read,
@@ -2452,13 +2459,24 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     extFieldMapping = refresh.planningInputs.extFieldMapping
     assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   }
+  // R-69 1b-i — CHECKPOINT 1, BEFORE THE SOURCE READ: the signal, then `await checkpoint()`, ahead of the
+  // first call that can touch the source (the armed B2a schema pin just below reads its schema). No-op
+  // unless a governed entry passed a signal or a checkpoint.
+  await passGovernedCheckpoint(governedEntry, 'read')
   // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
   // before `plan`, before `revision` and before any evidence exists to be produced.
   const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
     b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, sourceAdapter, extFieldMapping, now: b2aNow,
   })
+  // The expansion records a failed read as a global error and returns; a governed refusal is kept here and
+  // re-raised right after it, so a stop is never reported as a source fault. Stays null ungoverned.
+  let governedReadRefusal = null
   const expansion = await runB2aGuardedSourceRead(b2aTrialRegistration, () => expandPlmProjectBom({
-    sourceAdapter,
+    // R-69 1b-i — CHECKPOINT 2, BEFORE EACH PAGE: every `read()` the expansion issues passes the signal and
+    // `checkpoint()` first. Without a governed entry this is the adapter itself (same object).
+    sourceAdapter: governSourceAdapterReads(sourceAdapter, governedEntry, (refusal) => {
+      if (!governedReadRefusal) governedReadRefusal = refusal
+    }),
     projectNo: parameters.projectNo,
     readPlan: action.source.readPlan,
     pageLimit: action.pageLimit,
@@ -2488,6 +2506,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // spread, never `demandEvidence: undefined`): a not-governed expansion stays byte-identical.
     ...(refresh && refresh.governed ? { demandEvidence: refresh.evidenceOptions } : {}),
   }))
+  if (governedReadRefusal) throw governedReadRefusal
   // R-05 + E3-02, result side: the expander CATCHES its own bounds and returns them as global error
   // entries, so a truncated batch arrives as data rather than as a throw. Classified here, before
   // the plan.
@@ -2530,6 +2549,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       } : {}),
     }
   }
+  // R-69 1b-i — CHECKPOINT 3, BEFORE PLANNING: the source read is over; nothing of the plan (the target
+  // sheet read, the planner, the ledger readback) starts once the caller must stop. No-op ungoverned.
+  await passGovernedCheckpoint(governedEntry, 'plan')
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo, { pullBatchBand: pullBatchLanes.readerBandOf(pullBatchLane) })
   // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
   // dry-run before its first write, BEFORE any write on the apply path. Sits after the project-scoped
@@ -2739,6 +2761,9 @@ function hasHardApplyBlockingRowErrors(expansion) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // R-69 1b-i: `input.signal` / `input.checkpoint` come only from a governed entry; `null` (neither) is
+  // the pre-1b-i path. Validated here, before the B2a claim, so a malformed one costs nothing.
+  const governedEntry = normalizeGovernedEntryOptions({ signal: input.signal, checkpoint: input.checkpoint })
   // 批次标识 BI-1b: the route's server-held lane input (band + switch + ledger), validated before any IO.
   const pullBatchLane = pullBatchLanes.normalizePullBatchLaneInput(input.pullBatch)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
@@ -2793,6 +2818,8 @@ async function dryRunStockPreparationAction(input = {}) {
     b2aNow: input.now,
     // PR-3a: the route's governance handle (absent = a direct lib caller = the pre-step-4 path).
     refreshGovernance: input.refreshGovernance,
+    // R-69 1b-i: `null` unless a governed entry passed a signal or a checkpoint.
+    governedEntry,
     // 批次标识 BI-1b: the reader strip (always) and, while the switch is on, the band probe fold.
     pullBatchLane,
   })

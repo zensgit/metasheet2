@@ -2,6 +2,7 @@ import type { Request, Response, Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { auditLog } from '../audit/audit'
+import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
@@ -34,6 +35,7 @@ import {
   disableNamespaceAdmissionsWithoutRoles,
   listRoleNamespaces,
   lockNamespaceAdmissionWrites,
+  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import { assignUserRoles, unassignUserRoles } from '../rbac/role-assignment'
 import { invalidateUserPerms, isAdmin as isRbacAdmin } from '../rbac/service'
@@ -375,6 +377,15 @@ async function createOne(adminUserId: string, row: PlannedCreateRow): Promise<Ba
           executor: client,
         })
       }
+      // Batch create has no admission checkbox. A missing attendance row still
+      // bootstraps attendance_employee on login, so persist the disabled intent.
+      await writeUserNamespaceAdmission({
+        userId,
+        namespace: ATTENDANCE_SELF_SERVICE_NAMESPACE,
+        enabled: false,
+        actorId: adminUserId,
+        source: 'admin_batch_create',
+      }, client)
     })
     invalidateUserPerms(userId)
     await auditItem(adminUserId, 'create', userId, {

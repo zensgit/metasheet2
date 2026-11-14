@@ -36,6 +36,11 @@ const POLICY_IMPORTER_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['auth/security-action-proof.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './external-login-assurance'],
 ]
+/** Allowlists are posix. path.relative on Windows returns backslashes. */
+function posixImportEdges(edges: ReadonlyArray<ImportEdge>): ImportEdge[] {
+  return edges.map(([file, specifier]) => [file.replaceAll('\\', '/'), specifier])
+}
+
 const PROTOTYPE_KEYS = ['constructor', 'toString', '__proto__', 'hasOwnProperty'] as const
 const UNKNOWN_PURPOSES = ['', 'bind', 'EXTERNAL_IDENTITY_BIND', undefined, null, 0, {}, ...PROTOTYPE_KEYS] as const
 
@@ -202,7 +207,7 @@ describe('security action assurance policy', () => {
       { role: ' Admin ' },
       { role_ids: ['admin'] },
       { role_ids: ['attendance_admin'] },
-      { department_scopes: [['attendance', 'd1']] },
+      { department_scopes: [['attendance', 'd1', true]] },
       { direct_codes: ['x:*'] },
       { role_permission_pairs: [['operator', 'users:write']] },
       { legacy_permissions: [['*:*']] },
@@ -222,10 +227,16 @@ describe('security action assurance policy', () => {
     }
     const fingerprint = createHash('sha256').update(canonical({ matrix, classifications, composition })).digest('hex')
     expect(Number.isInteger(SECURITY_ACTION_POLICY_REVISION) && SECURITY_ACTION_POLICY_REVISION > 0).toBe(true)
+    // Re-pin only. Policy decisions are unchanged, so SECURITY_ACTION_POLICY_REVISION stays 1.
+    // The digest moved because fixtures[5].department_scopes is now ['attendance','d1', true]
+    // (the column default) and composition.domain is metasheet:security-action:privilege:v2|.
+    // composition.witness is that domain over the canonical inputs of
+    // { role_ids: ['b','B','a'], direct_codes: ['tasks:write'], admissions: [['attendance', true]] }
+    // with privilegeRow defaults for every other grant input (no department scope on that row).
     expect(
       { revision: SECURITY_ACTION_POLICY_REVISION, fingerprint },
       'The policy matrix, the outcome of a pinned classification fixture or the witness composition changed: review whether SECURITY_ACTION_POLICY_REVISION must be incremented, then re-pin the fingerprint',
-    ).toEqual({ revision: 1, fingerprint: '8320a7a961371d3eb707f79637264745a1b6a94cc4d63c22ab44daa4cd26929e' })
+    ).toEqual({ revision: 1, fingerprint: '4fc473aa4394b8aa03f9f00c251c185a761c2b9a11496b122414fe7b70789704' })
   })
 })
 
@@ -351,7 +362,7 @@ describe('security action purpose registry', () => {
   })
 
   it('is imported by exactly the allowlisted files: the classifier and the action proof service', () => {
-    const edges = collectImportEdges(SRC, /external-login-assurance/, (file) => readFileSync(file, 'utf8'))
+    const edges = posixImportEdges(collectImportEdges(SRC, /external-login-assurance/, (file) => readFileSync(file, 'utf8')))
     expect(importEdgeViolations(edges, POLICY_IMPORTER_ALLOWLIST)).toEqual([])
     for (const file of listSourceFiles(SRC)) {
       expect(readFileSync(file, 'utf8')).not.toMatch(/(?:require|import)\(\s*['"`][^'"`]*external-login-assurance/)

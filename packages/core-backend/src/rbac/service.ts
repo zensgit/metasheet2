@@ -180,9 +180,17 @@ export async function listUserPermissions(userId: string, runQuery?: RbacPermiss
   }
 }
 
+export type InheritedRoleGrant = {
+  roleId: string
+  roleName: string | null
+  permissions: string[]
+}
+
 export type UserPermissionGrantInspection = {
   direct: string[]
   inherited: string[]
+  /** Role rows behind `inherited`. Orphan memberships stay visible with a null name. */
+  inheritedRoles: InheritedRoleGrant[]
   legacy: string[]
   effective: string[]
   blockedByNamespaceAdmission: string[]
@@ -201,9 +209,31 @@ function codesFromNamedRows(rows: unknown[]): string[] {
   return uniqueSortedCodes(codes)
 }
 
+function inheritedRolesFromRows(rows: unknown[]): InheritedRoleGrant[] {
+  const byRole = new Map<string, { roleName: string | null; codes: string[] }>()
+  for (const row of rows as Array<{ code?: unknown; role_id?: unknown; role_name?: unknown }>) {
+    const roleId = typeof row?.role_id === 'string' ? row.role_id.trim() : ''
+    const code = typeof row?.code === 'string' ? row.code.trim() : ''
+    if (!roleId || !code) continue
+    const named = typeof row?.role_name === 'string' ? row.role_name.trim() : ''
+    const current = byRole.get(roleId) ?? { roleName: null, codes: [] }
+    if (!current.roleName && named) current.roleName = named
+    if (code) current.codes.push(code)
+    byRole.set(roleId, current)
+  }
+  return Array.from(byRole.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([roleId, value]) => ({
+      roleId,
+      roleName: value.roleName,
+      permissions: uniqueSortedCodes(value.codes),
+    }))
+}
+
 const EMPTY_PERMISSION_GRANT_INSPECTION: UserPermissionGrantInspection = {
   direct: [],
   inherited: [],
+  inheritedRoles: [],
   legacy: [],
   effective: [],
   blockedByNamespaceAdmission: [],
@@ -238,15 +268,19 @@ export async function inspectUserPermissionGrants(
       [userId],
     )
     const inheritedResult = await exec(
-      `SELECT DISTINCT rp.permission_code AS code
+      `SELECT DISTINCT rp.permission_code AS code,
+              ur.role_id AS role_id,
+              r.name AS role_name
        FROM user_roles ur
        JOIN role_permissions rp ON rp.role_id = ur.role_id
+       LEFT JOIN roles r ON r.id = ur.role_id
        WHERE ur.user_id = $1`,
       [userId],
     )
     const legacyResult = await exec('SELECT permissions FROM users WHERE id = $1', [userId])
     const direct = codesFromNamedRows(directResult.rows)
     const inherited = codesFromNamedRows(inheritedResult.rows)
+    const inheritedRoles = inheritedRolesFromRows(inheritedResult.rows)
     const legacyRow = (legacyResult.rows as Array<{ permissions?: unknown }>)[0]
     const legacy = Array.isArray(legacyRow?.permissions)
       ? uniqueSortedCodes((legacyRow.permissions as unknown[]).map((item) => typeof item === 'string' ? item.trim() : ''))
@@ -261,6 +295,7 @@ export async function inspectUserPermissionGrants(
     return {
       direct,
       inherited,
+      inheritedRoles,
       legacy,
       effective,
       blockedByNamespaceAdmission: merged.filter((code) => !effectiveSet.has(code)),

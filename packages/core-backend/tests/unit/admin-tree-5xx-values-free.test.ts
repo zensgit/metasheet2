@@ -2044,11 +2044,13 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     expect(nonLiteralSentenceSites(readRoute(ADMIN_USERS))).toEqual([])
   })
 
-  it('is not vacuous: 46 helper calls, each inside a catch and handing it the caught value; the helper itself is a 500 sink', () => {
+  it('is not vacuous: 47 helper calls, each inside a catch and handing it the caught value; the helper itself is a 500 sink', () => {
     const source = readRoute(ADMIN_USERS)
     const sf = parseSource(ADMIN_USERS, source)
     const calls = failureHelperCalls(sf)
-    expect(calls).toHaveLength(46)
+    // 46 prior sinks plus GET /api/admin/access-capabilities ACCESS_CAPABILITIES_FAILED,
+    // which sits in that route's catch and passes the caught error through.
+    expect(calls).toHaveLength(47)
     for (const { call, errorText } of calls) {
       let clause: ts.CatchClause | undefined
       for (let p: ts.Node | undefined = call.parent; p && !clause; p = p.parent) if (ts.isCatchClause(p)) clause = p
@@ -2125,7 +2127,8 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     }
 
     expect(missed).toEqual([])
-    expect(calls.length * rawShapes.length).toBe(184)
+    // 47 calls × the 4 raw echo shapes above.
+    expect(calls.length * rawShapes.length).toBe(188)
   })
 })
 

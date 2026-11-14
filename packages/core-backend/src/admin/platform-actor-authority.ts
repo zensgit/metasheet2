@@ -37,12 +37,16 @@ export async function lockSharedAccessSubjects(
 }
 
 /**
- * Platform authority is `users.role = 'admin'` or the RBAC `admin` role.
- * The `is_admin` flag is not authority. The caller must already hold `actor`'s row lock.
+ * Default platform authority is `users.role = 'admin'` or the RBAC `admin` role.
+ * Attendance, admin-user, and scope callers keep that default.
+ * `requireLiveRbacAdmin` is the permission-management contract: a live `user_roles`
+ * admin membership on this locked row. `users.role`, `is_admin`, and token claims
+ * are not enough. The caller must already hold `actor`'s row lock.
  */
 export async function assertPlatformActorAuthority(
   client: AccessGraphTransactionClient,
   actor: LockedAccessGraphUser | undefined,
+  options?: { requireLiveRbacAdmin?: boolean },
 ): Promise<void> {
   if (!actor || actor.deletedAt || actor.purgedAt || actor.isActive !== true || actor.activationStatus !== 'activated') {
     throw new PlatformActorAuthorityLost()
@@ -57,7 +61,12 @@ export async function assertPlatformActorAuthority(
   const roleIds = roles.rows
     .map((row) => row.role_id)
     .filter((roleId): roleId is string => typeof roleId === 'string' && roleId.length > 0)
-  if (actor.role !== 'admin' && !roleIds.includes(PLATFORM_ADMIN_ROLE_ID)) {
+  const hasLiveRbacAdmin = roleIds.includes(PLATFORM_ADMIN_ROLE_ID)
+  if (options?.requireLiveRbacAdmin === true) {
+    if (!hasLiveRbacAdmin) throw new PlatformActorAuthorityLost()
+    return
+  }
+  if (actor.role !== 'admin' && !hasLiveRbacAdmin) {
     throw new PlatformActorAuthorityLost()
   }
 }

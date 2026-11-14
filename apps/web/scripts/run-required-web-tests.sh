@@ -1563,7 +1563,17 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # between `StockPreparationProjectWorkspaceView` and `StockPreparationRail`; it matches exactly one spec file, and a
 # substring check in BOTH directions finds no token that contains it or is contained by it (its neighbours diverge
 # right after `StockPreparationP` / `StockPreparation`). The manifest was regenerated with the same command.
+# DingTalk callback guidance (2026-11-13): ONE token added, `dingtalk-auth-callback` — the existing mounted spec of
+# the DingTalk sign-in / bind callback page (fixed guidance by stable code, the fallback for unknown / missing codes,
+# unreadable bodies and network failures, and the code-table key pin mirrored by the backend callback test), which no
+# CI entry ran before. Inserted at its case-insensitive position between `dataSourcesLoadFailedReseal` and
+# `dingtalk-internal-view-link-warnings`; it matches exactly one file under apps/web/tests, and a substring check in
+# BOTH directions over every manifest token and every attendance-web-guard targeted token finds none. The same spec is
+# registered in the domain guard (.github/workflows/attendance-web-guard.yml). The manifest was regenerated with the
+# same command.
 exec npx vitest run \
+  adminAccess.spec.ts \
+  adminAuthorizationConfirm.spec.ts \
   adminPageContentSearch.spec.ts \
   adminUserBatch \
   amountAutoSum \
@@ -1726,6 +1736,7 @@ exec npx vitest run \
   data-sources-api-preview \
   data-sources-ui \
   dataSourcesLoadFailedReseal \
+  dingtalk-auth-callback \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
@@ -1735,6 +1746,7 @@ exec npx vitest run \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \
+  guardPolicy.managementScope.spec.ts \
   integrationErrorCodeLabels \
   IntegrationK3WiseSetupView \
   IntegrationPipelineRunSection \
@@ -1743,6 +1755,7 @@ exec npx vitest run \
   IntegrationWorkbenchView \
   lineDerivation \
   LoginView.spec.ts \
+  managementRouteGuardFailClosed.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \
@@ -1790,6 +1803,7 @@ exec npx vitest run \
   multitable-api-token-manager \
   multitable-attachment-editor \
   multitable-attachment-list \
+  multitable-automation-integration-preview \
   multitable-automation-interval-minutes \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
@@ -1873,6 +1887,7 @@ exec npx vitest run \
   multitable-import \
   multitable-import-create-fields-plan \
   multitable-import-modal \
+  multitable-integration-run-finished-trigger \
   multitable-kanban-view \
   multitable-link-picker \
   multitable-linked-record-chip \
@@ -1938,6 +1953,7 @@ exec npx vitest run \
   multitable-richtext-mention \
   multitable-richtext-wiring \
   multitable-rollup-aggregation-fe \
+  multitable-run-integration-job-editor \
   multitable-scoped-permissions \
   multitable-sheet-cursor-state \
   multitable-sheet-permission-manager \
@@ -1978,13 +1994,17 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionChecker.spec.ts \
+  permissionExceptionSources.spec.ts \
   permissionManagementView \
   personal-view-client \
+  platform-shell-nav.spec.ts \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMemberAuthorization.spec.ts \
   roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \
