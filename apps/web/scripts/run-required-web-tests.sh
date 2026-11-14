@@ -1952,6 +1952,7 @@ exec npx vitest run \
   multitable-richtext-mention \
   multitable-richtext-wiring \
   multitable-rollup-aggregation-fe \
+  multitable-run-integration-job-editor \
   multitable-scoped-permissions \
   multitable-sheet-cursor-state \
   multitable-sheet-permission-manager \

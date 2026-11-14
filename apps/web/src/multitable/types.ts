@@ -1378,6 +1378,9 @@ export type AutomationActionType =
   | 'parallel_branch'
   // FWB activation: create a new record on the rule sheet from approved form values.
   | 'write_approval_form_values'
+  // R-69 1b-iii: run an integration job (stock-prep pull, DRY RUN ONLY) on a schedule.cron rule; offered only
+  // while the server switch is on (session feature integrationAutomationRunAction). R-69 is OPEN.
+  | 'run_integration_job'
   // Legacy aliases
   | 'notify'
   | 'update_field'
