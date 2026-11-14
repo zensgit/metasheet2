@@ -694,6 +694,39 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/integrations/dingtalk/integration-scoped-credentials-flag.ts#isDingTalkIntegrationScopedCredentialsEnabled',
   },
   {
+    key: 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Directory integration capability surface: GET /api/admin/directory/integration-capabilities/:integrationId and the capability service behind it. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: the route answers 404 after the administrator check and the service issues no statement. On: the two capability tables are read after a non-throwing existence probe, and the route shows each capability's stored state, governance and reason. Apply the migration before turning it on; every replica must carry the same value. danger=low: no existing path reads the capability tables, so the switch changes what an administrator can see and nothing else; it is not an authorization input.",
+    source: 'packages/core-backend/src/integrations/directory-integration-capabilities-flag.ts#isDirectoryIntegrationCapabilitiesEnabled',
+  },
+  {
+    key: 'USER_NOTIFICATION_PREFERENCES_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "User notification endpoints and preferences: GET/POST/DELETE /api/me/notification-endpoints and GET/PATCH /api/me/notification-preferences, and the reads and writes of user_notification_endpoints and user_notification_preferences. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: every route answers 404 after authentication and the two tables are not queried. On: a user can make an endpoint from a proof they already hold (a directory link on a named connection; a request carries no recipient identifier, and the address is derived again whenever it is needed and never stored), revoke it, and set a preference per topic (on or off, a primary and a backup endpoint, quiet hours). Nothing is sent: no message is produced for any endpoint or preference and no business reads them, so turning the switch on changes what a person can set and see and nothing else. Apply the migration before turning it on; every replica must carry the same value. danger=medium: the routes write rows that belong to the caller and widen no authorization.",
+    source: 'packages/core-backend/src/notifications/notification-flags.ts#isUserNotificationPreferencesEnabled',
+  },
+  {
+    key: 'APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Approval-routing source requirement for organisations that have two or more active pull-type directory sources (provider other than 'local', status 'active', de-duplicated by provider and corp id; the local directory is never counted) and no approval_routing policy. Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF); read on every call. Off: routing resolution and the legacy integration write paths are byte-identical to before the switch existed. On: for a requester with a linked directory account in such an organisation the routing resolution does not pick a source and fails closed with a typed, values-free error instead of choosing one, and the legacy integration write paths (creating a second pull source, setting a non-active pull source active) refuse until the organisation has a policy. danger=high: ON changes the outcome of approval creation for organisations that are already in the multi-source, no-policy state; run the read-only census for such organisations and set their policies before turning it on.",
+    source: 'packages/core-backend/src/directory/pull-source-rule.ts#isApprovalRoutingRequirePolicyEnabled',
+  },
+  {
     key: 'MULTITABLE_BUSINESS_TIMEZONE',
     type: 'enum',
     activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
@@ -846,6 +879,51 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled',
   },
   {
+    key: 'STOCK_PREP_PULL_BATCH_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "批次标识 (pull batch; register R-65; design §7.1): the switch that lets stock-prep pulls stamp the two machine columns 首次批次 / 本次拉取 on a project sheet's NEW rows. Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the plugin routes through the lanes helper (plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled), never by the libraries. OFF: zero ledger IO (migration 105's four tables are never read or written), no pull answer carries a pullBatch key (dry-run, apply, large plan / approve / chunk, board), rows created while off land blank and are labelled later by an owner-approved gap pass, the reader still strips both band cells onto a Symbol (hash-neutral: a token minted before an install and an apply after it hash the same rows), and the ADMIN status read …/projects/:projectNo/target/pull-batch still answers from host reads only. ON: on a project sheet whose two band columns are proven present in db mode and whose pull-batch ledger row is resolved (born_empty / backfilled) with no gap rows, the small apply and every large chunk open or join ONE batch per logical pull lazily at the first create and write both cells on created rows only (an ADD that finds its row, an UPDATE, an INACTIVE never write them); a sheet being installed refuses every pull lane 409 STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS; a ledger failure is 503 STOCK_PREP_PULL_BATCH_STORE_FAILED before the first create (a run stop); previews, the board stanza and pilot readiness v3 report the state. ON also admits the owner-gated per-sheet install POST …/projects/:projectNo/target/pull-batch (BI-2; modes install / abort; the typed project number, the plan digest, the attested pull count and an approvalRef; the plan persisted before the first cell write; fill-blank only; a sheet being installed refuses every pull lane; every real run is owner gate O-BI-1 per sheet) and makes NEW project sheets born ready at create (band + landing + a born_empty ledger row, only while the sheet is still empty). OFF: install / abort answer 409 STOCK_PREP_PULL_BATCH_DISABLED before any IO, the install dry_run answers from host reads only, and new sheets are created in the legacy shape (the create answer carries no pullBatchBand key). BI-7 (landed): the three stock-prep:admin settings routes (GET / POST …/pull-batch/settings, the tenant default; POST …/projects/:projectNo/target/pull-batch/settings, one captured sheet's rule / format) answer 404 STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED after their gate and before any IO unless this switch AND MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED are both exactly 'true' (ruling C6: off, the 数据来源与体检 settings panel is invisible); on, they write only the plugin ledger's settings rows, each with its project_fields_update audit row in the same transaction. The host's 人工补充 stamp on manual rows does NOT read it (ruling C10). Danger=high: ON writes two machine columns on customer production sheets; flipping it on a customer host is owner gate O-BI-7.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs#stockPrepPullBatchEnabled',
+  },
+  {
+    key: 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "备料分批拉取第一期 step 6d-2a — doubled-sheet repair (step-6 design §6.6; register R-91): the operator switch for the repair of a project sheet that holds a component twice (its own root subtree AND a copy nested under another parent). Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the plugin routes through the repair library (plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs#stockPrepSheetRepairWriteEnabled), never by the host. OFF: the three stock-prep:admin routes (POST …/projects/:projectNo/target/sheet-repair, GET …/target/sheet-repair/fills-report, GET …/target/sheet-repair/runs) answer 404 STOCK_PREP_SHEET_REPAIR_DISABLED after their gate and before any IO — preview, fills report and run list included — so the whole repair surface is invisible and the repair routes never read or write migration 108's two tables. Pilot readiness v7 (no_open_sheet_repair_run, S6-5b) and the pilot enable's in-lease re-read READ integration_stock_prep_sheet_repair_run whatever this switch says: a run left open while the switch was on still refuses the enable after it is off, and without 108 readiness fails for every project. No other existing route or answer changes. They are also 404 while MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is off (not modeled as dependsOn: the combination is inert, not illegal). ON: stock-prep:admin (or a platform admin) may preview a retire of a superseded root subtree or the restore of one earlier retire run, read the values-free fills report, and EXECUTE a previewed plan; and may close a run left open after its rows were written with the continuation verify_and_close_run, which verifies every planned row against the run's own backup and writes NO row (its own preview digest and approvalRef). An execute of a recipe is a production write of four machine cells (有效 as the boolean false / true and three RUN stamps; never a human cell, never a batch column) on rows of a customer sheet and needs, each refused before the first write: the typed project number, the preview's planDigest echoed and still equal after the recompute INSIDE the sheet write lease (purpose sheet_repair), an approvalRef, a project that is not governed, and a one-shot claim of that digest (migration 108, PRIMARY KEY: an approved plan runs at most once — 409 STOCK_PREP_SHEET_REPAIR_ALREADY_CONSUMED). Every row is backed up in the run row before the first patch; each patch is host-fenced and version-conditional, and a row that moved stops the run. A sheet whose batch columns are being installed, or whose aborted install still holds its persisted plan or its settings lock, is refused (409 STOCK_PREP_SHEET_REPAIR_INSTALL_IN_PROGRESS) whatever the pull-batch switch says: the repair reads that one row of the batch ledger (migration 105) on every preview and execute of a recipe, and an unwired or unreadable batch ledger is 503 — repair and install windows never interleave. Danger=medium: it writes customer production sheets, bounded by the gates above and undone byte-identically by the restore recipe; turning it ON is owner gate ② per sheet (O6-6: one approvalRef per approved preview digest, the project's pulls paused for the window) and it is turned OFF again when the window closes. The switch is not the approval: an approvalRef is recorded, not verified, so the owner's window is what authorizes a run.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-sheet-repair.cjs#stockPrepSheetRepairWriteEnabled',
+  },
+  {
+    key: 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // `.trim().toLowerCase() === 'true'` (http-routes.cjs stockPreparationTenantClaimRequired)
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: after an enable nothing refuses at run time (only the pilot GET re-lists the id), so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback = delete the line and restart; nothing persists.",
+    source: 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired',
+  },
+  {
+    key: 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH',
+    type: 'enum',
+    activationValue: "a path to a deploy-local JSON object file (trimmed); unset / blank = no pilot declarations (today's behaviour); set but unreadable / not JSON / not an object = the plugin fails to load (logged), never 'nothing declared'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "备料分批拉取 pilot declarations (pre-pilot fix batch 8(f), batch-refresh pre-flip; register R-91): a DEPLOY-FILE key — the env names a JSON object file on the deployment's own machine, read once at plugin activation by readDeployJsonObjectFile into config.stockPreparationPilot, the same reader and fail-closed posture as the customer-pack, ext-field-mapping, B2a-registry and handoff path keys. Default OFF: unset (or blank) omits the key, both declarations read null and pilot readiness answers exactly as before this key existed. The plugin honours two keys of that object and only as the EXACT literal 'not_applicable' (anything else declares nothing): specReadPlanSlot — this deployment's source has no 规格 column to read (readiness spec_read_plan_slot then passes without part.specField); customerPack — this deployment runs without a customer pack (readiness pack_columns_installed then passes only while no ext_ column is declared or installed). It enables nothing by itself: the pilot is still the admin POST behind every readiness check and CONTINUATION_SUPPORT_VERSION. Danger=medium: a declaration is a SITE FACT the owner states (never guessed, O-8 / B-M8); declaring the 规格 slot not applicable on a site whose source does have the column means that column is never read for a pilot project. The four sibling _PATH deploy-file keys are not registered here (pre-existing).",
+    source: 'packages/core-backend/src/plugin-runtime-config.ts#resolvePluginRuntimeConfig',
+  },
+  {
     key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -940,6 +1018,63 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries',
   },
   {
+    key: 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "C1/S2 first slice (iPaaS baseline v2.3 §10.3.1): the MANUAL, SYNTHETIC multitable-automation integration preview (POST /api/multitable/sheets/:sheetId/automations/:ruleId/integration-preview and its catalog GET). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF), read on every run and at every admission checkpoint. Off: both routes answer a fixed 404 INTEGRATION_PREVIEW_DISABLED after the existing authentication and sheet-capability gate, before any catalog, provider, compiler or database read, and the panel stays hidden. On: an owner of the rule with canManageAutomation on the sheet scope and live integration authority can run one fixed plan: a host-registered synthetic provider (no network, database, file, env or credential) pages repo fixtures, values pass only through a per-run in-memory store, and the YiDa consumer calls the pure compileYidaLocalDraft in memory; one values-free summary row is written to multitable_automation_executions (triggered_by integration_preview, not retryable). It never sends, prepares/approves/submits a YiDa draft, issues a token or writes a business row, and it is not coupled to any other switch: AUTOMATION_DURABLE_DELIVERY_ENABLED, AUTOMATION_CLASSA_CLAIM_ENABLED, AUTOMATION_CLASSB_OUTBOUND_ENABLED and the INTEGRATION_YIDA_* switches neither open nor widen it (no prefix matching). danger=low: synthetic data only; real reads or sends need separate owner approval.",
+    source: 'packages/core-backend/src/integration/automation-synthetic-preview.ts#isSyntheticIntegrationPreviewEnabled',
+  },
+  // ── R-69 1b-ii (ADR adr-automation-pipeline-bridge-20261103 §7): the four run_integration_job switches. R-69
+  // is OPEN; every path they gate is dry-run only; only the first has a read point in 1b-ii.
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 1b-ii Bridge 1 — the run_integration_job automation action (packages/core-backend/src/multitable/automation-run-integration-job.ts, read by AutomationService.assertRunIntegrationJobAtSave at save and by the executor on EVERY trigger). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). Off: saving a rule that carries the action is refused 403 RUN_ACTION_DISABLED, and an already-saved rule's trigger records skipped(action_disabled) — never a silent success. On: a schedule.cron rule (IANA timezone required) whose creator is bound to exactly one active tenant may run the stock-prep pull DRY RUN per project through the plugin-registered IntegrationRunPort, under a per-project outbound-intent row and a fenced heartbeat job lease (meta_automation_job_leases, migration zzzz20261106111100; action CHECK zzzz20261106111300). Only dry-run jobs exist on this path: applyMode apply_when_ready and the pipeline kind are refused at save whatever any switch says. It does not read, imply or require AUTOMATION_CLASSB_OUTBOUND_ENABLED (the action always writes its intent row) or any other switch. danger=high: ON lets a saved automation rule read the bound tenant's PLM source through the plugin's governed dry-run chain on a schedule (a read, never a write; R-69 must be ruled before it is turned on).",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#isIntegrationAutomationRunActionEnabled',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "R-69 1c Bridge 2 — the integration.run_finished trigger (packages/core-backend/src/core/integration-run-events.ts). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF). READ at the three points the ADR names: the run_integration_job action layer before it emits its per-project summaries (automation-executor.ts), core on receipt (publishIntegrationRunFinished, and again when AutomationService dispatches), and the plugin before it publishes a pipeline-run summary (plugins/plugin-integration-core/lib/integration-run-events.cjs). Off: nothing is published or received; integration.run_finished rules can be saved (trigger CHECK zzzz20261106111500) but never fire. On: one values-free summary per job (one project of a stock-prep pull, one api/manual/replay pipeline run) is routed — inside the run's tenant, by job — to the enabled integration.run_finished rules, whose default alert set has skipped and not held; with AUTOMATION_DURABLE_DELIVERY_ENABLED it rides routing manifest v4 (consumer integration-run-trigger). It does not read, imply or require INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED or any other switch. danger=medium: ON routes job summaries into automation rules (alerts: outbound messages to the configured destinations).",
+    source: 'packages/core-backend/src/core/integration-run-events.ts#isIntegrationAutomationRunEventEnabled',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 unattended stock-prep APPLY (ADR Q12a; owner layer O ②). REGISTERED, NOT READ in 1b-ii: applyMode 'apply_when_ready' is refused at save (400) WHATEVER this switch says, so an early flip can never create a saveable-but-unimplemented rule (automation-run-integration-job.ts validateRunIntegrationJobConfig). Default OFF; exact literal 'true' only. A later, owner-approved slice adds the read points (save validation and the action after a ready dry run, before the dry-run token is consumed). danger=high: once read, ON lets an automation rule APPLY a stock-prep plan to a customer table unattended — a production write.",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II',
+  },
+  {
+    key: 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "R-69 unattended NON-DRY pipeline runs (ADR Q12b; owner layer O ②/③). REGISTERED, NOT READ in 1b-ii: the pipeline job kind is refused at save in this slice and the port only ever calls the dry-run path (dryRun: true, no C6 write-lifecycle marker), so no code consults this switch (automation-run-integration-job.ts). Default OFF; exact literal 'true' only. A later, owner-approved slice adds the read points (save validation of dryRun:false and the trigger-time check). danger=high: once read, ON lets an automation rule run a pipeline that writes its target (multitable rows, or an allow-listed HTTP target) unattended.",
+    source: 'packages/core-backend/src/multitable/automation-run-integration-job.ts#INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II',
+  },
+  {
     key: 'ENABLE_SCHEDULER_LEADER_LOCK',
     type: 'boolean',
     activationValue: 'true',
@@ -960,6 +1095,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "TTL of the automation scheduler's Redis leader lock. Read only when ENABLE_SCHEDULER_LEADER_LOCK is 'true' and Redis is reachable. Parsed with Number(raw): a positive result is used as-is (no upper bound, fractions accepted), unset / '' / non-numeric / zero / negative uses the default 30000. The attendance scheduler has its own ATTENDANCE_SCHEDULER_LEADER_LOCK_TTL_MS and does not read this.",
     source: 'packages/core-backend/src/multitable/automation-service.ts#resolveAutomationSchedulerLeaderOptions',
+  },
+  {
+    key: 'SECURITY_ACTION_PROOF_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; exact literal 'true' only, byte-identical (no trim, no case folding; unset, '', false, TRUE, ' true', 'true ', 1 and yes stay OFF). While OFF the router factory returns null, so POST /api/auth/security-actions/verify is not mounted, and every action-proof service entry point refuses before any SQL statement. Turn it on only after `migrate.js --confirm zzzz20261106120000_create_security_action_challenges` exits 0. While ON, the route issues a 300-second single-use proof only for a purpose whose own prerequisites are delivered; in this revision no purpose is, so every verify request is refused before any data is read and the table receives no row. Not a grant: it enables no binding, login grant or session change. Deploying and enabling are separate owner decisions.",
+    source: 'packages/core-backend/src/auth/security-action-proof-flag.ts#isSecurityActionProofEnabled; packages/core-backend/src/routes/security-actions.ts#securityActionsRouter',
+  },
+  {
+    key: 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF. Only the byte-exact env string 'true' enables persisting an exact department scope (includeChildren false); no trim and no case folding. Unset, '', false, 0, TRUE, True, ' true', 'true ', ' true ', 1, yes and on stay OFF. Gates three write sinks before any scope or template mutation: template department assign, direct delegated-admin scope assign, and template apply in both merge and replace. A refusal is HTTP 403 DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED with no audit and no permission invalidation, and replace does not delete first. Readers are not gated. Rollback: turning the flag off does not rewrite a stored false and does not change reader semantics; explicit true and unassign remain available; an omitted includeChildren on an existing false is preserved; a new omitted assign still defaults to true. Enabling a deployed process is a separate owner decision.",
+    source: 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled',
   },
 ])
 

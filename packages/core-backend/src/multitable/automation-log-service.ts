@@ -11,11 +11,37 @@ import { AUTOMATION_EXECUTION_SCHEMA_VERSION } from './automation-executor'
 import type { AutomationExecution, AutomationStepResult } from './automation-executor'
 import { redactString, redactValue } from './automation-log-redact'
 
+/**
+ * Rows that are not rule executions and stay out of the rule-monitoring reads (getRecent, listExecutions):
+ * button runs (B1-S1 D0-A §6) and synthetic integration previews (C1/S2). Both remain readable by getById.
+ */
+const NON_RULE_EXECUTION_TRIGGERS = ['button', 'integration_preview']
+
 /** Minimal query surface a transaction client satisfies (pg `QueryResult` shape). */
 export type ExecutionLogQueryFn = (
   sql: string,
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+/** The only shape `recordSyntheticPreviewSummary` accepts (fixed ids, enums and counts). */
+export type SyntheticPreviewLogEntry = Readonly<{
+  executionId: string
+  ruleId: string
+  sheetId: string
+  actorId: string
+  triggeredAt: string
+  finishedAt: string
+  summary: Readonly<{
+    outcome: string
+    operation: Readonly<{ id: string; version: number }>
+    consumer: string
+    fixtureId: string
+    mappingPresetId: string
+    counts: Readonly<{ pages: number; rows: number; bytes: number }>
+    durationMs: number
+    steps: readonly Readonly<{ stepId: string; type: string; status: string; durationMs: number }>[]
+  }>
+}>
 
 export interface AutomationStats {
   total: number
@@ -111,6 +137,56 @@ export class AutomationLogService {
   }
 
   /**
+   * Synthetic integration preview (C1/S2 first slice): persist ONE values-free summary row.
+   *
+   * It accepts only the dedicated `SyntheticPreviewLogEntry` (fixed ids, a fixed outcome code, counts and
+   * durations, all rebuilt by the host from enums and counts — integration/automation-synthetic-preview.ts
+   * buildSyntheticPreviewSummary). It never takes an AutomationExecution, a step output, a provider page,
+   * a compiler result or an error object, so no raw preview value can reach the insert. trigger_event and
+   * rule_snapshot stay NULL, so the unchanged retry gates refuse the row (MISSING_TRIGGER_EVENT when failed,
+   * NOT_RETRYABLE when successful), and there is no suspension, job or outbox row to resume. The existing
+   * redactor is not what keeps values out: the entry type is.
+   */
+  async recordSyntheticPreviewSummary(query: ExecutionLogQueryFn, entry: SyntheticPreviewLogEntry): Promise<void> {
+    await query(
+      `INSERT INTO multitable_automation_executions (
+         id, rule_id, triggered_by, triggered_at, status, steps, error, duration,
+         sheet_id, trigger_event, rule_snapshot, finished_at, schema_version, initiated_by
+       ) VALUES (
+         $1, $2, 'integration_preview', $3, $4, $5::jsonb, $6, $7,
+         $8, NULL, NULL, $9, $10, $11
+       )`,
+      [
+        entry.executionId,
+        entry.ruleId,
+        entry.triggeredAt,
+        entry.summary.outcome === 'OK' ? 'success' : 'failed',
+        JSON.stringify(entry.summary.steps.map((step) => ({
+          actionType: step.type,
+          status: step.status,
+          durationMs: step.durationMs,
+          output: step.type === 'integration_preview_read'
+            ? {
+              operationId: entry.summary.operation.id,
+              operationVersion: entry.summary.operation.version,
+              fixtureId: entry.summary.fixtureId,
+              pages: entry.summary.counts.pages,
+              rows: entry.summary.counts.rows,
+              bytes: entry.summary.counts.bytes,
+            }
+            : { consumer: entry.summary.consumer, mappingPresetId: entry.summary.mappingPresetId },
+        }))),
+        entry.summary.outcome === 'OK' ? null : `INTEGRATION_PREVIEW_${entry.summary.outcome}`,
+        entry.summary.durationMs,
+        entry.sheetId,
+        entry.finishedAt,
+        AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        entry.actorId,
+      ],
+    )
+  }
+
+  /**
    * Update an already-inserted execution row. A6-1 uses this after pre-creating
    * the parent execution before job/action side effects, so job rows never become
    * invisible orphans just because final execution persistence is delayed.
@@ -163,10 +239,11 @@ export class AutomationLogService {
    * DF-N1 rule-monitoring stream. It remains retrievable by getById for audit.
    */
   async getRecent(limit = 50): Promise<AutomationExecution[]> {
+    // C1/S2: a synthetic integration preview runs none of the rule's actions either; same exclusion.
     const rows = await db
       .selectFrom('multitable_automation_executions')
       .selectAll()
-      .where('triggered_by', '!=', 'button')
+      .where('triggered_by', 'not in', NON_RULE_EXECUTION_TRIGGERS)
       .orderBy('created_at', 'desc')
       .limit(limit)
       .execute()
@@ -187,7 +264,8 @@ export class AutomationLogService {
     // EXCLUDE triggered_by='button' (B1-S1 D0-A §6) — button runs are record-scoped
     // side effects, not rule executions; they stay out of the rule-monitoring reads
     // but remain retrievable by getById.
-    q = q.where('triggered_by', '!=', 'button')
+    // Synthetic integration previews (C1/S2) likewise.
+    q = q.where('triggered_by', 'not in', NON_RULE_EXECUTION_TRIGGERS)
     if (filters.sheetId) q = q.where('sheet_id', '=', filters.sheetId)
     if (filters.ruleId) q = q.where('rule_id', '=', filters.ruleId)
     if (filters.status) q = q.where('status', '=', filters.status)
@@ -222,6 +300,8 @@ export class AutomationLogService {
         sql<number>`COALESCE(AVG(duration) FILTER (WHERE duration > 0), 0)::int`.as('avg_duration'),
       ])
       .where('rule_id', '=', ruleId)
+      // C1/S2: a synthetic integration preview is not a rule execution; button rows keep their behaviour here.
+      .where('triggered_by', '!=', 'integration_preview')
       .executeTakeFirst()
 
     if (!row) {

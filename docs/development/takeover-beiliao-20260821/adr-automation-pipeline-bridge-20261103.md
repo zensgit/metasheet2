@@ -1,6 +1,6 @@
 # 自动化 × 数据管道：用「运行集成作业」动作与「作业运行完成」触发器把两台引擎连起来，替换 OS 定时任务并补失败告警（ADR 2026-11-03）
 
-> **状态**：草稿 v3（并入独立评审第一轮 FIX_FIRST 的 F1–F10、N1–N3，与第二轮 READY 的 NF1–NF6）。owner 2026-11-03 对主会话「两台引擎保持独立、只做连接、不建第三台」的提案回复「批准写 1a 的 ADR」；本 ADR 即 1a。标「T 层默认」的条目按章程默认前进、owner 24h 内可否决；标「待 owner 裁定」的条目在 §12 汇总，未裁定前不开 1b。**任何无人值守的写入（备料套用、非试算管道运行）都不在 T 层默认之内，各自有默认关的开关并路由给 owner。**
+> **状态**：草稿 v4。v3 并入独立评审第一轮 FIX_FIRST 的 F1–F10、N1–N3，与第二轮 READY 的 NF1–NF6；v4（2026-11-06）按冻结设计基线 v2.3 §10.2.6（`ipaas-yida-dev-baseline-v2.3-20261106.md`）修订旧任务的说法、作业超时、作业租约与切换前置，改动见文末「附注：2026-11-06 修订」M1–M5，正文受影响处标「11-06 注 Mx」。owner 2026-11-03 对主会话「两台引擎保持独立、只做连接、不建第三台」的提案回复「批准写 1a 的 ADR」；本 ADR 即 1a。标「T 层默认」的条目按章程默认前进、owner 24h 内可否决；标「待 owner 裁定」的条目在 §12 汇总，未裁定前不开 1b。**任何无人值守的写入（备料套用、非试算管道运行）都不在 T 层默认之内，各自有默认关的开关并路由给 owner。**
 > **线别**：备料接管线的交付项（「替换 OS 定时任务 + 失败告警」），比照 R-50 对 #6315 的框定，不算第三条线；本 ADR 不解封 #6323 / #6324 / #6337。
 > **基线**：main `b36f53c2f`（`b36f53c2f9140237f1cebfb162923c3181f6d9fb`）。下文所有 `path:line` 都在这个提交上核过；新增文件只写路径不写行号。初稿冻结在 `8f3867da7`，2026-11-04 合并 main 后逐条重核、重冻结到本提交；其间 main 改变了本 ADR 依赖的若干事实，见文末「附注：2026-11-04 重冻结」N1–N5，正文结论未改写、受影响处以「11-04 注 Nx」标出。合并前若 main 再前进，按章程重核行号。
 > **values-free**：不含主机、地址、口令、令牌、租户名、账号名或任何客户值，只指位置；「222」只是客户测试机在本目录文档里的既有代号；任务计划程序里的任务名也不写死，只指到读取它的位置。
@@ -11,7 +11,7 @@
 
 | # | 问题 | 裁决 | 层 | 落在哪里 |
 |---|---|---|---|---|
-| Q1 | OS 任务跑的到底是什么 | **不是管道**：脚本打的是备料表动作 `dry-run → apply`（`stock-preparation-scheduled-pull.mjs:377-381`），`pipelines/:id/run` 从未被它调用。所以 Bridge 1 的动作是「运行集成作业」`run_integration_job`，作业种类闭集 `{stock_prep_pull, pipeline}`；1b 先交 `stock_prep_pull`（这才替换得了 OS 任务）；`pipeline` 种类在 1b/1c **只允许试算**（Q12b） | 待 owner 裁定（偏离已批提案的措辞，§12 OQ1） | §1.5、§3 |
+| Q1 | OS 任务跑的到底是什么 | **不是管道**：脚本打的是备料表动作 `dry-run → apply`（`stock-preparation-scheduled-pull.mjs:377-381`）；**带 `--apply` 时才套用，222 登记的任务不带**，按仓库记录只试算，现状待现场计数（11-06 注 M1），`pipelines/:id/run` 从未被它调用。所以 Bridge 1 的动作是「运行集成作业」`run_integration_job`，作业种类闭集 `{stock_prep_pull, pipeline}`；1b 先交 `stock_prep_pull`（这才替换得了 OS 任务）；`pipeline` 种类在 1b/1c **只允许试算**（Q12b） | 待 owner 裁定（偏离已批提案的措辞，§12 OQ1） | §1.5、§3 |
 | Q2 | 动作落在 core 还是插件 | core 执行器持有动作类型、校验、幂等台账与审计；插件在激活时向 core **登记**一个 `IntegrationRunPort`（插件→core 的端口，与 `workdayCalendar.register` 同形，`index.ts:1772-1782,2818-2820`），只对 `plugin-integration-core` 开放；端口缺席即失败关闭。不走 `communication.call`，不自调 HTTP。端口的主体上下文由 core 从实时 RBAC 构造（§6.4） | T 层默认 | §2 ②③、§3.2、§6.4 |
 | Q3 | 运行身份绑定给谁 | 授权主体 = 规则的 `created_by`，**保存时冻结**、每次触发**实时复核**；推荐生产规则由租户绑定的服务账号令牌经自动化 API 创建（与 runbook / 运行记录里的服务账号一致），编辑器建的规则绑的是那个人、此人停用即停拉并告警；数据面读身份保持服务端 `dataSourceOwnerId`（`http-routes.cjs:6472-6485`）与 `pipeline.createdBy`，不随规则变；无租户声明的主体保存即拒 | T 层默认（生产规则用哪个身份 = §12 OQ7） | §6 |
 | Q4 | 重试 | 只在写入段**之前**失败（授权/加载/读源/变换，以及授权读取本身不可用）才由动作层有界重试（≤3 次、≥60 s 间隔）；写入段已开始且目标非幂等即 `outcome_unknown`、永不自动重试；消费令牌之后的 409（修订不符 / 不可套用）是**确定的拒绝**，记 `skipped(stale_plan)`、不重试、不算 unknown；行级数据错误留在既有死信。runner 本身不加重试循环 | T 层默认 | §5 |
@@ -64,7 +64,7 @@
 
 ### 1.3 今天的 OS 定时任务（备料拉取）
 
-- 脚本是普通 HTTP 客户端，顺序打 `table-actions/plm.stock-preparation.pull-bom.v1/dry-run` → `…/apply`（`stock-preparation-scheduled-pull.mjs:377-381,540-560`），缺省只试算（`:25-30,147-149`），输入只来自环境变量（`:70-73,123`）；令牌须为**租户绑定**的服务账号（`:32-50`，否则 `--allow-tenantless` 才放行）。
+- 脚本是普通 HTTP 客户端，顺序打 `table-actions/plm.stock-preparation.pull-bom.v1/dry-run` → `…/apply`（`stock-preparation-scheduled-pull.mjs:377-381,540-560`），缺省只试算（`:25-30,147-149`），**带 `--apply` 时才套用；222 登记的任务不带**（11-06 注 M1），输入只来自环境变量（`:70-73,123`）；令牌须为**租户绑定**的服务账号（`:32-50`，否则 `--allow-tenantless` 才放行）。
 - 两枪必须同一次运行：试算令牌一次性、30 分钟 TTL（`stock-preparation-table-actions.cjs:169-170,2001`），套用先原子消费令牌再校验（`:2146-2159`：消费后才判过期 / 不符，所以被拒的令牌照样烧掉），再比对修订与可套用性（`:3228,3303-3307`，409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH` / `TABLE_ACTION_DRY_RUN_NOT_APPLYABLE`）。套用默认只允许沙箱目标，生产策略只认服务端配置（`stock-preparation-production-policy.cjs:5-16`）。目标表有跨进程写锁（租约 + 计划代号，`stock-preparation-project-write-lock.cjs:1-45`，迁移 100）；**每个可套用主体做的试算都会抬高计划代号**（`:14-18`），使更早的未套用令牌在套用时以 409 不符收场。
 - 表动作的门：`requireTableActionAccess`（`http-routes.cjs:1440-1466`）——持 legacy `integration:*` 即放行并跳过 operator-scope；否则要 PULL 梯（`operatorMayRunStockPrepPull :1453`，梯的定义：`stock-prep:pull ∧ operate ∧ read`，或 `stock-prep:admin`，`:1384`、`stock-preparation-workbench-access.cjs:747`）+ 作用域解析。读身份对这一个 actionId 用服务端盖章的 `config.dataSourceOwnerId`（`http-routes.cjs:6472-6485`；盖章与剥除 `external-systems.cjs:30-34,480-482,515`）。
 - **x-tenant-id 历史**：鉴权中间件在令牌无租户声明时把请求头 `x-tenant-id` 填进 `user.tenantId`（`http-routes.cjs:1414-1415,1574,1644` 注释）；`resolveTenantId` 对租户绑定主体强制相等、对无租户平台管理员采信请求（`:1476-1499`；`isTenantlessPlatformAdmin :1362-1366`）；硬门 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED`（`:1764-1766`，`assertVerifiedTenantClaim :1668-1671`）默认关，打开它是部署事件：先填 `user_orgs`、重签令牌、全员重新登录（`:1747-1753`）。脚本头注释与 runbook 都因此要求租户绑定令牌（`222-deploy-window-runbook-20260901.md:852-866`）。
@@ -93,11 +93,11 @@
 
 ④ **四个开关**（§7）：Bridge 1、Bridge 2 各一个；备料套用、非试算管道运行各一个。保存时与每次触发时都读原文；关着的动作在触发时记 `skipped(action_disabled)`，不静默成功。
 
-⑤ **每个作业恰好一条摘要事件**，只在动作步的最终尝试之后发（§4.2）；HTTP / 手工 / 回放发起的运行由插件在 `finishRun` 之后经第二个端口 `integrationRunEvents.publish(summary)` 送进 core，自动化发起的运行（端口调用带 `automation` 标识）插件**不**发、由动作层发；core 按闭合键集校验（与 `yida-owner-runtime-factory.mjs` 的 `record()` 同样拒多键、拒 Proxy），再按作业 id 路由。
+⑤ **每个作业恰好一条摘要事件**（11-11 注，本地切片 I6d 第二轮 F1b，登记册 R-92 ②，未入 main、owner 可否决：本次触发没有同时核实「绑定主体是规则创建者」和「规则所在表是绑定租户的活跃登记表」时，不发摘要——这是本条的例外，这些情况不会触发告警规则），只在动作步的最终尝试之后发（§4.2）；HTTP / 手工 / 回放发起的运行由插件在 `finishRun` 之后经第二个端口 `integrationRunEvents.publish(summary)` 送进 core，自动化发起的运行（端口调用带 `automation` 标识）插件**不**发、由动作层发；core 按闭合键集校验（与 `yida-owner-runtime-factory.mjs` 的 `record()` 同样拒多键、拒 Proxy），再按作业 id 路由。
 
 ⑥ **幂等与重试按目标种类与阶段分类**（§5），不按模式。
 
-⑦ **cron 必带时区**（Q9）；`stock_prep_pull` 只接受 `schedule.cron`（不接受 interval）；`pipeline` 试算接受 cron 或 `intervalMs ≥ 15 min`；作业超时 `timeoutMs ≤ 3 h`（< 4 h 回收阈值）；全部在保存时校验。
+⑦ **cron 必带时区**（Q9）；`stock_prep_pull` 只接受 `schedule.cron`（不接受 interval）；`pipeline` 试算接受 cron 或 `intervalMs ≥ 15 min`；作业超时 `timeoutMs ≤ 55 min`、默认 30 min（< 4 h 回收阈值；11-06 注 M2，原为 ≤ 3 h）；全部在保存时校验。
 
 ⑧ **词表与表变化**：`VALID_TRIGGERS` 增 `'automation'`（`pipelines.cjs:30`；`057:105` 只是注释，无 CHECK）；`automation_rules` 的动作 CHECK 增 `run_integration_job`（1b-ii 迁移）、触发器 CHECK 增 `integration.run_finished`（1c 迁移），up/down 同 `zzzz20260720120000…:28-43` 的形式；新表 `meta_automation_job_leases(scope_key PK, holder, lease_expires_at, fence)`（1b-ii 迁移，§3.4；行只增不删，fence 单调）。
 
@@ -108,7 +108,7 @@
 ```
 { job: { kind: 'stock_prep_pull', projectNos: string[≤20], applyMode: 'dry_run_only' | 'apply_when_ready' }
 | job: { kind: 'pipeline', pipelineId, pipelineFingerprint, dryRun: true, mode?: 'incremental' | 'full' | 'manual' },
-  timeoutMs ≤ 3h (作为 AbortSignal 传入端口, §3.4), retry: { maxAttempts ≤ 3, backoffMs ≥ 60000 },
+  timeoutMs ≤ 55 min, 默认 30 min (作为 AbortSignal 传入端口, §3.4; 11-06 注 M2, 原为 ≤ 3h), retry: { maxAttempts ≤ 3, backoffMs ≥ 60000 },
   binding: { principalId, tenantId }  // 服务端盖章，客户端值一律丢弃（同 dataSourceOwnerId 的做法）}
 ```
 
@@ -128,12 +128,90 @@
 
 ### 3.4 并发、重叠与失效（按作业种类）
 
-- **作业租约（core，1b-ii）**：`meta_automation_job_leases` 一行一个作用域，`scope_key = 'stock_prep_pull:<tenantId>:<projectNo>'` 或 `'pipeline:<pipelineId>'`，TTL = `timeoutMs + 60 s`。认领 = `INSERT … ON CONFLICT (scope_key) DO UPDATE SET fence = leases.fence + 1, holder = $2, lease_expires_at = now() + ttl WHERE leases.lease_expires_at < now() RETURNING fence`（与 `automation-event-fires-lease.ts:26-65` 同一套认领 / 回收 / 单写者语义），认领失败即 `skipped(busy)`。释放 = **fence-CAS UPDATE** `SET lease_expires_at = now(), holder = NULL WHERE scope_key = $1 AND fence = $2`——**永不删行**，所以 fence 真正单调：一个超时的僵尸持有者带着旧 fence 回来释放，0 行受影响，后继者的租约完好（与 `markEventFiresDone` 的 fence-CAS 终态、保留行同一招，`automation-event-fires-lease.ts:67-76`）。两条规则拉同一个项目也串行。管道种类上它是纵深：DB 唯一索引（`058:34-36`）仍是权威，409 同样记 `skipped(busy)`。
-- **`timeoutMs` 是会被遵守的中止信号**：动作层建 AbortController、到点 `abort()`，signal 随端口调用传入受治理入口；入口在每个项目之前、每页源读之前检查 `signal.aborted`，并把 signal 交给能收它的下游。今天 runner 与表动作都没有 signal 管道（`pipeline-runner.cjs` 与 `stock-preparation-table-actions.cjs` 里没有 `AbortSignal` 的任何引用），1b-i 加上、不传时行为不变。一次已经发出的源读会跑完再看到 signal——这是**有界**的超跑（一页 / 一个项目），由 TTL 的 60 s 余量吸收；中止后动作步按 `failed(timeout)` 结算（试算无写入，可按 §5 有界重试），迟到结果丢弃；即便某个下游忽略 signal，它也只能持有自己的旧 fence，释放不了后继者的租约。
-- **跳重叠**：`stock_prep_pull` 只接受 cron（最小粒度 1 分钟但推荐每日），长于一跳的运行让下一跳 `skipped(busy)`，而不是并行；`pipeline` 试算用 interval 时 ≥ 15 min；作业超时 ≤ 3 h < 4 h 回收阈值，所以陈旧回收**永远不会**回收一条仍在跑的管道运行。
+- **作业租约（core，1b-ii）**：`meta_automation_job_leases` 一行一个作用域，`scope_key = 'stock_prep_pull:<tenantId>:<projectNo>'` 或 `'pipeline:<pipelineId>'`，TTL = **120 秒加心跳**（11-06 注 M3；v3 原为 `timeoutMs + 60 s`，见本节末「11-06 修订」）。认领 = `INSERT … ON CONFLICT (scope_key) DO UPDATE SET fence = leases.fence + 1, holder = $2, lease_expires_at = now() + ttl WHERE leases.lease_expires_at < now() RETURNING fence`（与 `automation-event-fires-lease.ts:26-65` 同一套认领 / 回收 / 单写者语义），认领失败即 `skipped(busy)`。释放 = **fence-CAS UPDATE** `SET lease_expires_at = now(), holder = NULL WHERE scope_key = $1 AND fence = $2`——**永不删行**，所以 fence 真正单调：一个超时的僵尸持有者带着旧 fence 回来释放，0 行受影响，后继者的租约完好（与 `markEventFiresDone` 的 fence-CAS 终态、保留行同一招，`automation-event-fires-lease.ts:67-76`）。两条规则拉同一个项目也串行。管道种类上它是纵深：DB 唯一索引（`058:34-36`）仍是权威，409 同样记 `skipped(busy)`。
+- **`timeoutMs` 是会被遵守的中止信号**：动作层建 AbortController、到点 `abort()`，signal 随端口调用传入受治理入口；入口在每个项目之前、每页源读之前检查 `signal.aborted`，并把 signal 交给能收它的下游。今天 runner 与表动作都没有 signal 管道（`pipeline-runner.cjs` 与 `stock-preparation-table-actions.cjs` 里没有 `AbortSignal` 的任何引用），1b-i 加上、不传时行为不变。一次已经发出的源读会跑完再看到 signal——这是**有界**的超跑（一页 / 一个项目），由 TTL 的 60 s 余量吸收（11-06 注 M3：这句不成立——到点不等于结束，超跑也没有固定上界；改由心跳租约与 I-1～I-6 约束，见本节末「11-06 修订」）；中止后动作步按 `failed(timeout)` 结算（试算无写入，可按 §5 有界重试），迟到结果丢弃；即便某个下游忽略 signal，它也只能持有自己的旧 fence，释放不了后继者的租约。
+- **跳重叠**：`stock_prep_pull` 只接受 cron（最小粒度 1 分钟但推荐每日），长于一跳的运行让下一跳 `skipped(busy)`，而不是并行；`pipeline` 试算用 interval 时 ≥ 15 min；作业超时 ≤ 55 min（11-06 注 M2，原为 ≤ 3 h）< 4 h 回收阈值，所以陈旧回收**永远不会**回收一条仍在跑的管道运行。
 - **备料套用与计划代号**：目标表写锁租约（迁移 100）保证跨进程只有一个写者；**已接受**：以可套用主体做的试算会抬高计划代号，使人工未套用的试算令牌失效（`stock-preparation-project-write-lock.cjs:14-18`）——今天的 OS 任务已如此；建议调度在工作时间之外。租约把两次自动化试算串行化，所以不会出现「同一项目两次并行试算、互烧令牌」。
 - **主失效中途**：旧主的在途回调继续跑完（`automation-scheduler.ts:469-483,698-700`），新主下一跳撞租约 → `skipped(busy)`。
-- **进程崩溃**：管道——`integration_runs` 行留 `running`，4 h 后被回收为 `failed`（`pipelines.cjs:893-926`）；备料——没有运行行，只有租约（到 TTL 自然过期）与一条 30 分钟后过期的试算令牌记录（runbook `:931-933` 已记的既有缺口）。两种都留下 `pending` 意图行，下次认领翻 `outcome_unknown`（`automation-outbound-intent.ts:237-246`）并由动作层发 `outcome_unknown` 摘要（11-04 注 N1：须意图租约过期之后；租约上限与 `timeoutMs ≤ 3 h` 的关系见 N1）。多实例部署必须开 `ENABLE_SCHEDULER_LEADER_LOCK`（1b-ii 顺带把它登记进 manifest；11-04 注 N2：#6716 已登记）。
+- **进程崩溃**：管道——`integration_runs` 行留 `running`，4 h 后被回收为 `failed`（`pipelines.cjs:893-926`）；备料——没有运行行，只有租约（到 TTL 自然过期）与一条 30 分钟后过期的试算令牌记录（runbook `:931-933` 已记的既有缺口）。两种都留下 `pending` 意图行，下次认领翻 `outcome_unknown`（`automation-outbound-intent.ts:237-246`）并由动作层发 `outcome_unknown` 摘要（11-04 注 N1：须意图租约过期之后；租约上限与 `timeoutMs ≤ 3 h` 的关系见 N1；11-06 注 M2 已改为 ≤ 55 min 加意图租约心跳）。多实例部署必须开 `ENABLE_SCHEDULER_LEADER_LOCK`（1b-ii 顺带把它登记进 manifest；11-04 注 N2：#6716 已登记）。
+
+#### 3.4.1 11-06 修订：心跳租约、不变量 I-1～I-6 与停止排空（取代上文「TTL = `timeoutMs + 60 s`」）
+
+> 以下逐字转录自冻结设计基线 v2.3 §10.2.3（`ipaas-yida-dev-baseline-v2.3-20261106.md`）。文中的 § 编号指基线的章节，`path:line` 在基线的代码基线 `aba11f45b` 上核对，实施前要按当时的 main 重核。套用切片（OQ2）以下游目标表写锁围栏为前置（见「还剩的重叠」最后一条）。
+
+**今天的情况**
+- **作业超时**：自动化执行器没有步级或执行级超时，只有传输层的 `AbortController`（`automation-executor.ts:4760`、`:5015`、`:6678`；`:4909` 是传输参数里的 `AbortSignal` 类型注解。证据附件 B 的 B3.1 把 `:4909` 也算作 `AbortController`，以本文为准）。
+- **中止信号**：运行器和表动作里没有任何 `AbortSignal` 引用（`pipeline-runner.cjs`、`stock-preparation-table-actions.cjs` 各 0 处）。
+- **意图租约**（#6715）：默认 120 秒，上限 1 小时（`automation-outbound-intent.ts:60-67`、`:138-146`）。`pending` 且租约有效时跳过；过期后由令牌围栏翻成 `outcome_unknown`（`:237-246`）。
+- **作业租约**：还不存在，由 1b-ii 新建。
+- **停止**：`stopOnce` 把各项排空任务交给关停栅栏 `waitForShutdownBarrier`，最多等 10 秒（`index.ts:3831-3855`）。到点时栅栏以 `SHUTDOWN_TIMEOUT` 拒绝，`stop()` 跟着拒绝，后面的 `pool.end()`（`:4192`）**不再执行**，连接池留着不关（日志「Shutdown timeout; database pool left open」，`:4169`）。随后信号处理包装 `stopForSignal` 以 `process.exit(1)` 退出（`:3789-3794`；信号注册 `:5361-5362`）。门 10 的关停超时测试（#6747）钉住的正是这一行为。没有任何信号通知在途步骤停下（`automation-service.ts` 里 0 个 `AbortController`）。
+- **pm2**：`ecosystem.config.cjs:54-61` 没有停止参数。Windows 下 `pm2 stop` 是否送达 SIGTERM，仓库没有记录（未核实）。
+
+**ADR §3.4 的缺口**（`adr-automation-pipeline-bridge-20261103.md:131-132`，租约 TTL = `timeoutMs` + 60 秒）
+1. **到点不等于结束。** 超时后释放租约或等 TTL 过期，后继就可能在前一次调用的尾巴还在跑时开始。
+2. **超跑没有上界。** 60 秒余量只是估计；试算最多读 100 页（`stock-preparation-table-actions.cjs:172-173`），任何固定余量都有超过它的输入。
+3. **死亡探测变慢。** TTL 跟着 3 小时超时走，进程崩溃后 3 小时内每一跳都 busy，每日任务就是整天不拉。
+4. **与意图租约冲突。** 意图租约上限 1 小时。作业跑过约 59.5 分钟后，同身份重放会把它翻成 `outcome_unknown`，原作业写结果时得 `confirmed:false`。
+5. **停止不通知作业。** 栅栏到点后进程以 `exit(1)` 退出，在途作业被直接终止，写不出结果，也释放不了租约，只能等 TTL 过期。
+
+**失去心跳不等于进程死亡：两处要闭合的交错**
+- **交错一：失主还活着。** A 可能因为进程暂停（GC、虚拟机挂起）或数据库断连而续租失败，于是失去租约，B 在 TTL 后接管。这时：
+  - A 已经发出的远端请求可能还在执行；
+  - A 恢复后，如果不检查，还会继续读下一页、调下一个项目。
+  所以必须保证两点：当前持有者唯一；发现自己已是失主后，拒绝准入任何新调用。已经准入的那一次单次读，属于明确列出的残余（见「还剩的重叠」）。
+- **交错二：作业 fence 与意图令牌各管各的。** 意图行按 `(kind, root_execution_id, action_key, target_key)` 定位，结果提交只检查 `status = 'pending' AND attempt_token = 自己的令牌`（`automation-outbound-intent.ts:342-361`）。B 若来自另一条规则或另一个执行根，接管的是同一个作业范围，但用的是另一行意图，不会让 A 的令牌失效。按 v2 的设计，A 恢复后仍能把自己的结果写成功。
+
+**不变量**
+- **I-1 持有者唯一**：同一 `scope_key` 任一时刻至多一个持有当前 fence 的调用。后继只能在前者用 fence-CAS 释放之后，或前者的租约在数据库时钟上过期之后认领。
+- **I-2 旧 fence 一律无效**：带旧 fence 的释放、续约、结果写都是 0 行；带旧令牌的结果写得 `confirmed:false`。
+- **I-3 超时只中止**：超时只发 abort，不释放。释放只在受治理入口的 promise 结束（settle）之后。
+- **I-4 停止只加速结束**：停机给在途作业发 abort；结束不了就不释放，交给 TTL 过期处理。
+- **I-5 发现失主后拒绝新准入**：
+  - 续租失败（0 行、数据库报错或超时）立即触发 `lostSignal`，中止端口；
+  - 本地还记一个截止时刻：上次续租成功时刻加 TTL，减去安全余量。过了这个时刻就当作已失去租约，即使还没收到续租失败；
+  - **每次新调用之前**（每个项目、每一页、每个远端请求）都通过端口回调 `checkpoint()` 到数据库核验 `fence = 自己的 AND lease_expires_at > now()`，不通过就中止，不准入这次调用；
+  - 这条保证的是「发现失主之后不再准入新调用」。在 `checkpoint()` 通过之后才失去租约，那一次已准入的单次读仍会发出，属于明确残余。
+- **I-6 提交同时受 fence 与令牌约束，并持有作业租约行锁**：
+  - 结果写（Tx B）的第一步是 `SELECT … FROM meta_automation_job_leases WHERE scope_key = $1 FOR UPDATE`，在锁内核验 `holder = 自己`、`fence = 自己的`、`lease_expires_at > now()`；
+  - 然后在同一事务里写意图结果（`pending + 自己的令牌` 的 CAS），再用 fence-CAS 释放作业租约，最后提交。行锁一直持到提交；
+  - 任一核验失败，或任一 CAS 为 0 行，整个事务回滚，结果是 `confirmed:false`；
+  - 只在同一事务里**普通读取** fence 不够：可能出现「检查通过 → B 接管 → A 提交旧结果」。持有行锁后，B 的认领（对同一行的 `INSERT … ON CONFLICT DO UPDATE`）会等到 A 提交才执行，线性化点就是 A 的提交。
+- **统一锁顺序**：凡是同时碰作业租约行和意图行的事务（续租、结果写、释放），一律先锁作业租约行，再动意图行。续租事务也是先 `FOR UPDATE` 作业租约行、核验 fence，再续意图租约（以令牌为条件）；任一 CAS 为 0 行就整体回滚，并触发 `lostSignal`。失去作业租约之后，不能再续意图租约。
+
+**还剩的重叠，以及什么时候不能只凭 TTL 接管**
+- 按 I-5，发现失主后不再准入新调用，但仍可能有一次读与 B 重叠。每个失主最多一次，有两种来源：
+  - 失去租约之前已经发出、仍在执行的那个远端请求；
+  - 已经通过 `checkpoint()`、但还没发出的那一次单次串行读：A 在检查通过后暂停，B 接管，A 恢复后照样把这次读发出去。
+- 1b/1c 只试算，重叠的只是一次源读或一次试算。代价是试算会推进计划代号，可能让人工手里未套用的令牌失效（`stock-preparation-project-write-lock.cjs:14-18`），不改数据。这一点作为已知残余写进 ADR。
+- 如果要求底层请求**绝不重叠**（例如以后的无人值守套用），就不能只凭 TTL 到期接管。写入必须带下游自己的围栏：套用路径已有目标表写锁，它在每次写都用 `lease_id + fencing_epoch + lease_seq` 做 CAS（同文件 `:45-55`），失主的写会被拒。任何套用切片都以此为前置。
+
+**一次调用的顺序**（1b-ii）
+1. 认领意图（Tx A），失败则按现有语义跳过。
+2. 认领作业租约（拿 fence），失败则 `skipped(busy)`。
+3. 起心跳：每 TTL/3 在**一个事务里**按统一锁顺序续租：先 `FOR UPDATE` 作业租约行并核验 fence，再续意图租约（以令牌为条件）。任一 CAS 为 0 行就整体回滚，触发 `lostSignal`。
+4. signal = 超时信号、停机信号、`lostSignal` 任一触发。
+5. 调用端口 `run({ context, job, signal, checkpoint })`。入口在每个项目、每页之前先检查 signal，再 `await checkpoint()`。
+6. 端口结束：停心跳 → 一个事务内完成：`FOR UPDATE` 锁作业租约行并核验 → 写意图结果 → fence-CAS 释放 → 提交（I-6）。
+7. 超时到点：abort，再等 `settleGraceMs`。
+   - 等到结束：步结果 `failed(timeout)`，照第 6 步收尾。
+   - 没等到：步结果 `outcome_unknown(timeout_unsettled)`，不释放，心跳继续；结束后再写结果、释放。
+8. 失去租约：步结果 `outcome_unknown(lease_lost)`；不写结果、不释放（已不是自己的），不再续意图租约。之后同身份重放在意图租约过期后把它翻成 `outcome_unknown`。
+9. 停机：同第 7 步。所有仍活着的部分都要接进关停生命周期：
+   - 提前返回 `timeout_unsettled` 之后仍在跑的端口调用；
+   - 心跳；
+   - 收尾事务（Tx B 与释放）。
+   每一项都用 `observeShutdownTask` 登记进 `stopOnce` 的栅栏（`index.ts:3865` 起），不得另起游离于这条生命周期之外的后台任务。栅栏 10 秒内结束就正常收尾；否则进程按上面的事实以 `exit(1)` 退出，留给 TTL 处理。
+
+**为什么不能只把租约拉长**
+- 一个 TTL 同时承担两件相反的事：探测死亡要短，容纳慢工作要长。拉长只顾后者，崩溃后整段 TTL 都 busy。
+- 任何有限 TTL 都有比它更长的工作，到点后后继会和前者并行。
+- 1 小时是 #6715 有意设的上限，放宽会改变所有 B 类发送的僵尸判定时间。
+- 改用心跳：TTL 短（120 秒，与目标表写锁 `stock-preparation-project-write-lock.cjs:132` 同量级），活着的工作一直续，死了 TTL 内回收。写锁已经这样做（同文件 `:1-60`）。
+
+**3 小时与 1 小时的对齐**
+- `timeoutMs` 保存上限降到 **55 分钟**（55 分钟 + 30 秒宽限，小于 1 小时上限），默认 **30 分钟**，等于旧任务今天的预算（脚本 `:253`）。
+- 意图租约也要心跳：新原语 `renewOutboundLease`，按令牌续期，每次仍截到 1 小时；它与作业租约的续期在同一事务里，并以作业 fence 为条件（I-6）。
+- 不放宽 #6715 的 1 小时上限。owner 如果坚持 3 小时，就要接受放宽这个上限，影响所有 B 类发送，不建议。
 
 ### 3.5 时区
 
@@ -202,7 +280,7 @@ cron 规则有 `timezone`（`automation-triggers.ts:40-44`）且保存校验 IAN
 
 ### 6.4 端口的主体上下文：谁构造、从哪来
 
-- **core 构造，紧挨着端口调用，事务先提交**：在一个 RC 事务里按 `automation-live-authority.ts:62-124` 的锁序（`user_roles → role_permissions → user_permissions → users → user_orgs → namespace admissions`，`:58-59`）FOR SHARE 读绑定主体的实时状态，组成 `{ user: { id, permissions[], roles[], role, tenantId }, authenticatedTenantId, explicitTenantIds: [] }`，然后 **COMMIT，再调用端口**——FOR SHARE 锁不跨最长 3 h 的端口调用持有；提交之后的撤权不中止在途作业，这是与宜搭 ADR 相同的已接受窗口。**不**用保存时的声明，**不**让插件自己去读 RBAC（那才是新的授权路径）。
+- **core 构造，紧挨着端口调用，事务先提交**：在一个 RC 事务里按 `automation-live-authority.ts:62-124` 的锁序（`user_roles → role_permissions → user_permissions → users → user_orgs → namespace admissions`，`:58-59`）FOR SHARE 读绑定主体的实时状态，组成 `{ user: { id, permissions[], roles[], role, tenantId }, authenticatedTenantId, explicitTenantIds: [] }`，然后 **COMMIT，再调用端口**——FOR SHARE 锁不跨最长 55 min（11-06 注 M2，原写 3 h）的端口调用持有；提交之后的撤权不中止在途作业，这是与宜搭 ADR 相同的已接受窗口。**不**用保存时的声明，**不**让插件自己去读 RBAC（那才是新的授权路径）。
 - **拒绝规则是成员关系，不是字段比对**：`users` 行存在且 `is_active`、通过认证门（`evaluateUserAuthenticationGate`），**且** `user_orgs` 对 (principalId, binding.tenantId) **恰有一行且 `is_active`**——与 `automation-live-authority.ts:133-141` 同一条规则；任一不成立 → `skipped(principal_unauthorized)`。上下文里的 `user.tenantId` 与 `authenticatedTenantId` 由这条规则**派生**为 `binding.tenantId`（是事实、不是检查）；`isTenantlessPlatformAdmin`（`http-routes.cjs:1362-1366`）在端口上由构造恒为假，不作为判定；`explicitTenantIds` 永远为空（没有请求、没有查询串、没有请求头）。插件对收到的上下文只读不写。
 - **权限集与请求路径同一解析器**：`user.permissions` 必须由请求路径用的同一函数产生——`rbac/service.ts:140` 的 `listUserPermissions(userId, runQuery)` 传入事务查询函数即走事务变体、不经缓存（`:141`），语义与池读相同：`user_permissions ∪ role_permissions ∪ users.permissions` 后过 `filterPermissionCodesByNamespaceAdmission`（`:124-138`）；所以 R-66 ③ 的口径（stock-prep 码只经角色 + 已启用的 `stock-prep` 命名空间准入才算，直接 `user_permissions` 授予被滤掉）在端口上与 HTTP 上逐码一致。**不**用 `automation-live-authority.ts:144-148` 那种不过准入过滤的并集。`role` / `roles[]` 同样取请求路径的判定（`isRbacAdmin`，`AuthService.ts:755-756`）。1b-ii 的等价测试（§11）：四组夹具——角色授予的 PULL 梯、直接授予的 stock-prep 码、持 PULL 梯但无 stock-prep 准入、legacy `integration:write`——端口上下文的权限码与请求期档案（`AuthService.ts:746-762`）的权限码逐码相等。
 - **与 RBAC 缓存抖动的关系**：请求期解析器的缓存在代际变动时对并发调用失败关闭为空集（`rbac/service.ts:159-161`；222 上 2026-10-30 观察到的考勤回填抖动即此）；端口走事务变体不经缓存，所以不会因此误判为撤权。读表本身失败归 `authority_unavailable`（可重试），定性的不在役 / 无成员关系 / 权限不足才是 `principal_unauthorized`（不重试）。
@@ -227,7 +305,7 @@ cron 规则有 `timezone`（`automation-triggers.ts:40-44`）且保存校验 IAN
 
 ## 8. 222 切换与回退
 
-- **切换前置**：L2 的规则至少跑过 3 个自然日且摘要事件与脚本日志一致（计数相等、状态相等）；告警规则对一次人为制造的失败（例如把规则指向一个已归档项目）发出过一条消息（见证红）。
+- **切换前置**：（11-06 注 M4）先读现场计数 **J1 = 0 且 J4 = `dry-run-only`**——J1 是任务动作里参数含 `--apply` 的个数，J4 是脚本日志最后一行汇总的 `mode`；读法见 `runbook-stock-prep-project-sheets-switch-on-20261014.md:178-191`，只报计数与枚举值。任一不成立，只试算的新路径不得替换旧任务；J1 没读到就不得宣称等价替换、不得停用旧任务。要替换含套用的任务，先等 OQ2 裁定、`INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED` 切片完成，再由 owner 按部署逐项批准。完整的五条切换硬门与禁止项见基线 v2.3 §10.2.2。在此之上：L2 的规则至少跑过 3 个自然日且摘要事件与脚本日志一致（计数相等、状态相等）；告警规则对一次人为制造的失败（例如把规则指向一个已归档项目）发出过一条消息（见证红）。
 - **切换**（L3，O ④）：在机器上用 `schtasks /Query` 读出实际登记的任务名（runbook `222-deploy-window-runbook-20260901.md:904-912` 给的是**示例**名；`48h-autonomous-run-record-20260906.md:32` 记录的实际登记名与示例不同——以机器上读到的为准，任务名不写进本 ADR 与证据），对它执行 `schtasks /Change /TN <读到的任务名> /DISABLE`，**不删除**任务与令牌文件；同一天观察自动化规则的那一跳。
 - **回退** = 把 `INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED` 置回未设并重启，再对同一任务 `schtasks /Change … /ENABLE`。两步都不碰数据：规则留在表里（触发时记 `skipped(action_disabled)`），`integration_runs` 与审计行只增不改。回退不需要迁移回滚：1b-ii/1c 的迁移只放宽 CHECK、增词表与一张租约表，旧代码不会写出新值、也不读新表。
 - **令牌**：切换完成并稳定一周后，由客户运维按自己的轮换纪律撤销 OS 任务用的服务账号令牌（`222-deploy-window-runbook-20260901.md:924-928` 把保管与轮换定为客户运维职责，本仓库不含任何默认值）；此前保留以便回退。若生产规则按 §6.2 以同一服务账号创建，撤销的只是 OS 任务那一张令牌，不影响规则（规则不持令牌，只持 `created_by`）。
@@ -266,27 +344,67 @@ cron 规则有 `timezone`（`automation-triggers.ts:40-44`）且保存校验 IAN
 - **变异见证（每条守卫先见红再报绿）**：开关读取点改成 `!== 'true'` 必红；**`pipeline` 的 `dryRun:false` 被保存接受、或在 `…_RUN_PIPELINE_WRITE_ENABLED` 未设时被执行必红**；`apply_when_ready` 在 `…_RUN_APPLY_ENABLED` 未设时被保存接受必红；去掉触发时实时复核必红（撤权后仍跑）；端口缺席时回退到 `communication.call` 必红；端口自盖 `runAs:'user'` 或 `C6_WRITE_LIFECYCLE_CONTEXT` 必红（armed 夹具下写入被拒的断言翻转）；保存时接受无租户主体必红；上下文满足 `isTenantlessPlatformAdmin` 仍放行必红；插件对上下文加宽必红（等价测试）；**去掉作业租约认领必红（同一项目两次并发都跑）**；**租约释放改成 DELETE 必红**（僵尸释放之后第三方可在新持有者仍在跑时认领）；入口不检查 signal 必红（到点后仍开始下一个项目 / 下一页）；端口权限集改用不过准入过滤的并集必红（直接授予的 stock-prep 码在端口上放行、HTTP 上拒绝）；`stock_prep_pull` 接受 interval 必红；`manual_confirm_required` 在缺省告警模板下产生告警必红（应为 1 条 `held` 事件、0 条告警）；指纹不比对必红；`failureStage=write` + 非幂等目标被重试必红；消费后 409 被归为 `outcome_unknown` 必红；`intervalMs` 下限与 `timeoutMs` 上限去掉必红；逐行 emit 必红（1000 行夹具事件数 ≠ 1）；中间尝试发事件必红（3 次尝试事件数 ≠ 1）；eventId 非确定性必红（同一步重投递产生两条）；深度守卫去掉必红（三层后仍触发）；摘要多一个键必红；`errorSummary` 进事件必红；日志带主体 id 必红。
 - **CI 陷阱清单**：test-chain 完整性（插件新测试要登记 `test-chain.txt`）、s6a `pluginIndex` / `pluginHttpRoutes` 重 pin（1b-i 必动 `http-routes.cjs`）、EXPECT_DB 三处镜像、guarded-paths 与 `integration-guard.yml` 集合相等、开关清单源码推导与显式测试、`index.ts` this-census 冻结字面量（新增 `this.X` 必跑完整 core-backend 单元套件）、web spec 变异锚点唯一性、`EXPECTED_OPS_TESTS_COUNT`（若动 `scripts/ops/__tests__`）。
 
+- **11-06 补：生命周期验收 T1～T8、T10～T12**（11-06 注 M5；逐字转录自冻结设计基线 v2.3 §10.2.5，§ 编号指基线；T9 是开发机手工检查，不进 CI）：
+
+| # | 场景 | 断言 | 变异见证（去掉守卫必红） |
+| --- | --- | --- | --- |
+| T1 | 超时到点，旧调用仍在跑 | 后继得 `skipped(busy)`；fence 不变；步结果 `outcome_unknown(timeout_unsettled)`；端口结束后才写结果、释放，之后的触发才能跑 | 去掉「结束后才释放」 |
+| T2a | 租约到期而持有者还活着 | 10 个 TTL 内后继一直 busy；到期时间单调前进 | 关掉心跳 |
+| T2b | 持有者死了（真库，两条连接） | B 在 TTL 后拿到 fence+1；A 迟到的释放 0 行、结果写 `confirmed:false`；A 的下一次心跳 0 行并自中止 | 释放改成删除行 |
+| T3 | 中途重启 | TTL 内 busy，TTL 后可跑；同身份重放在意图租约内跳过，过期后翻 `outcome_unknown`，恰好一条摘要 | 去掉意图租约过期判定 |
+| T4 | 围栏 | 旧 fence 的释放、续约，以及旧令牌的结果写，全部无效；行数不变；fence 严格递增 | 释放语句去掉 fence 条件 |
+| T5a | 停机，端口响应 signal | 下一个检查点中止；结果 `failed(shutdown)`；释放；栅栏内结束 | 去掉停机 abort |
+| T5b | 停机，端口不响应 signal | 不释放、不写结果；重启后 TTL 内 busy | 栅栏到点就释放 |
+| T6 | 到点后底层工作继续，之后结束 | 期间后继 busy；结束时结果写成功（意图租约靠心跳续着） | 去掉意图租约心跳 |
+| T7 | 3 小时与 1 小时 | `timeoutMs` 为 55 分钟 + 1 毫秒时保存 400；2 小时假时钟运行中，同身份重放始终跳过，意图行从不被翻 | 上限改回 3 小时 |
+| T8 | 插件入口检查点 | 第 1 页后中止就不读第 2 页；不传 signal 时请求与响应和快照逐字节相同 | 去掉检查点 |
+| T9 | Windows 下停止是否优雅（开发机手工，不进 CI） | `pm2 stop` 后看 `index.ts:3871` 的日志行是否出现，只报 True/False | — |
+| T10 | 暂停或断连 → **不同执行根**的 B 接管 → A 恢复（真库，两条连接，数据库时间加屏障；A 没有死） | 隔离 PG 上用短期合成租约（例如 TTL 2 秒）。A 停在屏障上不续租，或断开 A 的连接，等租约在数据库时间上过期；另一条规则（不同 `root_execution_id`）的 B 认领 fence+1 并开始跑。A 恢复后：<br>A 的下一次 `checkpoint()` 失败，端口不再发起调用（源读页数、项目数计数不再增加）；<br>A 续作业租约和意图租约都是 0 行；<br>A 的结果写 `confirmed:false`，尽管 A 的意图令牌本身仍然有效；<br>全程只有 B 的结果写成功；A 的步结果是 `outcome_unknown(lease_lost)` | 结果写去掉作业 fence 条件，A 写成功；去掉调用前的 `checkpoint()`，A 继续读下一页；意图续期不检查 fence，A 续成功 |
+| T10b | A 已核验、尚未提交时，B 尝试接管（真库，两条连接，屏障控制交错） | A 的结果写事务已 `FOR UPDATE` 锁住作业租约行并核验通过，停在屏障上，还没提交；等这份短期合成租约在数据库时间上过期，再让 B 去认领。<br>断言：B 的认领一直阻塞，直到 A 提交；A 提交后 A 的结果写成功、租约已释放，B 随后以 fence+1 认领；不出现「B 已接管、A 仍提交了旧结果」。<br>另一例：A 在锁内核验时租约已过期，A 整体回滚，B 正常认领 | 结果写里把 `FOR UPDATE` 换成普通读取，B 不阻塞，A 提交旧结果；续租不按统一锁顺序，并发续租与结果写会死锁或交错 |
+| T11 | 续租失败立即中止 | 让续租语句报错或超时（不是 0 行）：`lostSignal` 触发，端口在下一个检查点中止，此后不再发起任何调用；本地截止时刻过了也一样（模拟时钟跳过 TTL，数据库还没回应时） | 续租报错时只记日志不触发 `lostSignal`；去掉本地截止时刻 |
+| T12 | 停机排空包含所有仍活着的部分 | 一次调用先以 `timeout_unsettled` 提前返回，端口、心跳仍在跑；此时调用 `stop()`：<br>端口调用、心跳、收尾事务都已登记为关停任务；<br>栅栏等它们结束，10 秒内结束则正常收尾；<br>超时则 `stop()` 以 `SHUTDOWN_TIMEOUT` 拒绝，连接池不关，与 #6747 的关停测试一致 | 不登记心跳或收尾事务；在 `stopOnce` 之外另起后台任务 |
+
+另外沿用 ADR §11 已列的用例：同项目两次并发调用，恰好一次试算加一次 `skipped(busy)`；陈旧回收不碰在途运行；1000 行只发一条事件。
+
+**时间怎么控制**
+- JavaScript 的假时钟推进不了 PostgreSQL 的 `now()`。
+- 凡是租约过期由数据库判断的真库用例（T2b、T3、T4、T10、T10b），一律在隔离 PG 上用短期合成租约（秒级 TTL），按数据库时间等它过期，并用屏障控制交错。
+- 假时钟只用于不经数据库判断时间的单元用例（如 T1、T2a、T6、T7 的假端口部分）。
+- 不修改系统时钟。
+
 ## 12. 待 owner 裁定
 
 1. **OQ1 范围**：动作覆盖「备料拉取（表动作）」与「数据管道」两种作业、1b 先交拉取；接受本 ADR 对已批提案措辞「运行数据管道」的修正（Q1）。
 2. **OQ2 无人值守备料套用**：是否进入计划；若进入，`INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED` 的打开与每条 `apply_when_ready` 规则为 O ② 逐项批准（Q12a）。
-3. **OQ3 222 切换**：L1 上机、L2 前置（租户声明令牌）与开开关建规则、L3 停用 OS 任务、令牌撤销时点（§7 梯子、§8；O ④）。
+3. **OQ3 222 切换**：L1 上机、L2 前置（租户声明令牌）与开开关建规则、L3 停用 OS 任务、令牌撤销时点（§7 梯子、§8；O ④）。11-06 加两个子问：(a) J1 的现场确认（任务动作里参数含 `--apply` 的个数，期望 0）；(b) J6（过去有没有人手动带 `--apply` 跑过脚本；为「是」时，人工 `--apply` 的日志行不参与并行期比对）。不新增 OQ；无人值守套用仍归 OQ2，非试算管道仍归 OQ6。
 4. **OQ4 绑定 owner 停用**：是否要求绑定数据源的 owner 在役，否则拒跑（今天不拒，Q14）。
 5. **OQ5 告警目的地**：首个真实钉钉群与接收人（真实发送 = O ④）；测试群阶段用合成失败见证。
 6. **OQ6 无人值守非试算管道运行**：是否进入计划；若进入，`INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED` 的打开按目标种类分别批准——`metasheet:multitable` 目标是生产写入（O ②，且休眠部署上没有 C6 生命周期，`http-routes.cjs:6320`），HTTP 允许清单目标是外部回写（O ③）；1b/1c 不含这条路径（Q12b）。
 7. **OQ7 生产规则的身份**：推荐由租户绑定的服务账号经 API 创建（与 OS 任务同一身份类别），备选由指定管理员在编辑器创建并接受「此人停用即停拉并告警」（§6.2）。
-8. **T 层默认、24h 可否决**：四个开关名、重试 ≤3/≥60 s、`stock_prep_pull` 只认 cron、interval ≥ 15 min、timeout ≤ 3 h 且作为 AbortSignal 传入、租约 TTL = timeout + 60 s 与 fence-CAS 释放、`'automation'` 词项、指纹键集、`held` 与 `skipped` 两个状态及其 reason 闭集、事件缺省告警状态集（含 `skipped`、不含 `held`）、只在最终尝试后发摘要、告警不做跨跳抑制。
+8. **T 层默认、24h 可否决**：四个开关名、重试 ≤3/≥60 s、`stock_prep_pull` 只认 cron、interval ≥ 15 min、timeout ≤ 55 min、默认 30 min 且作为 AbortSignal 传入、作业租约 TTL 120 s 加心跳与 fence-CAS 释放、意图租约心跳 `renewOutboundLease`（11-06 注 M2、M3；v3 原为 timeout ≤ 3 h、租约 TTL = timeout + 60 s）、`'automation'` 词项、指纹键集、`held` 与 `skipped` 两个状态及其 reason 闭集、事件缺省告警状态集（含 `skipped`、不含 `held`）、只在最终尝试后发摘要、告警不做跨跳抑制。
 9. **R-69 登记行**（OPEN → RULED 由 owner 一并裁定）。
 
 ## 附注：2026-11-04 重冻结（`8f3867da7` → `b36f53c2f`）
 
 合并 main 后逐条重核全部 `path:line`：行号漂移已改到新基线；下面五条是 main 在这段时间里改变（或确认未变）的、本 ADR 依赖的事实。正文结论**没有**因此改写，受影响处标「11-04 注 Nx」；需要改的设计细节留给对应切片的评审。
 
-- **N1（#6715，外发意图台账）**：意图行现在带尝试令牌、租约与 `target_key`（`automation-outbound-intent.ts:9-24`，迁移 `db/migrations/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts`）。对本 ADR 的影响：① `pending` 行只有在租约过期后才被翻成 `outcome_unknown`（`automation-outbound-intent.ts:203-214,237-246`），租约内的认领得 `skip_inflight`、不发送也不宣告对方已死——Q13 与 §3.4 的「下次认领翻 unknown」应读作「租约过期后的下次认领」。② 只有 `skip_sent` 是 `alreadyApplied`；`skip_unknown` / `skip_inflight` 是失败步、停下后续步骤直到对账（`automation-executor.ts:3931-3947`）。§3.2 原写的「`sent/outcome_unknown` 即 `alreadyApplied` 跳过」由此作废，`run_integration_job` 沿用 main 的这条语义（更保守，失败关闭）。③ Tx B 必须带认领发的令牌，返回 `confirmed`（`automation-outbound-intent.ts:342-365`）；步骤只在 `confirmed` 为真时报成功。④ **租约上限与作业超时有冲突**：租约上限 1 h（`:60-67`），`outboundLeaseForTimeout` = 超时 + 30 s 再截到上限（`:143-146`），而 §2 ⑦ 允许 `timeoutMs ≤ 3 h`。跑过约 59.5 min 的作业，意图租约会在作业还在跑时过期；同一身份的重放（耐久重投递或人工 `retryExecution`）会把它翻成 `outcome_unknown`，原作业的 Tx B 因此得 `confirmed:false`。作业租约（§3.4）仍挡住第二次运行，所以不会重复写；但结果记不进去。1b-ii 必须二选一：把 `timeoutMs` 封顶在租约上限减宽限，或为本动作单独放宽上限。两者都属 T 层，留给 1b-ii 评审，本 ADR 不改 `≤ 3 h` 的默认值。⑤ 整动作意图的 `target_key` 是空串（`:60-61`）；要不要按项目用 `deriveOutboundTargetKey`（`:156-166`）给每个项目一条意图行，由 1b-ii 定。
+- **N1（#6715，外发意图台账）**：意图行现在带尝试令牌、租约与 `target_key`（`automation-outbound-intent.ts:9-24`，迁移 `db/migrations/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts`）。对本 ADR 的影响：① `pending` 行只有在租约过期后才被翻成 `outcome_unknown`（`automation-outbound-intent.ts:203-214,237-246`），租约内的认领得 `skip_inflight`、不发送也不宣告对方已死——Q13 与 §3.4 的「下次认领翻 unknown」应读作「租约过期后的下次认领」。② 只有 `skip_sent` 是 `alreadyApplied`；`skip_unknown` / `skip_inflight` 是失败步、停下后续步骤直到对账（`automation-executor.ts:3931-3947`）。§3.2 原写的「`sent/outcome_unknown` 即 `alreadyApplied` 跳过」由此作废，`run_integration_job` 沿用 main 的这条语义（更保守，失败关闭）。③ Tx B 必须带认领发的令牌，返回 `confirmed`（`automation-outbound-intent.ts:342-365`）；步骤只在 `confirmed` 为真时报成功。④ **租约上限与作业超时有冲突**：租约上限 1 h（`:60-67`），`outboundLeaseForTimeout` = 超时 + 30 s 再截到上限（`:143-146`），而 §2 ⑦ 允许 `timeoutMs ≤ 3 h`。跑过约 59.5 min 的作业，意图租约会在作业还在跑时过期；同一身份的重放（耐久重投递或人工 `retryExecution`）会把它翻成 `outcome_unknown`，原作业的 Tx B 因此得 `confirmed:false`。作业租约（§3.4）仍挡住第二次运行，所以不会重复写；但结果记不进去。1b-ii 必须二选一：把 `timeoutMs` 封顶在租约上限减宽限，或为本动作单独放宽上限。两者都属 T 层，留给 1b-ii 评审，本 ADR 不改 `≤ 3 h` 的默认值。**11-06 注 M2：选「降上限 + 意图租约心跳」**——`timeoutMs` 保存上限 55 min（55 min + 30 s 宽限 < 1 h）、默认 30 min；意图租约用新原语 `renewOutboundLease` 按令牌续期、每次仍截到 1 h，并与作业租约的续期在同一事务里、以作业 fence 为条件；**不放宽** #6715 的 1 小时上限。⑤ 整动作意图的 `target_key` 是空串（`:60-61`）；要不要按项目用 `deriveOutboundTargetKey`（`:156-166`）给每个项目一条意图行，由 1b-ii 定。
 - **N2（#6716 / #6715 / #6718，开关登记）**：`ENABLE_SCHEDULER_LEADER_LOCK` 与 `SCHEDULER_LEADER_LOCK_TTL_MS` 已登记（`global-history-flag-manifest.mjs:930-951`），`AUTOMATION_CLASSB_OUTBOUND_ENABLED` 由 #6715 登记（`:860-870`）。§1.1、§3.4、§7、§11 里「未登记 / 1b-ii 顺带登记」那几项已经在 main 上完成，1b-ii 只登记本 ADR 的四个新开关。`INTEGRATION_YIDA_CONNECTION_TEST_ENABLED` 后面现在紧跟 #6718 的 `INTEGRATION_YIDA_MULTI_TARGET_ENABLED`（`:72-82`）。
 - **N3（#5619 / #5649，webhook 发送时目标检查）**：规则驱动的 `send_webhook` 在发送时过 SSRF 守卫、不跟随重定向（`automation-executor.ts:4661` 起）；webhook 订阅投递同样接了守卫（`webhook-service.ts`）。本 ADR 的告警走 `send_dingtalk_group_message` / `send_dingtalk_person_message`，不用 `send_webhook`，结论不变；以后若有切片用 webhook 发告警，就继承这道守卫。
 - **N4（#6714 / #6718，宜搭 v3 映射与多目标）**：v3 映射只在本地预览、本地重算；多目标由 `INTEGRATION_YIDA_MULTI_TARGET_ENABLED` 控制，默认关。§2 ② 引的范式（`yida-owner-runtime.ts:9-12`：授权与事务归 core）没变；§10 把「无人值守宜搭发送」「通用宜搭映射」排除在范围外，这条也不变——v3 映射不是发送路径。
 - **N5（#6717，数据源凭据加密）**：宿主数据源门只是下移两行，仍然是严格的 owner 相等、平台管理员例外（`DataSourceManager.ts:791-801`），Q14 / §6.3 / OQ4 照旧。
+
+## 附注：2026-11-06 修订（按冻结设计基线 v2.3 §10.2.6）
+
+基线：`ipaas-yida-dev-baseline-v2.3-20261106.md`（同目录，冻结；代码基线 `aba11f45b`）。本次只改措辞与设计约束，不改代码；正文受影响处标「11-06 注 Mx」。
+
+- **M1（旧任务做什么）**：脚本的能力是 `dry-run → apply`，但只在显式传 `--apply` 时才在同一次运行里套用（脚本 `:148-150`、`:630-640`）；不传时 `ready` 记 `skipped_dry_run_only`（`:25-30`、`:147`、`:747`）。222 登记的任务是每日 06:00、只试算、不带 `--apply`（`customer-delivery-guide-20260904.md:234-236`；`48h-autonomous-run-record-20260906.md:32`），10-14 的最后一次记录为 result=0、`skipped_dry_run_only`（`runbook-stock-prep-project-sheets-switch-on-20261014.md:401`）。10-14 之后没有人读过任务参数，现状以现场计数 J1–J7 为准（基线 §10.2.1）。改在 Q1、§1.3。
+- **M2（作业超时）**：`timeoutMs ≤ 3 h` 改为 ≤ 55 min、默认 30 min（等于旧任务今天的整次预算，脚本 `:253`）；选「降上限 + 意图租约心跳」，不放宽 #6715 的 1 小时上限。改在 §2 ⑦、§3.1、§3.4、§6.4、§12 第 8 条、N1 ④。
+- **M3（作业租约）**：TTL 由 `timeoutMs + 60 s` 改为 120 秒加心跳；补不变量 I-1～I-6、步结果 `timeout_unsettled` 与 `lease_lost`、「失去心跳不等于进程死亡」的两处交错、已知残余（每个失主最多一次读：仍在途的，或已通过 `checkpoint()` 尚未发出的）、I-6 的行锁与统一锁顺序；套用切片以下游写锁围栏为前置。见 §3.4.1。
+- **M4（切换前置）**：§8 的 L3 前置加 J1 = 0 与 J4 = `dry-run-only`；OQ3 加 J1 现场确认与 J6 两个子问，不新增 OQ。
+- **M5（验收）**：§11 加 T1～T8、T10～T12（T9 为开发机手工检查）。
+- **仍待定**（基线 §10.2.6）：Windows 停止信号是否送达（T9）；`timeout_unsettled` 是否进默认告警（T 层默认：告警）；意图租约心跳要不要推广到既有 B 类发送（本期不推广）；多实例时要开 `ENABLE_SCHEDULER_LEADER_LOCK`，且时钟差小于 TTL/3。
+- 登记册 R-69 的对应措辞在同一 PR 里修订。
 
 ## 附录：借鉴而不引入外部引擎
 

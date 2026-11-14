@@ -17,8 +17,11 @@ describe('access-graph mutex protocol', () => {
             username: null,
             mobile: null,
             activation_status: 'activated',
+            role: 'user',
             is_active: true,
             access_generation: 0,
+            deleted_at: null,
+            purged_at: null,
           }],
         }
       }),
@@ -38,6 +41,40 @@ describe('access-graph mutex protocol', () => {
     ])
     expect(calls.every((call) => /FROM users[\s\S]*FOR UPDATE/i.test(call.sql))).toBe(true)
     expect(Array.from(locked.keys())).toEqual(['user-a', 'user-m', 'user-z'])
+  })
+
+  it('reads the role column with the locked row so writers can apply the shared authentication gate', async () => {
+    const client = {
+      query: vi.fn(async (sql: string, params: unknown[] = []) => ({
+        rows: [{
+          id: params[0],
+          name: null,
+          email: null,
+          username: null,
+          mobile: null,
+          activation_status: 'activated',
+          role: 'disabled',
+          is_active: true,
+          access_generation: 2,
+          deleted_at: null,
+          purged_at: null,
+        }],
+      })),
+    }
+
+    const locked = await lockUsersForAccessGraphWrite(client, ['user-r'])
+
+    expect(client.query.mock.calls.length).toBe(1)
+    expect(client.query.mock.calls[0][0]).toMatch(/SELECT[\s\S]*\brole\b[\s\S]*FROM users/i)
+    expect(locked.get('user-r')).toMatchObject({
+      id: 'user-r',
+      role: 'disabled',
+      isActive: true,
+      activationStatus: 'activated',
+      accessGeneration: 2,
+      deletedAt: null,
+      purgedAt: null,
+    })
   })
 
   it('keeps supersede and generation as one inseparable helper contract', async () => {

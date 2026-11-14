@@ -204,8 +204,9 @@ describe('P-07 wiring (source scan): both chokepoints, the strip and the carry',
   })
   it('POST /fields strips it (normalizeFieldWriteInput); PATCH /fields carries the stored value', () => {
     const meta = read('routes/univer-meta.ts')
-    expect(meta).toContain('property: stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField[\'type\'], rawProperty))),')
-    expect(meta).toContain('const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))')
+    // The pull-batch band marker wraps both outermost (stock-preparation-pull-batch-band-marker.test.ts BM-06 pins the full lines).
+    expect(meta).toContain('stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField[\'type\'], rawProperty)))')
+    expect(meta).toContain('carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))')
   })
   it('the provisioning write runs through the field-codecs chokepoint (sanitizeFieldProperty)', () => {
     const provisioning = read('multitable/provisioning.ts')

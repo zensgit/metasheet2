@@ -98,9 +98,7 @@ function roleButton(id: string): HTMLButtonElement {
 }
 
 function permissionLabel(code: string): string {
-  const label = Array.from(container?.querySelectorAll('.admin-page__checkbox') || []).find((item) => (
-    item.querySelector('strong')?.textContent === code
-  ))
+  const label = container?.querySelector(`[data-permission-code="${code}"]`)
   if (!label) throw new Error(`permission ${code} not found`)
   return label.textContent || ''
 }
@@ -170,7 +168,12 @@ describe('RoleManagementView members and Chinese labels', () => {
     expect(roleButton('constructor').querySelector('strong')?.textContent).toBe('Attendance Admin')
     expect(permissionLabel('attendance:read')).toContain('考勤读取')
     expect(permissionLabel('attendance:read')).toContain('读取考勤记录和汇总')
+    expect(permissionLabel('attendance:read')).toContain('attendance:read')
     expect(permissionLabel('attendance:read')).not.toContain('Attendance Read')
+    expect(container?.querySelector('[data-permission-code="attendance:read"] strong')?.textContent).toBe('考勤读取')
+    expect(container?.querySelector('[data-permission-group="attendance"] h4')?.textContent).toContain('考勤')
+    expect(container?.querySelector('[data-permission-group="custom"]')).toBeTruthy()
+    expect(container?.querySelector('[data-permission-group="attendance"]')?.textContent).not.toContain('Floor only')
     expect(permissionLabel('custom:note')).toContain('Floor only')
     expect(permissionLabel('custom:note')).toContain('Keep this note')
     expect(permissionLabel('constructor')).toContain('Attendance Read')
@@ -178,9 +181,7 @@ describe('RoleManagementView members and Chinese labels', () => {
 
     await selectRole('attendance_admin')
     expect(nameInput().value).toBe('考勤管理员')
-    const customLabel = Array.from(container?.querySelectorAll('.admin-page__checkbox') || []).find((item) => (
-      item.querySelector('strong')?.textContent === 'custom:note'
-    ))
+    const customLabel = container?.querySelector('[data-permission-code="custom:note"]')
     const checkbox = customLabel?.querySelector('input') as HTMLInputElement | null
     if (!checkbox) throw new Error('custom permission missing')
     checkbox.checked = true

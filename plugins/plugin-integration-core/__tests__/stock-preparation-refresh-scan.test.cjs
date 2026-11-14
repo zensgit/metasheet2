@@ -177,8 +177,10 @@ test('SC-2 the chunk route hands refreshGovernanceGate: INSIDE its lease callbac
   assert.equal(body.split('input.refreshGovernanceGate(').length, 2, 'one gate call per chunk')
 })
 
-test('SC-3 every route call of dryRunStockPreparationAction / prepareStockPreparationConfirmationDecisions / prepareStockPreparationMvpSnapshot / applyStockPreparationAction carries refreshGovernance: refreshGovernanceFor( — exactly four sites', () => {
-  const names = ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction']
+test('SC-3 every route call of dryRunStockPreparationAction / prepareStockPreparationConfirmationDecisions / prepareStockPreparationMvpSnapshot / applyStockPreparationAction / recoverStockPreparationExecution / readStockPreparationSheetRepairSource carries refreshGovernance: refreshGovernanceFor( — exactly six sites', () => {
+  // Batch-refresh step 6a-2 (S6-2, R-91): the recovery's in-lease recompute is the fifth planning entry.
+  // Batch-refresh step 6d-2a (S6-6, R-91): the doubled-sheet repair's source read is the sixth planning entry.
+  const names = ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction', 'recoverStockPreparationExecution', 'readStockPreparationSheetRepairSource']
   let total = 0
   for (const name of names) {
     const calls = callsOf(HR, name)
@@ -186,9 +188,9 @@ test('SC-3 every route call of dryRunStockPreparationAction / prepareStockPrepar
     for (const call of calls) assert.match(call.text, /refreshGovernance:\s*refreshGovernanceFor\(/, `${name} threads the handle`)
     total += calls.length
   }
-  assert.equal(total, 4)
+  assert.equal(total, 6)
   // ...and nothing else in the route module plans through those entries under another name.
-  assert.equal((HR.match(/refreshGovernance:\s*refreshGovernanceFor\(/g) || []).length, 4)
+  assert.equal((HR.match(/refreshGovernance:\s*refreshGovernanceFor\(/g) || []).length, 6)
 })
 
 test('SC-4 the carry takes its lease, THEN consults (refreshGovernanceFor( ... .consult), THEN the two rows-based refusals, THEN the ledger pre-flight; assertPullNotSuspended( never appears in the carry handler', () => {
@@ -217,21 +219,21 @@ test('SC-5 computeDryRun: assertTargetFieldsExist( < consultForPlanning( < asser
   const read = body.indexOf('expandPlmProjectBom(')
   for (const [label, at] of [['probe', probe], ['consult', consult], ['b2a', b2a], ['read', read]]) assert.ok(at >= 0, `${label} present`)
   assert.ok(probe < consult && consult < b2a && b2a < read)
-  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction']) {
+  for (const name of ['dryRunStockPreparationAction', 'prepareStockPreparationConfirmationDecisions', 'prepareStockPreparationMvpSnapshot', 'applyStockPreparationAction', 'recoverStockPreparationExecution', 'readStockPreparationSheetRepairSource']) {
     const entry = functionBody(TA, name)
     const calls = callsOf(entry, 'computeDryRun')
     assert.equal(calls.length, 1, `${name}: one computeDryRun`)
     assert.match(calls[0].text, /refreshGovernance:\s*input\.refreshGovernance\b/, `${name} threads the handle`)
   }
-  assert.equal(callsOf(TA, 'computeDryRun').length, 4, 'no fifth planning entry')
+  assert.equal(callsOf(TA, 'computeDryRun').length, 6, 'no seventh planning entry (step 6a-2 added the recovery, step 6d-2a the source read of the sheet repair)')
 })
 
 test('SC-6 (PR-3b) each large non-write route calls consultLargeLane( once, on one line, for its own lane, AFTER assertLargeLaneAllowedForPilot( and BEFORE its first IO; the plan hands the lib governanceVerdict: planGovernance; five consultLargeLane( sites in all', () => {
   const ROUTES = {
     tableActionLargeBomExpansionJobStart: { lane: 'large_expansion_start', io: ['createLargeBomBackgroundExpansionJob(', 'observeGeneration('] },
     tableActionLargeBomExpansionJobRun: { lane: 'large_expansion_run', io: ['assertB2aReadAuthorization(', 'b2aTableActionSourceObjects(', 'loadTableActionSourceAdapter(', 'runLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', io: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'loadTableScopeConflictPolicies(', 'planLargeBomBackgroundExpansionJob(', 'resolveInstalledFieldProperties('] },
-    tableActionLargeBomApplyJobStart: { lane: 'large_approve', io: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'resolveInstalledFieldProperties(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration('] },
+    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', io: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'loadTableScopeConflictPolicies(', 'planLargeBomBackgroundExpansionJob(', 'resolveInstalledFieldProperties(', 'prepareLargePlanPullBatch('] },
+    tableActionLargeBomApplyJobStart: { lane: 'large_approve', io: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'resolveInstalledFieldProperties(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration(', 'assertLargeApprovePullBatch('] },
   }
   const rawRoutes = raw['http-routes.cjs']
   for (const [handler, spec] of Object.entries(ROUTES)) {

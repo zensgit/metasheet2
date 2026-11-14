@@ -31,6 +31,11 @@ export type AutomationActionType =
   // (APPROVAL_FWB_WRITEBACK_ENABLED, default OFF) and rides the durable outbox + the FWB instance-scoped
   // idempotency ledger (lock D9: claim + record + revision + outbox = ONE transaction).
   | 'write_approval_form_values'
+  // R-69 1b-ii (ADR adr-automation-pipeline-bridge-20261103 Bridge 1; design baseline v2.3 §10.2): run an
+  // integration JOB (closed kinds stock_prep_pull | pipeline) through the plugin-registered IntegrationRunPort,
+  // under a fenced heartbeat job lease. DRY-RUN ONLY in this slice; save-gated by the default-OFF
+  // INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (exact 'true'); R-69 is OPEN.
+  | 'run_integration_job'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -49,7 +54,32 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'parallel_branch',
   'record_click',
   'write_approval_form_values',
+  'run_integration_job',
 ]
+
+/**
+ * Config shape for run_integration_job (R-69 1b-ii; ADR §3.1 closed key set). RUNTIME VALIDATION IS THE SOURCE
+ * OF TRUTH (validateRunIntegrationJobConfig in automation-run-integration-job.ts); this shape documents the
+ * keys the validator accepts.
+ *
+ *   - `job.kind` is a CLOSED set. 1b-ii delivers `stock_prep_pull` (the OS task's dry-run); `pipeline` is part of
+ *     the closed vocabulary but is REFUSED at save in this slice (its server-recomputed `pipelineFingerprint`
+ *     cannot be derived by core yet), so no saveable rule exists for a path that is not implemented.
+ *   - `applyMode` accepts ONLY `'dry_run_only'`; `'apply_when_ready'` is a 400 regardless of any flag
+ *     (ADR Q12a: unattended apply is an owner-layer write, not in 1b/1c).
+ *   - `timeoutMs` ≤ 55 min (RUN_INTEGRATION_JOB_TIMEOUT_MAX_MS), default 30 min — kept under the 1 h intent-lease
+ *     clamp so a live job is never flipped to outcome_unknown by a same-identity replay.
+ *   - `binding` is SERVER-STAMPED at save from the rule's `created_by` and its single active `user_orgs` row;
+ *     a client-supplied binding is dropped. The executor re-verifies the principal live on every trigger.
+ *   - `retry` (ADR §5 bounded retry) is NOT accepted in 1b-ii (a later slice); the key is reserved.
+ */
+export interface RunIntegrationJobConfig {
+  job:
+    | { kind: 'stock_prep_pull'; projectNos: string[]; applyMode: 'dry_run_only'; actionId?: string }
+    | { kind: 'pipeline'; pipelineId: string; dryRun: true; mode?: 'incremental' | 'full' | 'manual' }
+  timeoutMs?: number
+  binding?: { principalId: string; tenantId: string }
+}
 
 /**
  * Config shape for write_approval_form_values (FWB activation).

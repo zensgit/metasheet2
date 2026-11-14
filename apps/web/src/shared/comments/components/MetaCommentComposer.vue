@@ -470,23 +470,30 @@ function selectSuggestion(suggestion: MetaCommentMentionSuggestion) {
 // Windows and Linux, Firefox) never reaches them. The composer's keys act on none of these: during a
 // composition the input method owns the arrows and Tab (its candidates), Escape (cancel) and Enter
 // (commit). That is why `preventDefault` is called in these handlers, after the check, and not by
-// `.prevent` modifiers in the template, which run first. For every other key each one behaves as
-// before, `preventDefault` included.
+// `.prevent` modifiers in the template, which run first. An arrow or Tab is held only when it acts on
+// the suggestion list; otherwise it keeps its native job (the caret moves between lines, Tab and
+// Shift+Tab leave the box). Escape is always held, so a draft never closes the panel around it.
 function isImeKeyEvent(event: KeyboardEvent): boolean {
   return event.isComposing || event.keyCode === 229 || event.key === 'Process'
 }
 function onArrowKey(direction: 1 | -1, event: KeyboardEvent) {
   if (isImeKeyEvent(event)) return
+  if (!showSuggestions.value || filteredSuggestions.value.length === 0) return
   event.preventDefault()
   onNavigateSuggestion(direction)
 }
 function onTabKey(event: KeyboardEvent) {
   // A Tab the input method took (keyCode 229) is its own. A Tab during a composition that the input
-  // method passed on is still held, as every Tab here always was (otherwise the browser would move
-  // focus out of the box mid-composition), but it picks no suggestion.
+  // method passed on is held (otherwise the browser would move focus out of the box mid-composition)
+  // but picks no suggestion. Outside a composition, Tab picks the active suggestion while the list
+  // offers one, and otherwise leaves the box as a Tab does.
   if (event.keyCode === 229) return
+  if (isImeKeyEvent(event)) {
+    event.preventDefault()
+    return
+  }
+  if (!showSuggestions.value || !activeSuggestion.value) return
   event.preventDefault()
-  if (isImeKeyEvent(event)) return
   onSelectActiveSuggestion()
 }
 function onEscapeKey(event: KeyboardEvent) {

@@ -914,10 +914,11 @@ describe('completion wiring: durable consumer + eventBus fallback share ONE idem
     for (const eventType of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       expect(expandConsumerKeysForEvent(eventType)).toContain('multitable-record-approval')
     }
-    // v3 since the dingtalk-todo-mirror consumer landed; this consumer's OWN route is version-independent
+    // v4 since the R-69 1c integration.run_finished family landed (v3: the dingtalk-todo-mirror consumer); this
+    // consumer's OWN route is version-independent
     // (it must survive every future manifest bump), so the assertion above is a `toContain`, not an
     // exact set - the exact per-version sets are pinned in automation-routing-manifest.test.ts.
-    expect(CURRENT_ROUTING_MANIFEST.version).toBe(3)
+    expect(CURRENT_ROUTING_MANIFEST.version).toBe(4)
     expect(manifestConsumerKeys()).toContain('multitable-record-approval')
     // the other direction: a routed key with no registered adapter would park rows forever
     expect([...DURABLE_CONSUMER_KEYS]).toContain('multitable-record-approval')

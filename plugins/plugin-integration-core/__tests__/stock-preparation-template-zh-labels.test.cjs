@@ -102,6 +102,10 @@ const MAIN_LABELS_ZH = Object.freeze({
   procurementReplyDate: '采购回复日期',
   warehouseDone: '仓库完成',
   actualArrivalDate: '实际到货日期',
+  // R-71 ⑦.4 PR-4: 发料确认日期 (machine write-back, plm_system) and 项目规格型号 (empty plm_system column).
+  // Appended after the departmental band, so no deployed grid column moves.
+  issueConfirmDate: '发料确认日期',
+  projectSpecModel: '项目规格型号',
 })
 
 const LEDGER_LABELS_ZH = Object.freeze({
@@ -150,7 +154,11 @@ const BASE_BUILT_DIGESTS = Object.freeze({
   // entries longer. Recomputed by running this exact computation (locale env genuinely
   // unset, plain JSON.stringify, sha256) against the changed template — it still proves
   // "unset language changes nothing", now over the extended structure.
-  mainStructure: 'f2a077cba33228bec89567fefbcb7a406d2d52004e81a4fb50a9f4348d79f42f',
+  // mainStructure / canonicalDescriptor / sandboxDescriptor re-pinned DELIBERATELY again (were f2a077cb…8d79f42f,
+  // 198fc818…be0385dd, 605c3f1c…87aeb77e): R-71 ⑦.4 PR-4 appended `issueConfirmDate` (发料确认日期) and
+  // `projectSpecModel` (项目规格型号), both plm_system, after `actualArrivalDate`. Only these three digests moved
+  // (the ledger and the nine MVP tables did not); every pre-existing column keeps its id, name, type and order.
+  mainStructure: '7ae27ad67d19c12015821e4f1cbfa8bca8b5c05a6bbf503555bb5b8ba5ca8591',
   // UNCHANGED by that edit, and that is itself evidence: the confirmation-decision
   // ledger and the nine MVP tables were not touched.
   ledgerStructure: 'afaf79ff5ebefaa7d64d3d75e3e0c46b53f1eb0e11d8d70ae539106f1317c4e2',
@@ -165,8 +173,8 @@ const BASE_BUILT_DIGESTS = Object.freeze({
   // and for the same single reason (five appended human_preserved columns). Recomputed the
   // same way; the zh negative control below still fails against them, so they remain
   // capable of failing rather than being a rubber stamp.
-  canonicalDescriptor: '198fc8181f8fe9ff6d37d502c016bde003a4980eec29199e35ca68d9be0385dd',
-  sandboxDescriptor: '605c3f1c5ec12b215e495280f8f19ddfe15c0489a5de71cf19a844b987aeb77e',
+  canonicalDescriptor: 'a0f0ab309904c17a2d18c185bd2af069ef075b4076313a44038e7ea384bf56bd',
+  sandboxDescriptor: '5f659701a4116fb9aca9c063c48a5b5cd48313fb38fcc35daf7d62aafc85f5ff',
 })
 
 const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_demo'
@@ -216,7 +224,7 @@ async function withLocaleEnvAsync(value, fn) {
 // 0. 规格 P (owner 2026-09-15) -- the five main-table fields the customer saw in ENGLISH on
 //    222 (父组件图号 / 父组件名称 / PLM 物料ID / BOM 路径 / 组件规格), pinned BY NAME so that
 //    dropping or re-wording any one of them fails with a message that names the field.
-//    assertCompletenessAndFrozenIds below already covers all 33; this is the readable M3
+//    assertCompletenessAndFrozenIds below already covers all 35; this is the readable M3
 //    tripwire for the five the ruling is about. The parent pair keeps the strings it has had
 //    since #5446 -- 222 showed English for a rename-collision reason, not a missing labelZh.
 //    M3 (drop or change one of the five zh labels) => this function is red.
@@ -262,12 +270,13 @@ function assertCompletenessAndFrozenIds() {
   assert.deepEqual(
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => f.id),
     MAIN_IDS,
-    'main table field ids are frozen (33), in order',
+    'main table field ids are frozen (35), in order',
   )
   // 25 -> 28 (#5446: 父组件图号 / 父组件名称 / 规格, plm_system) -> 33: 自制/外购 plus the four
   // departmental response columns (采购完成 / 采购回复日期 / 仓库完成 / 实际到货日期), all
   // human_preserved and APPENDED, so no pre-existing column changed id, type, label or order.
-  assert.equal(MAIN_IDS.length, 33, 'main table has exactly 33 fields')
+  // -> 35 (R-71 ⑦.4 PR-4): 发料确认日期 / 项目规格型号, both plm_system and APPENDED last.
+  assert.equal(MAIN_IDS.length, 35, 'main table has exactly 35 fields')
   assert.deepEqual(
     STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.fields.map((f) => f.id),
     LEDGER_IDS,

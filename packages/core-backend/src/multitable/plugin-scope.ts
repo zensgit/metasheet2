@@ -680,6 +680,19 @@ export function createPluginScopedMultitableApi(
               await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
               return surface.ensureMissingObjectFields({ ...rest, projectId, objectId } as typeof input)
             },
+            // Y7 review MEDIUM-2: the max field order read — exposed iff the host's surface has it (the optional-
+            // capability idiom), and object-scoped like every other read inside the tx (read-once values).
+            ...(typeof surface.readObjectMaxFieldOrder === 'function'
+              ? {
+                  readObjectMaxFieldOrder: async (input: Parameters<NonNullable<MultitableRepairTransactionSurface['readObjectMaxFieldOrder']>>[0]) => {
+                    const projectId = input.projectId
+                    const objectId = input.objectId
+                    assertProjectIdAllowedForPlugin(pluginName, projectId)
+                    await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+                    return surface.readObjectMaxFieldOrder!({ projectId, objectId })
+                  },
+                }
+              : {}),
           }
           return fn(scoped)
         })
@@ -1000,6 +1013,48 @@ export function createPluginScopedMultitableApi(
         if (typeof multitable.provisioning.findObjectView !== 'function') return null
         return multitable.provisioning.findObjectView({ ...rest, projectId, objectId } as typeof input)
       },
+      // 批次标识 BI-5: the landing promotion (a WRITE of one view's created_at) and the values-free layout read. Both
+      // are exposed iff the host exposes them (the optional-capability idiom of `ensureSystemBase` above) and take
+      // exactly the gates of `findObjectView` / the object-keyed writes: project namespace (pure), the overview object
+      // refused (pure, before any IO — its views and layout are the overview module's), then object scope; values are
+      // read ONCE and the checked values are what the host receives. Not plugin-name gated: they act only on an
+      // object the scope hook attributes to the caller.
+      ...(typeof multitable.provisioning?.promoteObjectViewToFirst === 'function'
+        ? {
+            promoteObjectViewToFirst: async (
+              input: Parameters<NonNullable<MultitableAPI['provisioning']['promoteObjectViewToFirst']>>[0],
+            ) => {
+              const projectId = input.projectId
+              const objectId = input.objectId
+              const viewLogicalId = input.viewLogicalId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              refuseOverviewObjectStructureWrite(objectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return multitable.provisioning.promoteObjectViewToFirst!({ projectId, objectId, viewLogicalId })
+            },
+          }
+        : {}),
+      ...(typeof multitable.provisioning?.describeObjectSheetLayout === 'function'
+        ? {
+            describeObjectSheetLayout: async (
+              input: Parameters<NonNullable<MultitableAPI['provisioning']['describeObjectSheetLayout']>>[0],
+            ) => {
+              const projectId = input.projectId
+              const objectId = input.objectId
+              const candidateViewLogicalIds = input.candidateViewLogicalIds
+              const leftInsertCount = input.leftInsertCount
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              refuseOverviewObjectStructureWrite(objectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return multitable.provisioning.describeObjectSheetLayout!({
+                projectId,
+                objectId,
+                candidateViewLogicalIds: Array.isArray(candidateViewLogicalIds) ? [...candidateViewLogicalIds] : candidateViewLogicalIds,
+                leftInsertCount,
+              })
+            },
+          }
+        : {}),
       patchObjectFieldProperty: async (input) => {
         // Fix round 1 (read-once): the checked values are the forwarded values (see ensureMissingObjectFields).
         const projectId = input.projectId
