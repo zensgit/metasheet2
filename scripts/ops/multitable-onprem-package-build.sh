@@ -65,6 +65,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-update.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.ps1"
+  "scripts/ops/web-dist-retain-assets.mjs"
   "scripts/ops/attendance-onprem-deploy-easy.sh"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"

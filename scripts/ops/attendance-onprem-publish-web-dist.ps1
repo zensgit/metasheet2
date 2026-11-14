@@ -96,6 +96,16 @@ if (Test-SamePath -Left $source -Right $target) {
   exit 0
 }
 
+$helper = Join-Path $PSScriptRoot 'web-dist-retain-assets.mjs'
+if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+  throw 'Missing web-dist-retain-assets.mjs; use the complete installation package'
+}
+$nodeCommand = @(Get-Command node -CommandType Application -ErrorAction Stop)[0].Source
+# Check original input trees before Copy-Item can follow a junction or recurse
+# into a target nested under the source. Native failures need an explicit check.
+& $nodeCommand $helper validate $source $target
+if ($LASTEXITCODE -ne 0) { throw 'Web dist validation failed; live files unchanged' }
+
 $targetParent = Split-Path -Parent $target
 New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
 
@@ -104,6 +114,8 @@ New-Item -ItemType Directory -Force -Path $tmpTarget | Out-Null
 
 try {
   Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $tmpTarget -Recurse -Force
+  & $nodeCommand $helper retain $target $tmpTarget
+  if ($LASTEXITCODE -ne 0) { throw 'Web asset retention failed; live files unchanged' }
   if (Test-Path -LiteralPath $target) {
     Remove-Item -LiteralPath $target -Recurse -Force
   }
