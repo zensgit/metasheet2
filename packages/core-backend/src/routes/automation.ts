@@ -12,6 +12,8 @@
  *   GET  /api/multitable/sheets/:sheetId/automations/:ruleId/stats
  *   POST /api/multitable/sheets/:sheetId/automations/fwb/confirm
  *   POST /api/multitable/sheets/:sheetId/automations/dingtalk-person-recipient-status
+ *   GET  /api/multitable/sheets/:sheetId/automations/integration-preview/catalog   (C1/S2, default OFF)
+ *   POST /api/multitable/sheets/:sheetId/automations/:ruleId/integration-preview  (C1/S2, default OFF)
  *
  * Response shapes (match apps/web/src/multitable/api/client.ts):
  *   test  → AutomationExecution (flat object)
@@ -27,6 +29,8 @@ import {
   type AutomationTestRunSampleRecord,
 } from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
+import { syntheticPreviewErrorCode } from '../integration/automation-synthetic-preview'
+import { describeSyntheticPreviewCatalog } from '../integration/automation-operation-catalog'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
@@ -960,6 +964,133 @@ export function createAutomationRoutes(
           ? { code: 'DB_NOT_READY', message: 'Service temporarily unavailable' }
           : { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
       })
+    }
+  })
+
+  // ── C1/S2 synthetic integration preview (default OFF) ──────────────────
+  //
+  // Manual, synthetic, zero-network: fixed plan -> synthetic named read-only operation -> in-run values ->
+  // YiDa pure preview (integration/automation-synthetic-preview.ts). Gate order: no-store on EVERY answer,
+  // canManageAutomation on the PATH sheet (403 first), sheet liveness, service readiness, the switch
+  // (a fixed 404 INTEGRATION_PREVIEW_DISABLED before any catalog, provider or compiler), the authenticated
+  // tenant claim (req.authenticatedTenantId from the verified JWT, never x-tenant-id or the body), then the
+  // service, whose strict DTO accepts exactly { planId, fixtureId, mappingPresetId } and whose per-checkpoint
+  // transaction re-proves rule ownership, the sheet scope and the live integration actor. Every refusal is a
+  // fixed, values-free body; no raw error reaches the client or the default error middleware.
+
+  const integrationPreviewRateLimiter = createRateLimiter({
+    windowMs: 60_000,
+    maxRequests: 20,
+    keyPrefix: 'automation-integration-preview',
+    keyFn: (req) => req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? undefined,
+    onLimited: (_req, res, retryAfterSeconds) => {
+      res.set('Cache-Control', 'no-store')
+      res.status(429).json({ ok: false, error: { code: 'RATE_LIMITED', retryAfter: retryAfterSeconds } })
+    },
+  })
+
+  const INTEGRATION_PREVIEW_REFUSALS: Record<string, { status: number; message: string }> = {
+    INPUT: { status: 400, message: 'The preview request must be exactly { planId, fixtureId, mappingPresetId } from the fixed catalog' },
+    DISABLED: { status: 404, message: 'Synthetic integration preview is not enabled' },
+    DENIED: { status: 403, message: 'Synthetic integration preview is not authorized' },
+    NOT_FOUND: { status: 404, message: 'Automation rule not found' },
+    LIMIT: { status: 422, message: 'The synthetic preview exceeded its fixed budget' },
+    REJECTED: { status: 422, message: 'The synthetic preview could not be compiled' },
+    CANCELLED: { status: 409, message: 'The synthetic preview was cancelled' },
+    TIMEOUT: { status: 504, message: 'The synthetic preview exceeded its deadline' },
+    INACTIVE: { status: 503, message: 'Synthetic integration preview is not available right now' },
+    UNAVAILABLE: { status: 503, message: 'Synthetic integration preview is not available right now' },
+  }
+
+  function sendIntegrationPreviewRefusal(res: Response, code: string) {
+    const refusal = INTEGRATION_PREVIEW_REFUSALS[code] ?? INTEGRATION_PREVIEW_REFUSALS.UNAVAILABLE
+    const fixed = INTEGRATION_PREVIEW_REFUSALS[code] ? code : 'UNAVAILABLE'
+    res.set('Cache-Control', 'no-store')
+    return res.status(refusal.status).json({ ok: false, error: { code: `INTEGRATION_PREVIEW_${fixed}`, message: refusal.message } })
+  }
+
+  /** Path sheet capability + liveness for the preview surface. Returns null once it answered. */
+  async function authorizeIntegrationPreview(req: Request, res: Response): Promise<{ svc: AutomationService; sheetId: string } | null> {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      sendIntegrationPreviewRefusal(res, 'INPUT')
+      return null
+    }
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        res.set('Cache-Control', 'no-store')
+        sendForbidden(res)
+        return null
+      }
+      if (sheetLiveness !== 'live') {
+        res.set('Cache-Control', 'no-store')
+        sendSheetNotLive(res, sheetLiveness)
+        return null
+      }
+    } catch {
+      sendIntegrationPreviewRefusal(res, 'UNAVAILABLE')
+      return null
+    }
+    const svc = resolve()
+    if (!svc) {
+      sendIntegrationPreviewRefusal(res, 'UNAVAILABLE')
+      return null
+    }
+    if (!svc.syntheticIntegrationPreviewEnabled()) {
+      sendIntegrationPreviewRefusal(res, 'DISABLED')
+      return null
+    }
+    return { svc, sheetId }
+  }
+
+  // Values-free discovery for the panel. OFF: the fixed disabled refusal, no catalog.
+  router.get('/sheets/:sheetId/automations/integration-preview/catalog', integrationPreviewRateLimiter, async (req: Request, res: Response) => {
+    const authorized = await authorizeIntegrationPreview(req, res)
+    if (!authorized) return undefined
+    res.set('Cache-Control', 'no-store')
+    return res.json({ ok: true, enabled: true, synthetic: true, catalog: describeSyntheticPreviewCatalog() })
+  })
+
+  router.post('/sheets/:sheetId/automations/:ruleId/integration-preview', integrationPreviewRateLimiter, async (req: Request, res: Response) => {
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
+    if (!ruleId) return sendIntegrationPreviewRefusal(res, 'INPUT')
+    const authorized = await authorizeIntegrationPreview(req, res)
+    if (!authorized) return undefined
+    const actorId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
+    // The verified tenant claim only. A tenantless token cannot run the preview (fail closed).
+    const tenantId = typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId.trim() : ''
+    if (!actorId || !tenantId) return sendIntegrationPreviewRefusal(res, 'DENIED')
+
+    // HTTP disconnect cancels the run through the same abort/drain lifecycle as cancel/timeout/shutdown.
+    const controller = new AbortController()
+    const onClose = () => { if (!res.writableEnded) controller.abort() }
+    res.on('close', onClose)
+    try {
+      const result = await authorized.svc.previewIntegrationPlan(
+        { actorId, tenantId, sheetId: authorized.sheetId, ruleId },
+        req.body,
+        { signal: controller.signal },
+      )
+      res.set('Cache-Control', 'no-store')
+      // Rebuilt here once more: the four authority flags are host constants, never the runtime's object.
+      return res.json({
+        ok: true,
+        synthetic: true,
+        summary: result.summary,
+        preview: result.preview,
+        canSend: false,
+        canApply: false,
+        tokenIssued: false,
+        externalWriteAttempted: false,
+      })
+    } catch (error) {
+      const code = syntheticPreviewErrorCode(error) ?? 'UNAVAILABLE'
+      if (res.writableEnded || res.destroyed) return undefined
+      return sendIntegrationPreviewRefusal(res, code)
+    } finally {
+      res.off('close', onClose)
     }
   })
 

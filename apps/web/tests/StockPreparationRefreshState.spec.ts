@@ -30,6 +30,7 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import {
+  STOCK_PREP_REFRESH_STATUS_LABELS_EN,
   STOCK_PREP_REFRESH_STATUS_LABELS_ZH,
   STOCK_PREP_REFRESH_STATUS_TOKENS,
   parseStockPrepRefreshStanza,
@@ -40,6 +41,16 @@ import {
   stockPrepRefreshRendering,
 } from '../src/services/integration/stockPreparation/refreshState'
 import {
+  STOCK_PREP_CONTENT_CLASS_HOLD_KINDS,
+  stockPrepRefreshIsContentClassHold,
+} from '../src/services/integration/stockPreparation/refreshChangePlan'
+import {
+  STOCK_PREP_REFRESH_CHANGE_PLAN_BLOCKED_PLAIN,
+  STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN,
+  STOCK_PREP_REFRESH_FIELD_PLAIN,
+  STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN,
+  STOCK_PREP_REFRESH_RENDERING_PLAIN,
+  STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN,
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_ERROR_REASON_PLAIN,
@@ -59,6 +70,7 @@ import {
   stockPrepSyncVerdictPlain,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 import {
+  STOCK_PREPARATION_DRY_RUN_STATUSES,
   StockPreparationProjectSyncCallError,
   classifyPlanStep,
   classifyRefreshApplyFailure,
@@ -76,7 +88,8 @@ import {
   recordStockPrepProjectVisit,
 } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import { buildOperatorHomeCards } from '../src/services/integration/stockPreparation/operatorHomeCards'
-import type { StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import type { StockPreparationOperatorDirectory, StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import { buildStockPrepProjectQueryRows, filterStockPrepProjectQueryRows } from '../src/services/integration/stockPreparation/projectQuery'
 
 const nodeRequire = createRequire(import.meta.url)
 const PLUGIN_LIB = '../../../plugins/plugin-integration-core/lib/'
@@ -129,6 +142,15 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
   it('RS-MIRROR: tokens and zh labels are byte-equal to the plugin module', () => {
     expect([...STOCK_PREP_REFRESH_STATUS_TOKENS]).toEqual([...backendState.STATUS_TOKENS])
     expect({ ...STOCK_PREP_REFRESH_STATUS_LABELS_ZH }).toEqual({ ...backendState.STATUS_LABELS_ZH })
+  })
+
+  // PR-9 (the #6579 version-skew residual): the English status words are a map of their own, one per live token.
+  it('RS-LABEL-EN (PR-9): the en status words cover exactly the status tokens, and none is a raw token', () => {
+    expect(Object.keys(STOCK_PREP_REFRESH_STATUS_LABELS_EN).sort()).toEqual([...STOCK_PREP_REFRESH_STATUS_TOKENS].sort())
+    for (const token of STOCK_PREP_REFRESH_STATUS_TOKENS) {
+      expect(STOCK_PREP_REFRESH_STATUS_LABELS_EN[token].trim().length, token).toBeGreaterThan(0)
+      expect(STOCK_PREP_REFRESH_STATUS_LABELS_EN[token], token).not.toMatch(/[a-z]+_[a-z_]+/)
+    }
   })
 
   it('RS-MIRROR: 「可以导出」 is the server verdict over the REAL derivation, for every status × settled', () => {
@@ -188,6 +210,12 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     const pending = parseStockPrepRefreshStanza({ readable: true, status: 'pending_confirmation', governed: 'pilot', counts: { pendingConfirm: 2 } })
     expect(stockPrepRefreshRendering(pending)).toBe('pending')
     expect(stockPrepRefreshRendering(pending, { pendingHolds: 0 })).toBe('none_pending')
+    // PR-9 (R-77 ①): a fourth distinct rendering — no hold, a written change awaiting its review.
+    const review = parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', counts: { pendingConfirm: 0, pendingReviews: 1 } })
+    expect(stockPrepRefreshRendering(review)).toBe('review_pending')
+    expect(stockPrepRefreshRendering(parseStockPrepRefreshStanza({ readable: true, status: 'executed_pending_settlement', governed: 'pilot', counts: { pendingConfirm: 0, pendingReviews: 2 } }))).toBe('review_pending')
+    expect(stockPrepRefreshRendering(parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', counts: null }))).toBe('review_pending')
+    expect(new Set(['not_governed', 'unreadable', 'none_pending', 'review_pending']).size).toBe(4)
   })
 
   it('RS-BANNER: per status; link only for a puller with holds; none for not_governed / complete ∧ settled / absent', () => {
@@ -202,7 +230,13 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     expect(stockPrepRefreshBanner(stanza('executed_pending_settlement'), { canOpenQueue: true })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('complete'))?.key).toBe('unsettled')
     expect(stockPrepRefreshBanner(stanza('complete'))?.zh).toContain('待核对')
-    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toContain('执行失败待恢复')
+    // S6-3 (step-6 design §5.4, R-91): 「上次写入未完成,等待拉取人员核对;正式导出已暂停」 — re-pinned from 执行失败待恢复;
+    // the second line names the card (拉取待确认) and keeps the runbook for an unprovable check (平台管理员).
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zh).toBe('本项目上次写入未完成,等待拉取人员核对;正式导出已暂停。')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('拉取待确认')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'))?.zhNext).toContain('平台管理员按手册')
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: true })?.link).toBe(true)
+    expect(stockPrepRefreshBanner(stanza('failed_pending_recovery'), { canOpenQueue: false })?.link).toBe(false)
     expect(stockPrepRefreshBanner(stanza('change_pending_review'))?.zh).toContain('变更待复核')
     expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: false, status: 'unreadable' }))?.zh).toContain('读取失败')
     for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
@@ -212,6 +246,45 @@ describe('RS — the board stanza on the web (refreshState.ts)', () => {
     }
     expect(stockPrepRefreshRailCount(stanza('pending_confirmation'))).toBe(3)
     expect(stockPrepRefreshRailCount(stanza('pending_confirmation', { counts: { pendingConfirm: 0 } }))).toBeNull()
+  })
+
+  // PR-9 (R-77 ⑥): the banner links a PULLER to 「拉取待确认」 for a written change awaiting review too (the review is a
+  // section of that page); the floor still gets no link (R-11). The link set 1 → 2 statuses is that decision.
+  it('RS-BANNER (PR-9): change_pending_review links for a puller, never for the floor; its second line names 核对', () => {
+    const review = parseStockPrepRefreshStanza({ readable: true, status: 'change_pending_review', governed: 'pilot', settled: false, counts: { pendingConfirm: 0, pendingReviews: 1 } })
+    expect(stockPrepRefreshBanner(review, { canOpenQueue: true })?.link).toBe(true)
+    expect(stockPrepRefreshBanner(review, { canOpenQueue: false })?.link).toBe(false)
+    expect(stockPrepRefreshBanner(review)?.link).toBe(false)
+    expect(stockPrepRefreshBanner(review)?.zhNext).toContain('拉取待确认')
+    expect(stockPrepRefreshBanner(review)?.zhNext).toContain('核对')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    // The banner's second line and the 「拉取待确认」 review_pending rendering line both say so conditionally.
+    for (const [name, entry] of [['banner', stockPrepRefreshBanner(review)], ['rendering', STOCK_PREP_REFRESH_RENDERING_PLAIN.review_pending]] as const) {
+      expect(entry?.zhNext, name).toContain('已执行待核对')
+      expect(entry?.zhNext, name).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
+      expect(entry?.enNext, name).toContain('awaiting check')
+      expect(entry?.enNext, name).not.toMatch(/still opens|presses “Check” again|is still needed/)
+    }
+    // Every other unfinished status keeps no link (only pending_confirmation, change_pending_review and — S6-3, R-91:
+    // the recovery card — failed_pending_recovery have one). The link set 2 → 3 statuses is that decision.
+    for (const status of STOCK_PREP_REFRESH_STATUS_TOKENS) {
+      const banner = stockPrepRefreshBanner(status === 'unreadable' ? parseStockPrepRefreshStanza({ readable: false, status }) : parseStockPrepRefreshStanza({ readable: true, status, governed: 'pilot', settled: false, counts: { pendingConfirm: 1, pendingReviews: 1 } }), { canOpenQueue: true })
+      if (!banner) continue
+      expect(banner.link, status).toBe(status === 'pending_confirmation' || status === 'change_pending_review' || status === 'failed_pending_recovery')
+    }
+    // A confirmed change plan reads confirmed_pending_execution too: its words name both.
+    expect(stockPrepRefreshBanner(parseStockPrepRefreshStanza({ readable: true, status: 'confirmed_pending_execution', governed: 'pilot', settled: false, counts: null }))?.zh).toContain('变更计划')
+  })
+
+  // PR-9 (R-77 ⑤): the rail badge = open holds + pending reviews (main counted holds only: {2,1} was 2, is 3).
+  it('RS-RAIL (PR-9): open holds + pending reviews, positive only', () => {
+    const counted = (pendingConfirm: number, pendingReviews: number) => stockPrepRefreshRailCount(parseStockPrepRefreshStanza({ readable: true, status: 'pending_confirmation', governed: 'pilot', settled: false, counts: { pendingConfirm, pendingReviews } }))
+    expect(counted(2, 1)).toBe(3)
+    expect(counted(0, 1)).toBe(1)
+    expect(counted(0, 0)).toBeNull()
+    expect(counted(3, 0)).toBe(3)
+    expect(stockPrepRefreshRailCount(parseStockPrepRefreshStanza({ readable: false, status: 'unreadable' }))).toBeNull()
+    expect(stockPrepRefreshRailCount(null)).toBeNull()
   })
 })
 
@@ -230,6 +303,11 @@ describe('RS-COPY — every step-4 code has its own copy (the cross-side tripwir
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-pairing.cjs`) as { CONTINUATION_ERROR_CODES: Record<string, string> }).CONTINUATION_ERROR_CODES)
     add((nodeRequire(`${PLUGIN_LIB}stock-preparation-project-write-lock.cjs`) as { PROJECT_WRITE_ERROR_CODES: Record<string, string> }).PROJECT_WRITE_ERROR_CODES)
     codes.add((nodeRequire(`${PLUGIN_LIB}stock-preparation-project-target-store.cjs`) as { PROJECT_TARGET_PILOT_STATE_MOVED_CODE: string }).PROJECT_TARGET_PILOT_STATE_MOVED_CODE)
+    // 批次标识 BI-1b (R-65): every pull-batch code (install / config codes included), read LIVE from the pure module.
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-pull-batch.cjs`) as { PULL_BATCH_ERROR_CODES: Record<string, string> }).PULL_BATCH_ERROR_CODES)
+    // Batch-refresh step 6d-1b (R-91): the component ruling ledger's codes and the census / acknowledgement lib's, read LIVE.
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-component-ruling-store.cjs`) as { COMPONENT_RULING_ERROR_CODES: Record<string, string> }).COMPONENT_RULING_ERROR_CODES)
+    add((nodeRequire(`${PLUGIN_LIB}stock-preparation-remnant-acknowledgement.cjs`) as { REMNANT_ACKNOWLEDGEMENT_ERROR_CODES: Record<string, string> }).REMNANT_ACKNOWLEDGEMENT_ERROR_CODES)
     for (const literal of [
       'STOCK_PREP_HANDOFF_BLOCKED_BY_REFRESH_STATE',
       'LARGE_BOM_APPLY_PLAN_SUSPENDED',
@@ -334,10 +412,15 @@ describe('RS-WORDS — every hold-page token has words (the cross-side tripwire)
     HOLD_KINDS: readonly string[]
     NOT_CONFIRMABLE_REASONS: readonly string[]
     SHAPE_TOKENS: readonly string[]
+    CONTENT_CLASS_HOLD_KINDS: readonly string[]
+    REVIEWED_CONTENT_MOVED_REASON: string
+    contentTriggerFieldIds: (options: Record<string, unknown>) => string[]
+    isContentClassHold: (hold: unknown) => boolean
   }
   const store = nodeRequire(`${PLUGIN_LIB}stock-preparation-continuation-store.cjs`) as {
     EVIDENCE_HISTORY_STATUSES: readonly string[]
     CONTINUATION_ROW_STATUSES: readonly string[]
+    REVIEW_CONCLUSIONS: readonly string[]
   }
 
   /** The field statuses `compareSevenItems` assigns, scanned out of the plugin source (they are not exported). */
@@ -382,6 +465,61 @@ describe('RS-WORDS — every hold-page token has words (the cross-side tripwire)
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'not_a_kind')).toBeNull()
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, 'toString')).toBeNull()
     expect(stockPrepRefreshTokenPlain(STOCK_PREP_REFRESH_HOLD_KIND_PLAIN, null)).toBeNull()
+  })
+
+  /** The string literals `pattern` captures inside `function <name>(` of a plugin source (they are not exported). */
+  function scannedLiterals(file: string, functionName: string, patterns: RegExp[]): string[] {
+    const source = readFileSync(resolve(__dirname, PLUGIN_LIB, file), 'utf8').replace(/\r\n/g, '\n')
+    const start = source.indexOf(`function ${functionName}(`)
+    expect(start, `${functionName} in ${file}`).toBeGreaterThan(0)
+    const end = source.indexOf('\nfunction ', start + 1)
+    const body = source.slice(start, end > start ? end : undefined)
+    const tokens = new Set<string>()
+    for (const pattern of patterns) {
+      for (const match of body.matchAll(pattern)) for (const group of match.slice(1)) if (group) tokens.add(group)
+    }
+    return [...tokens].sort()
+  }
+
+  // PR-9 (R-77): the 「变更计划」 / 「变更复核」 vocabularies, each against its LIVE source.
+  it('RS-WORDS (PR-9): blocked tokens, review conclusions, content reasons and observation roles all have words', () => {
+    const blocked = scannedLiterals('stock-preparation-refresh-decisions.cjs', 'proposalOf', [/blocked = '([a-z_]+)'/g, /\? '([a-z_]+)' : '([a-z_]+)'/g])
+    expectWords('change-plan blocked', STOCK_PREP_REFRESH_CHANGE_PLAN_BLOCKED_PLAIN, blocked, 7)
+    expectWords('review conclusion', STOCK_PREP_REFRESH_REVIEW_CONCLUSION_PLAIN, store.REVIEW_CONCLUSIONS, 2)
+    const plannerReasons = scannedLiterals('stock-preparation-conflict-planner.cjs', 'planOnce', [/noteContentChange\([^)]*\{ reason: '([a-z_]+)' \}\)/g])
+    const contentReasons = [...new Set([pairing.REVIEWED_CONTENT_MOVED_REASON, ...plannerReasons])].sort()
+    expect(contentReasons).toEqual(expect.arrayContaining(['component_identity_conflict', 'plm_system_refresh', 'reviewed_content_moved']))
+    expectWords('content reason', STOCK_PREP_REFRESH_CONTENT_REASON_PLAIN, contentReasons, 3)
+    const roles = scannedLiterals('stock-preparation-refresh-decisions.cjs', 'observationsOfDemand', [/role: '([a-z_]+)'/g])
+    expectWords('observation role', STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN, roles, 2)
+  })
+
+  it('RS-FIELDS (PR-9): every content-trigger and human field of the default template has its column name, equal to the template', () => {
+    const templates = nodeRequire(`${PLUGIN_LIB}stock-preparation-templates.cjs`) as { HUMAN_PRESERVED_FIELD_IDS: readonly string[]; STOCK_PREPARATION_MAIN_TABLE_TEMPLATE: { fields: Array<{ id: string; label: string; labelZh?: string }> } }
+    const byId = new Map(templates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, field]))
+    const ids = [...new Set([...pairing.contentTriggerFieldIds({}), ...templates.HUMAN_PRESERVED_FIELD_IDS])]
+    expect(ids.length).toBeGreaterThanOrEqual(15)
+    for (const id of ids) {
+      const field = byId.get(id)
+      expect(field, id).toBeDefined()
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id], `${id} has words`).toBeDefined()
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id].zh, id).toBe(field!.labelZh)
+      expect(STOCK_PREP_REFRESH_FIELD_PLAIN[id].en, id).toBe(field!.label)
+    }
+    expect(Object.keys(STOCK_PREP_REFRESH_FIELD_PLAIN).filter((id) => !ids.includes(id)), 'labels for fields the template no longer has').toEqual([])
+  })
+
+  it('RS-CLASS (PR-9): the web content-class mirror equals the plugin\'s isContentClassHold for every kind × verdict × reason', () => {
+    expect([...STOCK_PREP_CONTENT_CLASS_HOLD_KINDS]).toEqual([...pairing.CONTENT_CLASS_HOLD_KINDS])
+    for (const kind of pairing.HOLD_KINDS) {
+      for (const verdict of ['content_changed', 'structure_changed', null]) {
+        for (const reason of ['needs_step5', 'specialist_repair', null]) {
+          const server = pairing.isContentClassHold({ kind, notConfirmableReason: reason, detail: { verdict } })
+          const web = stockPrepRefreshIsContentClassHold({ kind, notConfirmableReason: reason, verification: { verdict } })
+          expect(web, `${kind} × ${verdict} × ${reason}`).toBe(server)
+        }
+      }
+    }
   })
 })
 
@@ -433,8 +571,42 @@ const SUSPENDED_PLAN = {
   refreshHold: { held: true, holdCount: 2, confirmableCount: 1, kinds: { syn_kind_sentinel: 2 }, holdSetFingerprint: 'f'.repeat(64) },
 }
 
-function callError(status: number, code: string, details: { reason?: string; partial?: boolean; holdCount?: number } = {}): StockPreparationProjectSyncCallError {
-  return new StockPreparationProjectSyncCallError(status, 'route', { code, detailReason: details.reason ?? null, detailPartial: details.partial, detailHoldCount: details.holdCount })
+function callError(status: number, code: string, details: { reason?: string; partial?: boolean; holdCount?: number; pendingReviews?: number } = {}): StockPreparationProjectSyncCallError {
+  return new StockPreparationProjectSyncCallError(status, 'route', { code, detailReason: details.reason ?? null, detailPartial: details.partial, detailHoldCount: details.holdCount, detailPendingReviews: details.pendingReviews })
+}
+
+/** PR-9: a governed preview whose written change awaits review (server table-actions.cjs `withReviewStatus`). */
+const REVIEW_PENDING_PLAN = {
+  status: 'review_pending',
+  canApply: false,
+  dryRunToken: null,
+  counts: { add: 0, update: 2, skip: 4, inactive: 0, manual_confirm: 0 },
+  refreshReview: { pending: true, pendingReviews: 1, blocksMint: true, syn_review_sentinel: 'SYN-REVIEW-SENTINEL' },
+}
+
+/**
+ * PR-9 (RS-DRYRUN): the dry-run status literals the server can answer, scanned out of the plugin source (they are not
+ * exported): every literal `dryRunStatus` and `withReviewStatus` return, plus the preview answer's `recovery_pending`.
+ */
+function serverDryRunStatuses(): string[] {
+  const source = readFileSync(resolve(__dirname, PLUGIN_LIB, 'stock-preparation-table-actions.cjs'), 'utf8').replace(/\r\n/g, '\n')
+  const bodyOf = (name: string): string => {
+    const start = source.indexOf(`function ${name}(`)
+    expect(start, `${name} in the table-actions source`).toBeGreaterThan(0)
+    const end = source.indexOf('\nfunction ', start + 1)
+    return source.slice(start, end > start ? end : undefined)
+  }
+  const tokens = new Set<string>()
+  for (const name of ['dryRunStatus', 'withReviewStatus']) {
+    for (const match of bodyOf(name).matchAll(/return (?:[^\n]*\? )?'([a-z_]+)'(?: : '([a-z_]+)')?/g)) {
+      tokens.add(match[1])
+      if (match[2]) tokens.add(match[2])
+    }
+  }
+  const recovery = source.match(/\bstatus: recovery \? '([a-z_]+)'/)
+  expect(recovery, 'the preview answer\'s recovery status').not.toBeNull()
+  tokens.add(recovery![1])
+  return [...tokens].sort()
 }
 
 describe('PS — projectSync learns the batch refresh (W4)', () => {
@@ -524,16 +696,80 @@ describe('PS — projectSync learns the batch refresh (W4)', () => {
     }
   })
 
+  it('RS-DRYRUN (PR-9): every dry-run status the server can answer is in the web vocabulary, and nothing else is', () => {
+    const live = serverDryRunStatuses()
+    expect(live).toEqual(expect.arrayContaining(['ready', 'manual_confirm_required', 'suspended', 'recovery_pending', 'review_pending']))
+    expect([...STOCK_PREPARATION_DRY_RUN_STATUSES].sort()).toEqual(live)
+  })
+
+  it('PS-REV-1 (PR-9): review_pending ⇒ ① OK with pendingReviews, ② / ③ / ④ skips (never apply), verdict review_pending', async () => {
+    const api = syncApi({ dryRun: vi.fn().mockResolvedValue(REVIEW_PENDING_PLAN) })
+    const report = await runStockPreparationProjectSync(api, SYN_PROJECT)
+    expect(report.steps.map((step) => [step.id, step.status, step.reason])).toEqual([
+      ['dry-run', 'ok', 'PLAN_REVIEW_PENDING'],
+      ['confirm-queue', 'skip', 'RECONCILE_DEFERRED_REVIEW_PENDING'],
+      ['apply', 'skip', 'WRITE_REVIEW_PENDING'],
+      ['archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED'],
+    ])
+    expect(report.steps[0].detail).toMatchObject({ planStatus: 'review_pending', pendingReviews: 1 })
+    expect(report.verdict).toBe('review_pending')
+    expect(report.pass).toBe(true)
+    expect(api.reconcile).not.toHaveBeenCalled()
+    expect(api.apply).not.toHaveBeenCalled()
+    expect(api.archive).not.toHaveBeenCalled()
+    // Values-free: only the integer leaves the stanza — never `blocksMint`, never anything else in it.
+    expect(JSON.stringify(report)).not.toContain('SYN-REVIEW-SENTINEL')
+    expect(JSON.stringify(report)).not.toContain('blocksMint')
+    // Not the source-data failure main read it as.
+    expect(classifyPlanStep(1, REVIEW_PENDING_PLAN).reason).toBe('PLAN_REVIEW_PENDING')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).toContain('复核不代替核对')
+    // Review fix (R-77 ⑨): after the review a 核对 is only MAYBE still needed — when the board shows 「已执行待核对」.
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).toContain('已执行待核对')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.zhNext).not.toMatch(/复核后还要核对一次|再点一次「核对」/)
+    expect(stockPrepSyncVerdictPlain('review_pending')?.enNext).toContain('awaiting check')
+    expect(stockPrepSyncVerdictPlain('review_pending')?.enNext).not.toMatch(/still opens|presses “Check” again|is still needed/)
+  })
+
+  it('PS-AP-6 (PR-9): apply 409 REVIEW_PENDING ⇒ ③ skip WRITE_REVIEW_PENDING (partial 0), verdict review_pending, archive not attempted', async () => {
+    const api = syncApi({ apply: vi.fn().mockRejectedValue(callError(409, 'STOCK_PREP_REFRESH_REVIEW_PENDING', { partial: false, pendingReviews: 2 })) })
+    const report = await runStockPreparationProjectSync(api, SYN_PROJECT)
+    const write = report.steps.find((step) => step.id === 'apply')!
+    expect(write).toMatchObject({ status: 'skip', reason: 'WRITE_REVIEW_PENDING' })
+    expect(write.detail).toMatchObject({ partial: 0, pendingReviews: 2 })
+    expect(report.verdict).toBe('review_pending')
+    expect(report.pass).toBe(true)
+    expect(report.steps.find((step) => step.id === 'archive')?.reason).toBe('BATCH_ARCHIVE_NOT_ATTEMPTED')
+    expect(api.archive).not.toHaveBeenCalled()
+    expect(classifyRefreshApplyFailure('STOCK_PREP_REFRESH_REVIEW_PENDING')).toBe('WRITE_REVIEW_PENDING')
+  })
+
+  it('PS-CHK-5 (PR-9): 「核对」 meeting review_pending ⇒ outcome review_pending (not failed); one dry run only', async () => {
+    const api = syncApi({ dryRun: vi.fn().mockResolvedValue(REVIEW_PENDING_PLAN) })
+    const result = await runStockPreparationSettlementCheck(api, SYN_PROJECT)
+    expect(result).toMatchObject({ outcome: 'review_pending', reason: 'PLAN_REVIEW_PENDING' })
+    expect(api.dryRun).toHaveBeenCalledTimes(1)
+    expect(api.reconcile).not.toHaveBeenCalled()
+    expect(api.apply).not.toHaveBeenCalled()
+    expect(api.archive).not.toHaveBeenCalled()
+  })
+
   it('PS-COPY: every new projectSync reason has sync-panel copy with a second line', () => {
     for (const reason of [
       'PLAN_SUSPENDED', 'PLAN_RECOVERY_PENDING', 'PLAN_STATE_MOVED', 'PLAN_REFRESH_STORE_UNAVAILABLE', 'PLAN_REFRESH_SCOPE_CHANGED',
       'RECONCILE_DEFERRED_SUSPENDED', 'WRITE_PULL_SUSPENDED', 'WRITE_BINDING_STALE', 'WRITE_RECOVERY_PENDING', 'WRITE_STATE_MOVED',
       'WRITE_REFRESH_STORE_UNAVAILABLE', 'WRITE_REFRESH_SCOPE_CHANGED',
+      // PR-9 (R-77 ⑦).
+      'PLAN_REVIEW_PENDING', 'RECONCILE_DEFERRED_REVIEW_PENDING', 'WRITE_REVIEW_PENDING',
     ]) {
       expect(Object.prototype.hasOwnProperty.call(STOCK_PREP_SYNC_REASON_PLAIN, reason), reason).toBe(true)
       expect(String(STOCK_PREP_SYNC_REASON_PLAIN[reason].zhNext ?? '').length, reason).toBeGreaterThan(0)
     }
     expect(stockPrepSyncVerdictPlain('awaiting_recovery')?.zhNext).toContain('平台管理员')
+    // PR-9: the review_pending verdict has both lines and is not the source-data sentence.
+    const review = stockPrepSyncVerdictPlain('review_pending')
+    expect(String(review?.zh ?? '').length).toBeGreaterThan(0)
+    expect(String(review?.zhNext ?? '').length).toBeGreaterThan(0)
+    expect(`${review?.zh}${review?.zhNext}`).not.toContain('源数据')
   })
 })
 
@@ -562,8 +798,10 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
       ['executed_pending_settlement', 'check'],
       ['confirmed_pending_execution', 'resync'],
       ['executing', null],
-      ['failed_pending_recovery', null],
-      ['change_pending_review', null],
+      // S6-3 (R-91): null → 'go-refresh-queue' — the recovery card is a section of 「拉取待确认」 (NS-6).
+      ['failed_pending_recovery', 'go-refresh-queue'],
+      // PR-9 (R-77 ⑥): null → 'go-refresh-queue' — the review is a section of 「拉取待确认」 (NS-5).
+      ['change_pending_review', 'go-refresh-queue'],
       ['unreadable', null],
     ]
     for (const [status, pullerAction] of rows) {
@@ -575,6 +813,35 @@ describe('NS — rule 3b: an unfinished batch refresh, puller vs floor', () => {
     }
     expect(operatorNextStep(nextStepInput({ refreshStatus: 'pending_confirmation', refreshPendingConfirmCount: 3, canOpenRefreshQueue: false, canPull: false })).zh).toContain('请联系拉取人员')
     expect(operatorNextStep(nextStepInput({ refreshStatus: 'complete', refreshSettled: false, canOpenRefreshQueue: true })).action).toBe('check')
+  })
+
+  it('NS-5 (PR-9): change_pending_review — a puller is sent to review it; the floor gets the sentence and no action', () => {
+    const puller = operatorNextStep(nextStepInput({ refreshStatus: 'change_pending_review', refreshSettled: false, refreshPendingConfirmCount: 0, canOpenRefreshQueue: true }))
+    expect(puller).toMatchObject({ key: 'refresh', action: 'go-refresh-queue', actionZh: '去复核' })
+    expect(puller.zh).toContain('复核')
+    const floor = operatorNextStep(nextStepInput({ refreshStatus: 'change_pending_review', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(floor.action).toBeNull()
+    expect(floor.actionZh).toBe('')
+    expect(floor.zh).toContain('请联系拉取人员')
+    // A confirmed change plan reads confirmed_pending_execution too: the words name it, zh and en.
+    const confirmed = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: true }))
+    expect(confirmed.zh).toContain('变更计划')
+    expect(confirmed.en).toContain('change plan')
+    const confirmedFloor = operatorNextStep(nextStepInput({ refreshStatus: 'confirmed_pending_execution', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(confirmedFloor.zh).toContain('变更计划')
+  })
+
+  it('NS-6 (S6-3): failed_pending_recovery — a puller is sent to the recovery card; the floor gets the sentence and no action', () => {
+    const puller = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, refreshPendingConfirmCount: 0, canOpenRefreshQueue: true }))
+    expect(puller).toMatchObject({ key: 'refresh', action: 'go-refresh-queue', actionZh: '去核对' })
+    expect(puller.zh).toContain('拉取待确认')
+    expect(puller.zh).toContain('结束这次执行')
+    expect(puller.zh).not.toContain('平台管理员')
+    const floor = operatorNextStep(nextStepInput({ refreshStatus: 'failed_pending_recovery', refreshSettled: false, canOpenRefreshQueue: false, canPull: false }))
+    expect(floor.action).toBeNull()
+    expect(floor.actionZh).toBe('')
+    expect(floor.zh).toContain('等待拉取人员核对')
+    expect(floor.zh).toContain('请联系拉取人员')
   })
 
   it('NS-2: absent / not_governed / complete ∧ settled never fire rule 3b (dormancy)', () => {
@@ -644,5 +911,58 @@ describe('OH — 今天要处理 keeps 刷新未完成', () => {
     // A live pending count still decides on its own.
     const live = buildOperatorHomeCards([registryRow({ pendingDecisionCount: 2 })], [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
     expect(live[0].posture.key).toBe('pending_decision')
+  })
+
+  // Pre-pilot fix batch 8(c) (register R-91; PR-9 residual 5): the registry row carries the server's blocked token.
+  it('OH-DIR (8c): a registry row\'s server token decides before 「可以导出」 — 变更待复核 / 待核对 / 状态读取失败 / 刷新未完成; null is the live 「可以导出」 even over a remembered block; the count badges still rank first; a row without the key keeps the fold', () => {
+    const card = (overrides: Partial<StockPreparationOperatorProject>, memory: Array<{ projectNo: string; updatedAt: string; postureKey: 'blocked_pull_state' | 'ready' }> = []) => buildOperatorHomeCards([registryRow(overrides)], memory)[0]
+    const review = card({ refreshBlocked: 'change_pending_review', pendingReviewCount: 1, openRefreshHoldCount: 0 })
+    expect([review.posture.key, review.posture.zh, review.postureFromMemory]).toEqual(['blocked_pull_state', '变更待复核', false])
+    expect(card({ refreshBlocked: 'unsettled', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('待核对')
+    expect(card({ refreshBlocked: 'failed_pending_recovery', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('上次写入未完成')
+    // 「状态读取失败」 even on a row the overview never stamped (no counts): never 「看不到」, never 「可以导出」.
+    const unreadable = card({ refreshBlocked: 'unreadable', pendingReviewCount: null, openRefreshHoldCount: null, pulledRowCount: null })
+    expect([unreadable.posture.key, unreadable.posture.zh]).toEqual(['blocked_pull_state', '状态读取失败'])
+    expect(card({ refreshBlocked: 'made_up_token', pendingReviewCount: 0, openRefreshHoldCount: 0 }).posture.zh).toBe('刷新未完成')
+    // The open holds already fold into the live pending count, which still ranks first.
+    expect(card({ refreshBlocked: 'pending_confirmation', openRefreshHoldCount: 2, pendingReviewCount: 0, pendingDecisionCount: 2 }).posture.key).toBe('pending_decision')
+    // null = the server says the export would not refuse on the state: the LIVE answer beats a remembered block.
+    const ready = card({ refreshBlocked: null, pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }])
+    expect([ready.posture.key, ready.postureFromMemory]).toEqual(['ready', false])
+    // And a live block beats a remembered 「可以导出」.
+    expect(card({ refreshBlocked: 'executing', pendingReviewCount: 0, openRefreshHoldCount: 0 }, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'ready' }]).posture.zh).toBe('正在写入')
+    // An older server (no key): the PR-7 fold, unchanged.
+    expect(card({}, [{ projectNo: SYN_PROJECT, updatedAt: ISO_NEW, postureKey: 'blocked_pull_state' }]).posture.key).toBe('blocked_pull_state')
+  })
+
+  it('OH-DIR-MIRROR (8c): for EVERY status × settled the server derives, the token the directory row carries renders on the home card exactly what the server overview posture says — 「可以导出」 only where the formal-surface verdict allows', () => {
+    const overview = nodeRequire(`${PLUGIN_LIB}stock-preparation-project-overview.cjs`) as {
+      refreshBlockedToken: (input: Record<string, unknown>) => string | null
+      projectOverviewPosture: (input: Record<string, unknown>) => { key: string; zh: string; en: string; tone: string }
+      REFRESH_BLOCKED_TOKENS: readonly string[]
+    }
+    for (const status of [...STOCK_PREP_REFRESH_STATUS_TOKENS, 'made_up']) {
+      for (const settled of [true, false]) {
+        const token = overview.refreshBlockedToken({ refreshStatus: status, refreshSettled: settled })
+        if (token !== null) expect(overview.REFRESH_BLOCKED_TOKENS).toContain(token)
+        const server = overview.projectOverviewPosture({ pulledRowCount: 12, refreshStatus: status, refreshSettled: settled, refreshPendingConfirmCount: 0 })
+        const web = buildOperatorHomeCards([registryRow({ refreshBlocked: token, openRefreshHoldCount: 0, pendingReviewCount: 0 })], [])[0].posture
+        expect({ status, settled, posture: web }).toEqual({ status, settled, posture: server })
+        expect(web.key === 'ready').toBe(status !== 'made_up' && backendState.formalSurfaceVerdict({ readable: status !== 'unreadable', status, settled }).allowed === true)
+      }
+    }
+  })
+
+  it('OH-DIR-QUERY (8c): 项目查询 inherits it — the 「可以导出」 chip never lists a row the server says is blocked', () => {
+    const directory = {
+      tenantId: 'tenant-syn', directoryReady: true, ledgerReady: true,
+      projects: [
+        registryRow({ projectNo: 'SYN-Q-READY', refreshBlocked: null, openRefreshHoldCount: 0, pendingReviewCount: 0 }),
+        registryRow({ projectNo: 'SYN-Q-REVIEW', refreshBlocked: 'change_pending_review', openRefreshHoldCount: 0, pendingReviewCount: 1 }),
+      ],
+    } as unknown as StockPreparationOperatorDirectory
+    const rows = buildStockPrepProjectQueryRows(directory, [])
+    const ready = filterStockPrepProjectQueryRows(rows, { status: 'ready', source: 'all', search: '' } as never).map((row) => row.projectNo)
+    expect(ready).toEqual(['SYN-Q-READY'])
   })
 })

@@ -7,6 +7,7 @@
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -23,6 +24,13 @@ const {
 } = require('./stock-preparation-project-write-lock.cjs')
 // 人工补充行 B1 (ADR adr-stock-prep-manual-rows-20261030 §5.2): the reserved `manual:` namespace.
 const { isManualPrefixKey } = require('./stock-preparation-manual-rows.cjs')
+// 批次标识 BI-1b (design §3.4; register R-65): the writer's side input and the allocation's answer contract (pure module).
+const {
+  PULL_BATCH_ERROR_CODES,
+  StockPreparationPullBatchError,
+  assertAllocatedBatch,
+  normalizePullBatchStamp,
+} = require('./stock-preparation-pull-batch.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 // The ONE decision a key in the reserved namespace refuses (ADR §5.2): an ADD. Its per-decision code.
@@ -255,6 +263,35 @@ function assertNoHumanFields(payload, context, humanFields = HUMAN_PRESERVED_FIE
       })
     }
   }
+}
+
+// R-71 ⑦.4 PR-4: a PLM refresh never writes a machine write-back column (MACHINE_WRITEBACK_FIELD_IDS, today
+// `issueConfirmDate`). The planner already keeps it out of every payload it builds; this is the writer's own
+// copy of that wall, so a forged or hand-built plan is refused here too, before any lookup or write.
+function assertNoMachineWritebackFields(payload, context) {
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      throw new StockPreparationApplyWriterError(`${context} must not include machine write-back field ${field}`, {
+        field,
+        context,
+      })
+    }
+  }
+}
+
+// The PR-8 one-re-read band must never contain a machine write-back column: if it did, a write-back landing
+// between plan and apply would stop the whole pull with `machine_columns_moved` instead of sending the patch
+// once more. The band is derived from the planner's writable band, which already excludes these ids; this
+// makes that a checked property rather than an inherited one.
+function assertWrittenBandExcludesMachineWriteback(band) {
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (band.includes(field)) {
+      throw new StockPreparationApplyWriterError(`the plugin-written band must not include machine write-back field ${field}`, {
+        field,
+      })
+    }
+  }
+  return band
 }
 
 // The per-row lookup, unchanged: ONE key, `LIMIT 2` so that "more than one row carries this key"
@@ -611,7 +648,21 @@ async function callFencedRecordsApi(operation, writeFence, callback) {
   }
 }
 
-async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index }) {
+// 批次标识 BI-1b (design §3.4, G2): a failed allocation STOPS THE RUN (`error.stopsRun`, the PR-8 flag and loop break),
+// never a per-row failure that lets the loop continue into the next create. INACTIVE decisions are emitted after every
+// ADD, so a stop at the first create runs none of them: batch-1 rows are never set 有效=否 without their copies. A typed
+// refusal keeps its own status and code (409 INSTALL_IN_PROGRESS / CONFLICT / EXECUTION_CLOSED / NOT_READY / LEASE_LOST,
+// 503 STORE_FAILED); anything untyped is the ledger's 503. `partial` is decided by the caller (rows an earlier decision
+// of this run wrote).
+function pullBatchAllocationStop(error) {
+  const typed = error && Number.isInteger(error.status) && error.status >= 400 && typeof error.code === 'string'
+    ? error
+    : new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STORE_FAILED, 'the pull-batch ledger could not open or join this pull\'s batch; nothing more was written', { operation: 'allocate', partial: false })
+  typed.stopsRun = true
+  return typed
+}
+
+async function applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, pullBatch }) {
   const key = decisionKey(decision, target)
   // 人工补充行 B1 (ADR §5.2): an ADD never mints a key in the reserved `manual:` namespace (a PLM key starts with `{`,
   // so only a defect or a forged plan gets here). Refused HERE, right after the key is taken and before any lookup or
@@ -627,6 +678,7 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
   let record = copyPayload(decision.record, 'decision.record')
   if (!Object.prototype.hasOwnProperty.call(record, target.keyField)) record[target.keyField] = key
   assertNoHumanFields(record, 'add record', humanFields)
+  assertNoMachineWritebackFields(record, 'add record')
   record = normalizePayloadForTemplate(record, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
@@ -643,14 +695,20 @@ async function applyAddDecision({ recordsApi, target, decision, humanFields, tem
     return { status: 'updated', recordId }
   }
 
+  // 批次标识 BI-1b (design §3.4; E10 §4.5): the CREATE leg alone stamps — the patch leg above writes NEITHER band cell.
+  // The batch is allocated (lazily, once per run) after the lookup found no row and BEFORE the fence CAS and the host
+  // write, so no row can carry a label whose ledger row and execution link are not already committed. The two cells
+  // join the payload AFTER the logical->physical mapping, under their physical ids (never through target.fieldIdMap).
+  const pullBatchCells = pullBatch ? await pullBatch.cellsFor(key) : null
   await fenceBeforeWrite(writeFence, { index, decision: decision.decision, operation: 'createRecord' })
   const created = await callFencedRecordsApi('createRecord', writeFence, () => recordsApi.createRecord({
     sheetId: target.sheetId,
-    data: mapRecordFields(record, target.fieldIdMap),
+    data: pullBatchCells ? { ...mapRecordFields(record, target.fieldIdMap), ...pullBatchCells } : mapRecordFields(record, target.fieldIdMap),
     ...hostFenceInput(writeFence),
   }))
   const recordId = created && created.id
   rememberWrittenRow(keyIndex, key, recordId)
+  if (pullBatchCells) pullBatch.stamped += 1
   return { status: 'created', recordId }
 }
 
@@ -694,6 +752,42 @@ const WRITER_STOP_REASONS = Object.freeze([
 function isRecordVersionConflict(error) {
   if (!error) return false
   return error.code === 'VERSION_CONFLICT' || error.name === 'MultitableRecordVersionConflictError'
+}
+
+// Batch-refresh step 6a-1 (S6-1, design §3.3 / RR G8; rebaseline S6-1 (2)): THE WRITER-SCOPED PRE-IO MARKER. The writer
+// sets `error.writerPhase = 'pre_io'` (and `error.writerPreIoReason`, one of the closed list below) on EXACTLY the
+// refusals it raises before ANY record IO of the run, at their call sites in applyStockPreparationPlan, and nowhere
+// else: never on a stop inside the loop (`writerStop`, a fence stop, a pull-batch allocation stop) and never on
+// `metadata_scope_incomplete`. The governed apply's best-effort failed finish self-verifies a run ONLY on this marker
+// (zero writes, zero attempts are then provable) — never on `details.partial === false`, which `writerStop` and the lock
+// also set with other meanings. The zero-IO refusals at the very top of the writer (permission, plan shape, the first
+// suspension check, the target, the expected-records map) are deliberately UNMARKED: leaving a refusal unmarked is fail
+// safe (the run stays recoverable instead of self-verified).
+const WRITER_PRE_IO_REASONS = Object.freeze([
+  // 批次标识 (R-65): the stamp admission — the writer's ONE copy (admittedPullBatchStampOf, which
+  // assertWriterAdmitsPullBatchStamp also runs), 500 STAMP_INVALID, before the fence refusal below.
+  'pull_batch_stamp_admission',
+  'write_fence_required',
+  // PR-3a: the governance tripwire (assertWriterAdmitsPlan: its suspension re-check and the four governance reasons).
+  'governance_tripwire',
+  'host_fence_unsupported',
+])
+
+function markWriterPreIo(error, reason) {
+  if (!WRITER_PRE_IO_REASONS.includes(reason)) throw new Error(`markWriterPreIo: ${reason} is not a writer pre-IO reason`)
+  if (error && typeof error === 'object') {
+    error.writerPhase = 'pre_io'
+    error.writerPreIoReason = reason
+  }
+  return error
+}
+
+function preIo(reason, fn) {
+  try {
+    return fn()
+  } catch (error) {
+    throw markWriterPreIo(error, reason)
+  }
 }
 
 function writerStop(reason, decision) {
@@ -802,6 +896,7 @@ async function applyPatchDecision({ recordsApi, target, decision, humanFields, t
   const key = decisionKey(decision, target)
   let patch = copyPayload(decision.patch, 'decision.patch')
   assertNoHumanFields(patch, `${decision.decision} patch`, humanFields)
+  assertNoMachineWritebackFields(patch, `${decision.decision} patch`)
   patch = normalizePayloadForTemplate(patch, templateFields)
 
   const existing = await findExistingRecord(recordsApi, target, key, keyIndex)
@@ -1006,10 +1101,14 @@ async function applyStockPreparationPlan(input = {}) {
   const humanFields = ownership.humanPreservedFieldIds
   // PR-8: the columns THE PLUGIN WRITES (the pack-aware plm_system band + the RUN stamps), from the SAME derivation
   // as the human wall above — what the one-re-read rule compares (see patchWithVersionFence).
-  const writtenBand = Array.from(new Set([...ownership.plmWritableFieldIds, ...RUN_FIELD_IDS])).sort()
+  const writtenBand = assertWrittenBandExcludesMachineWriteback(
+    Array.from(new Set([...ownership.plmWritableFieldIds, ...RUN_FIELD_IDS])).sort(),
+  )
   // PR-8: optional; validated before any IO (a malformed map is a caller defect, never a skipped fence).
   const expectedRecords = normalizeExpectedRecords(input.expectedRecords)
   const templateFields = fieldMapForTemplate(template)
+  // 批次标识 BI-1b: the optional side input, validated BEFORE any IO (500 STAMP_INVALID). Absent => byte-identical.
+  const pullBatch = preIo('pull_batch_stamp_admission', () => pullBatchRunOf(input.pullBatchStamp, { plan, target, writeFence: input.writeFence && typeof input.writeFence.beforeWrite === 'function' ? input.writeFence : null }))
   const counts = {
     created: 0,
     updated: 0,
@@ -1027,13 +1126,13 @@ async function applyStockPreparationPlan(input = {}) {
   // production stock-prep write without the lease fence is refused here (501), whatever the caller did
   // before. Direct callers (writer tests, fakes) that pass neither keep the unfenced behaviour.
   if (input.writeFenceRequired === true && !writeFence) {
-    throw new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' })
+    throw markWriterPreIo(new StockPreparationProjectWriteLockError(501, PROJECT_WRITE_ERROR_CODES.UNAVAILABLE, 'stock-prep writes require the sheet write fence; nothing is written without it', { reason: 'write_fence_required' }), 'write_fence_required')
   }
   // PR-3a: the governance tripwire (see assertWriterAdmitsPlan). Runs AFTER the refusal above on purpose —
   // check (iii) reads `writeFence.generationToken`, and only that refusal guarantees a fence here.
-  if (input.writeFenceRequired === true) assertWriterAdmitsPlan({ plan, governance: input.governance, writeFence })
+  if (input.writeFenceRequired === true) preIo('governance_tripwire', () => assertWriterAdmitsPlan({ plan, governance: input.governance, writeFence }))
   // A fenced run is ALSO host-fenced on every record write; fail closed before any IO otherwise.
-  assertHostFencedWriteSupported(recordsApi, writeFence)
+  preIo('host_fence_unsupported', () => assertHostFencedWriteSupported(recordsApi, writeFence))
 
   // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
   // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
@@ -1064,7 +1163,7 @@ async function applyStockPreparationPlan(input = {}) {
           continue
         }
         if (decision.decision === DECISIONS.ADD) {
-          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index })
+          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields, keyIndex, writeFence, index, pullBatch })
           incrementCounts(counts, decision.decision, applied.status)
           results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
           continue
@@ -1195,7 +1294,94 @@ async function applyStockPreparationPlan(input = {}) {
     // Present ONLY on a fenced stop, so an unfenced (or uninterrupted) run's result is byte-identical.
     // `error` is the fence's own typed error: the caller rethrows it with the partial counts attached.
     ...(abort ? { abort: { index: abort.index, code: abort.error.code, error: abort.error } } : {}),
+    // 批次标识 BI-1b: present ONLY when the caller handed a stamp — whether this run allocated a batch, and how many of its
+    // creates were CONFIRMED carrying the label (the link's count, set by value at finish). Values-free.
+    ...(pullBatch ? { pullBatch: pullBatch.summary() } : {}),
   }
+}
+
+/**
+ * 批次标识 BI-1b / F-7 (R-65): the ZERO-IO checks the writer applies to its `pullBatchStamp` side input — the stamp's
+ * own shape (normalizePullBatchStamp against the target's fieldIdMap) and the ADD coverage below. null without a
+ * stamp. ONE copy: pullBatchRunOf runs it, and the large chunk gate pre-runs it (assertWriterAdmitsPullBatchStamp)
+ * BEFORE the job turns `running`, so a stamp the writer would refuse can never strand a running job (F-7).
+ */
+function admittedPullBatchStampOf(value, { plan, target }) {
+  const stamp = normalizePullBatchStamp(value, { fieldIdMap: target.fieldIdMap })
+  if (!stamp) return null
+  for (const entry of plan.decisions) {
+    if (!entry || entry.decision !== DECISIONS.ADD) continue
+    let addKey = null
+    try {
+      addKey = decisionKey(entry, target)
+    } catch {
+      continue
+    }
+    if (!stamp.firstPullBatchByKey.has(addKey)) {
+      throw new StockPreparationPullBatchError(PULL_BATCH_ERROR_CODES.STAMP_INVALID, 'the pull-batch stamp does not cover every ADD of this plan; nothing was written', { field: 'pullBatchStamp.firstPullBatchByKey', partial: false })
+    }
+  }
+  return stamp
+}
+
+/**
+ * 批次标识 F-7 (R-65): the writer's stamp checks, run by a caller BEFORE it commits to a write — the large chunk gate,
+ * before the job turns `running` (the assertWriterAdmitsPlan rule: anything the writer would refuse is refused before
+ * the job runs). The plan and the target are normalized exactly as applyStockPreparationPlan normalizes them. Throws
+ * what the writer would throw (500 STAMP_INVALID for the stamp); answers nothing. Zero IO.
+ */
+function assertWriterAdmitsPullBatchStamp({ pullBatchStamp, plan, target } = {}) {
+  admittedPullBatchStampOf(pullBatchStamp, { plan: normalizePlan(plan), target: normalizeTarget(target) })
+}
+
+/**
+ * 批次标识 BI-1b (design §3.4): the per-run stamping state. null without a stamp. Every ADD decision the plan can key
+ * must have its 首次批次 entry (null = "this batch"): a map built from another plan is a defect, refused before the
+ * first write (500 STAMP_INVALID) rather than guessed per row; a decision without a usable key fails in the loop as
+ * today. `ensure()` is memoized (the first create allocates or joins; every later create reuses the answer) and runs
+ * the allocation INSIDE the guard's host-write bracket (P-5: the ledger transaction's holder assert holds the lease
+ * row FOR UPDATE; the heartbeat must not queue behind it — the N6 rule).
+ */
+function pullBatchRunOf(value, { plan, target, writeFence }) {
+  const stamp = admittedPullBatchStampOf(value, { plan, target })
+  if (!stamp) return null
+  let allocation = null
+  const run = {
+    stamped: 0,
+    async ensure() {
+      if (allocation) return allocation
+      let answer
+      try {
+        answer = await (writeFence && typeof writeFence.withHostWrite === 'function' ? writeFence.withHostWrite(() => stamp.allocate()) : stamp.allocate())
+      } catch (error) {
+        throw pullBatchAllocationStop(error)
+      }
+      try {
+        allocation = assertAllocatedBatch(answer)
+      } catch (error) {
+        throw pullBatchAllocationStop(error)
+      }
+      return allocation
+    },
+    async cellsFor(key) {
+      const batch = await run.ensure()
+      const first = stamp.firstPullBatchByKey.get(key)
+      return {
+        [stamp.fieldIds.pullBatch]: batch.label,
+        [stamp.fieldIds.firstPullBatch]: first === undefined || first === null ? batch.label : first,
+      }
+    },
+    summary() {
+      return Object.freeze({
+        allocated: Boolean(allocation),
+        batchNo: allocation ? allocation.batchNo : null,
+        label: allocation ? allocation.label : null,
+        joined: Boolean(allocation && allocation.joined === true),
+        stampedRowCount: run.stamped,
+      })
+    },
+  }
+  return run
 }
 
 // Review round 2 (F1): how many HOST WRITES this run issued — confirmed ones (`written`) plus every row
@@ -1232,16 +1418,25 @@ module.exports = {
   // PR-8: the version fence's stop code (the lanes / store / decisions spell the same literal).
   CHANGE_PLAN_STALE_CODE,
   WRITER_STOP_REASONS,
+  // Step 6a-1 (R-91): the closed list of the refusals the writer marks `writerPhase === 'pre_io'`.
+  WRITER_PRE_IO_REASONS,
   StockPreparationApplyWriterError,
   applyStockPreparationPlan,
   assertHostFencedWriteSupported,
   // PR-3a (AW-2): the large chunk pre-runs it BEFORE the job turns `running`, so no writer refusal can fire
   // after the job is stored as running (a throw there would strand it — F-7 class).
   assertWriterAdmitsPlan,
+  // 批次标识 F-7 (R-65): the large chunk gate pre-runs the writer's stamp checks before the job turns `running`.
+  assertWriterAdmitsPullBatchStamp,
   summarizeApplyResultForEvidence,
   countAttemptedHostWrites,
   __internals: {
     assertNoHumanFields,
+    assertNoMachineWritebackFields,
+    assertWrittenBandExcludesMachineWriteback,
+    // Step 6a-1: the pre-IO marker (XS-04).
+    markWriterPreIo,
+    pullBatchAllocationStop,
     isRecordVersionConflict,
     logicalRowOf,
     normalizeExpectedRecords,

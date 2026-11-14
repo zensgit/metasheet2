@@ -23,6 +23,25 @@
 import { apiFetch } from '../../../utils/api'
 import type { IntegrationScope } from '../workbench'
 import { parseStockPreparationConfirmResponse } from './confirmApi'
+// PR-9: the change-plan calls' shapes (type-only — refreshChangePlan.ts imports this module, never the other way at runtime).
+import type {
+  StockPrepChangePlanCalls,
+  StockPrepChangePlanConfirmResult,
+  StockPrepChangePlanPage,
+  StockPrepChangeReviewResult,
+} from './refreshChangePlan'
+// S6-3: the recovery card's three calls (type-only — refreshRecovery.ts never imports this module at runtime).
+import type {
+  StockPrepCloseUnverifiedCloseBody,
+  StockPrepCloseUnverifiedInspectBody,
+  StockPrepRecoverCloseBody,
+  StockPrepRecoverVerifyBody,
+  StockPrepRecoveryCalls,
+  StockPrepRecoveryCloseAnswer,
+  StockPrepRecoveryInspectAnswer,
+  StockPrepRecoveryVerifyAnswer,
+  StockPrepRefreshExecutionList,
+} from './refreshRecovery'
 
 const BASE = '/api/integration/stock-preparation/projects'
 
@@ -145,6 +164,8 @@ export interface StockPrepRefreshPageSummary {
 
 export interface StockPrepRefreshHoldPage {
   refresh: StockPrepRefreshPageSummary
+  /** The server's hold-set digest (decisions.cjs `listHolds`); PR-9 cross-checks it against the change plan's. */
+  holdSetFingerprint?: string | null
   page: { holds: StockPrepRefreshHold[]; next: string | null; limit: number; pairLimit: number }
   /** Null for a project the batch refresh does not govern (the server issues no receipt for it). */
   readReceipt: StockPrepRefreshReceipt | null
@@ -196,7 +217,17 @@ export interface StockPrepRefreshEndBody {
 
 export type StockPrepRefreshEndOutcome = 'release_to_normal_refresh' | 'escalate_special_repair'
 
-export interface StockPrepRefreshQueueApi {
+/**
+ * PR-9: the three change-plan calls (refreshChangePlan.ts) ride on this same api, so the page keeps one test seam:
+ * `readChangePlan` (GET change-plans/current), `confirmChangePlan` (POST change-plans/confirm) and
+ * `completeChangeReview` (POST change-reviews/complete).
+ */
+/**
+ * S6-3 (R-91): plus the recovery card's three calls (refreshRecovery.ts): `listExecutions` (GET refresh/executions),
+ * `recoverExecution` (POST …/recover: verify / close) and `closeExecutionUnverified` (POST …/close-unverified: inspect /
+ * close, ADMIN).
+ */
+export interface StockPrepRefreshQueueApi extends StockPrepChangePlanCalls, StockPrepRecoveryCalls {
   listHolds(projectNo: string, query?: StockPrepRefreshHoldsQuery): Promise<StockPrepRefreshHoldPage>
   readEvidence(projectNo: string, holdId: string): Promise<unknown>
   readContinuation(projectNo: string, continuationId: string): Promise<StockPrepRefreshContinuationDetail>
@@ -273,6 +304,36 @@ export function createStockPrepRefreshQueueApi(scope: IntegrationScope = {}): St
     },
     async end(projectNo, continuationId, body) {
       return postJson(`${projectPath(projectNo)}/continuations/${encodeURIComponent(continuationId)}/end`, withTenant(scope, { ...body }))
+    },
+    // PR-9 (refreshChangePlan.ts header): `recordLimit` is NEVER sent — the server default (100) keeps the written
+    // plan's page count, and so its receipt entry, stable across reads.
+    async readChangePlan(projectNo, query = {}) {
+      const cursor = query.recordCursor
+      const suffix = querySuffix({
+        tenantId: tenantOf(scope),
+        recordCursor: typeof cursor === 'number' && Number.isInteger(cursor) && cursor > 0 ? cursor : null,
+        receipt: query.receipt ?? null,
+      })
+      const response = await apiFetch(`${projectPath(projectNo)}/change-plans/current${suffix}`)
+      return parseStockPreparationConfirmResponse<StockPrepChangePlanPage>(response)
+    },
+    async confirmChangePlan(projectNo, body): Promise<StockPrepChangePlanConfirmResult> {
+      return postJson(`${projectPath(projectNo)}/change-plans/confirm`, withTenant(scope, { ...body }))
+    },
+    async completeChangeReview(projectNo, body): Promise<StockPrepChangeReviewResult> {
+      return postJson(`${projectPath(projectNo)}/change-reviews/complete`, withTenant(scope, { ...body }))
+    },
+    // S6-3 (refreshRecovery.ts header): `limit` is NEVER sent (the server default, 20); the cursor is the server's own.
+    async listExecutions(projectNo, query = {}): Promise<StockPrepRefreshExecutionList> {
+      const suffix = querySuffix({ tenantId: tenantOf(scope), cursor: query.cursor ?? null })
+      const response = await apiFetch(`${projectPath(projectNo)}/executions${suffix}`)
+      return parseStockPreparationConfirmResponse<StockPrepRefreshExecutionList>(response)
+    },
+    async recoverExecution(projectNo, executionId, body: StockPrepRecoverVerifyBody | StockPrepRecoverCloseBody): Promise<StockPrepRecoveryVerifyAnswer | StockPrepRecoveryCloseAnswer> {
+      return postJson(`${projectPath(projectNo)}/executions/${encodeURIComponent(executionId)}/recover`, withTenant(scope, { ...body }))
+    },
+    async closeExecutionUnverified(projectNo, executionId, body: StockPrepCloseUnverifiedInspectBody | StockPrepCloseUnverifiedCloseBody): Promise<StockPrepRecoveryInspectAnswer | StockPrepRecoveryCloseAnswer> {
+      return postJson(`${projectPath(projectNo)}/executions/${encodeURIComponent(executionId)}/close-unverified`, withTenant(scope, { ...body }))
     },
   }
 }
@@ -405,6 +466,10 @@ export const STOCK_PREP_REFRESH_REREAD_CODES: readonly string[] = Object.freeze(
   'STOCK_PREP_REFRESH_HOLD_NOT_FOUND',
   'STOCK_PREP_CONTINUATION_CONFIRM_STALE',
   'STOCK_PREP_CONTINUATION_NOT_FOUND',
+  // PR-9: the change plan moved on (a newer computation, a replaced or absorbed plan) — re-read the page.
+  'STOCK_PREP_CHANGE_PLAN_STALE',
+  'STOCK_PREP_CHANGE_REVIEW_STALE',
+  'STOCK_PREP_CHANGE_PLAN_NOT_FOUND',
 ])
 
 /** The read-receipt reasons that mean "the item changed — read it again" rather than "read the rest". */
@@ -413,7 +478,7 @@ export const STOCK_PREP_REFRESH_REREAD_RECEIPT_REASONS: readonly string[] = Obje
 export function stockPrepRefreshNeedsReread(code: string | null | undefined, reason: string | null | undefined): boolean {
   if (typeof code !== 'string') return false
   if (STOCK_PREP_REFRESH_REREAD_CODES.includes(code)) return true
-  return code === 'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE'
+  return (code === 'STOCK_PREP_CONTINUATION_CONFIRM_READ_RECEIPT_INCOMPLETE' || code === 'STOCK_PREP_CHANGE_REVIEW_READ_RECEIPT_INCOMPLETE')
     && typeof reason === 'string'
     && STOCK_PREP_REFRESH_REREAD_RECEIPT_REASONS.includes(reason)
 }

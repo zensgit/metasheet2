@@ -18,6 +18,8 @@
  *                                (manifest v2; same sink the eventBus leg subscribes)
  *   - dingtalk-todo-mirror     → dingtalk-todo-mirror-service applyTodoMirrorTaskCreated / ...Completion
  *                                (manifest v3; same sink the eventBus leg subscribes, flag-gated inside)
+ *   - integration-run-trigger  → AutomationService.handleIntegrationRunFinishedDelivery
+ *                                (manifest v4, R-69 1c; the in-process leg is the publish sink, flag-gated inside)
  *
  * A handler throwing is mapped by the activation registry to a retryable `adapter_error` (the dispatcher
  * reschedules with backoff, bounded → dead_letter) — EXCEPT a `PermanentDeliveryFailure`, which dead-letters.
@@ -53,6 +55,8 @@ export interface DurableDeliveryServices {
     handleApprovalCompletionTrigger(event: ApprovalCompletionEventV1): Promise<void>
     handleApprovalTaskCreatedTrigger(event: ApprovalTaskCreatedEventV1): Promise<void>
     handleEvent(eventType: string, payload: AutomationEventPayload): Promise<void>
+    /** Manifest v4 (R-69 1c): the durable leg of integration.run_finished — re-validates and dispatches. */
+    handleIntegrationRunFinishedDelivery(payload: unknown): Promise<void>
   }
   projectionService: {
     reconcile(instanceId: string): Promise<unknown>
@@ -167,6 +171,15 @@ export function buildDurableConsumerHandlers(services: DurableDeliveryServices):
         return
       }
       throw new Error(`dingtalk-todo-mirror: unroutable event type "${event.eventType}"`)
+    },
+    'integration-run-trigger': async (event: ClaimedConsumer) => {
+      // Manifest v4 (R-69 1c). Only `integration.run_finished` is routed here; anything else is a producer
+      // bug and THROWS (retry / dead-letter ceiling), never a silent drop. The per-rule exactly-once claim
+      // (`integration.run_finished:<eventId>`) makes a redelivery a no-op for every rule that already ran.
+      if (event.eventType !== 'integration.run_finished') {
+        throw new Error(`integration-run-trigger: unroutable event type "${event.eventType}"`)
+      }
+      await automationService.handleIntegrationRunFinishedDelivery(event.payload)
     },
   }
 }

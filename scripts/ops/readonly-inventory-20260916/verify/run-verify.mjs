@@ -789,6 +789,85 @@ export function verifyButtonWebhookTotals() {
   }
 }
 
+// ── 07 (2026-11-06): row counts of the 11 legacy BPMN tables ────────────────
+// 07-bpmn-table-totals.sql prints one row per bpmn_* table (name + count(*)),
+// then its INVENTORY_RESULT line, plus a 12th row for the optional legacy-049
+// bpmn_deployments when it exists. No other fixture here creates a bpmn_*
+// table, so 07 runs on its own fixture (fixture-bpmn-tables.sql), on that
+// fixture without the optional table, with one core table dropped, on an
+// empty schema, as a role that can see only one table, and with a write
+// injected after its SET line.
+export const FILE_07 = '07-bpmn-table-totals.sql'
+export const BPMN_07_HEADER = 'table_name|row_count'
+export const BPMN_TABLES_FIXTURE = 'fixture-bpmn-tables.sql'
+
+/** Run 07 the way the runbook says; return its count rows (null when skipped), result line and stdout. */
+export function runBpmnTableTotals(schema, extraVars = []) {
+  const o = runPackFile(FILE_07, schema, extraVars)
+  assert.equal(o.status, 0, `07 exited ${o.status}: ${o.stderr}`)
+  const found = parseBlocks(o.stdout).filter(b => b.header === BPMN_07_HEADER)
+  assert.ok(found.length <= 1, '07 printed its count table more than once')
+  return { rows: found.length ? found[0].rows : null, result: resultLine(o.stdout, FILE_07), stdout: o.stdout }
+}
+
+/**
+ * Run 07 as a fresh LOGIN role that holds USAGE on the schema and SELECT on
+ * `tables` only. information_schema hides the other tables from it, so the
+ * probe must come up short (incomplete), never print a zero for a table the
+ * role could not read. The role is dropped afterwards.
+ */
+export function runBpmnTableTotalsAsLimitedRole(schema, tables) {
+  const role = `inv_verify_bpmn_${Math.random().toString(36).slice(2, 8)}`
+  exec(`CREATE ROLE "${role}" LOGIN PASSWORD 'fake-verify-only'`)
+  try {
+    exec(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`)
+    for (const t of tables) exec(`GRANT SELECT ON "${schema}".${t} TO "${role}"`)
+    const url = new URL(process.env.DATABASE_URL)
+    url.username = role
+    url.password = 'fake-verify-only'
+    const r = spawnSync(PSQL, [
+      '-d', url.toString(), '--no-psqlrc', '-A',
+      '-v', `schema=${schema}`, '-f', path.join(PACK, FILE_07),
+    ], { encoding: 'utf8', env: { ...process.env, PGCLIENTENCODING: 'UTF8' } })
+    const stdout = r.stdout || ''
+    const found = parseBlocks(stdout).filter(b => b.header === BPMN_07_HEADER)
+    return {
+      exit: r.status,
+      rows: found.length ? found[0].rows : null,
+      result: resultLine(stdout, FILE_07),
+      stdout,
+      stderr: r.stderr || '',
+    }
+  } finally {
+    for (const t of tables) { try { exec(`REVOKE SELECT ON "${schema}".${t} FROM "${role}"`) } catch {} }
+    try { exec(`REVOKE USAGE ON SCHEMA "${schema}" FROM "${role}"`) } catch {}
+    try { exec(`DROP ROLE IF EXISTS "${role}"`) } catch {}
+  }
+}
+
+export const checkBpmnTableTotalsReadOnly = schema =>
+  checkReadOnlyInOneTransaction(schema, FILE_07, 'bpmn_process_definitions', 'd1')
+
+/** Everything the 07 tests check, in one report (used by the CLI entry point below). */
+export function verifyBpmnTableTotals() {
+  return {
+    tables: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, runBpmnTableTotals),
+    oneTransaction: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => runBpmnTableTotals(s, ['-1'])),
+    optionalAbsent: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => {
+      exec(`DROP TABLE "${s}".bpmn_deployments`)
+      return runBpmnTableTotals(s)
+    }),
+    oneMissing: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, s => {
+      exec(`DROP TABLE "${s}".bpmn_signal_events`)
+      return runBpmnTableTotals(s)
+    }),
+    empty: withFixture('inventory_fixture_empty', null, runBpmnTableTotals),
+    limitedRole: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE,
+      s => runBpmnTableTotalsAsLimitedRole(s, ['bpmn_process_definitions'])),
+    readOnly: withFixture('inventory_fixture_bpmn', BPMN_TABLES_FIXTURE, checkBpmnTableTotalsReadOnly),
+  }
+}
+
 export async function verifyAll() {
   const modern = createFixture('inventory_fixture_modern', 'fixture-modern.sql')
   const legacy = createFixture('inventory_fixture_legacy', 'fixture-legacy.sql')
@@ -819,6 +898,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   verifyAll().then(r => {
     r.webhookTotals05 = verifyWebhookTotals()
     r.buttonWebhookTotals06 = verifyButtonWebhookTotals()
+    r.bpmnTableTotals07 = verifyBpmnTableTotals()
     console.log(JSON.stringify(r, null, 2))
     console.log('\nALL CHECKS PASSED (synthetic fixtures only; nothing was run against a real database).')
   }).catch(e => {

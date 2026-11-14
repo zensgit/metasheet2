@@ -1149,3 +1149,115 @@ describe('keyboard during an input-method composition', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
+
+// An attachment write names the record it was made on, through the inspector's relay, because the
+// drawer can move to another record before the write ends. Every other patch keeps its two arguments.
+describe('inspector patch relay: the record an attachment write was made on', () => {
+  const REC_A = record('rec_A', { fld_title: 'Alpha', fld_notes: '', fld_files: ['att_a1'] })
+  const REC_B = record('rec_B', { fld_title: 'Beta', fld_notes: '', fld_files: ['att_b1'] })
+  const NEW_ATTACHMENT = { id: 'att_new', filename: 'new.pdf', mimeType: 'application/pdf', size: 1, url: '/a/att_new', thumbnailUrl: null, uploadedAt: '' }
+
+  function mountAB(extra: PanelProps = {}) {
+    const onPatch = vi.fn()
+    let settle!: (value: unknown) => void
+    const uploadFn = vi.fn(() => new Promise((resolve) => { settle = resolve }))
+    let settleDelete!: () => void
+    const deleteAttachmentFn = vi.fn(() => new Promise<void>((resolve) => { settleDelete = resolve }))
+    const harness = mountInspector({
+      record: REC_A,
+      fields: [F_TITLE, F_NOTES, F_FILES],
+      recordIds: ['rec_A', 'rec_B'],
+      uploadFn,
+      deleteAttachmentFn,
+      onPatch,
+      ...extra,
+    })
+    return { ...harness, onPatch, uploadFn, settle: (value: unknown) => settle(value), deleteAttachmentFn, settleDelete: () => settleDelete() }
+  }
+
+  function pickFile(input: HTMLInputElement) {
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'new.pdf', { type: 'application/pdf' })], configurable: true })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  it('details tab: an upload that ends after the switch to rec_B reaches onPatch as rec_A\'s write', async () => {
+    const { container, set, onPatch, uploadFn, settle } = mountAB()
+    await flushUi()
+    pickFile(container.querySelector<HTMLInputElement>('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]')!)
+    await flushUi()
+    expect(uploadFn).toHaveBeenCalledTimes(1)
+    set({ record: REC_B })
+    await flushUi()
+    settle(NEW_ATTACHMENT)
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
+  })
+
+  it('attachments tab: the same upload, switched to rec_B before it ends, reaches onPatch as rec_A\'s write', async () => {
+    const { container, set, onPatch, uploadFn, settle } = mountAB()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    pickFile(container.querySelector<HTMLInputElement>('.meta-record-attachments-panel__file-input')!)
+    await flushUi()
+    expect(uploadFn).toHaveBeenCalledTimes(1)
+    set({ record: REC_B })
+    await flushUi()
+    // the tab stays open across the switch, so the panel is still mounted when the upload ends
+    expect(container.querySelector('.meta-record-attachments-panel')).not.toBeNull()
+    settle(NEW_ATTACHMENT)
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
+  })
+
+  it('details tab: a remove that ends after the switch to rec_B reaches onPatch with all four arguments', async () => {
+    const { container, set, onPatch, deleteAttachmentFn, settleDelete } = mountAB()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__field[data-field-id="fld_files"] .meta-attachment-list__remove')!.click()
+    await flushUi()
+    expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    set({ record: REC_B })
+    await flushUi()
+    settleDelete()
+    await flushUi()
+    // The removed id comes through the relay too, so the workbench can take it out of rec_A's list as it is now.
+    expect(onPatch.mock.calls).toEqual([['fld_files', [], 'rec_A', ['att_a1']]])
+  })
+
+  it('attachments tab: the same remove, switched to rec_B before it ends, reaches onPatch with all four arguments', async () => {
+    const { container, set, onPatch, deleteAttachmentFn, settleDelete } = mountAB()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    container.querySelector<HTMLButtonElement>('.meta-record-attachments-panel .meta-attachment-list__remove')!.click()
+    await flushUi()
+    expect(deleteAttachmentFn).toHaveBeenCalledWith('att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+    set({ record: REC_B })
+    await flushUi()
+    settleDelete()
+    await flushUi()
+    expect(onPatch.mock.calls).toEqual([['fld_files', [], 'rec_A', ['att_a1']]])
+  })
+
+  it('a text-field edit in the details tab still reaches onPatch with exactly two arguments', async () => {
+    const { container, onPatch } = mountAB()
+    await flushUi()
+    const textarea = container.querySelector<HTMLTextAreaElement>('#drawer_field_fld_notes')!
+    textarea.value = 'typed'
+    textarea.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledWith('fld_notes', 'typed')
+    expect(onPatch.mock.calls[0]).toHaveLength(2)
+  })
+
+  it('the title input\'s patch still has exactly two arguments', async () => {
+    const { container, onPatch } = mountAB()
+    await flushUi()
+    const title = container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    title.value = 'Gamma'
+    title.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(onPatch).toHaveBeenCalledWith('fld_title', 'Gamma')
+    expect(onPatch.mock.calls[0]).toHaveLength(2)
+  })
+})

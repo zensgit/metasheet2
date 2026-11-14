@@ -957,6 +957,28 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # token or of the other (they diverge right after `StockPreparationRefresh`), and each matches exactly one
 # file on disk. Case-insensitive order: …Rail < …RefreshQueue < …RefreshState < …RouteFailedPlain.
 #
+# 备料分批拉取第一期 step 5 PR-9 (batch-refresh, register R-77, 2026-11-06): ONE token added,
+# `StockPreparationRefreshChangePlan` — the NEW spec (apps/web/tests/StockPreparationRefreshChangePlan.spec.ts) for
+# 「拉取待确认」's 「变更计划」 / 「变更复核」 sections (fail-closed reads, allow-listed bodies parsed out of the plugin
+# source and fed to its real normalizers, the read receipt over every named hold and every written-plan page, C11 /
+# C12, values staying in the page) and CP-ALIGN through the real shell for the three change-plan controls the
+# permission matrix defers to. Substring collision checked in BOTH directions: no existing token is a substring of it
+# (`StockPreparationRefreshQueue` / `StockPreparationRefreshState` diverge right after `StockPreparationRefresh`,
+# `StockPreparationRail` right after `StockPreparationR`), it is a substring of no token, and it matches exactly one
+# file on disk. Case-insensitive order: …Rail < …RefreshChangePlan < …RefreshQueue.
+#
+# 备料分批拉取第一期 step 6a-3 (batch-refresh S6-3, register R-91, 2026-11-10): ONE token added,
+# `StockPreparationRefreshRecovery` — the NEW spec (apps/web/tests/StockPreparationRefreshRecovery.spec.ts) for
+# 「拉取待确认」's recovery card (dormancy outside 失败待恢复, verify / paged pending list / close echoing the last digest,
+# UNPROVABLE and the admin's runbook close, allow-listed bodies parsed out of the plugin source and fed to its real
+# normalizers, N-SWITCH by key presence, values staying in the page, the live-vocabulary words) and RC-ALIGN through the
+# real shell for the three recovery controls the permission matrix defers to. Substring collision checked in BOTH
+# directions: no existing token is a substring of it (`StockPreparationRefreshChangePlan` / `StockPreparationRefreshQueue`
+# / `StockPreparationRefreshState` diverge right after `StockPreparationRefresh`, `StockPreparationRail` right after
+# `StockPreparationR`), it is a substring of no token, and it matches exactly one test file on disk (the component
+# StockPreparationRefreshRecoveryCard.vue is not a test file). Case-insensitive order: …RefreshQueue <
+# …RefreshRecovery < …RefreshState.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1525,7 +1547,33 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# 批次标识 BI-3 (2026-11-08; register R-65): ONE token inserted at its case-insensitive sorted position —
+# `StockPreparationPullBatchLines`, the new pure spec for the pull-batch lines on 项目备料页 and the sync panel
+# (apps/web/tests/StockPreparationPullBatchLines.spec.ts: parse, copy, the live server-list tripwire and the mirror over
+# the real server builders). It sits after `StockPreparationProjectWorkspaceView` and before `StockPreparationRail`
+# (and before BI-7's `StockPreparationPullBatchSettingsPanel`, which neither prefixes nor extends it). It matches
+# exactly one file under apps/web/tests, and a substring-collision check in BOTH directions over every manifest token
+# found none. The board / sync / target / large-BOM cases this PR adds ride the specs already registered here. The
+# manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# 批次标识 BI-7 (register R-65, 2026-11-08): ONE token added, `StockPreparationPullBatchSettingsPanel` — the NEW spec
+# (apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts) for 数据来源与体检's pull-batch settings panel: the
+# vocabulary pinned live against the plugin's pure module and ledger store, the switch-off invisibility (any 404
+# renders nothing, ruling C6), the tenant default save, the per-sheet captured values / locks and their typed-confirm
+# edit, the scope / session straddle, the manifest alignment and the copy. Inserted at its alphabetical position
+# between `StockPreparationProjectWorkspaceView` and `StockPreparationRail`; it matches exactly one spec file, and a
+# substring check in BOTH directions finds no token that contains it or is contained by it (its neighbours diverge
+# right after `StockPreparationP` / `StockPreparation`). The manifest was regenerated with the same command.
+# DingTalk callback guidance (2026-11-13): ONE token added, `dingtalk-auth-callback` — the existing mounted spec of
+# the DingTalk sign-in / bind callback page (fixed guidance by stable code, the fallback for unknown / missing codes,
+# unreadable bodies and network failures, and the code-table key pin mirrored by the backend callback test), which no
+# CI entry ran before. Inserted at its case-insensitive position between `dataSourcesLoadFailedReseal` and
+# `dingtalk-internal-view-link-warnings`; it matches exactly one file under apps/web/tests, and a substring check in
+# BOTH directions over every manifest token and every attendance-web-guard targeted token finds none. The same spec is
+# registered in the domain guard (.github/workflows/attendance-web-guard.yml). The manifest was regenerated with the
+# same command.
 exec npx vitest run \
+  adminAccess.spec.ts \
+  adminAuthorizationConfirm.spec.ts \
   adminPageContentSearch.spec.ts \
   adminUserBatch \
   amountAutoSum \
@@ -1688,6 +1736,7 @@ exec npx vitest run \
   data-sources-api-preview \
   data-sources-ui \
   dataSourcesLoadFailedReseal \
+  dingtalk-auth-callback \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
@@ -1697,6 +1746,7 @@ exec npx vitest run \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \
+  guardPolicy.managementScope.spec.ts \
   integrationErrorCodeLabels \
   IntegrationK3WiseSetupView \
   IntegrationPipelineRunSection \
@@ -1705,6 +1755,7 @@ exec npx vitest run \
   IntegrationWorkbenchView \
   lineDerivation \
   LoginView.spec.ts \
+  managementRouteGuardFailClosed.spec.ts \
   meta-ai-bulk-labels \
   meta-api-error-labels \
   meta-api-token-labels \
@@ -1752,6 +1803,8 @@ exec npx vitest run \
   multitable-api-token-manager \
   multitable-attachment-editor \
   multitable-attachment-list \
+  multitable-automation-integration-preview \
+  multitable-automation-interval-minutes \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
   multitable-automation-rule-editor \
@@ -1834,6 +1887,7 @@ exec npx vitest run \
   multitable-import \
   multitable-import-create-fields-plan \
   multitable-import-modal \
+  multitable-integration-run-finished-trigger \
   multitable-kanban-view \
   multitable-link-picker \
   multitable-linked-record-chip \
@@ -1899,6 +1953,7 @@ exec npx vitest run \
   multitable-richtext-mention \
   multitable-richtext-wiring \
   multitable-rollup-aggregation-fe \
+  multitable-run-integration-job-editor \
   multitable-scoped-permissions \
   multitable-sheet-cursor-state \
   multitable-sheet-permission-manager \
@@ -1939,13 +1994,17 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionChecker.spec.ts \
+  permissionExceptionSources.spec.ts \
   permissionManagementView \
   personal-view-client \
+  platform-shell-nav.spec.ts \
   public-multitable-form \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMemberAuthorization.spec.ts \
   roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \
@@ -1985,8 +2044,12 @@ exec npx vitest run \
   StockPreparationProjectSyncPanel.spec.ts \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
+  StockPreparationPullBatchLines \
+  StockPreparationPullBatchSettingsPanel \
   StockPreparationRail \
+  StockPreparationRefreshChangePlan \
   StockPreparationRefreshQueue \
+  StockPreparationRefreshRecovery \
   StockPreparationRefreshState \
   StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \

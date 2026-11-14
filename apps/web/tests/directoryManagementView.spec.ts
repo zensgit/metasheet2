@@ -227,7 +227,7 @@ function createTestResultPayload(overrides: Record<string, unknown> = {}) {
       summary: {
         code: 'scope_or_root_misconfigured',
         title: '通讯录范围或根部门疑似配置不当',
-        nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+        nextAction: '请按预期的同步范围核对应用通讯录权限范围与根部门 ID；正常的叶子部门或小范围目录也可能出现此结果。本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
       },
       warnings: [
         '根部门 1 未返回任何子部门。',
@@ -546,7 +546,7 @@ describe('DirectoryManagementView', () => {
     [
       'available',
       { success: true, data: { available: true, unavailableReason: null, missingEnv: [] } },
-      '当前钉钉登录：可用。',
+      '登录配置检查：配置检查通过，尚未验证实际扫码、身份关联及账号授权。',
     ],
     [
       'several missing',
@@ -558,27 +558,27 @@ describe('DirectoryManagementView', () => {
           missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'private-secret-value', 'DINGTALK_REDIRECT_URI'],
         },
       },
-      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_REDIRECT_URI；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
+      '登录配置检查：未通过，缺少服务端环境变量 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY）、DINGTALK_REDIRECT_URI；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致。',
     ],
     [
       'older backend without missingEnv',
       { success: true, data: { available: false, unavailableReason: 'missing_client_secret' } },
-      '当前钉钉登录：不可用，缺少服务端环境变量 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）。',
+      '登录配置检查：未通过，缺少服务端环境变量 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET）。',
     ],
     [
       'corp not allowed',
       { success: true, data: { available: false, unavailableReason: 'corp_not_allowed', missingEnv: [], corpId: 'private-corp-value' } },
-      '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
+      '登录配置检查：未通过，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
     ],
     [
       'unknown reason',
       { success: true, data: { available: false, unavailableReason: 'unexpected-private-value' } },
-      '当前钉钉登录：不可用。',
+      '登录配置检查：未通过，服务端钉钉登录当前不可用。',
     ],
     [
       'probe failure',
       { success: false, error: 'private-error-value' },
-      '当前钉钉登录：无法获取状态，请稍后重试。',
+      '登录配置检查：无法获取检查结果，请稍后重试。',
     ],
   ])('#6467 login probe button reports %s', async (_label, probePayload, expected) => {
     apiFetchMock.mockImplementation(async (url: string) => (
@@ -603,6 +603,62 @@ describe('DirectoryManagementView', () => {
     for (const value of ['private-secret-value', 'private-corp-value', 'private-error-value', 'unexpected-private-value']) {
       expect(container!.textContent).not.toContain(value)
     }
+  })
+
+  it('names the login probe a configuration check, shows a loading state, and words a pass as configuration-only', async () => {
+    let resolveProbe: (value: unknown) => void = () => undefined
+    apiFetchMock.mockImplementation((url: string) => (
+      url === '/api/auth/dingtalk/launch?probe=1'
+        ? new Promise((resolve) => { resolveProbe = resolve })
+        : Promise.resolve(createJsonResponse({ ok: true, data: { items: [] } }))
+    ))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    const button = container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!
+    expect(button.textContent?.trim()).toBe('登录配置检查')
+    expect(button.disabled).toBe(false)
+    // Mounting the page sent no probe request.
+    expect(apiFetchMock.mock.calls.filter(([url]) => url === '/api/auth/dingtalk/launch?probe=1')).toHaveLength(0)
+
+    button.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="dingtalk-login-probe-status"]')?.textContent).toBe('正在进行登录配置检查…')
+    expect(button.disabled).toBe(true)
+    button.click()
+    await flushUi()
+    // A second click while busy does not send another request.
+    expect(apiFetchMock.mock.calls.filter(([url]) => url === '/api/auth/dingtalk/launch?probe=1')).toHaveLength(1)
+
+    resolveProbe(createJsonResponse({ success: true, data: { available: true, unavailableReason: null, missingEnv: [] } }))
+    await flushUi()
+    const text = container!.querySelector('[data-testid="dingtalk-login-probe-status"]')?.textContent ?? ''
+    expect(text).toBe('登录配置检查：配置检查通过，尚未验证实际扫码、身份关联及账号授权。')
+    expect(container!.textContent).not.toContain('登录：可用')
+    expect(button.disabled).toBe(false)
+    // Only the configuration probe ran: no sign-in, callback or other login request.
+    expect(apiFetchMock.mock.calls.map(([url]) => url).filter((url) => String(url).startsWith('/api/auth/'))).toEqual([
+      '/api/auth/dingtalk/launch?probe=1',
+    ])
+  })
+
+  it('reports a failed configuration check when the probe request itself fails', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/auth/dingtalk/launch?probe=1') throw new TypeError('private-network-detail')
+      return createJsonResponse({ ok: true, data: { items: [] } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="dingtalk-login-probe-status"]')?.textContent).toBe('登录配置检查：无法获取检查结果，请稍后重试。')
+    expect(container!.textContent).not.toContain('private-network-detail')
+    expect(container!.querySelector<HTMLButtonElement>('[data-testid="dingtalk-login-probe-button"]')!.disabled).toBe(false)
   })
 
   it('renders the linked OAuth help without fetching or editing credentials', async () => {
@@ -7061,7 +7117,89 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
     expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeTruthy()
     expect(container?.textContent).toContain('通讯录范围或根部门疑似配置不当')
-    expect(container?.textContent).toContain('请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。')
+    expect(container?.textContent).toContain('请按预期的同步范围核对应用通讯录权限范围与根部门 ID；正常的叶子部门或小范围目录也可能出现此结果。本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。')
+    // A non-healthy diagnosis is not reported as a pass.
+    expect(container?.querySelector('.directory-admin__status')?.textContent?.trim()).toBe('目录连通性测试完成，请查看诊断结论')
+    expect(container?.textContent).not.toContain('目录连通性测试通过')
+  })
+
+  it('reports only the sampled reads on a healthy test, and drops the earlier result when a later test fails', async () => {
+    const healthy = createTestResultPayload({
+      departmentSampleCount: 2,
+      summary: {
+        code: 'healthy',
+        title: '部门、成员列表与一名成员详情抽样读取成功',
+        nextAction: '本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
+      },
+      warnings: [],
+    })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+      .mockResolvedValueOnce(createJsonResponse(healthy))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: false,
+        error: { code: 'DIRECTORY_TEST_FAILED', message: 'Failed to test directory integration: DingTalk rejected the request (errcode 60011)' },
+      }, 400))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', { props: ['to'], template: '<a><slot /></a>' })
+    app.mount(container!)
+    await flushUi()
+
+    const testButton = () => Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
+    testButton()?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+    expect(container?.querySelector('.directory-admin__status')?.textContent?.trim()).toBe('目录连通性测试：抽样接口读取成功（未验证全员范围与扫码登录）')
+    expect(container?.textContent).toContain('部门、成员列表与一名成员详情抽样读取成功')
+    expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeTruthy()
+    expect(container?.textContent).not.toContain('目录连通性测试通过')
+
+    testButton()?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+    const statusNode = container?.querySelector('.directory-admin__status')
+    expect(statusNode?.textContent?.trim()).toBe('Failed to test directory integration: DingTalk rejected the request (errcode 60011)')
+    expect(statusNode?.classList.contains('directory-admin__status--error')).toBe(true)
+    expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeNull()
+    expect(container?.textContent).not.toContain('部门、成员列表与一名成员详情抽样读取成功')
+    expect(container?.textContent).not.toContain('根部门直属成员 1')
+  })
+
+  it('shows an unverified member-detail result as a diagnosis to read, not a pass', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+      .mockResolvedValueOnce(createJsonResponse(createTestResultPayload({
+        departmentSampleCount: 2,
+        userSampleCount: 0,
+        sampledUsers: [],
+        summary: {
+          code: 'member_detail_unverified',
+          title: '成员详情权限未验证',
+          nextAction: '部门与成员列表抽样读取成功，但没有普通可见成员样本可供读取详情，成员详情权限未验证；不能据此确认目录同步或扫码登录可用。本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
+        },
+        warnings: ['没有普通可见成员样本，成员详情权限未验证；不能据此确认目录同步或扫码登录可用。'],
+      })))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', { props: ['to'], template: '<a><slot /></a>' })
+    app.mount(container!)
+    await flushUi()
+
+    Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+    expect(container?.querySelector('.directory-admin__status')?.textContent?.trim()).toBe('目录连通性测试完成，请查看诊断结论')
+    expect(container?.textContent).toContain('成员详情权限未验证')
+    expect(container?.textContent).toContain('没有普通可见成员样本，成员详情权限未验证；不能据此确认目录同步或扫码登录可用。')
   })
 
   it('renders connectivity diagnostics without a summary for legacy responses', async () => {
@@ -7108,6 +7246,8 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门子部门 0')
     expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
     expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeNull()
+    // Without a summary there is no diagnosis to vouch for a pass.
+    expect(container?.querySelector('.directory-admin__status')?.textContent?.trim()).toBe('目录连通性测试完成，请查看诊断结论')
   })
 
   it('tests and saves DingTalk work notification Agent ID from the directory page', async () => {
