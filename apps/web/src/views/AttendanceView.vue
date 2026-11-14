@@ -10767,6 +10767,7 @@ import { usePlugins } from '../composables/usePlugins'
 import { apiFetch as sendApiFetch } from '../utils/api'
 import { permissionUserPayloadUnavailable } from './adminPermissionGrantDisplay'
 import { readAttendanceLegacyPermissionPayload } from './attendance/readAttendanceLegacyPermissionPayload'
+import { ATTENDANCE_PROVISION_ROLE_PERMISSIONS } from './attendance/attendanceProvisionRolePermissions'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
@@ -12825,11 +12826,7 @@ const payrollCycleValidationHint = computed(() => {
 const rotationRuleTimezoneLabel = computed(() => displayTimezone(rotationRuleForm.timezone))
 const shiftTimezoneLabel = computed(() => displayTimezone(shiftForm.timezone))
 
-const provisionRolePermissions: Record<ProvisionRole, string[]> = {
-  employee: ['attendance:read', 'attendance:write'],
-  approver: ['attendance:read', 'attendance:approve'],
-  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
-}
+const provisionRolePermissions = ATTENDANCE_PROVISION_ROLE_PERMISSIONS
 
 const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
