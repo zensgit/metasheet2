@@ -178,6 +178,8 @@ describe('legacy revoke waits for the live actor', () => {
             permissionWrite = params
             return { rows: [{ id: params?.[0] }], rowCount: 1 }
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -244,6 +246,8 @@ describe('legacy revoke waits for the live actor', () => {
             permissionWrite = params
             throw new Error('legacy revoke wrote after a role-only demotion')
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -293,6 +297,8 @@ describe('legacy revoke waits for the live actor', () => {
           if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
           if (text.includes('directory_deprovision')) return { rows: [] }
           if (text.includes('SET access_generation')) return { rows: [{ access_generation: 5 }] }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -368,6 +374,8 @@ describe('legacy revoke waits for the live actor', () => {
             database.generation += 1
             throw new Error('injected legacy generation failure')
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }

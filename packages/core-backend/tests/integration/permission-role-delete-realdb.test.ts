@@ -21,7 +21,8 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
-import { query, transaction } from '../../src/db/pg'
+import { pool, query, transaction } from '../../src/db/pg'
+import { lockUsersForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { rolesRouter } from '../../src/routes/roles'
 
@@ -233,6 +234,94 @@ describe('permission role delete real database', () => {
     expect(await count(
       'SELECT count(*)::int AS n FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND namespace = $2',
       [holderId, namespace],
+    )).toBe(0)
+    expect(await count('SELECT count(*)::int AS n FROM roles WHERE id = $1', [roleId])).toBe(0)
+  })
+
+  // D21 (Y5a) writer rule, subject layer: a writer takes the subject authorization version row AFTER
+  // the locks outside the admission holder's set (roles, the namespace-admission advisory). Every
+  // lockSharedAccessSubjects caller (platform-actor-authority.ts) takes advisory → mutex (version row,
+  // then users FOR UPDATE). The DELETE must not hold the member's version row while it waits for that
+  // advisory, or the two writers form a cycle and PostgreSQL aborts one with 40P01.
+  it('D21: the DELETE takes the member subject version row only after the member admission lock, so a canonical subject writer serializes with it (no 40P01)', async () => {
+    if (!pool) throw new Error('pg pool is unavailable')
+    await query(
+      'INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
+      [roleId, `role delete ${runHex}`],
+    )
+    await query(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [holderId, roleId],
+    )
+    // Premise: the users INSERT trigger created the member's version row, so a NOWAIT probe can see it held.
+    expect(await count(
+      'SELECT count(*)::int AS n FROM subject_authorization_versions WHERE subject_id = $1',
+      [holderId],
+    )).toBe(1)
+
+    const probeVersionRow = async (): Promise<'free' | 'held'> => {
+      const probe = await pool!.connect()
+      try {
+        await probe.query('BEGIN')
+        await probe.query(
+          'SELECT 1 FROM subject_authorization_versions WHERE subject_id = $1 FOR UPDATE NOWAIT',
+          [holderId],
+        )
+        return 'free'
+      } catch (error) {
+        if ((error as { code?: string }).code === '55P03') return 'held'
+        throw error
+      } finally {
+        await probe.query('ROLLBACK').catch(() => undefined)
+        probe.release()
+      }
+    }
+
+    const writer = await pool.connect()
+    let pendingDelete: Promise<HttpResult> | undefined
+    let revokerPid: number | null = null
+    let versionRowWhileParked = 'unobserved'
+    let writerOutcome = 'unobserved'
+    try {
+      await writer.query('BEGIN')
+      // The first statement of the canonical subject writer: the member's namespace-admission advisory.
+      await writer.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`namespace-admission:${holderId}`])
+      const writerPid = Number((await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+      const started = request(app)
+        .delete(`/api/roles/${roleId}`)
+        .auth(adminToken, { type: 'bearer' })
+      const deletion = Promise.resolve(started).then((response: HttpResult) => ({ status: response.status, body: response.body }))
+      pendingDelete = deletion
+      void deletion.catch(() => undefined)
+      revokerPid = await waitForAdvisoryLockWaiterPid(writerPid)
+      versionRowWhileParked = await probeVersionRow()
+      // The rest of that writer's prefix: the access-graph mutex (subject version row, then users FOR UPDATE).
+      try {
+        await lockUsersForAccessGraphWrite(writer, [holderId])
+        writerOutcome = 'ok'
+      } catch (error) {
+        writerOutcome = String((error as { code?: string }).code ?? 'error')
+      }
+    } finally {
+      await writer.query(writerOutcome === 'ok' ? 'COMMIT' : 'ROLLBACK').catch(() => undefined)
+      writer.release()
+    }
+    const deleted = pendingDelete ? await pendingDelete : { status: 0, body: null }
+
+    expect({
+      deleteParkedOnAdmissionLock: revokerPid !== null,
+      versionRowWhileParked,
+      writerOutcome,
+      deleteStatus: deleted.status,
+    }).toEqual({
+      deleteParkedOnAdmissionLock: true,
+      versionRowWhileParked: 'free',
+      writerOutcome: 'ok',
+      deleteStatus: 200,
+    })
+    expect(await count(
+      'SELECT count(*)::int AS n FROM user_roles WHERE user_id = $1 AND role_id = $2',
+      [holderId, roleId],
     )).toBe(0)
     expect(await count('SELECT count(*)::int AS n FROM roles WHERE id = $1', [roleId])).toBe(0)
   })

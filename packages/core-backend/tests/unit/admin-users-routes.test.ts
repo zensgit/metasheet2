@@ -13,6 +13,8 @@ const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
   /** Every statement the routes issued (pool and transaction), in order — D21 version bumps included. */
   statements: [] as string[],
+  /** The query function transaction() hands its client (the bump-answering wrapper below). */
+  clientQuery: undefined as unknown as (sql: string, params?: unknown[]) => Promise<unknown>,
 }))
 
 const rbacMocks = vi.hoisted(() => ({
@@ -91,6 +93,7 @@ vi.mock('../../src/db/pg', () => {
     }
     return pgMocks.query(sql, params)
   }
+  pgMocks.clientQuery = query
   return {
     query,
     // W4-PRE-1: POST /api/admin/users now wraps its write sequence in transaction() (the
@@ -1767,7 +1770,7 @@ describe('admin-users routes', () => {
       enabled: true,
       actorId: 'admin-1',
       source: 'platform_admin',
-    }), expect.objectContaining({ query: pgMocks.query }))
+    }), expect.objectContaining({ query: pgMocks.clientQuery }))
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'grant',
       resourceType: 'user-namespace-admission',
@@ -1823,14 +1826,14 @@ describe('admin-users routes', () => {
       enabled: false,
       actorId: 'admin-1',
       source: 'platform_admin',
-    }), expect.objectContaining({ query: pgMocks.query }))
+    }), expect.objectContaining({ query: pgMocks.clientQuery }))
     expect(namespaceAdmissionMocks.writeUserNamespaceAdmission).toHaveBeenNthCalledWith(2, expect.objectContaining({
       userId: 'user-2',
       namespace: 'crm',
       enabled: false,
       actorId: 'admin-1',
       source: 'platform_admin',
-    }), expect.objectContaining({ query: pgMocks.query }))
+    }), expect.objectContaining({ query: pgMocks.clientQuery }))
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-2')
     expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
@@ -1929,7 +1932,7 @@ describe('admin-users routes', () => {
       enabled: true,
       actorId: 'crm-admin-1',
       source: 'delegated_admin',
-    }), expect.objectContaining({ query: pgMocks.query }))
+    }), expect.objectContaining({ query: pgMocks.clientQuery }))
   })
 
   it('rejects delegated role assignment outside allowed namespaces', async () => {
@@ -2593,12 +2596,14 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    // D21 (Y5a): the membership write runs in one transaction whose first statement bumps the
-    // user's subject authorization version row, immediately before the member INSERT.
+    // D21 (Y5a): the membership write runs behind #6833's access-graph mutex: the subject
+    // authorization version rows first, then the users rows FOR UPDATE, then the member INSERT.
     const bumpAt = pgMocks.statements.findIndex((statement) => statement.includes('INSERT INTO subject_authorization_versions'))
+    const userLockAt = pgMocks.statements.findIndex((statement) => /FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(statement))
     const memberAt = pgMocks.statements.findIndex((statement) => statement.includes('INSERT INTO platform_member_group_members'))
     expect(bumpAt).toBeGreaterThanOrEqual(0)
-    expect(memberAt).toBe(bumpAt + 1)
+    expect(userLockAt).toBeGreaterThan(bumpAt)
+    expect(memberAt).toBeGreaterThan(userLockAt)
     expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       resourceType: 'platform-member-group',
       resourceId: 'group-1:user-1',

@@ -154,6 +154,10 @@ function installScript(script: Script) {
       query: async (sql: string, params?: unknown[]) => {
         const text = String(sql)
         sqlLog.push(text)
+        // D21 (Y5a): the access-graph mutex bumps the subject authorization version rows first.
+        if (text.includes('INSERT INTO subject_authorization_versions')) {
+          return { rows: [], rowCount: Array.isArray(params?.[0]) ? (params[0] as unknown[]).length : 1 }
+        }
         if (text.includes('pg_advisory_xact_lock') && String(params?.[0]) === 'namespace-admission:admin-1' && admissionHeld) {
           markAdmission()
           await admissionHeld
@@ -302,6 +306,11 @@ describe('legacy permission revoke', () => {
     expect(admissionAt).toBeGreaterThanOrEqual(0)
     expect(admissionAt).toBeLessThan(userAt)
     expect(userAt).toBeLessThan(writeAt)
+    // D21 (Y5a): advisory → subject version rows (one sorted statement) → users FOR UPDATE → the write.
+    const bumpAt = script.sqlLog.findIndex((sql) => sql.includes('INSERT INTO subject_authorization_versions'))
+    expect(bumpAt).toBeGreaterThan(admissionAt)
+    expect(bumpAt).toBeLessThan(userAt)
+    expect(script.sqlLog.filter((sql) => sql.includes('INSERT INTO subject_authorization_versions'))).toHaveLength(1)
     expect(script.sqlLog[writeAt]).toContain('RETURNING id')
     expect(script.sqlLog.some((sql) => sql.includes('directory_deprovision_effects'))).toBe(true)
     expect(script.order).toEqual(['commit'])

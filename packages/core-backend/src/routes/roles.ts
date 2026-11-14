@@ -948,11 +948,6 @@ export function rolesRouter(): Router {
           // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
           // because it is PRE-commit: a failed read answers the 500 below with nothing deleted.
           memberIds = await readRoleMemberIds(id, client)
-          // D21 (Y5a): every member's subject authorization version row, sorted, before any
-          // membership row goes — explicitly through unassignUserRoles below, or implicitly through
-          // the `roles → user_roles` cascade where that FK exists (the cascade's trigger bumps would
-          // otherwise land in scan order, racing a concurrent multi-user revocation).
-          await bumpSubjectAuthorizationVersions(client, memberIds)
           if (protection && protection.kind !== 'platform_admin_role') {
             removesMemberships = true
             if (memberIds.length > 0) {
@@ -974,6 +969,16 @@ export function rolesRouter(): Router {
             // any surviving membership keeps them. Same transaction, so it commits with the rest.
             await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
           }
+          // D21 (Y5a): every member's subject authorization version row, sorted, before the role row
+          // goes and with it the `roles → user_roles` cascade where that FK exists (the cascade's
+          // trigger bumps would otherwise land in scan order, racing a concurrent multi-user
+          // revocation). It sits AFTER the namespace-admission locks above (the writer rule: locks
+          // outside the admission holder's set first, then the version row; every
+          // lockSharedAccessSubjects caller takes advisory → version row, so a version row taken
+          // before those locks is one half of a writer-vs-writer 40P01). The protected branch's
+          // membership removal already took the same rows, sorted, inside unassignUserRoles, after
+          // those locks and before its DELETE; here they are held, and an ordinary role takes them now.
+          await bumpSubjectAuthorizationVersions(client, memberIds)
           await client.query('DELETE FROM roles WHERE id=$1', [id])
         })
       } catch (error) {

@@ -477,10 +477,29 @@ describe('W — writers bump FIRST', () => {
     const permissions = readFileSync(path.join(SRC, 'routes', 'permissions.ts'), 'utf8')
     expect(permissions.match(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/g)).toHaveLength(3)
     expect(permissions).not.toMatch(/pool\.query\(\s*[`']\s*(INSERT INTO|DELETE FROM) user_permissions/)
+    // #6833 moved the member-group route and syncLegacyAdminProfile into transactions behind the
+    // access-graph mutex (lockSharedAccessSubjects: namespace-admission advisory → subject version
+    // rows, sorted → users FOR UPDATE; W-01), so the bump comes first by construction there.
     const adminUsers = readFileSync(path.join(SRC, 'routes', 'admin-users.ts'), 'utf8')
-    expect(adminUsers).toMatch(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)\s*if \(action === 'assign'\)/)
-    expect(adminUsers).not.toMatch(/await query\(\s*`INSERT INTO platform_member_group_members/)
-    expect(adminUsers).toMatch(/async function syncLegacyAdminProfile[\s\S]*?await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/)
+    expect(adminUsers).toMatch(/await transaction\(async \(client\) => \{\s*const subjects = await lockSharedAccessSubjects\(client, \[userId, adminUserId\]\)\s*requireWritableTarget\(subjects, userId\)\s*await assertPlatformActorAuthority\(client, subjects\.get\(adminUserId\)\)\s*if \(action === 'assign'\) \{\s*await client\.query\(\s*`INSERT INTO platform_member_group_members/)
+    expect(adminUsers).not.toMatch(/await query\(\s*`(INSERT INTO|DELETE FROM) platform_member_group_members/)
+    const syncLegacy = /async function syncLegacyAdminProfile\([\s\S]*?\n\}/.exec(adminUsers)?.[0] ?? ''
+    expect(syncLegacy).toMatch(/await runQuery\(\s*`UPDATE users/)
+    expect(syncLegacy).not.toMatch(/\bawait (query|transaction|pool\.)/)
+    const syncCalls = Array.from(adminUsers.matchAll(/await syncLegacyAdminProfile\(userId, (?:true|false), /g)).map((match) => match.index!)
+    expect(syncCalls).toHaveLength(4)
+    for (const at of syncCalls) {
+      const txnAt = adminUsers.lastIndexOf('await transaction(async (client) => {', at)
+      const mutexAt = adminUsers.lastIndexOf('await lockSharedAccessSubjects(client, ', at)
+      expect(txnAt).toBeGreaterThan(0)
+      expect(mutexAt).toBeGreaterThan(txnAt)
+    }
+    // #6872's legacy users.permissions revoke: the mutex before the users UPDATE, in the route's transaction.
+    const legacy = readFileSync(path.join(SRC, 'admin', 'legacy-permission-revoke.ts'), 'utf8')
+    const legacyMutexAt = legacy.indexOf('await lockSharedAccessSubjects(client, [actorId, userId])')
+    expect(legacyMutexAt).toBeGreaterThan(0)
+    expect(legacy.indexOf('`UPDATE users')).toBeGreaterThan(legacyMutexAt)
+    expect(permissions).toMatch(/await transaction\(async \(client\) => revokeLegacyUserPermission\(client, /)
   })
 
   it('W-03 sheet layer: every route bumps AFTER its meta_sheets row lock and BEFORE any exclusive record lock — the record-permission routes between record-link phases 1–4 (shared) and phase 5, the grant / configuration routes right after assertSheetLiveForUpdate', () => {
@@ -533,7 +552,11 @@ describe('W — writers bump FIRST', () => {
 
   it('W-06 setUserNamespaceAdmission bumps after the advisory and before the upsert; the two user_orgs helpers bump before their first statement', () => {
     const admission = readFileSync(path.join(SRC, 'rbac', 'namespace-admission.ts'), 'utf8')
-    expect(admission).toMatch(/await lockNamespaceAdmissionWrites\(client, userId\)\s*(?:\/\/[^\n]*\n\s*)*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)\s*await client\.query\(\s*`INSERT INTO user_namespace_admissions/)
+    // #6833: the advisory for every subject (sorted), then the access-graph mutex (subject version
+    // rows first, W-01), then the upsert through writeUserNamespaceAdmission on the same client.
+    expect(admission).toMatch(/for \(const subjectId of subjectIds\) await lockNamespaceAdmissionWrites\(client, subjectId\)\s*await lockVisibleUsersForAccessGraphWrite\(client, subjectIds\)\s*await writeUserNamespaceAdmission\(options, client\)/)
+    const mutex = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
+    expect(mutex).toMatch(/export async function lockVisibleUsersForAccessGraphWrite\([^)]*\)[^{]*\{\s*const locked = await lockUsersForAccessGraphWrite\(client, userIds\)/)
     const sync = readFileSync(path.join(SRC, 'directory', 'directory-sync.ts'), 'utf8')
     for (const helper of ['upsertActiveUserOrgMembership', 'deactivateUserOrgMembershipIfNoOtherActiveBinding']) {
       const start = sync.indexOf(`export async function ${helper}(`)
@@ -544,6 +567,22 @@ describe('W — writers bump FIRST', () => {
       expect(bumpAt).toBeGreaterThan(0)
       expect(firstQueryAt).toBeGreaterThan(bumpAt)
     }
+  })
+
+  it('W-07 role delete: the members\' subject bump sits after the namespace-admission locks (#6827) and before the role row DELETE (the cascade)', () => {
+    const roles = readFileSync(path.join(SRC, 'routes', 'roles.ts'), 'utf8')
+    const start = roles.indexOf("r.delete('/api/roles/:id'")
+    const roleDelete = "await client.query('DELETE FROM roles WHERE id=$1', [id])"
+    const end = roles.indexOf(roleDelete, start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const body = roles.slice(start, end + roleDelete.length)
+    const bumpAt = body.indexOf('await bumpSubjectAuthorizationVersions(client, memberIds)')
+    const lockAt = body.lastIndexOf('await lockNamespaceAdmissionWrites(client, memberId)')
+    expect(lockAt).toBeGreaterThan(0)
+    expect(bumpAt).toBeGreaterThan(lockAt)
+    expect(body.indexOf(roleDelete)).toBeGreaterThan(bumpAt)
+    expect(body.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
   })
 })
 

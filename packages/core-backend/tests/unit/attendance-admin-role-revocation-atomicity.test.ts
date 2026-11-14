@@ -439,6 +439,7 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
       'resolve-targets',
       'role-lock',
       ...subjects.map(() => 'lock'),
+      'authz-version',
       ...subjects.map(() => 'user-lock'),
       'actor-roles',
       'resolve-targets',
@@ -447,6 +448,9 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     expect(call.resolveLocked).toEqual([false, true])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    // D21 (Y5a): the access-graph mutex bumps the subject version rows after the admission locks and before users FOR UPDATE.
+    expect(call.events.indexOf('authz-version')).toBeGreaterThan(call.events.lastIndexOf('lock'))
+    expect(call.events.indexOf('authz-version')).toBeLessThan(call.events.indexOf('user-lock'))
     expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
     expect(call.events.indexOf('actor-roles')).toBeLessThan(call.events.lastIndexOf('resolve-targets'))
     expect(call.roleLockIds).toEqual(['attendance_employee'])
@@ -478,6 +482,7 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
       'resolve-targets',
       'role-lock',
       ...subjects.map(() => 'lock'),
+      'authz-version',
       ...subjects.map(() => 'user-lock'),
       'actor-roles',
       'rollback',
@@ -485,6 +490,9 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     expect(call.resolveLocked).toEqual([false])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    // D21 (Y5a): the access-graph mutex bumps the subject version rows after the admission locks and before users FOR UPDATE.
+    expect(call.events.indexOf('authz-version')).toBeGreaterThan(call.events.lastIndexOf('lock'))
+    expect(call.events.indexOf('authz-version')).toBeLessThan(call.events.indexOf('user-lock'))
     expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
     expect(call.roleLockIds).toEqual(['attendance_employee'])
     expect(call.lockKeys).toEqual(subjects.map((id) => `namespace-admission:${id}`))
