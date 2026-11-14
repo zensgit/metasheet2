@@ -65,6 +65,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const projectSheet = require('./support/stock-preparation-project-sheet-harness.cjs')
@@ -1396,7 +1398,8 @@ test('L-05 source order: the gate follows the staleness check and precedes every
   const chunk = body('tableActionLargeBomApplyJobRun')
   assert.match(chunk, /largeLanePilotCheck: \(\{ target \}\) => assertLargeLaneAllowedForPilot\(/, 'the chunk hands the lib the in-lease check')
   assert.ok(chunk.indexOf('largeLanePilotCheck:') < chunk.indexOf('projectWriteGuard,'), 'listed with the guard it runs under')
-  const dry = body('tableActionDryRun')
+  // R-69 1b-i: the dry run's lib call moved into the governed entry the handler delegates to.
+  const dry = body('tableActionDryRun') + governedEntrySourceFor(HTTP_ROUTES_SOURCE, 'tableActionDryRun')
   assert.match(dry, /pilotLaneGuard: \(\) => stockPreparationPilotGate\.assertSmallLaneCapNotExceededForPilot\(/, 'the dry run hands the lib the over-cap guard')
   // The lib seams exist and sit where the design puts them.
   const libSource = fs.readFileSync(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'), 'utf8')
