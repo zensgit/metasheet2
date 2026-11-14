@@ -20,11 +20,13 @@ const closures = {
     'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
     'scripts/ops/attendance-onprem-publish-web-dist.sh',
     'scripts/ops/attendance-onprem-publish-web-dist.ps1',
+    'scripts/ops/web-dist-retain-assets.mjs',
     // Batch identifier (R-65): the install client imports the scheduled-pull client by relative path.
     'scripts/ops/stock-preparation-pull-batch-install.mjs',
     'scripts/ops/stock-preparation-scheduled-pull.mjs',
   ],
   attendance: [
+    'scripts/ops/web-dist-retain-assets.mjs',
     'packages/mssql-readonly-utils/package.json',
     'packages/mssql-readonly-utils/index.cjs',
   ],
