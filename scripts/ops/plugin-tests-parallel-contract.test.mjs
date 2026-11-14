@@ -268,6 +268,14 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(routingPolicyRequiredDbAddition, '')
         step.run = step.run.replace(routingPolicyRequiredApiAddition, '')
       }
+      if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
+        // R-69 1b-ii (job lease): explicit additive suite — preserve the frozen original command byte-for-byte.
+        const predecessor = '  tests/integration/multitable-automation-outbound-intent-realdb.test.ts \\\n'
+        const leaseAddition = '  tests/integration/multitable-automation-job-lease-realdb.test.ts \\\n'
+        assert.equal(step.run.split(leaseAddition).length - 1, 1, 'Job-lease real-DB suite must run exactly once')
+        assert.ok(step.run.includes(predecessor + leaseAddition), 'Keep the job-lease suite right after the outbound-intent suite')
+        step.run = step.run.replace(leaseAddition, '')
+      }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`
         assert.equal(step.run.split(lockProtocolJsonReporter).length - 1, 1, 'The lock-protocol JSON reporter must appear exactly once')
