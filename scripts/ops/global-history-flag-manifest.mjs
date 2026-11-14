@@ -1018,6 +1018,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/automation-executor.ts#maxWebhookRetries',
   },
   {
+    key: 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "C1/S2 first slice (iPaaS baseline v2.3 §10.3.1): the MANUAL, SYNTHETIC multitable-automation integration preview (POST /api/multitable/sheets/:sheetId/automations/:ruleId/integration-preview and its catalog GET). Default OFF; exact literal 'true' only (no trim, no case folding; '1', 'TRUE', ' true' stay OFF), read on every run and at every admission checkpoint. Off: both routes answer a fixed 404 INTEGRATION_PREVIEW_DISABLED after the existing authentication and sheet-capability gate, before any catalog, provider, compiler or database read, and the panel stays hidden. On: an owner of the rule with canManageAutomation on the sheet scope and live integration authority can run one fixed plan: a host-registered synthetic provider (no network, database, file, env or credential) pages repo fixtures, values pass only through a per-run in-memory store, and the YiDa consumer calls the pure compileYidaLocalDraft in memory; one values-free summary row is written to multitable_automation_executions (triggered_by integration_preview, not retryable). It never sends, prepares/approves/submits a YiDa draft, issues a token or writes a business row, and it is not coupled to any other switch: AUTOMATION_DURABLE_DELIVERY_ENABLED, AUTOMATION_CLASSA_CLAIM_ENABLED, AUTOMATION_CLASSB_OUTBOUND_ENABLED and the INTEGRATION_YIDA_* switches neither open nor widen it (no prefix matching). danger=low: synthetic data only; real reads or sends need separate owner approval.",
+    source: 'packages/core-backend/src/integration/automation-synthetic-preview.ts#isSyntheticIntegrationPreviewEnabled',
+  },
+  {
     key: 'ENABLE_SCHEDULER_LEADER_LOCK',
     type: 'boolean',
     activationValue: 'true',

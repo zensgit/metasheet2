@@ -1211,6 +1211,7 @@ test('automation flags: the read-site scan finds every registered automation key
   assert.deepEqual(automationFlagsInSource(), [
     'AUTOMATION_CLASSA_CLAIM_ENABLED',
     'AUTOMATION_DURABLE_DELIVERY_ENABLED',
+    'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED',
     'AUTOMATION_WEBHOOK_MAX_RETRIES',
     'AUTOMATION_WEBHOOK_TIMEOUT_MS',
     'ENABLE_SCHEDULER_LEADER_LOCK',
@@ -1262,6 +1263,35 @@ test('AUTOMATION_CLASSA_CLAIM_ENABLED: exact true, danger high, predicate source
   assert.ok(spec.purpose.includes(migrationOnDisk(/^zzzz\d{14}_create_automation_action_applied\.ts$/)), 'purpose names the claim-table migration on disk')
   assert.equal(isActivated(spec, 'true'), true)
   for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+})
+
+test('AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED: exact true, danger low, single predicate, no coupling to any other flag', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED
+  assert.ok(spec, 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/integration/automation-synthetic-preview.ts#isSyntheticIntegrationPreviewEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  const reader = /\nexport function isSyntheticIntegrationPreviewEnabled\([^)]*\): boolean \{\n([\s\S]*?)\n\}\n/.exec(module)
+  assert.ok(reader, 'the predicate is found')
+  assert.equal(reader[1].trim(), "return env.AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED === 'true'", 'exact literal, its own key only')
+  // The host wires the runtime through this predicate only; no other flag is read on that line.
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  const wiring = service.split('\n').filter((line) => line.includes('readEnablement:') && line.includes('SyntheticIntegrationPreview'))
+  assert.deepEqual(wiring, ["    readEnablement: () => (isSyntheticIntegrationPreviewEnabled() ? 'true' : 'false'),"])
+  // No other module reads the key, and no reader matches it by prefix.
+  const reads = grepFlagTokens('AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED')
+  assert.ok(reads.length >= 1)
+  const code = module.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  assert.equal(/startsWith\(|AUTOMATION_\[|RegExp\(|\/\^AUTOMATION_/.test(code), false, 'no prefix-based flag matching in the preview runtime')
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false, String(value))
+  // .env.example documents it as OFF.
+  assert.match(readRepoSource('.env.example'), /\n# AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED=false\n/)
 })
 
 test('automation webhook knobs: numeric, defaults and bounds match the executor parsers', () => {

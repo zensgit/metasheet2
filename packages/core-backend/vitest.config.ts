@@ -84,6 +84,12 @@ export default defineConfig({
       // Owner-run connection test (ADR adr-yida-connection-test-20261028): same step, whole files.
       'tests/integration/yida-host-connection-test-realdb.test.ts',
       'tests/integration/yida-connection-test-http-realdb.test.ts',
+      // C1/S2 synthetic integration preview: two-connection admission/revocation proofs on a real PG schema,
+      // and the real-host HTTP acceptance on the migrated CI database. Same EXPECT_DB plugin-tests step.
+      'tests/integration/automation-synthetic-preview-realdb.test.ts',
+      'tests/integration/automation-synthetic-preview-host-realdb.test.ts',
+      // C1/S2 C01 real-browser case: a whole file of the real-host browser launcher (run-stock-preparation-yida-browser-ci.mjs).
+      'tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
       // Permission lifecycle real-DB gate. Trust-off config; whole file in plugin-tests.yml runtime-db.
       'tests/integration/permission-lifecycle-realdb.test.ts',
       'tests/integration/permission-role-delete-realdb.test.ts',
