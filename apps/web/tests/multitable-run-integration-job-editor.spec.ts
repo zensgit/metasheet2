@@ -9,6 +9,15 @@
  *   C. The editor offers the action only while the server switch is on (session feature
  *      integrationAutomationRunAction) and the trigger is schedule.cron; a loaded one stays listed; the payload is
  *      the dry-run shape without binding; the save mirror blocks what the server would refuse.
+ *      R-69 I6d: EXACTLY ONE project per rule (the server's rule-sheet guard, register R-90) — label, hint and save
+ *      block; a loaded rule that lists several is shown whole and cannot be saved. The payload carries the action
+ *      list AND its first action mirrored into the legacy pair — the wire shape the core-backend service tests
+ *      (tests/unit/automation-run-integration-job-editor-save-path.test.ts) drive through the real save.
+ *      R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — the editor adds nothing beside it, offers it
+ *      for a new selection only on a one-action rule, and a loaded rule that has others is shown whole and cannot be
+ *      saved until they are removed.
+ *      R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — a loaded one that does is shown
+ *      whole and cannot be saved until they are removed (the mirror of the server's refusal).
  * The server/client save-validator byte parity itself lives in core-backend
  * (tests/unit/automation-run-integration-job-web-parity.test.ts), where both validators are imported live.
  */
@@ -22,14 +31,22 @@ import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomatio
 import MetaAutomationLogViewer from '../src/multitable/components/MetaAutomationLogViewer.vue'
 import type { AutomationExecution, AutomationRule } from '../src/multitable/types'
 import {
+  RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE,
+  RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_MAX_PROJECTS,
+  RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE,
   RUN_INTEGRATION_JOB_REASON_LABELS,
   RUN_INTEGRATION_JOB_STEP_OUTCOMES,
+  checkRunIntegrationJobConditions,
+  checkRunIntegrationJobRuleSheetProjects,
+  checkRunIntegrationJobSoleAction,
+  isRunIntegrationJobSelectable,
   runIntegrationJobStepView,
 } from '../src/multitable/runIntegrationJobAuthoring'
 import { buildAutomationLogSupportPacket } from '../src/multitable/utils/automation-log-support-packet'
 import { BRANCH_AUTHORABLE_ACTION_TYPES, CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES } from '../src/multitable/utils/conditionBranchAuthoring'
 import { useLocale } from '../src/composables/useLocale'
-import { epOptions } from './helpers/epControls'
+import { epOptions, epSetSelect } from './helpers/epControls'
 
 let runActionFlag = false
 vi.mock('../src/stores/featureFlags', () => ({
@@ -246,11 +263,18 @@ function rijRule(config: Record<string, unknown>, overrides: Partial<AutomationR
   return cronRule({ actionType: 'run_integration_job', actionConfig: config, actions: [{ type: 'run_integration_job', config }], ...overrides })
 }
 
+// R-69 I6d: a saveable rule lists exactly one project (the project its sheet is registered to).
 const STORED_CONFIG = {
-  job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002'], applyMode: 'dry_run_only' },
+  job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' },
   timeoutMs: 20 * 60_000,
   binding: { principalId: 'creator-sentinel', tenantId: TENANT_SENTINEL },
 }
+/** A rule stored before the one-project rule: it lists two. The editor shows both and cannot save it as it is. */
+const STORED_TWO_PROJECTS = { ...STORED_CONFIG, job: { ...STORED_CONFIG.job, projectNos: ['P-001', 'P-002'] } }
+const projectsTextOf = (container: HTMLElement) =>
+  (container.querySelector('[data-field="rijProjectNosText"] textarea, textarea[data-field="rijProjectNosText"]') as HTMLTextAreaElement).value
+const blockTextOf = (container: HTMLElement, key: string) =>
+  container.querySelector(`[data-action="save-block-reason"][data-reason-key="${key}"]`)?.textContent?.trim() ?? ''
 
 function mountEditor(props: Record<string, unknown>) {
   const container = document.createElement('div')
@@ -320,11 +344,11 @@ describe('rule editor: run_integration_job item', () => {
     expect(cfg.textContent).not.toContain('apply_when_ready')
     const kinds = epOptions(cfg.querySelector('[data-field="rijKind"]')!.closest('.el-select') ?? cfg.querySelector('.el-select'))
     expect(kinds.map((k) => [k.value, k.disabled])).toEqual([['stock_prep_pull', false], ['pipeline', true]])
-    expect((cfg.querySelector('[data-field="rijProjectNosText"] textarea, textarea[data-field="rijProjectNosText"]') as HTMLTextAreaElement).value).toBe('P-001\nP-002')
+    expect(projectsTextOf(container)).toBe('P-001')
     expect(container.textContent).not.toContain(TENANT_SENTINEL)
   })
 
-  it('save sends the dry-run shape without binding, and the trigger keeps its timezone', async () => {
+  it('save sends the dry-run shape without binding — the action list AND its first action mirrored into the pair — and the trigger keeps its timezone', async () => {
     runActionFlag = true
     const onSave = vi.fn()
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG), onSave })
@@ -333,12 +357,60 @@ describe('rule editor: run_integration_job item', () => {
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
     const payload = onSave.mock.calls[0]?.[0] as AutomationRule
-    expect(payload.actions?.[0]).toEqual({
-      type: 'run_integration_job',
-      config: { job: { kind: 'stock_prep_pull', projectNos: ['P-001', 'P-002'], applyMode: 'dry_run_only' }, timeoutMs: 20 * 60_000 },
-    })
+    const sentConfig = { job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' }, timeoutMs: 20 * 60_000 }
+    expect(payload.actions).toEqual([{ type: 'run_integration_job', config: sentConfig }])
+    // R-69 I6d: the wire shape the server's save gate must accept — the job travels in `actions[]` (what the
+    // executor runs) and, as the first action, is mirrored into the legacy pair. Never the pair alone.
+    expect(payload.actionType).toBe('run_integration_job')
+    expect(payload.actionConfig).toEqual(sentConfig)
+    expect(payload.executionMode ?? null).toBeNull()
     expect(JSON.stringify(payload)).not.toContain('binding')
     expect(payload.triggerConfig?.timezone).toBe('Asia/Shanghai')
+  })
+
+  // ── R-69 I6d: exactly one project per rule (the server's rule-sheet guard; register R-90) ───────────────────────
+  it('the editor limit is ONE project — not the pure validator cap — and says so in the label and the hint', async () => {
+    expect(RUN_INTEGRATION_JOB_EDITOR_MAX_PROJECTS).toBe(1)
+    // the parity-pinned mirror cap is a different number; the editor does not author against it
+    expect(RUN_INTEGRATION_JOB_MAX_PROJECTS).toBe(20)
+    const two = { job: { kind: 'stock_prep_pull', projectNos: ['P-1', 'P-2'], applyMode: 'dry_run_only' } }
+    expect(checkRunIntegrationJobRuleSheetProjects({ job: { ...two.job, projectNos: ['P-1'] } })).toBeNull()
+    expect(checkRunIntegrationJobRuleSheetProjects(two)?.code).toBe('projects_not_single')
+    runActionFlag = true
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    const cfg = container.querySelector('[data-action-config="run_integration_job"]') as HTMLElement
+    expect(cfg.querySelector('[data-field="rij-project-label"]')?.textContent).toContain('exactly one')
+    expect(cfg.querySelector('[data-field="rij-single-project-hint"]')?.textContent).toContain('One rule pulls one project')
+    expect(cfg.textContent).not.toContain('at most 20')
+    useLocale().setLocale('zh-CN')
+    await flushPromises()
+    expect(cfg.querySelector('[data-field="rij-project-label"]')?.textContent).toContain('恰一个')
+    expect(cfg.querySelector('[data-field="rij-single-project-hint"]')?.textContent).toContain('一条规则只拉取一个项目')
+    expect(cfg.textContent).not.toContain('最多 20')
+  })
+
+  it('a loaded rule that lists TWO projects is shown whole (never truncated) and cannot be saved until one is left', async () => {
+    runActionFlag = true
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: rijRule(STORED_TWO_PROJECTS), onSave })
+    await flushPromises()
+    expect(projectsTextOf(container)).toBe('P-001\nP-002')
+    expect(blockKeys(container)).toEqual(['runIntegrationJob:0'])
+    expect(blockTextOf(container, 'runIntegrationJob:0')).toBe('Action 1 (run integration job): list exactly one project number: the project this sheet is registered to.')
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flushPromises()
+    expect(onSave).not.toHaveBeenCalled()
+    // leaving one project clears the block, and that one project is what is sent
+    setTextarea(container, '[data-field="rijProjectNosText"]', 'P-002')
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
+    save.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect((payload.actions?.[0]?.config as { job: { projectNos: string[] } }).job.projectNos).toEqual(['P-002'])
   })
 
   it('switch OFF + a loaded action: listed, but save is blocked with a reason (the server would answer 403)', async () => {
@@ -368,6 +440,9 @@ describe('rule editor: run_integration_job item', () => {
   })
 
   it.each([
+    ['2 projects (one rule, one project)', '[data-field="rijProjectNosText"]', 'P-1\nP-2'],
+    ['2 projects on one line', '[data-field="rijProjectNosText"]', 'P-1, P-2'],
+    ['20 projects (the pure validator cap is not the editor limit)', '[data-field="rijProjectNosText"]', Array.from({ length: 20 }, (_, i) => `P-${i}`).join('\n')],
     ['21 projects', '[data-field="rijProjectNosText"]', Array.from({ length: 21 }, (_, i) => `P-${i}`).join('\n')],
     ['a repeated project', '[data-field="rijProjectNosText"]', 'P-1\nP-1'],
     ['no project', '[data-field="rijProjectNosText"]', ''],
@@ -383,6 +458,24 @@ describe('rule editor: run_integration_job item', () => {
     expect(blockKeys(container)).toContain('runIntegrationJob:0')
   })
 
+  it('2, 20 and 21 projects all answer the SAME one-project line (never "at most 20"); one project of any number is accepted client-side', async () => {
+    runActionFlag = true
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
+    await flushPromises()
+    for (const count of [2, 20, 21]) {
+      setTextarea(container, '[data-field="rijProjectNosText"]', Array.from({ length: count }, (_, i) => `P-${i}`).join('\n'))
+      await flushPromises()
+      expect(blockTextOf(container, 'runIntegrationJob:0'), `${count} projects`).toBe('Action 1 (run integration job): list exactly one project number: the project this sheet is registered to.')
+    }
+    setTextarea(container, '[data-field="rijProjectNosText"]', '')
+    await flushPromises()
+    expect(blockTextOf(container, 'runIntegrationJob:0')).toBe('Action 1 (run integration job): enter the project number (exactly one: the project this sheet is registered to).')
+    // Which project the sheet is registered to is the server's answer (its rule-sheet guard): any single number passes here.
+    setTextarea(container, '[data-field="rijProjectNosText"]', 'P-ANOTHER')
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
+  })
+
   it('55 minutes is accepted (the cap is inclusive)', async () => {
     runActionFlag = true
     const { container } = mountEditor({ rule: rijRule(STORED_CONFIG) })
@@ -390,5 +483,201 @@ describe('rule editor: run_integration_job item', () => {
     setTextarea(container, '[data-field="rijTimeoutMinutes"]', '55')
     await flushPromises()
     expect(blockKeys(container)).toEqual([])
+  })
+
+  // ── R-69 I6d fix round 2 (F2): the job is its rule's ONLY action (server: validateRunIntegrationJobSoleAction) ──
+  const JOB_ACTION = { type: 'run_integration_job', config: STORED_CONFIG }
+  const NOTIFY_ACTION = { type: 'send_notification', config: { userIds: ['u1'], message: 'ok' } }
+  const SOLE_LINE = 'Run integration job must be the only action of its rule: remove the other actions (give them a rule of their own).'
+  const actionSelectAt = (container: HTMLElement, index: number) =>
+    container.querySelector(`[data-action-index="${index}"] .meta-rule-editor__action-header .el-select`)
+  const optionsAt = (container: HTMLElement, index: number): string[] => {
+    const select = actionSelectAt(container, index)
+    return select ? epOptions(select).map((opt) => opt.value) : []
+  }
+  const actionRows = (container: HTMLElement) => container.querySelectorAll('[data-action-index]').length
+  const addActionButton = (container: HTMLElement) => container.querySelector('[data-action="add-action"]')
+  /** The row's remove button: the last one in its header button group (after move up / move down). */
+  const removeActionAt = (container: HTMLElement, index: number) => {
+    const buttons = container.querySelectorAll(`[data-action-index="${index}"] .meta-rule-editor__action-btns button`)
+    ;(buttons[buttons.length - 1] as HTMLButtonElement).click()
+  }
+  /** A rule as it would be LOADED: the stored action list, with its first action mirrored into the legacy pair. */
+  const ruleWithActions = (actions: Array<{ type: string; config: Record<string, unknown> }>) =>
+    cronRule({ actionType: actions[0].type, actionConfig: actions[0].config, actions } as Partial<AutomationRule>)
+
+  it('the pure mirror: the job alone is accepted in its two shapes; with anything else — in any order, in either column — it is refused', () => {
+    const job = { type: 'run_integration_job', config: {} }
+    const other = { type: 'send_notification', config: {} }
+    for (const [actionType, actions] of [
+      ['send_notification', [other]], ['send_notification', null],
+      ['run_integration_job', null], ['run_integration_job', undefined], ['run_integration_job', []], ['run_integration_job', [job]],
+    ] as const) {
+      expect(checkRunIntegrationJobSoleAction(actionType, actions), JSON.stringify([actionType, actions])).toBeNull()
+    }
+    for (const [actionType, actions] of [
+      ['run_integration_job', [job, other]], ['send_notification', [other, job]], ['run_integration_job', [job, job]],
+      ['run_integration_job', [other]], ['send_notification', [job]], ['run_integration_job', [job, null]],
+    ] as const) {
+      expect(checkRunIntegrationJobSoleAction(actionType, actions), JSON.stringify([actionType, actions]))
+        .toEqual({ code: 'not_sole_action', message: RUN_INTEGRATION_JOB_NOT_SOLE_MESSAGE })
+    }
+    // a NEW selection needs a one-action rule; a loaded job stays listed whatever the count
+    expect(isRunIntegrationJobSelectable(true, 'schedule.cron', 'update_record', 1)).toBe(true)
+    expect(isRunIntegrationJobSelectable(true, 'schedule.cron', 'update_record', 2)).toBe(false)
+    expect(isRunIntegrationJobSelectable(true, 'schedule.cron', 'update_record', 3)).toBe(false)
+    expect(isRunIntegrationJobSelectable(false, 'record.created', 'run_integration_job', 3)).toBe(true)
+  })
+
+  it('a rule with SEVERAL actions is not offered the job on any row (switch ON, cron); with one row left it is offered again', async () => {
+    runActionFlag = true
+    const { container } = mountEditor({ rule: ruleWithActions([NOTIFY_ACTION, { ...NOTIFY_ACTION }]) })
+    await flushPromises()
+    expect(actionRows(container)).toBe(2)
+    for (const row of [0, 1]) {
+      // the control of the same list: it is a real option list, and only the job is missing from it
+      expect(optionsAt(container, row), `row ${row}`).toContain('send_email')
+      expect(optionsAt(container, row), `row ${row}`).not.toContain('run_integration_job')
+    }
+    removeActionAt(container, 1)
+    await flushPromises()
+    expect(actionRows(container)).toBe(1)
+    expect(optionsAt(container, 0)).toContain('run_integration_job')
+  })
+
+  it('choosing the job on a one-action rule takes the add-action button away and says why; another type brings it back', async () => {
+    runActionFlag = true
+    const { container } = mountEditor({ rule: cronRule() })
+    await flushPromises()
+    expect(addActionButton(container)).not.toBeNull()
+    epSetSelect(actionSelectAt(container, 0), 'run_integration_job')
+    await flushPromises()
+    expect(container.querySelector('[data-action-config="run_integration_job"]')).not.toBeNull()
+    expect(addActionButton(container)).toBeNull()
+    expect(container.querySelector('[data-field="rij-sole-action-hint"]')?.textContent).toContain('only action of its rule')
+    // the job alone is not a save block of its own (what is left is the empty project number)
+    expect(blockKeys(container)).not.toContain('runIntegrationJobSole')
+    epSetSelect(actionSelectAt(container, 0), 'send_notification')
+    await flushPromises()
+    expect(container.querySelector('[data-action-config="run_integration_job"]')).toBeNull()
+    expect(addActionButton(container)).not.toBeNull()
+  })
+
+  it.each<[label: string, actions: Array<{ type: string; config: Record<string, unknown> }>, remove: number]>([
+    ['AFTER another action', [NOTIFY_ACTION, JOB_ACTION], 0],
+    ['BEFORE another action', [JOB_ACTION, NOTIFY_ACTION], 1],
+    ['TWICE', [JOB_ACTION, { ...JOB_ACTION }], 1],
+  ])('a LOADED rule that carries the job %s is shown whole, cannot be saved, takes no further action — and saves once the job is alone', async (_label, actions, remove) => {
+    runActionFlag = true
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: ruleWithActions(actions), onSave })
+    await flushPromises()
+    // shown whole: both rows, the job's project number readable
+    expect(actionRows(container)).toBe(2)
+    expect(container.querySelectorAll('[data-action-config="run_integration_job"]').length).toBe(actions.filter((action) => action.type === 'run_integration_job').length)
+    expect(blockKeys(container)).toContain('runIntegrationJobSole')
+    expect(blockTextOf(container, 'runIntegrationJobSole')).toBe(SOLE_LINE)
+    // nothing more is added beside the job, although the rule has fewer than three actions
+    expect(addActionButton(container)).toBeNull()
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flushPromises()
+    expect(onSave).not.toHaveBeenCalled()
+
+    removeActionAt(container, remove)
+    await flushPromises()
+    expect(actionRows(container)).toBe(1)
+    expect(blockKeys(container)).toEqual([])
+    save.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    const sentConfig = { job: { kind: 'stock_prep_pull', projectNos: ['P-001'], applyMode: 'dry_run_only' }, timeoutMs: 20 * 60_000 }
+    expect(payload.actions).toEqual([{ type: 'run_integration_job', config: sentConfig }])
+    expect(payload.actionType).toBe('run_integration_job')
+    expect(payload.actionConfig).toEqual(sentConfig)
+  })
+
+  it('the sole-action save block is localized', async () => {
+    runActionFlag = true
+    useLocale().setLocale('zh-CN')
+    const { container } = mountEditor({ rule: ruleWithActions([NOTIFY_ACTION, JOB_ACTION]) })
+    await flushPromises()
+    expect(blockTextOf(container, 'runIntegrationJobSole')).toBe('「运行集成任务」必须是规则里唯一的动作：请移除其他动作（其他动作请另建一条规则）。')
+    expect(container.querySelector('[data-field="rij-sole-action-hint"]')?.textContent).toContain('必须是规则里唯一的动作')
+  })
+})
+
+// ── R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — the client mirror ──────────────────
+describe('rule editor: run_integration_job and trigger conditions (mirror of the server refusal)', () => {
+  const CONDITIONS = { conjunction: 'AND' as const, conditions: [{ fieldId: 'fld_name', operator: 'equals' as const, value: 'x' }] }
+  const CONDITIONS_LINE = 'A rule with run integration job cannot have conditions (a schedule trigger has no record to test, so every run would be skipped): remove all conditions.'
+  const removeFirstCondition = (container: HTMLElement) =>
+    (container.querySelector('[data-condition-path] .meta-rule-editor__btn--icon') as HTMLButtonElement).click()
+
+  beforeEach(() => {
+    runActionFlag = true
+    useLocale().setLocale('en')
+  })
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('the pure mirror: absent conditions and an empty group are none; any node (or a malformed group) is refused with the server\'s text', () => {
+    expect(RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE).toBe('run_integration_job rules cannot carry conditions (a schedule trigger has no record context)')
+    for (const none of [null, undefined, { conjunction: 'AND', conditions: [] }]) expect(checkRunIntegrationJobConditions(none), JSON.stringify(none)).toBeNull()
+    for (const some of [CONDITIONS, { conjunction: 'OR', conditions: [{ conjunction: 'AND', conditions: [] }] }, { conjunction: 'AND' }]) {
+      expect(checkRunIntegrationJobConditions(some), JSON.stringify(some)).toEqual({ code: 'conditions_present', message: RUN_INTEGRATION_JOB_CONDITIONS_MESSAGE })
+    }
+  })
+
+  it('a LOADED job rule that carries conditions cannot be saved until they are removed; then it saves without them', async () => {
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG, { conditions: CONDITIONS }), onSave })
+    await flushPromises()
+    expect(blockKeys(container)).toEqual(['runIntegrationJobConditions'])
+    expect(blockTextOf(container, 'runIntegrationJobConditions')).toBe(CONDITIONS_LINE)
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flushPromises()
+    expect(onSave).not.toHaveBeenCalled()
+    removeFirstCondition(container)
+    await flushPromises()
+    expect(blockKeys(container)).toEqual([])
+    save.click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect(payload.actionType).toBe('run_integration_job')
+    // an omitted key would keep the STORED conditions on the server (incoming ?? stored): a job rule sends null
+    expect(payload.conditions).toBeNull()
+    expect(JSON.parse(JSON.stringify(payload))).toHaveProperty('conditions', null)
+  })
+
+  it('a plain rule whose conditions were removed keeps the omit-when-empty payload (only a job rule sends null)', async () => {
+    const onSave = vi.fn()
+    const { container } = mountEditor({ rule: cronRule({ conditions: CONDITIONS }), onSave })
+    await flushPromises()
+    removeFirstCondition(container)
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const payload = onSave.mock.calls[0]?.[0] as AutomationRule
+    expect(payload.actionType).toBe('send_notification')
+    expect('conditions' in JSON.parse(JSON.stringify(payload))).toBe(false)
+  })
+
+  it('a plain schedule rule with conditions is untouched by this mirror (control of the same draft)', async () => {
+    const { container } = mountEditor({ rule: cronRule({ conditions: CONDITIONS }) })
+    await flushPromises()
+    expect(container.querySelector('[data-condition-path]')).not.toBeNull()
+    expect(blockKeys(container)).not.toContain('runIntegrationJobConditions')
+  })
+
+  it('the conditions save block is localized', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mountEditor({ rule: rijRule(STORED_CONFIG, { conditions: CONDITIONS }) })
+    await flushPromises()
+    expect(blockTextOf(container, 'runIntegrationJobConditions')).toBe('带「运行集成任务」的规则不能设置触发条件（定时触发没有记录可判断，条件会让每次运行都被跳过）：请移除所有条件。')
   })
 })

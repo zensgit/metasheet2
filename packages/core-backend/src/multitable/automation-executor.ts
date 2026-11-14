@@ -1940,6 +1940,16 @@ function serializeRunIntegrationJobUnit(unit: RunIntegrationJobUnitResult): Reco
 
 type PortSettlement = { kind: 'resolved'; summary: IntegrationRunSummary } | { kind: 'rejected'; error: unknown }
 
+/**
+ * R-69 I6d fix round 2 (F1b): what ONE trigger established about the step's persisted binding. Written by the step
+ * when it reaches its binding checks; read — and settled, if still `unchecked` — by the summary emitter. `tenantId`
+ * is set together with `verified`, and is the only tenant a summary of that trigger may be routed to.
+ */
+interface RunIntegrationJobRouteCheck {
+  verdict: 'unchecked' | 'verified' | 'refused'
+  tenantId?: string
+}
+
 /** The reason the step's own timeout signal aborts with; `name` is AbortError so standard checks recognize it. */
 export class RunIntegrationJobAbort extends Error {
   constructor(readonly abortCause: 'timeout' | 'shutdown') {
@@ -4260,6 +4270,9 @@ export class AutomationExecutor {
    * once, after the step's final result — never inside the unit loop, never from a `timeout_unsettled`
    * continuation (its late settlement is the intent ledger's business, not a second event). The step's result
    * is returned unchanged whatever the publish answers.
+   *
+   * R-69 I6d fix round 2 (F1b): "per project" holds for a step whose ROUTE this trigger verified — see
+   * emitRunIntegrationJobSummaries. A step that stopped because its binding could not be verified publishes nothing.
    */
   private async executeRunIntegrationJob(
     config: Record<string, unknown>,
@@ -4267,16 +4280,48 @@ export class AutomationExecutor {
     identity: ClassAActionIdentity | undefined,
   ): Promise<AutomationStepResult> {
     let result: AutomationStepResult
+    const route: RunIntegrationJobRouteCheck = { verdict: 'unchecked' }
     try {
-      result = await this.executeRunIntegrationJobStep(config, context, identity)
+      result = await this.executeRunIntegrationJobStep(config, context, identity, route)
     } catch (error) {
       // R-69 1c (ADR §4.1 "exactly one per job", fix-I5): a throw OUTSIDE the unit loop (the unit loop turns its
-      // own throws into closed unit results) still ends as a closed step result, so every configured project gets
-      // its one summary. Values-free: the error's code or name only — never its message.
+      // own throws into closed unit results) still ends as a closed step result, so the emitter below has one
+      // result to summarize per configured project. Whether it publishes is the route check's (F1b): a throw
+      // before the binding checks leaves the route `unchecked`, and the emitter then runs those checks itself
+      // before anything is published. Values-free: the error's code or name only — never its message.
       result = this.runIntegrationJobStep('failed', 'failed', integrationRunErrorClass(error))
     }
-    await this.emitRunIntegrationJobSummaries(result, config, context, identity)
+    await this.emitRunIntegrationJobSummaries(result, config, context, identity, route)
     return result
+  }
+
+  /**
+   * The two trigger-time checks of the PERSISTED binding, in the step's order. null = both hold; otherwise the step
+   * result of the refusal.
+   *   1. ADR §6.2 — the binding principal IS the rule's stored creator (the binding is frozen to created_by; a config
+   *      whose binding names someone else never runs).
+   *   2. R-69 I6a (ADR §3.1 + §6.5) — the rule's sheet is the ACTIVE registered project sheet (registry 087) of the
+   *      binding tenant. Archived / never registered / switch off ⇒ unregistered; another tenant's row ⇒ tenant
+   *      mismatch — both skipped(principal_unauthorized) with a closed cause (INTEGRATION_RUN_FINISHED_REASONS stays
+   *      closed). Unreadable ⇒ not_started(authority_unavailable).
+   * Together they are what makes `binding.tenantId` more than text the row happens to hold: the creator is the rule's
+   * own, and the registry — not the rule — says this sheet belongs to that tenant.
+   */
+  private async verifyRunIntegrationJobBinding(
+    parsed: NormalizedRunIntegrationJobConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult | null> {
+    if (parsed.binding.principalId !== context.ruleCreatedBy) {
+      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', { cause: 'binding_principal_mismatch' })
+    }
+    const ruleSheet = await checkRunIntegrationJobRuleSheet(this.deps.queryFn, { sheetId: context.sheetId, tenantId: parsed.binding.tenantId })
+    if (ruleSheet.ok === false) {
+      if (ruleSheet.refusal === 'unreadable') return this.runIntegrationJobStep('failed', 'not_started', 'authority_unavailable')
+      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', {
+        cause: ruleSheet.refusal === 'tenant_mismatch' ? 'rule_sheet_tenant_mismatch' : 'rule_sheet_unregistered',
+      })
+    }
+    return null
   }
 
   /**
@@ -4284,17 +4329,42 @@ export class AutomationExecutor {
    * INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED before building anything (the ADR's third read point); needs the
    * persisted config (the projects and the binding tenant, which routes but never rides in the event) and the
    * class-A identity (the deterministic event id). Never throws; a refusal is logged values-free.
+   *
+   * R-69 I6d fix round 2 (F1b) — THE ROUTE IS A TENANT THIS TRIGGER VERIFIED, OR THERE IS NO SUMMARY. The route tenant
+   * decides whose integration.run_finished rules fire, and the publish port checks its shape only. The exact rule:
+   *   - a summary is published only when verifyRunIntegrationJobBinding held ON THIS TRIGGER for this config — the
+   *     binding principal is the rule's stored creator AND the rule's sheet is the active registered project sheet of
+   *     the binding tenant — and it is routed to that tenant;
+   *   - the step's own verdict is used when it reached those checks (`verified` / `refused`);
+   *   - a step that returned BEFORE them (`unchecked`: the action switch is off, or a throw) has the same two checks
+   *     run here, once, before anything is published — so skipped(action_disabled) is still summarized for a rule
+   *     whose binding verifies, and for no other;
+   *   - refused, unreadable or throwing ⇒ nothing is published (one values-free log line). The step result is not
+   *     touched: the execution log still records why the step stopped.
+   * So a stop for an unverified binding (principal mismatch, sheet archived / unregistered / another tenant's,
+   * registry unreadable or switched off) is no longer summarized: it used to be routed to whatever tenant the stored
+   * binding named. Later stops (live authority, port, lease, units) happen after verification and are summarized.
    */
   private async emitRunIntegrationJobSummaries(
     result: AutomationStepResult,
     config: Record<string, unknown>,
     context: ExecutionContext,
     identity: ClassAActionIdentity | undefined,
+    route: RunIntegrationJobRouteCheck,
   ): Promise<void> {
     if (!isIntegrationAutomationRunEventEnabled()) return
     try {
       const parsed = parsePersistedRunIntegrationJobConfig(config)
       if (!parsed || !identity) return
+      if (route.verdict === 'unchecked') {
+        route.verdict = (await this.verifyRunIntegrationJobBinding(parsed, context)) === null ? 'verified' : 'refused'
+        if (route.verdict === 'verified') route.tenantId = parsed.binding.tenantId
+      }
+      if (route.verdict !== 'verified' || typeof route.tenantId !== 'string') {
+        logger.warn('run_integration_job summary not published: the binding was not verified on this trigger', { ruleId: context.ruleId, executionId: context.executionId })
+        return
+      }
+      const routeTenantId = route.tenantId
       const parentDepth = (context.triggerEvent as Record<string, unknown> | null | undefined)?._automationDepth
       const events = buildAutomationRunFinishedEvents({
         output: result.output,
@@ -4307,7 +4377,7 @@ export class AutomationExecutor {
         occurredAt: new Date().toISOString(),
       })
       for (const event of events) {
-        const published = await publishIntegrationRunFinished(event, { tenantId: parsed.binding.tenantId }, 'automation')
+        const published = await publishIntegrationRunFinished(event, { tenantId: routeTenantId }, 'automation')
         if (published.published === false && published.code !== 'SINK_INACTIVE') {
           logger.warn('run_integration_job summary not published', { ruleId: context.ruleId, executionId: context.executionId, code: published.code, ...(published.field ? { field: published.field } : {}) })
         }
@@ -4321,28 +4391,24 @@ export class AutomationExecutor {
     config: Record<string, unknown>,
     context: ExecutionContext,
     identity: ClassAActionIdentity | undefined,
+    route: RunIntegrationJobRouteCheck,
   ): Promise<AutomationStepResult> {
     // 0. The switch is read on EVERY trigger (ADR §7): off ⇒ skipped(action_disabled), never a silent success.
     if (!isIntegrationAutomationRunActionEnabled()) return this.runIntegrationJobStep('skipped', 'skipped', 'action_disabled')
     const parsed = parsePersistedRunIntegrationJobConfig(config)
     if (!parsed) return this.runIntegrationJobStep('failed', 'not_started', 'config_invalid')
     if (!identity) return this.runIntegrationJobStep('failed', 'not_started', 'identity_required')
-    if (parsed.binding.principalId !== context.ruleCreatedBy) {
-      // ADR §6.2: the binding is frozen to created_by; a config whose binding names someone else never runs.
-      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', { cause: 'binding_principal_mismatch' })
+    // 0.5. The persisted binding, checked on EVERY trigger (verifyRunIntegrationJobBinding): its principal is the
+    // rule's stored creator (ADR §6.2), and — R-69 I6a, ADR §3.1 + §6.5 — the rule's sheet is still the ACTIVE
+    // registered project sheet (registry 087) of the binding tenant. Before the port lookup: nothing is claimed,
+    // leased or called. The verdict is handed to the summary emitter (F1b): only a verified tenant is a route.
+    const bindingRefusal = await this.verifyRunIntegrationJobBinding(parsed, context)
+    if (bindingRefusal) {
+      route.verdict = 'refused'
+      return bindingRefusal
     }
-    // 0.5. R-69 I6a (ADR §3.1 + §6.5, re-checked on EVERY trigger): the rule's sheet is still the ACTIVE registered
-    // project sheet (registry 087) of the binding tenant. Archived / never registered / switch off ⇒ unregistered;
-    // another tenant's row ⇒ tenant mismatch — both skipped(principal_unauthorized) with a closed cause (the
-    // binding_principal_mismatch pattern; INTEGRATION_RUN_FINISHED_REASONS stays closed). Unreadable ⇒
-    // not_started(authority_unavailable). Before the port lookup: nothing is claimed, leased or called.
-    const ruleSheet = await checkRunIntegrationJobRuleSheet(this.deps.queryFn, { sheetId: context.sheetId, tenantId: parsed.binding.tenantId })
-    if (ruleSheet.ok === false) {
-      if (ruleSheet.refusal === 'unreadable') return this.runIntegrationJobStep('failed', 'not_started', 'authority_unavailable')
-      return this.runIntegrationJobStep('skipped', 'skipped', 'principal_unauthorized', {
-        cause: ruleSheet.refusal === 'tenant_mismatch' ? 'rule_sheet_tenant_mismatch' : 'rule_sheet_unregistered',
-      })
-    }
+    route.verdict = 'verified'
+    route.tenantId = parsed.binding.tenantId
     const port = this.deps.integrationRunPort ? this.deps.integrationRunPort() : null
     if (!port) return this.runIntegrationJobStep('failed', 'not_started', 'port_inactive')
     const transaction = this.deps.transaction

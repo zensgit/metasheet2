@@ -1,0 +1,978 @@
+/**
+ * R-69 I6d — the SAVE PATH the rule editor really takes for `run_integration_job` (dry run only, default OFF; R-69 is
+ * OPEN). Synthetic only: no plugin, no port implementation, no network, no real database.
+ *
+ * WHY THIS FILE EXISTS (I6a re-review finding H1, pre-existing since R-69 1b-ii): the editor ALWAYS posts the rule's
+ * action list as `actions[]` and mirrors `actions[0]` into the legacy pair (apps/web/src/multitable/components/
+ * MetaAutomationRuleEditor.vue buildPayload: `actions`, `actionType: actions[0].type`, `actionConfig:
+ * actions[0].config`). The save gate decided "nested" by OBJECT IDENTITY against a list the service had already
+ * copied (collectNestedAutomationActions → validateActionObject returns `{ type, config }`), so every `actions[]`
+ * occurrence was refused as "must be a top-level action" — only a hand-written pair-only API body could save, and the
+ * per-occurrence gate behind that refusal (closed config, binding stamp, the I6a rule-sheet guard) was unreachable
+ * for the shape the executor actually runs (toExecutorRule: `actions` when non-empty, else the pair).
+ *
+ * WHAT IT DRIVES: the wire body the editor sends (JSON round-tripped — over HTTP `actionConfig` and
+ * `actions[0].config` are DISTINCT objects), through the route's own exported chain (parseCreateRuleInput /
+ * parseUpdateRuleInput → the three preflights → createRule / updateRule) on a small in-memory rule store. The
+ * action config is built by the editor's own `buildRunIntegrationJobConfig`, imported LIVE across the package
+ * boundary (the web module has no runtime import; precedent: automation-run-integration-job-web-parity.test.ts).
+ *
+ * WHAT "NESTED" MEANS (the rule this slice makes structural): the save gate applies its binding stamp and its
+ * per-occurrence checks to the legacy pair and to the top level of `actions[]`, and to no other position. An
+ * occurrence inside a branch container (`config.branches[*].actions[*]`, `config.defaultBranch.actions[*]` — the two
+ * lists the executor dispatches branch steps from) would be stored with whatever `binding` the client wrote, so it is
+ * refused by position, at any depth.
+ *
+ * WHAT THESE CASES PROVE, AND WHAT THEY DO NOT (fix round 2; the round-1 refuter's finding 1). Each case here is ONE
+ * save, or saves one after the other: for those, every occurrence the save stores went through the gate and carries
+ * the server binding. That says nothing about two saves that interleave. Three other things carry that, each with
+ * its own cases:
+ *   - F1 — updateRule binds its write to the row version it validated; a write whose row changed is validated again
+ *     (the F1 block below on the in-memory store; the real statement on the real table, two backends, in
+ *     tests/integration/multitable-automation-run-integration-job-realdb.test.ts);
+ *   - F1b — whatever a stored binding says, the executor publishes a summary only to a tenant its own trigger
+ *     verified (tests/unit/automation-integration-run-finished.test.ts), so the summary route does not rest on the
+ *     nested refusal alone;
+ *   - F2 — the job is its rule's ONLY action (the F2 block below): no later step, nothing beside it.
+ * Not covered by any of them: a row written by something other than createRule / updateRule.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { AutomationExecutor } from '../../src/multitable/automation-executor'
+import type { IntegrationRunInput, IntegrationRunPort } from '../../src/core/integration-run-port'
+import { EventBus } from '../../src/integration/events/event-bus'
+import {
+  RUN_INTEGRATION_JOB_NOT_SOLE_ERROR,
+  collectRunIntegrationJobOccurrences,
+  parsePersistedRunIntegrationJobConfig,
+  validateRunIntegrationJobSoleAction,
+} from '../../src/multitable/automation-run-integration-job'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
+import {
+  AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE,
+  AutomationRuleValidationError,
+  AutomationService,
+  RULE_WRITE_MAX_ATTEMPTS,
+  parseCreateRuleInput,
+  parseUpdateRuleInput,
+  preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
+  preflightAutomationWebhookTargets,
+  preflightDingTalkAutomationCreate,
+  toExecutorRule,
+  type AutomationRule,
+} from '../../src/multitable/automation-service'
+import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
+import { createFakeJobDb } from '../utils/run-integration-job-fake-db'
+// LIVE import of the editor's config builder across the package boundary (relative path; apps/web is not a dependency).
+// eslint-disable-next-line import/no-relative-packages
+import { buildRunIntegrationJobConfig } from '../../../../apps/web/src/multitable/runIntegrationJobAuthoring'
+
+const FLAG = 'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'
+const NESTED_MESSAGE = 'run_integration_job must be a top-level action (not inside a condition_branch / parallel_branch)'
+/** Fix round 2 (F2). The text is pinned HERE, not read from the module: a reworded refusal is a change to review. */
+const NOT_SOLE_MESSAGE = 'run_integration_job must be the only action of its rule (no other action before it, after it or beside it)'
+const M = RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES
+const CREATOR = 'svc_user'
+const SERVER_BINDING = { principalId: CREATOR, tenantId: 'tenant_1' }
+const CLIENT_BINDING = { principalId: CREATOR, tenantId: 'tenant_foreign' }
+
+type Action = { type: string; config: Record<string, unknown> }
+type RegistryRow = { sheet_id: string; tenant_id: string; project_no: string; status: string; object_id: string }
+
+/** The wire: what the server receives is a parsed JSON body — no object is shared between two positions. */
+const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+/** The action config the editor sends for one project (its own builder; 30 minutes is the editor's default). */
+const editorJobConfig = (projectNosText: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  ...buildRunIntegrationJobConfig({ rijKind: 'stock_prep_pull', rijProjectNosText: projectNosText, rijTimeoutMinutes: 30 }),
+  ...extra,
+})
+const rij = (projectNosText = 'P-1', extra: Record<string, unknown> = {}): Action => ({ type: 'run_integration_job', config: editorJobConfig(projectNosText, extra) })
+const updateRecord = (): Action => ({ type: 'update_record', config: { fields: { fld_1: 'x' } } })
+
+/**
+ * MetaAutomationRuleEditor.vue buildPayload, for a rule whose action list is `actions`: the list itself, the legacy
+ * pair mirrored from `actions[0]`, the trigger twice (flat + nested), and the execution mode (null unless a branch
+ * action forces workflow_job_v1). Returned AS THE WIRE BODY.
+ */
+function editorBody(actions: Action[], overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const triggerConfig = { cron: '0 6 * * *', timezone: 'Asia/Shanghai' }
+  const needsJobMode = actions.some((action) => action.type === 'condition_branch' || action.type === 'parallel_branch')
+  return wire({
+    name: 'Nightly pull',
+    triggerType: 'schedule.cron',
+    triggerConfig,
+    trigger: { type: 'schedule.cron', config: triggerConfig },
+    conditions: undefined,
+    actions,
+    actionType: actions[0]?.type ?? 'update_record',
+    actionConfig: actions[0]?.config ?? {},
+    executionMode: needsJobMode ? 'workflow_job_v1' : null,
+    ...overrides,
+  })
+}
+
+const emptyGroup = () => ({ conjunction: 'AND', conditions: [] })
+/** A condition_branch whose `where` list carries the given actions (the other list carries an ordinary action). */
+function conditionBranch(where: 'branches' | 'defaultBranch', nested: Action[]): Action {
+  return {
+    type: 'condition_branch',
+    config: {
+      branches: [{ key: 'b1', conditions: emptyGroup(), actions: where === 'branches' ? nested : [updateRecord()] }],
+      defaultBranch: { key: 'otherwise', actions: where === 'defaultBranch' ? nested : [updateRecord()] },
+    },
+  }
+}
+
+const REGISTERED = (sheetId: string, tenantId: string, projectNo: string, status = 'active'): RegistryRow =>
+  ({ sheet_id: sheetId, tenant_id: tenantId, project_no: projectNo, status, object_id: `obj_${sheetId}` })
+
+const ORGS = /FROM user_orgs/i
+const REGISTRY = /FROM integration_stock_prep_project_target WHERE sheet_id = \$1/
+const JSON_COLUMNS = ['trigger_config', 'action_config', 'conditions', 'actions']
+
+/**
+ * AutomationService over an in-memory `automation_rules` store (the three Kysely shapes createRule / getRule /
+ * updateRule issue) and a query function that answers the creator's memberships and the project-sheet registry. The
+ * registry answers by EXACT match on each row's own `sheet_id` and returns the row as stored — never an echo of the
+ * query parameter.
+ *
+ * `onRuleUpdate` (fix round 2, F1) stands for ANOTHER save landing between an updateRule attempt's read and its write:
+ * it is called when the n-th UPDATE of this service is about to run, may change the store, and by answering `'lost'`
+ * makes that UPDATE match no row — what the real statement's row-version predicate does then (the predicate itself
+ * is proven on the real table: tests/integration/multitable-automation-run-integration-job-realdb.test.ts).
+ */
+function makeService(options: {
+  orgRows?: Array<{ org_id: string }>
+  registry?: RegistryRow[] | Error
+  onRuleUpdate?: (nth: number, rules: Map<string, Record<string, unknown>>) => 'lost' | undefined
+} = {}) {
+  const orgRows = options.orgRows ?? [{ org_id: 'tenant_1' }]
+  const registry = options.registry ?? [REGISTERED('sheet_1', 'tenant_1', 'P-1')]
+  const rules = new Map<string, Record<string, unknown>>()
+  const writes: Array<{ op: 'insert' | 'update'; values: Record<string, unknown> }> = []
+  let ruleUpdates = 0
+  const asStored = (values: Record<string, unknown>) => {
+    const row: Record<string, unknown> = { ...values }
+    for (const column of JSON_COLUMNS) if (typeof row[column] === 'string') row[column] = JSON.parse(row[column] as string)
+    return row
+  }
+  const builder = (op: 'insert' | 'select' | 'update' | 'delete', table: string) => {
+    const state: { values?: Record<string, unknown>; wheres: Array<[string, unknown]> } = { wheres: [] }
+    const self: Record<string, unknown> = {}
+    for (const method of ['selectAll', 'select', 'orderBy', 'limit', 'offset', 'returningAll', 'onConflict', 'columns', 'doUpdateSet', 'groupBy', 'leftJoin']) self[method] = () => self
+    self.values = (values: Record<string, unknown>) => { state.values = values; return self }
+    self.set = (values: Record<string, unknown>) => { state.values = values; return self }
+    self.where = (column: unknown, _operator: unknown, value: unknown) => { if (typeof column === 'string') state.wheres.push([column, value]); return self }
+    const matching = () => (table === 'automation_rules' ? [...rules.values()].filter((row) => state.wheres.every(([column, value]) => row[column] === value)) : [])
+    self.execute = async () => {
+      if (table !== 'automation_rules') return []
+      if (op === 'insert') {
+        const row = asStored(state.values ?? {})
+        rules.set(String(row.id), row)
+        writes.push({ op, values: state.values ?? {} })
+        return []
+      }
+      if (op === 'update') {
+        ruleUpdates += 1
+        if (options.onRuleUpdate?.(ruleUpdates, rules) === 'lost') return []
+        const hit = matching()
+        for (const row of hit) Object.assign(row, asStored(state.values ?? {}))
+        if (hit.length > 0) writes.push({ op, values: state.values ?? {} })
+        return hit.map((row) => ({ ...row }))
+      }
+      return op === 'select' ? matching().map((row) => ({ ...row })) : []
+    }
+    self.executeTakeFirst = async () => {
+      const first = op === 'select' ? matching()[0] : undefined
+      return first ? { ...first } : undefined
+    }
+    return self
+  }
+  const db = {
+    insertInto: (table: string) => builder('insert', table),
+    selectFrom: (table: string) => builder('select', table),
+    updateTable: (table: string) => builder('update', table),
+    deleteFrom: (table: string) => builder('delete', table),
+  }
+  const queryFn = vi.fn(async (sql: string, params: unknown[] = []) => {
+    if (ORGS.test(sql)) return { rows: orgRows, rowCount: orgRows.length }
+    if (REGISTRY.test(sql)) {
+      if (registry instanceof Error) throw registry
+      const rows = registry.filter((row) => row.sheet_id === params[0])
+      return { rows, rowCount: rows.length }
+    }
+    return { rows: [], rowCount: 0 }
+  })
+  const service = new AutomationService(new EventBus(), db as never, queryFn as never)
+  // R-69 B1: an enabled job rule is saved only by a user who holds the job authority live (the acting user, in the
+  // binding tenant). These cases are about the gate's shape checks, so the creator and the other editor both hold it;
+  // the refusals of B1 itself are automation-run-integration-job-editor-authority.test.ts.
+  service.setRunIntegrationJobEditorAuthorityResolverForTest(async ({ principalId, tenantId }) => (
+    [CREATOR, 'editor_2'].includes(principalId) && tenantId === 'tenant_1'
+      ? { ok: true, user: { id: principalId, permissions: ['workflow:write'], roles: [], role: 'user', tenantId } }
+      : { ok: false, reason: 'principal_unauthorized' }
+  ))
+  const registryReads = () => queryFn.mock.calls.filter(([sql]) => REGISTRY.test(String(sql))).map(([, params]) => params)
+  const tenantReads = () => queryFn.mock.calls.filter(([sql]) => ORGS.test(String(sql))).length
+
+  /** POST /sheets/:sheetId/automations after authn/authz (routes/univer-meta.ts): the same four calls, in order. */
+  const post = async (sheetId: string, body: Record<string, unknown>, userId: string = CREATOR): Promise<AutomationRule> => {
+    const parsed = parseCreateRuleInput(body, userId)
+    preflightAutomationWebhookTargets(parsed)
+    const input = await preflightDingTalkAutomationCreate(queryFn as never, sheetId, parsed)
+    await preflightAutomationConditionFields(queryFn as never, sheetId, input.conditions, input)
+    return service.createRule(sheetId, input)
+  }
+  /** PATCH /sheets/:sheetId/automations/:ruleId after authn/authz: the same calls, in order. */
+  const patch = async (sheetId: string, ruleId: string, body: Record<string, unknown>, userId: string): Promise<AutomationRule | null> => {
+    const parsed = parseUpdateRuleInput(body)
+    if (!parsed) throw new Error('test body carries no recognised field')
+    const preflight = await preflightAutomationRuleUpdate(queryFn as never, sheetId, ruleId, parsed, service)
+    if (!preflight) return null
+    const effective = { ...preflight.input, actionType: preflight.effectiveActionType ?? preflight.input.actionType, actionConfig: preflight.effectiveActionConfig ?? preflight.input.actionConfig }
+    preflightAutomationWebhookTargets(effective)
+    await preflightAutomationConditionFields(queryFn as never, sheetId, preflight.input.conditions, effective)
+    return service.updateRule(ruleId, sheetId, preflight.input, userId)
+  }
+  /** A row that is already in the table (it never went through the save gate): what an edit finds stored. */
+  const seed = (row: Record<string, unknown>) => { rules.set(String(row.id), { enabled: true, name: 'stored', conditions: null, execution_mode: null, ...row }) }
+  return { service, rules, writes, queryFn, registryReads, tenantReads, post, patch, seed }
+}
+
+const refusalOf = (work: Promise<unknown>) => work.then(() => null, (error: unknown) => error as Error)
+/** The save must be REFUSED as a validation error; answers its message. A save that goes through is a plain red here. */
+async function refusedWith(work: Promise<unknown>): Promise<string> {
+  const refusal = await refusalOf(work)
+  expect(refusal, 'the save must be refused, nothing written').toBeInstanceOf(AutomationRuleValidationError)
+  return (refusal as Error).message
+}
+const actionsColumn = (values: Record<string, unknown>) => JSON.parse(String(values.actions)) as Action[]
+const configColumn = (values: Record<string, unknown>) => JSON.parse(String(values.action_config)) as Record<string, unknown>
+const stamped = (projectNo = 'P-1') => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 30 * 60_000, binding: SERVER_BINDING })
+
+beforeEach(() => {
+  vi.stubEnv(FLAG, 'true')
+  vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true')
+})
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllEnvs()
+})
+
+describe('run_integration_job occurrences are decided by POSITION, never by object identity (I6d, pure)', () => {
+  const copy = (action: Action): Action => ({ type: action.type, config: action.config })
+
+  it('a top-level actions[] occurrence is top-level even when the flattened list holds COPIES (the service always passes copies)', () => {
+    const top = rij()
+    const flattened = [copy(top)]
+    expect(flattened[0]).not.toBe(top)
+    expect(collectRunIntegrationJobOccurrences('run_integration_job', top.config, [top] as never, flattened as never)).toEqual({
+      occurrences: [{ path: 'actionConfig', config: top.config }, { path: 'actions[0].config', config: top.config }],
+      error: null,
+    })
+    // A later-step occurrence is still COLLECTED as a top-level one — the walk does not call it nested — and, fix
+    // round 2 (F2), the rule is refused for another reason: the job is not its only action.
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, [updateRecord(), top] as never, [copy(updateRecord()), copy(top)] as never))
+      .toEqual({ occurrences: [{ path: 'actions[1].config', config: top.config }], error: NOT_SOLE_MESSAGE })
+  })
+
+  it.each([
+    ['actions[i] condition_branch, branches', 'update_record', {}, [conditionBranch('branches', [rij()])]],
+    ['actions[i] condition_branch, defaultBranch', 'update_record', {}, [conditionBranch('defaultBranch', [rij()])]],
+    ['actions[i] parallel_branch, branches', 'update_record', {}, [{ type: 'parallel_branch', config: { joinMode: 'all', branches: [{ key: 'a', actions: [rij()] }] } }]],
+    ['the pair as a condition_branch, branches', 'condition_branch', conditionBranch('branches', [rij()]).config, null],
+    ['the pair as a condition_branch, defaultBranch', 'condition_branch', conditionBranch('defaultBranch', [rij()]).config, null],
+    ['two levels down (a branch inside a branch)', 'update_record', {}, [conditionBranch('branches', [conditionBranch('defaultBranch', [rij()])])]],
+    ['a valid top-level occurrence beside a nested one', 'run_integration_job', rij().config, [rij(), conditionBranch('branches', [rij()])]],
+    // The walk does not ask what TYPE carries the branch list (a superset of the two containers the executor
+    // dispatches from): a list smuggled under any other action is refused all the same, at every level.
+    ['an actions[i] that is NOT a branch container but carries a branch list', 'update_record', {}, [{ type: 'update_record', config: { fields: {}, branches: [{ key: 'b1', actions: [rij()] }] } }]],
+    ['a pair that is NOT a branch container but carries a branch list', 'update_record', { fields: {}, defaultBranch: { key: 'otherwise', actions: [rij()] } }, null],
+    ['a NESTED action that is not a branch container but carries a branch list', 'update_record', {}, [conditionBranch('branches', [{ type: 'update_record', config: { defaultBranch: { actions: [rij()] } } }])]],
+  ])('the walk finds a nested occurrence WITHOUT any flattened list: %s', (_label, actionType, actionConfig, actions) => {
+    // `allActions` is the top-level list itself (what the trigger-only edit passes): only the walk can see the nesting.
+    const result = collectRunIntegrationJobOccurrences(actionType, actionConfig as never, actions as never, actions as never)
+    expect(result.error).toBe(NESTED_MESSAGE)
+    const none = collectRunIntegrationJobOccurrences(actionType, actionConfig as never, actions as never, null)
+    expect(none.error).toBe(NESTED_MESSAGE)
+  })
+
+  it('the flattened-list tripwire: more occurrences in the service flattening than at the top level of actions[] is nested, wherever it sits', () => {
+    // No branch container is visible in `actions` here — only the count of the flattening can tell.
+    const top = rij()
+    const somewhere = { type: 'update_record', config: {} } as Action
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, [somewhere, top] as never, [copy(rij()), copy(somewhere), copy(top)] as never).error).toBe(NESTED_MESSAGE)
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, [somewhere] as never, [copy(somewhere), copy(rij())] as never).error).toBe(NESTED_MESSAGE)
+    // equal counts are not NESTED: the editor's shape is accepted …
+    expect(collectRunIntegrationJobOccurrences('run_integration_job', top.config, [top] as never, [copy(top)] as never).error).toBeNull()
+    // … and a later-step job with equal counts answers the sole-action message (F2), not the nested one — with the
+    // flattening, and with the walk alone in charge (an absent flattening)
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, [somewhere, top] as never, [copy(somewhere), copy(top)] as never).error).toBe(NOT_SOLE_MESSAGE)
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, [somewhere, top] as never, null).error).toBe(NOT_SOLE_MESSAGE)
+  })
+
+  it('branch lists that are not lists, and entries that are not actions, are ignored (nothing to run there)', () => {
+    const odd = [{ type: 'condition_branch', config: { branches: 'x', defaultBranch: { actions: [null, 7, 'run_integration_job', { type: 'update_record' }] } } }]
+    expect(collectRunIntegrationJobOccurrences('update_record', {}, odd as never, odd as never)).toEqual({ occurrences: [], error: null })
+  })
+})
+
+describe('the editor wire shape through the real createRule (I6d)', () => {
+  it('the job as the first action — actions[0] plus its mirrored pair — SAVES, and both persisted columns carry the server binding', async () => {
+    const h = makeService()
+    // The editor never sends a binding; a hand-edited body that does is dropped in BOTH positions.
+    const body = editorBody([rij('P-1', { binding: CLIENT_BINDING })])
+    expect(body.actionConfig).not.toBe((body.actions as Action[])[0].config)
+    expect(body.actionConfig).toEqual((body.actions as Action[])[0].config)
+    const saved = await h.post('sheet_1', body)
+
+    expect(h.writes).toHaveLength(1)
+    const row = h.writes[0].values
+    expect(row.action_type).toBe('run_integration_job')
+    expect(configColumn(row)).toEqual(stamped())
+    expect(actionsColumn(row)).toEqual([{ type: 'run_integration_job', config: stamped() }])
+    expect(JSON.stringify(row)).not.toContain('tenant_foreign')
+    expect(row.created_by).toBe(CREATOR)
+    // every occurrence is checked against the RULE sheet's registration (the pair and actions[0])
+    expect(h.registryReads()).toEqual([['sheet_1'], ['sheet_1']])
+    // what the executor runs is `actions`, and its config re-parses as the stamped shape
+    const runnable = toExecutorRule(saved).actions
+    expect(runnable).toHaveLength(1)
+    expect(parsePersistedRunIntegrationJobConfig(runnable[0].config)).toEqual(stamped())
+    h.service.unregisterSchedule(saved.id)
+  })
+
+  // Fix round 2 (F2): round 1 let this shape save (the job stamped at actions[1]). The job is its rule's ONLY action now.
+  it('the job as a LATER action (the pair is another action) is REFUSED with the sole-action message; nothing is written', async () => {
+    const h = makeService()
+    expect(await refusedWith(h.post('sheet_1', editorBody([updateRecord(), rij('P-1', { binding: CLIENT_BINDING })])))).toBe(NOT_SOLE_MESSAGE)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.size).toBe(0)
+    // refused on the shape alone: before the creator's tenant or the registry is read
+    expect(h.tenantReads()).toBe(0)
+    expect(h.registryReads()).toEqual([])
+  })
+
+  /**
+   * The WHOLE stored rule through the real executor (`execute`, the scheduler's entry: legacy mode, a record-less
+   * `_triggeredBy: 'schedule'` event) on the in-memory ledger model, with a port that answers at once.
+   */
+  async function runStoredRule(saved: AutomationRule) {
+    vi.useFakeTimers()
+    const ledger = createFakeJobDb()
+    const calls: IntegrationRunInput[] = []
+    const port: IntegrationRunPort = { run: async (input) => { await input.checkpoint(); calls.push(input); return { status: 'succeeded', reason: 'ready', canApply: true, counts: { add: 1 } } } }
+    const executor = new AutomationExecutor({
+      eventBus: new EventBus(),
+      queryFn: ledger.query,
+      transaction: ledger.transaction,
+      integrationRunPort: () => port,
+      trackIntegrationJobTask: () => undefined,
+      resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { id: CREATOR, permissions: ['workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }),
+      integrationJobRuntime: { leaseTtlMs: 3_000, settleGraceMs: 500, shutdownSettleGraceMs: 300 },
+    })
+    const execution = await executor.execute(toExecutorRule(saved), { _triggeredBy: 'schedule' })
+    return { execution, calls, ledger }
+  }
+
+  it('the saved editor shape RUNS: the executor takes the stored rule — its actions[0] — to the port exactly once, for the one project', async () => {
+    const h = makeService()
+    const saved = await h.post('sheet_1', editorBody([rij()]))
+    h.service.unregisterSchedule(saved.id)
+    const { execution, calls, ledger } = await runStoredRule(saved)
+    expect(execution.status).toBe('success')
+    expect(execution.steps.map((step) => [step.actionType, step.status])).toEqual([['run_integration_job', 'success']])
+    expect(execution.steps[0].output).toMatchObject({ outcome: 'succeeded', reason: 'ready' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].job).toEqual({ kind: 'stock_prep_pull', projectNo: 'P-1' })
+    expect(calls[0].context.authenticatedTenantId).toBe('tenant_1')
+    expect(ledger.intentRows().map(([, row]) => row.status)).toEqual(['sent'])
+  })
+
+  // Fix round 2 (F2): round 1 saved [record_click, job] and ran the job as step 1. That rule is not saved any more,
+  // so there is no stored later-step job for the executor to reach (a row written by hand is outside the save gate;
+  // the executor's own trigger-time checks are what it meets).
+  it('as a LATER action — after the executor\'s inert record_click — it is refused at save: no row, so no later-step job to run', async () => {
+    const h = makeService()
+    expect(await refusedWith(h.post('sheet_1', editorBody([{ type: 'record_click', config: {} }, rij()])))).toBe(NOT_SOLE_MESSAGE)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.size).toBe(0)
+  })
+
+  it.each([
+    ['actions[1] is a condition_branch whose branch carries the job', () => editorBody([updateRecord(), conditionBranch('branches', [rij()])])],
+    ['actions[1] is a condition_branch whose DEFAULT branch carries the job', () => editorBody([updateRecord(), conditionBranch('defaultBranch', [rij()])])],
+    ['the pair alone is a condition_branch whose branch carries the job (no actions[])', () => editorBody([conditionBranch('branches', [rij()])], { actions: null })],
+    ['the pair alone is a condition_branch whose DEFAULT branch carries the job (no actions[])', () => editorBody([conditionBranch('defaultBranch', [rij()])], { actions: null })],
+    ['a VALID top-level job at actions[0] and a nested one inside actions[1]', () => editorBody([rij(), conditionBranch('branches', [rij()])])],
+    ['a nested job that brings its OWN binding (another tenant)', () => editorBody([updateRecord(), conditionBranch('defaultBranch', [rij('P-1', { binding: CLIENT_BINDING })])])],
+    // Not a branch container, so the service's flattening does not see it: only the position walk refuses this one.
+    ['a branch list smuggled under an action that is NOT a branch container (actions[0])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, defaultBranch: { key: 'otherwise', actions: [rij('P-1', { binding: CLIENT_BINDING })] } } }])],
+    // …and under a LATER action: the pair mirrors actions[0], which is clean, so only the walk of actions[1] sees it.
+    ['a branch list smuggled under a LATER action that is NOT a branch container (actions[1])', () => editorBody([updateRecord(), { type: 'update_record', config: { fields: { fld_1: 'y' }, defaultBranch: { key: 'otherwise', actions: [rij('P-1', { binding: CLIENT_BINDING })] } } }])],
+    ['a branch list smuggled under a pair that is NOT a branch container (no actions[])', () => editorBody([{ type: 'update_record', config: { fields: { fld_1: 'x' }, branches: [{ key: 'b1', actions: [rij('P-1', { binding: CLIENT_BINDING })] }] } }], { actions: null })],
+  ])('a genuinely NESTED occurrence is refused — %s — with the fixed message, before any tenant or registry read, and nothing is written', async (_label, build) => {
+    const h = makeService()
+    const refusal = await refusalOf(h.post('sheet_1', build()))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toBe(NESTED_MESSAGE)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.size).toBe(0)
+    expect(h.tenantReads()).toBe(0)
+    expect(h.registryReads()).toEqual([])
+  })
+
+  it('inside a parallel_branch the job is still refused (by the branch allow-list, before this gate) and nothing is written', async () => {
+    const h = makeService()
+    const parallel: Action = { type: 'parallel_branch', config: { joinMode: 'all', branches: [{ key: 'a', actions: [rij()] }] } }
+    const refusal = await refusalOf(h.post('sheet_1', editorBody([updateRecord(), parallel])))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toMatch(/cannot contain run_integration_job/)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  // ── in ONE save, each occurrence goes through the gate's checks: the executor runs `actions[]`, not the pair ────
+  // (Saves one at a time. Two saves that interleave are the F1 block's and the real-DB file's subject.)
+  const projectOf = (projectNo: string) => ({ job: { kind: 'stock_prep_pull', projectNos: [projectNo], applyMode: 'dry_run_only' }, timeoutMs: 30 * 60_000 })
+
+  it.each([
+    ['an unregistered sheet', 'sheet_9', [REGISTERED('sheet_1', 'tenant_1', 'P-1')], M.unregistered],
+    ["another tenant's registered sheet", 'sheet_2', [REGISTERED('sheet_2', 'tenant_2', 'P-1')], M.tenant_mismatch],
+    ['an archived sheet', 'sheet_1', [REGISTERED('sheet_1', 'tenant_1', 'P-1', 'archived')], M.unregistered],
+    ["a project that is not the sheet's", 'sheet_1', [REGISTERED('sheet_1', 'tenant_1', 'P-OTHER')], M.project_mismatch],
+  ])('the editor shape on %s is refused by the I6a rule-sheet guard (values-free), nothing written', async (_label, sheetId, registry, message) => {
+    const h = makeService({ registry })
+    const refusal = await refusalOf(h.post(sheetId, editorBody([rij()])))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toBe(message)
+    expect(h.writes).toHaveLength(0)
+    for (const needle of ['sheet_', 'tenant_', 'P-1', 'P-OTHER']) expect(refusal!.message).not.toContain(needle)
+  })
+
+  it('the editor shape with two projects is refused (exactly one project per rule), also when the first is the sheet\'s', async () => {
+    const h = makeService()
+    expect(await refusedWith(h.post('sheet_1', editorBody([rij('P-1\nP-2')])))).toBe(M.project_mismatch)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  // Fix round 2 (F2): round 1 held this shape to the rule-sheet guard. It does not get that far now.
+  it('the job ONLY at actions[1] (no pair occurrence) is refused as not the only action, whatever its project or sheet — the guard is never asked', async () => {
+    const wrongProject = makeService()
+    expect(await refusedWith(wrongProject.post('sheet_1', editorBody([updateRecord(), rij('P-2')])))).toBe(NOT_SOLE_MESSAGE)
+    const unregistered = makeService()
+    expect(await refusedWith(unregistered.post('sheet_9', editorBody([updateRecord(), rij()])))).toBe(NOT_SOLE_MESSAGE)
+    expect(wrongProject.writes.length + unregistered.writes.length).toBe(0)
+    expect(wrongProject.registryReads()).toEqual([])
+    expect(unregistered.registryReads()).toEqual([])
+  })
+
+  it('a VALID pair does not vouch for actions[0]: a wrong project, or a widened config, in actions[0] is refused by its own path', async () => {
+    // The pair lists the sheet's project; actions[0] — the one the executor runs — does not.
+    const project = makeService()
+    const projectBody = wire({ ...editorBody([rij('P-2')]), actionConfig: projectOf('P-1') })
+    expect(await refusedWith(project.post('sheet_1', projectBody))).toBe(M.project_mismatch)
+    expect(project.registryReads()).toEqual([['sheet_1'], ['sheet_1']])
+    for (const [widened, message] of [
+      [{ job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'apply_when_ready' } }, /^actions\[0\]\.config\.job\.applyMode 'apply_when_ready' is not accepted/],
+      [{ ...projectOf('P-1'), retry: { maxAttempts: 2, backoffMs: 60_000 } }, /^actions\[0\]\.config\.retry is reserved/],
+      [{ ...projectOf('P-1'), timeoutMs: 55 * 60_000 + 1 }, /^actions\[0\]\.config\.timeoutMs must be at most 3300000/],
+      [{ job: { kind: 'pipeline', pipelineId: 'p', dryRun: true } }, /^actions\[0\]\.config\.job\.kind 'pipeline' is not deliverable/],
+    ] as const) {
+      const h = makeService()
+      const body = wire({ ...editorBody([{ type: 'run_integration_job', config: widened as Record<string, unknown> }]), actionConfig: projectOf('P-1') })
+      const refusal = await refusalOf(h.post('sheet_1', body))
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal!.message).toMatch(message)
+      expect(h.writes).toHaveLength(0)
+      expect(project.writes).toHaveLength(0)
+    }
+  })
+
+  it('and a valid actions[0] does not vouch for the pair: a widened pair is refused by ITS path', async () => {
+    const h = makeService()
+    const body = wire({ ...editorBody([rij()]), actionConfig: { job: { kind: 'stock_prep_pull', projectNos: ['P-1'], applyMode: 'apply_when_ready' } } })
+    expect(await refusedWith(h.post('sheet_1', body))).toMatch(/^actionConfig\.job\.applyMode 'apply_when_ready' is not accepted/)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  it('the rest of the gate holds for the editor shape: the action switch, the project-sheets switch, an unreadable registry, the trigger coupling, the single tenant', async () => {
+    vi.stubEnv(FLAG, 'TRUE')
+    const off = makeService()
+    expect(await refusalOf(off.post('sheet_1', editorBody([rij()])))).toMatchObject({ code: 'RUN_ACTION_DISABLED' })
+    expect(off.tenantReads()).toBe(0)
+    vi.stubEnv(FLAG, 'true')
+
+    vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, '1')
+    const sheetsOff = makeService()
+    expect(await refusedWith(sheetsOff.post('sheet_1', editorBody([rij()])))).toBe(M.switch_off)
+    expect(sheetsOff.registryReads()).toEqual([])
+    vi.stubEnv(STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, 'true')
+
+    const unreadable = makeService({ registry: Object.assign(new Error('boom'), { code: '57P01' }) })
+    expect(await refusedWith(unreadable.post('sheet_1', editorBody([rij()])))).toBe(M.unreadable)
+
+    const interval = makeService()
+    expect(await refusedWith(interval.post('sheet_1', editorBody([rij()], { triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }))))
+      .toMatch(/only allowed on a schedule.cron trigger/)
+    const noZone = makeService()
+    expect(await refusedWith(noZone.post('sheet_1', editorBody([rij()], { triggerConfig: { cron: '0 6 * * *' } }))))
+      .toMatch(/must declare triggerConfig.timezone/)
+
+    const tenantless = makeService({ orgRows: [] })
+    expect(await refusedWith(tenantless.post('sheet_1', editorBody([rij()])))).toMatch(/exactly one active tenant \(none found\)/)
+    const twoTenants = makeService({ orgRows: [{ org_id: 'tenant_1' }, { org_id: 'tenant_2' }] })
+    expect(await refusedWith(twoTenants.post('sheet_1', editorBody([rij()])))).toMatch(/several found/)
+
+    for (const h of [off, sheetsOff, unreadable, interval, noZone, tenantless, twoTenants]) expect(h.writes).toHaveLength(0)
+  })
+})
+
+describe('the editor wire shape through the real updateRule (I6d)', () => {
+  /** What createRule stored for the editor shape (both columns stamped), found by a later edit. */
+  const storedEditorRule = (overrides: Record<string, unknown> = {}) => ({
+    id: 'atr_1', sheet_id: 'sheet_1', created_by: CREATOR,
+    trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    action_type: 'run_integration_job', action_config: stamped(), actions: [{ type: 'run_integration_job', config: stamped() }],
+    ...overrides,
+  })
+
+  it('an edit by ANOTHER person re-saves the editor shape: both columns re-stamped from the STORED creator, the editor\'s binding dropped', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule())
+    const body = editorBody([rij('P-1', { binding: { principalId: 'editor_2', tenantId: 'tenant_foreign' }, timeoutMs: 20 * 60_000 })], { name: 'Nightly pull (renamed)' })
+    const updated = await h.patch('sheet_1', 'atr_1', body, 'editor_2')
+
+    expect(updated).not.toBeNull()
+    expect(h.writes).toHaveLength(1)
+    const set = h.writes[0].values
+    const expected = { ...stamped(), timeoutMs: 20 * 60_000 }
+    expect(set.name).toBe('Nightly pull (renamed)')
+    expect(configColumn(set)).toEqual(expected)
+    expect(actionsColumn(set)).toEqual([{ type: 'run_integration_job', config: expected }])
+    expect(JSON.stringify(set)).not.toContain('editor_2')
+    expect(JSON.stringify(set)).not.toContain('tenant_foreign')
+    expect(set.created_by).toBeUndefined()
+    expect(parsePersistedRunIntegrationJobConfig(toExecutorRule(updated as AutomationRule).actions[0].config)).toEqual(expected)
+    // the guard ran on the rule's STORED sheet for both occurrences
+    expect(h.registryReads()).toEqual([['sheet_1'], ['sheet_1']])
+    h.service.unregisterSchedule('atr_1')
+  })
+
+  it('an edit that MOVES the job into a branch is refused with the fixed message; the stored row is untouched', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule())
+    const before = JSON.stringify(h.rules.get('atr_1'))
+    for (const where of ['branches', 'defaultBranch'] as const) {
+      const refusal = await refusalOf(h.patch('sheet_1', 'atr_1', editorBody([updateRecord(), conditionBranch(where, [rij('P-1', { binding: CLIENT_BINDING })])]), 'editor_2'))
+      expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+      expect(refusal!.message).toBe(NESTED_MESSAGE)
+    }
+    expect(h.writes).toHaveLength(0)
+    expect(JSON.stringify(h.rules.get('atr_1'))).toBe(before)
+  })
+
+  it('an edit that only replaces actions[] is still held to the guard: another project, two projects, a sheet archived since the save', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule())
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-2')] }), 'editor_2'))).toBe(M.project_mismatch)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ actions: [rij('P-1\nP-2')] }), 'editor_2'))).toBe(M.project_mismatch)
+    const archived = makeService({ registry: [REGISTERED('sheet_1', 'tenant_1', 'P-1', 'archived')] })
+    archived.seed(storedEditorRule())
+    expect(await refusedWith(archived.patch('sheet_1', 'atr_1', editorBody([rij()]), 'editor_2'))).toBe(M.unregistered)
+    expect(h.writes.length + archived.writes.length).toBe(0)
+  })
+
+  it('a trigger-only edit sees the stored job (the editor shape): dropping the timezone, or leaving cron, is refused', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule())
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerConfig: { cron: '0 7 * * *' } }), 'editor_2')))
+      .toMatch(/must declare triggerConfig.timezone/)
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } }), 'editor_2')))
+      .toMatch(/only allowed on a schedule.cron trigger/)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  // Fix round 2 (F2): round 1 answered the coupling for this stored shape (it was saveable then). It is not a shape a
+  // save stores any more; the trigger-only path reads the stored `actions[]` and refuses the edit for the shape itself.
+  it('a trigger-only edit of a stored row whose job is a LATER step (the pair is another action) is refused with the sole-action message — also when the new trigger is a valid cron', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule({ action_type: 'update_record', action_config: updateRecord().config, actions: [updateRecord(), { type: 'run_integration_job', config: stamped() }] }))
+    for (const body of [
+      { triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } },
+      { triggerConfig: { cron: '0 7 * * *' } },
+      { triggerType: 'schedule.interval', triggerConfig: { intervalMs: 900_000 } },
+    ]) {
+      expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire(body), 'editor_2')), JSON.stringify(body)).toBe(NOT_SOLE_MESSAGE)
+    }
+    expect(h.writes).toHaveLength(0)
+  })
+
+  it('a trigger-only edit of a row that carries a NESTED occurrence (never saveable; a hand-written row) is refused by the walk alone', async () => {
+    const h = makeService()
+    h.seed(storedEditorRule({
+      action_type: 'update_record', action_config: updateRecord().config, execution_mode: 'workflow_job_v1',
+      actions: [updateRecord(), conditionBranch('defaultBranch', [{ type: 'run_integration_job', config: { ...stamped(), binding: CLIENT_BINDING } }])],
+    }))
+    const refusal = await refusalOf(h.patch('sheet_1', 'atr_1', wire({ triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } }), 'editor_2'))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toBe(NESTED_MESSAGE)
+    expect(h.writes).toHaveLength(0)
+  })
+})
+
+// ── fix round 2 (F2): the job is its rule's ONLY action ────────────────────────────────────────────────────────
+//
+// Round 1 let the job be saved as a later step, or beside other actions. The round-1 judge's two reasons to close
+// that (a T-layer default): the executor stops a rule at its first failed step, so a job behind one is skipped at the
+// EXECUTION level — it never reaches the step that emits its summary, and nothing alerts; and a job behind a step
+// that SUSPENDS (wait_for_callback, start_approval) would run when the execution is resumed, at a time that is not
+// the cron's. A rule that carries the job is now one of two shapes — the legacy pair alone, or the editor's
+// `actions: [job]` with `actions[0]` mirrored into the pair — and every other shape that carries it is refused with
+// one fixed message under the nested refusal's code (VALIDATION_ERROR: a 400 on the route).
+describe('run_integration_job is its rule\'s ONLY action (fix round 2, F2)', () => {
+  const other = (): Action => ({ type: 'record_click', config: {} })
+  const waitStep = (): Action => ({ type: 'wait_for_callback', config: {} })
+  const approvalStep = (): Action => ({ type: 'start_approval', config: { templateId: 'tpl_1', formDataMapping: { title: 'fld_1' } } })
+  const JOB_MODE = { executionMode: 'workflow_job_v1' }
+  /** What createRule stored for the editor shape (both columns stamped). */
+  const storedJobRule = (overrides: Record<string, unknown> = {}) => ({
+    id: 'atr_1', sheet_id: 'sheet_1', created_by: CREATOR,
+    trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    action_type: 'run_integration_job', action_config: stamped(), actions: [{ type: 'run_integration_job', config: stamped() }],
+    ...overrides,
+  })
+  /** A stored rule that carries NO job. */
+  const storedPlainRule = () => storedJobRule({ action_type: 'record_click', action_config: {}, actions: null })
+  /** Refused with the sole-action message AND the nested refusal's code. */
+  async function refusedAsNotSole(work: Promise<unknown>, label = ''): Promise<void> {
+    const refusal = await refusalOf(work)
+    expect(refusal, `${label}: the save must be refused`).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message, label).toBe(NOT_SOLE_MESSAGE)
+    expect((refusal as AutomationRuleValidationError).code, label).toBe('VALIDATION_ERROR')
+  }
+
+  it('pure: the two shapes that hold the job alone are accepted, every other shape that carries it is refused, and a rule without it is not judged', () => {
+    const J = { type: 'run_integration_job', config: {} }
+    const X = { type: 'record_click', config: {} }
+    expect(RUN_INTEGRATION_JOB_NOT_SOLE_ERROR).toBe(NOT_SOLE_MESSAGE)
+    // (A) the legacy pair alone; (B) the editor shape
+    for (const actions of [undefined, null, [], [J]]) {
+      expect(validateRunIntegrationJobSoleAction('run_integration_job', actions as never), JSON.stringify(actions)).toBeNull()
+    }
+    // no job at the top level: nothing to judge, whatever else the rule holds
+    for (const actions of [undefined, null, [], [X], [X, X, X], [null], 'not a list']) {
+      expect(validateRunIntegrationJobSoleAction('record_click', actions as never), JSON.stringify(actions)).toBeNull()
+    }
+    for (const [actionType, actions] of [
+      ['run_integration_job', [J, X]],       // the job, then another action
+      ['record_click', [X, J]],              // another action, then the job
+      ['run_integration_job', [J, J]],       // the job twice
+      ['run_integration_job', [J, X, X]],
+      ['run_integration_job', [X]],          // the job only in the pair, beside a list that runs something else
+      ['record_click', [J]],                 // the job only in the list, under a pair that is another action
+      ['run_integration_job', [J, null]],    // an entry that is not an action is still an entry beside the job
+      ['run_integration_job', [null]],
+    ] as const) {
+      expect(validateRunIntegrationJobSoleAction(actionType, actions as never), JSON.stringify([actionType, actions])).toBe(NOT_SOLE_MESSAGE)
+    }
+  })
+
+  it.each<[label: string, build: () => Record<string, unknown>]>([
+    ['the job, then another action', () => editorBody([rij(), other()])],
+    ['another action, then the job', () => editorBody([other(), rij()])],
+    ['the job between two other actions', () => editorBody([other(), rij(), other()])],
+    ['the job twice', () => editorBody([rij(), rij()])],
+    ['the job only in the pair, beside an actions[] that holds another action (a hand-written body)', () => wire({ ...editorBody([other()]), actionType: 'run_integration_job', actionConfig: rij().config })],
+    ['the job only in actions[], under a pair that is another action (a hand-written body)', () => wire({ ...editorBody([rij()]), actionType: 'record_click', actionConfig: {} })],
+    ['a job that brings its own binding (another tenant), behind another action', () => editorBody([other(), rij('P-1', { binding: CLIENT_BINDING })])],
+  ])('createRule refuses %s — the fixed message, before any tenant or registry read; nothing is written', async (label, build) => {
+    const h = makeService()
+    await refusedAsNotSole(h.post('sheet_1', build()), label)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.size).toBe(0)
+    expect(h.tenantReads()).toBe(0)
+    expect(h.registryReads()).toEqual([])
+  })
+
+  it('the positive control of the same gate: the legacy pair alone — actions null, [] or absent — saves stamped, like the editor shape', async () => {
+    for (const [label, body] of [
+      ['actions null', editorBody([rij()], { actions: null })],
+      ['actions []', editorBody([rij()], { actions: [] })],
+      ['actions absent', (() => { const b = editorBody([rij()]); delete b.actions; return b })()],
+    ] as const) {
+      const h = makeService()
+      const saved = await h.post('sheet_1', body as Record<string, unknown>)
+      expect(h.writes, label).toHaveLength(1)
+      expect(h.writes[0].values.action_type, label).toBe('run_integration_job')
+      expect(configColumn(h.writes[0].values), label).toEqual(stamped())
+      // what the executor runs is the pair: one action, the stamped job
+      const runnable = toExecutorRule(saved).actions
+      expect(runnable.map((action) => action.type), label).toEqual(['run_integration_job'])
+      expect(parsePersistedRunIntegrationJobConfig(runnable[0].config), label).toEqual(stamped())
+      h.service.unregisterSchedule(saved.id)
+    }
+  })
+
+  // The path the round-1 judge flagged as unseen: a job behind a step that suspends runs on RESUME — not at the cron's
+  // time. Whether that shape could be saved was not checked then. It cannot: by createRule, or by an edit.
+  it.each<[label: string, step: () => Action]>([
+    ['wait_for_callback', waitStep],
+    ['start_approval', approvalStep],
+  ])('a job behind a step that SUSPENDS (%s, workflow_job_v1) cannot be saved — not by createRule, not by a PATCH onto a stored job rule or onto a stored plain rule', async (label, step) => {
+    const created = makeService()
+    await refusedAsNotSole(created.post('sheet_1', editorBody([step(), rij()], JOB_MODE)), `${label} create`)
+    expect(created.writes).toHaveLength(0)
+
+    const ontoJobRule = makeService()
+    ontoJobRule.seed(storedJobRule())
+    const before = JSON.stringify(ontoJobRule.rules.get('atr_1'))
+    await refusedAsNotSole(ontoJobRule.patch('sheet_1', 'atr_1', editorBody([step(), rij()], JOB_MODE), 'editor_2'), `${label} patch onto a job rule`)
+    // an action-list-only PATCH too (the stored pair stays the job)
+    await refusedAsNotSole(ontoJobRule.patch('sheet_1', 'atr_1', wire({ actions: [step(), rij()], ...JOB_MODE }), 'editor_2'), `${label} actions-only patch`)
+    expect(ontoJobRule.writes).toHaveLength(0)
+    expect(JSON.stringify(ontoJobRule.rules.get('atr_1'))).toBe(before)
+
+    const ontoPlainRule = makeService()
+    ontoPlainRule.seed(storedPlainRule())
+    await refusedAsNotSole(ontoPlainRule.patch('sheet_1', 'atr_1', editorBody([step(), rij()], JOB_MODE), 'editor_2'), `${label} patch onto a plain rule`)
+    expect(ontoPlainRule.writes).toHaveLength(0)
+  })
+
+  it('updateRule refuses every edit that would leave the job beside something else, whichever columns the PATCH sends; the stored row is untouched', async () => {
+    const h = makeService()
+    h.seed(storedJobRule())
+    const before = JSON.stringify(h.rules.get('atr_1'))
+    for (const [label, body] of [
+      ['the whole editor body: the job, then another action', editorBody([rij(), other()])],
+      ['the whole editor body: another action, then the job', editorBody([other(), rij()])],
+      ['actions only: another action is appended', wire({ actions: [rij(), other()] })],
+      // The stored pair stays the job, and the list the executor would run no longer holds it.
+      ['actions only: the list is replaced by another action', wire({ actions: [other()] })],
+      // The stored actions[] still runs the job, under a pair that is now another action.
+      ['the pair only: re-typed to another action', wire({ actionType: 'record_click', actionConfig: {} })],
+    ] as const) {
+      await refusedAsNotSole(h.patch('sheet_1', 'atr_1', body as Record<string, unknown>, 'editor_2'), label)
+    }
+    expect(h.writes).toHaveLength(0)
+    expect(JSON.stringify(h.rules.get('atr_1'))).toBe(before)
+
+    // and onto a rule that carries no job yet: adding the job beside what is stored
+    const plain = makeService()
+    plain.seed(storedPlainRule())
+    await refusedAsNotSole(plain.patch('sheet_1', 'atr_1', wire({ actions: [other(), rij()] }), 'editor_2'), 'actions only onto a plain rule')
+    await refusedAsNotSole(plain.patch('sheet_1', 'atr_1', wire({ actions: [rij()] }), 'editor_2'), 'actions only: the job under the stored other pair')
+    expect(plain.writes).toHaveLength(0)
+  })
+
+  it('the positive controls of the same edits: an edit that leaves the job alone, or takes it out whole, goes through', async () => {
+    // the job leaves the rule whole: pair and list both replaced (what the editor sends when the type is changed)
+    const leaves = makeService()
+    leaves.seed(storedJobRule())
+    expect(await leaves.patch('sheet_1', 'atr_1', editorBody([other()]), 'editor_2')).not.toBeNull()
+    expect(leaves.rules.get('atr_1')).toMatchObject({ action_type: 'record_click', actions: [other()] })
+    leaves.service.unregisterSchedule('atr_1')
+
+    // the list is dropped: the legacy pair alone is left, re-stamped
+    const pairOnly = makeService()
+    pairOnly.seed(storedJobRule())
+    expect(await pairOnly.patch('sheet_1', 'atr_1', wire({ actions: null }), 'editor_2')).not.toBeNull()
+    expect(pairOnly.rules.get('atr_1')).toMatchObject({ action_type: 'run_integration_job', action_config: stamped(), actions: null })
+    pairOnly.service.unregisterSchedule('atr_1')
+
+    // a plain rule becomes a job rule whole: the pair and the list in one PATCH
+    const becomes = makeService()
+    becomes.seed(storedPlainRule())
+    expect(await becomes.patch('sheet_1', 'atr_1', editorBody([rij('P-1', { binding: CLIENT_BINDING })]), 'editor_2')).not.toBeNull()
+    expect(becomes.rules.get('atr_1')).toMatchObject({ action_type: 'run_integration_job', action_config: stamped(), actions: [{ type: 'run_integration_job', config: stamped() }] })
+    becomes.service.unregisterSchedule('atr_1')
+  })
+
+  it('a stored row in which the job is NOT the only action (written before this rule, or by hand) can still be renamed and switched off — neither edit runs the action gate', async () => {
+    const h = makeService()
+    h.seed(storedJobRule({ action_type: 'record_click', action_config: {}, actions: [other(), { type: 'run_integration_job', config: stamped() }] }))
+    expect(await h.patch('sheet_1', 'atr_1', wire({ enabled: false }), 'editor_2')).not.toBeNull()
+    expect(await h.patch('sheet_1', 'atr_1', wire({ name: 'to be fixed' }), 'editor_2')).not.toBeNull()
+    expect(h.rules.get('atr_1')).toMatchObject({ enabled: false, name: 'to be fixed' })
+    // … and what it cannot do is be saved FORWARD in that shape: an action-shaped edit that keeps it is refused
+    await refusedAsNotSole(h.patch('sheet_1', 'atr_1', wire({ executionMode: null }), 'editor_2'), 'an execution-mode edit')
+    h.service.unregisterSchedule('atr_1')
+  })
+})
+
+// ── fix round 2 (F1): a write whose stored row changed under it ─────────────────────────────────────────────────
+//
+// updateRule binds its UPDATE to the row version it validated. A write that matches no row at that version has
+// written nothing, and the whole save is validated again on the row as it now is. These cases drive that loop on the
+// in-memory store (the n-th UPDATE "loses": see makeService). That the REAL statement loses exactly when the row
+// changed — and only then — is proven on the real table, two backends, in the real-DB file's F1 block.
+describe('updateRule — a write whose stored row changed under it is validated again, never written as it was (fix round 2, F1)', () => {
+  /** A stored rule that carries no job: schedule.cron with a timezone, and an action no save gate looks at. */
+  const storedPlainRule = () => ({
+    id: 'atr_1', sheet_id: 'sheet_1', created_by: CREATOR,
+    trigger_type: 'schedule.cron', trigger_config: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+    action_type: 'record_click', action_config: {}, actions: null,
+  })
+  /** The other save, landing between this one's read and its write: the rule now carries the (stamped) job. */
+  const otherSaveMakesItAJobRule = (nth: number, rules: Map<string, Record<string, unknown>>): 'lost' | undefined => {
+    if (nth !== 1) return undefined
+    Object.assign(rules.get('atr_1')!, { action_type: 'run_integration_job', action_config: stamped() })
+    return 'lost'
+  }
+
+  it('a trigger PATCH that lost to a save which made the rule a job rule is validated again and refused with the coupling message; nothing is written', async () => {
+    const h = makeService({ onRuleUpdate: otherSaveMakesItAJobRule })
+    h.seed(storedPlainRule())
+    expect(await refusedWith(h.patch('sheet_1', 'atr_1', wire({ triggerType: 'record.created', triggerConfig: {} }), 'editor_2')))
+      .toBe('run_integration_job (stock_prep_pull) is only allowed on a schedule.cron trigger (got record.created)')
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.get('atr_1')).toMatchObject({ trigger_type: 'schedule.cron', action_type: 'run_integration_job' })
+  })
+
+  it('a config PATCH that lost to the same save is validated again as the JOB config it has become, and written with the SERVER binding', async () => {
+    const h = makeService({ onRuleUpdate: otherSaveMakesItAJobRule })
+    h.seed(storedPlainRule())
+    const updated = await h.patch('sheet_1', 'atr_1', wire({ actionConfig: editorJobConfig('P-1', { binding: CLIENT_BINDING, timeoutMs: 20 * 60_000 }) }), 'editor_2')
+    expect(updated).not.toBeNull()
+    expect(h.writes).toHaveLength(1)
+    expect(configColumn(h.writes[0].values)).toEqual({ ...stamped(), timeoutMs: 20 * 60_000 })
+    expect(JSON.stringify(h.rules.get('atr_1'))).not.toContain('tenant_foreign')
+    h.service.unregisterSchedule('atr_1')
+  })
+
+  it('a save that loses every time is refused after the last attempt — VALIDATION_ERROR, one fixed values-free message — and has written nothing', async () => {
+    let statements = 0
+    const h = makeService({ onRuleUpdate: (nth) => { statements = nth; return 'lost' } })
+    h.seed(storedPlainRule())
+    const refusal = await refusalOf(h.patch('sheet_1', 'atr_1', wire({ name: 'renamed' }), 'editor_2'))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect((refusal as AutomationRuleValidationError).code).toBe('VALIDATION_ERROR')
+    expect(refusal!.message).toBe(AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE)
+    expect(RULE_WRITE_MAX_ATTEMPTS).toBe(3)
+    expect(statements).toBe(RULE_WRITE_MAX_ATTEMPTS)
+    expect(h.writes).toHaveLength(0)
+    expect(h.rules.get('atr_1')!.name).toBe('stored')
+    for (const needle of ['atr_1', 'sheet_1', CREATOR, 'tenant_', 'P-1']) expect(refusal!.message).not.toContain(needle)
+  })
+
+  it.each([
+    ['is GONE', (rules: Map<string, Record<string, unknown>>) => { rules.delete('atr_1') }],
+    ['now sits on ANOTHER sheet', (rules: Map<string, Record<string, unknown>>) => { rules.get('atr_1')!.sheet_id = 'sheet_2' }],
+  ])('a rule that %s when its write finds no row answers null (not found), from the next validation\'s first read', async (_label, change) => {
+    let statements = 0
+    const h = makeService({ onRuleUpdate: (nth, rules) => { statements = nth; change(rules); return 'lost' } })
+    h.seed(storedPlainRule())
+    expect(await h.patch('sheet_1', 'atr_1', wire({ name: 'renamed' }), 'editor_2')).toBeNull()
+    expect(statements).toBe(1)
+    expect(h.writes).toHaveLength(0)
+  })
+
+  it('a save that does not lose reads the rule as often as it did before the fix and sends ONE statement', async () => {
+    for (const [body, reads] of [
+      [{ name: 'renamed' }, 1],
+      [{ actionConfig: {} }, 1],
+      [{ actionConfig: {}, triggerConfig: { cron: '0 7 * * *', timezone: 'Asia/Shanghai' } }, 2],
+    ] as const) {
+      let statements = 0
+      const h = makeService({ onRuleUpdate: (nth) => { statements = nth; return undefined } })
+      h.seed(storedPlainRule())
+      const getRule = vi.spyOn(h.service, 'getRule')
+      // the service call itself (the route's own preflight read is not part of updateRule)
+      expect(await h.service.updateRule('atr_1', 'sheet_1', wire(body) as never, 'editor_2')).not.toBeNull()
+      expect(getRule).toHaveBeenCalledTimes(reads)
+      expect(statements).toBe(1)
+      expect(h.writes).toHaveLength(1)
+      h.service.unregisterSchedule('atr_1')
+    }
+  })
+})
+
+// ── The I5 pointer of the I6a re-review, receive side (a pin, not a fix) ─────────────────────────────────────────
+//
+// "Can an integration.run_finished rule on sheet X receive another tenant's summaries?" The rule's tenant is ONLY
+// `trigger_config.binding.tenantId`; dispatch selects on it (loader SQL + the in-loop compare with the route tenant)
+// and then re-checks the creator's live membership in the route tenant. The rule's SHEET is not part of that — a
+// sheet carries no tenant, and an alert rule is not tied to a project sheet. So what the save path has to do is
+// re-stamp that binding on every write: create stamps it (pinned in automation-integration-run-finished.test.ts) and
+// an update re-stamps it from the stored creator. The update half had no test; the five update shapes below are it.
+// WHAT THEY PROVE: for each of these shapes, saved one at a time, the written trigger_config carries the creator's
+// tenant. An edit that races another edit is not these cases' subject — updateRule's row-version predicate is (fix
+// round 2, F1: the re-stamp is part of what the retried attempt runs again) — and a receive-side re-check stands
+// behind both (the dispatch re-checks the creator's live membership in the route tenant).
+describe('integration.run_finished: each of these update shapes re-stamps the trigger binding from the stored creator — saved one at a time, none leaves a planted one (I6d pin)', () => {
+  const ALERT_ACTION = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
+  /** A stored alert rule whose binding names ANOTHER tenant (a planted row: it never passed the save gate). */
+  const plantedAlertRule = () => ({
+    id: 'atr_rf', sheet_id: 'sheet_not_a_project_sheet', created_by: CREATOR,
+    trigger_type: 'integration.run_finished', trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: CLIENT_BINDING },
+    action_type: 'send_dingtalk_group_message', action_config: ALERT_ACTION, actions: null,
+  })
+  function alertService() {
+    const h = makeService()
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    return h
+  }
+
+  it.each([
+    ['a trigger edit whose body names another tenant', { triggerConfig: { job: { kind: 'stock_prep_pull' }, statuses: ['failed', 'skipped'], binding: { principalId: 'editor_2', tenantId: 'tenant_foreign' } } }],
+    ['a rename', { name: 'renamed' }],
+    // (R-69 I6d r7, R3: the switch OFF alone no longer runs the gate — its own case below; switching ON does)
+    ['an on switch', { enabled: true }],
+    ['an off switch together with a rename', { enabled: false, name: 'renamed' }],
+    ['an action edit', { actionConfig: { ...ALERT_ACTION, titleTemplate: '{{run.reason}}' } }],
+    ['an execution-mode edit', { executionMode: null }],
+  ])('%s: the written trigger_config carries the creator\'s single tenant, never the planted or the posted one', async (_label, body) => {
+    const h = alertService()
+    h.seed(plantedAlertRule())
+    const updated = await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire(body), 'editor_2')
+    expect(updated).not.toBeNull()
+    expect(h.writes).toHaveLength(1)
+    expect(typeof h.writes[0].values.trigger_config, 'this update shape writes the re-stamped trigger_config').toBe('string')
+    const written = JSON.parse(String(h.writes[0].values.trigger_config)) as { binding: unknown; job: unknown }
+    expect(written.binding).toEqual(SERVER_BINDING)
+    expect(written.job).toEqual({ kind: 'stock_prep_pull' })
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('tenant_foreign')
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('editor_2')
+  })
+
+  it('and a creator who is no longer bound to exactly one tenant cannot be re-stamped at all: the edit is refused, the row untouched', async () => {
+    const h = makeService({ orgRows: [] })
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    h.seed(plantedAlertRule())
+    const refusal = await refusalOf(h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ name: 'renamed' }), 'editor_2'))
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect(refusal!.message).toMatch(/integration\.run_finished rules need a creator bound to exactly one active tenant/)
+    expect(h.writes).toHaveLength(0)
+  })
+})
+
+// R-69 I6d r7, R3 (owner-approved 2026-11-13): a write whose ONLY effect is to switch an integration.run_finished rule
+// off skips the run_finished save gate, so it re-stamps nothing; the rule cannot fire while off, and switching it on runs
+// the full gate (and the re-stamp) again.
+describe('integration.run_finished: the switch OFF alone re-stamps nothing; the switch ON re-stamps (R-69 I6d r7, R3)', () => {
+  const ALERT_ACTION = { destinationIds: ['d1'], titleTemplate: '{{run.status}}', bodyTemplate: '{{run.job.projectNo}}' }
+  const plantedAlertRule = () => ({
+    id: 'atr_rf', sheet_id: 'sheet_not_a_project_sheet', created_by: CREATOR,
+    trigger_type: 'integration.run_finished', trigger_config: { job: { kind: 'stock_prep_pull' }, statuses: ['failed'], binding: CLIENT_BINDING },
+    action_type: 'send_dingtalk_group_message', action_config: ALERT_ACTION, actions: null,
+  })
+  function alertService() {
+    const h = makeService()
+    h.service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { id: CREATOR, permissions: ['stock-prep:read', 'workflow:write'], roles: [], role: 'user', tenantId: 'tenant_1' } }))
+    return h
+  }
+
+  it('the switch OFF alone (R-69 I6d r7, R3) writes only `enabled`: the planted binding is not re-stamped while the rule cannot fire (dispatch loads enabled rules only), and switching it back ON re-stamps it', async () => {
+    const h = alertService()
+    h.seed(plantedAlertRule())
+    expect((await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ enabled: false }), 'editor_2'))?.enabled).toBe(false)
+    expect(h.writes).toHaveLength(1)
+    expect(Object.keys(h.writes[0].values).sort()).toEqual(['enabled', 'updated_at'])
+    expect(h.rules.get('atr_rf')!.enabled).toBe(false)
+    expect((await h.patch('sheet_not_a_project_sheet', 'atr_rf', wire({ enabled: true }), 'editor_2'))?.enabled).toBe(true)
+    expect(h.writes).toHaveLength(2)
+    expect((JSON.parse(String(h.writes[1].values.trigger_config)) as { binding: unknown }).binding).toEqual(SERVER_BINDING)
+    expect(JSON.stringify(h.rules.get('atr_rf'))).not.toContain('tenant_foreign')
+  })
+})

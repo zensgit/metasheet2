@@ -1437,12 +1437,23 @@
 
             <!-- R-69 1b-iii run_integration_job config: DRY RUN ONLY. Job kind is the closed set (pipeline shown,
                  not selectable yet), the apply mode is a fixed display (no other mode is authorable), the timeout
-                 is in whole minutes (≤ 55, default 30). Save blocks mirror the server gate exactly. -->
+                 is in whole minutes (≤ 55, default 30). Save blocks mirror the checks of the server gate a client
+                 can decide (the pure validators, byte parity pinned in core-backend, and the switch as the session
+                 feature reports it); the project-sheet registry and the creator's tenant stay the server's answer.
+                 R-69 I6d: EXACTLY ONE project per rule — the project this sheet is registered to (the server's
+                 rule-sheet guard, register R-90). A loaded rule that lists several is shown whole and blocks save.
+                 R-69 I6d fix round 2 (F2): the job is its rule's ONLY action — no action is added beside it, and a
+                 loaded rule that has others is shown whole and blocks save until they are removed. -->
             <div v-if="action.type === 'run_integration_job'" class="meta-rule-editor__action-config" data-action-config="run_integration_job">
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="rij-dry-run-hint">
                 {{ isZh
-                  ? '仅预演：按计划对所列项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
-                  : 'Dry run only: runs the stock-prep pull as a dry run for the listed projects on schedule and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
+                  ? '仅预演：按计划对本表登记的项目做备料拉取的预演，不写入任何业务数据；需定时（Cron）触发器并声明时区。'
+                  : 'Dry run only: runs the stock-prep pull as a dry run for the project this sheet is registered to, on schedule, and writes no business data. Needs a scheduled (cron) trigger with a timezone.' }}
+              </div>
+              <div class="meta-rule-editor__hint" data-field="rij-sole-action-hint">
+                {{ isZh
+                  ? '此动作必须是规则里唯一的动作：带有它的规则不能再添加其他动作。'
+                  : 'This action is the only action of its rule: a rule that has it takes no other action.' }}
               </div>
               <label class="meta-rule-editor__label">{{ isZh ? '任务种类' : 'Job kind' }}</label>
               <el-select v-model="(action.config.rijKind as string)" class="meta-rule-editor__select" data-field="rijKind">
@@ -1457,8 +1468,8 @@
                     : (isZh ? '管道（pipeline，暂不可用）' : 'Pipeline (pipeline, not available yet)')"
                 />
               </el-select>
-              <label class="meta-rule-editor__label">
-                {{ isZh ? `项目号（每行一个，最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个）` : `Project numbers (one per line, at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS})` }}
+              <label class="meta-rule-editor__label" data-field="rij-project-label">
+                {{ isZh ? '项目号（恰一个：本表登记的项目）' : 'Project number (exactly one: the project this sheet is registered to)' }}
               </label>
               <el-input
                 v-model="(action.config.rijProjectNosText as string)"
@@ -1467,6 +1478,11 @@
                 class="meta-rule-editor__input"
                 data-field="rijProjectNosText"
               />
+              <div class="meta-rule-editor__hint" data-field="rij-single-project-hint">
+                {{ isZh
+                  ? '一条规则只拉取一个项目：填写本表登记的那个项目号。其他项目请在各自的项目表上各建一条规则。'
+                  : 'One rule pulls one project: enter the project number this sheet is registered to. Every other project gets its own rule on its own project sheet.' }}
+              </div>
               <label class="meta-rule-editor__label">{{ isZh ? '应用方式' : 'Apply mode' }}</label>
               <div class="meta-rule-editor__hint" data-field="rijApplyMode" :data-value="RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE">
                 {{ isZh ? '仅预演（dry_run_only）' : 'Dry run only (dry_run_only)' }}
@@ -1796,8 +1812,10 @@
               </el-collapse-item>
             </el-collapse>
           </div>
+          <!-- R-69 I6d fix round 2 (F2): no second action beside run_integration_job — it is its rule's only action
+               (the server refuses anything else; the job's own config block says so). -->
           <el-button
-            v-if="draft.actions.length < 3"
+            v-if="draft.actions.length < 3 && !draftCarriesRunIntegrationJob"
             size="small"
             class="meta-rule-editor__btn"
             data-action="add-action"
@@ -2022,10 +2040,12 @@ import {
   RUN_INTEGRATION_JOB_AUTHORABLE_APPLY_MODE,
   RUN_INTEGRATION_JOB_AUTHORABLE_KIND,
   RUN_INTEGRATION_JOB_KINDS,
-  RUN_INTEGRATION_JOB_MAX_PROJECTS,
   RUN_INTEGRATION_JOB_TIMEOUT_MAX_MINUTES,
   buildRunIntegrationJobConfig,
+  checkRunIntegrationJobConditions,
   checkRunIntegrationJobConfig,
+  checkRunIntegrationJobRuleSheetProjects,
+  checkRunIntegrationJobSoleAction,
   checkRunIntegrationJobTriggerCoupling,
   defaultRunIntegrationJobDraft,
   isRunIntegrationJobSelectable,
@@ -2199,6 +2219,10 @@ const fwbWritebackEnabled = computed(() => featureFlags.hasFeature('approvalFwbW
 // R-69 1b-iii: run_integration_job is offered for a NEW selection only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED, surfaced as the session feature integrationAutomationRunAction).
 const integrationRunActionEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunAction'))
+// R-69 I6d fix round 2 (F2): run_integration_job is its rule's ONLY action (server: validateRunIntegrationJobSoleAction).
+// While the draft carries one, no action is added beside it; a LOADED rule that already has others is shown whole
+// and blocked at save (runIntegrationJobSaveBlockReasons) until they are removed.
+const draftCarriesRunIntegrationJob = computed(() => draft.value.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE))
 // R-69 1c: integration.run_finished is offered for a NEW rule only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, surfaced as the session feature integrationAutomationRunEvent).
 const integrationRunEventEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunEvent'))
@@ -2578,7 +2602,8 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
   }
   // R-69 1b-iii: run_integration_job — new only with the switch ON and a schedule.cron trigger; a loaded one
   // always stays listed (never silently dropped). Top-level only: not in any branch-authorable list.
-  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType)) {
+  // R-69 I6d fix round 2 (F2): and only on a rule with ONE action row — the job is its rule's only action.
+  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, draft.value.actions.length)) {
     if (!types.includes(RUN_INTEGRATION_JOB_ACTION_TYPE)) types.push(RUN_INTEGRATION_JOB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
@@ -4305,13 +4330,33 @@ const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
 // exactly what buildPayload would send: the rebuilt config and the trigger timezone triggerTimezoneForSave
 // writes. A refusal becomes an inline save-block line instead of an opaque 400. The switch itself (403) is the
 // server's: the action is not offered for a new selection while it is off.
+// R-69 I6d: after the pure mirror, the count half of the server's rule-sheet guard (register R-90: EXACTLY ONE
+// project per rule, the sheet's registered one) — checkRunIntegrationJobRuleSheetProjects, same server order.
+// R-69 I6d fix round 2 (F2): before all of them, as on the server, the job must be the rule's ONLY action
+// (checkRunIntegrationJobSoleAction, the mirror of validateRunIntegrationJobSoleAction).
 const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
   const indexes = draft.value.actions
     .map((action, idx) => (action.type === RUN_INTEGRATION_JOB_ACTION_TYPE ? idx : -1))
     .filter((idx) => idx >= 0)
   if (indexes.length === 0) return []
   const reasons: SaveBlockReason[] = []
-  // Same order as the server gate: the switch first (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
+  // R-69 I6d fix round 2 (F2), first as on the server: the job is its rule's ONLY action. The mirror is given what
+  // buildPayload sends — the action list, and its first action's type as the legacy pair. Reachable from a LOADED
+  // rule only (one stored before this rule, or written by hand): this editor adds nothing beside the job.
+  const sole = checkRunIntegrationJobSoleAction(
+    draft.value.actions[0]?.type ?? '',
+    draft.value.actions.map((action) => ({ type: action.type })),
+  )
+  if (sole) {
+    reasons.push({
+      key: 'runIntegrationJobSole',
+      message: isZh.value
+        ? '「运行集成任务」必须是规则里唯一的动作：请移除其他动作（其他动作请另建一条规则）。'
+        : 'Run integration job must be the only action of its rule: remove the other actions (give them a rule of their own).',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
+  // Then the switch (its 403 RUN_ACTION_DISABLED). A loaded action stays listed
   // while the switch is off, but the rule cannot be saved with it — say so instead of an opaque 403.
   if (!integrationRunActionEnabled.value) {
     reasons.push({
@@ -4323,7 +4368,8 @@ const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
     })
   }
   for (const idx of indexes) {
-    const check = checkRunIntegrationJobConfig(buildRunIntegrationJobConfig(draft.value.actions[idx].config), `actions[${idx}].config`)
+    const config = buildRunIntegrationJobConfig(draft.value.actions[idx].config)
+    const check = checkRunIntegrationJobConfig(config, `actions[${idx}].config`) ?? checkRunIntegrationJobRuleSheetProjects(config)
     if (check) {
       reasons.push({
         key: `runIntegrationJob:${idx}`,
@@ -4348,6 +4394,21 @@ const runIntegrationJobSaveBlockReasons = computed<SaveBlockReason[]>(() => {
       anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
     })
   }
+  // R-69 1b-ii (owner-approved 2026-11-11): a job rule carries no conditions — its schedule trigger fires with an
+  // empty record, so a condition would skip every run (checkRunIntegrationJobConditions, the mirror of the server's
+  // validateRunIntegrationJobConditions), given what buildPayload sends: the group only when it has a node.
+  const conditionsCheck = checkRunIntegrationJobConditions(
+    draft.value.conditions.conditions.length > 0 ? { conjunction: draft.value.conditions.conjunction, conditions: draft.value.conditions.conditions } : null,
+  )
+  if (conditionsCheck) {
+    reasons.push({
+      key: 'runIntegrationJobConditions',
+      message: isZh.value
+        ? '带「运行集成任务」的规则不能设置触发条件（定时触发没有记录可判断，条件会让每次运行都被跳过）：请移除所有条件。'
+        : 'A rule with run integration job cannot have conditions (a schedule trigger has no record to test, so every run would be skipped): remove all conditions.',
+      anchor: `[data-action-index="${indexes[0]}"] [data-action-config="run_integration_job"]`,
+    })
+  }
   return reasons
 })
 
@@ -4356,9 +4417,12 @@ function runIntegrationJobConfigBlockText(code: string, idx: number): string {
   const step = zh ? `动作 ${idx + 1}（运行集成任务）：` : `Action ${idx + 1} (run integration job): `
   switch (code) {
     case 'projects_empty':
-      return step + (zh ? '请至少填写一个项目号。' : 'enter at least one project number.')
+      return step + (zh ? '请填写项目号（恰一个：本表登记的项目）。' : 'enter the project number (exactly one: the project this sheet is registered to).')
+    // R-69 I6d: one rule, one project (the server's rule-sheet guard). The pure mirror's own cap answers
+    // `projects_too_many` first for a very long list; for the author it is the same thing to fix.
     case 'projects_too_many':
-      return step + (zh ? `最多 ${RUN_INTEGRATION_JOB_MAX_PROJECTS} 个项目。` : `at most ${RUN_INTEGRATION_JOB_MAX_PROJECTS} projects.`)
+    case 'projects_not_single':
+      return step + (zh ? '只能填写一个项目号：本表登记的项目。' : 'list exactly one project number: the project this sheet is registered to.')
     case 'project_shape':
       return step + (zh ? '项目号只能是 1–128 个可见 ASCII 字符（不含空格，不含 ://）。' : 'a project number must be 1–128 visible ASCII characters (no spaces, no "://").')
     case 'project_repeat':
@@ -4484,6 +4548,8 @@ function removeConditionNode(path: ConditionPath) {
 
 function addAction() {
   if (draft.value.actions.length >= 3) return
+  // R-69 I6d fix round 2 (F2): run_integration_job is its rule's only action — nothing is added beside it.
+  if (draftCarriesRunIntegrationJob.value) return
   draft.value.actions.push(createDraftAction('update_record'))
 }
 
@@ -6130,6 +6196,12 @@ function buildPayload(): Partial<AutomationRule> {
   ) {
     delete payload.triggerConfig
     delete payload.trigger
+  }
+  // R-69 1b-ii (owner-approved 2026-11-11): a job rule cannot carry conditions, and the server judges the NEXT stored
+  // conditions (incoming ?? stored). An omitted key keeps the stored ones, so a job rule whose conditions the author
+  // removed sends an explicit `null` — the clearing the server allows. Other rules keep the omit-when-empty payload.
+  if (payload.conditions === undefined && actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE)) {
+    (payload as Record<string, unknown>).conditions = null
   }
   return payload
 }
