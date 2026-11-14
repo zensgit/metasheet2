@@ -113,12 +113,14 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 $f = @('<安装根目录>\app.env', '<安装根目录>\docker\app.env') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $f) { throw 'app.env not found' }
 @(Select-String -LiteralPath $f -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*=\s*["'']?\s*true').Count
-@(pm2 env <后端的 pm2 id> | Select-String -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*:\s*["'']?\s*true').Count
+$e = @(pm2 env <后端的 pm2 id>)
+@($e | Select-String -Pattern '^\s*DATABASE_URL\s*:').Count
+@($e | Select-String -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*:\s*["'']?\s*true').Count
 ```
 
 - **文件取哪一个。** 与启动脚本相同：安装根目录下的 `app.env` 在就用它，不在才用 `docker\app.env`（`scripts/ops/attendance-onprem-start-pm2.ps1:34-37`，基线 89617a418）。上面第一行就是这个顺序。
-- **进程环境。** `<后端的 pm2 id>` 是 `pm2 list` 里 `metasheet-backend` 那一行的 id。用拥有这个 pm2 应用的那个 Windows 账号、同一个 `PM2_HOME` 跑（同 §1.4a 第 3 步）；换了账号或 `PM2_HOME`，看到的是另一个空的 pm2，计数一定是 0。`pm2 env` 会打印进程的全部环境变量，包括口令，所以只取这个计数，不要把整段输出贴到任何地方。`pm2 env` 的输出格式（每行 `键: 值`）取自交付说明与 222 手册里现成的 `pm2 env 0 | Select-String '^DATABASE_URL:'` 写法，本手册没有另做见证。
-- **不要把出错记成 0。** 找不到文件、`pm2 env` 报错或一行都没输出（找不到这个应用）时，不要记 0：先改对路径、id、账号或 `PM2_HOME` 再数。
+- **进程环境。** `<后端的 pm2 id>` 是 `pm2 list` 里 `metasheet-backend` 那一行的 id。用拥有这个 pm2 应用的那个 Windows 账号、同一个 `PM2_HOME` 跑（同 §1.4a 第 3 步）；换了账号或 `PM2_HOME`，看到的是另一个空的 pm2，计数一定是 0。`pm2 env` 会打印进程的全部环境变量，包括口令，所以只取计数，不要打印 `$e`，也不要把输出贴到任何地方。倒数第二行是对照：它数的是后端一定有的 `DATABASE_URL`（只数，不看值），**应 ≥ 1**；为 0 说明看的不是后端进程（id、账号或 `PM2_HOME` 不对），这时最后一行的 0 什么也证明不了。`pm2 env` 的输出格式（每行 `键: 值`）取自交付说明与 222 手册里现成的 `pm2 env 0 | Select-String '^DATABASE_URL:'` 写法，本手册没有另做见证。
+- **不要把出错记成 0。** 找不到文件、`pm2 env` 报错、或对照计数为 0 时，不要记 0：先改对路径、id、账号或 `PM2_HOME` 再数。
 
 **(4) 停下来的条件**（任一成立就不开窗口）：(1) 不通过；(d) 不为 0（先由 owner 定怎么处理那张 env 表）；Q-B 或 G-B9 没批；切包提交没定。
 
