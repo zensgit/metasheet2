@@ -41,8 +41,8 @@
   `uploadAttachmentFn`/`deleteAttachmentFn` are unchanged, only a second consumer). Download URLs are
   whatever `MetaAttachment.url`/`thumbnailUrl` the existing F2 gated signing already put on each
   summary — this panel does not construct or resolve any URL itself. Mutating intents (upload/remove)
-  are `emit('patch', fieldId, value)` — the SAME emit name/payload shape MetaRecordFieldsPanel.vue
-  already uses, which the inspector shell forwards 1:1 to the workbench's existing `onDrawerPatch`
+  are `emit('patch', fieldId, value, recordId)` — the SAME emit name/payload shape MetaRecordFieldsPanel.vue
+  already uses for an attachment write, which the inspector shell forwards 1:1 to the workbench's existing `onDrawerPatch`
   (same `patchCell` path as every other field edit) — no new mutation surface either.
 
   Local `attachmentActivity`/`attachmentErrors`/`localAttachmentSummaries` state below mirrors
@@ -127,7 +127,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'patch', fieldId: string, value: unknown): void
+  /** `recordId`, `removed` and `added`: the record the write was made on, the ids a remove that ended after the
+   *  drawer moved on took out, and the ids an upload added (as in MetaRecordFieldsPanel.vue). */
+  (e: 'patch', fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]): void
 }>()
 
 const { isZh } = useLocale()
@@ -260,6 +262,10 @@ async function onFileSelect(fieldId: string, e: Event) {
     input.value = ''
     return
   }
+  // The drawer can move to another record while the upload runs: every file and the patch go to the record it
+  // started on, and this panel's state (the shown record's) is touched only while that record is still shown.
+  const recordId = props.record?.id
+  const shown = () => props.record?.id === recordId
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
@@ -267,40 +273,55 @@ async function onFileSelect(fieldId: string, e: Event) {
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
-      rememberLocalAttachment(fieldId, attachment)
+      if (shown()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds])
+    // An upload that adds to the list names the ids it added: the list may have changed while it ran (an attachment
+    // added from elsewhere), and the listener adds them to the list as it is now. One that replaces the list is the
+    // new list as it is.
+    if (replaceExisting) emit('patch', fieldId, newIds, recordId)
+    else emit('patch', fieldId, [...existing, ...newIds], recordId, undefined, newIds)
   } catch (error: any) {
-    setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
+    if (shown()) setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
-    setAttachmentActivity(fieldId)
+    if (shown()) setAttachmentActivity(fieldId)
     input.value = ''
   }
 }
 
 async function onRemoveAttachment(fieldId: string, attachmentId: string) {
   clearAttachmentError(fieldId)
+  // As for an upload: the delete and the patch belong to the record it started on.
+  const recordId = props.record?.id
+  const shown = () => props.record?.id === recordId
+  const started = attachmentList(fieldId)
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'removing')
     try {
       await props.deleteAttachmentFn(attachmentId, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentError(fieldId, error?.message ?? lc('cell.removeFailed'))
-      setAttachmentActivity(fieldId)
+      if (shown()) {
+        setAttachmentError(fieldId, error?.message ?? lc('cell.removeFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
-    setAttachmentActivity(fieldId)
+    if (shown()) setAttachmentActivity(fieldId)
   }
-  const existing = attachmentList(fieldId)
-  emit('patch', fieldId, existing.filter((id) => id !== attachmentId))
-  forgetLocalAttachment(fieldId, attachmentId)
+  // Still shown: its list as it is now (the reload after the delete may have refreshed it). Otherwise this panel's
+  // record is another one by now: the list it started from, and the removed id with it (`removed` above).
+  if (shown()) {
+    emit('patch', fieldId, attachmentList(fieldId).filter((id) => id !== attachmentId), recordId)
+    forgetLocalAttachment(fieldId, attachmentId)
+  } else {
+    emit('patch', fieldId, started.filter((id) => id !== attachmentId), recordId, [attachmentId])
+  }
 }
 </script>
 

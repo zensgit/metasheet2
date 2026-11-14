@@ -16,8 +16,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, ref, type App, type VNodeChild } from 'vue'
+import { createApp, h, nextTick, ref, watch, type App, type VNodeChild } from 'vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface } from '../src/multitable/utils/workbench-undo'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
@@ -358,31 +359,45 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
     })
 
     // P2-A (2026-09-05, design brief §1.3): `.meta-record-drawer__tabs-bar` is the container-query
-    // container, and below 420px both the tabs pill and each tab get `flex: 1; min-width: 0` so all
-    // four stay on one row at the 360px panel floor. Source-text pin only — jsdom implements neither
-    // layout nor CSS Container Queries, so the resulting one-row layout itself is NOT verified here
-    // (same caveat this file's sibling flex-wrap pin above already discloses); real-browser
-    // verification is this PR's own checklist item "four tabs on one row at 360".
-    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) sets flex:1/min-width:0 on both the tabs pill and each tab (jsdom cannot verify the resulting one-row layout)', () => {
+    // container; below 420px the tabs pill and each tab get narrow-width flex rules. Source-text pin
+    // only — jsdom implements neither layout nor CSS Container Queries, so the resulting layout itself
+    // is NOT verified here (same caveat this file's sibling flex-wrap pin above already discloses).
+    // 2026-11-06: the original `flex: 1; min-width: 0` on both was measured in Safari and Chromium to
+    // overlap the en tab labels at 360-440px (`flex: 1` = a zero basis, so the pill never wrapped away
+    // from the hide-empty toggle and the tabs shrank below their text). The pin now holds the fix: a
+    // content-sized basis on the pill (never `flex: 1` / a 0 basis), and tabs never narrower than their
+    // labels. The measured outcome (no tab narrower than its text, en + zh-CN, 360/400/440/480px) is
+    // in that PR's description.
+    it('[source] .meta-record-drawer__tabs-bar is a container, and @container (width < 420px) gives the pill a content-sized basis (min-width 0) and each tab at least its label width (jsdom cannot verify the resulting layout)', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
       const tabsBarRule = src.match(/\.meta-record-drawer__tabs-bar\s*\{[^}]*\}/)?.[0] ?? ''
       expect(tabsBarRule).toMatch(/container-type:\s*inline-size/)
       const query = src.match(/@container \(width < 420px\)\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
       expect(query).toBeTruthy()
+      // one rule each for the pill and the tab inside the block (a second one could undo the first)
+      expect(query.match(/\.meta-record-drawer__tabs\s*\{/g)?.length).toBe(1)
+      expect(query.match(/\.meta-record-drawer__tab\s*\{/g)?.length).toBe(1)
       const tabsRule = query.match(/\.meta-record-drawer__tabs\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabsRule).toMatch(/flex:\s*1/)
-      expect(tabsRule).toMatch(/min-width:\s*0/)
+      expect(tabsRule).toMatch(/flex:\s*1 1 auto\s*;/)
+      expect(tabsRule).toMatch(/min-width:\s*0\s*;/)
+      // the overlap's cause: a zero flex basis on the pill (`flex: 1`, `flex: 1 1 0`, a `flex-basis`,
+      // `width: 0`); and one `flex` declaration only, so a later one cannot override the content basis
+      expect(tabsRule).not.toMatch(/flex:\s*1\s*;|flex:\s*1 1 0|flex-basis|(?<![-\w])width:\s*0/)
+      expect(tabsRule.match(/(?<![-\w])flex:/g)?.length).toBe(1)
       const tabRule = query.match(/\.meta-record-drawer__tab\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(tabRule).toMatch(/flex:\s*1/)
-      expect(tabRule).toMatch(/min-width:\s*0/)
+      expect(tabRule).toMatch(/flex:\s*1 1 auto\s*;/)
+      expect(tabRule).toMatch(/min-width:\s*max-content\s*;/)
+      expect(tabRule).not.toMatch(/min-width:\s*0/)
+      // the padding that fits the four en labels on one row at the 360px drawer (measured; 12px wraps)
+      expect(tabRule).toMatch(/padding:\s*5px 6px\s*;/)
 
       // Placement (real-browser-verified defect, caught before landing — see the @container block's
       // own comment): the block must come AFTER the UNCONDITIONAL base `.meta-record-drawer__tab`
-      // rule (`min-width: 76px`), not before it. The `flex:1`/`min-width:0` assertions above alone
-      // do NOT catch a regression that moves the block back above that base rule — both strings
-      // would still be present, just in the wrong relative order, and same-specificity CSS cascade
-      // order (a `@container` wrapper adds none of its own) would then let the LATER, unconditional
-      // `min-width: 76px` win at every width, silently reintroducing the exact defect this PR fixed.
+      // rule (`min-width: 76px`), not before it. The rule-text assertions above alone do NOT catch a
+      // regression that moves the block back above that base rule — the strings would still be
+      // present, just in the wrong relative order, and same-specificity CSS cascade order (a
+      // `@container` wrapper adds none of its own) would then let the LATER, unconditional base rule
+      // (`min-width: 76px; padding: 5px 12px`) win at every width, so the en tabs wrap again.
       const baseTabRuleIndex = src.indexOf('.meta-record-drawer__tab { min-width: 76px')
       const containerQueryIndex = src.indexOf('@container (width < 420px)')
       expect(baseTabRuleIndex).toBeGreaterThan(0)
@@ -600,6 +615,26 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
         key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
       }))
       expect(onNavigate).toHaveBeenCalledWith('rec_2')
+    })
+
+    it('the chord does nothing while an input method composes (moving on would commit the unconverted text)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement
+      const chord = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, isComposing: true, bubbles: true, cancelable: true,
+      })
+      textarea.dispatchEvent(chord)
+      expect(onNavigate).not.toHaveBeenCalled()
+      expect(chord.defaultPrevented).toBe(false)
+      // A key the input method took (keyCode 229), as some engines report it without isComposing.
+      const taken = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      })
+      Object.defineProperty(taken, 'keyCode', { value: 229 })
+      textarea.dispatchEvent(taken)
+      expect(onNavigate).not.toHaveBeenCalled()
     })
 
     it('bounds: chord at the first/last record emits nothing', async () => {
@@ -1029,5 +1064,294 @@ describe('MetaRecordInspector title keys during an input-method composition', ()
     await flushUi()
     expect(onPatch).toHaveBeenCalledTimes(1)
     expect(onPatch).toHaveBeenCalledWith('fld_title', 'Beta')
+  })
+})
+
+// The workbench's own undo (utils/workbench-undo.ts) with the REAL inspector and fields panel, wired the
+// way MultitableWorkbench wires it: installed on the document; a drawer `patch` marks a commit of that
+// field's controls (drawerCommitContainers) and settles it at once, as an accepted server patch does
+// (or, with `reject`, never, and the record re-renders as a rejected patch's rollback does); a record
+// switch resets every history (the workbench's selected-record watch).
+describe('MetaRecordInspector and the workbench-owned undo', () => {
+  const removers: Array<() => void> = []
+  afterEach(() => { while (removers.length) removers.pop()!() })
+
+  function mountWithUndo(record = ref<MetaRecord>(RECORD), options: { reject?: boolean } = {}) {
+    const undo = createWorkbenchUndo()
+    const gridUndo = vi.fn()
+    const patches: string[] = []
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const stopWatch = watch(() => record.value.id, () => undo.reset())
+    removers.push(stopWatch)
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record: record.value, fields: FIELDS, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1', 'rec_2'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+        onPatch: (fieldId: string, value: unknown) => {
+          patches.push(`${record.value.id}:${fieldId}=${String(value)}`)
+          const settle = undo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(FIELDS)?.id))
+          if (options.reject) record.value = { ...record.value, data: { ...record.value.data } } as MetaRecord
+          else settle()
+        },
+      }),
+    )
+    const title = () => container.querySelector<HTMLInputElement>('.meta-record-drawer__title-input')!
+    const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, next: string) => {
+      el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText' }))
+      el.value = next
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    }
+    const press = (el: HTMLElement, init: KeyboardEventInit) => {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+      el.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    return { container, record, gridUndo, patches, title, typeInto, press }
+  }
+
+  it('a value for the same record that lands while the title holds its own typing does not overwrite it: the typing stays undoable, and left with no net typing the title shows that value', async () => {
+    const { record, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    // own typing: undone from the title's history, no grid call
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(gridUndo).not.toHaveBeenCalled()
+    // redo it, then a value for this record lands (someone else's, or the title's own earlier commit)
+    expect(press(input, { key: 'Z', metaKey: true, shiftKey: true })).toBe(true)
+    expect(input.value).toBe('Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(gridUndo).not.toHaveBeenCalled()
+    input.blur()
+    await flushUi()
+    expect(input.value).toBe('Server value')
+  })
+
+  it('Escape after typing again on a committed title shows the committed title, not the record\'s (which can still lag behind the commit), and saves nothing more', async () => {
+    const { patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+    typeInto(input, 'Alpha XY')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape after typing again on a committed title shows the committed title also after a redraw that brings the record\'s older title', async () => {
+    const { record, patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    typeInto(input, 'Alpha XY')
+    // another field's answer redraws the record; its title has not taken the commit yet
+    record.value = { ...record.value, version: 2, data: { ...record.value.data, fld_title: 'Alpha', fld_notes: 'n' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches.filter((p) => p.includes('fld_title'))).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape shows a value that landed, and records it: a newer value that lands then is shown, not kept out as typing', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+    record.value = { id: 'rec_1', version: 3, data: { fld_title: 'Newer', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Newer')
+  })
+
+  it('Escape after a value landed while the title held typing shows that value', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+  })
+
+  it('a move to another record while the title holds typing writes that record\'s title and drops the typing history: the next Cmd+Z does nothing', async () => {
+    const { record, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_2', version: 1, data: { fld_title: 'Beta', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Beta')
+    expect(document.activeElement).toBe(input)
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).not.toHaveBeenCalled()
+    expect(input.value).toBe('Beta')
+  })
+
+  it('a title commit (Enter, then the change the blur fires) ends the title\'s history: the next Cmd+Z does nothing, with no second patch', async () => {
+    const { gridUndo, patches, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha draft'])
+    input.focus()
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).not.toHaveBeenCalled()
+    // not restored to the pre-commit 'Alpha' (which the next blur would save back): still the commit
+    expect(input.value).toBe('Alpha draft')
+    expect(patches).toEqual(['rec_1:fld_title=Alpha draft'])
+  })
+
+  it('a rejected title commit snaps the title back to the saved value (the rollback re-render): the next Cmd+Z does nothing', async () => {
+    const { gridUndo, patches, title, typeInto, press } = mountWithUndo(ref<MetaRecord>(RECORD), { reject: true })
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha draft'])
+    expect(input.value).toBe('Alpha')
+    input.focus()
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).not.toHaveBeenCalled()
+    expect(input.value).toBe('Alpha')
+  })
+
+  it('the drawer moving to another record with equal content (an empty Notes in both) never brings record A\'s typing into record B', async () => {
+    const record = ref<MetaRecord>(RECORD)
+    const { container, gridUndo, patches, typeInto, press } = mountWithUndo(record)
+    await flushUi()
+    const notes = () => container.querySelector<HTMLTextAreaElement>('.meta-record-drawer__field[data-field-id="fld_notes"] textarea')!
+    const a = notes()
+    a.focus()
+    typeInto(a, 'text meant for A')
+    a.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }))
+    a.value = ''
+    a.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }))
+    record.value = { id: 'rec_2', version: 1, data: { fld_title: 'Beta', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    const b = notes()
+    expect(b).toBe(a) // the same, reused element
+    b.focus()
+    expect(press(b, { key: 'z', metaKey: true })).toBe(true)
+    expect(b.value).toBe('')
+    expect(press(b, { key: 'Z', metaKey: true, shiftKey: true })).toBe(true)
+    expect(b.value).toBe('')
+    b.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches.some((entry) => entry.includes('text meant for A'))).toBe(false)
+    expect(gridUndo).not.toHaveBeenCalled()
+  })
+
+  it('drawerCommitContainers finds the REAL fields panel row (and the title for the primary field), so a field commit ends that control\'s history', async () => {
+    const { container, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const [notesRow] = drawerCommitContainers('fld_notes', 'fld_title')
+    expect(notesRow).toBeTruthy()
+    const notes = notesRow.querySelector<HTMLTextAreaElement>('textarea')!
+    expect(notes).toBeTruthy()
+    expect(container.contains(notes)).toBe(true)
+    expect(drawerCommitContainers('fld_title', 'fld_title')).toContain(title())
+    notes.focus()
+    typeInto(notes, 'a note')
+    notes.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    notes.focus()
+    expect(press(notes, { key: 'z', metaKey: true })).toBe(true)
+    expect(gridUndo).not.toHaveBeenCalled()
+    expect(notes.value).toBe('a note')
+  })
+
+  it('isWorkbenchGridSurface on the REAL drawer: after a press on the title or a field, Cmd+Z on the page is the grid\'s; after one on a tab, the comment box or Send, nothing', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record: RECORD, fields: FIELDS, canEdit: true, canComment: true, canDelete: false,
+        recordIds: ['rec_1', 'rec_2'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any, commentDraft: 'a comment',
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__tab'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_notes"] textarea, .meta-record-drawer__field[data-field-id="fld_notes"] input'))).toBe(1)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-comments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(container.querySelector('.meta-comment-composer textarea'))).toBe(0)
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-comment-composer__submit'))).toBe(0)
+  })
+
+  it('isWorkbenchGridSurface on the REAL drawer\'s attachments: a press on a file input (the fields panel\'s or the attachments tab\'s; disabled for the whole upload) never leaves Cmd+Z on the page to the grid', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const fields: MetaField[] = [...FIELDS, { id: 'fld_files', name: 'Files', type: 'attachment' } as MetaField]
+    const record = { ...RECORD, data: { ...RECORD.data, fld_files: [] } } as MetaRecord
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record, fields, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+        uploadFn: vi.fn(() => new Promise(() => {})),
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]'))).toBe(0)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel input[type="file"]'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel'))).toBe(0)
   })
 })

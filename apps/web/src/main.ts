@@ -21,6 +21,7 @@ import './styles/form-layout-utilities.css'
 import App from './App.vue'
 import { probeDeleteTransport } from './utils/delete-fallback'
 import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
+import { refreshAdminAccessCapabilities } from './composables/adminAccessCapabilities'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
 import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from './router/guardPolicy'
@@ -55,6 +56,23 @@ function requiresPasswordChange(user: unknown): boolean {
   if (!user || typeof user !== 'object') return false
   const record = user as Record<string, unknown>
   return record.must_change_password === true || record.mustChangePassword === true
+}
+
+function isFailClosedManagementRoute(to: {
+  path?: unknown
+  name?: unknown
+  matched?: ReadonlyArray<{ name?: unknown }>
+}): boolean {
+  // Canonical paths cover harness objects that have no route name. The installed
+  // router keeps a trailing slash or different case on to.path and puts the
+  // identity on the matched record. Prefixes are not these routes.
+  const path = typeof to.path === 'string' ? to.path : ''
+  if (path === '/admin/role-delegation' || path === '/admin/permissions') return true
+  const names: unknown[] = [to.name]
+  if (Array.isArray(to.matched)) {
+    for (const record of to.matched) names.push(record?.name)
+  }
+  return names.includes('role-delegation') || names.includes('permission-management')
 }
 
 router.beforeEach(async (to, _from, next) => {
@@ -126,7 +144,8 @@ router.beforeEach(async (to, _from, next) => {
       return next(flags.resolveHomePath())
     }
 
-    const adminRedirect = await resolveAdminRouteRedirect(to, auth, flags)
+    const capabilities = await refreshAdminAccessCapabilities()
+    const adminRedirect = await resolveAdminRouteRedirect(to, auth, flags, capabilities)
     if (adminRedirect) {
       return next(adminRedirect)
     }
@@ -148,6 +167,20 @@ router.beforeEach(async (to, _from, next) => {
       return next(decision.target)
     }
   } catch {
+    // These two checks live inside the policy call above. A throw from feature
+    // load, context, or policy must not skip them. Match the resolved route
+    // name so a trailing slash or different case cannot skip the catch.
+    // Every other route keeps the offline fallback.
+    if (isFailClosedManagementRoute(to)) {
+      let target = '/home'
+      try {
+        const home = flags.resolveHomePath()
+        if (typeof home === 'string' && home.length > 0 && home !== to.path) target = home
+      } catch {
+        // Home cannot be resolved. Still deny the management route.
+      }
+      return next(target)
+    }
     // If guard fails (network/offline), don't block navigation.
   }
 

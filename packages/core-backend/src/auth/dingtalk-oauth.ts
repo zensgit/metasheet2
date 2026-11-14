@@ -1348,9 +1348,7 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 
   if (requireGrant) {
     throw createPolicyError(
-      dtUser.email
-        ? `DingTalk account ${dtUser.email} is not linked to an enabled local user`
-        : 'DingTalk account is not linked to an enabled local user',
+      'DingTalk account is not linked to an enabled local user',
       {
         statusCode: 403,
         code: 'unlinked_enabled_local_user',
@@ -1360,9 +1358,7 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 
   if (!shouldAutoProvision()) {
     throw createPolicyError(
-      dtUser.email
-        ? `DingTalk account ${dtUser.email} is not linked to a local user`
-        : 'DingTalk account is not linked to a local user',
+      'DingTalk account is not linked to a local user',
       {
         statusCode: 403,
         code: 'unlinked_local_user',
@@ -1385,9 +1381,7 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
       { email: dtUser.email || null, unionId: dtUser.unionId || null },
     )
     throw createPolicyError(
-      dtUser.email
-        ? `DingTalk account ${dtUser.email} is not linked to a local user`
-        : 'DingTalk account is not linked to a local user',
+      'DingTalk account is not linked to a local user',
       {
         statusCode: 403,
         code: 'unlinked_local_user',

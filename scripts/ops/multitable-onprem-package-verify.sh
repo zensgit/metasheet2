@@ -1118,6 +1118,8 @@ required=(
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
+  "scripts/ops/stock-preparation-pull-batch-install.mjs"
+  "scripts/ops/stock-preparation-scheduled-pull.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"

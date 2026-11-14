@@ -41,8 +41,8 @@
 //   RT-EV   the evidence: the demand facts of the computation that opened the hold; history_unknown, then the
 //           relationship snapshot once a relationship claims the old root; the continuation detail
 //   RT-NG   a registered, NOT-governed project: not_governed, no holds, no receipt, no step-4 row written by a read
-// Synthetic values only; the pilot column is seeded directly (pilot enable is impossible on this build: the
-// readiness marker CONTINUATION_SUPPORT_VERSION is 0).
+// Synthetic values only; the pilot column is seeded directly (these cases never run the enable route; since S6-9 the
+// readiness marker CONTINUATION_SUPPORT_VERSION is 1, so the enable is gated by the other readiness checks only).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -340,6 +340,56 @@ test('RT-U03d by-id reads are never an existence oracle: another tenant\'s hold 
     assert.equal(errorOf(typed).code, CODES.REQUEST_INVALID)
     assert.equal(errorOf(typed).details.field, 'confirmProjectNo')
   } finally { st.restore() }
+})
+
+// Pre-pilot fix batch 8(b) (R-91): the typed project number on the two DECISION routes that change state — the hold
+// confirm and the relationship end — pinned with real, otherwise-admissible bodies. A mistyped number is 400 before the
+// scope, the consult or any store statement; the same body with the path's number then lands (calibration).
+test('RT-U03f the hold CONFIRM and the relationship END refuse a mistyped confirmProjectNo (another number, case-folded, a suffix, missing, not a string) 400 REQUEST_INVALID field confirmProjectNo — no consult, no store statement, no audit row, no host work, nothing persisted; the same body with the path\'s number then lands', async () => {
+  const mistyped = [
+    ['another number', { confirmProjectNo: 'PRJ-RD-OTHER' }],
+    ['case-folded', { confirmProjectNo: PROJECT.toLowerCase() }],
+    ['a suffix', { confirmProjectNo: `${PROJECT}0` }],
+    ['not a string', { confirmProjectNo: 7 }],
+  ]
+  async function assertRefusedBeforeAnyIo(st, label, send) {
+    const before = JSON.stringify(st.env.snapshot())
+    const audits = st.audits().length
+    const hostCalls = st.h.provisioning.calls.length + st.h.records.calls.length
+    st.env.db.log.length = 0
+    const res = await send()
+    assert.equal(res.statusCode, 400, `${label}: ${JSON.stringify(res.body)}`)
+    assert.equal(errorOf(res).code, CODES.REQUEST_INVALID, label)
+    assert.equal(errorOf(res).details.field, 'confirmProjectNo', label)
+    assert.equal(st.env.db.log.length, 0, `${label}: no consult and no store statement`)
+    assert.equal(st.audits().length, audits, `${label}: no audit row`)
+    assert.equal(st.h.provisioning.calls.length + st.h.records.calls.length, hostCalls, `${label}: zero host work`)
+    assert.equal(JSON.stringify(st.env.snapshot()), before, `${label}: nothing persisted`)
+  }
+  // The hold confirm: a real candidate hold, read through the page, bound by its receipt.
+  {
+    const st = mount()
+    try {
+      const { row, hold } = await seedCandidate(st)
+      const { body } = await readAndBind(st, row, hold)
+      for (const [label, typed] of mistyped) await assertRefusedBeforeAnyIo(st, `confirm ${label}`, () => confirm(st, { ...body, ...typed }))
+      await assertRefusedBeforeAnyIo(st, 'confirm missing', () => call(st, 'POST', PATHS.confirm, { body }))
+      const done = await confirm(st, body)
+      assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    } finally { st.restore() }
+  }
+  // The end: a relationship that needs re-confirmation, escalated (admissible while a hold names it).
+  {
+    const st = mount()
+    try {
+      const { confirmed } = await needsReconfirmation(st)
+      const body = { revision: 1, outcome: 'escalate_special_repair' }
+      for (const [label, typed] of mistyped) await assertRefusedBeforeAnyIo(st, `end ${label}`, () => end(st, confirmed.continuationId, { ...body, ...typed }))
+      await assertRefusedBeforeAnyIo(st, 'end missing', () => call(st, 'POST', PATHS.end, { params: { id: confirmed.continuationId }, body }))
+      const done = await end(st, confirmed.continuationId, body)
+      assert.equal(done.statusCode, 200, JSON.stringify(done.body))
+    } finally { st.restore() }
+  }
 })
 
 test('RT-U03e every value read appends exactly ONE values-free audit row (project_board_read with its mode) BEFORE the body; a sentinel planted in a hold\'s detail reaches the hold page and the evidence only — never an audit row, never an error detail of any refusal', async () => {
@@ -936,6 +986,42 @@ test('RT-RC a relationship_reconfirm hold is confirmed through the SAME route wi
   } finally { st.restore() }
 })
 
+// Pre-pilot fix batch 8(a) (R-91): the re-confirm's NOT_PILOT is decided UNDER THE LOCK, as the plain confirm's is.
+test('RT-RC2 (8a) the pilot marker cleared AFTER the re-confirm route\'s consult (its NOT_PILOT passed), before the store\'s transaction: 409 NOT_PILOT decided under the lock — the relationship stays needs_reconfirmation at revision 1, the hold open, no bump, no decision audit; the marker back => the same body 201 revision 2', async () => {
+  const st = mount()
+  try {
+    const fixture = await refreshKit.candidateHoldFixture()
+    const confirmed = await st.env.seedConfirmedContinuation(st.scope, fixture.hold, { sourceIdentity: fixture.sourceIdentity })
+    const reconfirm = refreshKit.reconfirmHoldFor(confirmed.continuationId, { verdict: 'source_scope_changed' })
+    await st.env.seedHolds(st.scope, [reconfirm], { verdicts: { [confirmed.continuationId]: 'source_scope_changed' } })
+    const row = st.holds().find((entry) => entry.fingerprint === reconfirm.fingerprint && entry.status === 'open')
+    const page = dataOf(await listHolds(st))
+    const body = { holdId: row.id, holdFingerprint: reconfirm.fingerprint, comparisonFingerprint: reconfirm.comparisonFingerprint, evidenceFingerprint: reconfirm.evidenceFingerprint, readReceipt: page.readReceipt.id, acknowledge: { historyUnknown: true }, continuation: { id: confirmed.continuationId, revision: 1 } }
+    const before = JSON.stringify(st.env.snapshot())
+    const lock0 = JSON.stringify(st.lockRow())
+    const decisionAudits = () => st.audits().filter((item) => item.action === REFRESH_DECISION_AUDIT.decisionAction).length
+    const audits0 = decisionAudits()
+    const fired = pauseBeforeTransaction(st, 'hold', row.id, async () => {
+      for (const entry of st.h.registryRows()) if (entry.project_no === PROJECT) entry.pilot_enabled_at = null
+    })
+    const refused = await confirm(st, body)
+    assert.equal(fired(), true, 'calibration: the marker was cleared after the consult, before the transaction')
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(errorOf(refused).code, CODES.NOT_PILOT)
+    assert.equal(errorOf(refused).details.decidedUnderLock, true, 'refused by the STORE under the lock (the consult said pilot)')
+    assert.equal(JSON.stringify(st.env.snapshot()), before, 'nothing persisted')
+    assert.equal(JSON.stringify(st.lockRow()), lock0, 'no bump')
+    assert.equal(decisionAudits(), audits0, 'no decision audit row')
+    assert.equal(st.continuations()[0].status, 'needs_reconfirmation')
+    assert.equal(st.continuations()[0].revision, 1)
+    markPilot(st.h)
+    const done = await confirm(st, body)
+    assert.equal(done.statusCode, 201, JSON.stringify(done.body))
+    assert.equal(done.body.data.revision, 2)
+    assert.equal(st.continuations()[0].status, 'active')
+  } finally { st.restore() }
+})
+
 // ── RT-E: the end ────────────────────────────────────────────────────────────────────────────────
 
 async function needsReconfirmation(st, { count, verdict = 'new_position_removed' } = {}) {
@@ -1252,10 +1338,73 @@ test('RT-EV the evidence behind a hold: the demand facts the computation recorde
   } finally { st.restore() }
 })
 
+// ── RT-DIR (pre-pilot fix batch 8(c), R-91; PR-9 residual 5) ───────────────────────────────────────
+
+const DIRECTORY_PATH = '/api/integration/stock-preparation/operator/projects'
+const directory = (st, options = {}) => harness.call(st.h.routes, 'GET', DIRECTORY_PATH, { user: PULLER, query: { includePullTargets: '1', ...(options.query || {}) }, params: {} })
+const rowOf = (res, projectNo = PROJECT) => dataOf(res).projects.find((entry) => entry.projectNo === projectNo)
+const refreshKeysOf = (row) => ({ openRefreshHoldCount: row.openRefreshHoldCount, pendingReviewCount: row.pendingReviewCount, refreshBlocked: row.refreshBlocked })
+
+test('RT-DIR (8c) the directory\'s REGISTRY rows carry the open hold count, the pending reviews and a closed blocked token from the derived refresh state: an open hold => pending_confirmation; a pilot never settled => unsettled; a not-governed project beside it => null with zero counts and NO consult; a governed index that cannot be read => unreadable on every registry row; values-free', async () => {
+  // (a) a governed pilot project with an open candidate hold, and a not-governed registered project beside it.
+  {
+    const st = mount()
+    try {
+      st.h.seedRegistryRow('PRJ-RD-PLAIN')
+      await seedCandidate(st)
+      const consultsBefore = st.env.db.log.filter(([method, args]) => method === 'trx.select' && args && args.table === REFRESH_STORE_TABLES.continuation).length
+      const res = await directory(st)
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+      assert.deepEqual(refreshKeysOf(rowOf(res)), { openRefreshHoldCount: 1, pendingReviewCount: 0, refreshBlocked: 'pending_confirmation' })
+      assert.equal(rowOf(res).pendingDecisionCount, 1, 'the union count is unchanged (the hold folded in)')
+      assert.deepEqual(refreshKeysOf(rowOf(res, 'PRJ-RD-PLAIN')), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: null })
+      // ONE consult: the governed row only (the consult's snapshot reads continuations by (tenant, project) AND by sheet).
+      const consults = st.env.db.log.filter(([method, args]) => method === 'trx.select' && args && args.table === REFRESH_STORE_TABLES.continuation)
+      const projectsConsulted = new Set(consults.slice(consultsBefore).map(([, args]) => args.where && args.where.project_no).filter(Boolean))
+      assert.deepEqual([...projectsConsulted], [PROJECT], 'the not-governed registry row was never consulted')
+      assert.equal(JSON.stringify(res.body).includes(SENTINEL), false)
+    } finally { st.restore() }
+  }
+  // (b) a pilot with no step-4 row at all: complete but never settled => unsettled (the export refuses not_settled).
+  {
+    const st = mount()
+    try {
+      assert.deepEqual(refreshKeysOf(rowOf(await directory(st))), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: 'unsettled' })
+    } finally { st.restore() }
+  }
+  // (c) a registered project that is NOT governed (no marker, no row): the pre-8(c) posture inputs, no consult.
+  {
+    const st = mount({ pilot: false })
+    try {
+      assert.deepEqual(refreshKeysOf(rowOf(await directory(st))), { openRefreshHoldCount: 0, pendingReviewCount: 0, refreshBlocked: null })
+    } finally { st.restore() }
+  }
+  // (d) the governed index cannot be read (the state table read fails): every registry row is unreadable, never ready.
+  {
+    const st = mount({ pilot: false })
+    try {
+      st.env.db.faults.select = (args) => (args && args.table === REFRESH_STORE_TABLES.state && args.where && args.where.tenant_id && !args.where.project_no ? refreshKit.sqlError('42P01', 'relation does not exist') : null)
+      const row = rowOf(await directory(st))
+      assert.equal(row.refreshBlocked, 'unreadable')
+      assert.equal(row.pendingReviewCount, null)
+      st.env.db.faults.select = null
+    } finally { st.restore() }
+  }
+  // (e) governance not wired: the three keys are ABSENT (nobody asked), the rest of the row as before.
+  {
+    const st = mount({ unwired: true })
+    try {
+      const row = rowOf(await directory(st))
+      for (const key of ['openRefreshHoldCount', 'pendingReviewCount', 'refreshBlocked']) assert.equal(Object.prototype.hasOwnProperty.call(row, key), false, key)
+      assert.equal(typeof row.archived, 'boolean', 'still a registry row')
+    } finally { st.restore() }
+  }
+})
+
 // ── RT-NG ────────────────────────────────────────────────────────────────────────────────────────
 
-test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker stays 0 (pilot enable impossible — the pilot column is seeded directly by these cases)', async () => {
-  assert.equal(CONTINUATION_SUPPORT_VERSION, 0)
+test('RT-NG a registered project that is NOT governed: the hold page answers not_governed with no holds and NO receipt (nothing to confirm; a receipt is a plugin_kv row that is never swept — PR-4 review N4), the read is still audited, and no step-4 row is written by any read; the build marker is 1 since S6-9 (the pilot column is still seeded directly by these cases, never through the enable route)', async () => {
+  assert.equal(CONTINUATION_SUPPORT_VERSION, 1)
   const st = mount({ pilot: false })
   try {
     const page = dataOf(await listHolds(st))

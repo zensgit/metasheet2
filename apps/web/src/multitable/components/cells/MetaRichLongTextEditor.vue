@@ -124,6 +124,7 @@ import {
   detectMentionQuery,
   filterMentionSuggestions,
   insertMentionChipAtRange,
+  MENTION_CHIP_ATTR,
 } from '../../utils/rich-longtext-mention'
 import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion } from '../../types'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../../utils/meta-core-labels'
@@ -132,6 +133,9 @@ import { isImeKeyEvent } from '../../utils/ime-keys'
 const props = defineProps<{
   /** Current rich-`longText` HTML value (server-sanitized). */
   modelValue: unknown
+  /** What the value belongs to (the record drawer passes the record id): the editor is reused across records, and
+   *  shows the value again when this changes, also when the value itself is the same. */
+  syncKey?: string | number | null
   isZh?: boolean
   /**
    * People-mention candidates (B5). Fed ONLY by authenticated hosts (cell editor +
@@ -321,8 +325,15 @@ function onInput(): void {
   emitLive()
 }
 
+// The content when the editor took the focus (or last committed with Cmd/Ctrl+Enter): a blur commits only a
+// change from it, as an input's `change` does.
+let committedOnFocus: string | null = null
+// Whether the model (or the sync key) changed while the editor was focused, and so was not shown.
+let modelChangedWhileFocused = false
+
 function onFocus(): void {
   focused.value = true
+  committedOnFocus = currentValue()
 }
 
 // --- B5 mention detection + insertion ---
@@ -473,7 +484,9 @@ function onEscape(event: KeyboardEvent): void {
   emit('cancel')
 }
 
-/** Blur = commit. Emit BOTH the final live value and the `change` commit event. */
+/** Blur = commit. Emit BOTH the final live value and, when it changed since the editor took the focus, the
+ *  `change` commit event (as an input's `change`): focus that only passes through (the drawer focusing its title
+ *  on open, a click, the focus coming back after a record switch) commits nothing. */
 function onBlur(): void {
   focused.value = false
   // Dismiss the mention popover on blur. The suggestion buttons use
@@ -482,7 +495,15 @@ function onBlur(): void {
   dismissMention()
   const value = currentValue()
   emit('update:modelValue', value)
-  emit('change', value)
+  if (value !== committedOnFocus) {
+    emit('change', value)
+    // This commit supersedes a value that came while the editor was focused.
+    modelChangedWhileFocused = false
+  } else if (modelChangedWhileFocused) {
+    // Nothing to commit: show the value that came while the editor was focused. (Not otherwise: the model can
+    // still lag behind this editor's own commit, which must stay shown until the host takes it.)
+    syncFromModel()
+  }
 }
 
 /**
@@ -496,6 +517,8 @@ function onConfirm(): void {
   const value = currentValue()
   emit('update:modelValue', value)
   emit('change', value)
+  committedOnFocus = value
+  modelChangedWhileFocused = false
   emit('confirm')
 }
 
@@ -569,10 +592,28 @@ function syncFromModel(): void {
   // NEVER rewrite innerHTML while the user is editing: a sanitized value flowing
   // back from our own emit (or a normalization round-trip) would stomp the live
   // DOM and jump the caret. Re-sync only applies external changes received while
-  // the surface is blurred.
-  if (focused.value) return
-  const next = sanitizeRichLongTextHtml(props.modelValue)
+  // the surface is blurred (a blur that commits nothing applies one that came
+  // while it was focused, see onBlur).
+  if (focused.value) {
+    modelChangedWhileFocused = true
+    return
+  }
+  modelChangedWhileFocused = false
+  const next = withAtomicMentions(sanitizeRichLongTextHtml(props.modelValue))
   if (el.innerHTML !== next) el.innerHTML = next
+}
+
+/**
+ * The HTML with every @-mention chip non-editable, as buildMentionChip inserts it: the
+ * sanitizer drops that attribute, so a redrawn chip would otherwise take the caret (and
+ * the typing after it). The emitted value is sanitized again, so it never carries it.
+ */
+function withAtomicMentions(html: string): string {
+  if (!html.includes(MENTION_CHIP_ATTR)) return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  for (const chip of template.content.querySelectorAll(`span[${MENTION_CHIP_ATTR}]`)) chip.setAttribute('contenteditable', 'false')
+  return template.innerHTML
 }
 
 onMounted(() => {
@@ -581,7 +622,7 @@ onMounted(() => {
 })
 
 watch(
-  () => props.modelValue,
+  [() => props.modelValue, () => props.syncKey],
   () => {
     // Only re-sync external changes; the focus guard in syncFromModel prevents a
     // mid-type caret jump from our own emitted value flowing back.

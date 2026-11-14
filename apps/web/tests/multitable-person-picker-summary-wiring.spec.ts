@@ -195,7 +195,9 @@ function createGridMock() {
     toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),
     updateFilterRule: vi.fn(), removeFilterRule: vi.fn(), clearFilters: vi.fn(), applySortFilter: vi.fn(),
     undo: vi.fn(), redo: vi.fn(), setGroupField: vi.fn(), setGroupFields: vi.fn(), goToPage: vi.fn(),
-    patchCell: vi.fn().mockResolvedValue(true),
+    // What the real patchCell returns for a stored write: null (anything else is the call's own failure, which the
+    // picker now reads instead of the grid's shared error).
+    patchCell: vi.fn().mockResolvedValue(null),
     createRecord: vi.fn(), deleteRecord: vi.fn(), duplicateRecord: vi.fn(), resolveRowActions: vi.fn(() => null),
     loadViewData: vi.fn().mockResolvedValue(true), reloadCurrentPage: vi.fn(), dismissConflict: vi.fn(),
     retryConflict: vi.fn(), setColumnWidth: vi.fn(), setSearchQuery: vi.fn(),

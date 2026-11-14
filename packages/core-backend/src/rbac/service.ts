@@ -10,8 +10,13 @@ import {
 
 const logger = new Logger('RBACService')
 
+// Not an authorization memo. Entries are never stored: a process-local TTL cannot
+// observe another process's committed role, direct, legacy, or admission change,
+// and this process's invalidateUserPerms does not reach that process. The generation
+// counter still covers a read in THIS process that straddles invalidateUserPerms.
 const cache = new Map<string, { codes: string[]; exp: number; generation: number }>()
 const permCacheGeneration = new Map<string, number>()
+// Reported by getPermCacheStatus only. It is not a serve window.
 const TTL_MS = parseInt(process.env.RBAC_CACHE_TTL_MS || '60000', 10)
 
 // Graceful degradation for missing RBAC tables (Phase B)
@@ -139,32 +144,27 @@ async function readUserPermissionsFromPool(userId: string): Promise<string[]> {
 
 export async function listUserPermissions(userId: string, runQuery?: RbacPermissionQueryFn): Promise<string[]> {
   if (typeof runQuery === 'function') return readUserPermissionsOn(userId, runQuery)
-  const now = Date.now()
-  const key = `perms:${userId}`
+  // Each pool-path call reads committed rows (direct ∪ role ∪ legacy, then admission).
+  // Cost is those indexed reads on every profile load instead of a 60s Map hit.
+  // A hit would keep the other process's pre-commit allow or deny, including when
+  // this process never runs invalidateUserPerms. RBAC_CACHE_TTL_MS does not change that.
   const generation = currentPermCacheGeneration(userId)
-  const hit = cache.get(key)
-  if (hit && hit.exp > now && hit.generation === generation) {
-    metrics.rbacPermCacheHits.inc()
-    return hit.codes
-  }
   metrics.rbacPermCacheMiss.inc()
   if (!pool) return []
   try {
     const filtered = await readUserPermissionsFromPool(userId)
     if (currentPermCacheGeneration(userId) !== generation) {
       // One bounded retry. If that retry's generation also moves, the codes it
-      // read are not a witness for this caller: do not cache them and do not
-      // return them. Empty fails closed the current profile; the next caller
-      // misses and reads again. Optional-schema errors still use the catch below.
+      // read are not a witness for this caller: do not return them. Empty fails
+      // closed the current profile; the next caller reads again. Optional-schema
+      // errors still use the catch below. Nothing is stored for a later call.
       const retryGeneration = currentPermCacheGeneration(userId)
       const retried = await readUserPermissionsFromPool(userId)
       if (currentPermCacheGeneration(userId) !== retryGeneration) {
         return []
       }
-      cache.set(key, { codes: retried, exp: Date.now() + TTL_MS, generation: retryGeneration })
       return retried
     }
-    cache.set(key, { codes: filtered, exp: now + TTL_MS, generation })
     return filtered
   } catch (error) {
     if (isDatabaseSchemaError(error) && rbacOptionalEnabled()) {
@@ -180,9 +180,17 @@ export async function listUserPermissions(userId: string, runQuery?: RbacPermiss
   }
 }
 
+export type InheritedRoleGrant = {
+  roleId: string
+  roleName: string | null
+  permissions: string[]
+}
+
 export type UserPermissionGrantInspection = {
   direct: string[]
   inherited: string[]
+  /** Role rows behind `inherited`. Orphan memberships stay visible with a null name. */
+  inheritedRoles: InheritedRoleGrant[]
   legacy: string[]
   effective: string[]
   blockedByNamespaceAdmission: string[]
@@ -201,9 +209,31 @@ function codesFromNamedRows(rows: unknown[]): string[] {
   return uniqueSortedCodes(codes)
 }
 
+function inheritedRolesFromRows(rows: unknown[]): InheritedRoleGrant[] {
+  const byRole = new Map<string, { roleName: string | null; codes: string[] }>()
+  for (const row of rows as Array<{ code?: unknown; role_id?: unknown; role_name?: unknown }>) {
+    const roleId = typeof row?.role_id === 'string' ? row.role_id.trim() : ''
+    const code = typeof row?.code === 'string' ? row.code.trim() : ''
+    if (!roleId || !code) continue
+    const named = typeof row?.role_name === 'string' ? row.role_name.trim() : ''
+    const current = byRole.get(roleId) ?? { roleName: null, codes: [] }
+    if (!current.roleName && named) current.roleName = named
+    if (code) current.codes.push(code)
+    byRole.set(roleId, current)
+  }
+  return Array.from(byRole.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([roleId, value]) => ({
+      roleId,
+      roleName: value.roleName,
+      permissions: uniqueSortedCodes(value.codes),
+    }))
+}
+
 const EMPTY_PERMISSION_GRANT_INSPECTION: UserPermissionGrantInspection = {
   direct: [],
   inherited: [],
+  inheritedRoles: [],
   legacy: [],
   effective: [],
   blockedByNamespaceAdmission: [],
@@ -238,15 +268,19 @@ export async function inspectUserPermissionGrants(
       [userId],
     )
     const inheritedResult = await exec(
-      `SELECT DISTINCT rp.permission_code AS code
+      `SELECT DISTINCT rp.permission_code AS code,
+              ur.role_id AS role_id,
+              r.name AS role_name
        FROM user_roles ur
        JOIN role_permissions rp ON rp.role_id = ur.role_id
+       LEFT JOIN roles r ON r.id = ur.role_id
        WHERE ur.user_id = $1`,
       [userId],
     )
     const legacyResult = await exec('SELECT permissions FROM users WHERE id = $1', [userId])
     const direct = codesFromNamedRows(directResult.rows)
     const inherited = codesFromNamedRows(inheritedResult.rows)
+    const inheritedRoles = inheritedRolesFromRows(inheritedResult.rows)
     const legacyRow = (legacyResult.rows as Array<{ permissions?: unknown }>)[0]
     const legacy = Array.isArray(legacyRow?.permissions)
       ? uniqueSortedCodes((legacyRow.permissions as unknown[]).map((item) => typeof item === 'string' ? item.trim() : ''))
@@ -261,6 +295,7 @@ export async function inspectUserPermissionGrants(
     return {
       direct,
       inherited,
+      inheritedRoles,
       legacy,
       effective,
       blockedByNamespaceAdmission: merged.filter((code) => !effectiveSet.has(code)),
@@ -279,6 +314,8 @@ export async function inspectUserPermissionGrants(
 
 export function invalidateUserPerms(userId: string) {
   cache.delete(`perms:${userId}`)
+  // Local generation only. A committed change is visible to every process on its
+  // next listUserPermissions read; this bump retries a read already in flight here.
   permCacheGeneration.set(userId, currentPermCacheGeneration(userId) + 1)
 }
 
