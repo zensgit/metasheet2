@@ -337,6 +337,195 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     }
   })
 
+  it.each([
+    {
+      scenario: 'shanghai-normal', zone: 'Asia/Shanghai', day: '2026-07-01', total: 480, review: null,
+      definitions: [{ startTime: '09:00', endTime: '12:00' }, { startTime: '13:00', endTime: '18:00' }],
+      events: [['check_in', '2026-07-01T09:00:00+08:00'], ['check_out', '2026-07-01T12:00:00+08:00'],
+        ['check_in', '2026-07-01T13:00:00+08:00'], ['check_out', '2026-07-01T18:00:00+08:00']],
+      expected: [
+        { start: '2026-07-01T01:00:00.000Z', end: '2026-07-01T04:00:00.000Z', minutes: 180, reasons: ['within_window'] },
+        { start: '2026-07-01T05:00:00.000Z', end: '2026-07-01T10:00:00.000Z', minutes: 300, reasons: ['within_window'] },
+      ],
+    },
+    {
+      scenario: 'ny-internal-gap', zone: 'America/New_York', day: '2026-03-08', total: null, review: 'dst_gap_local_time',
+      definitions: [{ startTime: '00:30', endTime: '01:00' }, { startTime: '02:30', endTime: '04:00' }],
+      events: [['check_in', '2026-03-08T00:30:00-05:00']], expected: [],
+    },
+    {
+      scenario: 'ny-internal-fold-start', zone: 'America/New_York', day: '2025-11-02', total: 165, review: null,
+      definitions: [{ startTime: '00:30', endTime: '00:45' }, { startTime: '01:30', endTime: '03:00' }],
+      events: [['check_in', '2025-11-02T00:30:00-04:00'], ['check_out', '2025-11-02T00:45:00-04:00'],
+        ['check_in', '2025-11-02T01:30:00-04:00'], ['check_out', '2025-11-02T03:00:00-05:00']],
+      expected: [
+        { start: '2025-11-02T04:30:00.000Z', end: '2025-11-02T04:45:00.000Z', minutes: 15, reasons: ['within_window'] },
+        { start: '2025-11-02T05:30:00.000Z', end: '2025-11-02T08:00:00.000Z', minutes: 150,
+          reasons: ['dst_fold_start_earlier', 'within_window'] },
+      ],
+    },
+    {
+      scenario: 'ny-internal-fold-end', zone: 'America/New_York', day: '2025-11-02', total: 195, review: null,
+      definitions: [{ startTime: '00:30', endTime: '01:45' }, { startTime: '02:00', endTime: '03:00' }],
+      events: [['check_in', '2025-11-02T00:30:00-04:00'], ['check_out', '2025-11-02T01:45:00-05:00'],
+        ['check_in', '2025-11-02T02:00:00-05:00'], ['check_out', '2025-11-02T03:00:00-05:00']],
+      expected: [
+        { start: '2025-11-02T04:30:00.000Z', end: '2025-11-02T06:45:00.000Z', minutes: 135,
+          reasons: ['dst_fold_end_later', 'within_window'] },
+        { start: '2025-11-02T07:00:00.000Z', end: '2025-11-02T08:00:00.000Z', minutes: 60, reasons: ['within_window'] },
+      ],
+    },
+    {
+      scenario: 'ny-internal-shared-fold', zone: 'America/New_York', day: '2025-11-02', total: null,
+      review: 'dst_fold_shared_boundary_ambiguous',
+      definitions: [{ startTime: '00:30', endTime: '01:30' }, { startTime: '01:30', endTime: '03:00' }],
+      events: [['check_in', '2025-11-02T00:30:00-04:00']], expected: [],
+    },
+  ] as const)('PARENT_CALC11_DST_HTTP: canonical internal boundaries ($scenario)', async proof => {
+    const fixture = await seedOrg('shadow')
+    const headers = { Authorization: 'Bearer ' + fixture.token }
+    const timezoneRow = await pool.query(
+      'UPDATE attendance_rules SET timezone = $2 WHERE org_id = $1 AND is_default = true RETURNING timezone, timezone_version',
+      [fixture.orgId, proof.zone],
+    )
+    expect(timezoneRow.rows).toEqual([{ timezone: proof.zone, timezone_version: 2 }])
+    await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+    await pool.query(
+      "INSERT INTO user_permissions (user_id, permission_code) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING",
+      [fixture.userId, ['attendance:read', 'attendance:write']],
+    )
+    const created = await requestJson(baseUrl + '/api/attendance/shifts', {
+      method: 'POST', headers, body: { name: 'DST native proof', timezone: proof.zone,
+        segments: proof.definitions, lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+        workingDays: [0, 1, 2, 3, 4, 5, 6] },
+    })
+    expect(created.status, created.raw).toBe(201)
+    const shiftId = created.body?.data?.id as string
+    expect(typeof shiftId).toBe('string')
+    // Synthetic source fixture only: public assignment admission is not under test.
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $2, $3, $4, $5::date, $5::date, true, 'published', 0)`,
+      [randomUUID(), fixture.orgId, fixture.userId, shiftId, proof.day],
+    )
+    for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+      await pool.query(
+        'UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1',
+        [fixture.orgId, state, prior, version],
+      )
+    }
+    let operationId = ''
+    for (const [eventType, at] of proof.events) {
+      operationId = randomUUID()
+      const response = await requestJson(baseUrl + '/api/attendance/punch', {
+        method: 'POST', headers,
+        body: { orgId: fixture.orgId, eventType, operationId, occurredAt: at },
+      })
+      console.log('PARENT_CALC11_ADMISSION_RECEIPT ' + JSON.stringify({
+        scenario: proof.scenario, eventType, status: response.status, code: response.body?.error?.code ?? null,
+      }))
+      expect(response.status, 'PARENT_CALC11_CANONICAL_HTTP_200: ' + response.raw).toBe(200)
+    }
+    const query = await pool.query(
+      `SELECT c.*, o.entrypoint AS registry_entrypoint, o.identity_source_kind AS registry_source_kind,
+              r.id AS record_id, r.current_calculation_id, r.projection_owner,
+              r.visibility_state, r.visibility_reason, r.work_date::text AS parent_work_date,
+              r.timezone AS parent_timezone, r.status AS parent_status, r.work_minutes AS parent_minutes,
+              r.late_minutes AS parent_late, r.early_leave_minutes AS parent_early,
+              r.first_in_at AS parent_in, r.last_out_at AS parent_out
+         FROM attendance_record_calculations c
+         JOIN attendance_result_operations o ON o.operation_id = c.operation_id
+          AND o.org_id = c.org_id
+         JOIN attendance_records r ON r.id = c.attendance_record_id AND r.org_id = c.org_id
+        WHERE c.org_id = $1 AND o.operation_id = $2::uuid
+          AND o.entrypoint = 'live_punch' AND c.entrypoint = 'live'`,
+      [fixture.orgId, operationId],
+    )
+    expect(query.rows).toHaveLength(1)
+    const row = query.rows[0]
+    expect(row).toMatchObject({ mode: 'authoritative', entrypoint: 'live', operation_id: operationId,
+      registry_entrypoint: 'live_punch', registry_source_kind: 'direct_live_punch',
+      parent_work_date: proof.day, parent_timezone: proof.zone,
+      outcome: proof.review ? 'review_required' : 'completed',
+      outcome_reason_code: proof.review ?? 'calculated', projection_effect: proof.review ? 'none' : 'set_active',
+      expected_segment_count: proof.review ? 0 : 2 })
+    const definitions = proof.definitions.map((segment, index) => ({ index, ...segment,
+      startDayOffset: 0, endDayOffset: 0, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0 }))
+    expect(row.context_snapshot).toMatchObject({
+      schemaVersion: 1, selector: 'legacy', orgId: fixture.orgId, userId: fixture.userId,
+      shiftId, timezone: proof.zone, workDate: proof.day, isWorkday: true,
+    })
+    expect(row.context_snapshot.segments).toEqual(definitions)
+    expect(row.attribution_snapshot).toMatchObject({
+      posture: 'resolved_v2', value: { orgId: fixture.orgId, userId: fixture.userId, shiftId, workDate: proof.day },
+    })
+    expect(row.segment_snapshot).toEqual(proof.review ? [] : definitions)
+    expect(row.evidence_snapshot.map(evidence => ({ kind: evidence.kind, direction: evidence.direction,
+      at: new Date(evidence.occurredAt).toISOString(), source: evidence.source }))).toEqual(
+      proof.events.map(([direction, at]) => ({ kind: 'punch', direction,
+        at: new Date(at).toISOString(), source: 'attendance_event' })),
+    )
+    const children = await pool.query(
+      `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+              work_minutes, late_minutes, early_leave_minutes, status, status_reasons
+         FROM attendance_record_segments WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3
+        ORDER BY segment_index`, [fixture.orgId, row.record_id, row.id],
+    )
+    expect(children.rows.map(child => ({ ...child, expected_start_at: child.expected_start_at.toISOString(),
+      expected_end_at: child.expected_end_at.toISOString(), actual_in_at: child.actual_in_at?.toISOString() ?? null,
+      actual_out_at: child.actual_out_at?.toISOString() ?? null }))).toEqual(
+      proof.expected.map((segment, index) => ({ segment_index: index, expected_start_at: segment.start,
+        expected_end_at: segment.end, actual_in_at: segment.start, actual_out_at: segment.end,
+        work_minutes: segment.minutes, late_minutes: 0, early_leave_minutes: 0,
+        status: 'normal', status_reasons: [...segment.reasons] })),
+    )
+    if (proof.review) {
+      expect({ pointer: row.current_calculation_id, owner: row.projection_owner,
+        visibility: row.visibility_state, reason: row.visibility_reason,
+        firstIn: row.parent_in, lastOut: row.parent_out, minutes: row.parent_minutes,
+        late: row.parent_late, early: row.parent_early, status: row.parent_status }).toEqual({
+        pointer: null, owner: 'legacy_untracked', visibility: 'retired', reason: 'review_placeholder',
+        firstIn: null, lastOut: null, minutes: 0, late: 0, early: 0, status: 'normal',
+      })
+      expect({ status: row.projected_status, firstIn: row.projected_first_in_at,
+        lastOut: row.projected_last_out_at, minutes: row.projected_work_minutes,
+        late: row.projected_late_minutes, early: row.projected_early_leave_minutes,
+        fingerprint: row.projected_daily_fingerprint }).toEqual({
+        status: null, firstIn: null, lastOut: null, minutes: null, late: null, early: null, fingerprint: null,
+      })
+    } else {
+      expect({ pointerMatches: row.current_calculation_id === row.id, owner: row.projection_owner,
+        visibility: row.visibility_state, minutes: row.parent_minutes, status: row.parent_status,
+        late: row.parent_late, early: row.parent_early, projected: row.projected_work_minutes,
+        projectedStatus: row.projected_status, projectedLate: row.projected_late_minutes,
+        projectedEarly: row.projected_early_leave_minutes,
+        firstIn: row.parent_in.toISOString(), lastOut: row.parent_out.toISOString(),
+        projectedIn: row.projected_first_in_at.toISOString(), projectedOut: row.projected_last_out_at.toISOString(),
+      }).toEqual({
+        pointerMatches: true, owner: 'w4', visibility: 'active', minutes: proof.total, status: 'normal',
+        late: 0, early: 0, projected: proof.total, projectedStatus: 'normal', projectedLate: 0, projectedEarly: 0,
+        firstIn: proof.expected[0].start, lastOut: proof.expected[1].end,
+        projectedIn: proof.expected[0].start, projectedOut: proof.expected[1].end,
+      })
+    }
+    const events = await pool.query(
+      'SELECT work_date::text, event_type, occurred_at FROM attendance_events WHERE org_id = $1 ORDER BY occurred_at',
+      [fixture.orgId],
+    )
+    expect(events.rows.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()])).toEqual(
+      proof.events.map(([direction, at]) => [proof.day, direction, new Date(at).toISOString()]),
+    )
+    console.log('PARENT_CALC11_DST_HTTP_RECEIPT ' + JSON.stringify({
+      scenario: proof.scenario, timezone: proof.zone, workDate: proof.day,
+      HTTP200Count: proof.events.length, outcome: row.outcome, reason: row.outcome_reason_code,
+      canonicalMode: row.mode, selector: row.context_snapshot.selector, projectionEffect: row.projection_effect,
+      childCount: children.rows.length, workedMinutes: proof.total,
+      boundariesAndReasons: proof.expected, frozenDefinitionsAndEventsExact: true,
+      noActivePointer: row.current_calculation_id === null,
+    }))
+  }, 120000)
+
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
     const fixture = await seedOrg('shadow')
     const createOperationId = randomUUID()
