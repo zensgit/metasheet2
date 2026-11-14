@@ -1748,8 +1748,15 @@ exec npx vitest run \
   formViewValidation \
   guardPolicy.managementScope.spec.ts \
   integrationErrorCodeLabels \
+  IntegrationK3B4RunPanel \
+  IntegrationK3B4WorkbenchAccess \
+  IntegrationK3Bl2RunPanel \
+  IntegrationK3Bl2Services \
   IntegrationK3WiseSetupView \
+  IntegrationK3WorkbenchStartup \
   IntegrationPipelineRunSection \
+  IntegrationReadSourceConfigPanel \
+  IntegrationReadSourceWizard \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
   IntegrationWorkbenchView \

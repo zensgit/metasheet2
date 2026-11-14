@@ -1,6 +1,7 @@
 'use strict'
 
 const { executeConfiguredRead } = require('./read-source-read-runtime.cjs')
+const { isB4ReadOperationProfile } = require('./k3-read-operation-profiles.cjs')
 const {
   normalizeStockPreparationReadonlyIntake,
 } = require('./stock-preparation-readonly-intake.cjs')
@@ -242,7 +243,12 @@ function sourceCapability(plan) {
       { sourceChannel: sourceChannel(plan.requiredKind) },
     )
   }
-  return { pageSize: capability.pageSize, pagination, limitContract: capability.limitContract }
+  // The reviewed B4 response echoes the page size K3 actually applied. Generic K3 callers retain the
+  // historical honours-request contract; B4 must use the echoed bound so a 5-of-10 page cannot masquerade
+  // as a terminal short page while K3 still has a second page.
+  const limitContract = isB4ReadOperationProfile(plan.actionProfileVersion)
+    ? ADAPTER_REPORTED_LIMIT : capability.limitContract
+  return { pageSize: capability.pageSize, pagination, limitContract }
 }
 
 // The page bound the ADAPTER APPLIED, which is the only one a full-page test may be judged against. The
@@ -294,6 +300,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
 
   const capability = sourceCapability(preparedRead.plan)
   const pageSize = capability.pageSize
+  const knownB4 = isB4ReadOperationProfile(preparedRead.plan.actionProfileVersion)
   const usesPageIndex = capability.pagination === 'page_index'
   const supportsCursor = capability.pagination === 'cursor'
   const rowsAlias = 'primary'
@@ -306,6 +313,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   let cursor = null
   let declaredSourceTotal = null
   let appliedPageSize = pageSize
+  let firstB4AppliedPageSize = null
 
   for (let page = 1; page <= SOURCE_MAX_PAGES; page += 1) {
     const execution = usesPageIndex
@@ -443,6 +451,17 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
         'configured readonly source did not report the page bound it applied',
         { pageSize, receivedRows: rows.length, reason: 'effective_page_size_unknown' },
       )
+    }
+    if (knownB4) {
+      if (firstB4AppliedPageSize !== null && applied !== firstB4AppliedPageSize) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_INCONSISTENT',
+          'configured readonly source changed its applied page size during paging',
+          { page, previousPageSize: firstB4AppliedPageSize, appliedPageSize: applied },
+        )
+      }
+      firstB4AppliedPageSize = applied
     }
     appliedPageSize = applied
     const pageIsFull = pageRows.length >= appliedPageSize
