@@ -151,6 +151,17 @@ import {
 } from '../integration/automation-synthetic-preview'
 import { loadYidaLocalDraftCompiler } from '../integration/yida-automation-preview'
 import type { Queryable } from './automation-durable-dispatcher'
+// R-69 1b-ii — run_integration_job: the plugin-registered port (late-bound), the save gate and the shutdown signal.
+import { getIntegrationRunPort } from '../core/integration-run-port'
+import {
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+  collectRunIntegrationJobOccurrences,
+  isIntegrationAutomationRunActionEnabled,
+  stampRunIntegrationJobConfig,
+  validateRunIntegrationJobConditions,
+  validateRunIntegrationJobConfig,
+  validateRunIntegrationJobTriggerCoupling,
+} from './automation-run-integration-job'
 
 const logger = new Logger('AutomationService')
 
@@ -176,6 +187,9 @@ export type AutomationRuleValidationCode =
   | typeof STOCK_PREP_OVERVIEW_READ_ONLY_CODE
   // S0-a: a send_webhook target that can never be sent (http, internal name / IP literal, malformed).
   | typeof WEBHOOK_TARGET_REJECTED
+  // R-69 1b-ii (ADR §7): a rule carrying run_integration_job while INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is
+  // not 'true' — the automation routes answer this one code with 403, every other code with 400.
+  | 'RUN_ACTION_DISABLED'
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -1467,6 +1481,15 @@ export class AutomationService {
   private approvalBridgeService: AutomationApprovalBridgeService
   /** C1/S2 synthetic integration preview: host-owned runtime, drained by stopProducerAdmissions(). */
   private syntheticPreview: SyntheticPreviewRuntime
+  /**
+   * R-69 1b-ii: continuations of run_integration_job steps that returned early (`timeout_unsettled`): the port
+   * call still running, its heartbeat and its eventual Tx B. Drained by drainIntegrationJobs(), which the host
+   * registers on its FINAL shutdown barrier (index.ts stopOnce) — never a background task outside the lifecycle.
+   */
+  private readonly integrationJobsInFlight = new Set<Promise<void>>()
+  /** R-69 1b-ii (I-4): aborted in stopProducerAdmissions() BEFORE the scheduler is destroyed, so an in-flight job
+   *  is told to stop instead of blocking the producer drain for its whole timeout. */
+  private readonly shutdownController = new AbortController()
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
   private lastAutomationRetryLedgerSweepMs = 0
@@ -1515,6 +1538,13 @@ export class AutomationService {
       }),
       fetchFn,
       notificationService,
+      // R-69 1b-ii: the plugin-registered IntegrationRunPort (late-bound: plugins activate after this
+      // constructor), the shutdown signal and the continuation tracker (see integrationJobsInFlight).
+      integrationRunPort: () => getIntegrationRunPort() ?? null,
+      shutdownSignal: this.shutdownController.signal,
+      trackIntegrationJobTask: (task) => this.trackLifecycleTask(this.integrationJobsInFlight, task, (error) => {
+        logger.warn(`run_integration_job continuation failed: ${error instanceof Error ? error.name : 'error'}`)
+      }),
       // FWB activation (§11 Q6): construct the REAL four-gate set from the CURRENT write
       // transaction. Pool/cached permission reads here would reopen a revoke-after-check race.
       fwbGateChecksFactory: (transactionQuery) => buildProductionFwbGateChecks({
@@ -1708,10 +1738,10 @@ export class AutomationService {
       input.actionConfig ?? {},
       input.actions ?? null,
     )
-    const actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+    let actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
       ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
       : input.actionConfig ?? {}
-    const actions = Array.isArray(normalizedDingTalkInputs.actions)
+    let actions = Array.isArray(normalizedDingTalkInputs.actions)
       ? normalizedDingTalkInputs.actions as AutomationAction[]
       : input.actions ?? null
     const executionMode = normalizeExecutionMode(input.executionMode)
@@ -1724,6 +1754,22 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // R-69 1b-ii: run_integration_job save gate — switch (403 RUN_ACTION_DISABLED), closed config, cron + timezone
+    // coupling, and the SERVER-STAMPED binding (created_by + its single active tenant); a client binding is dropped.
+    const runIntegrationJobSave = await this.assertRunIntegrationJobAtSave({
+      triggerType: input.triggerType,
+      triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      actionType: input.actionType,
+      actionConfig,
+      actions,
+      allActions: actionsForValidation,
+      createdBy: input.createdBy ?? null,
+      conditions: input.conditions ?? null,
+    })
+    if (runIntegrationJobSave) {
+      actionConfig = runIntegrationJobSave.actionConfig
+      actions = runIntegrationJobSave.actions
+    }
     // S3 fix round 2 (F2): a result write-back may not target the read-only stock-preparation overview.
     const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
       this.queryFn as StockPreparationOverviewQueryFn,
@@ -1932,6 +1978,10 @@ export class AutomationService {
     // rewritten together below, even if the caller only sent one of them.
     let legacyActionTypeRewrite: string | undefined
     let legacyActionConfigRewrite: Record<string, unknown> | undefined
+    // R-69 1b-ii: set when the save gate re-stamped a run_integration_job binding — the stamped column is then
+    // written even if the caller did not send that column itself.
+    let runIntegrationJobConfigRewrite: Record<string, unknown> | undefined
+    let runIntegrationJobActionsRewrite: AutomationAction[] | null | undefined
     // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
     // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
     // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
@@ -1993,6 +2043,23 @@ export class AutomationService {
         actionsForValidation,
       )
       if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+      // R-69 1b-ii: the RESULTING rule (trigger = incoming ?? stored; actions as merged) must satisfy the save
+      // gate; the binding is re-stamped from the STORED created_by (ADR §6.2: the editor never takes it over).
+      const runIntegrationJobUpdate = await this.assertRunIntegrationJobAtSave({
+        triggerType: input.triggerType ?? existing.trigger_type,
+        triggerConfig: (input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config) as Record<string, unknown> | null,
+        actionType: nextActionType,
+        actionConfig: normalizedNextActionConfig,
+        actions: normalizedNextActions,
+        allActions: actionsForValidation,
+        createdBy: existing.created_by ?? null,
+        // the NEXT stored conditions: the incoming ones when sent, else the stored ones
+        conditions: input.conditions !== undefined ? input.conditions : existing.conditions ?? null,
+      })
+      const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
+      const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
+      if (runIntegrationJobUpdate?.stampedTopLevel) runIntegrationJobConfigRewrite = persistedNextActionConfig
+      if (runIntegrationJobUpdate?.stampedActions) runIntegrationJobActionsRewrite = persistedNextActions
       // S3 fix round 2 (F2): the same overview refusal as createRule, on every action-shaped edit.
       const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
         this.queryFn as StockPreparationOverviewQueryFn,
@@ -2014,10 +2081,10 @@ export class AutomationService {
 
       if (legacyNormalizedUpdate.changed) {
         legacyActionTypeRewrite = nextActionType
-        legacyActionConfigRewrite = normalizedNextActionConfig
+        legacyActionConfigRewrite = persistedNextActionConfig
       }
-      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
-      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
+      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = persistedNextActionConfig
+      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? persistedNextActions : null
       if (input.executionMode !== undefined) normalizedExecutionModeForUpdate = nextExecutionMode
     }
 
@@ -2033,6 +2100,9 @@ export class AutomationService {
       updates.action_type = legacyActionTypeRewrite
       updates.action_config = JSON.stringify(legacyActionConfigRewrite ?? {})
     }
+    // R-69 1b-ii: a re-stamped binding is persisted whichever columns the caller sent.
+    if (runIntegrationJobConfigRewrite !== undefined) updates.action_config = JSON.stringify(runIntegrationJobConfigRewrite)
+    if (runIntegrationJobActionsRewrite !== undefined) updates.actions = runIntegrationJobActionsRewrite ? JSON.stringify(runIntegrationJobActionsRewrite) : null
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
@@ -2082,6 +2152,19 @@ export class AutomationService {
       )
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
 
+      // R-69 1b-ii: a trigger-only edit of a rule that carries run_integration_job keeps the coupling
+      // (schedule.cron + a present IANA timezone). Action-shaped edits already ran the full gate above.
+      if (!shouldValidateActions) {
+        const couplingError = this.runIntegrationJobTriggerCouplingError(
+          nextTriggerType,
+          nextTriggerConfig as Record<string, unknown> | null,
+          existingForTrigger.action_type,
+          (existingForTrigger.action_config ?? null) as Record<string, unknown> | null,
+          existingForTrigger.actions ?? null,
+        )
+        if (couplingError) throw new AutomationRuleValidationError(couplingError)
+      }
+
       // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
       // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
       // existing activation (fall back to created_at for pre-fix rules) so an edit never re-opens backfill.
@@ -2127,6 +2210,30 @@ export class AutomationService {
       ) as Record<string, unknown> | null
       const inboundWebhookError = validateInboundWebhookTriggerAtSave(nextTriggerType, nextTriggerConfig)
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+    }
+
+    // R-69 1b-ii: a run_integration_job rule cannot carry conditions, judged on the NEXT stored state. An
+    // action-shaped edit ran this inside assertRunIntegrationJobAtSave above; this covers the edits that skip that
+    // gate but still set the conditions or the trigger (conditions-only, trigger-only), with the STORED actions
+    // deciding whether the rule is a job rule. A rename or a pure on/off switch does not open it (setRuleEnabled
+    // routes through updateRule): an operator can always turn a rule off. Every shape that opens it is also a T1-2
+    // shape, so `existingRuleSnapshot` is already fetched (no extra getRule).
+    if (!shouldValidateActions && (input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined)) {
+      const existingForConditions = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForConditions
+      if (!existingForConditions || existingForConditions.sheet_id !== sheetId) return null
+      const storedJob = collectRunIntegrationJobOccurrences(
+        existingForConditions.action_type,
+        (existingForConditions.action_config ?? null) as Record<string, unknown> | null,
+        existingForConditions.actions ?? null,
+        existingForConditions.actions ?? null,
+      )
+      if (storedJob.occurrences.length > 0) {
+        const conditionsError = validateRunIntegrationJobConditions(
+          input.conditions !== undefined ? input.conditions : existingForConditions.conditions ?? null,
+        )
+        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+      }
     }
 
     // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
@@ -2894,6 +3001,103 @@ export class AutomationService {
   }
 
   /**
+   * R-69 1b-ii save gate for `run_integration_job` (ADR §3.1, §3.5, §6.1 ①③, §6.2, §7; baseline §10.2.2 ②,
+   * §10.2.4). Returns null when the rule carries no such action (nothing touched); otherwise the rule's action
+   * columns with the SERVER-STAMPED binding, or throws:
+   *   - nested occurrence (inside a branch) → 400;
+   *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);
+   *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
+   *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
+   *   - binding: `createdBy` must be bound to EXACTLY ONE active tenant (user_orgs) — a tenantless or
+   *     multi-tenant principal cannot bind the job (ADR §6.1 ③) → 400.
+   * The binding is derived from the rule's creator (create) or its STORED creator (update); a client-supplied
+   * `binding` is dropped (the same posture as the stock-prep `dataSourceOwnerId` stamp).
+   */
+  private async assertRunIntegrationJobAtSave(input: {
+    triggerType: string
+    triggerConfig: Record<string, unknown> | null
+    actionType: string
+    actionConfig: Record<string, unknown>
+    actions: AutomationAction[] | null
+    allActions: AutomationAction[]
+    createdBy: string | null
+    /** The rule's NEXT stored conditions (create: the input; update: the input when sent, else the stored ones). */
+    conditions: ConditionGroup | null
+  }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
+    if (error) throw new AutomationRuleValidationError(error)
+    if (occurrences.length === 0) return null
+    if (!isIntegrationAutomationRunActionEnabled()) {
+      throw new AutomationRuleValidationError(
+        "run_integration_job is disabled on this deployment (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is not 'true')",
+        'RUN_ACTION_DISABLED',
+      )
+    }
+    for (const occurrence of occurrences) {
+      const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
+      if (configError) throw new AutomationRuleValidationError(configError)
+    }
+    // No conditions on a job rule: its schedule trigger has no record, so a condition would skip every fire (400).
+    const conditionsError = validateRunIntegrationJobConditions(input.conditions)
+    if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+    const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
+    if (couplingError) throw new AutomationRuleValidationError(couplingError)
+    const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
+    let actionConfig = input.actionConfig
+    let stampedTopLevel = false
+    if (input.actionType === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+      actionConfig = stampRunIntegrationJobConfig(input.actionConfig, binding) as unknown as Record<string, unknown>
+      stampedTopLevel = true
+    }
+    let actions = input.actions
+    let stampedActions = false
+    if (Array.isArray(input.actions) && input.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE)) {
+      actions = input.actions.map((action) => (
+        action.type === RUN_INTEGRATION_JOB_ACTION_TYPE
+          ? { ...action, config: stampRunIntegrationJobConfig(action.config, binding) as unknown as Record<string, unknown> }
+          : action
+      ))
+      stampedActions = true
+    }
+    return { actionConfig, actions, stampedTopLevel, stampedActions }
+  }
+
+  /** ADR §6.1 ③ / §6.5: the binding tenant is the creator's SINGLE active `user_orgs` row — never a request field. */
+  private async resolveRunIntegrationJobBinding(createdBy: string | null): Promise<{ principalId: string; tenantId: string }> {
+    const principalId = typeof createdBy === 'string' ? createdBy.trim() : ''
+    if (!principalId) throw new AutomationRuleValidationError('run_integration_job rules need an authenticated creator (the binding principal)')
+    let rows: unknown[]
+    try {
+      rows = (await this.queryFn('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = true ORDER BY org_id', [principalId])).rows
+    } catch {
+      throw new AutomationRuleValidationError("run_integration_job: the creator's tenant membership could not be read; the rule was not saved")
+    }
+    const tenantIds = [...new Set(rows
+      .map((row) => (row as { org_id?: unknown }).org_id)
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
+    if (tenantIds.length !== 1) {
+      throw new AutomationRuleValidationError(tenantIds.length === 0
+        ? 'run_integration_job rules need a creator bound to exactly one active tenant (none found): a tenantless principal cannot bind the job'
+        : 'run_integration_job rules need a creator bound to exactly one active tenant (several found)')
+    }
+    return { principalId, tenantId: tenantIds[0] }
+  }
+
+  /** Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. */
+  private runIntegrationJobTriggerCouplingError(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    actionConfig: Record<string, unknown> | null,
+    actions: AutomationAction[] | null,
+  ): string | null {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(actionType, actionConfig, actions, actions)
+    if (error) return error
+    if (occurrences.length === 0) return null
+    return validateRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)
+  }
+
+  /**
    * The scheduled lane's fire-start read of the STORED `enabled` flag (see the scheduler callback in the
    * constructor). `absent` = the row is gone (deleted, possibly through another instance).
    */
@@ -2933,6 +3137,11 @@ export class AutomationService {
   stopProducerAdmissions(): Promise<void> {
     this.producerStopPromise ??= (async () => {
       for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+      // R-69 1b-ii (I-4): tell every in-flight run_integration_job to stop BEFORE the scheduler drain — the
+      // scheduler's destroy() awaits the whole executeRule promise of a running cron job, and a job that is not
+      // aborted would hold the producer barrier for its whole timeout. Abort only hastens the end: nothing is
+      // released by this call (a job that cannot settle is left to its lease TTL).
+      this.shutdownController.abort(new Error('AUTOMATION_SHUTDOWN'))
       const schedulerStop = this.scheduler.destroy()
       // C1/S2: stop admitting synthetic previews and wait for every in-flight one (provider page,
       // admission transaction, summary insert) in the same producer drain the host shutdown awaits.
@@ -2946,6 +3155,21 @@ export class AutomationService {
 
   async drainTransitiveCompletionProducers(): Promise<void> {
     await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
+  }
+
+  /**
+   * R-69 1b-ii (baseline §10.2.3 step 9 / T12): wait for every run_integration_job continuation that outlived
+   * its step — the port call still running after a `timeout_unsettled` early return, its heartbeat and its
+   * eventual fenced Tx B. The host puts this on its FINAL shutdown barrier (SHUTDOWN_TIMEOUT, pool left open),
+   * so a continuation that does not finish inside the barrier is left to its lease TTL — never released early.
+   */
+  async drainIntegrationJobs(): Promise<void> {
+    await this.drainLifecycleTasks(this.integrationJobsInFlight)
+  }
+
+  /** R-69 1b-ii test seam: the signal the executor's run_integration_job step listens to for shutdown. */
+  get shutdownSignalForTest(): AbortSignal {
+    return this.shutdownController.signal
   }
 
   detachCompletionConsumers(): void {

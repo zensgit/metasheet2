@@ -274,7 +274,11 @@ function assertParallelWorkflow(doc) {
         const leaseAddition = '  tests/integration/multitable-automation-job-lease-realdb.test.ts \\\n'
         assert.equal(step.run.split(leaseAddition).length - 1, 1, 'Job-lease real-DB suite must run exactly once')
         assert.ok(step.run.includes(predecessor + leaseAddition), 'Keep the job-lease suite right after the outbound-intent suite')
-        step.run = step.run.replace(leaseAddition, '')
+        // R-69 1b-ii (action + executor): the run_integration_job real-DB suite, right after the job-lease suite.
+        const runJobAddition = '  tests/integration/multitable-automation-run-integration-job-realdb.test.ts \\\n'
+        assert.equal(step.run.split(runJobAddition).length - 1, 1, 'run_integration_job real-DB suite must run exactly once')
+        assert.ok(step.run.includes(leaseAddition + runJobAddition), 'Keep the run_integration_job suite right after the job-lease suite')
+        step.run = step.run.replace(leaseAddition, '').replace(runJobAddition, '')
       }
       if (suite === 'runtime-db' && step.id === lockProtocolStepId) {
         const tail = `  --reporter=verbose${lockProtocolJsonReporter}\n${lockProtocolZeroSkipLine}`

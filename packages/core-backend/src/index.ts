@@ -22,6 +22,12 @@ import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
 } from './core/workday-calendar-port'
+// R-69 1b-ii: the plugin → host IntegrationRunPort registry (owner-tracked in its module, no server field).
+import {
+  registerIntegrationRunPort,
+  unregisterIntegrationRunPortOwnedBy,
+  type IntegrationRunPort,
+} from './core/integration-run-port'
 import type {
   CoreAPI,
   UserInfo,
@@ -1826,6 +1832,11 @@ export class MetaSheetServer {
     if (this.workdayCalendarProviderOwner === pluginName) {
       getWorkdayCalendarRegistry().unregister()
       this.workdayCalendarProviderOwner = null
+    }
+    // R-69 1b-ii: unbind this plugin's IntegrationRunPort (owner-scoped: a non-owner is a no-op) so the
+    // run_integration_job action fails closed again instead of calling into an unloaded plugin.
+    if (unregisterIntegrationRunPortOwnedBy(pluginName)) {
+      this.logger.info(`IntegrationRunPort unbound (plugin ${pluginName})`)
     }
 
     const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
@@ -3690,6 +3701,19 @@ export class MetaSheetServer {
         yidaConnectionTestRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaConnectionTestRuntime.createPluginCapability()
           : undefined,
+        // R-69 1b-ii: the IntegrationRunPort registration (plugin → host, like workdayCalendar), for
+        // plugin-integration-core ONLY. Owner-tracked inside core/integration-run-port.ts (no server field);
+        // unbound again in cleanupPluginRuntimeRegistrations. The core run_integration_job action fails closed
+        // (`port_inactive`) while nothing is bound. Dry-run only; R-69 is OPEN.
+        integrationRun: manifest.name === 'plugin-integration-core'
+          ? {
+              register: (port: IntegrationRunPort) => {
+                const unbind = registerIntegrationRunPort(pluginName, port)
+                this.logger.info(`IntegrationRunPort bound by plugin: ${pluginName}`)
+                return unbind
+              },
+            }
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3910,6 +3934,20 @@ export class MetaSheetServer {
     return task
   }
 
+  /**
+   * R-69 1b-ii (design baseline v2.3 §10.2.3 step 9 / T12): the run_integration_job continuations that outlive
+   * their step — a port call still running after a `timeout_unsettled` early return, its heartbeat and its
+   * eventual fenced Tx B — are drained on the FINAL shutdown barrier (SHUTDOWN_TIMEOUT; on timeout stop()
+   * rejects, the pool is left open and stopForSignal exits 1 — #6747's verified fact), never on the earlier
+   * producer barrier and never as a background task outside stopOnce. Resolves at once (and creates no timer)
+   * when there is no automation service or it predates this drain (test doubles).
+   */
+  private drainIntegrationJobsForShutdown(): Promise<void> {
+    const service = this.automationService as { drainIntegrationJobs?: () => Promise<void> } | undefined
+    if (!service || typeof service.drainIntegrationJobs !== 'function') return Promise.resolve()
+    return service.drainIntegrationJobs()
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     // Latch/abort synchronously, then await below before DB teardown. PluginLoader
     // unloadAll does not await its hooks and is not an adequate draining barrier.
@@ -4004,6 +4042,8 @@ export class MetaSheetServer {
     }
 
     const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain]
+    // R-69 1b-ii: integration-job continuations (port call, heartbeat, Tx B) ride the FINAL barrier (T12).
+    shutdownTasks.push(this.observeShutdownTask(this.drainIntegrationJobsForShutdown()))
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {

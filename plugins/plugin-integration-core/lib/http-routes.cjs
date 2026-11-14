@@ -16010,6 +16010,14 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
     })
     registered.push(`${method} ${path}`)
   }
+  // R-69 1b-ii: hand the request-free governed entries to the plugin entry (index.cjs builds the
+  // IntegrationRunPort from them). Non-enumerable on the returned ARRAY, so `[...registered]` stays a plain
+  // route list and no second createHandlers() is ever needed (its per-registration state — the B2a trial
+  // registry, the pull-target scan cache, the dry-run job map — must stay the HTTP handlers' own).
+  Object.defineProperty(registered, 'governedEntries', {
+    value: handlers.governedEntries,
+    enumerable: false,
+  })
   return registered
 }
 

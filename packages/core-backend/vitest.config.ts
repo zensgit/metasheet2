@@ -1508,6 +1508,11 @@ export default defineConfig({
       // migration down refusal): real Postgres only, two connections — excluded HERE so it cannot skip-green in
       // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-job-lease-realdb.test.ts',
+      // R-69 1b-ii run_integration_job on the real executor + real ledgers (T3 restart / same-identity replay,
+      // T10 takeover by a different execution root while the holder is paused, live authority on real auth
+      // tables): real Postgres only — excluded HERE so it cannot skip-green, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-run-integration-job-realdb.test.ts',
       // Delivery-result truthfulness: the real EmailNotificationChannel driven through the executor's two-phase
       // send_email path against the REAL outbound-intent ledger + AutomationLogService.getStats — real Postgres
       // only (EXPECT_DB sentinel throws at import without it), excluded HERE so it cannot skip-green in the

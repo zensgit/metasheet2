@@ -1483,6 +1483,16 @@ export interface PluginServices {
     }): (() => void)
   }
   /**
+   * R-69 1b-ii — plugin→host registration of the IntegrationRunPort (core/integration-run-port.ts), the
+   * same direction and shape as `workdayCalendar`: plugin-integration-core registers at activation the port
+   * through which the core `run_integration_job` automation action runs a dry-run job via the plugin's
+   * governed entries. Exposed to plugin-integration-core ONLY; `register` returns the unbind. R-69 is OPEN:
+   * the action is dry-run only and default OFF.
+   */
+  integrationRun?: {
+    register(port: import('../core/integration-run-port').IntegrationRunPort): (() => void)
+  }
+  /**
    * S7-1..S7-4 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
    * approval-assignee kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级
    * `manager_at_level`), per the RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d).
