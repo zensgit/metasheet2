@@ -107,11 +107,18 @@ SELECT count(*) AS open_large_apply_jobs FROM plugin_kv
 
 (c)（带试点标记的登记行）与 (e)（第 4 步各表的行数）装机前查不了：101 / 102 / 103 还没跑，列和表都不存在。它们放在 §1.4 装后核对里，期望都是 0。
 
-**(3) 非备料基线（为 §7.3 留底）。** `app.env` 里 `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 是不是开着（只记「是 / 否」）。代码只认进程环境里精确的 `true`（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）；`app.env` 里那一行带引号或空格时，加载之后是不是 `true` 要看加载方式。所以这里放宽匹配（允许空格和引号，不分大小写），**计数不为 0 就记「是」**，宁可多记：
+**(3) 非备料基线（为 §7.3 留底）。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 是不是开着（只记「是 / 否」）。代码只认进程环境里精确的 `true`（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）。所以要数两处：文件，和**正在运行的后端进程**。只数文件不够：一行早先从文件里删掉了，进程里可能还留着它（`pm2 restart --update-env` 不清掉删掉的行，§6.1「关开关不能只删这一行」）；`app.env` 里那一行带引号或空格时，加载之后是不是 `true` 也要看加载方式。两处都放宽匹配（允许空格和引号，不分大小写），**任一个计数不为 0 就记「是」**，宁可多记：
 
 ```powershell
-@(Select-String -LiteralPath '<安装根目录>\docker\app.env' -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*=\s*["'']?\s*true').Count
+$f = @('<安装根目录>\app.env', '<安装根目录>\docker\app.env') | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $f) { throw 'app.env not found' }
+@(Select-String -LiteralPath $f -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*=\s*["'']?\s*true').Count
+@(pm2 env <后端的 pm2 id> | Select-String -Pattern '^\s*AUTOMATION_CLASSB_OUTBOUND_ENABLED\s*:\s*["'']?\s*true').Count
 ```
+
+- **文件取哪一个。** 与启动脚本相同：安装根目录下的 `app.env` 在就用它，不在才用 `docker\app.env`（`scripts/ops/attendance-onprem-start-pm2.ps1:34-37`，基线 89617a418）。上面第一行就是这个顺序。
+- **进程环境。** `<后端的 pm2 id>` 是 `pm2 list` 里 `metasheet-backend` 那一行的 id。用拥有这个 pm2 应用的那个 Windows 账号、同一个 `PM2_HOME` 跑（同 §1.4a 第 3 步）；换了账号或 `PM2_HOME`，看到的是另一个空的 pm2，计数一定是 0。`pm2 env` 会打印进程的全部环境变量，包括口令，所以只取这个计数，不要把整段输出贴到任何地方。`pm2 env` 的输出格式（每行 `键: 值`）取自交付说明与 222 手册里现成的 `pm2 env 0 | Select-String '^DATABASE_URL:'` 写法，本手册没有另做见证。
+- **不要把出错记成 0。** 找不到文件、`pm2 env` 报错或一行都没输出（找不到这个应用）时，不要记 0：先改对路径、id、账号或 `PM2_HOME` 再数。
 
 **(4) 停下来的条件**（任一成立就不开窗口）：(1) 不通过；(d) 不为 0（先由 owner 定怎么处理那张 env 表）；Q-B 或 G-B9 没批；切包提交没定。
 
@@ -261,7 +268,9 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 3. 在 `app.env` 里加一行 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=true`，重启后端。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；做法、Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步）。交付说明 §5-5 第 4 步只写「重载重启」，它 §7.1 的现成写法是先把 env 文件装进当前 PowerShell、再裸跑 `pm2 restart metasheet-backend --update-env`（`customer-delivery-guide-20260904.md:746-752`，本 PR 基线 e80a3d700 上）：在 Windows 现场由这个启动脚本代替。然后按 §5-5 第 4 步核两条（进程环境里能看到这一行；一个没有租户声明的旧令牌被拒 403 `OPERATOR_SCOPE_TENANT_REQUIRED`）。
 4. 再手动触发一次定时拉取：每个项目的结果应与打开前相同。
 
-**停止条件：只要有任何一个试点已启用，就不得删掉这一行。** 就绪检查只管「启用」这一下：启用之后，运行时没有任何检查因此拒绝，试点也不会因此被撤销（只有就绪的 GET 会重新列出 `tenant_claim_required`，§3 第 7 步；试点标记只能由 §3 的手册语句清掉）。删掉这一行，这张试点表上旧分支的路径就重新打开。交付说明 §5-5 的「回滚 = 删掉这一行」**只在没有试点启用时**适用；有试点时要回滚，先由 owner 裁定，按 §3「退出试点」处理每个试点之后才删。
+**停止条件：只要有任何一个试点已启用，就不得关掉这个开关：改成 `false` 不行，删掉这一行也不行。** 就绪检查只管「启用」这一下：启用之后，运行时没有任何检查因此拒绝，试点也不会因此被撤销（只有就绪的 GET 会重新列出 `tenant_claim_required`，§3 第 7 步；试点标记只能由 §3 的手册语句清掉）。开关一读成关，这张试点表上旧分支的路径就重新打开。只删这一行时，进程可能暂时还带着旧值（§6.1「关开关不能只删这一行」），但下一次 pm2 重建应用定义时就关了，所以删行同样不行。交付说明 §5-5 的回滚**只在没有试点启用时**适用；有试点时要回滚，先由 owner 裁定，按 §3「退出试点」处理每个试点之后才关。
+
+**关的做法（没有试点启用时）：不能只删这一行。** 与 §6.1 关修复开关相同：先把这一行改成 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=false`（读取方去空格、不分大小写后只认 `true`，`plugins/plugin-integration-core/lib/http-routes.cjs:1887`，基线 89617a418；`false` 就是关），用启动脚本重启（同第 3 步）；然后核两条：进程环境里这个键是 `false`（`pm2 env <后端的 pm2 id>`，账号与 `PM2_HOME` 同 §1.4a 第 3 步，只看这一个键）；一个没有租户声明的旧令牌打交付说明 §5-5 第 4 步那个 readiness 接口，不再得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED`。两条都对了，再删这一行。这一条是读代码加交付说明的实测（`customer-delivery-guide-20260904.md:717`），本手册没有另做见证。
 
 ## 2. 对所有项目生效的行为变化（不只试点项目）
 
@@ -293,7 +302,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 4. **看就绪。** `GET /api/integration/stock-preparation/projects/<项目号>/target/pilot`，`stock-prep:admin`（`http-routes.cjs:257`、`:12278-12279`）。回答是 `{ version, ready, checks: [{ id, ok }], failing: [id] }`（`stock-preparation-pilot-readiness.cjs:13`、`:491-497`），外加 `may.enable`。现在 `readiness.version` 是 **7**（`:135`，S6-5b），共 **29** 项（`:161-191`，S6-5b）：版本 3 加了批次标识六项，版本 4 加了 `change_plan_store_readable`、`execution_recovery_ready`，版本 5 加了 `no_unacknowledged_inactive_root_remnant`，版本 6 加了 `tenant_claim_required`（R-91 ㉘：租户声明开关打开才通过，§1.6），版本 7 加了 `no_open_sheet_repair_run`（这张表有未结束的修复运行就不通过，§0、§6.5），最后一项永远是 `continuation_support_version`。**装的包带 S6-9 时它通过**：`failing` 为空（`ready: true`）才说明这张表已经准备好。**装的包不带 S6-9 时（R 线），`failing` 里至少有 `continuation_support_version`**，这张表在这个包上启用不了。`failing` 里有 `tenant_claim_required`：开关没开（或没有生效），先做 §1.6，别的项不用查。`failing` 里有 `no_open_sheet_repair_run`：先按 §6.2 第 5 条查这张表的运行，按 §6.5 把它关掉；查出来是 0 而它仍不通过，是台账读不出（108、授权，§1.4），不是「没有运行」。`failing` 里有 `target_fields_present` 或 `plm_column_lock`（#6778，`stock-preparation-pilot-readiness.cjs:319-330`）：这张表还没补那两个模板列，第 0 步漏了，按 §1.4a 第 4 步补列（另批）后再看。switch-on 手册附录 B.1 写的「版本 2、18 项」已过时，按本节读。
 5. **启用。** 装上带 S6-9 的 main 包之后，按 `runbook-stock-prep-project-sheets-switch-on-20261014.md` 附录 B.2（旧大作业处置）、B.3（启用与「答 500 ⇒ 再 POST」）做。B.2 / B.3 描述的路由与请求体（`{"confirmProjectNo": "<项目号>"}`，`stock-prep:admin`，`http-routes.cjs:258`、`:12851-12853`）在 0f0d1842b 上成立。B.3 写的顺序在 0f0d1842b 上与启用路由逐步对过（`:12874-12955`）：就绪 → 推进代次（`pilot_enable`）→ 租约内再扫未结束的大作业 → 租约内再读未结束的修复运行（S6-5b 加的，B.3 没写，按本手册 §0 读）→ 宿主盖章 → 标记与审计行同一事务；「答 500 ⇒ 再 POST」与那条唯一例外的报错原文也对得上。B.2 只核了它对应的就绪项 `no_open_large_job` 未变，其中的作业状态与 SQL 没有重核。CI 上的正向一腿（G9-PE：就绪全绿、启用 200、登记行盖上当前就绪版本；G9-S9D-04：项-10 形状的表在 owner 记下残留确认之后同样启用 200）随 S6-9 跑过；**【待定 S6-9 冻结候选】** 真实部署上的正向一腿（G9 手动项 `PE-DEPLOY`）还没有，拿到后把实际回答写在这里。启用前还要：租户声明开关已打开（§1.6，就绪里 `tenant_claim_required` 为真）、**这张表没有未结束的修复运行**（§6.5；从 S6-5b 起由就绪 v7 的 `no_open_sheet_repair_run` 强制，启用 POST 在租约内再读一次，§0；启用前仍按 §6.2 第 5 条查一遍，结果记进私有记录）、拉取人员已指定、R-91 的否决窗口已过（Q-B 已于 2026-11-11 批准，R-91 ㉛）。启用仍是逐表、owner 批准的一步（R-91 ㉚）。
 6. **试点开启后的两条限制，要告诉拉取人员。** 试点项目每条大车道路由都答 409 `STOCK_PREP_PILOT_LARGE_LANE_REFUSED`；小车道试算撞到上限时答 `STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED`，**不会**转去大车道（`stock-preparation-pilot-gate.cjs:6-11`、`:33-34`）。所以超上限的项目不能做试点。试点表的通用网格导出被宿主关闭（附录 B.3）。
-7. **试点启用之后，租户声明开关不得删（§1.6 的停止条件）。** 启用之后只有就绪的 GET（第 4 步那条路由）会重新评估就绪（`http-routes.cjs:12305-12318`；启用 POST 在 `:12816` 评估、在 `:12823` 按结果拒绝，启用之后不再走这一步），运行时没有任何检查因此拒绝：开关被删后，它的回答里 `pilot.enabled` 仍为 `true`，`readiness.failing` 里重新出现 `tenant_claim_required`。项目备料页在试点启用后**不再显示**不通过的检查项（`apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue:2341`），所以要看就直接读这条 GET 的回答，或核 `app.env` 那一行还在。
+7. **试点启用之后，租户声明开关不得关，也不得删这一行（§1.6 的停止条件）。** 启用之后只有就绪的 GET（第 4 步那条路由）会重新评估就绪（`http-routes.cjs:12305-12318`；启用 POST 在 `:12816` 评估、在 `:12823` 按结果拒绝，启用之后不再走这一步），运行时没有任何检查因此拒绝：开关被关掉后（改成 `false`，或删掉这一行后进程不再带着它），它的回答里 `pilot.enabled` 仍为 `true`，`readiness.failing` 里重新出现 `tenant_claim_required`。项目备料页在试点启用后**不再显示**不通过的检查项（`apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue:2341`），所以要看就直接读这条 GET 的回答，或核进程环境里这个键仍是 `true`（`pm2 env <后端的 pm2 id>`，只看这一个键，§1.6 的停止条件）。只核 `app.env` 那一行还在不够：文件和运行中的进程可能不一致（§6.1）。
 
 **退出试点：** 没有路由。101 头注释给了 owner 批准的一条手册数据库语句（一次清三列，`101_add_stock_prep_project_target_pilot_columns_and_audit_pilot_enable.sql:24-29`）：
 
@@ -396,7 +405,7 @@ Remove-Variable token
   - `GET …/target/sheet-repair/runs`：这张表最近 50 次运行（更多时回答带 `truncated: true`），无值，不含备份（`stock-preparation-sheet-repair-store.cjs:75`、`:287-292`）。restore 和续关要用的运行 id 从这里取。
 - 开关 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED` 只认精确的 `true`：不去空格，也不认大写（`stock-preparation-sheet-repair.cjs:83-85`）。它或项目表开关不是 `true` 时，三条路由（预览、补填报告、运行列表都算）一律 404、零 IO（`http-routes.cjs:6854-6859`）。所以给客户准备 Q3 的补填报告，也要先开开关。
 - **开关按部署生效。** 开着时，这个部署上**每一个**项目的表都能被修复。窗口开始时在 `app.env` 里加这一行、重启；窗口结束时关掉它、重启（关法见下一条）。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步），不跑交付说明 §7.1 里裸的 `pm2 restart --update-env`。
-- **关开关不能只删这一行。** 启动脚本重读 `app.env`，再走 `pm2 restart … --update-env`（本 PR 基线 e80a3d700 上：导入 `attendance-onprem-start-pm2.ps1:51`，调用在 `:352`；重启 `:378`）；它只为自己列出的两个键删掉 pm2 的应用定义（`:8-11`）。交付说明记过实测：`pm2 restart --update-env` 不会因为某一行从 `app.env` 里删掉，就把它从运行中的进程里清掉（`customer-delivery-guide-20260904.md:717`，同一基线）。这一条是读代码加交付说明的实测，本手册没有另做见证。所以窗口结束时：先把这一行显式改成 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED=false`（开关只认精确的 `true`），用启动脚本重启；核对修复路由答 404 `STOCK_PREP_SHEET_REPAIR_DISABLED`（本 PR 基线 e80a3d700 上 `http-routes.cjs:6911-6912`）；然后再删掉这一行。
+- **关开关不能只删这一行。** 启动脚本重读 `app.env`，再走 `pm2 restart … --update-env`（本 PR 基线 e80a3d700 上：导入 `attendance-onprem-start-pm2.ps1:51`，调用在 `:352`；重启 `:378`）；只有三种情况它会删掉 pm2 的应用定义再重新启动，这时删掉的行才会顺带被清掉：自己列出的两个退役键（`:8-11`）还在 pm2 里而文件里没有（`:369-375`）；已有的应用定义与目标不符（陈旧定义，`:383-390`）；`pm2 jlist` 没列出这个应用、而文件里缺一个退役键（`:398-404`）。常规路径（`:377-378`）不会清（这几处行号在基线 89617a418 上同样成立）。交付说明记过实测：`pm2 restart --update-env` 不会因为某一行从 `app.env` 里删掉，就把它从运行中的进程里清掉（`customer-delivery-guide-20260904.md:717`，同一基线）。这一条是读代码加交付说明的实测，本手册没有另做见证。所以窗口结束时：先把这一行显式改成 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED=false`（开关只认精确的 `true`），用启动脚本重启；核对修复路由答 404 `STOCK_PREP_SHEET_REPAIR_DISABLED`（本 PR 基线 e80a3d700 上 `http-routes.cjs:6911-6912`）；然后再删掉这一行。
 - 开关开着而 108 没跑：修复路由答 503 `STOCK_PREP_SHEET_REPAIR_STORE_FAILED`，什么都不写（`108_…:67-70`）。
 - `approvalRef` 只记录、不核验：服务端不查它是不是 owner 真批过。批复原文和编号的对照只进私有记录（§8）。
 
@@ -541,7 +550,7 @@ SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'run
 
 ### 7.3 非备料停止条件（读代码得出；第 1 条已在 2026-11-13 的预演上见证，其余没有实际执行过；下面的查询（本手册所写，未在库上执行过；第一次用时先在开发机的一次性库上跑一遍））
 
-1. **外发开关。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 精确为 `true` 时（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）不能回 R83：`zzzz20261103120000` 把唯一索引改成 4 列（`…/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts:55-58`），而 R83 的认领语句写的是 3 列 `ON CONFLICT`（`git show onprem-r83:packages/core-backend/src/multitable/automation-outbound-intent.ts` 第 103 行），每次外发认领都会失败。要求：开关不是 `true`（§1.2 (3) 的计数为 0）。回 R84 也一样：`onprem-r84` 的同一行（`onprem-r84:packages/core-backend/src/multitable/automation-outbound-intent.ts:103`）也是 3 列。
+1. **外发开关。** `AUTOMATION_CLASSB_OUTBOUND_ENABLED` 精确为 `true` 时（`packages/core-backend/src/multitable/automation-outbound-intent.ts:118-119`）不能回 R83：`zzzz20261103120000` 把唯一索引改成 4 列（`…/zzzz20261103120000_outbound_intent_attempt_lease_target_key.ts:55-58`），而 R83 的认领语句写的是 3 列 `ON CONFLICT`（`git show onprem-r83:packages/core-backend/src/multitable/automation-outbound-intent.ts` 第 103 行），每次外发认领都会失败。要求：开关不是 `true`（§1.2 (3) 的两个计数，文件与运行中的进程环境，都为 0）。回 R84 也一样：`onprem-r84` 的同一行（`onprem-r84:packages/core-backend/src/multitable/automation-outbound-intent.ts:103`）也是 3 列。
    - **预演见证（2026-11-13，R-91 ㊾；R84 与 R83 结果相同）。** 在升级后的库上，旧代码的 `claimOutboundIntent` 报 SQLSTATE **42P10**（没有和 `ON CONFLICT` 匹配的唯一约束）。旧执行器的 `send_webhook` 过了 SSRF 门之后以这条消息记为 `failed`，发出 0 次，intent 0 行（调用点 `onprem-r84:packages/core-backend/src/multitable/automation-executor.ts:4953`）。对照组是旧库：认领答 `proceed`，发送 `success`，发出 1 次。
    - **含义。** 开关开着时回退，每一次 B 类 webhook 发送都失败，而且是失败关闭：什么都不发，也不会重复发。别的 B 类发送调用的是同一个认领（`automation-executor.ts:5293`、`:5490` 等，只读了代码，没有跑）。
 2. **通讯录交接。** 要求 0 行：`SELECT count(*) FROM directory_handovers WHERE state IN ('applied', 'finalized');`（状态词见 `…/zzzz20261101090000_create_directory_handovers.ts:9`）。不为 0 时，回 R83 后向相关集成投递审批卡片会被触发器拒（55000），而 R83 代码不处理这种拒绝。
@@ -585,7 +594,7 @@ SELECT count(*) FROM integration_stock_prep_sheet_repair_run WHERE status = 'run
 [S6-8] 序号 4 就绪 v7（带 S6-9 的包）：failing=[no_open_sheet_repair_run]；未结束修复运行 1（§6.2 第 5 条）
 [S6-8] 序号 3 就绪 v7（不带 S6-9 的包）：failing=[continuation_support_version]
 [S6-8] 普查 第 1 页：序号 5 incomplete reason=field_missing
-[S6-8] 租户声明开关（§1.6）：定时拉取令牌绑定租户 = 是；(a) --allow-tenantless 计数 任务 0 / 包装脚本启动行 0；(b) 下一次 06:00 定时运行新增结果行 2（不手动触发，R-91 [52] 的 R-P2-2）；(c) 标准错误已接入，does not carry 0 / does not declare 0；开关已加、旧令牌 403
+[S6-8] 租户声明开关（§1.6）：定时拉取令牌绑定租户 = 是；(a) --allow-tenantless 计数 任务 0 / 包装脚本启动行 0；(b) 结果行 2（按 §0 第 3a 步批复记下的方式：下一次 06:00 定时运行，或 3a 批准的一次手动触发；R-91 [52] (c)）；(c) 标准错误已接入，does not carry 0 / does not declare 0；开关已加、旧令牌 403
 ```
 
 **只能进私有记录**：项目号、序号与项目 / objectId 的对照、`componentHandle`（它是业务值的摘要，可被反推）、执行 id、完整的普查 / 核对应答文件、待处理页里的部件编码和名称、主机、地址、令牌、数据源 id、批复原文里的任何业务值。
