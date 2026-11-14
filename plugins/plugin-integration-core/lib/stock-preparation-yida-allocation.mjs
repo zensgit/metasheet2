@@ -1,5 +1,5 @@
 // Local, exact project allocation for the static YiDa preview. No I/O or apply path.
-import { buildYidaStaticPlan, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
+import { buildYidaStaticPlan, generatedTemplateDependencies, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
 
 const INPUT_KEYS = new Set(['config', 'rowsText', 'allocation'])
 const ALLOCATION_KEYS = new Set(['mode', 'projects', 'projectField', 'quantityField'])
@@ -86,6 +86,13 @@ function normalizeTransformRuleFields(projectField, quantityField, config, mode)
     || projectField === quantityField || config.businessKey.length < 2
     || !projectEntry || !quantityEntry || !config.businessKey.includes(projectEntry.target)
     || projectEntry.type !== 'string' || quantityEntry.type !== 'number') {
+    throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
+  }
+  // R-71 ⑦.4: a generated value is evaluated on the split rows, so it must read the split project
+  // (and a preset must take it as its project). G1 already implies this; asserted here as well.
+  if (config.fieldMap.some((entry) => entry.transform === 'generated'
+    && (!generatedTemplateDependencies(entry, config).includes(projectField)
+      || entry.template.some((part) => Object.prototype.hasOwnProperty.call(part, 'preset') && part.projectOf !== projectEntry.target)))) {
     throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
   }
   return { mode, projectField, quantityField }
@@ -314,8 +321,11 @@ function refusal(analysis, issues, sourceRows, projectCount, expandedRows) {
   }
 }
 
-export function buildYidaProjectAllocationPreview(input) {
-  try {
+// The one equal_integer / equal_decimal_exact expansion. The preview plans its rows; the send path
+// (R-71 ⑦.3) re-derives the same rows for a v3 selection instead of reversing a payload. Either a
+// refusal (exactly what the preview returns) or the expanded rows with their origins.
+function expandAllocation(input) {
+  { // The block keeps the moved preview body byte-identical (indentation included) for review.
     const top = dataObject(input)
     if (!hasExactKeys(top, INPUT_KEYS)) throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')
     const validation = validateYidaStaticConfig(top.config.value)
@@ -358,7 +368,7 @@ export function buildYidaProjectAllocationPreview(input) {
       analysis.push(entry)
     }
     if (projectedRows > MAX_ROWS) issues.push({ index: null, code: 'EXPANDED_ROWS_LIMIT' })
-    if (issues.length > 0) return refusal(analysis, issues, rows.length, projectCount, projectedRows)
+    if (issues.length > 0) return { refused: refusal(analysis, issues, rows.length, projectCount, projectedRows) }
 
     const expanded = []
     const origins = []
@@ -370,9 +380,18 @@ export function buildYidaProjectAllocationPreview(input) {
       }
     }
     if (new TextEncoder().encode(JSON.stringify(expanded)).length > MAX_TEXT_BYTES) {
-      return refusal(analysis, [{ index: null, code: 'EXPANDED_TEXT_LIMIT' }],
-        rows.length, projectCount, projectedRows)
+      return { refused: refusal(analysis, [{ index: null, code: 'EXPANDED_TEXT_LIMIT' }],
+        rows.length, projectCount, projectedRows) }
     }
+    return { config, rows, analysis, projectCount, expanded, origins }
+  }
+}
+
+export function buildYidaProjectAllocationPreview(input) {
+  try {
+    const expansion = expandAllocation(input)
+    if (expansion.refused) return expansion.refused
+    const { config, rows, analysis, projectCount, expanded, origins } = expansion
     const plan = buildYidaStaticPlan({ config, rows: expanded })
     const invalidSources = new Set()
     // Associate only actual planner result members with their generated origins.
@@ -393,6 +412,23 @@ export function buildYidaProjectAllocationPreview(input) {
       evidence: { sourceRows: rows.length, projectCount, expandedRows: expanded.length,
         invalidSourceRows: invalidSources.size },
     }
+  } catch (error) {
+    if (error instanceof YidaAllocationError) throw error
+    throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')
+  }
+}
+
+// R-71 ⑦.3: the expanded rows the preview plans, for an allocation the preview accepts; the same
+// array, from the same code. A refusal throws: ROWS_LIMIT for the expanded row/text limits, else
+// ROWS_INVALID. Rows only; no plan, no lookup, no I/O.
+export function expandYidaProjectAllocationRows(input) {
+  try {
+    const expansion = expandAllocation(input)
+    if (expansion.refused) {
+      throw new YidaAllocationError(expansion.refused.issues.some((issue) => ['EXPANDED_ROWS_LIMIT', 'EXPANDED_TEXT_LIMIT'].includes(issue.code))
+        ? 'YIDA_ALLOCATION_ROWS_LIMIT' : 'YIDA_ALLOCATION_ROWS_INVALID')
+    }
+    return expansion.expanded
   } catch (error) {
     if (error instanceof YidaAllocationError) throw error
     throw new YidaAllocationError('YIDA_ALLOCATION_INPUT_INVALID')

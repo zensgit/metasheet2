@@ -8,8 +8,9 @@ import executionDigest from './yida-execution-digest.cjs'
 import sendBudgetModule from './yida-send-budget.cjs'
 import { createInternalYidaApprovedTargetTransactionReader } from './yida-approved-target-store.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
-import { compileYidaDraft } from './yida-draft-plan.mjs'
-import { buildYidaStaticPlan } from './yida-static-plan.mjs'
+import { compileYidaSendDraft } from './yida-draft-plan.mjs'
+import { buildYidaStaticPlan, parseYidaStaticRows, yidaTransformSourceColumns } from './yida-static-plan.mjs'
+import { expandYidaProjectAllocationRows } from './stock-preparation-yida-allocation.mjs'
 
 // Host-private composition, never a plugin API/route/authority callback. The
 // host establishes its real actor permission, owns one transaction/isolation,
@@ -82,6 +83,8 @@ function targeted(input, keys) {
 function reconstructRows(compiled) {
   const config = compiled.source.config
   if (config.intent !== 'create') fail('CONFLICT')
+  if (config.version === 3) return projectTransformRows(compiled)
+  if (config.version !== 2) fail('UNAVAILABLE')
   // Allocation is already performed by the real full draft compiler. Recover
   // source field names from its executed payloads, never rowsText[ordinal] and
   // never a second implementation of equal_integer/equal_decimal_exact.
@@ -100,6 +103,42 @@ function reconstructRows(compiled) {
   }
   return { sourceRows, verified }
 }
+
+// R-71 ⑦.3: a v3 payload cannot be reversed into its row (copy / constant / concat entries have no
+// single source column, and a concat-only column never reaches the payload). The selected rows are
+// re-derived from the persisted source instead: the original rows, or the ONE shared allocation
+// expansion (never a second equal_integer / equal_decimal_exact implementation). Each row is then
+// projected onto the columns the mapping reads, so unmapped source columns never enter a grant, an
+// execution snapshot or a budget input; an absent column stays absent and null stays null. The
+// projected rows are planned again and must reproduce the compiled plan exactly, row by row.
+function projectTransformRows(compiled) {
+  const { config, rowsText, allocation } = compiled.source
+  const expanded = allocation.mode === 'original'
+    ? parseYidaStaticRows(rowsText, config)
+    : expandYidaProjectAllocationRows({ config, rowsText, allocation })
+  const columns = yidaTransformSourceColumns(config)
+  const sourceRows = expanded.map(row => Object.fromEntries(columns
+    .filter(column => Object.hasOwn(row, column)).map(column => [column, row[column]])))
+  const verified = buildYidaStaticPlan({ config, rows: sourceRows })
+  if (verified.rows.length !== compiled.plan.rows.length || verified.evidence.invalid !== 0
+    || verified.evidence.duplicateKeyCount !== 0 || verified.canApply !== false
+    || verified.tokenIssued !== false || verified.lookupExecuted !== false || verified.externalWriteAttempted !== false) fail('UNAVAILABLE')
+  for (let index = 0; index < verified.rows.length; index++) {
+    const row = verified.rows[index], original = compiled.plan.rows[index]
+    if (row.status !== 'planned_create' || row.issues.length !== 0
+      || row.localBusinessKey !== original.localBusinessKey || !same(row.payload, original.payload)
+      || !same(row.protocolPreview, original.protocolPreview)) fail('UNAVAILABLE')
+  }
+  return { sourceRows, verified }
+}
+
+// R-71 ⑦.3 decision C1 worst-case placeholders for the draft-time budget. Every opaque id the
+// draft does not know yet (operation, row, grant, target, credential) is at most 128 UTF-16 units;
+// a control character costs the most bytes a unit can cost once serialized (6), and serialized
+// bytes bound raw bytes. expiresAt and the generation take their largest accepted values.
+const WORST_OPAQUE = '\u0001'.repeat(128)
+const WORST_EXPIRES_AT = Number.MAX_SAFE_INTEGER
+const WORST_GENERATION = 2147483647
 
 function createPrimitives(options) {
   const parsed = record(options, ['security', 'context'])
@@ -122,7 +161,7 @@ function createPrimitives(options) {
       // authenticated 090, and original 091 all pass before a candidate may reach
       // the existing local draft writer.
       const approved = await readTarget(db, targetRef)
-      const compiled = compileYidaDraft(source)
+      const compiled = compileYidaSendDraft(source)
       if (compiled.source.config.intent !== 'create') fail('CONFLICT')
       if (approved.target.locator_digest !== compiled.locatorDigest
         || approved.target.key_definition_digest !== compiled.keyDefinitionDigest
@@ -197,6 +236,31 @@ function createPrimitives(options) {
       return Object.freeze({ withinBudget: verdict.withinBudget === true })
     } catch (error) { closed(error) }
   }
+  // R-71 ⑦.3 decision C1: a v3 mapping's constants and copies are not bounded by the 128 KiB row
+  // text, so a v3 draft must pass the gate-4 send budget when it is created, not first at approval.
+  // Pure: no transaction, no target, no material. Every row of the draft is assessed with the exact
+  // snapshot shape sendBudget builds, the unknown fields taken at their worst case (which dominates
+  // every real value), so a draft that passes here passes sendBudget at approval and admission.
+  // v2 is unchanged: { withinBudget: true } without assessing (its payload is bounded by its rows).
+  function draftSendBudget(input) {
+    try {
+      const source = record(input, ['config', 'rowsText', 'allocation'])
+      const compiled = compileYidaSendDraft(source)
+      if (compiled.source.config.version !== 3) return Object.freeze({ withinBudget: true })
+      // create only: reconstructRows refuses any other intent (CONFLICT), as prepareDraft does.
+      const { sourceRows, verified } = reconstructRows(compiled)
+      const within = verified.rows.every((planned, index) => {
+        const snapshot = { tenantId: fixed.tenantId, workspaceId: fixed.workspaceId, ownerId: fixed.ownerId,
+          actorId: fixed.ownerId, operationId: WORST_OPAQUE, rowKey: WORST_OPAQUE, grantRef: WORST_OPAQUE,
+          expiresAt: WORST_EXPIRES_AT, targetRef: WORST_OPAQUE, targetRevision: 'evidence-1',
+          planRevision: compiled.planDigest, credentialRef: WORST_OPAQUE,
+          credentialGeneration: WORST_GENERATION, config: compiled.source.config, row: sourceRows[index] }
+        const data = { ...planned.protocolPreview.data, formDataJson: stableCanonicalStringify(planned.payload) }
+        return sendBudgetModule.assessYidaSendBudget({ snapshot, data }).withinBudget === true
+      })
+      return Object.freeze({ withinBudget: within })
+    } catch (error) { closed(error) }
+  }
   async function prepareInTransaction(trx, input) {
     try {
       const requested = record(input, PREPARE)
@@ -230,7 +294,7 @@ function createPrimitives(options) {
       const { targetRef } = targeted(input, ['operationId', 'rowKey'])
       const selection = await resolveSelectionInTransaction(trx, input)
       const approved = await readTarget(crud(trx), targetRef)
-      const compiled = compileYidaDraft(selection.source)
+      const compiled = compileYidaSendDraft(selection.source)
       if (approved.target.target_ref !== selection.targetRef
         || approved.target.credential_ref !== selection.credentialRef
         || approved.target.credential_generation !== selection.credentialGeneration
@@ -259,7 +323,7 @@ function createPrimitives(options) {
     } catch (error) { closed(error) }
   }
   return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, sendBudget, prepareInTransaction, loadExecutionMaterialInTransaction })
+    executionPayloadDigest, sendBudget, draftSendBudget, prepareInTransaction, loadExecutionMaterialInTransaction })
 }
 
 export function createYidaSendAuthorityPrimitives(options) {

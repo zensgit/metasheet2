@@ -9,6 +9,14 @@ const test = require('node:test')
 const modulePath = path.join(__dirname, '..', 'lib', 'yida-static-plan.mjs')
 const modulePromise = import(pathToFileURL(modulePath).href)
 
+// The planner's one relative import (the material-code leaf) cannot resolve from a data: URL, so an
+// in-memory mutant imports it by its file URL; the mutated planner text is otherwise unchanged.
+function importPlannerSource(source) {
+  const resolved = source.replace(/from '(\.\/[^']+)'/g,
+    (_, relative) => `from '${pathToFileURL(path.resolve(path.dirname(modulePath), relative)).href}'`)
+  return import(`data:text/javascript;base64,${Buffer.from(resolved).toString('base64')}`)
+}
+
 function configA(patch = {}) {
   return {
     version: 1,
@@ -192,7 +200,7 @@ test('field diagnostics kill missing, misbound and unprojected metadata in the r
     ['unprojected', 'source: entry.source, target: entry.target, type: entry.type,', '...entry,'],
   ]) {
     assert.equal(source.split(from).length, 2, 'diagnostic mutation target occurs exactly once')
-    const changed = await import(`data:text/javascript;base64,${Buffer.from(source.replace(from, to)).toString('base64')}`)
+    const changed = await importPlannerSource(source.replace(from, to))
     assert.throws(() => assertV1FieldDiagnostics(changed.buildYidaStaticPlan), { name: 'AssertionError' })
     console.log(`YIDA_FIELD_METADATA_MUTATION ${name} killed=AssertionError sourceFileUnchanged=true`)
   }
@@ -369,11 +377,37 @@ test('examples are local, parseable, and provide two distinct hand-authored layo
   assert.throws(() => createYidaStaticExample('live'), /YIDA_STATIC_EXAMPLE_INVALID/)
 })
 
-test('production module remains I/O-free and build does not call fetch', async () => {
+// R-71 ⑦.4 (A8): the planner may import exactly one module, the material-code leaf, and every module
+// reached from it (the leaf, which must import nothing) is scanned the same way: no import or require
+// of any kind, no network primitive. A new import anywhere in that closure turns this red.
+const PLANNER_IMPORT_ALLOWLIST = ['./yida-material-code.mjs']
+const NETWORK_CALL = /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|EventSource)\s*\(|\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\b/
+function moduleImports(source) {
+  const statements = [...source.matchAll(/^\s*(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm)]
+  return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: /\bimport\s*\(|\brequire\s*\(/.test(source),
+    importLines: (source.match(/^\s*import\b/gm) || []).length }
+}
+function importClosure(entryPath, allowlist) {
+  const scanned = []
+  const queue = [[entryPath, allowlist]]
+  while (queue.length) {
+    const [file, allowed] = queue.shift()
+    if (scanned.includes(file)) continue
+    scanned.push(file)
+    const source = fs.readFileSync(file, 'utf8')
+    const { specifiers, dynamic, importLines } = moduleImports(source)
+    assert.deepEqual(specifiers, allowed, `imports of ${path.basename(file)}`)
+    assert.equal(importLines, allowed.length, `import statements of ${path.basename(file)}`)
+    assert.equal(dynamic, false, `dynamic import or require in ${path.basename(file)}`)
+    assert.doesNotMatch(source, NETWORK_CALL, path.basename(file))
+    for (const specifier of specifiers) queue.push([path.resolve(path.dirname(file), specifier), []])
+  }
+  return scanned.map((file) => path.relative(path.dirname(entryPath), file).replaceAll('\\', '/'))
+}
+
+test('production module imports only the I/O-free material-code leaf and build does not call fetch', async () => {
   const { buildYidaStaticPlan } = await modulePromise
-  const source = fs.readFileSync(modulePath, 'utf8')
-  assert.doesNotMatch(source, /^\s*import\s/m)
-  assert.doesNotMatch(source, /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon)\s*\(/)
+  assert.deepEqual(importClosure(modulePath, PLANNER_IMPORT_ALLOWLIST), ['yida-static-plan.mjs', 'yida-material-code.mjs'])
   const originalFetch = globalThis.fetch
   let fetchCalls = 0
   globalThis.fetch = () => { fetchCalls += 1; throw new Error('network forbidden') }
@@ -390,7 +424,7 @@ test('in-memory single-guard mutations are killed by independent result oracles'
   async function mutant(from, to) {
     assert.equal(source.split(from).length, 2, 'mutation target occurs exactly once')
     const changed = source.replace(from, to)
-    return import(`data:text/javascript;base64,${Buffer.from(changed).toString('base64')}`)
+    return importPlannerSource(changed)
   }
   const one = [{ projectNo: 'P', sourceRowId: 'L', componentCode: 'A', active: false }]
   const permissionMutant = await mutant('canApply: false, tokenIssued: false,', 'canApply: true, tokenIssued: false,')
@@ -777,7 +811,7 @@ test('production-source in-memory mutants independently prove v1 scan, duplicate
   const source = fs.readFileSync(modulePath, 'utf8')
   async function mutant(from, to) {
     assert.equal(source.split(from).length, 2, 'mutation target occurs exactly once')
-    return import(`data:text/javascript;base64,${Buffer.from(source.replace(from, to)).toString('base64')}`)
+    return importPlannerSource(source.replace(from, to))
   }
   const { parseYidaStaticRows } = await modulePromise
   const lossy = '[{"quantity":6.00000000000000001}]'
@@ -809,7 +843,7 @@ test('in-memory v2 guard mutations break independent identity, parser, options a
   const source = fs.readFileSync(modulePath, 'utf8')
   async function mutant(from, to) {
     assert.equal(source.split(from).length, 2, 'mutation target occurs exactly once')
-    return import(`data:text/javascript;base64,${Buffer.from(source.replace(from, to)).toString('base64')}`)
+    return importPlannerSource(source.replace(from, to))
   }
   const unsorted = await mutant(
     '}).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)',
@@ -843,4 +877,49 @@ test('in-memory v2 guard mutations break independent identity, parser, options a
     rows: duplicate }).rows.every((row) => 'protocolPreview' in row))
   assert.ok(buildYidaStaticPlan({ config: protocolConfig(),
     rows: duplicate }).rows.every((row) => !('protocolPreview' in row)))
+})
+
+// R-71 ⑦.3: which columns a v3 mapping reads. One case per transform name; the name list is the
+// planner's own closed table, so a new transform without a declared reader turns this red (seam for ⑦.4).
+const TRANSFORM_COLUMN_CASES = {
+  direct: { entry: { transform: 'direct', source: 'colDirect', target: 'extra', type: 'string', required: false }, columns: ['colDirect'] },
+  copy: { entry: { transform: 'copy', copyOf: 'key', target: 'extra', type: 'string', required: false }, columns: [] },
+  constant: { entry: { transform: 'constant', value: 'SYN-C', target: 'extra', type: 'string', required: false }, columns: [] },
+  concat: { entry: { transform: 'concat', parts: [{ source: 'colA' }, { literal: 'x' }, { source: 'colB' }, { source: 'colKey' }],
+    separator: '-', blank: 'skip', target: 'extra', type: 'string', required: false }, columns: ['colA', 'colB'] },
+  generated: { entry: { transform: 'generated', template: [{ literal: 'G-' }, { hash: ['key'], form: 'uuid-32' }, { field: 'key' }],
+    target: 'extra', type: 'string', required: false }, columns: [] },
+}
+function transformLayout(extra) {
+  return { version: 3, kind: 'yida-form-protocol-static', target: { appType: 'synthetic_app', formUuid: 'synthetic_form' },
+    intent: 'create', businessKey: ['key'], emptyKeyFields: [],
+    fieldCatalog: [{ id: 'key', control: 'text', required: true }, { id: 'extra', control: 'text', required: false }],
+    fieldMap: [{ transform: 'direct', source: 'colKey', target: 'key', type: 'string', required: true }, extra] }
+}
+
+test('R-71 ⑦.3: every v3 transform name declares the columns it reads (tripwire for new transforms)', async () => {
+  const { YIDA_TRANSFORM_NAMES, yidaTransformSourceColumns } = await modulePromise
+  assert.equal(Object.isFrozen(YIDA_TRANSFORM_NAMES), true)
+  assert.deepEqual([...YIDA_TRANSFORM_NAMES].sort(), Object.keys(TRANSFORM_COLUMN_CASES).sort())
+  for (const name of YIDA_TRANSFORM_NAMES) {
+    const { entry, columns } = TRANSFORM_COLUMN_CASES[name]
+    const actual = yidaTransformSourceColumns(transformLayout(entry))
+    assert.equal(Object.isFrozen(actual), true)
+    assert.deepEqual(actual, ['colKey', ...columns].sort(), name)
+  }
+})
+
+test('R-71 ⑦.3: source columns are sorted, de-duplicated, order-independent and only for a valid v3 config', async () => {
+  const { createYidaTransformExample, createYidaProtocolExample, yidaTransformSourceColumns } = await modulePromise
+  const { config } = createYidaTransformExample()
+  const columns = yidaTransformSourceColumns(config)
+  assert.deepEqual(columns, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'ext_blankLength', 'ext_blankThickness',
+    'ext_blankWidth', 'idempotencyKey', 'material', 'parentComponentCode', 'parentComponentName', 'projectNo', 'sourceVersion', 'totalQuantity'])
+  assert.deepEqual(yidaTransformSourceColumns({ ...config, fieldMap: [...config.fieldMap].reverse() }), columns)
+  const twice = transformLayout({ transform: 'concat', parts: [{ source: 'colKey' }, { source: 'colKey' }], separator: '', blank: 'skip',
+    target: 'extra', type: 'string', required: false })
+  assert.deepEqual(yidaTransformSourceColumns(twice), ['colKey'])
+  for (const invalid of [createYidaProtocolExample().config, { ...config, version: 4 }, { ...config, fieldMap: [] }, null]) {
+    assert.throws(() => yidaTransformSourceColumns(invalid), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
 })

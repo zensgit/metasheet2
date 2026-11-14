@@ -37,7 +37,7 @@ function prepared(selection, payloadDigest) {
 // verification uses actual stores/planners. This object has no transaction or
 // isolation fake: BEGIN/SET/COMMIT are rejected. Atomicity/locks are PG proofs.
 async function fixture(mode = 'original', alternateFactory) {
-  const [{ createYidaSendAuthorityPrimitives }, { compileYidaDraft }, { createYidaProtocolExample }] = await modules
+  const [{ createYidaSendAuthorityPrimitives }, { compileYidaSendDraft: compileYidaDraft }, { createYidaProtocolExample }] = await modules
   const key = randomBytes(32), calls = [], state = Object.fromEntries([TARGET, MATERIAL, DRAFT, OP, ROWS, LEDGER, AUDIT, DRAFT_AUDIT].map(name => [name, []]))
   const faults = { query: null, audit: null, wrapped: true, onQuery: null }
   const security = {
@@ -121,7 +121,7 @@ for (const mode of ['original', 'equal_integer', 'equal_decimal_exact']) {
   test(`actual full ${mode} selection uses allocated execution rows and never controls the host transaction`, async () => {
     const f = await fixture(mode), index = mode === 'original' ? 0 : 2
     const selected = await f.port.resolveSelectionInTransaction(f.trx, f.selection(f.draft, index))
-    assert.deepEqual(Object.keys(f.port).sort(), ['executionPayloadDigest', 'loadExecutionMaterialInTransaction',
+    assert.deepEqual(Object.keys(f.port).sort(), ['draftSendBudget', 'executionPayloadDigest', 'loadExecutionMaterialInTransaction',
       'prepareDraftInTransaction', 'prepareInTransaction', 'previewInTransaction', 'resolveSelectionInTransaction', 'sendBudget'])
     assert.equal(Object.isFrozen(selected) && Object.isFrozen(selected.selectedRow) && Object.isFrozen(selected.plan.rows), true)
     assert.deepEqual(Object.keys(selected).sort(), ['tenantId', 'workspaceId', 'ownerId', 'operationId', 'rowKey', 'targetRef',
@@ -629,5 +629,133 @@ test('in-memory removal of each new prepare/preview guard makes its rejection as
     const f = await fixture('original', await mutantPrimitives(guard))
     await assert.rejects(probe(f), error => error instanceof assert.AssertionError && /Missing expected rejection/.test(error.message))
     console.log(`MUTATION ${name}: RED (Missing expected rejection)`)
+  }
+})
+
+// R-71 ⑦.3: the slot's v2 protocol layout restated as v3 (same locator, key targets, types and
+// nullable parts, so the same key definition), plus one copy, one constant and one concat. The concat
+// reads ext_size, a column the payload never carries; ext_unmapped is read by nothing.
+function v3Of(v2, extra = []) {
+  const target = source => v2.fieldMap.find(entry => entry.source === source).target
+  return { ...structuredClone(v2), version: 3, businessKey: v2.businessKey.map(target), emptyKeyFields: v2.emptyKeyFields.map(target),
+    fieldCatalog: [...structuredClone(v2.fieldCatalog), { id: 'nameCopy', control: 'text', required: false },
+      { id: 'rule', control: 'text', required: true }, { id: 'label', control: 'text', required: false },
+      ...extra.map(entry => ({ id: entry.target, control: 'text', required: false }))],
+    fieldMap: [...v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+      { transform: 'copy', copyOf: 'componentName', target: 'nameCopy', type: 'string', required: false },
+      { transform: 'constant', value: 'SYN-RULE', target: 'rule', type: 'string', required: true },
+      { transform: 'concat', parts: [{ source: 'ext_size' }, { literal: 'mm' }], separator: ' ', blank: 'skip',
+        target: 'label', type: 'string', required: false }, ...extra] }
+}
+function v3Source(source, extra) {
+  const rows = JSON.parse(source.rowsText).map((row, index) => ({ ...row, ext_size: 1200 + index, ext_unmapped: 'SYN-UNMAPPED' }))
+  return { config: v3Of(source.config, extra), rowsText: JSON.stringify(rows), allocation: structuredClone(source.allocation) }
+}
+const constants = (count, character) => Array.from({ length: count }, (_, index) => ({ transform: 'constant',
+  value: character.repeat(4096), target: 'big' + index, type: 'string', required: false }))
+
+for (const mode of ['original', 'equal_integer']) {
+  test(`R-71 ⑦.3 ${mode}: a v3 draft for the v2 slot selects projected rows; preview payload is the executed data`, async () => {
+    const f = await fixture(mode), [, , { buildYidaStaticPlan, yidaTransformSourceColumns }] = await modules
+    const source = v3Source(f.source), index = mode === 'original' ? 0 : 2
+    const made = await f.port.prepareDraftInTransaction(f.trx, source)
+    assert.equal(made.reused, false); assert.equal(made.targetRef, f.draft.target.target_ref)
+    assert.notEqual(made.operationId, f.draft.operation.operation_id)
+    const operation = f.state[OP].find(row => row.operation_id === made.operationId)
+    assert.notEqual(operation.plan_digest, f.draft.operation.plan_digest)
+    const members = f.state[ROWS].filter(row => row.operation_id === made.operationId).sort((a, b) => a.ordinal - b.ordinal)
+    // Same layout and rows: every row keeps the v2 draft's business identity (the create fence).
+    assert.deepEqual(members.map(row => row.business_key_digest), f.draft.members.map(row => row.business_key_digest))
+    const request = { operationId: made.operationId, rowKey: members[index].row_key }
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, request)
+    assert.equal(selected.config.version, 3)
+    const columns = yidaTransformSourceColumns(selected.config)
+    assert.deepEqual(Object.keys(selected.selectedRow).sort(), [...columns])
+    assert.equal(columns.includes('ext_size') && !columns.includes('ext_unmapped'), true)
+    assert.equal(JSON.stringify(selected.selectedRow).includes('SYN-UNMAPPED'), false)
+    const planned = buildYidaStaticPlan({ config: selected.config, rows: [selected.selectedRow] }).rows[0]
+    assert.deepEqual(planned.payload, selected.plan.rows[index].payload)
+    assert.equal(planned.payload.label, '1200 mm')
+    assert.equal(planned.payload.rule, 'SYN-RULE'); assert.equal(planned.payload.nameCopy, planned.payload.componentName)
+    const preview = await f.port.previewInTransaction(f.trx, request)
+    assert.deepEqual(preview.payload, selected.plan.rows[index].payload)
+    // The digest the runner verifies is over exactly the previewed payload bytes.
+    const authorization = grant()
+    const data = { ...selected.plan.rows[index].protocolPreview.data, formDataJson: stableCanonicalStringify(preview.payload) }
+    assert.equal(f.port.executionPayloadDigest(selected, authorization), createHash('sha256').update(stableCanonicalStringify({
+      version: 1, grantRef: authorization.grantRef, expiresAt: authorization.expiresAt, actorId: authorization.actorId,
+      targetRef: selected.targetRef, targetRevision: selected.targetRevision, planRevision: selected.planRevision,
+      intent: 'create', data, formUuid: selected.config.target.formUuid })).digest('hex'))
+    for (const target of Object.keys(preview.payload)) assert.equal(selected.config.fieldCatalog.some(item => item.id === target), true)
+    assert.deepEqual(f.port.sendBudget(selected, authorization), { withinBudget: true })
+    assert.deepEqual(f.port.draftSendBudget(source), { withinBudget: true })
+    assert.equal(f.state[LEDGER].length, 0)
+  })
+}
+
+test('R-71 ⑦.3: a v3 draft whose key definition or intent differs from the slot is CONFLICT with no draft written', async () => {
+  const f = await fixture(), base = v3Source(f.source)
+  const narrowed = structuredClone(base); narrowed.config.businessKey = narrowed.config.businessKey.filter(target => target !== 'componentName')
+  const nullable = structuredClone(base); nullable.config.emptyKeyFields = []
+  nullable.rowsText = JSON.stringify(JSON.parse(nullable.rowsText).map(row => ({ ...row, parentCode: 'SYN-PARENT-' + row.quantity })))
+  const update = structuredClone(base); update.config.intent = 'update'; update.config.instanceIdField = 'instanceId'
+  update.rowsText = JSON.stringify(JSON.parse(update.rowsText).map((row, index) => ({ ...row, instanceId: 'SYN-INSTANCE-' + index })))
+  for (const input of [narrowed, nullable, update]) await rejected(f.port.prepareDraftInTransaction(f.trx, input), 'CONFLICT')
+  assert.equal(f.state[OP].length, 1); assert.equal(f.state[DRAFT_AUDIT].length, 0)
+  assert.throws(() => f.port.draftSendBudget(update), { code: 'YIDA_SEND_AUTHORITY_CONFLICT' })
+})
+
+test('R-71 ⑦.3 C1: draftSendBudget is one frozen boolean, v2 always within, v3 assessed per row; within implies sendBudget within', async () => {
+  const f = await fixture(), sql = f.calls.length
+  const v2 = f.port.draftSendBudget(f.source)
+  assert.deepEqual(v2, { withinBudget: true }); assert.equal(Object.isFrozen(v2), true)
+  assert.deepEqual(Object.getOwnPropertyNames(v2), ['withinBudget'])
+  // Over budget for v3 (constants live in the config, not the 128 KiB row text): refused.
+  assert.deepEqual(f.port.draftSendBudget(v3Source(f.source, constants(20, '中'))), { withinBudget: false })
+  assert.deepEqual(f.port.draftSendBudget(v3Source(f.source, constants(20, '"'))), { withinBudget: false })
+  assert.throws(() => f.port.draftSendBudget({ ...f.source, targetRef: 'caller' }), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.draftSendBudget(new Proxy(f.source, {})), { code: 'YIDA_SEND_AUTHORITY_INPUT' })
+  assert.throws(() => f.port.draftSendBudget({ ...f.source, rowsText: '[]' }), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.equal(f.calls.length, sql)
+  // Property: whenever the draft-time verdict is within, the approval-time verdict on the real
+  // selection is within too (the placeholders dominate the real ids, expiry and credentials).
+  const seen = new Set()
+  for (const character of ['中', '"', 'a']) {
+    for (let count = 0; count <= 20; count += 2) {
+      const source = v3Source(f.source, constants(count, character)), verdict = f.port.draftSendBudget(source)
+      seen.add(verdict.withinBudget)
+      if (!verdict.withinBudget) continue
+      const made = await f.port.prepareDraftInTransaction(f.trx, source)
+      for (const row of made.rows) {
+        const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: row.rowKey })
+        assert.deepEqual(f.port.sendBudget(selected, { ...grant(), expiresAt: Number.MAX_SAFE_INTEGER }), { withinBudget: true },
+          `${character} x ${count}`)
+      }
+    }
+  }
+  assert.deepEqual([...seen].sort(), [false, true])
+})
+
+test('R-71 ⑦.3 C1: at the exact draft-time edge the approval-time budget still holds with real-length ids', async () => {
+  const f = await fixture()
+  // Total constant text T split into 4096-char constants; find the largest T the draft accepts.
+  const sized = total => {
+    const extra = constants(Math.ceil(total / 4096), '中')
+    if (extra.length) extra[extra.length - 1].value = '中'.repeat(total - 4096 * (extra.length - 1))
+    return v3Source(f.source, extra)
+  }
+  let low = 0, high = 20 * 4096
+  assert.equal(f.port.draftSendBudget(sized(low)).withinBudget, true)
+  assert.equal(f.port.draftSendBudget(sized(high)).withinBudget, false)
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2)
+    if (f.port.draftSendBudget(sized(middle)).withinBudget) low = middle; else high = middle
+  }
+  const made = await f.port.prepareDraftInTransaction(f.trx, sized(low))
+  for (const row of made.rows) {
+    const selected = await f.port.resolveSelectionInTransaction(f.trx, { operationId: made.operationId, rowKey: row.rowKey })
+    // A real grant: a 36-char UUID ref and a current-epoch expiry, the shapes the host mints.
+    assert.deepEqual(f.port.sendBudget(selected, { grantRef: randomUUID(), expiresAt: Date.now() + 900000, actorId: context.ownerId }),
+      { withinBudget: true })
   }
 })

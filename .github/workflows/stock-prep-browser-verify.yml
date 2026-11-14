@@ -127,6 +127,7 @@ jobs:
                 plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.mjs|\
                 plugins/plugin-integration-core/lib/yida-rule-template.mjs|\
                 plugins/plugin-integration-core/lib/yida-static-plan.mjs|\
+                plugins/plugin-integration-core/lib/yida-material-code.mjs|\
                 scripts/ops/stock-prep-browser-ci-wiring.test.mjs|\
                 .github/workflows/stock-prep-browser-verify.yml)
                   relevant=true

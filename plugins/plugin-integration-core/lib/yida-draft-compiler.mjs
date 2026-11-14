@@ -164,8 +164,13 @@ function compile(input, versions) {
           [config.intent === 'create' ? 'formDataJson' : 'updateFormDataJson']: stableCanonicalStringify(row.payload) },
       }),
     }))
+    // R-71 ⑦.3 (B2): only a v3 plan carries the mapping marker, so the digest covers the mapping
+    // version while every v2 digest input (and so every stored v2 plan_digest) stays byte-identical.
+    // The key definition and row specs stay version-independent: a v3 draft of a v2 layout keeps
+    // the slot's key definition and each row's business key digest (the create fence).
     const planDigest = hashCanonical({
       version: 1, kind: 'yida-local-plan', locator, keyDefinition, intent: config.intent,
+      ...(config.version === 3 ? { mapping: 3 } : {}),
       rows: rowSpecs.map(({ businessKeyDigest, payloadDigest }) => ({ businessKeyDigest, payloadDigest }))
         .sort((left, right) => compareCodePoints(left.businessKeyDigest, right.businessKeyDigest)),
     })
@@ -178,10 +183,16 @@ function compile(input, versions) {
   }
 }
 
-// The persisted draft path (draft store, initialization, owner send port) compiles v2 only.
-// v3 is not accepted there until an owner approves widening it.
+// Initialization (and target registration) compiles v2 only (R-71 ⑦.3 decision E1): the slot's
+// sealed initialization draft is always a v2 layout.
 export function compileYidaDraft(input) {
   return compile(input, [2])
+}
+
+// R-71 ⑦.3: the persistent send path (draft store, send authority, owner send port) compiles v2
+// or v3. A v3 draft can only go to a target whose sealed key definition it matches exactly.
+export function compileYidaSendDraft(input) {
+  return compile(input, [2, 3])
 }
 
 // Same compiler for a local recompute that is never persisted: v2 or v3. It returns the
