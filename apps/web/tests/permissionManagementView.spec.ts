@@ -436,6 +436,17 @@ describe('PermissionManagementView grant readback', () => {
     delayTemplateApply?: Promise<void>
     throwOnGrant?: boolean
     legacyByUser?: Record<string, string[]>
+    templateRoleId?: string | null
+    inheritedRolesByUser?: Record<string, unknown>
+    legacyRevokeStatus?: number
+    legacyRevokeBody?: Record<string, unknown>
+    legacyRevokeAck?: 'missing-changed'
+    throwOnLegacyRevoke?: boolean
+    delayCheck?: Promise<void>
+    checkStatus?: number
+    checkBody?: Record<string, unknown>
+    checkDegraded?: boolean
+    checkAllowed?: boolean
   } = {}) {
     const state: Record<string, {
       direct: string[]
@@ -456,19 +467,26 @@ describe('PermissionManagementView grant readback', () => {
     let invalidJsonNextAccess = false
     let wrongSubjectNextAccess = false
     let legacyEffectiveNextAccess = false
+    const legacyState: Record<string, string[]> = {}
+    for (const [userId, codes] of Object.entries(options.legacyByUser ?? {})) legacyState[userId] = [...codes]
+    const checkSignals: AbortSignal[] = []
 
     const userPayload = (userId: string) => {
       const grants = state[userId]
-      return {
+      const payload: Record<string, unknown> = {
         userId,
         permissions: grants.effective,
         isAdmin: false,
         direct: grants.direct,
         inherited: grants.inherited,
-        legacy: options.legacyByUser?.[userId] ?? [],
+        legacy: legacyState[userId] ?? [],
         effective: grants.effective,
         blockedByNamespaceAdmission: grants.blocked,
       }
+      if (options.inheritedRolesByUser && Object.prototype.hasOwnProperty.call(options.inheritedRolesByUser, userId)) {
+        payload.inheritedRoles = options.inheritedRolesByUser[userId]
+      }
+      return payload
     }
 
     apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
@@ -513,7 +531,7 @@ describe('PermissionManagementView grant readback', () => {
             productMode: 'platform',
             permissions: options.templatePermissions ?? ['workflow:read'],
             presetId: null,
-            roleId: null,
+            roleId: options.templateRoleId ?? null,
           }, {
             id: 'tpl-2',
             name: '其他模板',
@@ -617,6 +635,7 @@ describe('PermissionManagementView grant readback', () => {
 
       if (pathname === '/api/permissions/grant' && method === 'POST') {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; permission?: string } : {}
+        bodies.push(body)
         const userId = String(body.userId || '')
         const permission = String(body.permission || '')
         if (options.throwOnGrant) throw new Error('timeout')
@@ -639,6 +658,7 @@ describe('PermissionManagementView grant readback', () => {
 
       if (pathname === '/api/permissions/revoke' && method === 'POST') {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; permission?: string } : {}
+        bodies.push(body)
         const userId = String(body.userId || '')
         const permission = String(body.permission || '')
         const grants = state[userId]
@@ -656,6 +676,51 @@ describe('PermissionManagementView grant readback', () => {
         return createJsonResponse({ success: true, userId, permission })
       }
 
+      if (pathname === '/api/permissions/check' && method === 'POST') {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {}
+        bodies.push(body)
+        if (init?.signal) checkSignals.push(init.signal)
+        if (options.delayCheck) await options.delayCheck
+        if (options.checkStatus) {
+          return createJsonResponse(options.checkBody ?? { error: 'Cannot check permissions for another user', allowed: true }, options.checkStatus)
+        }
+        if (options.checkDegraded) {
+          return createJsonResponse({
+            userId: body.userId,
+            permission: body.permission,
+            allowed: false,
+            degraded: true,
+          })
+        }
+        return createJsonResponse({
+          userId: body.userId,
+          permission: body.permission,
+          allowed: options.checkAllowed === true,
+        })
+      }
+
+      if (pathname === '/api/permissions/legacy/revoke' && method === 'POST') {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; permission?: string } : {}
+        bodies.push(body)
+        if (options.throwOnLegacyRevoke) throw new Error('network down')
+        const userId = String(body.userId || '')
+        const permission = String(body.permission || '')
+        if (options.legacyRevokeStatus) {
+          return createJsonResponse(options.legacyRevokeBody ?? { error: 'Legacy permission conflict' }, options.legacyRevokeStatus)
+        }
+        if (options.legacyRevokeAck === 'missing-changed') {
+          return createJsonResponse({ success: true, userId, permission })
+        }
+        const list = legacyState[userId] ?? []
+        if (!list.includes(permission)) return createJsonResponse({ error: 'Legacy permission not found' }, 404)
+        legacyState[userId] = list.filter((code) => code !== permission)
+        if (options.degradeReadbackAfterWrite) degradeNextAccess = true
+        if (options.failReadbackAfterWrite) failNextAccess = true
+        if (options.invalidJsonReadbackAfterWrite) invalidJsonNextAccess = true
+        if (options.wrongSubjectReadbackAfterWrite) wrongSubjectNextAccess = true
+        return createJsonResponse({ success: true, userId, permission, changed: true })
+      }
+
       throw new Error(`Unhandled apiFetch call: ${method} ${rawUrl}`)
     })
 
@@ -665,6 +730,7 @@ describe('PermissionManagementView grant readback', () => {
       bodies,
       stats,
       pendingAccess,
+      checkSignals,
       releaseOldestAccess() {
         pendingAccess.shift()?.release()
       },
@@ -674,6 +740,7 @@ describe('PermissionManagementView grant readback', () => {
   it('keeps a direct namespaced grant visible after readback even when admission blocks effective permission', async () => {
     const api = createPermissionApi()
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
 
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('暂无直接授予')
@@ -686,6 +753,7 @@ describe('PermissionManagementView grant readback', () => {
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-action-feedback"]')?.textContent?.includes('直接授予 crm:read')))
 
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('crm:read')
@@ -700,6 +768,7 @@ describe('PermissionManagementView grant readback', () => {
     const delayGrant = new Promise<void>((resolve) => { release = resolve })
     const api = createPermissionApi({ delayGrant })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
 
     const select = root.querySelector('[data-testid="permission-select"]') as HTMLSelectElement
@@ -707,12 +776,14 @@ describe('PermissionManagementView grant readback', () => {
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(root.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-action-feedback"]')?.textContent?.includes('不是用户 user-1 的直接授予')))
 
     select.value = 'crm:read'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
     await flushUi(4)
 
     const otherUser = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
@@ -760,6 +831,7 @@ describe('PermissionManagementView grant readback', () => {
     })
 
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-inspection-unavailable"]')))
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).not.toContain('暂无直接授予')
     expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent).not.toContain('暂无角色继承权限')
@@ -784,6 +856,18 @@ describe('PermissionManagementView grant readback', () => {
     button?.click()
   }
 
+  async function chooseListedUser(root: HTMLElement, name: string): Promise<void> {
+    await waitForCondition(() => Array.from(root.querySelectorAll('.permission-admin__user strong')).some((node) => (node.textContent || '').includes(name)))
+    clickNamedUser(root, name)
+    await flushUi()
+  }
+
+  async function confirmPermissionMutation(root: ParentNode): Promise<void> {
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-mutation-confirm"]')))
+    ;(root.querySelector('[data-testid="permission-mutation-confirm"]') as HTMLButtonElement).click()
+    await flushUi(2)
+  }
+
   async function applyNamedTemplate(root: HTMLElement): Promise<void> {
     const applyButton = root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement
     const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
@@ -792,16 +876,19 @@ describe('PermissionManagementView grant readback', () => {
     await flushUi()
     expect(applyButton.disabled).toBe(false)
     applyButton.click()
+    await confirmPermissionMutation(root)
   }
 
   it('marks a healthy inspection unread after a degraded or failed write readback', async () => {
     const degraded = createPermissionApi({ degradeReadbackAfterWrite: true })
     const degradedRoot = mountView()
+    await chooseListedUser(degradedRoot, 'Alpha')
     await waitForCondition(() => (degradedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     clickNamedUser(degradedRoot, 'Bravo')
     await waitForCondition(() => (degradedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
     await selectPermission(degradedRoot, 'workflow:read')
     ;(degradedRoot.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(degradedRoot)
     await waitForCondition(() => Boolean(degradedRoot.querySelector('[data-testid="permission-inspection-unavailable"]')))
     expect(degradedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).not.toContain('workflow:read')
     expect(degradedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('未读')
@@ -816,11 +903,13 @@ describe('PermissionManagementView grant readback', () => {
 
     createPermissionApi({ failReadbackAfterWrite: true })
     const failedRoot = mountView()
+    await chooseListedUser(failedRoot, 'Alpha')
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     clickNamedUser(failedRoot, 'Bravo')
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
     await selectPermission(failedRoot, 'workflow:read')
     ;(failedRoot.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(failedRoot)
     await waitForCondition(() => Boolean(failedRoot.querySelector('[data-testid="permission-inspection-unavailable"]')))
     expect(failedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).not.toContain('workflow:read')
     expect(failedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('未读')
@@ -830,6 +919,7 @@ describe('PermissionManagementView grant readback', () => {
   it('marks refresh and selection failures unread instead of keeping the previous grants or an empty list', async () => {
     createPermissionApi({ failUserAccessAfter: 1 })
     const refreshedRoot = mountView()
+    await chooseListedUser(refreshedRoot, 'Alpha')
     await waitForCondition(() => (refreshedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     const refresh = Array.from(refreshedRoot.querySelectorAll('button')).find((button) => button.textContent?.includes('刷新'))
     refresh?.click()
@@ -846,6 +936,7 @@ describe('PermissionManagementView grant readback', () => {
 
     createPermissionApi({ failUserAccessIds: ['user-2'] })
     const selectedRoot = mountView()
+    await chooseListedUser(selectedRoot, 'Alpha')
     await waitForCondition(() => (selectedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     clickNamedUser(selectedRoot, 'Bravo')
     await waitForCondition(() => Boolean(selectedRoot.querySelector('[data-testid="permission-inspection-unavailable"]')))
@@ -860,6 +951,7 @@ describe('PermissionManagementView grant readback', () => {
   it('keeps an overlapping A to B to A access read on the current generation', async () => {
     const api = createPermissionApi({ holdUserAccess: true })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => api.pendingAccess.length >= 1)
     api.state['user-1'].inherited = []
     clickNamedUser(root, 'Bravo')
@@ -891,6 +983,7 @@ describe('PermissionManagementView grant readback', () => {
   it('does not call an old empty effective readback or a degraded acknowledgement a verified grant', async () => {
     const oldRootApi = createPermissionApi({ oldEffective: true })
     const oldRoot = mountView()
+    await chooseListedUser(oldRoot, 'Alpha')
     await waitForCondition(() => (oldRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('未知'))
     expect(oldRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).not.toContain('暂无直接授予')
     expect(oldRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent).toContain('未知')
@@ -899,6 +992,7 @@ describe('PermissionManagementView grant readback', () => {
     expect(oldRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).not.toContain('暂无历史授权')
     await selectPermission(oldRoot, 'crm:read')
     ;(oldRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(oldRoot)
     await waitForCondition(() => Boolean(oldRoot.querySelector('[data-testid="permission-action-feedback"]')))
     expect(oldRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).not.toContain('且已出现在生效权限中')
     expect(oldRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).toContain('不能当作已核对成功')
@@ -911,11 +1005,13 @@ describe('PermissionManagementView grant readback', () => {
 
     createPermissionApi({ degradedAck: true })
     const ackRoot = mountView()
+    await chooseListedUser(ackRoot, 'Alpha')
     await waitForCondition(() => (ackRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     clickNamedUser(ackRoot, 'Bravo')
     await waitForCondition(() => (ackRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
     await selectPermission(ackRoot, 'workflow:read')
     ;(ackRoot.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(ackRoot)
     await waitForCondition(() => Boolean(ackRoot.querySelector('[data-testid="permission-inspection-unavailable"]')))
     expect(ackRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent).not.toContain('workflow:read')
     expect(ackRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).toContain('降级')
@@ -940,6 +1036,7 @@ describe('PermissionManagementView grant readback', () => {
       apiFetchMock.mockReset()
       const api = createPermissionApi({ withTemplate: true, ...options })
       const root = mountView()
+      await chooseListedUser(root, 'Alpha')
       await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
       await selectPermission(root, 'crm:read')
       expect((root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).disabled).toBe(false)
@@ -1040,9 +1137,11 @@ describe('PermissionManagementView grant readback', () => {
     const delayGrant = new Promise<void>((resolve) => { release = resolve })
     const api = createPermissionApi({ delayGrant, degradedAck: true })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await selectPermission(root, 'crm:read')
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
     await waitForCondition(() => api.calls.some((call) => call.includes('POST /api/permissions/grant')))
 
     clickNamedUser(root, 'Bravo')
@@ -1065,6 +1164,7 @@ describe('PermissionManagementView grant readback', () => {
     const holdCatalogOnRefresh = new Promise<void>((resolve) => { releaseCatalog = resolve })
     const api = createPermissionApi({ holdCatalogOnRefresh, failCatalogOnRefresh: true })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await selectPermission(root, 'crm:read')
     const grant = root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement
@@ -1094,6 +1194,7 @@ describe('PermissionManagementView grant readback', () => {
     const holdCatalogOnRefresh = new Promise<void>((resolve) => { releaseCatalog = resolve })
     const api = createPermissionApi({ holdCatalogOnRefresh, failCatalogOnRefresh: true })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     expect(root.textContent).toContain('普通用户')
     await selectPermission(root, 'crm:read')
@@ -1143,6 +1244,7 @@ describe('PermissionManagementView grant readback', () => {
     for (const templateAck of ['ok-false', 'invalid-json', 'degraded'] as const) {
       const api = createPermissionApi({ withTemplate: true, templateAck })
       const root = mountView()
+      await chooseListedUser(root, 'Alpha')
       await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
       const readsBeforeApply = api.stats.userAccessReads
       await applyNamedTemplate(root)
@@ -1166,6 +1268,7 @@ describe('PermissionManagementView grant readback', () => {
   it('shows collapsed historical grants and keeps them distinct from direct and inherited grants', async () => {
     createPermissionApi({ legacyByUser: { 'user-1': ['spreadsheet:share'] } })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-legacy-section"]')?.textContent || '').includes('spreadsheet:share'))
     const details = root.querySelector('[data-testid="permission-legacy-details"]') as HTMLDetailsElement
     expect(details.open).toBe(false)
@@ -1251,7 +1354,8 @@ describe('PermissionManagementView grant readback', () => {
     expect((root.querySelector('[data-testid="user-list-next"]') as HTMLButtonElement).disabled).toBe(false)
     expect(seen[0]).toBe('users:1:20:')
     expect(listNames()).not.toContain('Member 21')
-    expect(Array.from(root.querySelectorAll('h2')).some((heading) => heading.textContent?.includes('Member 01'))).toBe(true)
+    clickNamedUser(root, 'Member 01')
+    await waitForCondition(() => Array.from(root.querySelectorAll('h2')).some((heading) => heading.textContent?.includes('Member 01')))
 
     ;(root.querySelector('[data-testid="user-list-next"]') as HTMLButtonElement).click()
     await waitForCondition(() => listNames().includes('Member 21') && listNames().length === 20)
@@ -1429,6 +1533,7 @@ describe('PermissionManagementView grant readback', () => {
   it('does not call a template applied when a requested direct code is missing', async () => {
     const api = createPermissionApi({ withTemplate: true, skipTemplateDirectWrite: true })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await applyNamedTemplate(root)
     await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('不能算全部完成'))
@@ -1443,6 +1548,7 @@ describe('PermissionManagementView grant readback', () => {
   it('treats admission-blocked direct grants as a saved direct source without proving the plugin is usable', async () => {
     createPermissionApi({ withTemplate: true, templatePermissions: ['crm:read'] })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await applyNamedTemplate(root)
     await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('角色和插件准入没有改变'))
@@ -1459,6 +1565,7 @@ describe('PermissionManagementView grant readback', () => {
     const delayTemplateApply = new Promise<void>((resolve) => { release = resolve })
     const api = createPermissionApi({ withTemplate: true, delayTemplateApply })
     const root = mountView()
+    await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await applyNamedTemplate(root)
     await waitForCondition(() => api.calls.includes('POST /api/admin/permission-templates/apply'))
@@ -1481,11 +1588,13 @@ describe('PermissionManagementView grant readback', () => {
   it('offers a read-only refresh after an unconfirmed write and does not replay POST', async () => {
     const failed = createPermissionApi({ failReadbackAfterWrite: true })
     const failedRoot = mountView()
+    await chooseListedUser(failedRoot, 'Alpha')
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     clickNamedUser(failedRoot, 'Bravo')
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
     await selectPermission(failedRoot, 'workflow:read')
     ;(failedRoot.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(failedRoot)
     await waitForCondition(() => Boolean(failedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
     expect(failedRoot.querySelector('.permission-admin__status')?.textContent).toContain('未确认')
     expect(failedRoot.querySelector('.permission-admin__status')?.textContent).toContain('不会再次提交')
@@ -1509,9 +1618,11 @@ describe('PermissionManagementView grant readback', () => {
 
     const timedOut = createPermissionApi({ throwOnGrant: true })
     const timedRoot = mountView()
+    await chooseListedUser(timedRoot, 'Alpha')
     await waitForCondition(() => (timedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await selectPermission(timedRoot, 'crm:read')
     ;(timedRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(timedRoot)
     await waitForCondition(() => Boolean(timedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
     const grantPosts = timedOut.calls.filter((call) => call.startsWith('POST'))
     expect(grantPosts).toEqual(['POST /api/permissions/grant'])
@@ -1822,6 +1933,450 @@ describe('PermissionManagementView grant readback', () => {
       expect(router.currentRoute.value.query.tab).toBe('members')
       expect(router.currentRoute.value.hash).toBe('#kept')
     })
+  })
+
+  function checkerResult(root: ParentNode): HTMLElement | null {
+    return root.querySelector('[data-testid="permission-checker-result"]')
+  }
+
+  async function runChecker(root: HTMLElement, code: string): Promise<void> {
+    await selectPermission(root, code)
+    ;(root.querySelector('[data-testid="permission-checker-run"]') as HTMLButtonElement).click()
+  }
+
+  it('titles the page, keeps direct changes collapsed, and does not check before the button', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    expect(root.querySelector('[data-testid="permission-page-title"]')?.textContent).toBe('权限来源与例外')
+    expect(root.querySelector('[data-testid="permission-checker-scope"]')?.textContent).toContain('这一项权限码')
+    expect(root.querySelector('[data-testid="permission-checker-scope"]')?.textContent).not.toContain('生效列表')
+    const controls = root.querySelector('[data-testid="permission-exception-controls"]') as HTMLDetailsElement
+    expect(controls.open).toBe(false)
+    expect(controls.textContent).toContain('直接授权与例外')
+    expect(controls.textContent).toContain('添加直接授权')
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('暂无直接授予')
+    expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent).toContain('crm:admin')
+    expect(checkerResult(root)).toBeNull()
+    expect(api.calls.some((call) => call === 'POST /api/permissions/check')).toBe(false)
+  })
+
+  it('posts the selected user and code and renders allow or deny only from that response', async () => {
+    const allowed = createPermissionApi({ checkAllowed: true })
+    const allowedRoot = mountView()
+    await chooseListedUser(allowedRoot, 'Alpha')
+    await waitForCondition(() => Boolean(allowedRoot.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(allowedRoot, 'crm:read')
+    await waitForCondition(() => checkerResult(allowedRoot)?.getAttribute('data-phase') === 'allowed')
+    expect(allowed.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(checkerResult(allowedRoot)?.textContent).toContain('用户 user-1 的权限码 crm:read：允许')
+    expect(allowed.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual(['POST /api/permissions/check'])
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const denied = createPermissionApi()
+    const deniedRoot = mountView()
+    await chooseListedUser(deniedRoot, 'Alpha')
+    await waitForCondition(() => (deniedRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
+    clickNamedUser(deniedRoot, 'Bravo')
+    await waitForCondition(() => (deniedRoot.querySelector('[data-testid="permission-effective-section"]')?.textContent || '').includes('workflow:read'))
+    await runChecker(deniedRoot, 'workflow:read')
+    await waitForCondition(() => checkerResult(deniedRoot)?.getAttribute('data-phase') === 'denied')
+    expect(denied.bodies.at(-1)).toEqual({ userId: 'user-2', permission: 'workflow:read' })
+    expect(checkerResult(deniedRoot)?.textContent).toContain('：不允许')
+    expect(checkerResult(deniedRoot)?.textContent).not.toContain('：允许。')
+  })
+
+  it('shows forbidden, degraded, and error checks without turning them into allow or deny', async () => {
+    const cases: Array<{ options: { checkStatus?: number; checkBody?: Record<string, unknown>; checkDegraded?: boolean }; phase: string; absent: string }> = [
+      {
+        options: { checkStatus: 403, checkBody: { error: 'Cannot check permissions for another user', allowed: true } },
+        phase: 'forbidden',
+        absent: '：允许',
+      },
+      {
+        options: { checkDegraded: true },
+        phase: 'degraded',
+        absent: '：不允许',
+      },
+      {
+        options: { checkStatus: 500, checkBody: { error: 'Failed to check permission', allowed: true } },
+        phase: 'error',
+        absent: '：允许',
+      },
+    ]
+    for (const entry of cases) {
+      createPermissionApi(entry.options)
+      const root = mountView()
+      await chooseListedUser(root, 'Alpha')
+      await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+      await runChecker(root, 'crm:read')
+      await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === entry.phase)
+      expect(checkerResult(root)?.textContent || '').not.toContain(entry.absent)
+      expect(checkerResult(root)?.textContent).toContain('本次没有结论')
+      app?.unmount()
+      container?.remove()
+      app = null
+      container = null
+      apiFetchMock.mockReset()
+    }
+  })
+
+  it('drops a late check when the selected user or code changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const delayCheck = new Promise<void>((resolve) => { releaseCheck = resolve })
+    const api = createPermissionApi({ delayCheck, checkAllowed: true })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'pending')
+    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    releaseCheck?.()
+    await flushUi(8)
+    expect(checkerResult(root)).toBeNull()
+    expect(root.querySelector('[data-testid="permission-checker"]')?.textContent || '').not.toContain('：允许')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual(['POST /api/permissions/check'])
+  })
+
+  it('drops a late check when the selected permission code changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const delayCheck = new Promise<void>((resolve) => { releaseCheck = resolve })
+    createPermissionApi({ delayCheck, checkAllowed: true })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'pending')
+    await selectPermission(root, 'workflow:read')
+    releaseCheck?.()
+    await flushUi(8)
+    expect(checkerResult(root)).toBeNull()
+    expect(root.querySelector('[data-testid="permission-checker"]')?.textContent || '').not.toContain('：允许')
+  })
+
+  it('does not open the first user until someone chooses one', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await waitForCondition(() => (root.textContent || '').includes('Alpha'))
+    expect(root.querySelector('[data-testid="permission-select"]')).toBeNull()
+    expect(root.textContent).toContain('请选择用户')
+    expect(api.calls.some((call) => call.startsWith('GET /api/permissions/user/'))).toBe(false)
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    expect(api.calls.some((call) => call === 'GET /api/permissions/user/user-1')).toBe(true)
+  })
+
+  it('does not write a direct grant or template until the frozen confirmation is accepted', async () => {
+    const api = createPermissionApi({ withTemplate: true, templateRoleId: 'role-ref' })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-mutation-summary"]')))
+    const summary = root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || ''
+    expect(summary).toContain('user-1')
+    expect(summary).toContain('crm:read')
+    expect(summary).toContain('角色不会改变')
+    expect(summary).toContain('准入不会改变')
+    ;(root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => api.calls.some((call) => call === 'POST /api/permissions/grant'))
+    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+
+    const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
+    clickNamedUser(root, 'Alpha')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
+    templateSelect.value = 'tpl-1'
+    templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-template-role-badge"]')?.textContent).toBe('参考角色（不会分配）')
+    ;(root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || '').includes('workflow:read'))
+    expect(root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent).toContain('参考角色（不会分配）')
+    expect(root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent).toContain('角色不会改变')
+    templateSelect.value = 'tpl-2'
+    templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
+  })
+
+  it('keeps confirmation focus inside the dialog and cancels on Escape without a write', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    const grant = root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement
+    grant.focus()
+    grant.click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-mutation-dialog"]')))
+    const dialog = root.querySelector('[data-testid="permission-mutation-dialog"]') as HTMLElement
+    const shield = root.querySelector('[data-testid="permission-mutation-shield"]')
+    expect(shield?.contains(dialog)).toBe(true)
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    const confirm = root.querySelector('[data-testid="permission-mutation-confirm"]') as HTMLButtonElement
+    const cancel = root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    expect(document.activeElement).toBe(confirm)
+    cancel.focus()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    expect(document.activeElement).toBe(confirm)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    expect(document.activeElement).toBe(cancel)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
+    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(document.activeElement).toBe(grant)
+  })
+
+  it('links inherited roles and falls back to the roles page when the payload has no role rows', async () => {
+    const detailed = createPermissionApi({
+      inheritedRolesByUser: {
+        'user-1': [
+          { roleId: 'role-1', roleName: '现场角色', permissions: ['crm:admin'] },
+          { roleId: 'role-orphan', roleName: null, permissions: ['crm:read'] },
+        ],
+      },
+    })
+    const detailedRoot = mountView()
+    await chooseListedUser(detailedRoot, 'Alpha')
+    await waitForCondition(() => Boolean(detailedRoot.querySelector('[data-testid="permission-inherited-role-link"]')))
+    const links = Array.from(detailedRoot.querySelectorAll('[data-testid="permission-inherited-role-link"]')) as HTMLAnchorElement[]
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '/admin/roles?roleId=role-1&userId=user-1',
+      '/admin/roles?roleId=role-orphan&userId=user-1',
+    ])
+    expect(links[0]?.textContent).toContain('现场角色')
+    expect(links[1]?.textContent).toContain('未知角色（role-orphan）')
+    expect(detailedRoot.querySelector('[data-testid="permission-inherited-generic"]')).toBeNull()
+    expect(detailed.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    createPermissionApi()
+    const genericRoot = mountView()
+    await chooseListedUser(genericRoot, 'Alpha')
+    await waitForCondition(() => (genericRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
+    expect(genericRoot.querySelector('[data-testid="permission-inherited-role-link"]')).toBeNull()
+    expect(genericRoot.querySelector('[data-testid="permission-inherited-roles-link"]')?.getAttribute('href')).toBe('/admin/roles')
+    expect(genericRoot.querySelector('[data-testid="permission-inherited-users-link"]')?.getAttribute('href')).toBe('/admin/users')
+    expect(genericRoot.querySelector('[data-testid="permission-inherited-section"]')?.textContent).not.toContain('role-1')
+  })
+
+  it('clears only the legacy field after changed:true and a readback, and keeps surviving sources visible', async () => {
+    const api = createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] } })
+    api.state['user-1'].direct = ['crm:read']
+    api.state['user-1'].inherited = ['crm:read']
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(root.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || '').includes('历史授权'))
+    const summary = root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || ''
+    expect(summary).toContain('crm:read')
+    expect(summary).toContain('平台管理员身份')
+    expect(summary).toContain('插件准入')
+    expect(summary).toContain('不是整项权限的总撤销')
+    expect(summary).not.toContain('users.permissions')
+    ;(root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(api.calls.some((call) => call === 'POST /api/permissions/legacy/revoke')).toBe(false)
+
+    ;(root.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('历史授权'))
+    const feedback = root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(feedback).toContain('crm:read')
+    expect(feedback).toContain('直接授权')
+    expect(feedback).toContain('角色继承')
+    expect(feedback).toContain('平台管理员身份')
+    expect(feedback).toContain('这不是整项权限的总撤销')
+    expect(feedback).not.toContain('已彻底撤销')
+    expect(feedback).not.toContain('users.permissions')
+    expect(feedback).not.toContain('changed:true')
+    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(api.calls.some((call) => call.includes('/api/admin/users') && call.startsWith('POST'))).toBe(false)
+    expect(root.querySelector('[data-testid="permission-legacy-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('crm:read')
+    expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent).toContain('crm:read')
+  })
+
+  it('keeps a legacy clear unconfirmed when the receipt or readback cannot prove the change', async () => {
+    createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] }, legacyRevokeAck: 'missing-changed' })
+    const missingRoot = mountView()
+    await chooseListedUser(missingRoot, 'Alpha')
+    await waitForCondition(() => Boolean(missingRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(missingRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(missingRoot)
+    await waitForCondition(() => (missingRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('不能证明'))
+    const missingFeedback = missingRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(missingFeedback).toContain('crm:read')
+    expect(missingFeedback).not.toContain('已清除用户')
+    expect(missingRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).toContain('未读')
+    expect(missingRoot.textContent).not.toContain('changed:true')
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const failed = createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] }, legacyRevokeStatus: 409 })
+    const failedRoot = mountView()
+    await chooseListedUser(failedRoot, 'Alpha')
+    await waitForCondition(() => Boolean(failedRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(failedRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(failedRoot)
+    await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('409'))
+    expect(failedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).toContain('没有清除')
+    expect(failedRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).toContain('crm:read')
+    expect(failed.calls.filter((call) => call === 'POST /api/permissions/legacy/revoke')).toEqual(['POST /api/permissions/legacy/revoke'])
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const unread = createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] }, failReadbackAfterWrite: true })
+    const unreadRoot = mountView()
+    await chooseListedUser(unreadRoot, 'Alpha')
+    await waitForCondition(() => Boolean(unreadRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(unreadRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(unreadRoot)
+    await waitForCondition(() => Boolean(unreadRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
+    expect(unreadRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).toContain('未确认')
+    expect(unreadRoot.textContent).not.toContain('这不是整项权限的总撤销')
+    const posts = unread.calls.filter((call) => call.startsWith('POST'))
+    ;(unreadRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(unread.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
+  })
+
+  it('treats a legacy clear transport failure or HTTP 500 as an unknown result and only rereads', async () => {
+    const serverError = createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] }, legacyRevokeStatus: 500 })
+    const serverRoot = mountView()
+    await chooseListedUser(serverRoot, 'Alpha')
+    await waitForCondition(() => Boolean(serverRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(serverRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(serverRoot)
+    await waitForCondition(() => (serverRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('未能确认清除结果'))
+    const serverFeedback = serverRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(serverFeedback).toContain('crm:read')
+    expect(serverFeedback).not.toContain('没有清除')
+    expect(serverFeedback).not.toContain('已清除')
+    expect(serverRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).toContain('未读')
+    expect(serverRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
+    const serverPosts = serverError.calls.filter((call) => call.startsWith('POST'))
+    expect(serverPosts).toEqual(['POST /api/permissions/legacy/revoke'])
+    ;(serverRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(serverError.calls.filter((call) => call.startsWith('POST'))).toEqual(serverPosts)
+    await waitForCondition(() => (serverRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent || '').includes('crm:read'))
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const dropped = createPermissionApi({ legacyByUser: { 'user-1': ['crm:read'] }, throwOnLegacyRevoke: true })
+    const droppedRoot = mountView()
+    await chooseListedUser(droppedRoot, 'Alpha')
+    await waitForCondition(() => Boolean(droppedRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]')))
+    ;(droppedRoot.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(droppedRoot)
+    await waitForCondition(() => (droppedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('未能确认清除结果'))
+    expect(droppedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').not.toContain('没有清除')
+    expect(droppedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
+    const droppedPosts = dropped.calls.filter((call) => call.startsWith('POST'))
+    expect(droppedPosts).toEqual(['POST /api/permissions/legacy/revoke'])
+    ;(droppedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(dropped.calls.filter((call) => call.startsWith('POST'))).toEqual(droppedPosts)
+  })
+
+  it('drops the checker result after a mutation, a refresh, and unmount', async () => {
+    let releaseGrant: (() => void) | undefined
+    const delayGrant = new Promise<void>((resolve) => { releaseGrant = resolve })
+    const api = createPermissionApi({ checkAllowed: true, delayGrant })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'allowed')
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    expect(checkerResult(root)?.getAttribute('data-phase')).toBe('allowed')
+    await confirmPermissionMutation(root)
+    expect(checkerResult(root)).toBeNull()
+    expect(api.checkSignals[0]?.aborted).toBe(true)
+    releaseGrant?.()
+    await flushUi()
+
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'allowed')
+    const refresh = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('刷新'))
+    refresh?.click()
+    await flushUi()
+    expect(checkerResult(root)).toBeNull()
+
+    let releaseCheck: (() => void) | undefined
+    const delayCheck = new Promise<void>((resolve) => { releaseCheck = resolve })
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+    const held = createPermissionApi({ delayCheck, checkAllowed: true })
+    const heldRoot = mountView()
+    await chooseListedUser(heldRoot, 'Alpha')
+    await waitForCondition(() => Boolean(heldRoot.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(heldRoot, 'crm:read')
+    await waitForCondition(() => checkerResult(heldRoot)?.getAttribute('data-phase') === 'pending')
+    expect(held.checkSignals[0]?.aborted).toBe(false)
+    app?.unmount()
+    expect(held.checkSignals[0]?.aborted).toBe(true)
+    releaseCheck?.()
+    await flushUi()
+  })
+
+  it('points object permissions at the multitable workbench without a sheet id', async () => {
+    createPermissionApi()
+    const root = mountView()
+    await waitForCondition(() => (root.textContent || '').includes('打开多维表'))
+    const link = root.querySelector('[data-testid="permission-multitable-workbench-link"]') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('/multitable')
+    const note = root.querySelector('[data-testid="permission-object-permissions"]')?.textContent || ''
+    expect(note).toContain('权限管理')
+    expect(note).toContain('工具栏')
+    expect(note).toContain('字段权限')
+    expect(note).toContain('记录详情')
+    expect(note).not.toContain('数据表编号')
+    expect(note).not.toContain('全局对象')
+    expect(link.getAttribute('href')).not.toMatch(/sheet|tableId|recordId/i)
   })
 
   it('wires this spec into the required web lane', () => {

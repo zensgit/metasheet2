@@ -685,6 +685,10 @@ test('LL-11 (brief item 2) an expansion planned while NOT governed, then governe
 // cache — never on disk in the repo) by support/stock-preparation-large-lane-golden-harness.cjs; the head reproduced
 // every value before this literal was written. On 4c4cd3aba the consult counts were start 0, run 0, plan 0, approve 0,
 // chunk 1 (PR-3a's in-lease gate) and the stored expansion job carried no `governanceVerdict`.
+// RECAPTURED, R-71 ⑦.4 PR-4 (two template columns): `answers.plan`, `answers.getFinal`, `storedExpansionJob`,
+// `storedApplyJob`, `planRevision`, `planArtifact` — each hashes the action snapshot or the plan summary, which
+// carry the template's field list. With the two `field(...)` lines removed on the PR-4 branch every literal
+// reproduced; the sheet rows, the records-API call sequence and the source reads did not move.
 const GOLDEN_LARGE_BASE_SHA = '4c4cd3abafad0761cb1fedcc8731b4341d02ee19'
 const GOLDEN_LARGE_LANE = Object.freeze({
   statuses: { start: 202, getQueued: 200, run: 200, plan: 200, approve: 202, getApply: 200, chunks: [200], getFinal: 200 },
@@ -692,16 +696,16 @@ const GOLDEN_LARGE_LANE = Object.freeze({
     start: '7c1f2737b983081d5846027692ab829838d05bf7485e1e1f205b8c1c09313661',
     getQueued: '8c2eb1cd36b8b9111ae6950a6101e0f523e0ae6aad9faa3222ead9274f0e54e9',
     run: 'e5bf536de943b61864df826c979f18deb86ec3dfd532aeeac68ba8e94e7017d8',
-    plan: '3406809e0af98d4ce2543ca4b67f66a144ed07a607b6889332d6a1e3cd9e3aac',
+    plan: 'b826d483564dc18db4cb877da3a7c2f5236e93e3e097414e92bdedd6edaefa19',
     approve: '0b6060354c278157326b173187c8979a85f5cde2ba77cc40ec8b2d8a724c5503',
     getApply: 'ac111b3e78d532a740762080229c404cb38ce7ffa17be9c1d28c5b2286ea190f',
     chunks: 'f9cf7f241870cd38bc196e490609ddaa11d0802ad5af98063dc0601074432e64',
-    getFinal: '3406809e0af98d4ce2543ca4b67f66a144ed07a607b6889332d6a1e3cd9e3aac',
+    getFinal: 'b826d483564dc18db4cb877da3a7c2f5236e93e3e097414e92bdedd6edaefa19',
   },
-  storedExpansionJob: '7a436a91b2296b6a61929440e68a40d5dfb2b87dde6b0131ca207c89e69d898f',
-  storedApplyJob: 'fbb468ed6f8c1d7a2c76bfa8ae1799995493f15a9240e58515e82a2a06e62024',
-  planRevision: '8f3d54a18d17e039a202ea397719785498cef34ceb7404103ce135d9f864b7ec',
-  planArtifact: '1accc34edc4fe05175646f7be30be74efdc346bcc65f9c538cab89cf7d6fb039',
+  storedExpansionJob: '8d93ccda133118780372d7a4ff537b7057fb3c4d7b10b790df638d06152768a9',
+  storedApplyJob: '586d149a3a58c0909c93943eb9ff72af238a902ba7197fabb30e8754b5df4895',
+  planRevision: '7c1c2e3ca349c757f3683a95e3b36792307913b70cf2dcd562e00d235aa30992',
+  planArtifact: 'fddcf073e5c53c7f827b462c195f71971a17a65e417fe8d08f837eddf1d04efe',
   sheetRows: 'e1721819926317c01680cd9cb7f9869aa78f2619bf5eee6d6bc43af8d05b83a3',
   sheetRowCount: 1,
   recordsCalls: '71e7be3b87ee4de2eff4a24f0f8e6adffb3979c3e0727603e657aadee8da7bb8',

@@ -12,8 +12,16 @@ on:
       - 'packages/core-backend/src/rbac/role-assignment.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
       - 'packages/core-backend/src/routes/attendance-admin.ts'
+      - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/services/stock-preparation-members.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
+      - 'packages/core-backend/tests/integration/permission-ux-*.db.test.ts'
+      - 'packages/core-backend/tests/utils/permission-lifecycle-setup.ts'
+      - 'packages/core-backend/tests/utils/permission-ux-*.ts'
+      - 'packages/core-backend/vitest.admin-users-realdb.config.ts'
+      - 'packages/core-backend/vitest.permission-ux-*.config.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
   push:
     branches: [main]
@@ -26,8 +34,16 @@ on:
       - 'packages/core-backend/src/rbac/role-assignment.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
       - 'packages/core-backend/src/routes/attendance-admin.ts'
+      - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/services/stock-preparation-members.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
+      - 'packages/core-backend/tests/integration/permission-ux-*.db.test.ts'
+      - 'packages/core-backend/tests/utils/permission-lifecycle-setup.ts'
+      - 'packages/core-backend/tests/utils/permission-ux-*.ts'
+      - 'packages/core-backend/vitest.admin-users-realdb.config.ts'
+      - 'packages/core-backend/vitest.permission-ux-*.config.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
 
 permissions:
@@ -39,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slice: [batch, recycle]
+        slice: [batch, recycle, permission-ux-admin, permission-ux-legacy, permission-ux-witness]
     services:
       postgres:
         image: postgres:15-alpine
@@ -77,10 +93,29 @@ jobs:
         if: matrix.slice == 'batch'
         run: |
           mkdir -p artifacts/admin-users-realdb
-          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts \
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.admin-users-realdb.config.ts \
             tests/integration/admin-user-batch-review.db.test.ts \
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/batch-vitest.json
           node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/batch-vitest.json 1
       - name: Recycle regression tests against isolated PostgreSQL
         if: matrix.slice == 'recycle'
-        run: pnpm --filter @metasheet/core-backend exec vitest run --config vitest.integration.config.ts tests/integration/admin-user-recycle-review.db.test.ts
+        run: |
+          mkdir -p artifacts/admin-users-realdb
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.admin-users-realdb.config.ts \
+            tests/integration/admin-user-recycle-review.db.test.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/recycle-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/recycle-vitest.json 1
+      - name: Permission management UX against isolated PostgreSQL
+        if: startsWith(matrix.slice, 'permission-ux-')
+        run: |
+          mkdir -p artifacts/admin-users-realdb
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.${{ matrix.slice }}.config.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/${{ matrix.slice }}-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/${{ matrix.slice }}-vitest.json 1
+      - name: Upload real database verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-users-realdb-${{ matrix.slice }}
+          path: artifacts/admin-users-realdb/*-vitest.json
+          if-no-files-found: warn

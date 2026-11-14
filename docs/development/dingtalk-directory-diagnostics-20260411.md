@@ -73,14 +73,17 @@
 
 后端 `testDirectoryIntegration` 现在额外返回结构化结论 `summary`：
 
-- `code`：稳定字符串枚举（落库后重命名需迁移），当前取值固定为：
-  - `healthy`：通讯录连通正常
+- `code`：稳定字符串枚举（落库后重命名需迁移），当前共四个取值：
+  - `healthy`：部门与成员列表抽样读取成功（连接测试另读过一名普通可见成员的详情）；只说明已抽样的接口可读，不代表全员可见范围、所有成员详情或扫码登录已验证
   - `no_child_departments`：根部门未返回子部门，但根直属成员看起来正常
-  - `scope_or_root_misconfigured`：无子部门且根直属成员稀少，疑似权限范围或根部门配置不当
+  - `scope_or_root_misconfigured`：无子部门且根直属成员稀少，可能是权限范围或根部门配置与预期不符，也可能是正常的叶子部门或小范围目录
+  - `member_detail_unverified`：**只出自连接测试**——共享判定本应是 `healthy`，但没有普通可见成员样本，成员详情权限未验证；共享 builder 与手动同步的运行记录不会产生这个值
 - `title`：人类可读结论标题
 - `nextAction`：建议的下一步动作
 
-`code` 由 `buildDirectoryIntegrationDiagnosticSummary` 从既有计数派生，与第 2 节诊断告警同源，不引入新的判定条件。
+前三个 `code` 由 `buildDirectoryIntegrationDiagnosticSummary` 从既有计数派生，与第 2 节诊断告警同源，不引入新的判定条件；`member_detail_unverified` 只在连接测试里、在共享判定为 `healthy` 且没有普通成员样本时产生。
+
+连接测试（2026-11-13 起）在列表抽样之后，从普通可见成员样本里取一名（优先第一个子部门的样本，没有则取根部门普通样本，从不取「包含访问受限成员」的样本）做一次逻辑上的成员详情读取（transport 的既有重试不算额外的逻辑读取），配置与列表读取相同；详情读取失败时整次测试经既有错误处理失败（`400 DIRECTORY_TEST_FAILED`），不再报告健康；详情返回值不进入响应或日志。每个 `nextAction` 都写明只验证了已抽样的接口。
 
 手动同步（`triggerSource === 'manual'`）时，`syncDirectoryIntegration` 以 best-effort 方式采样一次根部门诊断，并写入该次运行的 `directory_sync_runs.stats`：
 

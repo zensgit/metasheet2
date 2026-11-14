@@ -322,7 +322,40 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       await flushUi()
 
       expect(uploadFn).toHaveBeenCalledWith(file, { recordId: 'rec_1', fieldId: 'fld_a' })
-      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_1', 'att_new'], 'rec_1')
+      expect(onPatch).toHaveBeenCalledWith('fld_a', ['att_1', 'att_new'], 'rec_1', undefined, ['att_new'])
+    })
+
+    // An upload that adds to the list names the ids it added (the fifth argument above): the listener adds them to
+    // the record's list as it is then. One that replaces the list (a single-file field that holds a file) names
+    // none: its value is the new list as it is.
+    it('an upload that replaces the single file of a one-file field emits the new list alone, naming no added ids', async () => {
+      const uploadFn = vi.fn().mockResolvedValue(attachment('att_new', 'new.pdf'))
+      const onPatch = vi.fn()
+      const container = mount({
+        record: RECORD({ fld_a: ['att_1'] }),
+        fields: [{ id: 'fld_a', name: 'Contract', type: 'attachment', property: { maxFiles: 1 } }] as MetaField[],
+        canEdit: true,
+        attachmentSummariesByField: { fld_a: [attachment('att_1', 'a.pdf')] },
+        uploadFn,
+        onPatch,
+      })
+      await flushUi()
+
+      const input = container.querySelector('.meta-record-attachments-panel__file-input') as HTMLInputElement
+      const file = new File(['x'], 'new.pdf', { type: 'application/pdf' })
+      Object.defineProperty(input, 'files', {
+        value: {
+          0: file,
+          length: 1,
+          item: (index: number) => (index === 0 ? file : null),
+          [Symbol.iterator]: function* iterator() { yield file },
+        },
+        configurable: true,
+      })
+      input.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_new'], 'rec_1']])
     })
   })
 
@@ -388,7 +421,7 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
 
       expect(uploadFn).toHaveBeenCalledWith(expect.any(File), { recordId: 'rec_A', fieldId: 'fld_a' })
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch.mock.calls[0]).toEqual(['fld_a', ['att_a1', 'att_new'], 'rec_A'])
+      expect(onPatch.mock.calls[0]).toEqual(['fld_a', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']])
     })
 
     it('two files with a switch after the first: the second upload is still made on rec_A', async () => {
@@ -409,7 +442,7 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       expect(uploadFn.mock.calls[1][1]).toEqual({ recordId: 'rec_A', fieldId: 'fld_a' })
       second.resolve(attachment('att_n2', 'two.pdf'))
       await flushUi()
-      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_n1', 'att_n2'], 'rec_A']])
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_n1', 'att_n2'], 'rec_A', undefined, ['att_n1', 'att_n2']]])
     })
 
     it('a remove that ends after the switch patches rec_A with the list it started from, minus the id (not rec_B\'s list)', async () => {
@@ -473,14 +506,14 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       await flushUi()
       expect(fileInput(container).disabled).toBe(true)
       expect(container.querySelector('.meta-record-attachments-panel__uploading')).not.toBeNull()
-      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_na'], 'rec_A']])
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_na'], 'rec_A', undefined, ['att_na']]])
 
       // control: B's own result does end it
       uploadB.resolve(attachment('att_nb', 'b.pdf'))
       await flushUi()
       expect(fileInput(container).disabled).toBe(false)
       expect(container.querySelector('.meta-record-attachments-panel__uploading')).toBeNull()
-      expect(onPatch.mock.calls[1]).toEqual(['fld_a', ['att_b1', 'att_nb'], 'rec_B'])
+      expect(onPatch.mock.calls[1]).toEqual(['fld_a', ['att_b1', 'att_nb'], 'rec_B', undefined, ['att_nb']])
     })
 
     it('A\'s late upload failure writes no error on rec_B and patches nothing', async () => {
@@ -575,7 +608,7 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
 
       expect(fileInput(container).disabled).toBe(false)
       expect(container.querySelector('.meta-record-attachments-panel__uploading')).toBeNull()
-      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A']])
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
     })
 
     it('control, same record: a failed upload or delete shows its error', async () => {
@@ -612,7 +645,7 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       upload.resolve(attachment('att_new', 'new.pdf'))
       await flushUi()
 
-      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A']])
+      expect(onPatch.mock.calls).toEqual([['fld_a', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new']]])
     })
   })
 

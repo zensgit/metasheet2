@@ -532,8 +532,67 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
   for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
 })
 
+// Exact-department rollout. `_ENABLED` keeps the refusal code
+// DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED and the include_children migration
+// constants out of the flag population.
+function delegatedScopeTokensInSource() {
+  return grepFlagTokens('DELEGATED_SCOPE_[A-Z_0-9]+').sort()
+}
+
+function delegatedScopeFlagsInSource() {
+  return delegatedScopeTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
+}
+
+test('delegated scope flags: the read-site scan finds the registered key and filters the refusal code', () => {
+  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
+  const all = delegatedScopeTokensInSource()
+  assert.ok(all.includes('DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'), 'the refusal code shares the prefix and must be scanned')
+  assert.ok(all.some((t) => !t.endsWith('_ENABLED')), 'the suffix filter is what excludes non-flags')
+  assert.ok(delegatedScopeFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, independent, predicate compares the literal', () => {
+  const key = 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'byte-exact: the reader neither trims nor lowercases')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled')
+  const module = readRepoSource(spec.source.split('#')[0])
+  assert.match(module, /export function isDelegatedScopeExactDepartmentEnabled\(/)
+  assert.ok(module.includes(`env.${key} === 'true'`), 'the reader compares the exact literal (no trim, no lowercase)')
+  assert.doesNotMatch(module, /toLowerCase\(\)|\.trim\(\)/, 'the reader must not fold case or trim')
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /byte-exact/)
+  assert.match(spec.purpose, /no trim/)
+  assert.match(spec.purpose, /three write sinks/)
+  assert.match(spec.purpose, /DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED/)
+  assert.match(spec.purpose, /no audit/)
+  assert.match(spec.purpose, /replace does not delete/)
+  assert.match(spec.purpose, /Readers are not gated/)
+  assert.match(spec.purpose, /does not rewrite a stored false/)
+  assert.match(spec.purpose, /explicit true and unassign remain/)
+  assert.match(spec.purpose, /existing false is preserved/)
+  assert.match(spec.purpose, /still defaults to true/)
+  assert.match(spec.purpose, /separate owner decision/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
+  }
+  for (const value of ['TRUE', '1', 'yes', 'on']) {
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${value} looks on but is not the exact literal`)
+  }
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  assert.equal(isMisconfiguredTruthy(spec, ''), false)
+  assert.equal(isMisconfiguredTruthy(spec, undefined), false)
+})
+
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource(), ...delegatedScopeFlagsInSource()])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,

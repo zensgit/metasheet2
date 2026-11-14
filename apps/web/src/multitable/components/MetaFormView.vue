@@ -129,7 +129,7 @@
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
-            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
+            @input="onNumberInput(field.id, $event)"
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
             <input type="checkbox" :disabled="isFieldReadOnly(field.id)" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
@@ -267,7 +267,7 @@
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :value="formData[field.id] ?? ''"
-            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
+            @input="onNumberInput(field.id, $event)"
           />
           <div v-else-if="field.type === 'rating'" class="meta-form-view__rating">
             <button
@@ -573,6 +573,16 @@ function formFieldAnchorClass(fieldId: string): string {
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+/** A number box (number, currency, percent) holding a draft it cannot read ("-", "1e": `validity.badInput`, whose
+ *  value then reads "") leaves the form's value as it is: the stored number, or the last number the box could
+ *  read. Held as empty, it would clear the stored number on Save, also from a page of the form no longer shown.
+ *  An empty box still clears. The same rule as the drawer's number box (MetaRecordFieldsPanel.vue). */
+function onNumberInput(fieldId: string, event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.validity.badInput) return
+  formData[fieldId] = input.value === '' ? null : Number(input.value)
 }
 
 function multiSelectValue(fieldId: string): string[] {

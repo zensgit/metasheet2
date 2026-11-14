@@ -1102,3 +1102,104 @@ describe('MetaFormView A4 form logic', () => {
     container.remove()
   })
 })
+
+// A number box holding a draft it cannot read ("-", "1e") reports `validity.badInput`, and its value reads "".
+// jsdom never reports it, so the cells set it on the box.
+describe('MetaFormView number boxes: a draft the box cannot read', () => {
+  function mountNumberForm(options: { type?: string; pages?: boolean } = {}) {
+    const submitSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_qty', name: 'Quantity', type: options.type ?? 'number' },
+            { id: 'fld_note', name: 'Note', type: 'string' },
+          ],
+          record: { id: 'rec_1', version: 1, data: { fld_qty: 5, fld_note: 'kept' } },
+          loading: false,
+          readOnly: false,
+          ...(options.pages
+            ? { formLayout: { pages: [{ id: 'p1', title: 'First', fieldIds: ['fld_qty'] }, { id: 'p2', title: 'Second', fieldIds: ['fld_note'] }] } }
+            : {}),
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+    app.mount(container)
+    const box = () => container.querySelector('#field_fld_qty') as HTMLInputElement
+    /** What the box reads, and whether it could read it. */
+    async function type(text: string, badInput = false) {
+      const input = box()
+      Object.defineProperty(input, 'validity', { get: () => ({ badInput }), configurable: true })
+      input.value = text
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+    async function submit() {
+      container.querySelector('form')!.dispatchEvent(new Event('submit'))
+      await flushUi()
+    }
+    function unmount() {
+      app.unmount()
+      container.remove()
+    }
+    return { container, submitSpy, box, type, submit, unmount }
+  }
+
+  it.each(['number', 'currency', 'percent'])('a %s box left on a draft it cannot read keeps the stored number: Save sends it as it was', async (type) => {
+    const form = mountNumberForm({ type })
+    await flushUi()
+    expect(form.box().value).toBe('5')
+    await form.type('', true)
+    await form.submit()
+    expect(form.submitSpy).toHaveBeenCalledTimes(1)
+    expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    form.unmount()
+  })
+
+  it('on a form with pages: the draft is left on the first page, and Save on the last page does not clear the stored number', async () => {
+    const form = mountNumberForm({ pages: true })
+    await flushUi()
+    await form.type('', true)
+    form.container.querySelector<HTMLButtonElement>('[data-form-next]')!.click()
+    await flushUi()
+    expect(form.container.querySelector('#field_fld_qty')).toBeNull()
+    await form.submit()
+    expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    form.unmount()
+  })
+
+  it('a number typed before the unreadable draft stays: the last number the box could read is sent', async () => {
+    const form = mountNumberForm()
+    await flushUi()
+    await form.type('12')
+    await form.type('', true) // "12e"
+    await form.submit()
+    expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 12, fld_note: 'kept' })
+    form.unmount()
+  })
+
+  // Controls (pass before the change too): an empty box still clears, and a number is still taken.
+  it('an empty box (nothing typed in it, not an unreadable draft) still clears the stored number', async () => {
+    const form = mountNumberForm()
+    await flushUi()
+    await form.type('')
+    await form.submit()
+    expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: null, fld_note: 'kept' })
+    form.unmount()
+  })
+
+  it('a box emptied and then holding "-" keeps the cleared value, and takes the number once it can be read', async () => {
+    const form = mountNumberForm()
+    await flushUi()
+    await form.type('')
+    await form.type('', true) // "-"
+    await form.type('-3')
+    await form.submit()
+    expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: -3, fld_note: 'kept' })
+    form.unmount()
+  })
+})

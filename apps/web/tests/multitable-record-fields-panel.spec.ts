@@ -357,7 +357,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       await flushUi()
 
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new'])
       for (const call of onPatch.mock.calls) {
         expect(call).not.toContain('rec_B')
         expect(call[1]).not.toContain('att_b1')
@@ -386,7 +386,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       expect(uploadFn.mock.calls[1]).toEqual([file2, CTX_A])
       second.resolve(attachment('att_n2', 'two.pdf'))
       await flushUi()
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_n1', 'att_n2'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_n1', 'att_n2'], 'rec_A', undefined, ['att_n1', 'att_n2'])
     })
 
     it('same record, no switch: patches A and clears the uploading state', async () => {
@@ -403,7 +403,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       await flushUi()
 
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new'])
       expect(fileInput(container).disabled).toBe(false)
       expect(uploadingText(container)).toBeNull()
     })
@@ -422,7 +422,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       await flushUi()
 
       expect(onPatch).toHaveBeenCalledTimes(1)
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new'])
     })
 
     it('a new object for the same record still counts as shown: a failure shows its error (ids are compared, not objects)', async () => {
@@ -539,13 +539,13 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
 
       uploadA.resolve(attachment('att_new', 'a.pdf'))
       await flushUi()
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new'])
       expect(fileInput(container).disabled).toBe(true)
       expect(uploadingText(container)).not.toBeNull()
 
       uploadB.resolve(attachment('att_b2', 'b.pdf'))
       await flushUi()
-      expect(onPatch).toHaveBeenLastCalledWith('fld_files', ['att_b1', 'att_b2'], 'rec_B')
+      expect(onPatch).toHaveBeenLastCalledWith('fld_files', ['att_b1', 'att_b2'], 'rec_B', undefined, ['att_b2'])
       expect(fileInput(container).disabled).toBe(false)
       expect(uploadingText(container)).toBeNull()
     })
@@ -597,7 +597,7 @@ describe('MetaRecordFieldsPanel — attachment writes stay on the record they st
       upload.resolve(attachment('att_new', 'new.pdf'))
       await flushUi()
 
-      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A')
+      expect(onPatch).toHaveBeenCalledWith('fld_files', ['att_a1', 'att_new'], 'rec_A', undefined, ['att_new'])
       expect(shownNames(container)).toEqual(['att_new'])
     })
   })

@@ -272,6 +272,78 @@ describe('R-41 — provider, transport and driver failures reach the body as a f
   })
 })
 
+describe('directory test: the member-detail read is checked end to end (real probe, client and transport)', () => {
+  const DETAIL_EMAIL = 'marker-detail@example.test'
+  const DETAIL_MOBILE = '13900000099'
+  /** Answers every read the probe makes; `detail` decides the member-detail answer. */
+  function stubDirectory(detail: () => Response): void {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/gettoken')) return jsonResponse({ errcode: 0, access_token: 'token-test', expires_in: 7200 })
+      if (url.includes('/topapi/v2/department/listsub')) {
+        return jsonResponse({ errcode: 0, result: [{ dept_id: 2, name: 'Synthetic Dept', parent_id: 1 }] })
+      }
+      if (url.includes('/topapi/v2/user/list')) {
+        return jsonResponse({ errcode: 0, result: { list: [{ userid: 'synthetic-user-1', name: 'Synthetic One' }], has_more: false } })
+      }
+      if (url.includes('/topapi/v2/user/get')) return detail()
+      throw new Error(`unexpected request ${url}`)
+    })
+  }
+  const body = { name: 'DingTalk CN', corpId: 'dingcorp', appKey: 'k-detail', appSecret: 's' }
+  const detailCalls = () => fetchMock.mock.calls.filter(([input]) => String(input).includes('/topapi/v2/user/get'))
+
+  it('list reads succeed but the detail read is rejected → 400 with the errcode only, never a healthy result', async () => {
+    // errcode 60011 is synthetic (not from the code) and outside the flow-control set, so the read tier does not retry it.
+    stubDirectory(() => jsonResponse({ errcode: 60011, errmsg: PROVIDER_TEXT }))
+    const res = await invoke('post', '/integrations/test', { body })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'DIRECTORY_TEST_FAILED', message: 'Failed to test directory integration: DingTalk rejected the request (errcode 60011)', details: undefined },
+    })
+    expectValuesFree(res)
+    expect(detailCalls()).toHaveLength(1)
+    expect(JSON.parse(String(detailCalls()[0][1]?.body))).toMatchObject({ userid: 'synthetic-user-1' })
+  })
+
+  it('a detail answer without the expected data → 400 with the incomplete-response sentence', async () => {
+    stubDirectory(() => jsonResponse({ errcode: 0, result: { userid: 'someone-else', name: 'x' } }))
+    const res = await invoke('post', '/integrations/test', { body })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_TEST_FAILED',
+        message: 'Failed to test directory integration: DingTalk returned a response without the expected data (errcode 0)',
+        details: undefined,
+      },
+    })
+  })
+
+  it('a readable detail passes the sampled reads only; no detail value reaches the body or the logs', async () => {
+    const infoSpy = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => undefined)
+    stubDirectory(() => jsonResponse({
+      errcode: 0,
+      result: { userid: 'synthetic-user-1', name: 'Synthetic One', email: DETAIL_EMAIL, mobile: DETAIL_MOBILE, dept_id_list: [2] },
+    }))
+    const res = await invoke('post', '/integrations/test', { body })
+    expect(res.statusCode).toBe(200)
+    const data = (res.body as { data: { summary: unknown; warnings: unknown } }).data
+    expect(data.summary).toEqual({
+      code: 'healthy',
+      title: '部门、成员列表与一名成员详情抽样读取成功',
+      nextAction: '本次只验证了已抽样的接口，未验证全员可见范围、所有成员详情或扫码登录。',
+    })
+    expect(data.warnings).toEqual([])
+    expect(detailCalls()).toHaveLength(1)
+    const surfaced = JSON.stringify(res.body) + JSON.stringify(warnSpy.mock.calls) + JSON.stringify(infoSpy.mock.calls)
+    expect(surfaced).not.toContain(DETAIL_EMAIL)
+    expect(surfaced).not.toContain(DETAIL_MOBILE)
+    infoSpy.mockRestore()
+  })
+})
+
 describe('R-41 follow-up — production refusing to encrypt / decrypt shows its own values-free sentence (400, as before)', () => {
   const MATERIAL_SENTENCE =
     'Invalid encryption material for production: ENCRYPTION_KEY not configured / not set; ENCRYPTION_SALT not configured / not set'
