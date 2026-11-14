@@ -29,6 +29,7 @@ import {
   type AttendanceW4TransactionClientV1,
 } from '../../src/attendance/w4c0-identity'
 import { acquireBusinessTripRequestPrefixV1 } from '../../src/attendance/attendance-business-trip-locks'
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 
 /**
  * Approval change-request design lock v5.9 §14.2 — real-DB acceptance for 判据 III (WI-13,
@@ -4706,31 +4707,27 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
 
   /**
    * One caller-owned connection. Statements sent through `client.query` are recorded while
-   * `recorder.on` is set; the override is on the client object itself, so the object the prefix
-   * helper remembers and the object handed to the entry stay the same object.
+   * recorder.on is set. Native observation leaves the managed checkout unchanged, so the
+   * prefix helper and external entry receive the same client identity.
    */
   async function withExternalEntryClient<T>(
     body: (client: PoolClient, recorder: { on: boolean; statements: string[] }) => Promise<T>,
   ): Promise<T> {
     const client = await pool().getInternalPool().connect()
     const recorder = { on: false, statements: [] as string[] }
-    const realQuery = (Object.getPrototypeOf(client) as { query: (...args: unknown[]) => unknown }).query
-    Object.defineProperty(client, 'query', {
-      configurable: true,
-      writable: true,
-      value: (...args: unknown[]) => {
-        if (recorder.on) {
-          const text = args[0]
-          recorder.statements.push(typeof text === 'string' ? text : String((text as { text?: unknown } | null)?.text ?? text))
-        }
-        return realQuery.apply(client, args)
-      },
-    })
+    let nativeProbe: ReturnType<typeof attendanceOwnedNativeQueryProbeV1> | undefined
     let destroy: Error | undefined
     try {
+      nativeProbe = attendanceOwnedNativeQueryProbeV1(pool().getInternalPool(), client, (call) => {
+        if (recorder.on) {
+          const text = call.args[0]
+          recorder.statements.push(typeof text === 'string' ? text : String((text as { text?: unknown } | null)?.text ?? text))
+        }
+        return call.next()
+      })
       return await body(client, recorder)
     } finally {
-      delete (client as { query?: unknown }).query
+      nativeProbe?.restore()
       await client.query('ROLLBACK').catch((error: unknown) => {
         destroy = error instanceof Error ? error : new Error(String(error))
       })

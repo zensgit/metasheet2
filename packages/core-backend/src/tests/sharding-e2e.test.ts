@@ -32,6 +32,12 @@ vi.mock('pg', () => {
   return { Pool: MockPool }
 })
 
+// This suite replaces the DB adapter; it does not exercise owning admission.
+// Protocol/lease guards are verified by the dedicated real-driver/PG suites.
+vi.mock('../attendance/attendance-owning-session', async () => ({
+  AttendanceManagedPgPool: (await import('pg')).Pool
+}))
+
 // Mock metrics
 vi.mock('../integration/metrics/metrics', () => ({
   coreMetrics: {

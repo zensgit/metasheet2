@@ -42,7 +42,8 @@ import { createRequire } from 'module'
 import { randomUUID } from 'crypto'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { seedAttendanceW7ContextSourcePostureV1 } from '../utils/w7-context-source-posture-fixture'
 import type { MetaSheetServer } from '../../src/index'
 import {
@@ -52,7 +53,6 @@ import {
   type AttendancePluginShapedTrxV1,
   type AttendanceW4LiveScheduledBoundaryV1,
 } from '../../src/attendance/w4c2-live-scheduled-boundary'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import { applyAttendanceInOutMergePolicyPureV1 } from '../../src/attendance/w4c1-merge-policy'
 import { issueAttendanceFrozenContextV1 } from '../../src/attendance/w7-resolver/w7-frozen-context-issuance-seam'
 import {
@@ -318,7 +318,7 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
       acquireConnection: async () => {
         const client = await pool.connect()
         return {
-          client: client as unknown as AttendanceW4TransactionClientV1,
+          client: attendanceOwningSessionForClientV1(client),
           release: () => client.release(),
         }
       },
@@ -433,7 +433,7 @@ describeDb('W7-2 — group_shadow dual-run: produced comparison rows (real bound
 
   beforeAll(async () => {
     if (!dbUrl) throw new Error('W7-2 dualrun suite needs DATABASE_URL')
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
     const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
       __attendanceW4c2LivePunchAdaptersForTests: LiveAdapters
       __attendanceW4c2ScheduledAdaptersForTests: ScheduledAdapters

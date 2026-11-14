@@ -1,3 +1,4 @@
+import { attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { createRequire } from 'node:module'
 
 const requireCjs = createRequire(import.meta.url)
@@ -46,7 +47,7 @@ export async function executeHistoricalPunchFixture(pool: import('pg').Pool, inp
   const boundary = createAttendanceLiveScheduledBoundaryV1({
     acquireConnection: async () => {
       const client = await pool.connect()
-      return { client, release: () => client.release() }
+      return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
     },
     legacyAdapters: {
       applyLivePunchLegacy: (trx, args) => a.applyLivePunchProjectionLegacyV1(trx, args, applyAttendanceInOutMergePolicyPureV1),

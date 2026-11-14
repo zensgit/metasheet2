@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { PoolClient } from 'pg'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
+import { withAttendanceExclusiveIdleSessionV1 } from '../attendance-owning-session'
 import { createAttendanceLegacyPlanCommitConnectionV1 } from '../w4c3a-legacy-plan-commit-connection'
 import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from '../w4c0-operation-contract'
 import {
@@ -350,36 +354,79 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
 })
 
 describe('legacy-plan COMMIT connection deadline', () => {
+  afterEach(disposeAttendanceOwningSessionUnitFixtures)
+
   it('leaves nonliteral transaction statements on the original client path', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] })
-    const connection = createAttendanceLegacyPlanCommitConnectionV1({ query } as unknown as Pick<PoolClient, 'query'>)
-    for (const text of ['COMMIT;', 'commit', 'BEGIN']) await connection.query(text)
+    const receivers: unknown[] = []
+    const nativeQuery = vi.fn(function (this: unknown, _statement: unknown, _values?: unknown[]) {
+      receivers.push(this)
+    })
+    const { checkout } = await createAttendanceOwningSessionUnitFixture(query, { onNativeQuery: nativeQuery })
+    const backend = Reflect.get(checkout, 'processID')
+    expect(backend).toEqual(expect.any(Number))
+    const connection = createAttendanceLegacyPlanCommitConnectionV1(checkout)
+    await withAttendanceExclusiveIdleSessionV1(connection, async lease => {
+      for (const text of ['COMMIT;', 'commit', 'BEGIN']) await lease.query(text)
+    })
     expect(query.mock.calls).toEqual([['COMMIT;', undefined], ['commit', undefined], ['BEGIN', undefined]])
+    expect(nativeQuery.mock.calls).toStrictEqual([['COMMIT;', undefined], ['commit', undefined], ['BEGIN', undefined]])
+    for (const receiver of receivers) expect(receiver).toBe(receivers[0])
+    expect(receivers[0]).toHaveProperty('processID', backend)
+    expect(Reflect.get(checkout, 'processID')).toBe(backend)
   })
 
   it('overrides only the COMMIT read timer with the existing transaction bound', async () => {
     const result = { rows: [{ observed: true }] }
     const query = vi.fn().mockResolvedValue(result)
-    const client = { query } as unknown as Pick<PoolClient, 'query'>
-    const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
+    const receivers: unknown[] = []
+    const nativeQuery = vi.fn(function (this: unknown, _statement: unknown, _values?: unknown[]) {
+      receivers.push(this)
+    })
+    const { checkout } = await createAttendanceOwningSessionUnitFixture(query, { onNativeQuery: nativeQuery })
+    const backend = Reflect.get(checkout, 'processID')
+    expect(backend).toEqual(expect.any(Number))
+    const connection = createAttendanceLegacyPlanCommitConnectionV1(checkout)
     const values = ['opaque-fixture']
-    expect(await connection.query('SELECT $1', values)).toBe(result)
-    expect(await connection.query('COMMIT', [])).toBe(result)
-    expect(await connection.query('ROLLBACK')).toBe(result)
-    expect(query.mock.calls).toEqual([
+    const commitValues: unknown[] = []
+    await withAttendanceExclusiveIdleSessionV1(connection, async lease => {
+      expect(await lease.query('SELECT $1', values)).toBe(result)
+      expect(await lease.query('COMMIT', commitValues)).toBe(result)
+      expect(await lease.query('ROLLBACK')).toBe(result)
+    })
+    expect(nativeQuery.mock.calls).toStrictEqual([
       ['SELECT $1', values],
       [{ text: 'COMMIT', values: [], query_timeout: W4_TRANSACTION_STATEMENT_TIMEOUT_MS }],
       ['ROLLBACK', undefined],
     ])
+    expect(query.mock.calls).toEqual([['SELECT $1', values], ['COMMIT', []], ['ROLLBACK', undefined]])
+    expect(nativeQuery.mock.calls[0][1]).toBe(values)
+    expect((nativeQuery.mock.calls[1][0] as { values: unknown[] }).values).toBe(commitValues)
+    expect(query.mock.calls[0][1]).toBe(values)
+    expect(query.mock.calls[1][1]).toBe(commitValues)
     expect(W4_TRANSACTION_STATEMENT_TIMEOUT_MS).toBe(180000)
+    for (const receiver of receivers) expect(receiver).toBe(receivers[0])
+    expect(receivers[0]).toHaveProperty('processID', backend)
+    expect(Reflect.get(checkout, 'processID')).toBe(backend)
   })
 
   it('does not hide commit errors or replace the acquired connection', async () => {
     const failure = Object.assign(new Error('synthetic-commit-failure'), { code: '40001' })
     const query = vi.fn().mockRejectedValue(failure)
-    const connection = createAttendanceLegacyPlanCommitConnectionV1({ query } as unknown as Pick<PoolClient, 'query'>)
-    await expect(connection.query('COMMIT')).rejects.toBe(failure)
+    const receivers: unknown[] = []
+    const nativeQuery = vi.fn(function (this: unknown, _statement: unknown, _values?: unknown[]) {
+      receivers.push(this)
+    })
+    const { checkout } = await createAttendanceOwningSessionUnitFixture(query, { onNativeQuery: nativeQuery })
+    const backend = Reflect.get(checkout, 'processID')
+    expect(backend).toEqual(expect.any(Number))
+    const connection = createAttendanceLegacyPlanCommitConnectionV1(checkout)
+    await expect(withAttendanceExclusiveIdleSessionV1(connection, lease => lease.query('COMMIT'))).rejects.toBe(failure)
     expect(query).toHaveBeenCalledTimes(1)
-    expect(query).toHaveBeenCalledWith({ text: 'COMMIT', values: undefined, query_timeout: 180000 })
+    expect(nativeQuery).toHaveBeenCalledTimes(1)
+    expect(nativeQuery).toHaveBeenCalledWith({ text: 'COMMIT', values: undefined, query_timeout: 180000 })
+    expect(query.mock.calls).toEqual([['COMMIT', undefined]])
+    expect(receivers[0]).toHaveProperty('processID', backend)
+    expect(Reflect.get(checkout, 'processID')).toBe(backend)
   })
 })

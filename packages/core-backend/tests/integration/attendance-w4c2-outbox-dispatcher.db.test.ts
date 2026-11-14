@@ -17,7 +17,8 @@
  * asserted across both sinks together.
  */
 import { randomUUID } from 'crypto'
-import { Client, Pool } from 'pg'
+import type { PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   dispatchAttendanceResultEventOutboxV1,
@@ -32,17 +33,12 @@ const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toStrin
 const ORG = `w4c2ob_${RUN}`
 const FP = 'f'.repeat(64)
 
-function wrap(client: Client) {
-  return {
-    query: async (sqlText: string, params?: unknown[]) => {
-      const result = await client.query(sqlText, params)
-      return { rows: (result.rows ?? []) as Array<Record<string, unknown>> }
-    },
-  }
+function wrap(client: PoolClient) {
+  return attendanceOwningSessionForClientV1(client)
 }
 
 describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)', () => {
-  let pool: Pool
+  let pool: AttendanceManagedPgPool
 
   const seedPending = async (eventKind: string, payload: Record<string, unknown>): Promise<string> => {
     const id = randomUUID()
@@ -88,14 +84,10 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
     }
   }
 
-  const openClient = async (): Promise<Client> => {
-    const client = new Client({ connectionString: dbUrl })
-    await client.connect()
-    return client
-  }
+  const openClient = async (): Promise<PoolClient> => pool.connect()
 
   beforeAll(async () => {
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
   })
 
   afterAll(async () => {
@@ -128,7 +120,7 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
       expect(emittedAgain.filter((e) => (e.payload as { run?: string })?.run === RUN)).toEqual([])
       expect(await businessCounts()).toEqual(before)
     } finally {
-      await client.end()
+      client.release(true)
     }
   })
 
@@ -179,10 +171,10 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
         ])
         expect(await rowState(poisoned)).toMatchObject({ delivery_state: 'delivered', attempts: 2 })
       } finally {
-        await restarted.end()
+        restarted.release(true)
       }
     } finally {
-      await client.end()
+      client.release(true)
     }
   })
 
@@ -244,8 +236,8 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
         expect(await rowState(id)).toMatchObject({ delivery_state: 'delivered', attempts: 1 })
       }
     } finally {
-      await a.end()
-      await b.end()
+      a.release(true)
+      b.release(true)
     }
   }, 30_000)
 
@@ -263,7 +255,7 @@ describeDb('W4C-2 outbox dispatcher (lock 7.1a/12.3, real DB, true concurrency)'
         dispatchAttendanceResultEventOutboxV1(trx, { emit: () => undefined, retryBackoffMs: -1 }),
       ).rejects.toMatchObject({ code: 'W4C2_OUTBOX_BACKOFF_INVALID' })
     } finally {
-      await client.end()
+      client.release(true)
     }
   })
 
