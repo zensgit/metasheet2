@@ -542,4 +542,247 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
     })
     expect(beyond.kind).toBe('unresolved')
   })
+  describe('MUT06_W2_NATIVE SQL organization-scope evidence', () => {
+    type Row = Record<string, unknown>
+    type Call = { kind: string; sql: string; params: unknown[]; rows: Row[] }
+    type ReadArgs = { orgId: string; userId: string; workDates: string[]; strictSources?: boolean }
+    const raw = attendancePlugin.__attendanceWorkDateResolverForTests as {
+      loadPublishedCandidatesForWorkDateResolver: (
+        db: { query: (sql: string, params?: unknown[]) => Promise<Row[]> }, args: ReadArgs,
+      ) => Promise<Row[]>
+      loadApprovedOvertimeWindowsForWorkDateResolver: (
+        db: { query: (sql: string, params?: unknown[]) => Promise<Row[]> }, args: ReadArgs,
+      ) => Promise<Row[]>
+    }
+    const dates = ['2049-10-04', '2049-10-05', '2049-10-06']
+    const shiftName = 'MUT06 Scoped Shift'
+    const scopes = [
+      { role: 'A', orgId: orgA, shift: randomUUID(), direct: randomUUID(), rule: randomUUID(),
+        rotation: randomUUID(), record: randomUUID(), request: randomUUID(), start: '09:00', end: '17:00' },
+      { role: 'B', orgId: orgB, shift: randomUUID(), direct: randomUUID(), rule: randomUUID(),
+        rotation: randomUUID(), record: randomUUID(), request: randomUUID(), start: '10:00', end: '18:00' },
+    ]
+
+    function kindOf(sql: string) {
+      if (sql.includes('FROM attendance_shift_assignments a')) return 'DIRECT'
+      if (sql.includes('FROM attendance_rotation_assignments a')) return 'ROTATION'
+      if (sql.includes('FROM attendance_shifts s') && sql.includes('WHERE s.id = $1')) return 'SHIFT_ID'
+      if (sql.includes('FROM attendance_shifts s') && sql.includes('s.name = ANY(')) return 'SHIFT_NAME'
+      if (sql.startsWith('SELECT user_id, org_id, work_date, first_in_at')) return 'OPEN'
+      if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return 'OVERTIME'
+      return 'OTHER'
+    }
+
+    function probe(orgId: string, requestedUser = userId) {
+      const calls: Call[] = []
+      const errors: string[] = []
+      return {
+        orgId, requestedUser, calls, errors,
+        async query(sql: string, params: unknown[] = []): Promise<Row[]> {
+          try {
+            const result = await pool.query(sql, params)
+            calls.push({ kind: kindOf(sql.replace(/\s+/g, ' ').trim()), sql: sql.replace(/\s+/g, ' ').trim(),
+              params: [...params], rows: result.rows })
+            return result.rows
+          } catch (error) {
+            const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'UNKNOWN'
+            errors.push(/^[A-Z0-9_]{1,40}$/.test(code) ? code : 'UNKNOWN')
+            throw error
+          }
+        },
+      }
+    }
+
+    function receipt(arm: string, probes: ReturnType<typeof probe>[], extra: Row = {}) {
+      console.log('MUT06_W2_SQL_RECEIPT ' + JSON.stringify({
+        arm, databaseErrors: probes.flatMap(p => p.errors),
+        observations: probes.map((p, index) => ({
+          role: ['A', 'B', 'EMPTY'][index],
+          calls: p.calls.map(c => ({ kind: c.kind, rows: c.rows.length,
+            foreignRows: c.rows.filter(r => r.org_id !== undefined && r.org_id !== p.orgId).length })),
+        })),
+        ...extra,
+      }))
+    }
+
+    function assertExecutedGuards(p: ReturnType<typeof probe>) {
+      expect(p.errors, 'MUT06_DATABASE_ERRORS').toEqual([])
+      for (const c of p.calls) {
+        expect(c.kind, 'MUT06_UNCLASSIFIED_QUERY').not.toBe('OTHER')
+        if (c.kind === 'DIRECT' || c.kind === 'ROTATION') {
+          expect(c.sql, 'MUT06_' + c.kind + '_WHERE').toContain('WHERE a.org_id = $1 AND a.user_id = $2')
+          expect(c.params, 'MUT06_' + c.kind + '_BINDS').toEqual([p.orgId, p.requestedUser, dates[2], dates[0]])
+          expect(c.sql, 'MUT06_' + c.kind + '_JOIN').toContain(
+            c.kind === 'DIRECT' ? 's.org_id = a.org_id' : 'r.org_id = a.org_id',
+          )
+        } else if (c.kind === 'SHIFT_ID' || c.kind === 'SHIFT_NAME') {
+          expect(c.sql, 'MUT06_' + c.kind + '_SEGMENT_ORG').toContain('seg.org_id = s.org_id')
+          if (c.kind === 'SHIFT_ID') {
+            expect(c.sql, 'MUT06_SHIFT_ID_WHERE').toContain('WHERE s.id = $1 AND s.org_id = $2')
+            expect(c.params[1], 'MUT06_SHIFT_ID_BIND').toBe(p.orgId)
+          } else {
+            expect(c.sql, 'MUT06_SHIFT_NAME_WHERE').toContain('WHERE s.org_id = $1 AND')
+            expect(c.params, 'MUT06_SHIFT_NAME_BINDS').toEqual([p.orgId, [shiftName]])
+          }
+        } else {
+          expect(c.sql, 'MUT06_' + c.kind + '_WHERE').toContain('WHERE org_id = $1 AND user_id = $2')
+          expect(c.params, 'MUT06_' + c.kind + '_BINDS').toEqual([p.orgId, p.requestedUser, [dates[0]]])
+        }
+      }
+    }
+
+    beforeAll(async () => {
+      await pool.query(
+        'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING',
+        [userId, orgB],
+      )
+      for (const s of scopes) {
+        await pool.query(
+          `INSERT INTO attendance_shifts
+             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight,
+              late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
+           VALUES ($1,$2,$3,'UTC',$4,$5,false,0,0,1,'[0,1,2,3,4,5,6]'::jsonb)`,
+          [s.shift, s.orgId, shiftName, s.start, s.end],
+        )
+        await pool.query(
+          `INSERT INTO attendance_shift_assignments
+             (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+           VALUES ($1,$2,$3,$4,$5,$5,true,'published',0)`,
+          [s.direct, s.orgId, userId, s.shift, dates[0]],
+        )
+        await pool.query(
+          `INSERT INTO attendance_rotation_rules (id,org_id,name,timezone,shift_sequence,is_active)
+           VALUES ($1,$2,'MUT06 scoped rotation','UTC',$3::jsonb,true)`,
+          [s.rule, s.orgId, JSON.stringify([s.shift, shiftName])],
+        )
+        await pool.query(
+          `INSERT INTO attendance_rotation_assignments
+             (id,org_id,user_id,rotation_rule_id,start_date,end_date,is_active,publish_status)
+           VALUES ($1,$2,$3,$4,$5,$6,true,'published')`,
+          [s.rotation, s.orgId, userId, s.rule, dates[1], dates[2]],
+        )
+        await pool.query(
+          `INSERT INTO attendance_records
+             (id,user_id,org_id,work_date,timezone,first_in_at,last_out_at,
+              work_minutes,late_minutes,early_leave_minutes,status,is_workday,meta)
+           VALUES ($1,$2,$3,$4,'UTC',$5,NULL,0,0,0,'partial',true,'{}'::jsonb)`,
+          [s.record, userId, s.orgId, dates[0], dates[0] + 'T' + s.start + ':00Z'],
+        )
+        await pool.query(
+          `INSERT INTO attendance_requests
+             (id,org_id,user_id,work_date,request_type,requested_in_at,requested_out_at,status,metadata)
+           VALUES ($1,$2,$3,$4,'overtime',$5,$6,'approved','{}'::jsonb)`,
+          [s.request, s.orgId, userId, dates[0], dates[0] + 'T17:00:00Z', dates[0] + 'T18:00:00Z'],
+        )
+      }
+      const memberships = await pool.query(
+        'SELECT org_id FROM user_orgs WHERE user_id=$1 AND org_id=ANY($2::text[]) AND is_active=true ORDER BY org_id',
+        [userId, [orgA, orgB]],
+      )
+      expect(memberships.rows.map(r => r.org_id).sort()).toEqual([orgA, orgB].sort())
+    })
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM attendance_requests WHERE id=ANY($1::uuid[])', [scopes.map(s => s.request)])
+      await pool.query('DELETE FROM attendance_records WHERE id=ANY($1::uuid[])', [scopes.map(s => s.record)])
+      await pool.query('DELETE FROM attendance_rotation_assignments WHERE id=ANY($1::uuid[])', [scopes.map(s => s.rotation)])
+      await pool.query('DELETE FROM attendance_rotation_rules WHERE id=ANY($1::uuid[])', [scopes.map(s => s.rule)])
+      await pool.query('DELETE FROM attendance_shift_assignments WHERE id=ANY($1::uuid[])', [scopes.map(s => s.direct)])
+      await pool.query('DELETE FROM attendance_shifts WHERE id=ANY($1::uuid[])', [scopes.map(s => s.shift)])
+    })
+
+    it('MUT06_W2_NATIVE published direct/rotation loaders expose scoped SQL rows before downstream rejection', async () => {
+      const ps = [probe(orgA), probe(orgB), probe(orgA, foreignUserId)]
+      const outcomes: Array<{ rows: Row[] | null; error: string | null }> = []
+      for (const p of ps) {
+        try {
+          outcomes.push({ rows: await raw.loadPublishedCandidatesForWorkDateResolver(p, {
+            orgId: p.orgId, userId: p.requestedUser, workDates: dates, strictSources: true,
+          }), error: null })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : ''
+          outcomes.push({ rows: null, error: /^[A-Z0-9_]{1,80}$/.test(message) ? message : 'UNKNOWN' })
+        }
+      }
+      receipt('PUBLISHED', ps, { returnedCandidates: outcomes.map(x => x.rows?.length ?? 0),
+        loaderErrors: outcomes.map(x => x.error) })
+      expect(outcomes[2]).toEqual({ rows: [], error: null })
+      for (const [index, s] of scopes.entries()) {
+        const p = ps[index]
+        const direct = p.calls.find(c => c.kind === 'DIRECT')
+        const rotation = p.calls.find(c => c.kind === 'ROTATION')
+        expect(direct?.rows.map(r => [r.org_id, r.user_id, r.assignment_id, r.shift_id]),
+          'MUT06_DIRECT_RAW_SCOPE').toEqual([[s.orgId, userId, s.direct, s.shift]])
+        expect(rotation?.rows.map(r => [r.org_id, r.user_id, r.assignment_id, r.rotation_rule_id]),
+          'MUT06_ROTATION_RAW_SCOPE').toEqual([[s.orgId, userId, s.rotation, s.rule]])
+        for (const kind of ['SHIFT_ID', 'SHIFT_NAME']) {
+          const call = p.calls.find(c => c.kind === kind)
+          expect(call?.rows.map(r => [r.org_id, r.id]), 'MUT06_' + kind + '_RAW_SCOPE').toEqual([[s.orgId, s.shift]])
+        }
+        expect(outcomes[index].error, 'MUT06_LOADER_ERROR').toBeNull()
+        const canonical = (outcomes[index].rows ?? []).map(r => ({ ...r,
+          workStartTime: String(r.workStartTime).slice(0, 5), workEndTime: String(r.workEndTime).slice(0, 5) }))
+          .sort((a, b) => String(a.workDate).localeCompare(String(b.workDate)))
+        const common = { orgId: s.orgId, userId, shiftId: s.shift, segmentIndex: null,
+          timezone: 'UTC', workStartTime: s.start, workEndTime: s.end, isOvernight: false }
+        expect(canonical, 'MUT06_PUBLISHED_ARRAY').toEqual([
+          { ...common, workDate: dates[0], assignmentId: s.direct, source: 'shift' },
+          { ...common, workDate: dates[1], assignmentId: s.rotation, source: 'rotation', rotationRuleId: s.rule },
+          { ...common, workDate: dates[2], assignmentId: s.rotation, source: 'rotation', rotationRuleId: s.rule },
+        ])
+        expect(p.calls.map(c => c.kind).sort()).toEqual(['DIRECT', 'ROTATION', 'SHIFT_ID', 'SHIFT_NAME'].sort())
+        assertExecutedGuards(p)
+      }
+      expect(ps[2].calls.map(c => c.kind).sort()).toEqual(['DIRECT', 'ROTATION'].sort())
+      assertExecutedGuards(ps[2])
+    }, 120000)
+
+    it('MUT06_W2_NATIVE active-current open records stay org scoped for the same global user', async () => {
+      const ps = [probe(orgA), probe(orgB), probe(orgA, foreignUserId)]
+      const results: Row[][] = []
+      for (const p of ps) results.push(await listActiveCurrentOpenRecordsForWorkDateResolverV1(
+        p.query, { orgId: p.orgId, userId: p.requestedUser, workDates: [dates[0]] },
+      ))
+      receipt('OPEN', ps, { returnedRows: results.map(x => x.length) })
+      expect(results[2]).toEqual([])
+      for (const [index, s] of scopes.entries()) {
+        const normalized = results[index].map(r => ({ ...r,
+          work_date: r.work_date instanceof Date ? [
+            String(r.work_date.getFullYear()).padStart(4, '0'),
+            String(r.work_date.getMonth() + 1).padStart(2, '0'),
+            String(r.work_date.getDate()).padStart(2, '0'),
+          ].join('-') : String(r.work_date).slice(0, 10),
+          first_in_at: new Date(String(r.first_in_at)).toISOString(),
+        }))
+        expect(normalized, 'MUT06_OPEN_RAW_SCOPE').toEqual([{
+          user_id: userId, org_id: s.orgId, work_date: dates[0],
+          first_in_at: dates[0] + 'T' + s.start + ':00.000Z', last_out_at: null, status: 'partial',
+        }])
+        expect(ps[index].calls.map(c => c.kind)).toEqual(['OPEN'])
+        assertExecutedGuards(ps[index])
+      }
+      assertExecutedGuards(ps[2])
+    }, 120000)
+
+    it('MUT06_W2_NATIVE approved legacy overtime windows stay org scoped before anchor decisions', async () => {
+      const ps = [probe(orgA), probe(orgB), probe(orgA, foreignUserId)]
+      const results: Row[][] = []
+      for (const p of ps) results.push(await raw.loadApprovedOvertimeWindowsForWorkDateResolver(p, {
+        orgId: p.orgId, userId: p.requestedUser, workDates: [dates[0]],
+      }))
+      receipt('OVERTIME', ps, { returnedRows: results.map(x => x.length) })
+      expect(results[2]).toEqual([])
+      for (const [index, s] of scopes.entries()) {
+        expect(results[index], 'MUT06_OVERTIME_RAW_SCOPE').toEqual([{
+          requestId: s.request, orgId: s.orgId, userId, workDate: dates[0], shiftId: null,
+          approvedStartAt: new Date(dates[0] + 'T17:00:00Z'),
+          approvedEndAt: new Date(dates[0] + 'T18:00:00Z'), anchor: null,
+        }])
+        expect(ps[index].calls.map(c => c.kind)).toEqual(['OVERTIME'])
+        assertExecutedGuards(ps[index])
+      }
+      assertExecutedGuards(ps[2])
+    }, 120000)
+  })
+
 })
