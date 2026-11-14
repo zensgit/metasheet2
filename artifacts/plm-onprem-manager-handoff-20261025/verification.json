@@ -1,0 +1,235 @@
+{
+  "at": "2026-10-25T06:53:34.213976+00:00",
+  "status": "SHELL_CONTRACT_ACCEPTED_LOCAL_NOT_INSTALL_ACCEPTANCE",
+  "Meta_Source": "908126779a345f65d484457154e37fca95c374a1",
+  "main_base": "8a426818804897a20f7674c39c56b3a445909c3a",
+  "retained_provider_source": "02b2151aa19559996dfbc9f9bf53f5c47e489173",
+  "provider_path": "scripts/ops/multitable-onprem-deploy-easy.sh",
+  "provider_sha256": "1894f187dee638fdedb548d7885f117fdd35fac25464c802287a7ff3c6e82865",
+  "product_tuple_unchanged": {
+    "Meta": "0cae1b88b3961bfcc718a63a3ead185e98c7bc81",
+    "Native": "117a310a955203248f48d101fa5beae5f0ee2e10"
+  },
+  "source_files_sha256": {
+    "scripts/ops/multitable-onprem-deploy-easy.sh": "1894f187dee638fdedb548d7885f117fdd35fac25464c802287a7ff3c6e82865",
+    "scripts/ops/multitable-onprem-startup-readiness.test.mjs": "02f356c1c668de26d72ff1f2deace31a3bd35c59375fd93455074dae9ec0d2bd",
+    "scripts/ops/multitable-onprem-private-command-logs.test.mjs": "de7500f2a54e05af73566812f394c58c4e01a6fd454b68a16dae57a97a09a934",
+    "scripts/ops/multitable-onprem-manager-handoff.test.mjs": "f631e265f8ab2f5131aa40ac3601f7cb9b8b756b8f8a7e532df7b1e631c6ac87",
+    ".github/workflows/plm-onprem-startup-readiness.yml": "4d03e79348ad63378d3fd3c3086d37d6081f775605cc785c30a5cdffcd7fceb6"
+  },
+  "author_model": "gpt-6.1-sol/high",
+  "baseline8_before": {
+    "pass": 8,
+    "fail": 0,
+    "skip": 0,
+    "duration_ms": 4569.282417
+  },
+  "author_behavior_RED": {
+    "command": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin/node --test scripts/ops/multitable-onprem-manager-handoff.test.mjs",
+    "environment": "PATH prepended with exact owned Node20 bin; new test itself puts fake curl/pm2/systemctl first.",
+    "source": "Unmodified retained provider02b script matching owner baseline SHA256.",
+    "exit": 1,
+    "tests": 59,
+    "pass": 3,
+    "fail": 56,
+    "skip": 0,
+    "duration_ms": 46865.378667,
+    "observed_behavior": "Managers other than explicit auto were silently changed to auto. Missing/empty/malformed/nonstring/blank fresh tokens, HTTP and curl failures still reached health and returned0, including inherited AUTH_TOKEN cases.",
+    "note": "One initial new-fixture JavaScript template syntax error was corrected before this effective behavioral RED. After RED, one additional normal positive test was added to prove nonblank token strings are not normalized or subjected to JWT format assumptions."
+  },
+  "author_GREEN": {
+    "command": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin/node --test scripts/ops/multitable-onprem-startup-readiness.test.mjs scripts/ops/multitable-onprem-private-command-logs.test.mjs scripts/ops/multitable-onprem-manager-handoff.test.mjs",
+    "environment": "PATH=/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin:/usr/bin:/bin",
+    "exit": 0,
+    "tests": 68,
+    "pass": 68,
+    "fail": 0,
+    "skip": 0,
+    "duration_ms": 36981.023458,
+    "baseline_tests": 8,
+    "new_tests": 60,
+    "runtime": "v20.20.2",
+    "node_binary": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin/node",
+    "node_binary_sha256": "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6",
+    "coverage": [
+      "Fresh valid token with caller none, pm2, systemd, explicit auto and default pm2; inherited token is replaced by the new exact token.",
+      "Explicit VERIFY_LOGIN=0 token and no-token health branches for all five manager selections; inherited-token limited fallback retained.",
+      "Default and explicit VERIFY_LOGIN=1 with and without inherited AUTH_TOKEN: missing, empty, malformed JSON, numeric/object/array/boolean/blank tokens, HTTP failure and curl failure all stop before health/supervisor.",
+      "Nested/top-level valid token extraction, nonblank string bytes preserved, original downstream BASE_URL/API_BASE/CHECK_NGINX/EXPECT_PRODUCT_MODE bytes, exact exit23 from failing health on both token and limited branches.",
+      "Old five real loopback HTTP readiness cases and three private-log cases retained; new tests also check output excludes synthetic password, fresh and inherited tokens."
+    ]
+  },
+  "author_mutants": [
+    {
+      "name": "force_auto_both_health_branches",
+      "change": "Only the two final health manager assignments reverted to auto; bootstrap forwarding preserved.",
+      "exit": 1,
+      "focused_failed": 2,
+      "pattern_skipped": 58,
+      "duration_ms": 1650.736208,
+      "killed": true
+    },
+    {
+      "name": "remove_fresh_token_guard",
+      "change": "Delete the new required fresh-token guard; target default-equivalent explicit VERIFY1 missing token with inherited AUTH_TOKEN.",
+      "exit": 1,
+      "focused_failed": 1,
+      "pattern_skipped": 59,
+      "duration_ms": 713.872708,
+      "killed": true
+    },
+    {
+      "name": "stringify_nonstring_or_blank_tokens",
+      "change": "Revert decoder to original String(token); target numeric and blank tokens.",
+      "exit": 1,
+      "focused_failed": 2,
+      "pattern_skipped": 58,
+      "duration_ms": 1357.235125,
+      "killed": true
+    }
+  ],
+  "author_static_checks": [
+    {
+      "command": "bash -n scripts/ops/multitable-onprem-deploy-easy.sh",
+      "exit": 0
+    },
+    {
+      "command": "/opt/homebrew/bin/shellcheck scripts/ops/multitable-onprem-deploy-easy.sh",
+      "version": "0.11.0",
+      "exit": 0
+    },
+    {
+      "command": "/opt/homebrew/bin/actionlint .github/workflows/plm-onprem-startup-readiness.yml",
+      "version": "1.7.12",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "independent": {
+    "accepted_source": true,
+    "actual_shell_controls": 28,
+    "controls_passed": 28,
+    "retained_baseline_suite": {
+      "command": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin/node --test scripts/ops/multitable-onprem-startup-readiness.test.mjs scripts/ops/multitable-onprem-private-command-logs.test.mjs",
+      "PATH": "/tmp/plm-owned-node20-restore-lock-20261025/toolchain-009c15ecf2ea4145b4739c80b2c6038e-20261024T204903Z/node-v20.20.2-darwin-arm64/bin:/usr/bin:/bin",
+      "exit": 0,
+      "tests": 8,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "duration_ms": 3976.014708,
+      "source": "current frozen hashes; five actual owned-loopback readiness cases plus three actual owned-loopback privacy/exit cases",
+      "not_the_authors_full68": true
+    },
+    "report_sha256": "35d9969c78a631e23b503d83dfd45a8ad7f4558d6ce29207f6051507d5a61ce9",
+    "counts_not_added_to_author": true
+  },
+  "Root_independent_actual_health_controls": {
+    "at": "2026-10-25T06:45:27.227Z",
+    "Source_script_sha256": "1894f187dee638fdedb548d7885f117fdd35fac25464c802287a7ff3c6e82865",
+    "retained02b_script_sha256": "2cd32b9bf2d9dfc609e98d891fb62db4ba43e83b243ea77b3d245adfdc6c37fe",
+    "actual_health_sha256": "295468cda1e097337711166066aac3395d484dd2538365a8e62ee9f815b905ad",
+    "actual_health_wrapper_sha256": "06204d960e0123bde1c8959b8ac35ac818c132204f7f77ca6ce94c24033786bd",
+    "Root_independent_controls": [
+      {
+        "name": "fixed-fresh-none",
+        "exit": 0,
+        "supervisor_probe_count": 0,
+        "actual_health_authme": [
+          {
+            "method": "GET",
+            "path": "/api/auth/me",
+            "token": "fresh"
+          }
+        ],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": false
+      },
+      {
+        "name": "old-fresh-none-observes-global-probes",
+        "exit": 0,
+        "supervisor_probe_count": 2,
+        "actual_health_authme": [
+          {
+            "method": "GET",
+            "path": "/api/auth/me",
+            "token": "fresh"
+          }
+        ],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": true
+      },
+      {
+        "name": "fixed-missing-inherited-refused",
+        "exit": 1,
+        "supervisor_probe_count": 0,
+        "actual_health_authme": [],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": false
+      },
+      {
+        "name": "old-missing-inherited-observes-fallback",
+        "exit": 0,
+        "supervisor_probe_count": 2,
+        "actual_health_authme": [
+          {
+            "method": "GET",
+            "path": "/api/auth/me",
+            "token": "inherited"
+          }
+        ],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": true
+      },
+      {
+        "name": "fixed-wrong-mode-health-refused",
+        "exit": 1,
+        "supervisor_probe_count": 0,
+        "actual_health_authme": [
+          {
+            "method": "GET",
+            "path": "/api/auth/me",
+            "token": "fresh"
+          }
+        ],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": false
+      },
+      {
+        "name": "fixed-nonstring-refused",
+        "exit": 1,
+        "supervisor_probe_count": 0,
+        "actual_health_authme": [],
+        "credential_values_absent_from_output": true,
+        "controlled_old_bad_behavior_observed": false
+      }
+    ],
+    "all_controls_passed": true,
+    "scope": "Real deploy and actual downstream health shell/Node JSON/real curl on ownedloopback HTTP; bootstrap/admin and supervisors are controlledfixtures. Not actual product login, DB, service installation, images or runtime qualification.",
+    "cleanup": "All owned child commands completed and HTTP servers/temp roots closed/removed."
+  },
+  "original_contracts": {
+    "private_log_test_byte_identical": true,
+    "readiness_only_ready_login_fixture_payload_changed": true,
+    "workflow_only_two_trigger_paths_and_actual_test_command_changed": true,
+    "source_only_decoder_guard_two_health_manager_assignments_changed": true,
+    "method": "Reverse exactly the authorized deltas in memory; resulting original bytes match every owner baseline SHA256. No baseline assertion changed."
+  },
+  "immutable_packet": "/Users/chouhua/.codex/worktrees/plm-listener-review-20261015/Yuantus/artifacts/plm-listener-review-20261015/private-acceptance-evidence-20261020/meta-onprem-manager-handoff-source-20261025",
+  "immutable_manifest_sha256": "d23e84dcbb1ad0848911cfc7f248726b8928ae3aaa91f624a8edf63a67577315",
+  "gates": {
+    "remote_CI_for_this_Source": "NOT_RUN_UNPUSHED",
+    "complete_dynamic_dependency_closure": false,
+    "actual_product_login": false,
+    "OS_service_installation": false,
+    "image_or_runtime_installation": false,
+    "coupled_Native_Meta_acceptance": false,
+    "whole_goal_complete": false,
+    "production_enabled": false,
+    "old_original_archive_workspace_packets": "UNCHANGED; futurecurrentoverlayrequiresseparatelyfixedMetaSource/hashandfreshmanifest"
+  },
+  "closing_commit": "record externally once, no self-reference"
+}
