@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Test double for `git` on the fake deploy host. Logs each call with the GIT_CONFIG_* pairs it saw.
+# The sync commands print what real git prints on a deploy checkout that moved: the previous
+# commit (the running one, abbreviated) and a changed migration file, on stdout and stderr, so
+# a sync whose output reaches the public log is seen by the harness.
+set -u
+cfg="count=${GIT_CONFIG_COUNT-<unset>}"
+for i in 0 1 2; do
+  k="GIT_CONFIG_KEY_${i}"; v="GIT_CONFIG_VALUE_${i}"
+  if [[ -n "${!k:-}" ]]; then cfg="${cfg} ${!k}=${!v-}"; fi
+done
+printf 'git\t-\t-\t%s\t%s\n' "$cfg" "$*" >> "${H_CALLS}"
+prev="bbbbbbb"
+file="packages/core-backend/src/db/migrations/zzzz20260601120000_harness_git_sync_marker.ts"
+case "${1:-}" in
+  rev-parse) [[ "${2:-}" == "--is-inside-work-tree" ]] && { echo true; exit 0; } ;;
+  fetch)
+    printf 'From origin\n   %s..aaaaaaa  main       -> origin/main\n' "$prev" >&2
+    printf 'fetched %s..aaaaaaa\n' "$prev"
+    exit "${H_GIT_FETCH_RC:-0}"
+    ;;
+  checkout)
+    printf 'M\t%s\n' "$file"
+    printf "Already on 'main' (was %s)\n" "$prev" >&2
+    exit 0
+    ;;
+  merge)
+    printf 'Updating %s..aaaaaaa\nFast-forward\n %s | 12 ++++\n create mode 100644 %s\n' "$prev" "$file" "$file"
+    printf 'merge: %s %s\n' "$prev" "$file" >&2
+    exit 0
+    ;;
+  stash)
+    printf 'Saved working directory and index state On main (%s): %s\n' "$prev" "$file"
+    printf 'stash: %s\n' "$file" >&2
+    exit 0
+    ;;
+  ls-files) for a in "$@"; do last="$a"; done; echo "$last"; exit 0 ;;
+  diff)
+    # `git diff --quiet <40-hex commit> -- files`: the host-file drift check.
+    if [[ "${3:-}" =~ ^[0-9a-f]{40}$ ]]; then exit "${H_GIT_DRIFT:-0}"; fi
+    # `git diff --quiet -- files`: H_GIT_DIRTY=1 makes the pre-synced host files differ (stash).
+    exit "${H_GIT_DIRTY:-0}"
+    ;;
+esac
+printf 'UNMODELED\t-\t-\t-\tgit %s\n' "$*" >> "${H_CALLS}"
+exit 99

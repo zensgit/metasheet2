@@ -161,3 +161,133 @@ test('backend health response exposes normalized build metadata', () => {
   assertContains(buildInfo, 'METASHEET_BUILD_IMAGE_DIGEST', 'build info helper')
   assertContains(buildInfo, "trimmed === 'unknown'", 'build info helper')
 })
+
+const DESTRUCTIVE_DOCKER = [
+  [/\bvolume\s+(rm|prune)\b/, 'volume removal'],
+  [/\b(image|container|builder|network)\s+prune\b/, 'prune'],
+  [/\bnetwork\s+rm\b/, 'network removal'],
+  [/\bcompose\b.*\srm(\s|$)/, 'compose rm'],
+  [/\bdocker\s+(container\s+)?(stop|restart|kill|rm|start|pause|update)\b.*\bmetasheet-(postgres|redis)\b/, 'a direct action on postgres or redis'],
+]
+function destructiveDockerUses(line) {
+  return DESTRUCTIVE_DOCKER.filter(([pattern]) => pattern.test(line)).map(([, label]) => label)
+}
+// `docker compose <global options> up|run <flags> <services>`; null for other lines. Every leading
+// global option is skipped with its value; an option this list does not know is reported as
+// `unknownGlobal`, so a new spelling fails the rule instead of hiding the line from it.
+// Quoted operator messages are not docker calls.
+const COMPOSE_GLOBAL_WITH_VALUE = ['-p', '--project-name', '-f', '--file', '--project-directory', '--env-file', '--profile', '--ansi', '--parallel', '--progress']
+const COMPOSE_GLOBAL_FLAGS = ['--compatibility', '--dry-run', '--all-resources']
+function composeUpRunCall(line) {
+  const plain = line.replace(/\b(echo|wlog|werr|fail)\s+"[^"]*"/g, '$1 MESSAGE')
+  const match = plain.match(/\bdocker compose\b(.*)$/)
+  if (!match) return null
+  const tokens = match[1].trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+  let i = 0
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const option = tokens[i]
+    const name = option.split('=')[0]
+    if (option.includes('=') && COMPOSE_GLOBAL_WITH_VALUE.includes(name)) i += 1
+    else if (COMPOSE_GLOBAL_WITH_VALUE.includes(option)) i += 2
+    else if (COMPOSE_GLOBAL_FLAGS.includes(option)) i += 1
+    else return { sub: null, unknownGlobal: option, flags: [], services: [], line }
+  }
+  const sub = tokens[i++]
+  if (sub !== 'up' && sub !== 'run') return null
+  const flags = []
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    const flag = tokens[i++]
+    flags.push(flag)
+    if (flag === '--name' || flag === '-e') i += 1
+  }
+  const services = []
+  if (sub === 'up') {
+    while (i < tokens.length && /^[a-z][a-z0-9_-]*$/.test(tokens[i])) services.push(tokens[i++])
+  } else if (i < tokens.length && /^[a-z][a-z0-9_-]*$/.test(tokens[i])) {
+    services.push(tokens[i])
+  }
+  return { sub, flags, services, line }
+}
+
+test('production deploy window never removes, prunes or recreates the data containers', () => {
+  const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
+  const lines = raw.split('\n').map((line) => line.trim()).filter((line) => !line.startsWith('#') && !line.startsWith("'#"))
+  const dockerLines = lines.filter((line) => /(^|[^A-Za-z0-9_-])docker\s+[a-z]/.test(line))
+  // The filter must see the window's real docker calls, or the negatives below prove nothing.
+  assert.ok(dockerLines.some((line) => line.includes('docker stop -t 60 metasheet-web')))
+  assert.ok(dockerLines.some((line) => line.includes('docker stop -t 60 metasheet-backend')))
+  assert.ok(dockerLines.some((line) => /docker compose .* run --rm --no-deps -T .*--latest/.test(line)))
+  assert.ok(dockerLines.some((line) => /docker compose .* up --no-start --no-deps --force-recreate backend/.test(line)))
+  // Inner `sh -c '...'` programs (psql flags and the like) are not docker's own arguments.
+  const ownArgs = dockerLines.map((line) => line.replace(/sh -c '[^']*'/g, 'sh -c PROGRAM'))
+  for (const [pattern, label] of [
+    [/\brm\s+-f\b/, 'rm -f'],
+    [/\bdocker\s+(container\s+)?rm\b/, 'docker rm'],
+    [/system\s+prune/, 'system prune'],
+    [/\bcompose\b.*\bdown\b/, 'compose down'],
+    [/\s-v(\s|$)|--volumes\b/, 'volume removal flag'],
+    [/\bup\b.*\b(postgres|redis)\b/, 'up of postgres or redis'],
+  ]) {
+    assert.deepEqual(ownArgs.filter((line) => pattern.test(line)), [], `no docker line may use ${label}`)
+  }
+  // Further destructive forms, and every compose up/run names its services and passes --no-deps.
+  // Static only: a line in an error branch that no scenario reaches is visible to nothing else.
+  for (const line of ownArgs) {
+    assert.deepEqual(destructiveDockerUses(line), [], `docker line: ${line}`)
+  }
+  const composeUpRun = dockerLines.map(composeUpRunCall).filter(Boolean)
+  assert.ok(composeUpRun.length >= 5, 'the rule sees the window\'s compose run and up lines')
+  for (const call of composeUpRun) {
+    assert.equal(call.unknownGlobal, undefined, `docker compose with an unknown global option: ${call.line}`)
+    assert.ok(call.flags.includes('--no-deps'), `compose ${call.sub} without --no-deps: ${call.line}`)
+    assert.ok(call.services.length > 0, `compose ${call.sub} without an explicit service list: ${call.line}`)
+    for (const service of call.services) assert.ok(['backend', 'web'].includes(service), `compose ${call.sub} of ${service}: ${call.line}`)
+  }
+  // Positive controls: each of these lines must be flagged by the checks above.
+  const P = 'docker compose -p "$P" --project-directory "$PROJECT_DIR" -f "$F"'
+  for (const probe of [
+    `timeout 60 ${P} rm -sfv postgres`,
+    'timeout 60 docker image prune -af',
+    'timeout 60 docker container prune -f',
+    'timeout 60 docker builder prune -af',
+    'timeout 60 docker network prune -f',
+    'timeout 60 docker network rm metasheet2_default',
+    'timeout 60 docker volume rm "${P}_metasheet-postgres-data"',
+    'timeout 60 docker volume prune -f',
+    'timeout 60 docker restart metasheet-postgres',
+    'timeout 90 docker stop -t 60 metasheet-postgres',
+    'timeout 60 docker kill metasheet-redis',
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} up -d --force-recreate backend web`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 120 ${P} run --rm -T backend node migrate.js --list`,
+    `IMAGE_OWNER=o IMAGE_TAG=t timeout 300 ${P} --env-file .env up -d`,
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --project-name "$P" -f "$F" up -d --force-recreate',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --file "$F" -p "$P" up -d',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --project-name="$P" --file="$F" up -d --no-deps',
+    'IMAGE_OWNER=o IMAGE_TAG=t timeout 300 docker compose --verbose up -d --no-deps backend',
+  ]) {
+    const call = composeUpRunCall(probe)
+    const composeBad = call && (call.unknownGlobal !== undefined || !call.flags.includes('--no-deps') || call.services.length === 0)
+    assert.ok(destructiveDockerUses(probe).length > 0 || composeBad, `the checks flag: ${probe}`)
+  }
+
+  const excludeFlag = '-e "MIGRATION_EXCLUDE='
+  assert.equal(raw.split(excludeFlag).length - 1, 1, 'MIGRATION_EXCLUDE is passed exactly once')
+  const excludeLine = raw.split('\n').find((line) => line.includes(excludeFlag))
+  assert.match(excludeLine, /migrate\.js --latest/)
+  assert.match(excludeLine, /-e "MIGRATION_EXCLUDE=\$\{PROD_EXCLUDE_CSV\}"/)
+
+  // The production exclusion list is the staging owner-ruled list (A-3 only), with its tables.
+  const lib = readRepoFile('scripts', 'ops', 'attendance-window-runner-pipeline.lib.sh')
+  const arrayOf = (text, name) => {
+    const match = text.match(new RegExp(`^\\s*${name}=\\(\\n([\\s\\S]*?)\\n\\s*\\)`, 'm'))
+    assert.ok(match, `${name} array present`)
+    return match[1].split('\n').map((entry) => entry.trim()).filter(Boolean)
+  }
+  const stagingNames = arrayOf(lib, 'STAGING_OWNER_EXCLUDED_MIGRATIONS')
+  assert.deepEqual(stagingNames, ['zzzz20260919090000_create_approval_template_group_backfill_batches'])
+  assert.deepEqual(arrayOf(raw, 'PROD_OWNER_EXCLUDED_MIGRATIONS'), stagingNames)
+  assert.deepEqual(arrayOf(raw, 'PROD_OWNER_EXCLUDED_TABLES'), arrayOf(lib, 'STAGING_OWNER_EXCLUDED_TABLES'))
+  assert.equal(raw.split('PROD_OWNER_EXCLUDED_MIGRATIONS=(').length - 1, 1)
+  assert.equal(raw.split('PROD_OWNER_EXCLUDED_TABLES=(').length - 1, 1)
+})

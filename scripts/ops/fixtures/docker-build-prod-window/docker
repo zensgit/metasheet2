@@ -1,0 +1,730 @@
+#!/usr/bin/env bash
+# Test double for `docker`, used only by scripts/ops/docker-build-prod-window.test.mjs.
+# No container, image or network is touched. State lives under $H_DS:
+#   ctr/<name>/   running, health, id, image_id, config_image, volume, label.<key>, fs/ (backend files)
+#   img/<key>/    rev, id, digests (keyed by image reference and by image id)
+#   ledger        applied migration names, one per line
+#   volumes/attendance-import/  contents of the backend's named volume mounted at
+#                 /app/uploads/attendance-import (compose); outside every container fs, so find
+#                 and the copy-out tar do not see it (as -xdev / --one-file-system), recreate keeps
+#                 it, and only `docker cp <ctr>:<path> -` of a parent path includes it
+#   oneoff/<name> one-off containers that are alive
+# Every call is appended to $H_CALLS (tab separated):
+#   kind  IMAGE_TAG  IMAGE_OWNER  meta  argv
+# meta records whether docker/app.env and .env are byte-identical to the scenario input at that
+# moment, the IMAGE_TAG written in .env, how many one-off migrate containers are alive, and the
+# id/image of the container a start/stop/kill/cp targets. A call this double does not model is
+# logged as UNMODELED and exits 99, so a silent change of path cannot pass a scenario.
+set -u
+DS="${H_DS:?}"
+C="${DS}/ctr"
+
+oneoff_alive() {
+  local n=0 f
+  for f in "${DS}"/oneoff/*migrate*; do
+    if [[ -e "$f" ]]; then n=$((n + 1)); fi
+  done
+  printf '%s' "$n"
+}
+flat() {
+  local line="$*"
+  line="${line//$'\n'/ }"
+  line="${line//$'\t'/ }"
+  printf '%s' "$line"
+}
+log_call() {
+  local appenv=0 dotenv=0 tag target="-" t
+  if cmp -s "${H_REPO}/docker/app.env" "${H_ORIG}/app.env"; then appenv=1; fi
+  if cmp -s "${H_REPO}/.env" "${H_ORIG}/dotenv"; then dotenv=1; fi
+  tag="$(sed -n 's/^IMAGE_TAG=//p' "${H_REPO}/.env" 2>/dev/null | tail -n 1)"
+  case "${1:-}" in
+    start|stop|kill)
+      for t in "$@"; do :; done
+      if [[ -d "${C}/${t}" ]]; then target="$(cat "${C}/${t}/id")@$(cat "${C}/${t}/image_id")"; fi
+      ;;
+    cp)
+      # `cp - <ctr>:/` (copy-in) or `cp <ctr>:<path> -` (read-back)
+      t="${3:-}"
+      if [[ "${2:-}" == *:* ]]; then t="${2}"; fi
+      t="${t%%:*}"
+      if [[ -d "${C}/${t}" ]]; then target="$(cat "${C}/${t}/id")@$(cat "${C}/${t}/image_id")"; fi
+      ;;
+  esac
+  printf 'docker\t%s\t%s\tappenv_orig=%s dotenv_orig=%s dotenv_tag=%s oneoff=%s target=%s\t%s\n' \
+    "${IMAGE_TAG-<unset>}" "${IMAGE_OWNER-<unset>}" "$appenv" "$dotenv" "${tag:-none}" "$(oneoff_alive)" "$target" "$(flat "$*")" >> "${H_CALLS}"
+}
+unmodeled() {
+  printf 'UNMODELED\t-\t-\t-\tdocker %s\n' "$(flat "$*")" >> "${H_CALLS}"
+  echo "harness: unmodeled docker call: $*" >&2
+  exit 99
+}
+log_call "$@"
+
+has() { [[ -d "${C}/$1" ]]; }
+get() { cat "${C}/$1/$2" 2>/dev/null; }
+put() { printf '%s' "$3" > "${C}/$1/$2"; }
+key() {
+  local k="$1"
+  k="${k//\//_}"
+  k="${k//:/_}"
+  k="${k//@/_}"
+  printf '%s' "$k"
+}
+img_dir() { printf '%s/img/%s' "$DS" "$(key "$1")"; }
+next_seq() {
+  local n
+  n="$(cat "${DS}/seq" 2>/dev/null || echo 0)"
+  n=$((n + 1))
+  printf '%s' "$n" > "${DS}/seq"
+  printf '%s' "$n"
+}
+
+ledger_count() { awk 'NF { n++ } END { printf "%d\n", n }' "${DS}/ledger"; }
+image_migrations() { tr ',' '\n' <<< "${H_IMAGE_MIGRATIONS}" | awk 'NF'; }
+pending_list() {
+  local n
+  while IFS= read -r n; do
+    if ! grep -qxF -- "$n" "${DS}/ledger"; then printf '%s\n' "$n"; fi
+  done < <(image_migrations)
+}
+applied_count() {
+  local n c=0
+  while IFS= read -r n; do
+    if grep -qxF -- "$n" "${DS}/ledger"; then c=$((c + 1)); fi
+  done < <(image_migrations)
+  printf '%s\n' "$c"
+}
+# Client backends other than the asking session: the running backend holds two, every live
+# one-off migrate container one, plus one per line of late_sessions (a client that connects
+# after the drain: H_LATE_SESSION). H_SESSIONS=never keeps two forever; migrate-stuck keeps
+# one from the first migrate start on, even after the container is killed.
+SESSION_COUNT_SQL="SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+late_session() {
+  if [[ "${H_LATE_SESSION:-}" == "$1" ]]; then echo late >> "${DS}/late_sessions"; fi
+}
+sessions() {
+  case "${H_SESSIONS:-model}" in
+    never) echo 2; return 0 ;;
+    migrate-stuck)
+      if [[ -e "${DS}/migrate_started" ]]; then echo 1; return 0; fi
+      ;;
+  esac
+  local n=0
+  if [[ "$(get metasheet-backend running)" == "true" ]]; then n=$((n + 2)); fi
+  n=$((n + $(oneoff_alive)))
+  if [[ -f "${DS}/late_sessions" ]]; then n=$((n + $(awk 'NF { c++ } END { printf "%d", c }' "${DS}/late_sessions"))); fi
+  echo "$n"
+}
+
+psql_answer() {
+  local sql="$1"
+  case "$sql" in
+    *pg_cancel_backend*) echo 0 ;;
+    *pg_terminate_backend*) unmodeled psql "$sql" ;;
+    *pg_database_size*) echo "${H_DB_BYTES:-1048576}" ;;
+    *approval_template_group_backfill*)
+      if [[ "${H_EXCLUDED_TABLES:-0}" == "1" ]]; then echo 3; return 0; fi
+      if grep -qxF -- "zzzz20260919090000_create_approval_template_group_backfill_batches" "${DS}/ledger"; then echo 3; else echo 0; fi
+      ;;
+    *kysely_migration*)
+      # H_PSQL_FAIL_AFTER_MIGRATE=1: every ledger read fails once the migration has started.
+      if [[ "${H_PSQL_FAIL_AFTER_MIGRATE:-0}" == "1" && -e "${DS}/migrate_started" ]]; then
+        echo 'psql: error: connection to server failed' >&2
+        exit 2
+      fi
+      case "$sql" in
+        *"count(*)"*) ledger_count ;;
+        *"SELECT name"*) sort "${DS}/ledger" ;;
+        *) unmodeled psql "$sql" ;;
+      esac
+      ;;
+    *"to_regclass('public.attendance_import_jobs')"*)
+      if [[ "${H_TABLES_ABSENT:-0}" == "1" ]]; then echo; else echo attendance_import_jobs; fi
+      ;;
+    *attendance_import_jobs*)
+      case "$sql" in
+        *"'running'"*) echo "${H_IMPORT_BUSY:-0}" ;;
+        *) echo 0 ;;
+      esac
+      ;;
+    *"to_regclass('public.directory_sync_runs')"*)
+      if [[ "${H_TABLES_ABSENT:-0}" == "1" ]]; then echo; else echo directory_sync_runs; fi
+      ;;
+    *directory_sync_runs*)
+      case "$sql" in
+        *">= now()"*) echo "${H_SYNC_LIVE:-0}" ;;
+        *) echo 0 ;;
+      esac
+      ;;
+    *string_agg*)
+      local s
+      s="$(sessions)"
+      if [[ "$s" == "0" ]]; then echo none; else echo "idle=${s}"; fi
+      ;;
+    *"autovacuum worker"*) echo 0 ;;
+    *"idle in transaction"*) echo 0 ;;
+    *"extract(epoch"*) echo 0 ;;
+    *"client backend"*)
+      # Only the exact drain query is modelled; any other client-backend count is a change of the window.
+      [[ "$sql" == "$SESSION_COUNT_SQL" ]] || unmodeled psql "$sql"
+      if [[ "${H_SESSION_COUNT_FAIL:-0}" == "1" ]]; then echo 'psql: error: FATAL:  sorry, too many clients already' >&2; exit 2; fi
+      sessions
+      ;;
+    *quote_ident*) : ;;
+    *server_version*) echo 15.8 ;;
+    *) unmodeled psql "$sql" ;;
+  esac
+}
+
+do_inspect() {
+  local fmt="" name=""
+  while (( $# )); do
+    case "$1" in
+      -f|--format) fmt="$2"; shift 2 ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+  if ! has "$name"; then echo "Error: No such object: ${name}" >&2; exit 1; fi
+  case "$fmt" in
+    '{{.State.Running}}') get "$name" running; echo ;;
+    '{{if .State.Health}}'*) get "$name" health; echo ;;
+    '{{index .Config.Labels "'*) local k="${fmt#*\"}"; k="${k%%\"*}"; get "$name" "label.${k}"; echo ;;
+    '{{range .Mounts}}{{println .Destination}}{{end}}')
+      # The compose file mounts the attendance-import volume into every backend container.
+      if [[ "$name" == "metasheet-backend" ]]; then echo /app/uploads/attendance-import; fi
+      echo
+      ;;
+    '{{range .Mounts}}'*) get "$name" volume; echo ;;
+    '{{.Image}}') get "$name" image_id; echo ;;
+    '{{.Config.Image}}') get "$name" config_image; echo ;;
+    '{{.Id}}') get "$name" id; echo ;;
+    *) unmodeled inspect "$fmt" "$name" ;;
+  esac
+}
+
+do_image_inspect() {
+  local fmt="" ref="" d
+  while (( $# )); do
+    case "$1" in
+      -f|--format) fmt="$2"; shift 2 ;;
+      *) ref="$1"; shift ;;
+    esac
+  done
+  d="$(img_dir "$ref")"
+  if [[ ! -d "$d" ]]; then echo "Error: No such image: ${ref}" >&2; exit 1; fi
+  case "$fmt" in
+    *org.opencontainers.image.revision*) cat "${d}/rev"; echo ;;
+    *RepoDigests*) cat "${d}/digests"; echo ;;
+    *) unmodeled image inspect "$fmt" "$ref" ;;
+  esac
+}
+
+do_ps() {
+  local fmt="" quiet=0 filter=""
+  while (( $# )); do
+    case "$1" in
+      -a) shift ;;
+      -q) quiet=1; shift ;;
+      --format) fmt="$2"; shift 2 ;;
+      --filter) filter="$2"; shift 2 ;;
+      *) unmodeled ps "$@" ;;
+    esac
+  done
+  if [[ "$quiet" == "0" && "$fmt" == '{{.Names}}' && -z "$filter" ]]; then
+    ls -1 "$C"
+    ls -1 "${DS}/oneoff"
+    if [[ -f "${DS}/extra_names" ]]; then cat "${DS}/extra_names"; fi
+    return 0
+  fi
+  if [[ "$quiet" == "1" && "$filter" == 'name=^/'*'$' ]]; then
+    local n="${filter#name=^/}"
+    n="${n%\$}"
+    if [[ -f "${DS}/oneoff/${n}" ]]; then cat "${DS}/oneoff/${n}"; echo; fi
+    if has "$n"; then get "$n" id; echo; fi
+    return 0
+  fi
+  unmodeled ps "$@"
+}
+
+# The effective one-off environment: values the compose env_file would add (H_ONEOFF_ENV,
+# comma separated) plus every -e of the call.
+env_has() {
+  local k="$1" e
+  shift
+  while IFS= read -r e; do
+    if [[ -n "$e" && ( "$e" == "${k}="* || "$e" == "$k" ) ]]; then return 0; fi
+  done <<< "$(tr ',' '\n' <<< "${H_ONEOFF_ENV:-}")"
+  for e in "$@"; do
+    if [[ "$e" == "${k}="* || "$e" == "$k" ]]; then return 0; fi
+  done
+  return 1
+}
+
+run_list() {
+  local name="$1" cmdtext="$2" k pend n count
+  shift 2
+  # The in-container guard: refuses (rc 1) when a guarded key is set in the effective env.
+  for k in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
+    if [[ "$cmdtext" == *"[ -z \"\${${k}+x}\" ]"* ]] && env_has "$k" "$@"; then
+      exit 1
+    fi
+  done
+  if [[ "$name" != *postlist* && "${H_LIST_RC:-0}" != "0" ]]; then
+    echo "Error: connect ECONNREFUSED" >&2
+    exit "${H_LIST_RC}"
+  fi
+  if [[ "$name" == *postlist* ]]; then
+    if [[ "${H_WEB_RUNNING_AFTER_COMMIT:-0}" == "1" ]]; then put metasheet-web running true; fi
+    if [[ "${H_WEB_GONE_AFTER_COMMIT:-0}" == "1" ]]; then rm -rf "${C:?}/metasheet-web"; fi
+    if [[ "${H_TERM_ON_POSTLIST:-0}" == "1" ]]; then kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"; fi
+  fi
+  pend="$(pending_list)"
+  if [[ "$name" == *postlist* && -n "${H_POSTLIST_EXTRA:-}" ]]; then
+    pend="${pend:+${pend}$'\n'}${H_POSTLIST_EXTRA}"
+    # H_POSTLIST_ONLY_EXTRA=1: the extra name is listed instead of the excluded one (same count).
+    if [[ "${H_POSTLIST_ONLY_EXTRA:-0}" == "1" ]]; then pend="${H_POSTLIST_EXTRA}"; fi
+  fi
+  count=0
+  if [[ -n "$pend" ]]; then count="$(awk 'NF { n++ } END { printf "%d", n }' <<< "$pend")"; fi
+  echo "Applied: $(applied_count)"
+  echo "Pending: ${count}"
+  if [[ -n "$pend" ]]; then
+    echo
+    echo "Pending migrations (in load order):"
+    while IFS= read -r n; do
+      if [[ -n "$n" ]]; then echo "  - ${n}"; fi
+    done <<< "$pend"
+  else
+    echo
+    echo "No pending migrations - schema is up to date."
+  fi
+}
+
+print_migrate_error() {
+  cat >&2 <<EOF
+failed to migrate
+error: duplicate key value violates unique constraint "harness_unique"
+    at Parser.parseErrorMessage (/app/node_modules/pg-protocol/dist/parser.js:283:98) {
+  length: 230,
+  severity: 'ERROR',
+  code: '23505',
+  detail: 'Key (email)=(${H_DETAIL:-harness-detail}) already exists.',
+  schema: 'public'
+}
+EOF
+}
+
+run_migrate() {
+  local name="$1" excl="" e n todo=() i
+  shift
+  for e in "$@"; do
+    if [[ "$e" == MIGRATION_EXCLUDE=* ]]; then excl="${e#MIGRATION_EXCLUDE=}"; fi
+  done
+  printf 'oneoff-%s' "$name" > "${DS}/oneoff/${name}"
+  : > "${DS}/migrate_started"
+  if [[ "${H_MIGRATE_IGNORE_EXCLUDE:-0}" == "1" ]]; then excl=""; fi
+  if [[ "${H_ABORT_ON:-}" == "migrate" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+  # H_ENV_RO_AT_MIGRATE=1: .env becomes read-only while the migration runs (the write at the commit fails).
+  if [[ "${H_ENV_RO_AT_MIGRATE:-0}" == "1" ]]; then chmod 0444 "${H_REPO}/.env"; fi
+  while IFS= read -r n; do
+    if [[ -z "$n" || ",${excl}," == *",${n},"* ]]; then continue; fi
+    todo+=("$n")
+  done < <(pending_list)
+  case "${H_MIGRATE:-ok}" in
+    ok|fail-committed)
+      for n in "${todo[@]}"; do
+        printf '%s\n' "$n" >> "${DS}/ledger"
+        echo "migration \"${n}\" was executed successfully"
+      done
+      rm -f "${DS}/oneoff/${name}"
+      if [[ "${H_MIGRATE:-ok}" == "fail-committed" ]]; then
+        echo "harness: client error after the commit" >&2
+        exit 1
+      fi
+      exit 0
+      ;;
+    fail-rollback)
+      # One transaction: the batch reports its earlier migrations, then fails; nothing is applied.
+      echo "migration \"${todo[0]}\" was executed successfully"
+      echo "failed to execute migration \"${todo[1]}\"" >&2
+      print_migrate_error
+      rm -f "${DS}/oneoff/${name}"
+      exit 1
+      ;;
+    fail-partial)
+      for n in "${todo[@]:0:${H_PARTIAL:-3}}"; do
+        printf '%s\n' "$n" >> "${DS}/ledger"
+        echo "migration \"${n}\" was executed successfully"
+      done
+      echo "failed to execute migration \"${todo[${H_PARTIAL:-3}]}\"" >&2
+      print_migrate_error
+      rm -f "${DS}/oneoff/${name}"
+      exit 1
+      ;;
+    fail-empty)
+      print_migrate_error
+      rm -f "${DS}/oneoff/${name}"
+      exit 1
+      ;;
+    timeout)
+      # As if `timeout` had ended the compose client: the one-off container is left running.
+      exit 124
+      ;;
+    term|term-after-commit)
+      # The window receives TERM while this one-off is still running; it stays alive until killed.
+      # term-after-commit: the batch has committed (ledger rows written) before the TERM.
+      if [[ "${H_MIGRATE}" == "term-after-commit" ]]; then
+        for n in "${todo[@]}"; do
+          printf '%s\n' "$n" >> "${DS}/ledger"
+          echo "migration \"${n}\" was executed successfully"
+        done
+      fi
+      kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"
+      for ((i = 0; i < 1200; i++)); do
+        if [[ ! -f "${DS}/oneoff/${name}" ]]; then exit 137; fi
+        /bin/sleep 0.05
+      done
+      exit 137
+      ;;
+    *) unmodeled migrate-mode "${H_MIGRATE}" ;;
+  esac
+}
+
+compose_run() {
+  local name="" envs=() svc="" ref
+  while (( $# )); do
+    case "$1" in
+      --rm|--no-deps|-T) shift ;;
+      --name) name="$2"; shift 2 ;;
+      -e) envs+=("$2"); shift 2 ;;
+      -*) unmodeled compose run option "$1" ;;
+      *) svc="$1"; shift; break ;;
+    esac
+  done
+  [[ "$svc" == "backend" ]] || unmodeled compose run service "$svc"
+  ref="ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-backend:${IMAGE_TAG:-latest}"
+  if [[ ! -d "$(img_dir "$ref")" ]]; then echo "Error: image not present: ${ref}" >&2; exit 1; fi
+  case "$*" in
+    *"migrate.js --latest"*) run_migrate "$name" "${envs[@]}" ;;
+    *"migrate.js --list"*) run_list "$name" "$*" "${envs[@]}" ;;
+    *) unmodeled compose run command "$*" ;;
+  esac
+}
+
+recreate() {
+  local name="$1" svc="$2" running="$3" ref d f keep
+  ref="ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-${svc}:${IMAGE_TAG:-latest}"
+  d="$(img_dir "$ref")"
+  if [[ ! -d "$d" ]]; then echo "Error: image not present: ${ref}" >&2; exit 1; fi
+  keep="${DS}/labels-keep"
+  rm -rf "$keep"
+  mkdir -p "$keep"
+  for f in "${C}/${name}"/label.*; do
+    if [[ -f "$f" ]]; then cp "$f" "${keep}/"; fi
+  done
+  rm -rf "${C:?}/${name}"
+  mkdir -p "${C}/${name}/fs"
+  for f in "${keep}"/label.*; do
+    if [[ -f "$f" ]]; then cp "$f" "${C}/${name}/"; fi
+  done
+  put "$name" id "new-${svc}-$(next_seq)"
+  put "$name" image_id "$(cat "${d}/id")"
+  put "$name" config_image "$ref"
+  put "$name" running "$running"
+  put "$name" health none
+  if [[ "$name" == "metasheet-backend" && -d "${DS}/volumes/attendance-import" ]]; then
+    mkdir -p "${C}/${name}/fs/app/uploads/attendance-import"
+  fi
+}
+
+compose_up() {
+  local nostart=0 svcs=() svc
+  while (( $# )); do
+    case "$1" in
+      --no-start) nostart=1; shift ;;
+      -d|--no-deps|--force-recreate) shift ;;
+      -*) unmodeled compose up option "$1" ;;
+      *) svcs+=("$1"); shift ;;
+    esac
+  done
+  for svc in "${svcs[@]}"; do
+    case "$svc" in
+      backend)
+        if [[ -n "${H_UP_BACKEND_RC:-}" ]]; then echo "Error response from daemon: harness" >&2; exit "${H_UP_BACKEND_RC}"; fi
+        ;;
+      web) ;;
+      *) unmodeled compose up service "$svc" ;;
+    esac
+    if [[ "$nostart" == "1" ]]; then recreate "metasheet-${svc}" "$svc" false; else recreate "metasheet-${svc}" "$svc" true; fi
+  done
+}
+
+compose_pull() {
+  local owner="${IMAGE_OWNER:-zensgit}" tag="${IMAGE_TAG:-latest}" svc ref id rev k d
+  if [[ "${H_PULL_RC:-0}" != "0" ]]; then echo "Error: pull failed" >&2; exit "${H_PULL_RC}"; fi
+  if [[ "${H_ABORT_ON:-}" == "pull" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+  for svc in "$@"; do
+    case "$svc" in backend|web) ;; *) unmodeled compose pull service "$svc" ;; esac
+    ref="ghcr.io/${owner}/metasheet2-${svc}:${tag}"
+    id="sha256:new${svc}image"
+    rev="$tag"
+    if [[ "$svc" == "backend" && -n "${H_NEW_REV_BACKEND:-}" ]]; then rev="${H_NEW_REV_BACKEND}"; fi
+    if [[ "$svc" == "web" && -n "${H_NEW_REV_WEB:-}" ]]; then rev="${H_NEW_REV_WEB}"; fi
+    for k in "$ref" "$id"; do
+      d="$(img_dir "$k")"
+      mkdir -p "$d"
+      printf '%s' "$rev" > "${d}/rev"
+      printf '%s' "$id" > "${d}/id"
+      if [[ "${H_NO_DIGEST:-}" == "$svc" ]]; then
+        : > "${d}/digests"
+      else
+        printf 'ghcr.io/%s/metasheet2-%s@sha256:%s\n' "$owner" "$svc" "$(printf 'd%.0s' {1..64})" > "${d}/digests"
+      fi
+    done
+  done
+}
+
+do_compose() {
+  local sub
+  while (( $# )); do
+    case "$1" in
+      -p|--project-directory|-f) shift 2 ;;
+      *) break ;;
+    esac
+  done
+  sub="${1:-}"
+  shift || true
+  case "$sub" in
+    version)
+      if [[ "${H_COMPOSE_MISSING:-0}" == "1" ]]; then echo "docker: 'compose' is not a docker command." >&2; exit 1; fi
+      if [[ "${1:-}" == "--short" ]]; then echo 2.29.7; else echo "Docker Compose version v2.29.7"; fi
+      ;;
+    pull) compose_pull "$@" ;;
+    run) compose_run "$@" ;;
+    up) compose_up "$@" ;;
+    *) unmodeled compose "$sub" "$@" ;;
+  esac
+}
+
+exec_pg() {
+  if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+    case "$3" in
+      *'exec psql'*) psql_answer "${5:-}" ;;
+      *'exec pg_dump -Fc'*)
+        if [[ "${H_ABORT_ON:-}" == "dump" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+        case "${H_DUMP_MODE:-ok}" in
+          ok) printf 'PGDMP harness archive\n' ;;
+          # slow: the dump runs past one heartbeat interval of the window (30 s on the scaled clock).
+          slow) printf 'PGDMP harness archive\n'; /bin/sleep 3 ;;
+          empty) : ;;
+          fail) echo "pg_dump: error: harness" >&2; exit 1 ;;
+          timeout) printf 'PGDMP partial'; exit 124 ;;
+        esac
+        ;;
+      *pg_dumpall*)
+        late_session after-backup
+        printf -- '-- harness globals\n'
+        ;;
+      *pg_isready*)
+        late_session before-migrate
+        if [[ "${H_ABORT_ON:-}" == "pg-isready" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+        echo "accepting connections"
+        ;;
+      *) unmodeled exec metasheet-postgres "$@" ;;
+    esac
+    return 0
+  fi
+  if [[ "${1:-}" == "pg_restore" ]]; then
+    cat > /dev/null
+    if [[ " $* " == *" -f /dev/null "* ]]; then
+      if [[ "${H_ABORT_ON:-}" == "restore" ]]; then : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"; fi
+      exit "${H_RESTORE_RC:-0}"
+    fi
+    if [[ " $* " == *" --list "* && "${H_TOC_NO_LEDGER:-0}" == "1" ]]; then
+      printf ';\n; Archive created by the harness\n;\n1; 2615 2200 SCHEMA - public app\n'
+      return 0
+    fi
+    if [[ " $* " == *" --list "* && "${H_TOC_LOCK_ONLY:-0}" == "1" ]]; then
+      # Only the lock table's data: its name starts with the ledger table's name.
+      printf ';\n; Archive created by the harness\n;\n1; 2615 2200 SCHEMA - public app\n2; 1259 16410 TABLE public kysely_migration_lock app\n3; 0 16410 TABLE DATA public kysely_migration_lock app\n'
+      return 0
+    fi
+    if [[ " $* " == *" --list "* ]]; then
+      printf ';\n; Archive created by the harness\n;\n1; 2615 2200 SCHEMA - public app\n2; 1259 16400 TABLE public kysely_migration app\n3; 0 16400 TABLE DATA public kysely_migration app\n'
+      return 0
+    fi
+  fi
+  unmodeled exec metasheet-postgres "$@"
+}
+
+exec_backend() {
+  local fs="${C}/metasheet-backend/fs" p paths=() rels=() f kb
+  case "${1:-}" in
+    sh)
+      [[ "${3:-}" == *ATTACHMENT_PATH* ]] || unmodeled exec metasheet-backend "$@"
+      for p in /app/data/attachments /app/uploads /app/storage; do
+        if [[ -d "${fs}${p}" ]]; then echo "$p"; fi
+      done
+      ;;
+    find)
+      shift
+      while (( $# )) && [[ "$1" != -* ]]; do paths+=("$1"); shift; done
+      for p in "${paths[@]}"; do
+        while IFS= read -r f; do
+          if [[ -n "$f" ]]; then wc -c < "$f" | tr -d '[:space:]'; echo; fi
+        done < <(find "${fs}${p}" -type f 2>/dev/null)
+      done
+      if [[ "${H_APPDATA_AFTER_EXTRA:-}" == "1" && "$(get metasheet-backend image_id)" == sha256:new* ]]; then echo 7; fi
+      ;;
+    du)
+      shift
+      if [[ "${1:-}" == -* ]]; then shift; fi
+      for p in "$@"; do
+        kb="$(du -sk "${fs}${p}" | awk '{ print $1 }')"
+        printf '%s\t%s\n' "$kb" "$p"
+      done
+      ;;
+    tar)
+      shift
+      while (( $# )); do
+        case "$1" in
+          -C) shift 2 ;;
+          -*) shift ;;
+          *) rels+=("$1"); shift ;;
+        esac
+      done
+      # H_TAR_OUT_RC: the copy-out fails after part of the archive was written.
+      if [[ "${H_TAR_OUT_RC:-0}" != "0" ]]; then
+        (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}") | head -c 1024
+        echo "tar: harness read error" >&2
+        exit "${H_TAR_OUT_RC}"
+      fi
+      # H_TAR_OUT_GARBAGE=1: the copy-out exits 0 but its output is no tar archive.
+      if [[ "${H_TAR_OUT_GARBAGE:-0}" == "1" ]]; then printf 'harness: not a tar archive\n'; exit 0; fi
+      (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}")
+      ;;
+    *) unmodeled exec metasheet-backend "$@" ;;
+  esac
+}
+
+do_exec() {
+  local name
+  while [[ "${1:-}" == -* ]]; do shift; done
+  name="$1"
+  shift
+  if ! has "$name" || [[ "$(get "$name" running)" != "true" ]]; then
+    echo "Error response from daemon: container ${name} is not running" >&2
+    exit 1
+  fi
+  case "$name" in
+    metasheet-postgres) exec_pg "$@" ;;
+    metasheet-backend) exec_backend "$@" ;;
+    *) unmodeled exec "$name" "$@" ;;
+  esac
+}
+
+do_stop() {
+  local name="" var
+  while (( $# )); do
+    case "$1" in
+      -t) shift 2 ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+  var="H_STOP_RC_${name//-/_}"
+  if [[ -n "${!var:-}" ]]; then exit "${!var}"; fi
+  if ! has "$name"; then echo "Error: No such container: ${name}" >&2; exit 1; fi
+  put "$name" running false
+  if [[ "$name" == "metasheet-backend" && "${H_ABORT_ON:-}" == "backend-stop" ]]; then
+    : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"
+  fi
+  if [[ "$name" == "metasheet-backend" && "${H_GONE_ON_BACKEND_STOP:-}" == "1" ]]; then
+    # As if a host GC had removed the stopped containers.
+    rm -rf "${C:?}/metasheet-backend" "${C:?}/metasheet-web"
+  fi
+  echo "$name"
+}
+
+do_start() {
+  local name="$1"
+  if ! has "$name"; then echo "Error: No such container: ${name}" >&2; exit 1; fi
+  put "$name" running true
+  if [[ "$(get "$name" image_id)" == sha256:old* ]]; then : > "${C}/${name}/restarted"; fi
+  # H_CLEANUP_ON_START=1: the new backend deletes an expired draft attachment as soon as it starts.
+  if [[ "${H_CLEANUP_ON_START:-0}" == "1" && "$name" == "metasheet-backend" && "$(get "$name" image_id)" == sha256:new* ]]; then
+    rm -f "${C}/${name}/fs/app/data/attachments/a.txt"
+  fi
+  echo "$name"
+}
+
+do_kill() {
+  local name="$1"
+  if [[ -f "${DS}/oneoff/${name}" ]]; then
+    rm -f "${DS}/oneoff/${name}"
+  elif has "$name"; then
+    put "$name" running false
+  else
+    echo "Error: No such container: ${name}" >&2
+    exit 1
+  fi
+  echo "$name"
+}
+
+do_cp() {
+  local target p
+  if [[ "${1:-}" == *:* && "${2:-}" == "-" && $# -eq 2 ]]; then
+    # Read-back: a tar of <path> from the container (created or running) to stdout.
+    target="${1%%:*}"
+    p="${1#*:}"
+    if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
+    if [[ ! -e "${C}/${target}/fs${p}" ]]; then echo "Error: Could not find the file ${p} in container ${target}" >&2; exit 1; fi
+    if [[ "$target" == "metasheet-backend" && -d "${DS}/volumes/attendance-import" && "/app/uploads/attendance-import" == "${p%/}"/* ]]; then
+      # docker cp includes the volume mounted below the path.
+      local stage rel="/app/uploads/attendance-import"
+      rel="${rel#"${p%/}"}"
+      stage="$(mktemp -d "${DS}/cp-stage.XXXXXX")"
+      cp -R "${C}/${target}/fs${p}" "${stage}/"
+      mkdir -p "${stage}/$(basename "$p")${rel}"
+      cp -R "${DS}/volumes/attendance-import/." "${stage}/$(basename "$p")${rel}/"
+      (cd "$stage" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "$(basename "$p")")
+      rm -rf "$stage"
+      return
+    fi
+    (cd "${C}/${target}/fs$(dirname "$p")" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "$(basename "$p")")
+    return
+  fi
+  [[ "${1:-}" == "-" ]] || unmodeled cp "$@"
+  target="${2%%:*}"
+  p="${2#*:}"
+  if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
+  mkdir -p "${C}/${target}/fs${p}"
+  "${H_REAL_TAR}" -xf - -C "${C}/${target}/fs${p}"
+  # H_CP_IN_SHORT=1: one copied file is missing in the container after the copy-in.
+  if [[ "${H_CP_IN_SHORT:-0}" == "1" ]]; then rm -f "${C}/${target}/fs/app/data/attachments/a.txt"; fi
+}
+
+case "${1:-}" in
+  compose) shift; do_compose "$@" ;;
+  inspect) shift; do_inspect "$@" ;;
+  image)
+    [[ "${2:-}" == "inspect" ]] || unmodeled "$@"
+    shift 2
+    do_image_inspect "$@"
+    ;;
+  ps) shift; do_ps "$@" ;;
+  info)
+    if [[ "${H_INFO_RC:-0}" != "0" ]]; then echo "Cannot connect to the Docker daemon" >&2; exit "${H_INFO_RC}"; fi
+    [[ "${2:-}" == "-f" && "${3:-}" == '{{.DockerRootDir}}' ]] || unmodeled "$@"
+    echo "${DS}/dockerroot"
+    ;;
+  exec) shift; do_exec "$@" ;;
+  stop) shift; do_stop "$@" ;;
+  start) shift; do_start "$@" ;;
+  kill) shift; do_kill "$@" ;;
+  cp) shift; do_cp "$@" ;;
+  logs)
+    if [[ "${H_TERM_ON_LOGS:-0}" == "1" ]]; then kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"; fi
+    printf 'server listening\noutbound webhook ops switch: %s\n' "${H_OPS_SWITCH:-off (normal delivery)}"
+    ;;
+  *) unmodeled "$@" ;;
+esac

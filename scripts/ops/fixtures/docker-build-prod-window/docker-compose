@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test double for the legacy `docker-compose` binary: logs the call and prints a version line,
+# so no scenario runs a docker-compose installed on the machine.
+printf 'docker-compose\t-\t-\t-\t%s\n' "$*" >> "${H_CALLS}"
+echo "docker-compose version 1.29.2, build harness"
