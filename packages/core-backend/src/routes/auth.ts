@@ -46,6 +46,8 @@ import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } from '../services/approval-notify-badge-flags'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
+import { isIntegrationAutomationRunActionEnabled } from '../multitable/automation-run-integration-job'
+import { isIntegrationAutomationRunEventEnabled } from '../core/integration-run-events'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { parseUserActivationStatus } from '../auth/user-activation'
@@ -329,6 +331,16 @@ function buildFeaturePayload(authUser: User) {
     // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
     // server without the flag issues no /api/tasks request at all. Never inferred from role.
     tasks: isTasksEnabled(),
+    // R-69 1b-iii: surfaces I3's INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (default OFF, exact 'true') so the
+    // automation rule editor offers run_integration_job only when a save could succeed (ADR PR 1b-iii: not
+    // rendered while the switch is off). The SAME predicate gates the save (403 RUN_ACTION_DISABLED) and every
+    // trigger. Not a new flag. Never inferred from role/mode/plugin state.
+    integrationAutomationRunAction: isIntegrationAutomationRunActionEnabled(),
+    // R-69 1c: surfaces INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (default OFF, exact 'true') so the rule editor
+    // offers the integration.run_finished trigger (and its alert template) only while summaries can actually be
+    // published and received. The SAME predicate gates publish, receipt and dispatch. Not a new flag. Never
+    // inferred from role/mode/plugin state.
+    integrationAutomationRunEvent: isIntegrationAutomationRunEventEnabled(),
     mode,
   }
 }

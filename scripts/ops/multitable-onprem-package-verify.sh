@@ -1139,6 +1139,7 @@ required=(
   "scripts/ops/multitable-onprem-healthcheck.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.sh"
   "scripts/ops/attendance-onprem-publish-web-dist.ps1"
+  "scripts/ops/web-dist-retain-assets.mjs"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "docker/app.env.example"

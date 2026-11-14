@@ -1803,6 +1803,7 @@ exec npx vitest run \
   multitable-api-token-manager \
   multitable-attachment-editor \
   multitable-attachment-list \
+  multitable-automation-integration-preview \
   multitable-automation-interval-minutes \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
@@ -1886,6 +1887,7 @@ exec npx vitest run \
   multitable-import \
   multitable-import-create-fields-plan \
   multitable-import-modal \
+  multitable-integration-run-finished-trigger \
   multitable-kanban-view \
   multitable-link-picker \
   multitable-linked-record-chip \
@@ -1951,6 +1953,7 @@ exec npx vitest run \
   multitable-richtext-mention \
   multitable-richtext-wiring \
   multitable-rollup-aggregation-fe \
+  multitable-run-integration-job-editor \
   multitable-scoped-permissions \
   multitable-sheet-cursor-state \
   multitable-sheet-permission-manager \

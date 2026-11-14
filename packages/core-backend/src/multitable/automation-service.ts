@@ -2,7 +2,14 @@ import { randomUUID } from 'crypto'
 import { sql, type Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
-import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
+import {
+  INTEGRATION_RUN_FINISHED_TRIGGER,
+  integrationRunFinishedConfiguredStatuses,
+  matchesTrigger,
+  TRIGGER_TYPE_BY_EVENT,
+  validateIntegrationRunFinishedTriggerConfig,
+  type AutomationTriggerType,
+} from './automation-triggers'
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
@@ -141,6 +148,47 @@ import {
 } from './stock-preparation-overview-contract'
 import { HUMAN_WRITE_LOCK_AUTOMATION_REFUSAL, findHumanWriteLockedFieldIds } from './human-write-lock'
 import type { Database } from '../db/types'
+import {
+  createAutomationSyntheticPreviewRuntime,
+  isSyntheticIntegrationPreviewEnabled,
+  type SyntheticPreviewResponse,
+  type SyntheticPreviewRuntime,
+  type SyntheticPreviewRuntimeDependencies,
+  type SyntheticPreviewScope,
+} from '../integration/automation-synthetic-preview'
+import { loadYidaLocalDraftCompiler } from '../integration/yida-automation-preview'
+import type { Queryable } from './automation-durable-dispatcher'
+// R-69 1b-ii — run_integration_job: the plugin-registered port (late-bound), the save gate and the shutdown signal.
+import { getIntegrationRunPort } from '../core/integration-run-port'
+import {
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+  RUN_INTEGRATION_JOB_NOT_SOLE_ERROR,
+  collectRunIntegrationJobOccurrences,
+  isIntegrationAutomationRunActionEnabled,
+  parsePersistedRunIntegrationJobConfig,
+  stampRunIntegrationJobConfig,
+  validateRunIntegrationJobConditions,
+  validateRunIntegrationJobConfig,
+  validateRunIntegrationJobTriggerCoupling,
+} from './automation-run-integration-job'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES, checkRunIntegrationJobRuleSheet } from './automation-run-integration-job-rule-sheet'
+// R-69 1c — Bridge 2: the integration.run_finished trigger (save gate, job-keyed dispatch, durable leg); its
+// trigger vocabulary is imported with the other automation-triggers names above.
+import {
+  INTEGRATION_RUN_FINISHED_EVENT_TYPE,
+  IntegrationRunSinkStoppedError,
+  isIntegrationAutomationRunEventEnabled,
+  validateIntegrationRunEventRoute,
+  validateIntegrationRunFinishedEvent,
+  type IntegrationRunEventRoute,
+  type IntegrationRunFinishedEvent,
+} from '../core/integration-run-events'
+import { produceAutomationEvent } from './automation-durable-activation'
+import type { TransactionalQueryable } from './pg-transaction-guard'
+import {
+  resolveIntegrationRunPrincipalOnTransaction,
+  type IntegrationRunPrincipalResolution,
+} from '../integration/automation-run-authority'
 
 const logger = new Logger('AutomationService')
 
@@ -166,6 +214,15 @@ export type AutomationRuleValidationCode =
   | typeof STOCK_PREP_OVERVIEW_READ_ONLY_CODE
   // S0-a: a send_webhook target that can never be sent (http, internal name / IP literal, malformed).
   | typeof WEBHOOK_TARGET_REJECTED
+  // R-69 1b-ii (ADR §7): a rule carrying run_integration_job while INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is
+  // not 'true' — the automation routes answer this one code with 403, every other code with 400.
+  | 'RUN_ACTION_DISABLED'
+  // R-69 B1: an enabled job rule saved by a user without the job authority, or whose authority could not be checked
+  // (a 400 like every other save refusal; see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE below).
+  | typeof RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE
+  // R-69 I6d (B1's run_finished sibling): an enabled integration.run_finished rule saved by a user without the
+  // integration read authority, or whose authority could not be checked (a 400; see the constant below).
+  | typeof INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -177,6 +234,142 @@ export type AutomationRuleValidationCode =
 export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
 export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
 
+/**
+ * R-69 I6d, finding B1 ("editor authority") — owner-approved 2026-11-13 (「按建议执行」). T-LAYER DEFAULT
+ * (direction ruled by the owner 2026-11-13; this exact wording is a T-layer elaboration the owner can veto,
+ * decision register R-92, 11-13 note):
+ *
+ *   "When a save (create or update, including setRuleEnabled) leaves a rule that carries run_integration_job AND is
+ *   enabled after the write, the acting user must pass the SAME live-authority predicate the executor applies at run
+ *   time (resolveIntegrationRunPrincipalOnTransaction, with principalId = the acting user and tenantId = the rule's
+ *   binding tenant). A missing acting user is refused. No check when the write leaves the rule disabled or removes
+ *   the job. The binding principal stays the stored creator (ADR §6.2)."
+ *
+ * Why: a save re-stamps the binding from the rule's STORED creator and the executor checks only that principal, so
+ * without this someone who may manage the sheet's automations but holds no job authority could retype the creator's
+ * schedule rule into a job rule, switch one on, or edit an enabled one — and the job ran under the creator's authority.
+ * ONE code (a 400, like every other save refusal on these routes; only RUN_ACTION_DISABLED is a 403) and two fixed,
+ * values-free messages: "not authorized" (a missing acting user, or the predicate said no) and "could not be checked"
+ * (the read failed, or the rule's binding tenant cannot be named) — both refuse; neither ever saves.
+ * Implemented by AutomationService.assertRunIntegrationJobEditorAuthority.
+ */
+export const RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE = 'RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED'
+export const RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE =
+  'an enabled run_integration_job rule can only be saved by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); the rule was not saved'
+export const RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE =
+  'run_integration_job: the saving user\'s job authority could not be checked; the rule was not saved'
+
+/**
+ * R-69 I6d — B1's sibling for integration.run_finished rules, owner-approved 2026-11-13 (item 3 of that day's
+ * proposal, answered 「3」). T-LAYER DEFAULT (direction ruled by the owner 2026-11-13; this exact wording is a T-layer
+ * elaboration the owner can veto, decision register R-92, 11-13 note):
+ *
+ *   "When a save (create or update, including setRuleEnabled) leaves a rule whose trigger is integration.run_finished
+ *   AND that is enabled after the write, the acting user must pass the SAME live check the run_finished save gate
+ *   applies to the creator (integrationRunFinishedCreatorAuthorized, or whatever that predicate is named; reuse it,
+ *   with principalId = the acting user and tenantId = the rule's binding tenant). A missing acting user is refused.
+ *   No check when the write leaves the rule disabled or moves the trigger away from integration.run_finished. The
+ *   binding principal stays the stored creator."
+ *
+ * (The predicate is AutomationService.integrationRunFinishedCreatorAuthorized, reused unchanged.)
+ * Why: an update re-stamps the trigger binding from the rule's STORED creator and the save gate checked only that
+ * creator, so someone who may manage the sheet's automations but cannot read integration results could retype a rule
+ * into an alert rule, switch one on, or change the statuses / the send action of an enabled one — and it fired under
+ * the creator's read authority.
+ * A SIBLING code, not B1's: B1's names the job authority (run_integration_job); this one is a different authority (the
+ * integration read codes) on a different rule kind, and a client or a log line must not read one as the other. A 400
+ * like every other save refusal (the routes' existing mapping; only RUN_ACTION_DISABLED is a 403). ONE fixed,
+ * values-free message: the reused predicate folds "not held" and "could not be read" into one `false` (fail closed),
+ * so the message names both. On create the gate's own creator check IS this check (the route passes the request user
+ * as createdBy), so a refused create keeps the gate's message. Implemented by
+ * AutomationService.assertIntegrationRunFinishedEditorAuthority.
+ */
+export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE = 'INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED'
+export const INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_MESSAGE =
+  'an enabled integration.run_finished rule can only be saved by a user who holds the integration read authority themself (active, a member of the rule\'s tenant, able to manage automation, holding integration:read or above or stock-prep:read); it is not held or could not be checked, so the rule was not saved'
+
+/**
+ * R-69 I6d, r7 adversarial review findings 1–3 — owner-approved 2026-11-13 (「按建议」: fix 1–3). T-LAYER DEFAULT
+ * (direction ruled by the owner 2026-11-13; this exact wording is a T-layer elaboration the owner can veto, decision
+ * register R-92, 11-13 note):
+ *
+ *   R1, retry of a run_finished execution:
+ *     - re-read INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (exact 'true');
+ *     - re-check binding == stored creator and the creator's live authority, exactly as dispatch does;
+ *     - the retrying actor must pass integrationRunFinishedCreatorAuthorized for the binding tenant.
+ *     Any failure refuses the retry before anything is sent. Reuse the dispatch predicates; do not redefine them.
+ *   R2, retry of a run_integration_job execution: the retrying actor must pass resolveIntegrationRunPrincipalOnTransaction
+ *     for the binding tenant (the B1 predicate, run like B1 with the READ COMMITTED transaction). Failure refuses the
+ *     retry before any intent claim, lease or port call.
+ *   R3: a write whose ONLY effect is to switch an integration.run_finished rule off (enabled:false, no other field) is
+ *     accepted without the save gate's creator authority check. Any other edit still runs the full gate.
+ *
+ * Why (R1, R2): POST /automation-executions/:id/retry is gated by requireAdminRole only — a GLOBAL role that says
+ * nothing about the rule's tenant — and retryExecution checked only that the rule is present + enabled and that its
+ * action fingerprint is unchanged before executeRule. A run_finished retry re-sent the stored run with the event switch
+ * off, a binding that no longer named the creator, or a creator who had lost authority (dispatch refuses all three); a
+ * job retry ran the job under the creator's binding (the executor checks that principal, never the retrying admin).
+ * Why (R3): PATCH { enabled: false } re-ran the run_finished save gate on the STORED creator, so a rule whose creator
+ * lost authority could not be switched off. (Job rules do not have that problem: a switch-only write never reaches the
+ * job save gate, and B1's acting-user check does not run on a write that leaves the rule disabled.)
+ * Refusals are the retry lane's own `{ status, code, message }` shape, 409 like its other refusals after the lookup:
+ * nothing is recorded, nothing is sent, and the one-shot first-retry marker is not spent. The codes are SIBLINGS of the
+ * save-path codes, not those codes (the save messages say "the rule was not saved"; a retry saves nothing):
+ * INTEGRATION_RUN_EVENT_DISABLED, INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED, INTEGRATION_RUN_FINISHED_RETRY_
+ * UNAUTHORIZED (the retrying actor), RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED (the retrying actor; B1's two messages).
+ * A retry whose CURRENT rule and STORED trigger event disagree about being integration.run_finished is RULE_CHANGED.
+ * Fixed, values-free messages. Implemented in AutomationService.retryExecution and updateRuleOnce.
+ */
+export const INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE =
+  'integration.run_finished is disabled on this deployment (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED is not \'true\'); nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED_MESSAGE =
+  'the rule\'s integration.run_finished binding no longer names its creator and the tenant of the original run, or the creator is no longer active, able to manage automation and holding integration:read (or above) or stock-prep:read; nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED_MESSAGE =
+  'an integration.run_finished execution can only be re-run by a user who holds the integration read authority themself (active, a member of the rule\'s tenant, able to manage automation, holding integration:read or above or stock-prep:read); it is not held or could not be checked, so nothing was re-run'
+export const INTEGRATION_RUN_FINISHED_RETRY_KIND_CHANGED_MESSAGE = 'Rule trigger changed since the original execution; cannot retry safely'
+export const RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED_MESSAGE =
+  'a run_integration_job execution can only be re-run by a user who holds the job authority themself (active, a member of the rule\'s tenant, able to manage automation); nothing was re-run'
+export const RUN_INTEGRATION_JOB_RETRY_AUTHORITY_UNAVAILABLE_MESSAGE =
+  'run_integration_job: the retrying user\'s job authority could not be checked; nothing was re-run'
+
+/**
+ * R-69 I6d r7, R3 (stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE): true only for `{ enabled: false }` with every
+ * other field of the update absent. Any other key that carries a value — today's fields or one added later — makes it
+ * an ordinary edit (fail closed: the full gate runs).
+ */
+function isSwitchOffOnlyUpdate(input: UpdateRuleInput): boolean {
+  return input.enabled === false && Object.entries(input).every(([key, value]) => key === 'enabled' || value === undefined)
+}
+
+/**
+ * The binding check of dispatchIntegrationRunFinished (R-69 1c), shared with the admin retry (R-69 I6d r7, R1) so it
+ * is defined once: the rule's stamped trigger binding names the rule's STORED creator and `tenantId` (on dispatch the
+ * route's tenant; on a retry the tenant the original run was dispatched for). Returns that creator, or null.
+ */
+function integrationRunFinishedBoundCreator(rule: AutomationRule, tenantId: string): string | null {
+  const config = (rule.trigger_config ?? {}) as Record<string, unknown>
+  const binding = (config.binding ?? {}) as Record<string, unknown>
+  if (binding.principalId !== rule.created_by || binding.tenantId !== tenantId || typeof rule.created_by !== 'string') return null
+  return rule.created_by
+}
+
+/**
+ * R-69 I6d r7, R1: the tenant an integration.run_finished execution was dispatched for. The stored event carries no
+ * tenant (the route never reaches the payload), but the execution's rule snapshot is the rule as it ran, and dispatch
+ * ran it only after matching its binding tenant to the route's. Null when the snapshot is not such a rule (no snapshot,
+ * another trigger, no stamped tenant) — the retry is then refused, never judged against a guessed tenant.
+ */
+function integrationRunFinishedRunTenantId(ruleSnapshot: unknown): string | null {
+  if (!isRecord(ruleSnapshot)) return null
+  const trigger = ruleSnapshot.trigger
+  if (!isRecord(trigger) || trigger.type !== INTEGRATION_RUN_FINISHED_TRIGGER) return null
+  const config = trigger.config
+  if (!isRecord(config)) return null
+  const binding = config.binding
+  if (!isRecord(binding)) return null
+  return typeof binding.tenantId === 'string' && binding.tenantId.length > 0 ? binding.tenantId : null
+}
+
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
 
@@ -186,6 +379,17 @@ export class AutomationRuleValidationError extends Error {
     this.name = 'AutomationRuleValidationError'
   }
 }
+
+/**
+ * R-69 I6d fix round 2 (F1) — AutomationService.updateRule. One attempt answers RULE_WRITE_LOST_RACE when the stored
+ * row changed between its read and its write (the guarded UPDATE matched no row at the version that was validated;
+ * nothing was written). updateRule validates again on the row as it now is, RULE_WRITE_MAX_ATTEMPTS attempts in all,
+ * then refuses with the existing 400 code VALIDATION_ERROR and this fixed, values-free message.
+ */
+const RULE_WRITE_LOST_RACE = Symbol('automation-rule-write-lost-race')
+export const RULE_WRITE_MAX_ATTEMPTS = 3
+export const AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE =
+  'the rule was changed by another save while this one was being checked; nothing was written — reload the rule and save again'
 
 export type AutomationTestRunMode = 'simulate' | 'real_fire'
 
@@ -271,7 +475,20 @@ const VALID_TRIGGER_TYPES = new Set([
   'form.submitted',
   'approval.completed',
   'approval.task_created',
+  // R-69 1c: job-keyed dedicated dispatch (handleIntegrationRunFinished), never the record lane.
+  'integration.run_finished',
 ])
+
+/**
+ * R-69 1c: an integration.run_finished rule's creator must be able to READ integration results — `integration:*`
+ * (read and above) or `stock-prep:read` (ADR §4.2), checked at save and re-checked live at fire, on top of the
+ * automation capability and the single active membership resolveIntegrationRunPrincipalOnTransaction decides.
+ */
+const INTEGRATION_RUN_FINISHED_READ_CODES: ReadonlySet<string> = new Set([
+  'integration:read', 'integration:write', 'integration:admin', 'stock-prep:read',
+])
+/** The durable consumer key for the integration.run_finished family (routing manifest v4). */
+export const INTEGRATION_RUN_TRIGGER_CONSUMER_KEY = 'integration-run-trigger'
 
 // ── T1-3 approval.completed trigger (first-batch ballot 2026-07-01) ────────
 // Routed by REQUIRED trigger_config.templateId (cross-sheet — completion events carry no sheet/record).
@@ -1414,6 +1631,32 @@ export async function resolveAutomationSchedulerLeaderOptions(): Promise<Automat
   return { leaderLock, ownerId, ttlMs }
 }
 
+/**
+ * Production dependencies of the synthetic integration preview: the host pool's RC transaction (the same
+ * shape as the YiDa runtimes' host transaction in index.ts), the exact-literal switch read on every run,
+ * the shared pure YiDa compiler (loaded once, compileYidaLocalDraft only) and the dedicated summary writer.
+ */
+function createDefaultSyntheticPreviewDependencies(logService: AutomationLogService): SyntheticPreviewRuntimeDependencies {
+  return {
+    database: {
+      transaction: (work) => poolManager.get().transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        const trx: Queryable = {
+          query: async (sqlText: string, params?: unknown[]) => {
+            const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+            return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+          },
+        }
+        return work(trx)
+      }),
+    },
+    // Its own exact-literal switch only (never derived from another AUTOMATION_* / INTEGRATION_* flag).
+    readEnablement: () => (isSyntheticIntegrationPreviewEnabled() ? 'true' : 'false'),
+    loadCompiler: loadYidaLocalDraftCompiler,
+    recordSummary: (trx, entry) => logService.recordSyntheticPreviewSummary((sqlText, params) => trx.query(sqlText, params), entry),
+  }
+}
+
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
@@ -1423,12 +1666,25 @@ export class AutomationService {
   private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
   private readonly completionConsumerInFlight = new Set<Promise<void>>()
   private producerStopPromise: Promise<void> | null = null
+  /** R-69 1c (fix-I5): set by detachCompletionConsumers — the integration.run_finished sink admits nothing after it. */
+  private completionConsumersDetached = false
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
+  /** C1/S2 synthetic integration preview: host-owned runtime, drained by stopProducerAdmissions(). */
+  private syntheticPreview: SyntheticPreviewRuntime
+  /**
+   * R-69 1b-ii: continuations of run_integration_job steps that returned early (`timeout_unsettled`): the port
+   * call still running, its heartbeat and its eventual Tx B. Drained by drainIntegrationJobs(), which the host
+   * registers on its FINAL shutdown barrier (index.ts stopOnce) — never a background task outside the lifecycle.
+   */
+  private readonly integrationJobsInFlight = new Set<Promise<void>>()
+  /** R-69 1b-ii (I-4): aborted in stopProducerAdmissions() BEFORE the scheduler is destroyed, so an in-flight job
+   *  is told to stop instead of blocking the producer drain for its whole timeout. */
+  private readonly shutdownController = new AbortController()
   private lastDateReminderLedgerSweepMs = 0
   private lastEventDedupLedgerSweepMs = 0
   private lastAutomationRetryLedgerSweepMs = 0
@@ -1477,6 +1733,13 @@ export class AutomationService {
       }),
       fetchFn,
       notificationService,
+      // R-69 1b-ii: the plugin-registered IntegrationRunPort (late-bound: plugins activate after this
+      // constructor), the shutdown signal and the continuation tracker (see integrationJobsInFlight).
+      integrationRunPort: () => getIntegrationRunPort() ?? null,
+      shutdownSignal: this.shutdownController.signal,
+      trackIntegrationJobTask: (task) => this.trackLifecycleTask(this.integrationJobsInFlight, task, (error) => {
+        logger.warn(`run_integration_job continuation failed: ${error instanceof Error ? error.name : 'error'}`)
+      }),
       // FWB activation (§11 Q6): construct the REAL four-gate set from the CURRENT write
       // transaction. Pool/cached permission reads here would reopen a revoke-after-check race.
       fwbGateChecksFactory: (transactionQuery) => buildProductionFwbGateChecks({
@@ -1503,6 +1766,7 @@ export class AutomationService {
     this.jobService = new AutomationJobService()
     this.suspensionService = new AutomationSuspensionService(this.jobService)
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
+    this.syntheticPreview = createAutomationSyntheticPreviewRuntime(createDefaultSyntheticPreviewDependencies(this.logService))
     this.scheduler = new AutomationScheduler(
       async (rule) => {
         // STORED `enabled` — the SCHEDULED lane, checked at fire start.
@@ -1669,10 +1933,10 @@ export class AutomationService {
       input.actionConfig ?? {},
       input.actions ?? null,
     )
-    const actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
+    let actionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
       ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
       : input.actionConfig ?? {}
-    const actions = Array.isArray(normalizedDingTalkInputs.actions)
+    let actions = Array.isArray(normalizedDingTalkInputs.actions)
       ? normalizedDingTalkInputs.actions as AutomationAction[]
       : input.actions ?? null
     const executionMode = normalizeExecutionMode(input.executionMode)
@@ -1685,6 +1949,26 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // R-69 1b-ii: run_integration_job save gate — switch (403 RUN_ACTION_DISABLED), closed config, cron + timezone
+    // coupling, and the SERVER-STAMPED binding (created_by + its single active tenant); a client binding is dropped.
+    const runIntegrationJobSave = await this.assertRunIntegrationJobAtSave({
+      sheetId,
+      triggerType: input.triggerType,
+      triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      actionType: input.actionType,
+      actionConfig,
+      actions,
+      allActions: actionsForValidation,
+      createdBy: input.createdBy ?? null,
+    })
+    if (runIntegrationJobSave) {
+      // R-69 1b-ii: a job rule cannot carry conditions (its schedule trigger has no record, so a condition would skip
+      // every fire); a create's next stored conditions are its input. updateRule judges its own next state below.
+      const conditionsError = validateRunIntegrationJobConditions(input.conditions ?? null)
+      if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+      actionConfig = runIntegrationJobSave.actionConfig
+      actions = runIntegrationJobSave.actions
+    }
     // S3 fix round 2 (F2): a result write-back may not target the read-only stock-preparation overview.
     const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
       this.queryFn as StockPreparationOverviewQueryFn,
@@ -1786,12 +2070,39 @@ export class AutomationService {
     const cardPlacementError = validateApprovalCardActionPlacement(input.triggerType, input.actionType, actionsForValidation)
     if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
 
+    // R-69 1c: integration.run_finished — closed config, record-less side-effect actions only, creator able to
+    // read integration results, and the SERVER-STAMPED binding (creator + its single active tenant).
+    const runFinishedTriggerConfig = await this.assertIntegrationRunFinishedRuleAtSave({
+      triggerType: input.triggerType,
+      triggerConfig: (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      actionType: input.actionType,
+      nestedActions: actionsForValidation,
+      conditions: input.conditions ?? null,
+      createdBy: input.createdBy ?? null,
+    })
+
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
     const persistedTriggerConfig: Record<string, unknown> =
       input.triggerType === 'schedule.date_field'
         ? { ...((input.triggerConfig ?? {}) as Record<string, unknown>), effectiveAt: now }
-        : ((input.triggerConfig ?? {}) as Record<string, unknown>)
+        : runFinishedTriggerConfig ?? ((input.triggerConfig ?? {}) as Record<string, unknown>)
+
+    // R-69 B1 (T-layer default, see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE): an ENABLED job rule is saved only
+    // by a user who holds the job authority live. On create the acting user IS the creator (the route passes the
+    // request user as createdBy); the action shape judged is the one about to be inserted, binding stamped. Last
+    // before the write, so every shape refusal above keeps its own message.
+    await this.assertRunIntegrationJobEditorAuthority({
+      actorId: input.createdBy,
+      enabledAfterWrite: input.enabled ?? true,
+      actionType: input.actionType,
+      actionConfig,
+      actions,
+    })
+    // R-69 I6d (see INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE): no second call here. On create the acting user
+    // IS the creator, and assertIntegrationRunFinishedRuleAtSave above already ran the same predicate on that same
+    // principal in that same binding tenant (for every create, enabled or not); a second read could never be the one
+    // that refuses. A refused create therefore carries the gate's own message.
 
     const row = {
       id: ruleId,
@@ -1868,6 +2179,32 @@ export class AutomationService {
   /**
    * Update an existing automation rule.
    * Returns the updated rule, or null if not found.
+   *
+   * R-69 I6d fix round 2 (F1) — THE WRITE IS BOUND TO THE ROW VERSION THAT WAS VALIDATED. Every check below judges
+   * the MERGED rule (request ?? stored) and the UPDATE writes only the request's columns, so a row that another save
+   * changed between this save's read and its write would end as a combination neither save validated (the job type
+   * over a config no gate looked at; the job on a trigger that is not schedule.cron). updateRuleOnce therefore:
+   *   - takes the version of the FIRST stored snapshot it reads (`updated_at`, to the millisecond);
+   *   - sends ONE statement that matches that version only, and in the same statement moves the version strictly
+   *     forward — `GREATEST(app clock, stored version + 1 ms)` — so every write of this method is a new version
+   *     whatever the clocks say (two saves stamped in one millisecond; a clock that stepped back);
+   *   - on 0 rows has written nothing: the row was changed, moved or deleted since it was read — the save LOST A RACE.
+   * A lost race is not answered at once: the whole method runs again on the row as it now is — the same result as
+   * if this save had arrived after the other one, so a refusal is the validators' own (same codes, same messages)
+   * and a rule that is gone answers null from the first read, as it always did. RULE_WRITE_MAX_ATTEMPTS losses in
+   * a row end as a 400 VALIDATION_ERROR (AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE); nothing was written, and
+   * repeating the request is safe.
+   *
+   * Why a version predicate and not SELECT … FOR UPDATE: the validators read through the pool (queryFn, getRule), so
+   * a transaction holding the row lock across them would hold one pooled connection while asking for another — as
+   * many concurrent saves as the pool has connections (DB_POOL_MAX) would each hold one and wait for one. The single
+   * guarded statement holds nothing between the read and the write.
+   *
+   * What this covers: the rule row, for every rule and every write shape of THIS method — at this commit the one
+   * UPDATE of automation_rules a search of the repository's source finds; a writer added beside it, or SQL run by
+   * hand, is outside it. It does not cover the rows the validators read beside the rule (membership, the
+   * project-sheet registry: both re-checked on every trigger), nor the route's early checks, which read the rule
+   * before this method is called (webhook target shape, condition value types, DingTalk links — none is the job gate).
    */
   async updateRule(
     ruleId: string,
@@ -1875,12 +2212,48 @@ export class AutomationService {
     input: UpdateRuleInput,
     authoringActorId?: string | null,
   ): Promise<AutomationRule | null> {
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await this.updateRuleOnce(ruleId, sheetId, input, authoringActorId)
+      if (outcome !== RULE_WRITE_LOST_RACE) return outcome
+      if (attempt >= RULE_WRITE_MAX_ATTEMPTS) throw new AutomationRuleValidationError(AUTOMATION_RULE_CHANGED_DURING_SAVE_MESSAGE)
+    }
+  }
+
+  /** One read → validate → guarded write of updateRule. RULE_WRITE_LOST_RACE: the row changed since it was read; nothing written. */
+  private async updateRuleOnce(
+    ruleId: string,
+    sheetId: string,
+    input: UpdateRuleInput,
+    authoringActorId?: string | null,
+  ): Promise<AutomationRule | null | typeof RULE_WRITE_LOST_RACE> {
     if (input.triggerType !== undefined && !VALID_TRIGGER_TYPES.has(input.triggerType)) {
       throw new AutomationRuleValidationError(`Invalid trigger_type: ${input.triggerType}`)
     }
     if (input.actionType !== undefined && !VALID_ACTION_TYPES.has(input.actionType)) {
       throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
     }
+    // F1: the version this attempt validates against is the FIRST stored snapshot it reads. A later read of the same
+    // attempt may see a newer row; the write below still matches the first version only, so it is then refused.
+    // (Same number of getRule calls as before: the unit suites queue its answers.)
+    let validatedVersion: string | undefined
+    // R-69 1b-ii (I6d): that first snapshot itself — the row the UPDATE below is bound to. The conditions check before
+    // the write judges the next stored state from THIS row, never from a later read.
+    let boundRule: AutomationRule | undefined
+    const readStoredRule = async (): Promise<AutomationRule | null> => {
+      const stored = await this.getRule(ruleId)
+      if (stored && validatedVersion === undefined) {
+        validatedVersion = stored.updated_at
+        boundRule = stored
+      }
+      return stored
+    }
+    // R-69 1b-ii (I6d): set by an action-shaped edit to the action shape it will persist; else the stored one is next.
+    let nextActionShapeForConditions: {
+      actionType: string
+      actionConfig: Record<string, unknown> | null
+      actions: AutomationAction[] | null
+      allActions: AutomationAction[] | null
+    } | undefined
     const updates: Record<string, unknown> = {}
     const shouldValidateActions = input.actionType !== undefined
       || input.actionConfig !== undefined
@@ -1893,6 +2266,13 @@ export class AutomationService {
     // rewritten together below, even if the caller only sent one of them.
     let legacyActionTypeRewrite: string | undefined
     let legacyActionConfigRewrite: Record<string, unknown> | undefined
+    // R-69 1b-ii: set when the save gate re-stamped a run_integration_job binding — the stamped column is then
+    // written even if the caller did not send that column itself.
+    let runIntegrationJobConfigRewrite: Record<string, unknown> | undefined
+    let runIntegrationJobActionsRewrite: AutomationAction[] | null | undefined
+    // R-69 I6d: the binding tenant the run_finished save gate stamped on THIS attempt; null when the resulting rule's
+    // trigger is not integration.run_finished (then the acting-user check before the write has nothing to judge).
+    let runFinishedBindingTenantId: string | null = null
     // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
     // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
     // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
@@ -1900,7 +2280,7 @@ export class AutomationService {
     let existingRuleSnapshot: AutomationRule | null | undefined
 
     if (shouldValidateActions) {
-      const existing = await this.getRule(ruleId)
+      const existing = await readStoredRule()
       existingRuleSnapshot = existing
       if (!existing || existing.sheet_id !== sheetId) return null
 
@@ -1954,6 +2334,25 @@ export class AutomationService {
         actionsForValidation,
       )
       if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+      // R-69 1b-ii: the RESULTING rule (trigger = incoming ?? stored; actions as merged) must satisfy the save
+      // gate; the binding is re-stamped from the STORED created_by (ADR §6.2: the editor never takes it over).
+      const runIntegrationJobUpdate = await this.assertRunIntegrationJobAtSave({
+        // R-69 I6a: the STORED sheet (an update never moves a rule; the route's sheetId already equals it).
+        sheetId: existing.sheet_id,
+        triggerType: input.triggerType ?? existing.trigger_type,
+        triggerConfig: (input.triggerConfig !== undefined ? input.triggerConfig : existing.trigger_config) as Record<string, unknown> | null,
+        actionType: nextActionType,
+        actionConfig: normalizedNextActionConfig,
+        actions: normalizedNextActions,
+        allActions: actionsForValidation,
+        createdBy: existing.created_by ?? null,
+      })
+      const persistedNextActionConfig = runIntegrationJobUpdate ? runIntegrationJobUpdate.actionConfig : normalizedNextActionConfig
+      const persistedNextActions = runIntegrationJobUpdate ? runIntegrationJobUpdate.actions : normalizedNextActions
+      // The NEXT stored action shape, for the conditions check before the write (`existing` is this attempt's first read).
+      nextActionShapeForConditions = { actionType: nextActionType, actionConfig: persistedNextActionConfig, actions: persistedNextActions, allActions: actionsForValidation }
+      if (runIntegrationJobUpdate?.stampedTopLevel) runIntegrationJobConfigRewrite = persistedNextActionConfig
+      if (runIntegrationJobUpdate?.stampedActions) runIntegrationJobActionsRewrite = persistedNextActions
       // S3 fix round 2 (F2): the same overview refusal as createRule, on every action-shaped edit.
       const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
         this.queryFn as StockPreparationOverviewQueryFn,
@@ -1975,10 +2374,10 @@ export class AutomationService {
 
       if (legacyNormalizedUpdate.changed) {
         legacyActionTypeRewrite = nextActionType
-        legacyActionConfigRewrite = normalizedNextActionConfig
+        legacyActionConfigRewrite = persistedNextActionConfig
       }
-      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
-      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
+      if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = persistedNextActionConfig
+      if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? persistedNextActions : null
       if (input.executionMode !== undefined) normalizedExecutionModeForUpdate = nextExecutionMode
     }
 
@@ -1994,6 +2393,9 @@ export class AutomationService {
       updates.action_type = legacyActionTypeRewrite
       updates.action_config = JSON.stringify(legacyActionConfigRewrite ?? {})
     }
+    // R-69 1b-ii: a re-stamped binding is persisted whichever columns the caller sent.
+    if (runIntegrationJobConfigRewrite !== undefined) updates.action_config = JSON.stringify(runIntegrationJobConfigRewrite)
+    if (runIntegrationJobActionsRewrite !== undefined) updates.actions = runIntegrationJobActionsRewrite ? JSON.stringify(runIntegrationJobActionsRewrite) : null
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
@@ -2003,7 +2405,7 @@ export class AutomationService {
     // trigger type/config is being changed and the result is a date_field rule (explicit type, or a config
     // change on an existing date_field rule). Mirrors createRule's gate so the API can't bypass the UI contract.
     if (input.triggerType !== undefined || input.triggerConfig !== undefined) {
-      const existingForTrigger = await this.getRule(ruleId)
+      const existingForTrigger = await readStoredRule()
       existingRuleSnapshot = existingForTrigger
       if (!existingForTrigger || existingForTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForTrigger.trigger_type
@@ -2043,6 +2445,19 @@ export class AutomationService {
       )
       if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
 
+      // R-69 1b-ii: a trigger-only edit of a rule that carries run_integration_job keeps the coupling
+      // (schedule.cron + a present IANA timezone). Action-shaped edits already ran the full gate above.
+      if (!shouldValidateActions) {
+        const couplingError = this.runIntegrationJobTriggerCouplingError(
+          nextTriggerType,
+          nextTriggerConfig as Record<string, unknown> | null,
+          existingForTrigger.action_type,
+          (existingForTrigger.action_config ?? null) as Record<string, unknown> | null,
+          existingForTrigger.actions ?? null,
+        )
+        if (couplingError) throw new AutomationRuleValidationError(couplingError)
+      }
+
       // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
       // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
       // existing activation (fall back to created_at for pre-fix rules) so an edit never re-opens backfill.
@@ -2079,7 +2494,7 @@ export class AutomationService {
       || input.name !== undefined
       || input.enabled !== undefined
     ) {
-      const existingForWebhook = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForWebhook = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       existingRuleSnapshot = existingForWebhook
       if (!existingForWebhook || existingForWebhook.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForWebhook.trigger_type
@@ -2104,7 +2519,7 @@ export class AutomationService {
       || input.name !== undefined
       || input.enabled !== undefined
     ) {
-      const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
       const nextTriggerConfig = (
@@ -2153,6 +2568,28 @@ export class AutomationService {
           existingForApproval.created_by,
         )
         if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
+      }
+      // R-69 1c: the RESULTING integration.run_finished rule passes the same save gate on every write shape, and
+      // its binding is re-stamped from the STORED creator and persisted whichever columns the caller sent.
+      // R-69 I6d r7, R3 (T-layer default, stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE): EXCEPT a
+      // write whose only effect is to switch the rule off ({ enabled: false }, no other field) — it changes no shape,
+      // re-stamps nothing, and leaves a rule that never fires (dispatch loads enabled rules only), so it does not run
+      // this gate: a rule whose creator lost its authority or its tenant can always be switched off. Any other edit
+      // (enabled: false WITH another field, enabled: true, a rename …) runs the full gate as before. The acting-user
+      // check before the write does not run either way for it (the rule is disabled after the write).
+      const runFinishedUpdateConfig = isSwitchOffOnlyUpdate(input) ? null : await this.assertIntegrationRunFinishedRuleAtSave({
+        triggerType: nextTriggerType,
+        triggerConfig: nextTriggerConfig,
+        actionType: nextActionType,
+        nestedActions: approvalActions,
+        conditions: nextConditions,
+        createdBy: existingForApproval.created_by ?? null,
+      })
+      if (runFinishedUpdateConfig) {
+        updates.trigger_config = JSON.stringify(runFinishedUpdateConfig)
+        if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
+        // The gate built this binding itself, from the stored creator's single active tenant (never a request field).
+        runFinishedBindingTenantId = (runFinishedUpdateConfig.binding as { tenantId: string }).tenantId
       }
       // FWB activation: the same fail-closed save gate for every resulting shape of a partial update.
       const fwbUpdateError = await this.validateFwbActionAtSave(
@@ -2211,7 +2648,7 @@ export class AutomationService {
     ) {
       // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
       // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
-      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await readStoredRule()
       existingRuleSnapshot = existingForDeletedTrigger
       if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
@@ -2252,19 +2689,89 @@ export class AutomationService {
       }
     }
 
+    // R-69 1b-ii (owner-approved 2026-11-11), inside the version-bound save path (I6d): a run_integration_job rule
+    // cannot carry conditions — its schedule.cron trigger fires with an EMPTY record, so a condition would skip every
+    // fire and no summary would ever be published. ONE check for every update shape that sets the conditions, the
+    // trigger or the action; a rename and the on/off switch (setRuleEnabled routes through here) never open it, nor
+    // does delete, so an operator can always turn such a rule off; clearing the conditions (null, or an empty group)
+    // is allowed. It judges the NEXT stored state: conditions = incoming ?? stored, actions = the shape an
+    // action-shaped edit persists, else the stored ones — the stored side always from `boundRule`, this attempt's
+    // FIRST read, the very row version the UPDATE below is bound to (F1). A save that changed the row in between
+    // makes that UPDATE match nothing, and the next attempt checks the row as it now is: no interleaving of two
+    // saves, each legal alone, stores a job rule with conditions.
+    if (shouldValidateActions || input.conditions !== undefined || input.triggerType !== undefined || input.triggerConfig !== undefined) {
+      // Every shape that opens this check also opened the T1-2 block above, which read the stored row.
+      if (!boundRule || boundRule.sheet_id !== sheetId) return null
+      const nextShape = nextActionShapeForConditions ?? {
+        actionType: boundRule.action_type,
+        actionConfig: (boundRule.action_config ?? null) as Record<string, unknown> | null,
+        actions: boundRule.actions ?? null,
+        allActions: null,
+      }
+      const { occurrences } = collectRunIntegrationJobOccurrences(nextShape.actionType, nextShape.actionConfig, nextShape.actions, nextShape.allActions)
+      if (occurrences.length > 0) {
+        const nextConditions = input.conditions !== undefined ? input.conditions : boundRule.conditions ?? null
+        const conditionsError = validateRunIntegrationJobConditions(nextConditions)
+        if (conditionsError) throw new AutomationRuleValidationError(conditionsError)
+      }
+    }
+
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
-    updates.updated_at = new Date().toISOString()
+    // F1: a write is never sent without the version it was validated against. Not reachable today — every field that
+    // puts a key into `updates` also opens the T1-2 block above, which reads the stored row — so this is the
+    // fail-closed side of a future edit that breaks that pairing, not a path with a caller.
+    if (validatedVersion === undefined || boundRule === undefined) throw new Error('updateRule: no stored rule snapshot was read before the write')
+
+    // R-69 B1 (T-layer default, see RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE): a write that leaves an ENABLED job
+    // rule needs the ACTING user's own live job authority — whatever this PATCH touches (a rename, a trigger edit and
+    // the on/off switch included; setRuleEnabled routes through here). Judged on THIS attempt's resulting rule: enabled
+    // = incoming ?? `boundRule` (this attempt's first read, the row version the UPDATE below is bound to); actions = the
+    // shape an action-shaped edit persists (binding re-stamped from the stored creator), else `boundRule`'s. A save that
+    // lost a race runs this again on its next attempt, against the row as it then is.
+    const resultingShape = nextActionShapeForConditions ?? {
+      actionType: boundRule.action_type,
+      actionConfig: (boundRule.action_config ?? null) as Record<string, unknown> | null,
+      actions: boundRule.actions ?? null,
+    }
+    await this.assertRunIntegrationJobEditorAuthority({
+      actorId: authoringActorId,
+      enabledAfterWrite: input.enabled !== undefined ? input.enabled : boundRule.enabled !== false,
+      actionType: resultingShape.actionType,
+      actionConfig: resultingShape.actionConfig,
+      actions: resultingShape.actions,
+    })
+    // R-69 I6d (T-layer default, see INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE): a write that leaves an ENABLED
+    // integration.run_finished rule needs the ACTING user's own live integration read authority — whatever this PATCH
+    // touches (statuses, the send action, a rename, the on/off switch; setRuleEnabled routes through here). Same
+    // `enabled` as B1's (incoming ?? `boundRule`); the rule kind and its binding tenant are what the run_finished save
+    // gate decided and stamped on THIS attempt (its snapshot differs from `boundRule` only when the row changed in
+    // between, and then the UPDATE below matches nothing and the next attempt judges again). After B1's check: a rule
+    // is never both kinds (that gate refuses run_integration_job on a run_finished rule), so at most one of the two
+    // reads runs, and a pass of one never skips the other.
+    await this.assertIntegrationRunFinishedEditorAuthority({
+      actorId: authoringActorId,
+      enabledAfterWrite: input.enabled !== undefined ? input.enabled : boundRule.enabled !== false,
+      bindingTenantId: runFinishedBindingTenantId,
+    })
+
+    // F1: the row version moves strictly forward with every write, in the statement that writes it (see updateRule).
+    const stampedAt = new Date().toISOString()
+    updates.updated_at = sql`GREATEST(${stampedAt}::timestamptz, date_trunc('milliseconds', updated_at) + interval '1 millisecond')`
 
     const result = await this.db
       .updateTable('automation_rules')
       .set(updates as never)
       .where('id', '=', ruleId)
       .where('sheet_id', '=', sheetId)
+      // F1: only the version this attempt validated against (both sides to the millisecond: the snapshot is a JS date).
+      .where(sql<boolean>`date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ${validatedVersion}::timestamptz)`)
       .returningAll()
       .execute()
 
-    if (result.length === 0) return null
+    // F1: no row at that version — it was changed, moved or deleted after this attempt read it. Nothing was written.
+    // Which of the three is the next attempt's first read to say (a rule that is gone answers null there, as before).
+    if (result.length === 0) return RULE_WRITE_LOST_RACE
 
     const rule = this.mapRow(result[0])
 
@@ -2855,6 +3362,507 @@ export class AutomationService {
   }
 
   /**
+   * R-69 1b-ii save gate for `run_integration_job` (ADR §3.1, §3.5, §6.1 ①③, §6.2, §7; baseline §10.2.2 ②,
+   * §10.2.4). Returns null when the rule carries no such action (nothing touched); otherwise the rule's action
+   * columns with the SERVER-STAMPED binding, or throws:
+   *   - nested occurrence (inside a branch) → 400. R-69 I6d: decided by POSITION (the branch lists of the pair and of
+   *     every `actions[i]`, plus the occurrence count of `allActions`, the caller's flattening of the same rule) —
+   *     never by object identity, so the rule editor's shape (`actions[]` with `actions[0]` mirrored into the pair)
+   *     reaches the checks below. Each of them runs for every occurrence of the request being saved, and both
+   *     columns THIS save persists are stamped. That is a statement about one save; a row that two saves raced for
+   *     is held to it by updateRule's row-version predicate (fix round 2, F1), not by this method;
+   *   - fix round 2 (F2): the job is not the rule's ONLY action — anything else in `actions`, a second job, or a
+   *     pair that is another action → 400, same code, its own fixed message (validateRunIntegrationJobSoleAction);
+   *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED !== 'true' → RUN_ACTION_DISABLED (the route answers 403);
+   *   - closed config (kind, projectNos ≤ 20, applyMode dry_run_only only, timeoutMs ≤ 55 min, no retry) → 400;
+   *   - trigger coupling: schedule.cron with a present, valid IANA timezone → 400;
+   *   - binding: `createdBy` must be bound to EXACTLY ONE active tenant (user_orgs) — a tenantless or
+   *     multi-tenant principal cannot bind the job (ADR §6.1 ③) → 400;
+   *   - R-69 I6a (ADR §3.1 + §6.5; T-layer defaults R-90): the rule's `sheetId` must be the ACTIVE registered
+   *     project sheet (registry 087) of the binding tenant, and every occurrence must list exactly that sheet's one
+   *     project; the project-sheets switch off fails closed; an unreadable registry is "could not be read; not
+   *     saved" → 400 (automation-run-integration-job-rule-sheet.ts). The executor re-checks on every trigger.
+   * The binding is derived from the rule's creator (create) or its STORED creator (update); a client-supplied
+   * `binding` is dropped (the same posture as the stock-prep `dataSourceOwnerId` stamp).
+   */
+  private async assertRunIntegrationJobAtSave(input: {
+    sheetId: string
+    triggerType: string
+    triggerConfig: Record<string, unknown> | null
+    actionType: string
+    actionConfig: Record<string, unknown>
+    actions: AutomationAction[] | null
+    allActions: AutomationAction[]
+    createdBy: string | null
+  }): Promise<{ actionConfig: Record<string, unknown>; actions: AutomationAction[] | null; stampedTopLevel: boolean; stampedActions: boolean } | null> {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(input.actionType, input.actionConfig, input.actions, input.allActions)
+    if (error) throw new AutomationRuleValidationError(error)
+    if (occurrences.length === 0) return null
+    if (!isIntegrationAutomationRunActionEnabled()) {
+      throw new AutomationRuleValidationError(
+        "run_integration_job is disabled on this deployment (INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED is not 'true')",
+        'RUN_ACTION_DISABLED',
+      )
+    }
+    for (const occurrence of occurrences) {
+      const configError = validateRunIntegrationJobConfig(occurrence.config, occurrence.path)
+      if (configError) throw new AutomationRuleValidationError(configError)
+    }
+    // (No conditions on a job rule: checked by the callers on the rule's next stored state — createRule after this
+    // gate, updateRule against the row its write is bound to.)
+    const couplingError = validateRunIntegrationJobTriggerCoupling(input.triggerType, input.triggerConfig)
+    if (couplingError) throw new AutomationRuleValidationError(couplingError)
+    const binding = await this.resolveRunIntegrationJobBinding(input.createdBy)
+    // R-69 I6a: the rule's sheet = the binding tenant's registered sheet of the (single) project, per occurrence.
+    for (const occurrence of occurrences) {
+      const job = occurrence.config.job as { projectNos?: unknown }
+      const projectNos = Array.isArray(job?.projectNos) ? (job.projectNos as string[]) : []
+      const verdict = await checkRunIntegrationJobRuleSheet(this.queryFn, { sheetId: input.sheetId, tenantId: binding.tenantId, projectNos })
+      if (verdict.ok === false) throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES[verdict.refusal])
+    }
+    let actionConfig = input.actionConfig
+    let stampedTopLevel = false
+    if (input.actionType === RUN_INTEGRATION_JOB_ACTION_TYPE) {
+      actionConfig = stampRunIntegrationJobConfig(input.actionConfig, binding) as unknown as Record<string, unknown>
+      stampedTopLevel = true
+    }
+    let actions = input.actions
+    let stampedActions = false
+    if (Array.isArray(input.actions) && input.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE)) {
+      actions = input.actions.map((action) => (
+        action.type === RUN_INTEGRATION_JOB_ACTION_TYPE
+          ? { ...action, config: stampRunIntegrationJobConfig(action.config, binding) as unknown as Record<string, unknown> }
+          : action
+      ))
+      stampedActions = true
+    }
+    return { actionConfig, actions, stampedTopLevel, stampedActions }
+  }
+
+  /**
+   * ADR §6.1 ③ / §6.5: the binding tenant is the creator's SINGLE active `user_orgs` row — never a request field.
+   * `label` names the rule kind in the refusal (R-69 1c reuses this for integration.run_finished rules).
+   */
+  private async resolveRunIntegrationJobBinding(createdBy: string | null, label = 'run_integration_job'): Promise<{ principalId: string; tenantId: string }> {
+    const principalId = typeof createdBy === 'string' ? createdBy.trim() : ''
+    if (!principalId) throw new AutomationRuleValidationError(`${label} rules need an authenticated creator (the binding principal)`)
+    let rows: unknown[]
+    try {
+      rows = (await this.queryFn('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = true ORDER BY org_id', [principalId])).rows
+    } catch {
+      throw new AutomationRuleValidationError(`${label}: the creator's tenant membership could not be read; the rule was not saved`)
+    }
+    const tenantIds = [...new Set(rows
+      .map((row) => (row as { org_id?: unknown }).org_id)
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0))]
+    if (tenantIds.length !== 1) {
+      throw new AutomationRuleValidationError(tenantIds.length === 0
+        ? `${label} rules need a creator bound to exactly one active tenant (none found): a tenantless principal cannot bind the job`
+        : `${label} rules need a creator bound to exactly one active tenant (several found)`)
+    }
+    return { principalId, tenantId: tenantIds[0] }
+  }
+
+  /**
+   * R-69 B1 — the T-layer default stated at RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE. The caller hands in the
+   * rule's RESULTING state: the action shape that will be stored (create: the stamped input; update: what this attempt
+   * persists, else its bound row) and whether the rule is enabled after the write. In order:
+   *   - disabled after the write, or no run_integration_job anywhere in the shape (top level or nested) → nothing to do;
+   *   - no acting user → refused (not authorized);
+   *   - the binding tenant is read from the shape's own stamped binding (what the executor will run under): every
+   *     top-level occurrence must carry a binding the executor's re-parse accepts, all naming ONE tenant; a nested
+   *     occurrence (never saveable; a hand-written row) has no binding this method reads — any of that → refused
+   *     (could not be checked). A fresh stamp comes from the stored creator, so the tenant is never the editor's;
+   *   - the predicate itself: principalId = the acting user, tenantId = that tenant. principal_unauthorized → refused
+   *     (not authorized); authority_unavailable or any throw → refused (could not be checked). Never a pass by default.
+   * The binding principal is not touched here: it stays the stored creator (ADR §6.2), and the executor still checks
+   * that principal on every trigger. What this does NOT decide: the plugin's own job permission (the PULL ladder or
+   * legacy integration:write/admin) — that definition lives only in the plugin's governed entry (ADR §2 ③) and is
+   * applied there, to the bound principal, at run time; it is not re-derived here.
+   */
+  private async assertRunIntegrationJobEditorAuthority(input: {
+    actorId: string | null | undefined
+    enabledAfterWrite: boolean
+    actionType: string
+    actionConfig: Record<string, unknown> | null
+    actions: AutomationAction[] | null
+  }): Promise<void> {
+    if (!input.enabledAfterWrite) return
+    const verdict = await this.runIntegrationJobActorVerdict(input.actorId, input, 'save')
+    if (verdict === 'unauthorized') throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+    if (verdict === 'unavailable') throw new AutomationRuleValidationError(RUN_INTEGRATION_JOB_EDITOR_AUTHORITY_UNAVAILABLE_MESSAGE, RUN_INTEGRATION_JOB_EDITOR_UNAUTHORIZED_CODE)
+  }
+
+  /**
+   * B1's acting-user judgement of a rule's action shape, without the save's "enabled after the write" gate: shared by
+   * the save (assertRunIntegrationJobEditorAuthority, B1) and the admin retry (retryExecution, R-69 I6d r7 R2), so the
+   * predicate, the way it is run and the binding-tenant read are defined once. In order:
+   *   - no run_integration_job anywhere in the shape (top level or nested) → 'no_job';
+   *   - no acting user → 'unauthorized';
+   *   - the binding tenant from the shape's own stamped binding (every top-level occurrence must parse with the
+   *     executor's re-parse, all naming ONE tenant; a nested occurrence has no binding read here) → else 'unavailable';
+   *   - the predicate itself (readRunIntegrationJobEditorAuthority: READ COMMITTED transaction), principalId = the acting
+   *     user, tenantId = that tenant: ok → 'authorized'; principal_unauthorized → 'unauthorized'; anything else →
+   *     'unavailable'. Never a pass by default.
+   */
+  private async runIntegrationJobActorVerdict(
+    actorIdInput: string | null | undefined,
+    shape: { actionType: string; actionConfig: Record<string, unknown> | null; actions: AutomationAction[] | null },
+    purpose: 'save' | 'retry',
+  ): Promise<'no_job' | 'authorized' | 'unauthorized' | 'unavailable'> {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(shape.actionType, shape.actionConfig, shape.actions, null)
+    if (occurrences.length === 0 && error === null) return 'no_job'
+    // The acting user exactly as the route authenticated it (never trimmed into another id).
+    const actorId = typeof actorIdInput === 'string' && actorIdInput.trim().length > 0 ? actorIdInput : null
+    if (actorId === null) return 'unauthorized'
+    // `error` other than the sole-action refusal is the nested one: a binding inside a branch is not read here.
+    if (error !== null && error !== RUN_INTEGRATION_JOB_NOT_SOLE_ERROR) return 'unavailable'
+    const tenantIds = new Set<string>()
+    for (const occurrence of occurrences) {
+      const persisted = parsePersistedRunIntegrationJobConfig(occurrence.config)
+      if (!persisted) return 'unavailable'
+      tenantIds.add(persisted.binding.tenantId)
+    }
+    if (tenantIds.size !== 1) return 'unavailable'
+    const [tenantId] = [...tenantIds]
+    const resolution = await this.readRunIntegrationJobEditorAuthority({ principalId: actorId, tenantId }, purpose)
+    if (resolution.ok === true) return 'authorized'
+    return resolution.reason === 'principal_unauthorized' ? 'unauthorized' : 'unavailable'
+  }
+
+  /** Test seam: replaces the live acting-user authority read of assertRunIntegrationJobEditorAuthority. */
+  private runIntegrationJobEditorAuthorityResolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null = null
+
+  setRunIntegrationJobEditorAuthorityResolverForTest(resolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null): void {
+    this.runIntegrationJobEditorAuthorityResolver = resolver
+  }
+
+  /**
+   * The executor's live-authority predicate, run the way the executor runs it (resolveIntegrationRunPrincipal): one
+   * committed READ COMMITTED transaction of the production pool, the predicate on that transaction, nothing held after
+   * it commits (the same accepted revoke-after-commit window). Any throw is authority_unavailable (fail closed); the
+   * log line is values-free (the error's class / code only — never its message, never the ids).
+   */
+  private async readRunIntegrationJobEditorAuthority(binding: { principalId: string; tenantId: string }, purpose: 'save' | 'retry' = 'save'): Promise<IntegrationRunPrincipalResolution> {
+    try {
+      if (this.runIntegrationJobEditorAuthorityResolver) return await this.runIntegrationJobEditorAuthorityResolver(binding)
+      return await poolManager.get().transaction(async ({ query }) => {
+        await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        return resolveIntegrationRunPrincipalOnTransaction({
+          query: async (sqlText: string, params?: unknown[]) => {
+            const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+            return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+          },
+        }, binding)
+      })
+    } catch (error) {
+      logger.warn(purpose === 'retry'
+        ? 'run_integration_job retry: the retrying user\'s live authority could not be read; nothing was re-run'
+        : 'run_integration_job save: the acting user\'s live authority could not be read; the rule was not saved', describeLookupError(error))
+      return { ok: false, reason: 'authority_unavailable' }
+    }
+  }
+
+  // ── R-69 1c: integration.run_finished (Bridge 2) ────────────────────────────────────────────────────────
+  //
+  // ADR adr-automation-pipeline-bridge-20261103 §4; design baseline v2.3 §10.2. Dry-run only, default OFF
+  // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED), R-69 OPEN. Save gate → job-keyed, tenant-scoped dispatch →
+  // per-rule exactly-once claim (`integration.run_finished:<eventId>`) → record-less executeRule.
+
+  /**
+   * Save gate for integration.run_finished rules (create AND every write shape of update). Returns null when
+   * the resulting rule is not one; otherwise the PERSISTED trigger config (closed job + statuses + the
+   * server-stamped binding), or throws AutomationRuleValidationError:
+   *   - closed trigger config (validateIntegrationRunFinishedTriggerConfig);
+   *   - no conditions (record-less);
+   *   - record-less side-effect actions only (the approval.completed side-effect set: no record write, no
+   *     run_integration_job — so "run finished → rule → run again" cannot be authored);
+   *   - creator bound to exactly one active tenant, and — live — active, able to manage automation and able to
+   *     read integration results (integration:* or stock-prep:read).
+   * The ACTING user of an update is judged separately, last before the write, by the same predicate
+   * (assertIntegrationRunFinishedEditorAuthority, R-69 I6d); on create the acting user is this creator.
+   */
+  private async assertIntegrationRunFinishedRuleAtSave(input: {
+    triggerType: string
+    triggerConfig: Record<string, unknown> | null
+    actionType: string
+    nestedActions: AutomationAction[]
+    conditions: ConditionGroup | null | undefined
+    createdBy: string | null
+  }): Promise<Record<string, unknown> | null> {
+    if (input.triggerType !== INTEGRATION_RUN_FINISHED_TRIGGER) return null
+    const config = input.triggerConfig ?? {}
+    const configError = validateIntegrationRunFinishedTriggerConfig(config)
+    if (configError) throw new AutomationRuleValidationError(configError)
+    if (input.conditions) {
+      const nodes = Array.isArray(input.conditions.conditions) ? input.conditions.conditions : null
+      if (!nodes || nodes.length > 0) {
+        throw new AutomationRuleValidationError('integration.run_finished rules cannot carry conditions (no record context)')
+      }
+    }
+    const actionTypes = new Set<string>([input.actionType, ...input.nestedActions.map((action) => action.type)])
+    for (const type of actionTypes) {
+      if (!APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES.has(type)) {
+        throw new AutomationRuleValidationError(
+          `action ${type} is not allowed on integration.run_finished rules (record-less: ${[...APPROVAL_COMPLETED_SIDE_EFFECT_ACTION_TYPES].join(', ')})`,
+        )
+      }
+    }
+    const binding = await this.resolveRunIntegrationJobBinding(input.createdBy, 'integration.run_finished')
+    if (!(await this.integrationRunFinishedCreatorAuthorized(binding))) {
+      throw new AutomationRuleValidationError(
+        'integration.run_finished rules require the creator to be active, to manage automation and to hold integration:read (or above) or stock-prep:read',
+      )
+    }
+    const job = config.job as Record<string, unknown>
+    const persistedJob: Record<string, unknown> = { kind: job.kind }
+    if (typeof job.pipelineId === 'string') persistedJob.pipelineId = job.pipelineId
+    if (typeof job.actionId === 'string') persistedJob.actionId = job.actionId
+    return {
+      job: persistedJob,
+      ...(Array.isArray(config.statuses) ? { statuses: [...(config.statuses as string[])] } : {}),
+      binding: { principalId: binding.principalId, tenantId: binding.tenantId },
+    }
+  }
+
+  /** Test seam: replaces the live creator-authority read of integration.run_finished rules. */
+  private integrationRunFinishedCreatorResolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null = null
+
+  setIntegrationRunFinishedCreatorResolverForTest(resolver: ((binding: { principalId: string; tenantId: string }) => Promise<IntegrationRunPrincipalResolution>) | null): void {
+    this.integrationRunFinishedCreatorResolver = resolver
+  }
+
+  /**
+   * The LIVE creator check (save and fire): one committed READ COMMITTED transaction over the creator's authority
+   * rows (resolveIntegrationRunPrincipalOnTransaction — active, authentication gate, exactly one active membership
+   * in the binding tenant, canManageAutomation), plus an integration read code. Fail closed on any error.
+   */
+  private async integrationRunFinishedCreatorAuthorized(binding: { principalId: string; tenantId: string }): Promise<boolean> {
+    let resolution: IntegrationRunPrincipalResolution
+    try {
+      resolution = this.integrationRunFinishedCreatorResolver
+        ? await this.integrationRunFinishedCreatorResolver(binding)
+        : await poolManager.get().transaction(async ({ query }) => {
+          await query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+          return resolveIntegrationRunPrincipalOnTransaction({
+            query: async (sqlText: string, params?: unknown[]) => {
+              const result = await query(sqlText, params) as { rows?: Array<Record<string, unknown>>; rowCount?: number | null }
+              return { rows: Array.isArray(result?.rows) ? result.rows : [], rowCount: result?.rowCount ?? null }
+            },
+          }, binding)
+        })
+    } catch {
+      return false
+    }
+    if (resolution.ok === false) return false
+    return resolution.user.roles.includes('admin') || resolution.user.permissions.some((code) => INTEGRATION_RUN_FINISHED_READ_CODES.has(code))
+  }
+
+  /**
+   * R-69 I6d — the T-layer default stated at INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE (update path; on create
+   * the gate's creator check is this check). The caller hands in the rule's RESULTING state: whether it is enabled
+   * after the write, and the binding tenant the run_finished save gate stamped on this attempt (null: the resulting
+   * trigger is not integration.run_finished). In order:
+   *   - disabled after the write, or not a run_finished rule after it → nothing to do;
+   *   - no acting user (absent, empty or blank) → refused, before any read;
+   *   - the save gate's own predicate, integrationRunFinishedCreatorAuthorized, unchanged and run its way (a committed
+   *     READ COMMITTED transaction of the production pool; any failure is `false`), with principalId = the acting user
+   *     exactly as the route authenticated it and tenantId = that binding tenant → `false` refuses. Never a pass by
+   *     default.
+   * The binding principal is not touched: it stays the stored creator, whom the gate checked on this attempt and the
+   * dispatch re-checks on every fire.
+   */
+  private async assertIntegrationRunFinishedEditorAuthority(input: {
+    actorId: string | null | undefined
+    enabledAfterWrite: boolean
+    bindingTenantId: string | null
+  }): Promise<void> {
+    if (!input.enabledAfterWrite || input.bindingTenantId === null) return
+    const refused = () => new AutomationRuleValidationError(INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_MESSAGE, INTEGRATION_RUN_FINISHED_EDITOR_UNAUTHORIZED_CODE)
+    const actorId = typeof input.actorId === 'string' && input.actorId.trim().length > 0 ? input.actorId : null
+    if (actorId === null) throw refused()
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: actorId, tenantId: input.bindingTenantId }))) throw refused()
+  }
+
+  /**
+   * R-69 I6d r7, R1 — the T-layer default stated at INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE, after its switch leg
+   * (read by the caller, which also compares the kinds). The dispatch checks on the CURRENT rule the retry would run,
+   * then the retrying actor, all in the tenant the original run was dispatched for. In order:
+   *   - that tenant: the execution's rule snapshot (integrationRunFinishedRunTenantId); unreadable → 'creator';
+   *   - the binding names the stored creator and that tenant (integrationRunFinishedBoundCreator — dispatch's own
+   *     check, the run's tenant standing in for the route's) → else 'creator';
+   *   - the creator's live authority (integrationRunFinishedCreatorAuthorized, as dispatch asks it) → else 'creator';
+   *   - the retrying actor: absent / empty / blank → 'actor', before any read; then the same predicate with
+   *     principalId = the actor exactly as the route authenticated it → false → 'actor'.
+   * Never a pass by default (the predicate is false on any failure).
+   */
+  private async integrationRunFinishedRetryVerdict(
+    rule: AutomationRule,
+    original: AutomationExecution,
+    actorIdInput: string | null | undefined,
+  ): Promise<'ok' | 'creator' | 'actor'> {
+    const runTenantId = integrationRunFinishedRunTenantId(original.ruleSnapshot)
+    if (runTenantId === null) return 'creator'
+    const creatorId = integrationRunFinishedBoundCreator(rule, runTenantId)
+    if (creatorId === null) return 'creator'
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: creatorId, tenantId: runTenantId }))) return 'creator'
+    const actorId = typeof actorIdInput === 'string' && actorIdInput.trim().length > 0 ? actorIdInput : null
+    if (actorId === null) return 'actor'
+    if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: actorId, tenantId: runTenantId }))) return 'actor'
+    return 'ok'
+  }
+
+  /** Test seam for the durable leg's enqueue transaction (production: a pool transaction). */
+  private integrationRunEventEnqueue: ((input: { eventId: string; payload: unknown; automationDepth: number }) => Promise<void>) | null = null
+
+  setIntegrationRunEventEnqueueForTest(enqueue: ((input: { eventId: string; payload: unknown; automationDepth: number }) => Promise<void>) | null): void {
+    this.integrationRunEventEnqueue = enqueue
+  }
+
+  /**
+   * THE SINK the host binds to core/integration-run-events.ts (index.ts). The event and route are already
+   * validated by the publish port. Durable delivery ON ⇒ enqueue on the routing manifest's
+   * `integration.run_finished` family in its own transaction (an unrouted family throws — publish fails
+   * closed, ADR §4.2); OFF ⇒ dispatch in-process as a tracked lifecycle task (the publisher is never blocked
+   * by the rules it triggers). ADR §4.2 accepted residual: the event is not committed with the run row, so a
+   * crash between the two loses one alert; the next run produces the next event.
+   */
+  async handleIntegrationRunFinished(event: IntegrationRunFinishedEvent, route: IntegrationRunEventRoute, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    // fix-I5: the gate is the COMPLETION-consumer detach, not the producer stop. Every `shutdown`-reason summary is
+    // emitted DURING the producer drain (stopProducerAdmissions aborts the jobs, then the scheduler's destroy()
+    // awaits the running rule, whose step emits), so gating on the producer stop dropped all of them while the
+    // port answered published:true. Until detach: durable ON enqueues (the row waits in the outbox for the next
+    // process — the delivery loop is stopping concurrently); OFF dispatches on completionConsumerInFlight, which
+    // the host drains after detach (index.ts stopOnce). After detach: refused with the closed SINK_STOPPED code.
+    if (this.completionConsumersDetached) throw new IntegrationRunSinkStoppedError()
+    if (isDurableDeliveryEnabled(env)) {
+      const payload = { event, route }
+      if (this.integrationRunEventEnqueue) {
+        await this.integrationRunEventEnqueue({ eventId: event.eventId, payload, automationDepth: event._automationDepth })
+        return
+      }
+      await poolManager.get().transaction(async ({ query }) => {
+        await produceAutomationEvent(
+          { query: async (sqlText: string, params?: unknown[]) => query(sqlText, params), isTransaction: true } as unknown as TransactionalQueryable,
+          { eventType: INTEGRATION_RUN_FINISHED_EVENT_TYPE, eventId: event.eventId, payload, automationDepth: event._automationDepth },
+          env,
+        )
+      })
+      return
+    }
+    this.trackLifecycleTask(this.completionConsumerInFlight, this.dispatchIntegrationRunFinished(event, route, env), (error) => {
+      logger.error('Automation integration.run_finished dispatch error', error instanceof Error ? error : undefined)
+    })
+  }
+
+  /**
+   * The durable consumer (`integration-run-trigger`, manifest v4): the stored `{ event, route }` is re-validated
+   * (closed key set again — the outbox row is data, not trust) and dispatched. A malformed row throws, so it
+   * surfaces through the retry / dead-letter ceiling instead of being dropped silently.
+   */
+  async handleIntegrationRunFinishedDelivery(payload: unknown, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+    const rawEvent = record.event as Record<string, unknown> | undefined
+    const origin = rawEvent && rawEvent.triggeredBy === 'automation' ? 'automation' : 'plugin'
+    const validation = validateIntegrationRunFinishedEvent(rawEvent, origin)
+    const route = validateIntegrationRunEventRoute(record.route)
+    if (validation.ok === false || !route) {
+      throw new Error('integration-run-trigger: the durable row is not a valid integration.run_finished event')
+    }
+    await this.dispatchIntegrationRunFinished(validation.event, route, env)
+  }
+
+  /**
+   * Job-keyed, tenant-scoped dispatch: the switch again (it may have been turned off since publish), the depth
+   * guard, the enabled rules of this tenant and job kind, then per rule — job id match, status filter (the
+   * DEFAULT alert set when the rule names none: held quiet, skipped alerts), the live creator re-check, and the
+   * per-rule exactly-once claim keyed `integration.run_finished:<eventId>` (a replay of the same id runs
+   * nothing). The rule sees a record-less payload carrying `run` (the event minus its depth) — never the route.
+   */
+  async dispatchIntegrationRunFinished(event: IntegrationRunFinishedEvent, route: IntegrationRunEventRoute, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    if (!isIntegrationAutomationRunEventEnabled(env)) return
+    const depth = event._automationDepth
+    if (depth >= MAX_AUTOMATION_DEPTH) {
+      logger.warn(`Automation recursion guard triggered (depth=${depth}) for integration.run_finished`)
+      return
+    }
+    const rules = await this.loadEnabledIntegrationRunFinishedRules(event.job.kind, route.tenantId)
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
+    if (rules.length === 0) return
+    const run: Record<string, unknown> = { ...event }
+    delete run._automationDepth
+    for (const rule of rules) {
+      const config = (rule.trigger_config ?? {}) as Record<string, unknown>
+      const job = (config.job ?? {}) as Record<string, unknown>
+      if (job.pipelineId !== undefined && job.pipelineId !== event.job.pipelineId) continue
+      if (job.actionId !== undefined && job.actionId !== event.job.actionId) continue
+      if (!integrationRunFinishedConfiguredStatuses(config).has(event.status)) continue
+      // (The binding check is shared with the admin retry, R-69 I6d r7 R1: integrationRunFinishedBoundCreator.)
+      const creatorId = integrationRunFinishedBoundCreator(rule, route.tenantId)
+      if (creatorId === null) {
+        logger.warn(`integration.run_finished rule ${rule.id} skipped: binding does not match its creator`)
+        continue
+      }
+      if (!(await this.integrationRunFinishedCreatorAuthorized({ principalId: creatorId, tenantId: route.tenantId }))) {
+        logger.warn(`integration.run_finished rule ${rule.id} skipped: creator not authorized at fire time`)
+        continue
+      }
+      try {
+        const payload: AutomationEventPayload & Record<string, unknown> = {
+          sheetId: rule.sheet_id,
+          recordId: '',
+          data: {},
+          actorId: null,
+          _automationDepth: depth,
+          eventId: event.eventId,
+          eventType: INTEGRATION_RUN_FINISHED_EVENT_TYPE,
+          occurredAt: event.occurredAt,
+          run,
+        }
+        await this.runWithEventDedup(rule.id, `${INTEGRATION_RUN_FINISHED_EVENT_TYPE}:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload), env)
+      } catch (err) {
+        logger.error(`integration.run_finished rule ${rule.id} failed`, err instanceof Error ? err : undefined)
+      }
+    }
+  }
+
+  /**
+   * The enabled integration.run_finished rules of one tenant (the server-stamped binding) and one job kind, with
+   * the same sheet-liveness filter as the template-keyed approval channels.
+   */
+  async loadEnabledIntegrationRunFinishedRules(kind: string, tenantId: string): Promise<AutomationRule[]> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('trigger_type', '=', INTEGRATION_RUN_FINISHED_TRIGGER)
+      .where('enabled', '=', true)
+      .where(sql<string>`trigger_config->'job'->>'kind'`, '=', kind)
+      .where(sql<string>`trigger_config->'binding'->>'tenantId'`, '=', tenantId)
+      .orderBy('created_at', 'asc')
+      .execute()
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), INTEGRATION_RUN_FINISHED_TRIGGER)
+  }
+
+  /**
+   * Trigger-only edits: the stored actions decide whether the cron + timezone coupling applies. Pure. No flattened
+   * list exists on this path (R-69 I6d): the position walk alone decides a nested occurrence. A stored row that
+   * carries one — or, fix round 2 (F2), one in which the job is not the only action — is not a shape this gate
+   * lets a save store, and its trigger is not edited forward: the edit is refused with that shape's own message.
+   */
+  private runIntegrationJobTriggerCouplingError(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    actionConfig: Record<string, unknown> | null,
+    actions: AutomationAction[] | null,
+  ): string | null {
+    const { occurrences, error } = collectRunIntegrationJobOccurrences(actionType, actionConfig, actions, null)
+    if (error) return error
+    if (occurrences.length === 0) return null
+    return validateRunIntegrationJobTriggerCoupling(triggerType, triggerConfig)
+  }
+
+  /**
    * The scheduled lane's fire-start read of the STORED `enabled` flag (see the scheduler callback in the
    * constructor). `absent` = the row is gone (deleted, possibly through another instance).
    */
@@ -2894,9 +3902,18 @@ export class AutomationService {
   stopProducerAdmissions(): Promise<void> {
     this.producerStopPromise ??= (async () => {
       for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+      // R-69 1b-ii (I-4): tell every in-flight run_integration_job to stop BEFORE the scheduler drain — the
+      // scheduler's destroy() awaits the whole executeRule promise of a running cron job, and a job that is not
+      // aborted would hold the producer barrier for its whole timeout. Abort only hastens the end: nothing is
+      // released by this call (a job that cannot settle is left to its lease TTL).
+      this.shutdownController.abort(new Error('AUTOMATION_SHUTDOWN'))
       const schedulerStop = this.scheduler.destroy()
+      // C1/S2: stop admitting synthetic previews and wait for every in-flight one (provider page,
+      // admission transaction, summary insert) in the same producer drain the host shutdown awaits.
+      const previewStop = this.syntheticPreview.stop()
       await this.drainLifecycleTasks(this.producerInFlight)
       await schedulerStop
+      await previewStop
     })()
     return this.producerStopPromise
   }
@@ -2905,7 +3922,23 @@ export class AutomationService {
     await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
   }
 
+  /**
+   * R-69 1b-ii (baseline §10.2.3 step 9 / T12): wait for every run_integration_job continuation that outlived
+   * its step — the port call still running after a `timeout_unsettled` early return, its heartbeat and its
+   * eventual fenced Tx B. The host puts this on its FINAL shutdown barrier (SHUTDOWN_TIMEOUT, pool left open),
+   * so a continuation that does not finish inside the barrier is left to its lease TTL — never released early.
+   */
+  async drainIntegrationJobs(): Promise<void> {
+    await this.drainLifecycleTasks(this.integrationJobsInFlight)
+  }
+
+  /** R-69 1b-ii test seam: the signal the executor's run_integration_job step listens to for shutdown. */
+  get shutdownSignalForTest(): AbortSignal {
+    return this.shutdownController.signal
+  }
+
   detachCompletionConsumers(): void {
+    this.completionConsumersDetached = true
     for (const id of this.completionSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
   }
 
@@ -2920,6 +3953,30 @@ export class AutomationService {
     this.detachCompletionConsumers()
     await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
+  }
+
+  /**
+   * C1/S2 first slice: the manual SYNTHETIC integration preview (integration/automation-synthetic-preview.ts).
+   * The rule only supplies ownership/permission context; its actions are never executed. Default OFF
+   * (AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED exact 'true'); every admission runs in its own RC
+   * transaction; refused with INACTIVE once producer admissions stopped.
+   */
+  previewIntegrationPlan(
+    scope: SyntheticPreviewScope,
+    request: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SyntheticPreviewResponse> {
+    return this.syntheticPreview.run(scope, request, options)
+  }
+
+  /** Values-free display bit; never authority (every run re-reads the switch). */
+  syntheticIntegrationPreviewEnabled(): boolean {
+    return this.syntheticPreview.enabled()
+  }
+
+  /** Test seam: replace the preview runtime (the default is built in the constructor). */
+  replaceSyntheticPreviewRuntimeForTest(runtime: SyntheticPreviewRuntime): void {
+    this.syntheticPreview = runtime
   }
 
   /**
@@ -3667,6 +4724,48 @@ export class AutomationService {
     // execution id. Fail-OPEN on a failed lookup, like every other lane in this file.
     if (!(await this.ruleSheetLive(rule, 'automation.retry', { executionId: original.id }))) {
       return { status: 409, code: SHEET_DELETED_CODE, message: RETRY_SHEET_DELETED_MESSAGE }
+    }
+    // R-69 I6d r7 (T-layer default; the rules R1 / R2 are stated verbatim at INTEGRATION_RUN_EVENT_RETRY_DISABLED_
+    // MESSAGE): an integration execution is re-run only when the run-time gates still hold AND the retrying admin holds
+    // the authority themself — the route's requireAdminRole is a GLOBAL role and says nothing about the rule's tenant.
+    // After the rule / fingerprint / sheet gates (they write nothing) and BEFORE the one-shot first-retry marker below
+    // (a refused attempt must not spend it) and executeRule: nothing is sent, claimed, leased or called. Answered like
+    // every other refusal on this lane (a coded 409, nothing recorded). The two kinds are judged independently and in a
+    // fixed order (R1, then R2): a pass of one never skips the other.
+    // R1 — integration.run_finished. The CURRENT rule (what would run) and the STORED trigger event (what would be
+    // replayed) must agree that this is one: the action fingerprint above does not cover the trigger, so a rule retyped
+    // since the run would otherwise replay a stored run with no binding to check, or an empty payload into an alert.
+    const ruleIsRunFinished = rule.trigger_type === INTEGRATION_RUN_FINISHED_TRIGGER
+    const eventIsRunFinished = isRecord(original.triggerEvent) && original.triggerEvent.eventType === INTEGRATION_RUN_FINISHED_EVENT_TYPE
+    if (ruleIsRunFinished || eventIsRunFinished) {
+      // The switch, re-read here exactly as dispatch reads it on every event (exact literal 'true').
+      if (!isIntegrationAutomationRunEventEnabled()) {
+        return { status: 409, code: 'INTEGRATION_RUN_EVENT_DISABLED', message: INTEGRATION_RUN_EVENT_RETRY_DISABLED_MESSAGE }
+      }
+      if (ruleIsRunFinished !== eventIsRunFinished) {
+        return { status: 409, code: 'RULE_CHANGED', message: INTEGRATION_RUN_FINISHED_RETRY_KIND_CHANGED_MESSAGE }
+      }
+      const runFinishedVerdict = await this.integrationRunFinishedRetryVerdict(rule, original, initiatedBy)
+      if (runFinishedVerdict === 'creator') {
+        return { status: 409, code: 'INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED', message: INTEGRATION_RUN_FINISHED_RETRY_CREATOR_UNAUTHORIZED_MESSAGE }
+      }
+      if (runFinishedVerdict === 'actor') {
+        return { status: 409, code: 'INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED', message: INTEGRATION_RUN_FINISHED_RETRY_UNAUTHORIZED_MESSAGE }
+      }
+    }
+    // R2 — run_integration_job anywhere in the CURRENT rule's actions: B1's acting-user judgement (the executor's
+    // predicate on a READ COMMITTED transaction, in the rule's stamped binding tenant), with the retrying admin as the
+    // acting user. The bound creator stays the executor's to check on the run itself.
+    const jobRetryVerdict = await this.runIntegrationJobActorVerdict(initiatedBy, {
+      actionType: rule.action_type,
+      actionConfig: (rule.action_config ?? null) as Record<string, unknown> | null,
+      actions: rule.actions ?? null,
+    }, 'retry')
+    if (jobRetryVerdict === 'unauthorized') {
+      return { status: 409, code: 'RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED', message: RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED_MESSAGE }
+    }
+    if (jobRetryVerdict === 'unavailable') {
+      return { status: 409, code: 'RUN_INTEGRATION_JOB_RETRY_UNAUTHORIZED', message: RUN_INTEGRATION_JOB_RETRY_AUTHORITY_UNAVAILABLE_MESSAGE }
     }
     const firstRetryAttempt = await claimFirstAutomationRetryAttempt(this.queryFn, rootExecutionId)
     const isGenuinelyFirstRetry = firstRetryAttempt && original.rerunOfExecutionId == null

@@ -66,15 +66,16 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
       outboxId = res.outboxId
       enqueued.push(outboxId)
       await client.query('COMMIT')
-      // CURRENT manifest = v3 (v2's four completion consumers + dingtalk-todo-mirror). Pinned
+      // CURRENT manifest = v4 (v3 + the R-69 1c integration.run_finished family; the approval.approved fan-out is v3's:
+      // v2's four completion consumers + dingtalk-todo-mirror). Pinned
       // explicitly, not via CURRENT_ROUTING_MANIFEST, so a silent manifest downgrade reds here.
       expect(res.consumerKeys).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3])
-      expect(res.manifestVersion).toBe(3)
+      expect(res.manifestVersion).toBe(4)
     } finally {
       client.release()
     }
     const { outbox, consumers } = await rowsFor(outboxId)
-    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 3, automation_depth: 2 })
+    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 4, automation_depth: 2 })
     expect(consumers.map((c) => c.consumer_key).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3].sort())
     expect(consumers.every((c) => c.status === 'pending')).toBe(true)
   })
@@ -150,7 +151,7 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
       enqueueOutboxEvent(txnStub(), { eventType: 'not.a.real.family', eventId: `evt_${RUN}_x`, payload: {} }),
     // Pinned to the CURRENT manifest version (v3 since the dingtalk-todo-mirror consumer landed) —
     // explicit, not loosened to /v\d/, so a future bump is a deliberate edit here too.
-    ).rejects.toThrow(/not routed by manifest v3/)
+    ).rejects.toThrow(/not routed by manifest v4/)
   })
 
   test('identity/depth validation is a boundary error: blank eventId and bad depth throw before any SQL', async () => {

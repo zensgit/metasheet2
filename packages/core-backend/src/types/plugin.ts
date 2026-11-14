@@ -1483,6 +1483,26 @@ export interface PluginServices {
     }): (() => void)
   }
   /**
+   * R-69 1b-ii — plugin→host registration of the IntegrationRunPort (core/integration-run-port.ts), the
+   * same direction and shape as `workdayCalendar`: plugin-integration-core registers at activation the port
+   * through which the core `run_integration_job` automation action runs a dry-run job via the plugin's
+   * governed entries. Exposed to plugin-integration-core ONLY; `register` returns the unbind. R-69 is OPEN:
+   * the action is dry-run only and default OFF.
+   */
+  integrationRun?: {
+    register(port: import('../core/integration-run-port').IntegrationRunPort): (() => void)
+  }
+  /**
+   * R-69 1c — host→plugin PUBLISH port for the `integration.run_finished` summary (core/integration-run-events.ts):
+   * plugin-integration-core publishes one values-free summary after its pipeline runner's `finishRun` for runs
+   * triggered by api / manual / replay. Closed key set (an extra key is refused), the run's tenant BESIDE the
+   * event as `route.tenantId`, never inside it; `triggeredBy: 'automation'` is refused (the core action layer
+   * owns those). Never throws. Exposed to plugin-integration-core ONLY. Dry-run only, default OFF, R-69 OPEN.
+   */
+  integrationRunEvents?: {
+    publish(summary: unknown, route: unknown): Promise<import('../core/integration-run-events').IntegrationRunPublishResult>
+  }
+  /**
    * S7-1..S7-4 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
    * approval-assignee kinds (直属上级 `direct_manager` / 部门主管 `dept_head` / 多级上级
    * `manager_at_level`), per the RATIFIED attendance-approval-s7 resolver design-lock, OD-S7-5 = (d).

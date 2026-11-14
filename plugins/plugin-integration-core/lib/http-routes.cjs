@@ -565,6 +565,8 @@ const {
   ReadSourceCompositionRuntimeError,
 } = require('./read-source-composition-runtime.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
+// R-69 1b-i: the governed entries' optional `{ signal, checkpoint }` (validated once, then handed down).
+const { normalizeGovernedEntryOptions } = require('./governed-entry-checkpoint.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
@@ -2122,6 +2124,30 @@ function requestQuery(req) {
 
 function requestParams(req) {
   return req.params && typeof req.params === 'object' ? req.params : {}
+}
+
+// R-69 1b-i: the request fields the governed chain reads — and the only ones. Pinned by
+// __tests__/governed-entry-abort-checkpoints.test.cjs against every `req.<field>` read in this file.
+const GOVERNED_PRINCIPAL_CONTEXT_FIELDS = Object.freeze(['user', 'authUser', 'authenticatedTenantId', 'query', 'params', 'body'])
+
+/**
+ * R-69 1b-i: the principal context a governed entry runs as, built from an HTTP request. A plain object
+ * holding the SAME values (same references) the handlers read off `req`, so every helper that used to
+ * read the request reads the identical thing. No Express object, response, header or socket rides along.
+ */
+function governedPrincipalContextFromRequest(req) {
+  const principalContext = {}
+  for (const field of GOVERNED_PRINCIPAL_CONTEXT_FIELDS) principalContext[field] = req[field]
+  // Module-private, never on the context itself: only the R67 ④ background lane asks which request a
+  // context came from (its enqueue mark is keyed by the request).
+  governedPrincipalContextRequests.set(principalContext, req)
+  return principalContext
+}
+
+const governedPrincipalContextRequests = new WeakMap()
+
+function requestOfGovernedPrincipalContext(principalContext) {
+  return principalContext && typeof principalContext === 'object' ? governedPrincipalContextRequests.get(principalContext) : undefined
 }
 
 const MAX_LIST_LIMIT = 500
@@ -7830,7 +7856,10 @@ function requireStockPreparationAudit() {
 
   /** Slot claim for a marked request; `null` (no-op) on the synchronous route. */
   function reserveDryRunJobForRequest(req, { actionId, body, tenantId, includeMissingComponents }) {
-    const mark = dryRunJobRequests.get(req)
+    // R-69 1b-i: `req` is the governed entry's principal context; the enqueue handler marked the HTTP
+    // request it was built from. A context no request built (a governed in-process caller) has no
+    // mark, so it is always the synchronous lane.
+    const mark = dryRunJobRequests.get(req) || dryRunJobRequests.get(requestOfGovernedPrincipalContext(req))
     if (!mark) return null
     // A job names its target; the plan's own validator, so a malformed number is the same 400.
     const { projectNo } = normalizeActionParameters(body.parameters)
@@ -7871,6 +7900,310 @@ function requireStockPreparationAudit() {
         }
       },
     })
+  }
+
+  /*
+   * R-69 1b-i — THE REQUEST-FREE GOVERNED ENTRIES (design baseline v2.3 §10.2.4; ADR
+   * adr-automation-pipeline-bridge-20261103.md §2 ③). ONE authorization chain, TWO callers: the HTTP
+   * handlers above build the principal context from `req` (`governedPrincipalContextFromRequest`) and
+   * call these; 1b-ii's core port will build it from a re-verified bound principal and call the SAME
+   * functions. There is no "port version" of any check, and nothing here widens, defaults or re-reads a
+   * permission: the chain is the handlers' chain, moved.
+   *
+   * THE PRINCIPAL CONTEXT is request-SHAPED but request-FREE: exactly the fields this file's governed
+   * helpers read off a request (`user`, `authUser`, `authenticatedTenantId`, and the tenant-steering
+   * carriers `query` / `params` / `body` that `resolveTenantId` / `collectExplicitTenantIds` consult) —
+   * no Express object, no `res`, no header. Inside the entries it keeps the name `req` on purpose: the
+   * moved lines are byte-identical to the handler they came from, so the move is reviewable as a move and
+   * every source guard that pins them still reads them. __tests__/governed-entry-abort-checkpoints.test.cjs
+   * pins that this file reads no other request field.
+   *
+   * THE THIRD ARGUMENT `{ signal, checkpoint }` is optional. Neither => `null` => the lib / runner get
+   * the exact objects they got before 1b-i. Given => handed down; the table action and the runner check
+   * the signal and then `await checkpoint()` before the source read, before each page and before planning.
+   *
+   * R-69 IS OPEN. Nothing calls these with a signal yet: no core action, no port, dry-run only (1b-ii).
+   */
+  function governedLibOptions(governedEntry) {
+    if (!governedEntry) return {}
+    return {
+      ...(governedEntry.signal ? { signal: governedEntry.signal } : {}),
+      ...(governedEntry.checkpoint ? { checkpoint: governedEntry.checkpoint } : {}),
+    }
+  }
+
+  /** 拉取 dry run (the stock-prep pull), request-free. Returns the dry-run payload the route answers 200 with. */
+  async function runGovernedStockPrepPull(principalContext, job, options) {
+    const governedEntry = normalizeGovernedEntryOptions(options)
+    const actionId = firstString(job && job.actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+    const { data } = await governedStockPrepPull(principalContext, { actionId }, governedEntry)
+    return data
+  }
+
+  // The moved body of `tableActionDryRun`. `background` is true only for a request the R67 ④ enqueue
+  // handler marked (the HTTP handler moves that mark onto the context); a governed caller never has one.
+  async function governedStockPrepPull(principalContext, { actionId }, governedEntry) {
+    const req = principalContext
+    await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
+    const body = normalizeTableActionBody(requestBody(req))
+    /*
+     * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
+     *
+     * This route is a `read` route, and it must stay one: a supervisor holding `integration:read`
+     * has always been able to run a trial and see the counts, and taking that away to ship a list
+     * would be a worse trade than not shipping it. But the list carries REAL PART NUMBERS, and
+     * `requireTableActionAccess`'s legacy branch RETURNS BEFORE the operator scope — a caller with
+     * `integration:read` never meets `resolveOperatorValueScope` at all. On a deployment whose
+     * tokens carry no tenant claim that branch's tenant comes from the `x-tenant-id` REQUEST
+     * HEADER (see the function's header), and a tenantless platform admin may steer `?tenantId=`
+     * across tenants outright. Handing either of them a part number would turn a values-free
+     * header hole into a VALUE leak.
+     *
+     * So the flag — and only the flag — carries its own gate, the same one every other
+     * value-bearing operator read in this plugin uses. Placed HERE: after the body is validated so
+     * an unknown key still 400s first, and before the action lookup, the B2a claim, the credential
+     * reload and the source read, so a refused caller costs none of them. A caller who does not
+     * set the flag walks the identical path they always did — not one extra check, not one extra
+     * key in the response.
+     */
+    let includeMissingComponents = false
+    if ('includeMissingComponents' in body) {
+      if (typeof body.includeMissingComponents !== 'boolean') {
+        throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'includeMissingComponents must be a boolean', { field: 'includeMissingComponents' })
+      }
+      includeMissingComponents = body.includeMissingComponents
+    }
+    const valueScope = includeMissingComponents
+      ? await resolveOperatorValueScope({
+        user: getUser(req),
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      : null
+    // S1: the project number rides into the lookup so the registry overlay can resolve THIS
+    // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
+    // validates a few lines down; with the switch off the registry ignores it.
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+      actionId,
+      projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+      targetPurpose: 'write',
+    })))
+    // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
+    // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
+    // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
+    // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
+    // response come out of that PLM, the value path must not derive it from anything the request
+    // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
+    // any caller who reached this line — the scope has already refused every input that could make
+    // them differ — so this is not a behaviour change; it is the derivation being made unable to
+    // drift from the proof.
+    const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+    // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
+    await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
+    // R67 ④: the background lane claims the project's one in-flight slot HERE — every guard above
+    // has passed, and nothing below (B2a claim, credential load, source read) has started. No-op on
+    // this synchronous route.
+    const dryRunJob = reserveDryRunJobForRequest(req, { actionId, body, tenantId: dryRunTenantId, includeMissingComponents })
+    // Batch-refresh phase 0 step 1 — PRECHECK: a preview of a sheet that another run is WRITING
+    // right now is refused 409 STOCK_PREP_PROJECT_WRITE_LOCKED here, before the B2a claim, the
+    // credential load and the PLM read (an applicable preview would supersede that run's plan, and the
+    // bump below refuses the same way). Read-only; no lock service wired -> no precheck (the token is
+    // then minted unbound, and apply refuses it). A malformed project number skips it: the plan
+    // answers its own 400 below, exactly as before.
+    let previewWriteScope = null
+    let previewMayBind = false
+    if (stockPreparationProjectWriteLock) {
+      try {
+        previewWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
+      } catch {
+        previewWriteScope = null
+      }
+      if (previewWriteScope) {
+        try {
+          // Round 6 (N4): through the require helper, like the apply route — a partially wired lock service
+          // is the same 501 everywhere, never a 500 from a missing method.
+          await requireStockPreparationProjectWriteLock().assertNoLiveWriter(previewWriteScope)
+        } catch (error) {
+          await stampWriteLockRefusal(action, dryRunTenantId, error)
+          throw error
+        }
+        // Only a caller who may APPLY binds (and so supersedes); see callerMayBindPlanGeneration.
+        previewMayBind = await callerMayBindPlanGeneration(req, actionId)
+      }
+    }
+    const dryRunB2aRunId = b2aRunId('table-action-dry-run')
+    // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
+    // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
+    const {
+      authorization: dryRunB2aAuthorization,
+      sourceObjects: dryRunB2aSourceObjects,
+    } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      req,
+      tenantScope: dryRunTenantId,
+      purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+      runId: dryRunB2aRunId,
+    })
+    // W-5: same stanza, forwarded so a `data-source:sql-readonly` source enforces its two SQL
+    // Server read floors for this run (see loadTableActionSourceAdapter / the adapter's read()).
+    const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: dryRunB2aAuthorization })
+    // S3 (ADR §5 「谁更新、什么时候更新」: dry-run 结束): the registry row the overlay resolved gets
+    // `last_pull_*` stamped — `previewed` with the run's distinct missing-component count, or
+    // `refused` with the typed code of a run that threw. A stamp that fails never fails the run.
+    // R67 ④: ONE closure for both lanes — awaited here, or run detached by the background lane.
+    const runDryRun = async () => {
+      let dryRunResult
+      try {
+        dryRunResult = await dryRunStockPreparationAction({
+          action,
+          parameters: body.parameters,
+          sourceAdapter,
+          recordsApi: getMultitableRecordsApi(),
+          tokenStore: context.storage,
+          policyStore: context.storage,
+          // 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder lands in the plugin's own durable storage
+          // (one values-free record per sheet), best effort — logged, never the answer.
+          manualRowsStore: context.storage,
+          logger: routeLogger,
+          conflictPolicyReview: body.conflictPolicyReview,
+          // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
+          // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
+          // tenant" a property of the code rather than of the caller's good manners.
+          includeMissingComponents,
+          // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
+          // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
+          // The apply route below resolves it the SAME way so the two agree on the plan revision.
+          installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+          // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
+          targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
+          // Batch-refresh step 4 PR-3a: the governance handle, UNCONDITIONALLY (an unwired service is 501 at
+          // consult time, before any source read), bound to this lane's own tenant.
+          refreshGovernance: refreshGovernanceFor(dryRunTenantId),
+          // 批次标识 BI-1b: the reader strip and, while the pull-batch switch is on, the band probe and the preview.
+          // R-69 1b-i merge: ported from the old `tableActionDryRun` body into this governed entry, so the HTTP route
+          // and the governed (automation) path run it identically (pinned by G-08).
+          pullBatch: pullBatchContextFor(dryRunTenantId, action.target),
+          // The source->`ext_` mapping, from server config. null when unconfigured, which
+          // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
+          // Configured: the SAME object the apply route passes, so both routes expand the same rows
+          // and agree on the dry-run revision. It is never request-influenced.
+          extFieldMapping: stockPreparationExtFieldMapping,
+          // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
+          confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
+          // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
+          // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
+          // gate checks and the tenant whose source is about to be read are one value, not two that
+          // could disagree.
+          b2aTrialRegistry,
+          b2aClaimStore: context.storage,
+          b2aOperationClaim,
+          b2aRunId: dryRunB2aRunId,
+          // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+          // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+          b2aSourceObjects: dryRunB2aSourceObjects,
+          tenantId: dryRunTenantId,
+          now: Date.now(),
+          // PR B (plan §5.1 / §9.4 L03): the small lane's over-cap rule for a PILOT project. Run by the lib
+          // only when the expansion hit a small-lane cap, before the token block: pilot -> 409
+          // STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED (the panel never auto-starts the large lane);
+          // unreadable -> 503; not pilot -> the `large_bom_bounded` answer, byte for byte.
+          pilotLaneGuard: () => stockPreparationPilotGate.assertSmallLaneCapNotExceededForPilot({
+            tenantId: dryRunTenantId,
+            projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
+            sheetId: action.target.sheetId,
+          }),
+          // Batch-refresh phase 0 step 1 — PLAN GENERATION: an APPLICABLE preview by a caller who may
+          // apply supersedes every earlier plan of this sheet. Called by the lib only when it is about to
+          // mint a token; refused 409 while a live writer holds the sheet (no token is minted then). A
+          // read-tier caller gets no binder: an unbound token that supersedes nothing (review round 1).
+          projectWriteGenerationBinder: previewWriteScope && previewMayBind
+            ? async () => writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
+            : undefined,
+          // R-69 1b-i: the governed entry's signal / checkpoint, ONLY when one was passed — an HTTP
+          // request passes neither, so the lib receives the exact object it received before 1b-i.
+          ...governedLibOptions(governedEntry),
+        })
+      } catch (error) {
+        // Stamped `refused` (and the overview row follows; S3 fix round 1, R5) — except WRITE_LOCKED from
+        // the generation bump (a live holder, or lock contention): that describes another run, which
+        // stamps its own outcome, and a late `refused` could overwrite its `applied` (review round 2).
+        await stampWriteLockRefusal(action, dryRunTenantId, error)
+        throw error
+      }
+      // PR-3a (AMB-6): a SUSPENDED preview is stamped `previewed` WITH the suspension code, and (review round 1) a
+      // preview awaiting RECOVERY with the recovery code (shape-only; no vocabulary migration); every other
+      // preview's stamp is unchanged.
+      await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult), ...previewStampCode(dryRunResult.status) })
+      if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
+      return dryRunResult
+    }
+    if (dryRunJob) return { data: await launchTableActionDryRunJob(dryRunJob, runDryRun), background: true }
+    return { data: await runDryRun(), background: false }
+  }
+
+  const GOVERNED_PIPELINE_TRIGGERS = new Set(['api', 'automation'])
+
+  /** Pipeline run / dry run, request-free. Returns the runner's result the route answers with. */
+  async function runGovernedPipeline(principalContext, job, options) {
+    const governedEntry = normalizeGovernedEntryOptions(options)
+    const pipelineId = job && job.pipelineId
+    const dryRun = Boolean(job && job.dryRun === true)
+    const triggeredBy = job && job.triggeredBy !== undefined ? job.triggeredBy : 'api'
+    if (!GOVERNED_PIPELINE_TRIGGERS.has(triggeredBy)) {
+      throw new TypeError('runGovernedPipeline: triggeredBy must be api or automation')
+    }
+    const req = principalContext
+    requireAccess(req, 'write')
+    const body = requestBody(req)
+    if (!dryRun) {
+      // B2a entry point (3) + E3-01. `pipelinesRun` never forwards `dryRun` (see `publicRunInput`),
+      // so this route is unconditionally the non-dry one.
+      const pipelineRunB2aRunId = b2aRunId('pipeline-run')
+      await assertPipelineRunAllowed(req, {
+        pipelineId,
+        dryRun: false,
+        runId: pipelineRunB2aRunId,
+      })
+      const pipelineRunInput = scopedInput(req, {
+        ...publicRunInput(body),
+        pipelineId,
+        triggeredBy,
+        runAs: 'user',
+      })
+      // W-2: hand the runner's own fence the run this route already claimed under, so the two guards
+      // share ONE operation. Attached only when ARMED — a dormant deployment passes the runner the
+      // exact object it passed before, with no extra key of any kind.
+      if (b2aTrialRegistry) pipelineRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineRunB2aRunId
+      // R-wave (finding 4): THE GOVERNED WRITE SURFACE. This route is a live write, and the marker
+      // says so with authority: it is attached only HERE, only after `requireAccess(req, 'write')`
+      // and only after `assertPipelineRunAllowed` above ran the E3-01 write fence and the B2a read
+      // authorization for this very pipeline. The runner refuses a markerless live write, which is
+      // what closes the cross-plugin door (`index.cjs` strips the marker off that input).
+      //
+      // ARMED-ONLY, exactly like the run marker one line above and for the same reason: the fence it
+      // feeds is armed-scoped, and a dormant deployment must hand the runner the object it always
+      // handed it — no extra key, not even one that is ignored.
+      if (b2aTrialRegistry) pipelineRunInput[C6_WRITE_LIFECYCLE_CONTEXT] = true
+      return governedEntry ? runner.runPipeline(pipelineRunInput, governedEntry) : runner.runPipeline(pipelineRunInput)
+    }
+    // B2a entry point (3): a dry run still READS the source, so it is gated. The E3-01 write
+    // fence does not apply — the dry path calls `previewUpsert`, never `upsert`.
+    const pipelineDryRunB2aRunId = b2aRunId('pipeline-dry-run')
+    await assertPipelineRunAllowed(req, {
+      pipelineId,
+      dryRun: true,
+      runId: pipelineDryRunB2aRunId,
+    })
+    const pipelineDryRunInput = scopedInput(req, {
+      ...publicRunInput(body),
+      pipelineId,
+      triggeredBy,
+      dryRun: true,
+      runAs: 'user',
+    })
+    // W-2: same shared-run marker as the live route above; armed-only, for the same reason.
+    if (b2aTrialRegistry) pipelineDryRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineDryRunB2aRunId
+    return governedEntry ? runner.runPipeline(pipelineDryRunInput, governedEntry) : runner.runPipeline(pipelineDryRunInput)
   }
 
   const VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'includeMissingComponents'])
@@ -8639,61 +8972,25 @@ function requireStockPreparationAudit() {
       return sendOk(res, created, 201)
     },
 
+    // R-69 1b-i: both pipeline routes are the request-free governed entry `runGovernedPipeline` (below
+    // `createHandlers`' helpers); the handler builds the principal context from `req` and answers. No
+    // signal, no checkpoint — the HTTP path is the one it always was.
     async pipelinesRun(req, res) {
-      requireAccess(req, 'write')
-      const body = requestBody(req)
-      // B2a entry point (3) + E3-01. `pipelinesRun` never forwards `dryRun` (see `publicRunInput`),
-      // so this route is unconditionally the non-dry one.
-      const pipelineRunB2aRunId = b2aRunId('pipeline-run')
-      await assertPipelineRunAllowed(req, {
+      const result = await runGovernedPipeline(governedPrincipalContextFromRequest(req), {
         pipelineId: requestParams(req).id,
         dryRun: false,
-        runId: pipelineRunB2aRunId,
-      })
-      const pipelineRunInput = scopedInput(req, {
-        ...publicRunInput(body),
-        pipelineId: requestParams(req).id,
         triggeredBy: 'api',
-        runAs: 'user',
       })
-      // W-2: hand the runner's own fence the run this route already claimed under, so the two guards
-      // share ONE operation. Attached only when ARMED — a dormant deployment passes the runner the
-      // exact object it passed before, with no extra key of any kind.
-      if (b2aTrialRegistry) pipelineRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineRunB2aRunId
-      // R-wave (finding 4): THE GOVERNED WRITE SURFACE. This route is a live write, and the marker
-      // says so with authority: it is attached only HERE, only after `requireAccess(req, 'write')`
-      // and only after `assertPipelineRunAllowed` above ran the E3-01 write fence and the B2a read
-      // authorization for this very pipeline. The runner refuses a markerless live write, which is
-      // what closes the cross-plugin door (`index.cjs` strips the marker off that input).
-      //
-      // ARMED-ONLY, exactly like the run marker one line above and for the same reason: the fence it
-      // feeds is armed-scoped, and a dormant deployment must hand the runner the object it always
-      // handed it — no extra key, not even one that is ignored.
-      if (b2aTrialRegistry) pipelineRunInput[C6_WRITE_LIFECYCLE_CONTEXT] = true
-      return sendOk(res, await runner.runPipeline(pipelineRunInput), 202)
+      return sendOk(res, result, 202)
     },
 
     async pipelinesDryRun(req, res) {
-      requireAccess(req, 'write')
-      const body = requestBody(req)
-      // B2a entry point (3): a dry run still READS the source, so it is gated. The E3-01 write
-      // fence does not apply — the dry path calls `previewUpsert`, never `upsert`.
-      const pipelineDryRunB2aRunId = b2aRunId('pipeline-dry-run')
-      await assertPipelineRunAllowed(req, {
+      const result = await runGovernedPipeline(governedPrincipalContextFromRequest(req), {
         pipelineId: requestParams(req).id,
         dryRun: true,
-        runId: pipelineDryRunB2aRunId,
-      })
-      const pipelineDryRunInput = scopedInput(req, {
-        ...publicRunInput(body),
-        pipelineId: requestParams(req).id,
         triggeredBy: 'api',
-        dryRun: true,
-        runAs: 'user',
       })
-      // W-2: same shared-run marker as the live route above; armed-only, for the same reason.
-      if (b2aTrialRegistry) pipelineDryRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineDryRunB2aRunId
-      return sendOk(res, await runner.runPipeline(pipelineDryRunInput), 200)
+      return sendOk(res, result, 200)
     },
 
     async pipelinesExternalWriteDryRun(req, res) {
@@ -8991,196 +9288,13 @@ function requireStockPreparationAudit() {
       // The action id is read from the route params FIRST because the gate is scoped to it — but it
       // is a pure param read, so the 401/403 still precedes every other validation and every IO.
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
-      await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
-      const body = normalizeTableActionBody(requestBody(req))
-      /*
-       * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
-       *
-       * This route is a `read` route, and it must stay one: a supervisor holding `integration:read`
-       * has always been able to run a trial and see the counts, and taking that away to ship a list
-       * would be a worse trade than not shipping it. But the list carries REAL PART NUMBERS, and
-       * `requireTableActionAccess`'s legacy branch RETURNS BEFORE the operator scope — a caller with
-       * `integration:read` never meets `resolveOperatorValueScope` at all. On a deployment whose
-       * tokens carry no tenant claim that branch's tenant comes from the `x-tenant-id` REQUEST
-       * HEADER (see the function's header), and a tenantless platform admin may steer `?tenantId=`
-       * across tenants outright. Handing either of them a part number would turn a values-free
-       * header hole into a VALUE leak.
-       *
-       * So the flag — and only the flag — carries its own gate, the same one every other
-       * value-bearing operator read in this plugin uses. Placed HERE: after the body is validated so
-       * an unknown key still 400s first, and before the action lookup, the B2a claim, the credential
-       * reload and the source read, so a refused caller costs none of them. A caller who does not
-       * set the flag walks the identical path they always did — not one extra check, not one extra
-       * key in the response.
-       */
-      let includeMissingComponents = false
-      if ('includeMissingComponents' in body) {
-        if (typeof body.includeMissingComponents !== 'boolean') {
-          throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', 'includeMissingComponents must be a boolean', { field: 'includeMissingComponents' })
-        }
-        includeMissingComponents = body.includeMissingComponents
-      }
-      const valueScope = includeMissingComponents
-        ? await resolveOperatorValueScope({
-          user: getUser(req),
-          authenticatedTenantId: req.authenticatedTenantId,
-          explicitTenantIds: collectExplicitTenantIds(req, {}),
-          tenantPrincipalDirectory,
-        })
-        : null
-      // S1: the project number rides into the lookup so the registry overlay can resolve THIS
-      // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
-      // validates a few lines down; with the switch off the registry ignores it.
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
-        actionId,
-        projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
-        targetPurpose: 'write',
-      })))
-      // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
-      // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
-      // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
-      // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
-      // response come out of that PLM, the value path must not derive it from anything the request
-      // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
-      // any caller who reached this line — the scope has already refused every input that could make
-      // them differ — so this is not a behaviour change; it is the derivation being made unable to
-      // drift from the proof.
-      const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
-      // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
-      await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
-      // R67 ④: the background lane claims the project's one in-flight slot HERE — every guard above
-      // has passed, and nothing below (B2a claim, credential load, source read) has started. No-op on
-      // this synchronous route.
-      const dryRunJob = reserveDryRunJobForRequest(req, { actionId, body, tenantId: dryRunTenantId, includeMissingComponents })
-      // Batch-refresh phase 0 step 1 — PRECHECK: a preview of a sheet that another run is WRITING
-      // right now is refused 409 STOCK_PREP_PROJECT_WRITE_LOCKED here, before the B2a claim, the
-      // credential load and the PLM read (an applicable preview would supersede that run's plan, and the
-      // bump below refuses the same way). Read-only; no lock service wired -> no precheck (the token is
-      // then minted unbound, and apply refuses it). A malformed project number skips it: the plan
-      // answers its own 400 below, exactly as before.
-      let previewWriteScope = null
-      let previewMayBind = false
-      if (stockPreparationProjectWriteLock) {
-        try {
-          previewWriteScope = stockPreparationProjectWriteScope(action, body.parameters)
-        } catch {
-          previewWriteScope = null
-        }
-        if (previewWriteScope) {
-          try {
-            // Round 6 (N4): through the require helper, like the apply route — a partially wired lock service
-            // is the same 501 everywhere, never a 500 from a missing method.
-            await requireStockPreparationProjectWriteLock().assertNoLiveWriter(previewWriteScope)
-          } catch (error) {
-            await stampWriteLockRefusal(action, dryRunTenantId, error)
-            throw error
-          }
-          // Only a caller who may APPLY binds (and so supersedes); see callerMayBindPlanGeneration.
-          previewMayBind = await callerMayBindPlanGeneration(req, actionId)
-        }
-      }
-      const dryRunB2aRunId = b2aRunId('table-action-dry-run')
-      // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
-      // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
-      const {
-        authorization: dryRunB2aAuthorization,
-        sourceObjects: dryRunB2aSourceObjects,
-      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
-        req,
-        tenantScope: dryRunTenantId,
-        purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-        runId: dryRunB2aRunId,
-      })
-      // W-5: same stanza, forwarded so a `data-source:sql-readonly` source enforces its two SQL
-      // Server read floors for this run (see loadTableActionSourceAdapter / the adapter's read()).
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: dryRunB2aAuthorization })
-      // S3 (ADR §5 「谁更新、什么时候更新」: dry-run 结束): the registry row the overlay resolved gets
-      // `last_pull_*` stamped — `previewed` with the run's distinct missing-component count, or
-      // `refused` with the typed code of a run that threw. A stamp that fails never fails the run.
-      // R67 ④: ONE closure for both lanes — awaited here, or run detached by the background lane.
-      const runDryRun = async () => {
-        let dryRunResult
-        try {
-          dryRunResult = await dryRunStockPreparationAction({
-            action,
-            parameters: body.parameters,
-            sourceAdapter,
-            recordsApi: getMultitableRecordsApi(),
-            tokenStore: context.storage,
-            policyStore: context.storage,
-            // 人工补充行 B1 (ADR §5.3): the last small-lane pull's reminder lands in the plugin's own durable storage
-            // (one values-free record per sheet), best effort — logged, never the answer.
-            manualRowsStore: context.storage,
-            logger: routeLogger,
-            conflictPolicyReview: body.conflictPolicyReview,
-            // W3a. `false` for every caller who did not opt in — and it can only be `true` here if the
-            // operator-scope gate above returned without throwing, which is what makes "operate ∧ proven
-            // tenant" a property of the code rather than of the caller's good manners.
-            includeMissingComponents,
-            // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
-            // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
-            // The apply route below resolves it the SAME way so the two agree on the plan revision.
-            installedFieldProperties: await resolveInstalledFieldProperties(req, action),
-            // 目标表字段存在性 — server-held, from the same tenant this route's source read is scoped to.
-            targetFieldExistence: targetFieldExistenceForTenant(dryRunTenantId),
-            // Batch-refresh step 4 PR-3a: the governance handle, UNCONDITIONALLY (an unwired service is 501 at
-            // consult time, before any source read), bound to this lane's own tenant.
-            refreshGovernance: refreshGovernanceFor(dryRunTenantId),
-            // 批次标识 BI-1b: the reader strip and, while the pull-batch switch is on, the band probe and the preview.
-            pullBatch: pullBatchContextFor(dryRunTenantId, action.target),
-            // The source->`ext_` mapping, from server config. null when unconfigured, which
-            // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
-            // Configured: the SAME object the apply route passes, so both routes expand the same rows
-            // and agree on the dry-run revision. It is never request-influenced.
-            extFieldMapping: stockPreparationExtFieldMapping,
-            // Confirmation-ledger readback (first cut). Server-resolved, see the factory above.
-            confirmationDecisionResolver: confirmationDecisionResolverForRequest(req),
-            // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
-            // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
-            // gate checks and the tenant whose source is about to be read are one value, not two that
-            // could disagree.
-            b2aTrialRegistry,
-            b2aClaimStore: context.storage,
-            b2aOperationClaim,
-            b2aRunId: dryRunB2aRunId,
-            // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
-            // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
-            b2aSourceObjects: dryRunB2aSourceObjects,
-            tenantId: dryRunTenantId,
-            now: Date.now(),
-            // PR B (plan §5.1 / §9.4 L03): the small lane's over-cap rule for a PILOT project. Run by the lib
-            // only when the expansion hit a small-lane cap, before the token block: pilot -> 409
-            // STOCK_PREP_PILOT_SMALL_LANE_LIMIT_EXCEEDED (the panel never auto-starts the large lane);
-            // unreadable -> 503; not pilot -> the `large_bom_bounded` answer, byte for byte.
-            pilotLaneGuard: () => stockPreparationPilotGate.assertSmallLaneCapNotExceededForPilot({
-              tenantId: dryRunTenantId,
-              projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
-              sheetId: action.target.sheetId,
-            }),
-            // Batch-refresh phase 0 step 1 — PLAN GENERATION: an APPLICABLE preview by a caller who may
-            // apply supersedes every earlier plan of this sheet. Called by the lib only when it is about to
-            // mint a token; refused 409 while a live writer holds the sheet (no token is minted then). A
-            // read-tier caller gets no binder: an unbound token that supersedes nothing (review round 1).
-            projectWriteGenerationBinder: previewWriteScope && previewMayBind
-              ? async () => writeBindingFromGeneration(await requireStockPreparationProjectWriteLock().bumpGeneration(previewWriteScope, { reason: 'small_preview', tenantId: dryRunTenantId }))
-              : undefined,
-          })
-        } catch (error) {
-          // Stamped `refused` (and the overview row follows; S3 fix round 1, R5) — except WRITE_LOCKED from
-          // the generation bump (a live holder, or lock contention): that describes another run, which
-          // stamps its own outcome, and a late `refused` could overwrite its `applied` (review round 2).
-          await stampWriteLockRefusal(action, dryRunTenantId, error)
-          throw error
-        }
-        // PR-3a (AMB-6): a SUSPENDED preview is stamped `previewed` WITH the suspension code, and (review round 1) a
-        // preview awaiting RECOVERY with the recovery code (shape-only; no vocabulary migration); every other
-        // preview's stamp is unchanged.
-        await stampProjectPullOutcome(action, dryRunTenantId, { outcome: 'previewed', missingComponentsCount: distinctMissingComponentCount(dryRunResult), ...previewStampCode(dryRunResult.status) })
-        if (isPlainObject(action.projectTarget)) await updateProjectOverviewRowBestEffort(dryRunTenantId, action.projectTarget.projectNo, { recount: true })
-        return dryRunResult
-      }
-      if (dryRunJob) return sendOk(res, await launchTableActionDryRunJob(dryRunJob, runDryRun), 202)
-      return sendOk(res, await runDryRun())
+      // R-69 1b-i: everything from the gate on is the request-free governed entry
+      // `governedStockPrepPull`; this handler only builds the principal context from `req` and answers.
+      // No signal, no checkpoint: the HTTP path is the one it always was. `background` is true only when
+      // the R67 ④ enqueue handler marked this request and the entry launched the job (202).
+      const { data, background } = await governedStockPrepPull(governedPrincipalContextFromRequest(req), { actionId }, null)
+      if (background) return sendOk(res, data, 202)
+      return sendOk(res, data)
     },
 
     // R67 ④ — 试算 in the background. NOT a second dry-run: it marks the request and runs the
@@ -15852,6 +15966,12 @@ function requireStockPreparationAudit() {
     },
   }
 
+  // R-69 1b-i: the request-free governed entries, for an in-process caller (1b-ii's port). Non-enumerable,
+  // so nothing that walks the handler map (route registration, guards) sees an extra entry.
+  Object.defineProperty(handlers, 'governedEntries', {
+    value: Object.freeze({ runGovernedStockPrepPull, runGovernedPipeline }),
+    enumerable: false,
+  })
   return handlers
 }
 
@@ -15890,6 +16010,14 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
     })
     registered.push(`${method} ${path}`)
   }
+  // R-69 1b-ii: hand the request-free governed entries to the plugin entry (index.cjs builds the
+  // IntegrationRunPort from them). Non-enumerable on the returned ARRAY, so `[...registered]` stays a plain
+  // route list and no second createHandlers() is ever needed (its per-registration state — the B2a trial
+  // registry, the pull-target scan cache, the dry-run job map — must stay the HTTP handlers' own).
+  Object.defineProperty(registered, 'governedEntries', {
+    value: handlers.governedEntries,
+    enumerable: false,
+  })
   return registered
 }
 
@@ -15904,6 +16032,8 @@ module.exports = {
   registerIntegrationRoutes,
   VALID_USER_RUN_MODES,
   __internals: {
+    GOVERNED_PRINCIPAL_CONTEXT_FIELDS,
+    governedPrincipalContextFromRequest,
     buildTemplatePreview,
     buildTargetPayloadPreview,
     hasPermission,
