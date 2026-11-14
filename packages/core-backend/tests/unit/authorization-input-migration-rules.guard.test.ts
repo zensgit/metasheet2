@@ -74,8 +74,8 @@ describe('rule tables', () => {
 })
 
 describe('historical migration files', () => {
-  const HISTORICAL_COUNT = 478
-  const HISTORICAL_DIGEST = 'f5f1a5832d503408919456d0f9ebcd977bd05b5c1c0a6d28e3f5cfbe70cd43f0'
+  const HISTORICAL_COUNT = 481
+  const HISTORICAL_DIGEST = '7945fcbbe66fed4aff9acd0689ade6217148dc276b75f6e3f555967c82c717b4'
 
   it('the set of historical migration files is pinned by count and digest', () => {
     const historical = historicalMigrationFiles()
