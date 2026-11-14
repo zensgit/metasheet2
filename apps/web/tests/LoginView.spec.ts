@@ -330,7 +330,7 @@ describe('LoginView', () => {
     ['corp_not_allowed',
       '钉钉企业白名单未放行，请联系管理员检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。',
       'Ask an administrator to check DINGTALK_CORP_ID against DINGTALK_ALLOWED_CORP_IDS; the corporate allowlist blocks DingTalk login.'],
-  ])('explains %s and updates the configuration hint when switching language', async (reason, zh, en) => {
+  ])('shows %s only when configured and updates the hint when switching language', async (reason, zh, en) => {
     mocks.apiFetch.mockImplementationOnce(async () => ({
       ok: true,
       status: 200,
@@ -359,7 +359,7 @@ describe('LoginView', () => {
       switcher.value = locale
       switcher.dispatchEvent(new Event('change', { bubbles: true }))
       await flushUi()
-      expect(container.querySelector('.login-hint')?.textContent).toBe(expected)
+      expect(container.querySelector('.login-hint')?.textContent).toBe(reason === 'corp_not_allowed' ? expected : undefined)
       expect(container.querySelector('.login-dingtalk')).toBeNull()
       expect(container.querySelector('button[type="submit"]')).not.toBeNull()
       expect(container.textContent).not.toContain('private-corp-value')
@@ -379,7 +379,7 @@ describe('LoginView', () => {
       json: async () => ({
         success: true,
         data: {
-          configured: false,
+          configured: true,
           available: false,
           corpId: 'private-corp-value',
           allowedCorpIds: [],
@@ -407,7 +407,7 @@ describe('LoginView', () => {
     }
   })
 
-  describe('#6467 missingEnv names every missing login variable', () => {
+  describe('#6467 unknown configuration state retains safe missingEnv hints', () => {
     async function mountWithProbe(data: Record<string, unknown>): Promise<HTMLSelectElement> {
       mocks.apiFetch.mockImplementationOnce(async () => ({
         ok: true,
@@ -415,7 +415,6 @@ describe('LoginView', () => {
         json: async () => ({
           success: true,
           data: {
-            configured: false,
             available: false,
             corpId: null,
             allowedCorpIds: [],
@@ -468,6 +467,19 @@ describe('LoginView', () => {
       expect(await hintIn(switcher, 'en')).toBe(en)
       expect(await hintIn(switcher, 'zh-CN')).toBe(zh)
       expect(container!.querySelector('.login-dingtalk')).toBeNull()
+    })
+
+    it.each([
+      ['missing_client_id', 'DINGTALK_CLIENT_ID|DINGTALK_APP_KEY',
+        'Ask an administrator to configure DINGTALK_CLIENT_ID (or DINGTALK_APP_KEY) for DingTalk login.',
+        '缺少服务端配置 DINGTALK_CLIENT_ID（或 DINGTALK_APP_KEY），请联系管理员配置钉钉登录。'],
+      ['missing_client_secret', 'DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET',
+        'Ask an administrator to configure DINGTALK_CLIENT_SECRET (or DINGTALK_APP_SECRET) for DingTalk login.',
+        '缺少服务端配置 DINGTALK_CLIENT_SECRET（或 DINGTALK_APP_SECRET），请联系管理员配置钉钉登录。'],
+    ])('retains the standalone %s hint when configuration is unknown', async (unavailableReason, requirement, en, zh) => {
+      const switcher = await mountWithProbe({ unavailableReason, missingEnv: [requirement] })
+      expect(await hintIn(switcher, 'en')).toBe(en)
+      expect(await hintIn(switcher, 'zh-CN')).toBe(zh)
     })
 
     it('keeps the per-reason sentence when only one variable is missing', async () => {
@@ -635,6 +647,117 @@ describe('LoginView', () => {
       // The isDingTalkContainer gate must short-circuit BEFORE the JSAPI load —
       // otherwise a plain browser would inject the CDN script and stall ~5s.
       expect(document.querySelector('script[data-dingtalk-jsapi]'), 'no jsapi script in a plain browser').toBeNull()
+    })
+  })
+
+  describe('explicit unconfigured login status', () => {
+    const unavailableHint = 'DingTalk login is unavailable right now.'
+
+    async function mountLogin(): Promise<void> {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(LoginViewComponent)
+      app.mount(container)
+      await flushUi()
+      const switcher = container.querySelector<HTMLSelectElement>('[data-testid="locale-switcher"]')!
+      switcher.value = 'en'
+      switcher.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+    }
+
+    function probe(data: Record<string, unknown>): void {
+      mocks.apiFetch.mockImplementationOnce(async () => ({
+        ok: true, status: 200, json: async () => ({ success: true, data }),
+      }))
+    }
+
+    it.each(['missing_client_id', 'unknown_reason'])('unconfigured status hides %s guidance in both languages', async (unavailableReason) => {
+      probe({ configured: false, available: false, unavailableReason,
+        missingEnv: ['DINGTALK_CLIENT_ID|DINGTALK_APP_KEY', 'DINGTALK_CLIENT_SECRET|DINGTALK_APP_SECRET', 'DINGTALK_REDIRECT_URI'] })
+      await mountLogin()
+      const switcher = container!.querySelector<HTMLSelectElement>('[data-testid="locale-switcher"]')!
+      for (const locale of ['en', 'zh-CN']) {
+        switcher.value = locale
+        switcher.dispatchEvent(new Event('change', { bubbles: true }))
+        await flushUi()
+        expect(container!.querySelector('.login-hint')).toBeNull()
+        expect(container!.querySelector('.login-dingtalk')).toBeNull()
+        expect(container!.querySelector('.login-divider')).toBeNull()
+        expect(container!.querySelector<HTMLInputElement>('input[autocomplete="username"]')?.disabled).toBe(false)
+        expect(container!.querySelector<HTMLInputElement>('input[type="password"]')?.disabled).toBe(false)
+        expect(container!.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false)
+      }
+      expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([undefined, null, 0, 'false', true])('keeps unavailable hints for non-false configured=%s', async (configured) => {
+      probe({ configured, available: false })
+      await mountLogin()
+      expect(container!.querySelector('.login-hint')?.textContent).toBe(unavailableHint)
+      expect(container!.querySelector('.login-dingtalk')).toBeNull()
+    })
+
+    it.each(['network', 'http', 'json'])('keeps the unavailable hint after a %s probe failure', async (failure) => {
+      mocks.apiFetch.mockImplementationOnce(async () => {
+        if (failure === 'network') throw new Error('synthetic network failure')
+        return {
+          ok: failure !== 'http', status: failure === 'http' ? 503 : 200,
+          json: async () => {
+            if (failure === 'json') throw new Error('synthetic invalid JSON')
+            return { success: true, data: { configured: false, available: false } }
+          },
+        }
+      })
+      await mountLogin()
+      expect(container!.querySelector('.login-hint')?.textContent).toBe(unavailableHint)
+      expect(container!.querySelector('.login-dingtalk')).toBeNull()
+    })
+
+    it('keeps active DingTalk launch failures visible', async () => {
+      probe({ configured: true, available: true })
+      mocks.apiFetch.mockImplementationOnce(async () => ({
+        ok: false, status: 503, json: async () => ({ success: false }),
+      }))
+      await mountLogin()
+      const button = container!.querySelector<HTMLButtonElement>('.login-dingtalk')!
+      expect(button).not.toBeNull()
+      button.click()
+      await flushUi(8)
+      expect(container!.querySelector('.login-error')?.textContent).toBe(unavailableHint)
+      expect(mocks.apiFetch).toHaveBeenLastCalledWith('/api/auth/dingtalk/launch', expect.objectContaining({ method: 'GET' }))
+      expect(mocks.routerReplace).not.toHaveBeenCalled()
+    })
+
+    it.each([true, false])('preserves password login success=%s while DingTalk is unconfigured', async (success) => {
+      probe({ configured: false, available: false, unavailableReason: 'missing_client_id' })
+      mocks.apiFetch.mockImplementationOnce(async () => ({
+        ok: success, status: success ? 200 : 401,
+        json: async () => success
+          ? { success: true, data: { token: 'synthetic-password-token', user: { role: 'user', permissions: [] }, features: {} } }
+          : { success: false },
+      }))
+      await mountLogin()
+      for (const [selector, value] of [['input[autocomplete="username"]', 'demo-user'], ['input[type="password"]', 'synthetic-password']]) {
+        const input = container!.querySelector<HTMLInputElement>(selector)!
+        input.value = value
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      container!.querySelector<HTMLButtonElement>('button[type="submit"]')!.click()
+      await flushUi(8)
+      expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+      expect(mocks.apiFetch).toHaveBeenLastCalledWith('/api/auth/login', expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ identifier: 'demo-user', password: 'synthetic-password' }),
+      }))
+      expect(container!.querySelector('.login-hint')).toBeNull()
+      if (success) {
+        expect(window.localStorage.getItem('auth_token')).toBe('synthetic-password-token')
+        expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
+        expect(container!.querySelector('.login-error')).toBeNull()
+      } else {
+        expect(window.localStorage.getItem('auth_token')).toBeNull()
+        expect(mocks.routerReplace).not.toHaveBeenCalled()
+        expect(container!.querySelector('.login-error')?.textContent).toBe('Sign-in failed. Check your account or password.')
+      }
     })
   })
 })
