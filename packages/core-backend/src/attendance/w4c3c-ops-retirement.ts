@@ -84,7 +84,7 @@ async function rows(
 
 function nullableIso(value: unknown): string | null {
   if (value === null || value === undefined) return null
-  const date = new Date(String(value))
+  const date = value instanceof Date ? value : new Date(String(value))
   if (Number.isNaN(date.getTime())) return null
   return date.toISOString()
 }

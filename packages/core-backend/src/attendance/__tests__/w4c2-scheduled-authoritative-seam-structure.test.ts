@@ -191,7 +191,7 @@ describe('W4C-2 Gate D3 — authoritative scheduled seam structure', () => {
     const core = read(CORE)
     // (1) The projected_status product-code pre-check, symmetric with F2's minutes check.
     expect(core).toContain('AUTHORITATIVE_PROJECTED_STATUSES_V1')
-    expect(core).toMatch(/if \(!AUTHORITATIVE_PROJECTED_STATUSES_V1\.has\(projection\.status\)\)/)
+    expect(core).toMatch(/if \(!AUTHORITATIVE_PROJECTED_STATUSES_V1\.has\(physicalProjection\.status\)\)/)
     // ...and it is spelled independently of ATTENDANCE_DAILY_STATUSES_V1, whose eighth member 'off'
     // the DB CHECK does not admit.
     expect(core).not.toMatch(/AUTHORITATIVE_PROJECTED_STATUSES_V1[^\n]*ATTENDANCE_DAILY_STATUSES_V1/)
