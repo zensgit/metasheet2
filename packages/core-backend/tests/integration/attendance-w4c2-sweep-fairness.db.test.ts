@@ -229,6 +229,66 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
     return r.rows[0].last_attempt_at
   }
 
+  it('revisits and finalizes an attempted run while every tick receives 25 newer runs', async () => {
+    const workDate = '2026-03-13'
+    const victim = await createStuckRun('continuous-victim', workDate)
+    const orgIds = [victim.orgId]
+    const recovered: string[] = []
+    const tick = () => withAllowlist(orgIds, () =>
+      sweepAttendanceScheduledRunsOnceV1(pool, {
+        limit: 25,
+        async recoverCandidate(candidate) { recovered.push(candidate.runId) },
+      }),
+    )
+    const warmup = await tick()
+    expect(warmup.scanned).toBe(1)
+    expect(warmup.notReady).toBe(1)
+    expect(recovered).toEqual([victim.runId])
+    expect(await lastAttemptAt(victim.runId)).not.toBeNull()
+
+    const callbacks: number[] = []
+    const finalizations: number[] = []
+    for (let round = 0; round < 4; round += 1) {
+      if (round === 3) {
+        // eslint-disable-next-line no-await-in-loop -- make the previously retried victim ready.
+        await sealGenerateTargetCompleted(victim.orgId, victim.runId, victim.userId, workDate)
+      }
+      const fresh: string[] = []
+      for (let index = 0; index < 25; index += 1) {
+        // eslint-disable-next-line no-await-in-loop -- arrivals must follow the prior scan.
+        const row = await createStuckRun(`continuous-new-${round}-${index}`, workDate)
+        orgIds.push(row.orgId)
+        fresh.push(row.runId)
+      }
+      // Compare PostgreSQL timestamps without the pg driver's millisecond truncation.
+      // This pins genuinely newer arrivals instead of relying on sleeps or a fake clock.
+      // eslint-disable-next-line no-await-in-loop -- each round proves its own arrival order.
+      const newer = await pool.query(
+        `SELECT count(*)::int AS n
+           FROM attendance_scheduled_runs fresh
+           CROSS JOIN attendance_scheduled_runs prior
+          WHERE fresh.run_id = ANY($1::uuid[]) AND prior.run_id = $2::uuid
+            AND fresh.created_at > COALESCE(prior.last_attempt_at, prior.created_at)`,
+        [fresh, victim.runId],
+      )
+      expect(newer.rows).toEqual([{ n: 25 }])
+      recovered.length = 0
+      // eslint-disable-next-line no-await-in-loop -- exercise durable selection across ticks.
+      const result = await tick()
+      expect(result.scanned).toBe(25)
+      expect(result.skipped).toBe(0)
+      expect(result.errored).toBe(0)
+      expect(result.notReady).toBe(25 - result.finalized)
+      callbacks.push(recovered.filter(runId => runId === victim.runId).length)
+      finalizations.push(result.finalized)
+    }
+
+    // Warm-up callbacks were cleared: this is a genuine subsequent recovery attempt.
+    expect(callbacks[0], 'SWEEP_CONTINUOUS_ARRIVAL_RECOVERY_REVISIT').toBe(1)
+    expect(finalizations).toEqual([0, 0, 0, 1])
+    expect(await runState(victim.runId)).toBe('completed')
+  }, 30000)
+
   // =============================================================================================
   // Gate 1 — >25 persistently-blocked candidates ahead; a later candidate still gets processed.
   // =============================================================================================
@@ -297,7 +357,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
       expect(await runState(healthyCreated.runId)).toBe('running')
 
       const tick2 = await tick()
-      // Tick 2's scan durably prioritizes `last_attempt_at IS NULL` rows FIRST (`NULLS FIRST`),
+      // In this fixed backlog, untouched rows have older queue ages than the first scan's stamp,
       // so both previously-unstamped rows are claimed this tick — `neverAttemptedRunning` drops
       // to 0 even though 2 of the 26 stuck rows from tick 1 are not re-scanned this tick (they
       // already carry a non-null `last_attempt_at` from tick 1, so they do not count here; this
@@ -706,7 +766,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep fairness/observability (real DB)'
         // `not_ready`, so `scanned`/`notReady`/`backlogRemaining` are flat across all 3 ticks).
         // Tick 1 scans the 25 oldest UNLOCKED rows (row 0 is skip-locked, invisible to the
         // selection entirely), leaving 4 unlocked rows + the locked row un-stamped (5). Tick 2's
-        // `last_attempt_at ASC NULLS FIRST` ordering claims those 4 remaining unlocked rows
+        // age ordering claims those 4 older, unattempted unlocked rows
         // FIRST, so only the permanently-locked row is left (1) — and it STAYS at 1 on tick 3,
         // because it is never claimable. This is the stuck-vs-churn signature: FLOORS nonzero
         // instead of draining to 0 (contrast the positive-control test immediately below, whose

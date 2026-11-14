@@ -1195,9 +1195,11 @@ export interface AttendanceScheduledRunSweepCandidateV1 {
  * next tick's shrunken/grown set). The scan and the write-back happen in the SAME statement
  * (`UPDATE ... WHERE run_id IN (SELECT ...)`), so the rotation is durable across ticks/process
  * restarts, not an in-memory cursor: every candidate this tick selects has its
- * `last_attempt_at` stamped to `now()` in the same statement, which demotes it below any
- * candidate this tick did NOT reach (`NULLS FIRST` keeps never-attempted rows — including
- * brand-new ones — ahead of anything already attempted). Steady state (backlog <= limit)
+ * `last_attempt_at` stamped to `now()` in the same statement. Queue age is the last attempt,
+ * or creation time before the first attempt. Unlike absolute NULL priority, newer arrivals
+ * cannot indefinitely preempt an older attempt. This assumes advancing timestamps and does
+ * not promise a fixed tick bound for locked rows or older/equal-priority arrivals.
+ * Steady state (backlog <= limit)
  * selects the SAME candidate SET the old fixed-prefix query did: every row starts
  * `last_attempt_at IS NULL`, so the `created_at ASC` tiebreak alone decides which rows the
  * inner `ORDER BY ... LIMIT` picks. It does NOT guarantee the same RETURNED order —
@@ -1214,8 +1216,8 @@ export interface AttendanceScheduledRunSweepCandidateV1 {
  * `sweepAttendanceScheduledRunsOnceV1` (whose scan transaction sits OUTSIDE the per-candidate
  * try/catch) and killed the ENTIRE tick, 0 candidates processed. `FOR UPDATE SKIP LOCKED` is
  * the standard durable-queue claim idiom: a currently-locked row is simply excluded from THIS
- * tick's candidate set (never stamped, never counted as `errored`) and remains at the front of
- * the rotation (`last_attempt_at IS NULL`) to be retried next tick — fully compatible with the
+ * tick's candidate set (never stamped, never counted as `errored`) and retains its queue age.
+ * It becomes claimable after unlock — fully compatible with the
  * fairness rotation above, and restores section 1.7's containment invariant for the scan phase
  * ("one stuck candidate cannot block the others in the same scan"). It also makes two
  * concurrent scan workers claim disjoint candidate sets instead of duplicating work (a locked
@@ -1235,7 +1237,7 @@ export async function scanAttendanceScheduledRunSweepCandidatesV1(
         SELECT run_id
           FROM attendance_scheduled_runs
          WHERE state = 'running'
-         ORDER BY last_attempt_at ASC NULLS FIRST, created_at ASC
+         ORDER BY COALESCE(last_attempt_at, created_at) ASC, created_at ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
