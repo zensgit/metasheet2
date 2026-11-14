@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import * as localFilesystem from '../../src/multitable/recovery-local-filesystem'
 import { createRequire } from 'node:module'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
@@ -332,8 +333,11 @@ describe('persistent local archive object store', () => {
     vi.spyOn(options.transactionDepth, 'currentTransactionDepth').mockReturnValue(1)
     await expect(store.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE_CALL_IN_TRANSACTION')
     vi.restoreAllMocks()
-    const statfs = fs.statfs
-    vi.spyOn(fs, 'statfs').mockImplementation(async (target) => ({ ...await statfs(target), type: 0x6969 }))
+    vi.spyOn(localFilesystem, 'isRecoveryLocalFilesystem').mockResolvedValue(false)
+    const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-file-store-refused-'))
+    roots.push(emptyRoot)
+    await expect(provisionRecoveryArchiveFileRoot({ ...options, basePath: emptyRoot })).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE')
+    expect(await fs.readdir(emptyRoot)).toEqual([])
     await expect(store.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE')
     expect(await fs.readdir(options.basePath)).toEqual(before)
   })
