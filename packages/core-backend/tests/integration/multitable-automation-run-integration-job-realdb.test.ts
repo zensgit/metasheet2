@@ -31,11 +31,14 @@
 import { randomUUID } from 'node:crypto'
 
 import { Client } from 'pg'
-import { afterAll, beforeAll, describe, expect, it, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, test, vi } from 'vitest'
 
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { up as leasesUp } from '../../src/db/migrations/zzzz20261106111100_create_automation_job_leases'
+import { down as runFinishedTriggerDown, up as runFinishedTriggerUp } from '../../src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type'
+import { AutomationService } from '../../src/multitable/automation-service'
+import { clearIntegrationRunFinishedSinkForTest, registerIntegrationRunFinishedSink } from '../../src/core/integration-run-events'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { listUserPermissions } from '../../src/rbac/service'
 import { resolveIntegrationRunPrincipalOnTransaction } from '../../src/integration/automation-run-authority'
@@ -398,6 +401,109 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     expect(await leaseRow()).toMatchObject({ fence: '2', holder: null })
     await Promise.all(A.tracked)
   }, 30_000)
+})
+
+// ── R-69 1c: integration.run_finished on the REAL tables ─────────────────────────────────────────────────────
+//
+// The action layer's summary, published through the real port, dispatched by a real AutomationService into the
+// REAL per-rule claim ledger (meta_automation_event_fires): a replayed step (same deterministic event id) reaches the
+// rule once; a new execution reaches it again. And the trigger CHECK migration's up / down on the real constraint.
+// The rule's action is never executed here (executeRule is observed, not run): no message is sent.
+describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires claim; trigger CHECK up/down)', () => {
+  const RULE = `rule_rf_${RUN}`
+  const RF_PROJECT = `PRF-${RUN}`
+  const RF_CONFIG = { ...CONFIG, job: { ...CONFIG.job, projectNos: [RF_PROJECT] } }
+  const EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
+  const savedAction = process.env[FLAG]
+  const savedEvent = process.env[EVENT_FLAG]
+  const insertRule = (id: string, triggerType = 'integration.run_finished') => q(
+    `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+     VALUES ($1, $2, 'rf', $3, $4::jsonb, 'send_notification', '{}'::jsonb, true, $5)`,
+    [id, `sheet_rf_${RUN}`, triggerType, JSON.stringify({ job: { kind: 'stock_prep_pull' }, statuses: ['succeeded'], binding: { principalId: PRINCIPAL_ID, tenantId: TENANT } }), PRINCIPAL_ID],
+  )
+
+  beforeAll(async () => {
+    await leasesUp(db as never)
+    await runFinishedTriggerUp(db as never)
+    process.env[FLAG] = 'true'
+    process.env[EVENT_FLAG] = 'true'
+  })
+  afterAll(async () => {
+    clearIntegrationRunFinishedSinkForTest()
+    for (const [key, saved] of [[FLAG, savedAction], [EVENT_FLAG, savedEvent]] as const) {
+      if (saved === undefined) delete process.env[key]
+      else process.env[key] = saved
+    }
+    await q(`DELETE FROM meta_automation_event_fires WHERE rule_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
+    await q(`DELETE FROM automation_rules WHERE id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
+    await q(`DELETE FROM meta_automation_outbound_intent WHERE root_execution_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
+    await q(`DELETE FROM meta_automation_job_leases WHERE scope_key LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
+    await runFinishedTriggerUp(db as never).catch(() => undefined)
+  })
+
+  test('a replayed step (same deterministic id) reaches the rule ONCE through the real claim ledger; a new execution reaches it again', async () => {
+    await insertRule(RULE)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { ...PRINCIPAL, permissions: ['integration:read', 'workflow:write'] } }))
+    const executeRule = vi.spyOn(service, 'executeRule').mockResolvedValue({} as never)
+    registerIntegrationRunFinishedSink(`rf_${RUN}`, (event, route) => service.dispatchIntegrationRunFinished(event, route))
+    const X = executorWith(immediatePort, poolTransaction, { leaseTtlMs: 2_000 })
+    const first = await X.run(`exec_rf_${RUN}`, RF_CONFIG)
+    expect(first.status).toBe('success')
+    const replay = await X.run(`exec_rf_${RUN}`, RF_CONFIG) // the same execution again: intent sent ⇒ already_applied, same id
+    expect(replay.status).toBe('success')
+    expect(executeRule).toHaveBeenCalledTimes(1)
+    const fires = await q(`SELECT dedup_key FROM meta_automation_event_fires WHERE rule_id = $1`, [RULE])
+    expect(fires.rows).toHaveLength(1)
+    expect(String((fires.rows[0] as { dedup_key: string }).dedup_key)).toMatch(/^integration\.run_finished:[0-9a-f]{64}$/)
+    const payload = executeRule.mock.calls[0][1] as Record<string, unknown>
+    expect(payload.run).toMatchObject({ status: 'succeeded', job: { kind: 'stock_prep_pull', projectNo: RF_PROJECT }, triggeredBy: 'automation' })
+    expect(JSON.stringify(payload)).not.toContain(TENANT)
+    await X.run(`exec_rf2_${RUN}`, RF_CONFIG) // a new execution: a new id ⇒ the rule runs again
+    expect(executeRule).toHaveBeenCalledTimes(2)
+  }, 20_000)
+
+  // fix-I5 F5: the tenant wall on the REAL loader (its SQL filter on the stamped binding) AND the in-loop binding
+  // check. A rule bound to another tenant (same creator, same job kind, same statuses) must never fire on this
+  // tenant's summary. Red only when BOTH layers are removed (each is the other's defense in depth); the unit suite
+  // pins the in-loop layer alone.
+  test('tenant wall: a rule bound to ANOTHER tenant never fires on this tenant\'s summary (real loader + in-loop check)', async () => {
+    const ruleA = `${RULE}_tenant_a`
+    const ruleB = `${RULE}_tenant_b`
+    const insertBound = (id: string, tenantId: string) => q(
+      `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
+       VALUES ($1, $2, 'rf', 'integration.run_finished', $3::jsonb, 'send_notification', '{}'::jsonb, true, $4)`,
+      [id, `sheet_rf_${RUN}`, JSON.stringify({ job: { kind: 'stock_prep_pull' }, statuses: ['succeeded'], binding: { principalId: PRINCIPAL_ID, tenantId } }), PRINCIPAL_ID],
+    )
+    try {
+      await insertBound(ruleA, TENANT)
+      await insertBound(ruleB, `${TENANT}_other`)
+      const service = new AutomationService(new EventBus(), db as never, q as never)
+      service.setIntegrationRunFinishedCreatorResolverForTest(async () => ({ ok: true, user: { ...PRINCIPAL, permissions: ['integration:read', 'workflow:write'] } }))
+      const executeRule = vi.spyOn(service, 'executeRule').mockResolvedValue({} as never)
+      registerIntegrationRunFinishedSink(`rf_tenant_${RUN}`, (event, route) => service.dispatchIntegrationRunFinished(event, route))
+      const X = executorWith(immediatePort, poolTransaction, { leaseTtlMs: 2_000 })
+      const step = await X.run(`exec_rft_${RUN}`, RF_CONFIG)
+      expect(step.status).toBe('success')
+      const fired = executeRule.mock.calls.map((call) => (call[0] as { id: string }).id).filter((id) => id === ruleA || id === ruleB)
+      expect(fired).toEqual([ruleA])
+    } finally {
+      await q(`DELETE FROM meta_automation_event_fires WHERE rule_id = ANY($1::text[])`, [[ruleA, ruleB]])
+      await q(`DELETE FROM automation_rules WHERE id = ANY($1::text[])`, [[ruleA, ruleB]])
+    }
+  }, 20_000)
+
+  test('trigger CHECK migration: up admits the type; down REFUSES while a rule uses it, then restores the prior set; up again', async () => {
+    await expect(runFinishedTriggerDown(db as never)).rejects.toThrow(/still use trigger_type 'integration.run_finished'/)
+    await q(`DELETE FROM automation_rules WHERE id = $1`, [RULE])
+    await runFinishedTriggerDown(db as never)
+    await expect(insertRule(`${RULE}_after_down`)).rejects.toMatchObject({ code: '23514' })
+    await insertRule(`${RULE}_prior_type`, 'approval.task_created') // the prior set is intact
+    await runFinishedTriggerUp(db as never)
+    await insertRule(`${RULE}_after_up`)
+    const { rows } = await q(`SELECT id FROM automation_rules WHERE id = ANY($1::text[]) ORDER BY id`, [[`${RULE}_after_up`, `${RULE}_prior_type`]])
+    expect(rows).toHaveLength(2)
+  }, 20_000)
 })
 
 // R-69 1b-ii (owner-approved 2026-11-11): a run_integration_job rule cannot carry conditions — its schedule trigger

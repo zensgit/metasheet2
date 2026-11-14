@@ -28,6 +28,8 @@ import {
   unregisterIntegrationRunPortOwnedBy,
   type IntegrationRunPort,
 } from './core/integration-run-port'
+// R-69 1c: the integration.run_finished publish port and sink registry (module-level, no server field).
+import { publishIntegrationRunFinished, registerIntegrationRunFinishedSink } from './core/integration-run-events'
 import type {
   CoreAPI,
   UserInfo,
@@ -3714,6 +3716,13 @@ export class MetaSheetServer {
               },
             }
           : undefined,
+        // R-69 1c: the integration.run_finished PUBLISH port (plugin → host), for plugin-integration-core ONLY.
+        // Closed key-set validation, the switch and the sink live in core/integration-run-events.ts (no server
+        // field); origin 'plugin' may never publish a `triggeredBy: 'automation'` summary (the action layer owns
+        // those). Never throws: the plugin's run result is never changed by its summary.
+        integrationRunEvents: manifest.name === 'plugin-integration-core'
+          ? { publish: (summary: unknown, route: unknown) => publishIntegrationRunFinished(summary, route, 'plugin') }
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -4411,6 +4420,11 @@ export class MetaSheetServer {
       this.automationService = pendingAutomationService
       this.automationServiceReady = true
       setAutomationServiceInstance(pendingAutomationService)
+      // R-69 1c: bind the integration.run_finished sink (module-level registry in core/integration-run-events.ts,
+      // no server field). Until this line a publish answers SINK_INACTIVE and nothing fires. Dry-run only, default
+      // OFF (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED), R-69 OPEN.
+      const runFinishedService = pendingAutomationService
+      registerIntegrationRunFinishedSink('automation-service', (event, route) => runFinishedService.handleIntegrationRunFinished(event, route))
       this.logger.info('AutomationService initialized')
     } catch (e) {
       // Roll back the half-built instance. It was never published (no field, no singleton, routes see

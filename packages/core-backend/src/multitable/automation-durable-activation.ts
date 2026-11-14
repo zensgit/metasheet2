@@ -61,6 +61,12 @@ export interface DurableConsumerHandlers {
    * adapter would fail `assertManifestCompleteness` at boot and park every v3 row forever.
    */
   'dingtalk-todo-mirror': (event: ClaimedConsumer) => Promise<void>
+  /**
+   * Manifest v4 addition — R-69 1c `integration.run_finished` (one values-free summary per integration job).
+   * Registered UNCONDITIONALLY: INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED gates what the dispatch does, never
+   * whether the adapter exists (a missing adapter fails `assertManifestCompleteness` at boot).
+   */
+  'integration-run-trigger': (event: ClaimedConsumer) => Promise<void>
 }
 
 export const DURABLE_CONSUMER_KEYS = [
@@ -72,6 +78,7 @@ export const DURABLE_CONSUMER_KEYS = [
   'webhook-event-bridge',
   'multitable-record-approval',
   'dingtalk-todo-mirror',
+  'integration-run-trigger',
 ] as const satisfies readonly (keyof DurableConsumerHandlers)[]
 
 /**

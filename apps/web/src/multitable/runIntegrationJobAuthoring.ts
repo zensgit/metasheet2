@@ -41,6 +41,8 @@ const CONFIG_KEYS: readonly string[] = ['job', 'timeoutMs', 'binding', 'retry']
 const STOCK_PREP_JOB_KEYS: readonly string[] = ['kind', 'projectNos', 'applyMode', 'actionId']
 const PIPELINE_JOB_KEYS: readonly string[] = ['kind', 'pipelineId', 'dryRun', 'mode', 'pipelineFingerprint']
 const PROJECT_NO_SHAPE = /^[!-~]{1,128}$/
+/** Mirror of the server's RUN_INTEGRATION_JOB_ACTION_ID_SHAPE (R-69 1c: the shape every run summary carries). */
+const ACTION_ID_SHAPE = /^[A-Za-z0-9_:.-]{1,128}$/
 
 /** Closed codes for the editor's localized save-block line; the `message` is the server's string. */
 export type RunIntegrationJobConfigErrorCode =
@@ -116,11 +118,13 @@ export function checkRunIntegrationJobConfig(config: unknown, path: string): Run
     if (typeof projectNo !== 'string' || !PROJECT_NO_SHAPE.test(projectNo)) {
       return fail('project_shape', `${path}.job.projectNos entries must be non-blank strings (1..128 visible ASCII characters)`)
     }
+    // Mirror of the server (R-69 1c, I5 ruling N2): the run summary refuses a projectNo containing '://'.
+    if (projectNo.includes('://')) return fail('project_shape', `${path}.job.projectNos entries must not contain "://" (a project number is never a URL)`)
     if (seen.has(projectNo)) return fail('project_repeat', `${path}.job.projectNos must not repeat a project`)
     seen.add(projectNo)
   }
-  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !PROJECT_NO_SHAPE.test(job.actionId))) {
-    return fail('action_id', `${path}.job.actionId must be a non-blank string when present`)
+  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !ACTION_ID_SHAPE.test(job.actionId))) {
+    return fail('action_id', `${path}.job.actionId must be an identifier when present (1..128 of A-Z a-z 0-9 _ : . -)`)
   }
   if (config.timeoutMs !== undefined) {
     const timeoutMs = config.timeoutMs
@@ -297,6 +301,9 @@ export const RUN_INTEGRATION_JOB_REASON_LABELS: Readonly<Record<string, { zh: st
   manual_confirm_required: { zh: '需人工确认', en: 'manual confirmation required' },
   suspended: { zh: '已暂停', en: 'suspended' },
   large_bom_bounded: { zh: 'BOM 过大，已限量', en: 'BOM too large, bounded' },
+  review_pending: { zh: '变更待复核', en: 'a written change awaits review' },
+  pull_batch_installing: { zh: '批次列安装中', en: 'batch columns are being installed' },
+  not_found: { zh: '源系统中未找到该项目', en: 'project not found in the source' },
   project_absent: { zh: '项目不存在', en: 'project absent' },
   project_archived: { zh: '项目已归档', en: 'project archived' },
 })

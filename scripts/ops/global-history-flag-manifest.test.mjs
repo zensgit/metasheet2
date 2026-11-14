@@ -1346,10 +1346,57 @@ test('INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED: exact true, danger high, predic
   assert.match(readRepoSource('.env.example'), /\n# INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED=false\n/)
 })
 
-test('INTEGRATION_AUTOMATION_RUN_{EVENT,APPLY,PIPELINE_WRITE}_ENABLED: registered, exact true, default OFF, and NOT READ anywhere in 1b-ii (the refusals they would gate are flag-independent)', () => {
+// R-69 1c: Bridge 2's switch is READ now, at exactly the three points the ADR names (§7): the action layer before
+// it emits, core on receipt (publish + dispatch), and the plugin before it publishes.
+const RUN_EVENTS_MODULE = 'packages/core-backend/src/core/integration-run-events.ts'
+const PLUGIN_RUN_EVENTS_MODULE = 'plugins/plugin-integration-core/lib/integration-run-events.cjs'
+test('INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED: exact true, danger medium, predicate source, the three read points (action layer, core receipt, plugin publish), .env.example OFF', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED
+  assert.ok(spec, 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED must be registered in the manifest')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'medium')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, `${RUN_EVENTS_MODULE}#isIntegrationAutomationRunEventEnabled`)
+  const module = readRepoSource(RUN_EVENTS_MODULE)
+  const reader = /\nexport function isIntegrationAutomationRunEventEnabled\([^)]*\): boolean \{\n([\s\S]*?)\n\}\n/.exec(module)
+  assert.ok(reader, 'the core predicate is found')
+  assert.equal(reader[1].trim(), "return env.INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED === 'true'", 'exact literal, its own key only')
+  // core on receipt: the publish port reads the predicate before anything else.
+  assert.ok(module.includes("if (!isIntegrationAutomationRunEventEnabled(env)) return { published: false, code: 'EVENT_DISABLED' }"), 'publish reads the predicate first')
+  // core dispatch reads it again (the switch may have been turned off since publish).
+  const service = readRepoSource('packages/core-backend/src/multitable/automation-service.ts')
+  assert.ok(service.includes('if (!isIntegrationAutomationRunEventEnabled(env)) return'), 'dispatch re-reads the predicate')
+  // the action layer reads it before it builds any summary.
+  const executor = readRepoSource('packages/core-backend/src/multitable/automation-executor.ts')
+  assert.ok(executor.includes('if (!isIntegrationAutomationRunEventEnabled()) return'), 'the executor reads the predicate before it emits')
+  // the plugin reads the exact literal before it publishes.
+  const plugin = readRepoSource(PLUGIN_RUN_EVENTS_MODULE)
+  const pluginReader = /\nfunction isRunEventPublishEnabled\([^)]*\) \{\n([\s\S]*?)\n\}\n/.exec(plugin)
+  assert.ok(pluginReader, 'the plugin predicate is found')
+  assert.equal(pluginReader[1].trim(), "return env.INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED === 'true'", 'plugin: exact literal, its own key only')
+  assert.ok(plugin.includes('if (!port || !isRunEventPublishEnabled(env)) return null'), 'the plugin reads the predicate before it builds the summary')
+  // No prefix matching anywhere a reader lives.
+  for (const source of [module, plugin]) {
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+    assert.equal(/startsWith\(|INTEGRATION_AUTOMATION_RUN_\[|RegExp\(|\/\^INTEGRATION_AUTOMATION/.test(code), false, 'no prefix-based flag matching')
+  }
+  assert.equal(hasReadSite('env[.]INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'), true)
+  assert.equal(hasReadSite('env[.]INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED', { file: PLUGIN_RUN_EVENTS_MODULE }), true)
+  // The purpose names the trigger CHECK migration as it is on disk.
+  const onDisk = migrationOnDisk(/^zzzz\d{14}_add_integration_run_finished_trigger_type\.ts$/)
+  assert.ok(spec.purpose.includes(onDisk.slice(0, 'zzzz00000000000000'.length)), `purpose names ${onDisk}`)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false, String(value))
+  assert.match(readRepoSource('.env.example'), /\n# INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED=false\n/)
+})
+
+test('INTEGRATION_AUTOMATION_RUN_{APPLY,PIPELINE_WRITE}_ENABLED: registered, exact true, default OFF, and NOT READ anywhere in 1b-ii / 1c (the refusals they would gate are flag-independent)', () => {
   const module = readRepoSource(RUN_INTEGRATION_JOB_MODULE)
+  assert.equal(module.includes("'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED',"), false, 'the EVENT switch left the NOT-READ list (1c reads it)')
   for (const [key, danger] of [
-    ['INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED', 'medium'],
     ['INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED', 'high'],
     ['INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED', 'high'],
   ]) {

@@ -8,7 +8,9 @@
  *   - INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED — READ here (save) and by the executor (every trigger). Off:
  *     saving a rule that carries the action is refused with RUN_ACTION_DISABLED; an existing rule's trigger
  *     records `skipped(action_disabled)`, never a silent success.
- *   - INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED — Bridge 2 (1c). NOT READ in 1b-ii.
+ *   - INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED — Bridge 2 (1c). Not read in 1b-ii; READ by 1c at its three
+ *     points (core/integration-run-events.ts: the action layer before it emits and core on receipt; the plugin
+ *     before it publishes).
  *   - INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED — unattended apply (owner layer, ADR Q12a). NOT READ in 1b-ii:
  *     `applyMode: 'apply_when_ready'` is a 400 at save whatever the switch says.
  *   - INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED — unattended non-dry pipeline runs (ADR Q12b). NOT READ
@@ -37,9 +39,10 @@ export function isIntegrationAutomationRunActionEnabled(env: NodeJS.ProcessEnv =
 /**
  * Registered in the flag manifest, NOT read by any 1b-ii code path (ADR §7). Listed here by name so the
  * manifest's source scan sees the registration is deliberate; a read point for any of them is a later slice.
+ * R-69 1c: INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED left this list — it is READ now (core/integration-run-events.ts
+ * isIntegrationAutomationRunEventEnabled, the plugin's lib/integration-run-events.cjs before publish).
  */
 export const INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II = Object.freeze([
-  'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED',
   'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED',
   'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED',
 ] as const)
@@ -53,6 +56,13 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set(['job', 'timeoutMs', 'binding',
 const STOCK_PREP_JOB_KEYS: ReadonlySet<string> = new Set(['kind', 'projectNos', 'applyMode', 'actionId'])
 const PIPELINE_JOB_KEYS: ReadonlySet<string> = new Set(['kind', 'pipelineId', 'dryRun', 'mode', 'pipelineFingerprint'])
 const PROJECT_NO_SHAPE = /^[!-~]{1,128}$/
+/**
+ * R-69 1c (fix-I5): the job identifier shape — byte-identical to automation-triggers.ts INTEGRATION_RUN_JOB_ID_SHAPE
+ * (pinned by tests/unit/automation-integration-run-finished.test.ts). The action's `actionId` rides in every
+ * integration.run_finished summary, whose port refuses any other shape: a wider id here would have been accepted
+ * at save and then dropped every summary of the job.
+ */
+export const RUN_INTEGRATION_JOB_ACTION_ID_SHAPE = /^[A-Za-z0-9_:.-]{1,128}$/
 
 export interface RunIntegrationJobBinding {
   principalId: string
@@ -111,11 +121,14 @@ export function validateRunIntegrationJobConfig(config: unknown, path: string): 
     if (typeof projectNo !== 'string' || !PROJECT_NO_SHAPE.test(projectNo)) {
       return `${path}.job.projectNos entries must be non-blank strings (1..128 visible ASCII characters)`
     }
+    // R-69 1c (I5 ruling N2): the run summary refuses a projectNo containing '://' (core/integration-run-events.ts),
+    // so a number saved with one would run and then drop its summary — refuse it here, as the actionId shape is.
+    if (projectNo.includes('://')) return `${path}.job.projectNos entries must not contain "://" (a project number is never a URL)`
     if (seen.has(projectNo)) return `${path}.job.projectNos must not repeat a project`
     seen.add(projectNo)
   }
-  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !PROJECT_NO_SHAPE.test(job.actionId))) {
-    return `${path}.job.actionId must be a non-blank string when present`
+  if (job.actionId !== undefined && (typeof job.actionId !== 'string' || !RUN_INTEGRATION_JOB_ACTION_ID_SHAPE.test(job.actionId))) {
+    return `${path}.job.actionId must be an identifier when present (1..128 of A-Z a-z 0-9 _ : . -)`
   }
   if (config.timeoutMs !== undefined) {
     const timeoutMs = config.timeoutMs

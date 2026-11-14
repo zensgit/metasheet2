@@ -41,6 +41,9 @@ import {
   type IntegrationRunStatus,
   type IntegrationRunSummary,
 } from '../core/integration-run-port'
+// R-69 1c — Bridge 2: the per-job integration.run_finished summaries and their publish port.
+import { isIntegrationAutomationRunEventEnabled, publishIntegrationRunFinished } from '../core/integration-run-events'
+import { buildAutomationRunFinishedEvents } from './automation-run-finished-events'
 import {
   buildIntegrationRunPrincipalContext,
   resolveIntegrationRunPrincipalOnTransaction,
@@ -1187,6 +1190,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { recipients }
       payload = {
@@ -1243,6 +1247,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { destinationIds }
       payload = {
@@ -1313,6 +1318,7 @@ function simulatedGenericClassBPlan(
         recordId: context.recordId,
         actorId: context.actorId ?? '',
         record: context.recordData,
+        ...integrationRunTemplateVars(context),
       }
       target = { userIds, memberGroupIds }
       payload = {
@@ -1872,6 +1878,20 @@ export function describeDingTalkUnreachableRecipients(counts: DingTalkSkippedRec
   return `No DingTalk recipient was reached: ${total} skipped `
     + `(not linked: ${counts.notLinked}, inactive: ${counts.inactive}, not found: ${counts.notFound}) `
     + '(DINGTALK_RECIPIENTS_UNREACHABLE)'
+}
+
+// ── R-69 1c: `run.*` template variables (ADR §4.3) ───────────────────────────────────────────────────────────
+
+/**
+ * Present ONLY on an integration.run_finished execution: `run` is the dispatched, closed-key, values-free event
+ * (status, reason, counts.*, job.*, durationMs, attempts, errorClass …; AutomationService.dispatchIntegrationRunFinished
+ * strips the depth). Every other trigger renders exactly what it rendered before (no `run` key at all).
+ */
+function integrationRunTemplateVars(context: ExecutionContext): Record<string, unknown> {
+  const trigger = context.triggerEvent as Record<string, unknown> | null | undefined
+  if (!trigger || trigger.eventType !== 'integration.run_finished') return {}
+  const run = trigger.run
+  return run && typeof run === 'object' && !Array.isArray(run) ? { run } : {}
 }
 
 // ── R-69 1b-ii: run_integration_job step vocabulary (module-level, values-free) ──────────────────────────────
@@ -4234,7 +4254,69 @@ export class AutomationExecutor {
     if (this.deps.trackIntegrationJobTask) this.deps.trackIntegrationJobTask(settled)
   }
 
+  /**
+   * R-69 1c (ADR §4.2): the step, then EXACTLY ONE integration.run_finished summary per project, emitted HERE —
+   * once, after the step's final result — never inside the unit loop, never from a `timeout_unsettled`
+   * continuation (its late settlement is the intent ledger's business, not a second event). The step's result
+   * is returned unchanged whatever the publish answers.
+   */
   private async executeRunIntegrationJob(
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<AutomationStepResult> {
+    let result: AutomationStepResult
+    try {
+      result = await this.executeRunIntegrationJobStep(config, context, identity)
+    } catch (error) {
+      // R-69 1c (ADR §4.1 "exactly one per job", fix-I5): a throw OUTSIDE the unit loop (the unit loop turns its
+      // own throws into closed unit results) still ends as a closed step result, so every configured project gets
+      // its one summary. Values-free: the error's code or name only — never its message.
+      result = this.runIntegrationJobStep('failed', 'failed', integrationRunErrorClass(error))
+    }
+    await this.emitRunIntegrationJobSummaries(result, config, context, identity)
+    return result
+  }
+
+  /**
+   * R-69 1c — the action layer's summaries (automation-run-finished-events.ts). Reads
+   * INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED before building anything (the ADR's third read point); needs the
+   * persisted config (the projects and the binding tenant, which routes but never rides in the event) and the
+   * class-A identity (the deterministic event id). Never throws; a refusal is logged values-free.
+   */
+  private async emitRunIntegrationJobSummaries(
+    result: AutomationStepResult,
+    config: Record<string, unknown>,
+    context: ExecutionContext,
+    identity: ClassAActionIdentity | undefined,
+  ): Promise<void> {
+    if (!isIntegrationAutomationRunEventEnabled()) return
+    try {
+      const parsed = parsePersistedRunIntegrationJobConfig(config)
+      if (!parsed || !identity) return
+      const parentDepth = (context.triggerEvent as Record<string, unknown> | null | undefined)?._automationDepth
+      const events = buildAutomationRunFinishedEvents({
+        output: result.output,
+        projectNos: parsed.job.projectNos,
+        ...(parsed.job.actionId ? { actionId: parsed.job.actionId } : {}),
+        rootExecutionId: identity.rootExecutionId,
+        executionId: context.executionId,
+        actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType: 'run_integration_job', canonicalConfig: config }),
+        automationDepth: (typeof parentDepth === 'number' && Number.isSafeInteger(parentDepth) && parentDepth >= 0 ? parentDepth : 0) + 1,
+        occurredAt: new Date().toISOString(),
+      })
+      for (const event of events) {
+        const published = await publishIntegrationRunFinished(event, { tenantId: parsed.binding.tenantId }, 'automation')
+        if (published.published === false && published.code !== 'SINK_INACTIVE') {
+          logger.warn('run_integration_job summary not published', { ruleId: context.ruleId, executionId: context.executionId, code: published.code, ...(published.field ? { field: published.field } : {}) })
+        }
+      }
+    } catch (error) {
+      logger.warn('run_integration_job summary emit failed', { ruleId: context.ruleId, executionId: context.executionId, errorClass: integrationRunErrorClass(error) })
+    }
+  }
+
+  private async executeRunIntegrationJobStep(
     config: Record<string, unknown>,
     context: ExecutionContext,
     identity: ClassAActionIdentity | undefined,
@@ -4276,20 +4358,28 @@ export class AutomationExecutor {
           units.push({ projectNo, scopeKey, outcome: 'not_started', reason: abortedBy, confirmed: false, durationMs: 0 })
           continue
         }
-        const unit = await this.runIntegrationJobUnit({
-          rawConfig: config,
-          context,
-          identity,
-          parsed,
-          projectNo,
-          scopeKey,
-          principal: principal.user,
-          port,
-          transaction,
-          timeoutSignal: timeoutController.signal,
-          shutdownSignal,
-          runtime,
-        })
+        let unit: RunIntegrationJobUnitResult
+        try {
+          unit = await this.runIntegrationJobUnit({
+            rawConfig: config,
+            context,
+            identity,
+            parsed,
+            projectNo,
+            scopeKey,
+            principal: principal.user,
+            port,
+            transaction,
+            timeoutSignal: timeoutController.signal,
+            shutdownSignal,
+            runtime,
+          })
+        } catch (error) {
+          // R-69 1c (fix-I5): a throw the unit did not classify itself (it classifies Tx A, the lease claim and the
+          // busy write) never ends the loop — the next project still runs and every project keeps its one summary.
+          // Where it threw is not known, so the job MAY have started: outcome_unknown, error class only.
+          unit = { projectNo, scopeKey, outcome: 'outcome_unknown', reason: integrationRunErrorClass(error), confirmed: false, durationMs: 0 }
+        }
         units.push(unit)
         if (unit.outcome === 'outcome_unknown' && unit.reason === 'timeout_unsettled') break
       }
@@ -4335,7 +4425,14 @@ export class AutomationExecutor {
     const intentLeaseMs = outboundLeaseForTimeout(parsed.timeoutMs)
 
     // 2. Tx A — the intent row is ALWAYS written for this action (ADR §5), whatever the class-B switch says.
-    const claim = await claimOutboundIntent(this.deps.queryFn, intentId, { leaseMs: intentLeaseMs })
+    // R-69 1c (fix-I5): a database failure here is a closed unit result, never a throw past the loop (ADR §4.1:
+    // every project keeps its one summary). The port was not called: `failed`, the error CLASS only.
+    let claim: Awaited<ReturnType<typeof claimOutboundIntent>>
+    try {
+      claim = await claimOutboundIntent(this.deps.queryFn, intentId, { leaseMs: intentLeaseMs })
+    } catch (error) {
+      return unit('failed', integrationRunErrorClass(error))
+    }
     if (claim.decision !== 'proceed' && claim.decision !== 'retry_failed') {
       if (claim.decision === 'skip_sent') return unit('succeeded', 'already_applied', { confirmed: true })
       return unit('outcome_unknown', claim.decision === 'skip_inflight' ? 'inflight_lease' : 'prior_outcome_unknown')
@@ -4343,9 +4440,19 @@ export class AutomationExecutor {
     const attemptToken = claim.attemptToken
 
     // 3. Job lease — busy ⇒ Tx B records a definite non-delivery (`failed`, busy) and the unit is skipped(busy).
-    const lease = await claimJobLease(this.deps.queryFn, scopeKey, jobLeaseHolderId(input.context.executionId), runtime.leaseTtlMs)
+    let lease: Awaited<ReturnType<typeof claimJobLease>>
+    try {
+      lease = await claimJobLease(this.deps.queryFn, scopeKey, jobLeaseHolderId(input.context.executionId), runtime.leaseTtlMs)
+    } catch (error) {
+      // R-69 1c (fix-I5): the port was not called — a definite non-delivery, recorded best effort (a write that
+      // fails too leaves the pending row to its intent lease; a lease row that did commit is left to its TTL).
+      const errorClass = integrationRunErrorClass(error)
+      await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', errorClass, attemptToken).catch(() => undefined)
+      return unit('failed', errorClass)
+    }
     if (!lease) {
       const busy = await recordOutboundOutcome(this.deps.queryFn, intentId, 'failed', 'busy', attemptToken)
+        .catch((): { confirmed: boolean } => ({ confirmed: false }))
       return unit('skipped', 'busy', { confirmed: busy.confirmed })
     }
 
@@ -5739,6 +5846,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const subject = renderAutomationTemplate(subjectTemplate, templateData).trim()
     const content = renderAutomationTemplate(bodyTemplate, templateData).trim()
@@ -6417,6 +6525,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),
@@ -7088,6 +7197,7 @@ export class AutomationExecutor {
       recordId: context.recordId,
       actorId: context.actorId ?? '',
       record: context.recordData,
+      ...integrationRunTemplateVars(context),
     }
     const renderedTitle = truncateDingTalkMessageText(
       renderAutomationTemplate(titleTemplate, templateData).trim(),

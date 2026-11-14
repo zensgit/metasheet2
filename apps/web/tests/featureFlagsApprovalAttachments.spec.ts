@@ -222,3 +222,70 @@ describe('integrationAutomationRunAction feature flag', () => {
     expect(hasFeature('integrationAutomationRunAction')).toBe(true)
   })
 })
+
+// R-69 1c: the rule editor offers the integration.run_finished trigger only while the session feature
+// integrationAutomationRunEvent is true. Same discipline: OFF before the session loads, OFF when an (older) backend
+// omits the key, ON only from an explicit backend boolean true — never from a string, the admin role or plugin state.
+describe('integrationAutomationRunEvent feature flag', () => {
+  it.each([
+    [{ data: { user: { features: { integrationAutomationRunEvent: true } } } }, true],
+    [{ data: { user: { features: { integrationAutomationRunEvent: false } } } }, false],
+    [{ data: { user: { features: { integrationAutomationRunEvent: 'true' } } } }, undefined],
+    [{ data: { user: { features: { integrationAutomationRunEvent: 1 } } } }, undefined],
+    [{ data: { user: { features: {} } } }, undefined],
+  ])('parses only an explicit boolean from the payload key', (payload, expected) => {
+    expect(extractFeaturesFromPayload(payload).integrationAutomationRunEvent).toBe(expected)
+  })
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    localStorage.clear()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.resetModules()
+  })
+
+  async function loadWith(features: Record<string, unknown>, role = 'admin') {
+    localStorage.setItem('auth_token', 'session-token')
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/me')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { user: { role, features: { attendance: true, workflow: false, ...features } } } }),
+        }
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    }))
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    const flags = useFeatureFlags()
+    const loaded = await flags.loadProductFeatures(true)
+    return { features: loaded, hasFeature: flags.hasFeature }
+  }
+
+  it('is off before the session has loaded, and when the backend omits the key (even for an administrator)', async () => {
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    expect(useFeatureFlags().hasFeature('integrationAutomationRunEvent')).toBe(false)
+    vi.resetModules()
+    const { features, hasFeature } = await loadWith({})
+    expect(features.integrationAutomationRunEvent).toBe(false)
+    expect(hasFeature('integrationAutomationRunEvent')).toBe(false)
+  })
+
+  it('stays off for a string "true", and turns on only from an explicit boolean true (not role-derived)', async () => {
+    expect((await loadWith({ integrationAutomationRunEvent: 'true' })).features.integrationAutomationRunEvent).toBe(false)
+    vi.resetModules()
+    const { features, hasFeature } = await loadWith({ integrationAutomationRunEvent: true }, 'user')
+    expect(features.integrationAutomationRunEvent).toBe(true)
+    expect(hasFeature('integrationAutomationRunEvent')).toBe(true)
+    // independent of the action switch's key
+    expect(features.integrationAutomationRunAction).toBe(false)
+  })
+})

@@ -14,6 +14,9 @@
 //        `dryRunToken`, `revision` and `evidence` never leave; counts keep integers only.
 //   P-04 refusals: 401/403 => skipped(principal_unauthorized); PROJECT_ABSENT / ARCHIVED => held; other
 //        HttpRouteError => failed(errorClass = code); an abort or a lease-lost checkpoint rejection is RETHROWN.
+//        批次标识 BI-2 (I5 follow-up): a READY preview whose pull-batch stanza says installing (P-03), and a 409
+//        WRITE_LOCKED whose lease holder is the pull-batch install (P-04) => held(pull_batch_installing); any other
+//        stanza reason leaves ready succeeded, any other WRITE_LOCKED stays failed.
 //   P-05 a REAL GovernedEntryAbortError (lib/governed-entry-checkpoint.cjs) thrown by the REAL
 //        runGovernedStockPrepPull (the I2 project-sheet harness: real routes, fake host / PLM) is RETHROWN as the
 //        same instance — the host's signal firing after page 1, and the host's checkpoint refusing page 2 (its
@@ -147,12 +150,32 @@ const tests = [
     assert.deepEqual(ready.counts, { add: 1 })
     assert.equal(JSON.stringify(ready).includes('PART-X'), false)
     assert.equal(JSON.stringify(ready).includes('secret'), false)
-    for (const status of ['manual_confirm_required', 'suspended', 'large_bom_bounded']) {
+    for (const status of ['manual_confirm_required', 'suspended', 'large_bom_bounded', 'review_pending']) {
       const held = summarizeStockPrepDryRun({ status, canApply: true, counts: { add: 2 } }, t0)
       assert.equal(held.status, 'held', status)
       assert.equal(held.reason, status)
       assert.equal(held.canApply, false, 'a held preview is never applicable')
     }
+    // R-69 1c (I5 ruling N4): review_pending is held with its counts and nothing of its review stanza; not_found is
+    // skipped(not_found) — the scheduled pull's skipped_review_pending / skipped_not_found.
+    const review = summarizeStockPrepDryRun({ status: 'review_pending', canApply: false, refreshReview: { pendingReviews: 2, blocksMint: true }, counts: { add: 0, update: 3 } }, t0)
+    assert.deepEqual(review, { status: 'held', reason: 'review_pending', canApply: false, counts: { add: 0, update: 3 }, durationMs: review.durationMs })
+    const notFound = summarizeStockPrepDryRun({ status: 'not_found', canApply: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } }, t0)
+    assert.deepEqual(notFound, { status: 'skipped', reason: 'not_found', canApply: false, counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }, durationMs: notFound.durationMs })
+    // 批次标识 BI-2 (#6818; I5 follow-up at the main merge): a READY preview whose pull-batch stanza says installing is held
+    // (pull_batch_installing) with its counts and canApply false — the scheduled pull's skipped_pull_batch_installing;
+    // nothing of the stanza or the token rides the summary; any other stanza reason leaves a ready preview succeeded; the
+    // stanza is read on a READY preview only (the script reads it after `status === 'ready'`).
+    const installing = summarizeStockPrepDryRun({ status: 'ready', canApply: true, dryRunToken: 'secret', revision: 'r1', pullBatch: { preview: true, wouldStamp: false, reason: 'installing' }, counts: { add: 2, update: 0 } }, t0)
+    assert.deepEqual(installing, { status: 'held', reason: 'pull_batch_installing', canApply: false, counts: { add: 2, update: 0 }, durationMs: installing.durationMs })
+    assert.equal(JSON.stringify(installing).includes('secret'), false)
+    assert.equal(JSON.stringify(installing).includes('wouldStamp'), false)
+    const notInstalled = summarizeStockPrepDryRun({ status: 'ready', canApply: true, pullBatch: { preview: true, wouldStamp: false, reason: 'not_installed' }, counts: { add: 2 } }, t0)
+    assert.deepEqual([notInstalled.status, notInstalled.reason, notInstalled.canApply, 'pullBatch' in notInstalled], ['succeeded', 'ready', true, false])
+    const stamping = summarizeStockPrepDryRun({ status: 'ready', canApply: true, pullBatch: { preview: true, wouldStamp: true, reason: null }, counts: { add: 2 } }, t0)
+    assert.deepEqual([stamping.status, stamping.reason], ['succeeded', 'ready'])
+    const heldWithStanza = summarizeStockPrepDryRun({ status: 'manual_confirm_required', canApply: true, pullBatch: { preview: true, wouldStamp: false, reason: 'installing' }, counts: { add: 1 } }, t0)
+    assert.equal(heldWithStanza.reason, 'manual_confirm_required', 'read on a ready preview only, as the script does')
     // Same race as P-04: call once and assert on the stored result.
     const recoveryPending = summarizeStockPrepDryRun({ status: 'recovery_pending' }, t0)
     assert.equal(typeof recoveryPending.durationMs, 'number')
@@ -178,6 +201,18 @@ const tests = [
     assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'x'), t0).reason, 'project_absent')
     assert.equal(classifyRefusal(new HttpRouteError(404, 'STOCK_PREPARATION_PROJECT_ABSENT', 'x'), t0).reason, 'project_absent')
     assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'x'), t0).reason, 'project_archived')
+    // 批次标识 BI-2 (#6818; I5 follow-up): the dry-run precheck's 409 WRITE_LOCKED held by the pull-batch install =>
+    // held(pull_batch_installing) — in the lock's own error class (stock-preparation-project-write-lock.cjs `writeLocked`:
+    // status, code, details) and as an HttpRouteError with the same code; nothing of the details rides the summary; a
+    // WRITE_LOCKED held by another purpose, or a contention refusal (no holder), stays failed(errorClass = code).
+    const lockRefusal = (details) => Object.assign(new Error('another run is writing this stock-prep sheet; retry after it finishes'), { name: 'StockPreparationProjectWriteLockError', status: 409, code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', details })
+    const installing = classifyRefusal(lockRefusal({ holderPurpose: 'pull_batch_install', heldSince: '2026-11-08T01:00:00.000Z', interrupted: false }), t0)
+    assert.deepEqual(installing, { status: 'held', reason: 'pull_batch_installing', durationMs: installing.durationMs })
+    assert.equal(JSON.stringify(installing).includes('heldSince'), false, 'nothing of the details rides the summary')
+    assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED', 'x', { holderPurpose: 'pull_batch_install' }), t0).reason, 'pull_batch_installing')
+    const otherHolder = classifyRefusal(lockRefusal({ holderPurpose: 'small_apply', interrupted: false }), t0)
+    assert.deepEqual([otherHolder.status, otherHolder.errorClass], ['failed', 'STOCK_PREP_PROJECT_WRITE_LOCKED'])
+    assert.deepEqual([classifyRefusal(lockRefusal({ reason: 'contention' }), t0).status, classifyRefusal(lockRefusal(undefined), t0).status], ['failed', 'failed'])
     const other = classifyRefusal(new HttpRouteError(503, 'B2A_AUTHORITY_UNAVAILABLE', 'the message body must not leak'), t0)
     assert.deepEqual(other, { status: 'failed', errorClass: 'B2A_AUTHORITY_UNAVAILABLE', failureStage: 'authorize', durationMs: other.durationMs })
     assert.equal(JSON.stringify(other).includes('message body'), false)

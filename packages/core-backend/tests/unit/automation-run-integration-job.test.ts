@@ -197,7 +197,7 @@ describe('run_integration_job — save-time vocabulary (pure)', () => {
   it('the switch reads the exact literal only; the three other switches have no read point', () => {
     expect(isIntegrationAutomationRunActionEnabled({ [FLAG]: 'true' } as NodeJS.ProcessEnv)).toBe(true)
     for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) expect(isIntegrationAutomationRunActionEnabled({ [FLAG]: value } as NodeJS.ProcessEnv)).toBe(false)
-    expect([...INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II]).toEqual(['INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED', 'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED', 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED'])
+    expect([...INTEGRATION_AUTOMATION_RUN_FLAGS_NOT_READ_IN_1B_II]).toEqual(['INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED', 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED'])
   })
   it('accepts the dry-run stock_prep_pull shape and refuses every widening (T7: 55 min + 1 ms is a 400)', () => {
     const ok = { job: { kind: 'stock_prep_pull', projectNos: ['P-1', 'P-2'], applyMode: 'dry_run_only' } }
