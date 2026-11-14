@@ -25,6 +25,10 @@
  *     COMMITTED authority transaction over the production transaction seam — a seeded principal runs to success
  *     with the request-path permission codes in the port context; deactivated ⇒ skipped(principal_unauthorized)
  *     before anything is leased.
+ *   - ADR §11 permission equivalence matrix: four fixtures (role-granted PULL ladder + admission; the same
+ *     stock-prep codes granted directly; the PULL-ladder role WITHOUT admission; legacy integration:write) — the
+ *     port principal's codes equal the request-time profile's (AuthService.verifyToken → resolveRbacProfile, the
+ *     claim-trusting fast path off) code for code, and the plugin-visible role set is the same on both sides.
  *
  *   - R-69 I6a (ADR §3.1 + §6.5): every executor here runs on a rule sheet registered (migration 087, real table) to
  *     TENANT / PROJECT, because the executor re-checks the rule sheet on every trigger; the I6a case proves the save
@@ -43,6 +47,7 @@ import path from 'node:path'
 import { Client } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, test, vi } from 'vitest'
 
+import { authService } from '../../src/auth/AuthService'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { up as leasesUp } from '../../src/db/migrations/zzzz20261106111100_create_automation_job_leases'
@@ -657,6 +662,182 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
     const { rows } = await q(`SELECT id FROM automation_rules WHERE id = ANY($1::text[]) ORDER BY id`, [[`${RULE}_after_up`, `${RULE}_prior_type`]])
     expect(rows).toHaveLength(2)
   }, 20_000)
+})
+
+// ── ADR §11: the four-fixture permission equivalence matrix (port principal ≡ request-time profile) ─────────────
+//
+// ADR adr-automation-pipeline-bridge-20261103 §6.x / §11: for the four fixtures below, the permission codes in the
+// port's principal context (resolveIntegrationRunPrincipalOnTransaction, on a committed READ COMMITTED transaction)
+// equal, code for code, the codes of the REQUEST-TIME profile — AuthService.verifyToken → getUserById →
+// resolveRbacProfile, with the dev-only claim-trusting fast path OFF so the profile comes from the database exactly
+// as on a production request (precedent: approval-can-decide-current-node.db.test.ts withoutTokenClaimTrust). The
+// expected code set of each fixture is ALSO pinned, so the two sides cannot agree by both widening.
+//
+//   F1  a role granting stock-prep:pull|operate|read + workflow:write, and an ENABLED stock-prep admission
+//   F2  the same codes granted DIRECTLY in user_permissions (an enabled stock-prep admission too): no role reaches
+//       the namespace ⇒ every stock-prep:* code is dropped on both sides (R-66 ③)
+//   F3  the F1 role with NO admission ⇒ every stock-prep:* code is dropped on both sides
+//   F4  a role granting legacy integration:write + workflow:write, and an enabled `integration` admission
+//       (`integration` is admission-controlled like stock-prep; without the row both sides drop it — F3's case)
+//
+// PRODUCT_MODE: AuthService adds the attendance self-service codes when supportsAttendanceSelfService(PRODUCT_MODE)
+// holds — and an UNSET PRODUCT_MODE normalizes to 'platform', which supports it. So the strict matrix pins
+// PRODUCT_MODE to 'plm-workbench' (self-service off), and a second case runs the default (unset) mode and asserts
+// the difference explicitly: request − port is exactly {attendance:read, attendance:write}, nothing else differs.
+//
+// Witness (seen red): replacing the admission-filtered listUserPermissions(id, trx) in automation-run-authority.ts
+// with the unfiltered union turns F2 and F3 red.
+describeIfDatabase('ADR §11 permission equivalence: port principal codes ≡ request-time profile codes (four fixtures)', () => {
+  const MATRIX_TENANT = `tenant_mx_${RUN}`
+  const ROLE_PULL = `role_mx_pull_${RUN}`
+  const ROLE_LEGACY = `role_mx_legacy_${RUN}`
+  const PULL_LADDER = ['stock-prep:operate', 'stock-prep:pull', 'stock-prep:read']
+  const ATTENDANCE_SELF_SERVICE = ['attendance:read', 'attendance:write']
+  type Fixture = { name: 'F1' | 'F2' | 'F3' | 'F4'; expected: string[] }
+  const FIXTURES: Fixture[] = [
+    { name: 'F1', expected: [...PULL_LADDER, 'workflow:write'] },
+    { name: 'F2', expected: ['workflow:write'] },
+    { name: 'F3', expected: ['workflow:write'] },
+    { name: 'F4', expected: ['integration:write', 'workflow:write'] },
+  ]
+  const userIdOf = (fixture: Fixture['name'], mode: 'strict' | 'platform') => `mx_${fixture.toLowerCase()}_${mode}_${RUN}`
+  const savedEnv = { PRODUCT_MODE: process.env.PRODUCT_MODE, RBAC_TOKEN_TRUST: process.env.RBAC_TOKEN_TRUST }
+
+  async function seedFixture(fixture: Fixture['name'], userId: string): Promise<void> {
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [userId, `${userId}@example.test`, userId])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [userId, MATRIX_TENANT])
+    const admit = (namespace: string) => q(`INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, $2, true)`, [userId, namespace])
+    if (fixture === 'F1') {
+      await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, [userId, ROLE_PULL])
+      await admit('stock-prep')
+    } else if (fixture === 'F2') {
+      for (const code of [...PULL_LADDER, 'workflow:write']) {
+        await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2)`, [userId, code])
+      }
+      await admit('stock-prep')
+    } else if (fixture === 'F3') {
+      await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, [userId, ROLE_PULL])
+    } else {
+      await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, [userId, ROLE_LEGACY])
+      await admit('integration')
+    }
+  }
+
+  /** The port side: the production resolver on a committed READ COMMITTED transaction (the executor's seam shape). */
+  async function portPrincipal(userId: string) {
+    const resolution = await poolTransaction(async ({ query }) => resolveIntegrationRunPrincipalOnTransaction(
+      { query: async (s: string, p?: unknown[]) => { const r = await query(s, p); return { rows: r.rows as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null } } },
+      { principalId: userId, tenantId: MATRIX_TENANT },
+    ))
+    expect(resolution.ok).toBe(true)
+    if (!resolution.ok) throw new Error(`port principal unresolved: ${resolution.reason}`)
+    return resolution.user
+  }
+
+  /**
+   * The request side: a real token through AuthService.verifyToken with the claim-trusting fast path OFF. The
+   * token CLAIMS role 'admin' on purpose — the profile must come from the database (role 'user'), never the claim.
+   */
+  async function requestProfile(userId: string, productMode: string | undefined) {
+    const token = authService.createToken({ id: userId, email: `${userId}@example.test`, name: userId, role: 'admin', permissions: [], created_at: new Date(), updated_at: new Date() } as never)
+    process.env.RBAC_TOKEN_TRUST = 'false'
+    if (productMode === undefined) delete process.env.PRODUCT_MODE
+    else process.env.PRODUCT_MODE = productMode
+    try {
+      const user = await authService.verifyToken(token)
+      expect(user).not.toBeNull()
+      // tripwire: getUserById's non-production fallback (a DB error) is an admin '*:*' dev user — never this profile
+      expect(user!.id).toBe(userId)
+      expect(user!.role).toBe('user')
+      expect(user!.permissions).not.toContain('*:*')
+      return user!
+    } finally {
+      for (const [key, saved] of Object.entries(savedEnv)) {
+        if (saved === undefined) delete process.env[key]
+        else process.env[key] = saved
+      }
+    }
+  }
+
+  /** What the plugin's hasPermission reads (http-routes.cjs listUserPermissions): codes ∪ role:${roles[i]} ∪ role:${role}. */
+  function pluginView(user: { permissions?: unknown; roles?: unknown; role?: unknown }): string[] {
+    const view: string[] = []
+    if (Array.isArray(user.permissions)) view.push(...user.permissions.map(String))
+    if (Array.isArray(user.roles)) view.push(...user.roles.map((role) => `role:${String(role)}`))
+    if (typeof user.role === 'string') view.push(`role:${user.role}`)
+    return [...new Set(view)].sort()
+  }
+  const sorted = (codes: readonly string[]) => [...new Set(codes)].sort()
+  const stockPrepCodes = (codes: readonly string[]) => codes.filter((code) => code.startsWith('stock-prep:'))
+
+  beforeAll(async () => {
+    for (const code of [...PULL_LADDER, 'workflow:write', 'integration:write']) {
+      await q(`INSERT INTO permissions (code, name) SELECT $1::varchar, $1::varchar WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE code = $1::varchar)`, [code])
+    }
+    await q(`INSERT INTO roles (id, name) VALUES ($1, $1), ($2, $2)`, [ROLE_PULL, ROLE_LEGACY])
+    for (const code of [...PULL_LADDER, 'workflow:write']) {
+      await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)`, [ROLE_PULL, code])
+    }
+    for (const code of ['integration:write', 'workflow:write']) {
+      await q(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)`, [ROLE_LEGACY, code])
+    }
+    // Every grant is seeded BEFORE any read: the pool-path profile memoizes per user, so no user is re-read after a change.
+    for (const fixture of FIXTURES) {
+      await seedFixture(fixture.name, userIdOf(fixture.name, 'strict'))
+      await seedFixture(fixture.name, userIdOf(fixture.name, 'platform'))
+    }
+  })
+  afterAll(async () => {
+    for (const [key, saved] of Object.entries(savedEnv)) {
+      if (saved === undefined) delete process.env[key]
+      else process.env[key] = saved
+    }
+    // user_roles by user also removes the attendance_employee row the default-mode backfill persisted.
+    for (const [table, column] of [['user_namespace_admissions', 'user_id'], ['user_roles', 'user_id'], ['user_permissions', 'user_id'], ['user_orgs', 'user_id'], ['users', 'id']]) {
+      await q(`DELETE FROM ${table} WHERE ${column} LIKE $1`, [`mx_%${RUN}`]).catch(() => undefined)
+    }
+    await q(`DELETE FROM role_permissions WHERE role_id = ANY($1::text[])`, [[ROLE_PULL, ROLE_LEGACY]]).catch(() => undefined)
+    await q(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_PULL, ROLE_LEGACY]]).catch(() => undefined)
+  })
+
+  test.each(FIXTURES)('$name (PRODUCT_MODE plm-workbench, self-service off): port codes ≡ request-time profile codes, the pinned set; role / roles parity in the plugin view', async (fixture) => {
+    const userId = userIdOf(fixture.name, 'strict')
+    const port = await portPrincipal(userId)
+    const request = await requestProfile(userId, 'plm-workbench')
+
+    expect(sorted(port.permissions)).toEqual(sorted(request.permissions))
+    expect(sorted(port.permissions)).toEqual(fixture.expected)
+    expect(sorted(request.permissions)).toEqual(fixture.expected)
+    // role / roles: the same scalar role from the same rows; the plugin-visible set (codes + role:*) is identical
+    expect(port.role).toBe(request.role)
+    expect(port.roles).toEqual([])
+    expect((request as { roles?: unknown }).roles ?? []).toEqual(port.roles)
+    expect(pluginView(port)).toEqual(pluginView(request))
+    if (fixture.name === 'F2' || fixture.name === 'F3') {
+      expect(stockPrepCodes(port.permissions)).toEqual([])
+      expect(stockPrepCodes(request.permissions)).toEqual([])
+    }
+  }, 20_000)
+
+  test('default PRODUCT_MODE (unset ⇒ platform, self-service ON): the ONLY difference is the attendance self-service pair the profile adds; every other code is equal and the pinned sets hold on the port', async () => {
+    // requestProfile(_, undefined) deletes PRODUCT_MODE for the read, whatever the lane's env carries
+    for (const fixture of FIXTURES) {
+      const userId = userIdOf(fixture.name, 'platform')
+      const request = await requestProfile(userId, undefined)
+      const port = await portPrincipal(userId)
+      const requestCodes = sorted(request.permissions)
+      const portCodes = sorted(port.permissions)
+      expect(requestCodes.filter((code) => !portCodes.includes(code)), fixture.name).toEqual(ATTENDANCE_SELF_SERVICE)
+      expect(portCodes.filter((code) => !requestCodes.includes(code)), fixture.name).toEqual([])
+      expect(requestCodes.filter((code) => !ATTENDANCE_SELF_SERVICE.includes(code)), fixture.name).toEqual(fixture.expected)
+      expect(portCodes, fixture.name).toEqual(fixture.expected)
+      expect(port.role).toBe(request.role)
+      if (fixture.name === 'F2' || fixture.name === 'F3') {
+        expect(stockPrepCodes(port.permissions), fixture.name).toEqual([])
+        expect(stockPrepCodes(request.permissions), fixture.name).toEqual([])
+      }
+    }
+  }, 30_000)
 })
 
 // R-69 1b-ii (owner-approved 2026-11-11): a run_integration_job rule cannot carry conditions — its schedule trigger
