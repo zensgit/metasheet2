@@ -93,7 +93,7 @@
 
 ④ **四个开关**（§7）：Bridge 1、Bridge 2 各一个；备料套用、非试算管道运行各一个。保存时与每次触发时都读原文；关着的动作在触发时记 `skipped(action_disabled)`，不静默成功。
 
-⑤ **每个作业恰好一条摘要事件**，只在动作步的最终尝试之后发（§4.2）；HTTP / 手工 / 回放发起的运行由插件在 `finishRun` 之后经第二个端口 `integrationRunEvents.publish(summary)` 送进 core，自动化发起的运行（端口调用带 `automation` 标识）插件**不**发、由动作层发；core 按闭合键集校验（与 `yida-owner-runtime-factory.mjs` 的 `record()` 同样拒多键、拒 Proxy），再按作业 id 路由。
+⑤ **每个作业恰好一条摘要事件**（11-11 注，本地切片 I6d 第二轮 F1b，登记册 R-92 ②，未入 main、owner 可否决：本次触发没有同时核实「绑定主体是规则创建者」和「规则所在表是绑定租户的活跃登记表」时，不发摘要——这是本条的例外，这些情况不会触发告警规则），只在动作步的最终尝试之后发（§4.2）；HTTP / 手工 / 回放发起的运行由插件在 `finishRun` 之后经第二个端口 `integrationRunEvents.publish(summary)` 送进 core，自动化发起的运行（端口调用带 `automation` 标识）插件**不**发、由动作层发；core 按闭合键集校验（与 `yida-owner-runtime-factory.mjs` 的 `record()` 同样拒多键、拒 Proxy），再按作业 id 路由。
 
 ⑥ **幂等与重试按目标种类与阶段分类**（§5），不按模式。
 
