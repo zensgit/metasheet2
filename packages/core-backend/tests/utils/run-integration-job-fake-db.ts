@@ -1,22 +1,53 @@
 /**
- * R-69 1c test utility: the in-memory model of the outbound-intent and job-lease ledgers that
- * tests/unit/automation-run-integration-job.test.ts (I3) defines inline — the same statements, matched by shape,
- * `now()` evaluated with the (fake) clock, a transaction rolled back on throw. Copied verbatim (not imported) so the
- * I3 suite stays byte-identical. Synthetic only.
+ * R-69 1c test utility: the in-memory model of the outbound-intent and job-lease ledgers — the statements
+ * automation-outbound-intent.ts and automation-job-lease.ts issue, matched by shape, `now()` evaluated with the (fake)
+ * clock, a transaction rolled back on throw. It began as a verbatim copy of the model the I3 suite
+ * (tests/unit/automation-run-integration-job.test.ts) defined inline; since R-69 I6a that suite imports it from here,
+ * so there is one model. Synthetic only.
+ *
+ * R-69 I6a: the model also answers the ONE project-sheet registry read the executor's rule-sheet re-check issues
+ * (stock-preparation-manual-rows-gate.ts MANUAL_ROWS_PROJECT_TARGET_SQL, migration 087). `projectTargets` defaults to
+ * the one row every harness here runs on — `sheet_1` registered, active, to `tenant_1` / `P-1` — so the existing
+ * cases keep their meaning; a case mutates the map (archive, re-register) or sets the registry unreadable. The read
+ * is not in `log` (the `log` assertions are about the ledgers); its parameter is recorded in `registryReads`.
+ *
+ * R-69 I6a fix (re-review M1): a registry row is stored under its REAL sheet id and the answer carries THAT id —
+ * never the query parameter echoed back. The match is byte equality on the raw parameter (PostgreSQL text `=`), with
+ * no coercion. An echo cannot represent "the registry answered with another sheet's row", so it hides a guard that
+ * normalizes the id before the read or never compares the answered row with the id it asked for.
  */
 import type { AutomationDeps } from '../../src/multitable/automation-executor'
 
 interface IntentRow { status: string; attempts: number; token: string | null; lease: number | null; lastError: string | null }
 interface LeaseRow { holder: string | null; fence: number; expires: number }
+export interface FakeProjectTargetRow { tenantId: string; projectNo: string; status: 'active' | 'archived'; objectId?: string }
 
-export function createFakeJobDb() {
+export const FAKE_REGISTERED_SHEET = Object.freeze({ sheetId: 'sheet_1', tenantId: 'tenant_1', projectNo: 'P-1' })
+
+export function createFakeJobDb(options: { projectTargets?: Record<string, FakeProjectTargetRow> } = {}) {
   const intents = new Map<string, IntentRow>()
   const leases = new Map<string, LeaseRow>()
   const log: string[] = []
   let renewalsFailing = false
+  const projectTargets = new Map<string, FakeProjectTargetRow>(Object.entries(options.projectTargets ?? {
+    [FAKE_REGISTERED_SHEET.sheetId]: { tenantId: FAKE_REGISTERED_SHEET.tenantId, projectNo: FAKE_REGISTERED_SHEET.projectNo, status: 'active' },
+  }))
+  let registryError: (Error & { code?: string }) | null = null
+  const registryReads: unknown[] = []
   const key = (p: unknown[], idx = [0, 1, 2, 3]) => idx.map((i) => String(p[i])).join('|')
   const query: AutomationDeps['queryFn'] = async (sql, params = []) => {
     const now = Date.now()
+    if (/FROM integration_stock_prep_project_target WHERE sheet_id = \$1/.test(sql)) {
+      const param = params[0]
+      registryReads.push(param)
+      if (registryError) throw registryError
+      // `sheet_id = $1` on a text column is byte equality; the answer carries the STORED row's own id, never the parameter.
+      for (const [storedSheetId, row] of projectTargets) {
+        if (storedSheetId !== param) continue
+        return { rows: [{ sheet_id: storedSheetId, project_no: row.projectNo, status: row.status, object_id: row.objectId ?? 'obj_1', tenant_id: row.tenantId }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
     if (/INSERT INTO meta_automation_outbound_intent/.test(sql)) {
       const k = key(params)
       log.push('intent:claim')
@@ -115,5 +146,11 @@ export function createFakeJobDb() {
     setTransactionsFailing(value: boolean) { renewalsFailing = value },
     lease(scope: string) { return leases.get(scope) },
     intentRows() { return [...intents.entries()] },
+    /** R-69 I6a: the project-sheet registry rows (the row's REAL sheet id → row); mutate to archive / re-register / remove. */
+    projectTargets,
+    /** R-69 I6a fix (M1): the parameter of every registry read, as issued (raw, in order) — also of a read that threw. */
+    registryReads,
+    /** R-69 I6a: every registry read throws this SQLSTATE (anything but 42P01 is "unreadable"); null restores. */
+    setRegistryUnreadable(code: string | null) { registryError = code ? Object.assign(new Error('fake db: registry unreadable'), { code }) : null },
   }
 }

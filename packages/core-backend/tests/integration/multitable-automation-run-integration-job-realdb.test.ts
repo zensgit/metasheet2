@@ -26,9 +26,19 @@
  *     with the request-path permission codes in the port context; deactivated ⇒ skipped(principal_unauthorized)
  *     before anything is leased.
  *
+ *   - R-69 I6a (ADR §3.1 + §6.5): every executor here runs on a rule sheet registered (migration 087, real table) to
+ *     TENANT / PROJECT, because the executor re-checks the rule sheet on every trigger; the I6a case proves the save
+ *     refuses another tenant's registered sheet (nothing written) and a trigger after ARCHIVE is skipped with 0 port
+ *     calls and no lease / intent row.
+ *     I6a fix (re-review M1): the sheet id is EXACT on the real registry read — the registered id plus one whitespace
+ *     code point is another sheet: refused at save (no rule row) and at every trigger (0 port calls, no intent row,
+ *     no lease), while the registered id itself saves and runs (the positive control of the same lookups).
+ *
  * Two-point wired (plugin-tests.yml multitable real-DB step + vitest.config.ts exclude); EXPECT_DB sentinel.
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 
 import { Client } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, test, vi } from 'vitest'
@@ -37,7 +47,9 @@ import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { up as leasesUp } from '../../src/db/migrations/zzzz20261106111100_create_automation_job_leases'
 import { down as runFinishedTriggerDown, up as runFinishedTriggerUp } from '../../src/db/migrations/zzzz20261106111500_add_integration_run_finished_trigger_type'
-import { AutomationService } from '../../src/multitable/automation-service'
+import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES } from '../../src/multitable/automation-run-integration-job-rule-sheet'
+import { STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV } from '../../src/multitable/stock-preparation-manual-rows-gate'
 import { clearIntegrationRunFinishedSinkForTest, registerIntegrationRunFinishedSink } from '../../src/core/integration-run-events'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { listUserPermissions } from '../../src/rbac/service'
@@ -79,6 +91,26 @@ const SCOPE = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, proj
 const CONFIG = { job: { kind: 'stock_prep_pull', projectNos: [PROJECT], applyMode: 'dry_run_only' }, timeoutMs: 60_000, binding: { principalId: PRINCIPAL_ID, tenantId: TENANT } }
 const PRINCIPAL = { id: PRINCIPAL_ID, permissions: ['workflow:write'], roles: [], role: 'user', tenantId: TENANT }
 const q: JobLeaseQueryFn = (s, p) => poolManager.get().query(s, p)
+/** R-69 I6a: the rule sheet every executor here runs on — registered (087) to TENANT / PROJECT, active. */
+const SHEET = `sheet_${RUN}`
+
+/**
+ * R-69 I6a: the project-sheet registry (087) on the real database. The CI database carries it (plugin migrations);
+ * a bare database gets the REAL 087 SQL, verbatim, only when the table is missing (never re-run on an existing one).
+ * Then the rule sheet's row (idempotent; cleaned by RUN).
+ */
+async function registerRuleSheet(sheetId: string = SHEET, tenantId: string = TENANT, projectNo: string = PROJECT): Promise<void> {
+  const { rows } = await q(`SELECT to_regclass('integration_stock_prep_project_target') IS NOT NULL AS present`)
+  if (!(rows[0] as { present: boolean }).present) {
+    await q(readFileSync(path.join(__dirname, '..', '..', 'migrations', '087_create_integration_stock_prep_project_target.sql'), 'utf8'))
+  }
+  await q(
+    `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status, created_by)
+     VALUES ($1, $2, $3, $4, $5, 'active', 'syn') ON CONFLICT DO NOTHING`,
+    [`pt_${sheetId}`, tenantId, projectNo, sheetId, `obj_${sheetId}`],
+  )
+}
+const unregisterRuleSheets = () => q(`DELETE FROM integration_stock_prep_project_target WHERE tenant_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /** The production transaction seam shape (AutomationService wires poolManager.transaction the same way). */
@@ -166,8 +198,8 @@ function executorWith(port: IntegrationRunPort, transaction: JobLeaseTransaction
     integrationJobRuntime: seams,
     ...extra,
   })
-  const run = (executionId: string, config: typeof CONFIG = CONFIG): Promise<AutomationStepResult> => {
-    const context: ExecutionContext = { executionId, ruleId: `rule_${RUN}`, sheetId: 'sheet_1', recordId: '', recordData: {}, ruleCreatedBy: config.binding.principalId, triggerEvent: {}, rootExecutionId: executionId }
+  const run = (executionId: string, config: typeof CONFIG = CONFIG, sheetId: string = SHEET): Promise<AutomationStepResult> => {
+    const context: ExecutionContext = { executionId, ruleId: `rule_${RUN}`, sheetId, recordId: '', recordData: {}, ruleCreatedBy: config.binding.principalId, triggerEvent: {}, rootExecutionId: executionId }
     const identity: ClassAActionIdentity = { structuralPath: '0', rootExecutionId: executionId }
     return (exec as unknown as { executeSingleAction(a: unknown, c: ExecutionContext, i: ClassAActionIdentity): Promise<AutomationStepResult> })
       .executeSingleAction({ type: 'run_integration_job', config }, context, identity)
@@ -179,16 +211,22 @@ const unitOf = (step: AutomationStepResult) => ((step.output as { units: Array<R
 describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real ledgers', () => {
   let a: Client
   const savedFlag = process.env[FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
 
   beforeAll(async () => {
     await leasesUp(db as never)
     process.env[FLAG] = 'true'
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await registerRuleSheet()
     a = new Client({ connectionString: process.env.DATABASE_URL })
     await a.connect()
   })
   afterAll(async () => {
     if (savedFlag === undefined) delete process.env[FLAG]
     else process.env[FLAG] = savedFlag
+    if (savedProjectSheets === undefined) delete process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+    else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
+    await unregisterRuleSheets()
     await q(`DELETE FROM meta_automation_outbound_intent WHERE root_execution_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
     await q(`DELETE FROM meta_automation_job_leases WHERE scope_key LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
     for (const [table, column] of [['user_namespace_admissions', 'user_id'], ['user_roles', 'user_id'], ['user_permissions', 'user_id'], ['user_orgs', 'user_id'], ['users', 'id']]) {
@@ -356,6 +394,9 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     await q(`UPDATE users SET is_active = false WHERE id = $1`, [principalId])
     const refused = await A.run(`exec_prod2_${RUN}`, config)
     expect(refused).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized' } })
+    // I6a fix (L3): this is LIVE AUTHORITY's refusal (step 1) — the rule-sheet re-check passed, so no cause is named
+    // (the rule-sheet step and the binding check always name one).
+    expect(refused.output).not.toHaveProperty('cause')
     expect(state.calls).toBe(1)
     expect(await intentRow(intentOf(`exec_prod2_${RUN}`, config))).toBeUndefined()
     expect(await leaseRow()).toMatchObject({ fence: '1', holder: null })
@@ -401,6 +442,114 @@ describeIfDatabase('R-69 1b-ii run_integration_job on the real executor + real l
     expect(await leaseRow()).toMatchObject({ fence: '2', holder: null })
     await Promise.all(A.tracked)
   }, 30_000)
+
+  test("R-69 I6a (ADR §3.1 + §6.5): the save refuses ANOTHER tenant's registered sheet (nothing written); a trigger after the rule sheet is ARCHIVED is skipped(rule_sheet_unregistered) with 0 port calls, no intent row, no lease", async () => {
+    // Its own principal (one active membership in TENANT), its own registered sheet + project, its own scope.
+    const principalId = `svc6_${RUN}`
+    const project = `P6-${RUN}`
+    const sheet = `sheet6_${RUN}`
+    const foreignSheet = `sheet6x_${RUN}`
+    const scope = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, projectNo: project })
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc6'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await registerRuleSheet(sheet, TENANT, project)
+    await registerRuleSheet(foreignSheet, `${TENANT}_other`, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const ruleInput = {
+      triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+      actionType: 'run_integration_job', actionConfig: { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } },
+      createdBy: principalId, name: `i6a_${RUN}`,
+    }
+    // save on another tenant's registered sheet: a 400-class refusal, and no rule row on that sheet
+    const refusal = await service.createRule(foreignSheet, ruleInput as never).then(() => null, (error: unknown) => error)
+    expect(refusal).toBeInstanceOf(AutomationRuleValidationError)
+    expect((refusal as Error).message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.tenant_mismatch)
+    expect((await q(`SELECT 1 FROM automation_rules WHERE sheet_id = $1`, [foreignSheet])).rows).toHaveLength(0)
+    // save on its own registered sheet succeeds and stamps the binding
+    const rule = await service.createRule(sheet, ruleInput as never)
+    try {
+      expect(rule.sheet_id).toBe(sheet)
+      const config = rule.action_config as unknown as typeof CONFIG
+      expect(config.binding).toEqual({ principalId, tenantId: TENANT })
+      // control: the registered sheet runs once
+      const { port, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }])
+      const X = executorWith(port, poolTransaction, { leaseTtlMs: 2_000 }, { resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { ...PRINCIPAL, id: principalId } }) })
+      expect((await X.run(`exec_i6a_ok_${RUN}`, config, sheet)).status).toBe('success')
+      expect(state.calls).toBe(1)
+      // I6a fix (L3) — the POSITIVE CONTROL of the two "nothing was claimed" lookups below: the SAME intent lookup
+      // finds the ok run's row, and the SAME lease read finds its lease. An undefined intent / an unchanged lease
+      // after the archive is therefore a real absence, not a mis-keyed read.
+      const i6aIntent = (root: string): OutboundIntentIdentity => ({ ...intentOf(root, config), targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, project]) })
+      expect(await intentRow(i6aIntent(`exec_i6a_ok_${RUN}`))).toMatchObject({ status: 'sent' })
+      // archive (the S4 shape: status + archived_at together, the CHECK holds) ⇒ the next trigger never reaches the port
+      await q(`UPDATE integration_stock_prep_project_target SET status = 'archived', archived_at = now(), archived_by = 'syn' WHERE sheet_id = $1`, [sheet])
+      const leaseBefore = (await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows
+      expect(leaseBefore).toEqual([{ fence: '1' }])
+      const skipped = await X.run(`exec_i6a_archived_${RUN}`, config, sheet)
+      expect(skipped).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+      expect(state.calls).toBe(1)
+      expect(await intentRow(i6aIntent(`exec_i6a_archived_${RUN}`))).toBeUndefined()
+      expect((await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows).toEqual(leaseBefore)
+    } finally {
+      await q(`DELETE FROM automation_rules WHERE id = $1`, [rule.id]).catch(() => undefined)
+    }
+  }, 20_000)
+
+  test('R-69 I6a fix (re-review M1): the rule sheet id is EXACT on the real registry read — the registered id plus one whitespace code point is refused at save (no rule row) and at every trigger (0 port calls, no intent row, no lease); the registered id itself saves and runs', async () => {
+    // Its own principal, registered sheet + project and scope. A look-alike is the registered id plus ONE code point
+    // String.prototype.trim() strips, on either side: the sheet-create route takes such text as a client id, so each
+    // names a different, ordinary sheet — and a read with a TRIMMED id would find the registered row.
+    const principalId = `svc7_${RUN}`
+    const project = `P7-${RUN}`
+    const sheet = `sheet7_${RUN}`
+    const lookalikes = [`${sheet} `, ` ${sheet}`, `${sheet}\t`, `\u00a0${sheet}`]
+    const scope = jobLeaseScopeKey({ kind: 'stock_prep_pull', tenantId: TENANT, projectNo: project })
+    await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svc7'])
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
+    await registerRuleSheet(sheet, TENANT, project)
+    const service = new AutomationService(new EventBus(), db as never, q as never)
+    const ruleInput = {
+      triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
+      actionType: 'run_integration_job', actionConfig: { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } },
+      createdBy: principalId, name: `i6a_m1_${RUN}`,
+    }
+    try {
+      // the premise on the real table: ONE registry row answers these ids — the registered id's own
+      expect((await q(`SELECT sheet_id FROM integration_stock_prep_project_target WHERE sheet_id = ANY($1::text[])`, [[sheet, ...lookalikes]])).rows).toEqual([{ sheet_id: sheet }])
+      // SAVE: every look-alike is refused as unregistered, and no rule row lands under any of them
+      for (const lookalike of lookalikes) {
+        expect(lookalike.trim()).toBe(sheet)
+        const saved = await service.createRule(lookalike, ruleInput as never).then((rule) => rule, (error: unknown) => error)
+        expect(saved).toBeInstanceOf(AutomationRuleValidationError)
+        expect((saved as Error).message).toBe(RUN_INTEGRATION_JOB_RULE_SHEET_SAVE_MESSAGES.unregistered)
+      }
+      expect((await q(`SELECT sheet_id FROM automation_rules WHERE sheet_id = ANY($1::text[])`, [lookalikes])).rows).toHaveLength(0)
+      // control: the registered id itself saves, under exactly that id
+      const rule = await service.createRule(sheet, ruleInput as never)
+      expect(rule.sheet_id).toBe(sheet)
+      const config = rule.action_config as unknown as typeof CONFIG
+      const m1Intent = (root: string): OutboundIntentIdentity => ({ ...intentOf(root, config), targetKey: deriveOutboundTargetKey(['stock_prep_pull', TENANT, project]) })
+      const leaseRows = async () => (await q(`SELECT fence::text AS fence FROM meta_automation_job_leases WHERE scope_key = $1`, [scope])).rows
+      const { port, state } = pagedPort([{ opened: Promise.resolve(), open: () => undefined }])
+      const X = executorWith(port, poolTransaction, { leaseTtlMs: 2_000 }, { resolveIntegrationRunPrincipal: async () => ({ ok: true, user: { ...PRINCIPAL, id: principalId } }) })
+      // TRIGGER: the saved rule's own config on each look-alike sheet id never reaches the port and claims nothing
+      for (const [index, lookalike] of lookalikes.entries()) {
+        const root = `exec_m1_lookalike${index}_${RUN}`
+        expect(await X.run(root, config, lookalike)).toMatchObject({ status: 'skipped', output: { outcome: 'skipped', reason: 'principal_unauthorized', cause: 'rule_sheet_unregistered' } })
+        expect(await intentRow(m1Intent(root))).toBeUndefined()
+      }
+      expect(state.calls).toBe(0)
+      expect(await leaseRows()).toEqual([])
+      // control: the registered id runs once — and the SAME lookups find its intent row and its lease
+      expect((await X.run(`exec_m1_ok_${RUN}`, config, sheet)).status).toBe('success')
+      expect(state.calls).toBe(1)
+      expect(await intentRow(m1Intent(`exec_m1_ok_${RUN}`))).toMatchObject({ status: 'sent' })
+      expect(await leaseRows()).toEqual([{ fence: '1' }])
+    } finally {
+      // by sheet id: a look-alike rule row exists only if the guard regressed — never leave one (or the control's) behind
+      await q(`DELETE FROM automation_rules WHERE sheet_id = ANY($1::text[])`, [[sheet, ...lookalikes]]).catch(() => undefined)
+    }
+  }, 20_000)
 })
 
 // ── R-69 1c: integration.run_finished on the REAL tables ─────────────────────────────────────────────────────
@@ -416,6 +565,7 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
   const EVENT_FLAG = 'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'
   const savedAction = process.env[FLAG]
   const savedEvent = process.env[EVENT_FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
   const insertRule = (id: string, triggerType = 'integration.run_finished') => q(
     `INSERT INTO automation_rules (id, sheet_id, name, trigger_type, trigger_config, action_type, action_config, enabled, created_by)
      VALUES ($1, $2, 'rf', $3, $4::jsonb, 'send_notification', '{}'::jsonb, true, $5)`,
@@ -427,13 +577,16 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
     await runFinishedTriggerUp(db as never)
     process.env[FLAG] = 'true'
     process.env[EVENT_FLAG] = 'true'
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await registerRuleSheet()
   })
   afterAll(async () => {
     clearIntegrationRunFinishedSinkForTest()
-    for (const [key, saved] of [[FLAG, savedAction], [EVENT_FLAG, savedEvent]] as const) {
+    for (const [key, saved] of [[FLAG, savedAction], [EVENT_FLAG, savedEvent], [STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV, savedProjectSheets]] as const) {
       if (saved === undefined) delete process.env[key]
       else process.env[key] = saved
     }
+    await unregisterRuleSheets()
     await q(`DELETE FROM meta_automation_event_fires WHERE rule_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
     await q(`DELETE FROM automation_rules WHERE id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
     await q(`DELETE FROM meta_automation_outbound_intent WHERE root_execution_id LIKE $1`, [`%${RUN}%`]).catch(() => undefined)
@@ -513,10 +666,12 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
 // already carries conditions (planted with a direct UPDATE: a row saved before this check).
 describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions (real automation_rules rows)', () => {
   const savedFlag = process.env[FLAG]
+  const savedProjectSheets = process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
   const principalId = `svcc_${RUN}`
   const sheet = `sheetc_${RUN}`
+  const project = `PC-${RUN}`
   const conditions = { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] }
-  const job = { job: { kind: 'stock_prep_pull', projectNos: [`PC-${RUN}`], applyMode: 'dry_run_only' } }
+  const job = { job: { kind: 'stock_prep_pull', projectNos: [project], applyMode: 'dry_run_only' } }
   const base = {
     name: `cond_${RUN}`, triggerType: 'schedule.cron', triggerConfig: { cron: '0 6 * * *', timezone: 'Asia/Shanghai' },
     actionType: 'run_integration_job', actionConfig: job, createdBy: principalId,
@@ -532,12 +687,18 @@ describeIfDatabase('R-69 1b-ii run_integration_job rules cannot carry conditions
 
   beforeAll(async () => {
     process.env[FLAG] = 'true'
+    // R-69 I6a: a job rule saves only on the binding tenant's registered project sheet (the switch on, the row active).
+    process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = 'true'
+    await registerRuleSheet(sheet, TENANT, project)
     await q(`INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $2, $3, 'x', 'user', true)`, [principalId, `${principalId}@example.test`, 'svcc'])
     await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`, [principalId, TENANT])
   })
   afterAll(async () => {
     if (savedFlag === undefined) delete process.env[FLAG]
     else process.env[FLAG] = savedFlag
+    if (savedProjectSheets === undefined) delete process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV]
+    else process.env[STOCK_PREP_PROJECT_SHEETS_ENABLED_ENV] = savedProjectSheets
+    await unregisterRuleSheets()
     await q(`DELETE FROM automation_rules WHERE sheet_id = $1`, [sheet]).catch(() => undefined)
     await q(`DELETE FROM user_orgs WHERE user_id = $1`, [principalId]).catch(() => undefined)
     await q(`DELETE FROM users WHERE id = $1`, [principalId]).catch(() => undefined)
