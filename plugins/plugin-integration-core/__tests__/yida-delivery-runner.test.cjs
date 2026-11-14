@@ -498,3 +498,55 @@ test('same completed identity survives a new runner without token fetch or resen
   assert.equal(h.businessFetches.length, 1)
   assert.equal(h.tokenFetches.length, 1)
 })
+
+// R-71 ⑦.3: a v3 snapshot (copy / constant / concat) is accepted and sends exactly its own planned
+// payload; any other mapping version is SNAPSHOT_INVALID before any ledger, token or form I/O.
+async function v3Harness(t) {
+  const h = await harness(t)
+  const { createYidaTransformExample } = await import('../lib/yida-static-plan.mjs')
+  const example = createYidaTransformExample()
+  h.snapshot.config = example.config
+  h.snapshot.row = example.rows[0]
+  return h
+}
+
+test('R-71 ⑦.3: a v3 snapshot sends exactly its planned payload, derived targets included', async (t) => {
+  const h = await v3Harness(t)
+  safeResult(await h.runner.run(request()), 'acknowledged', true)
+  assert.equal(h.businessFetches.length, 1)
+  const body = JSON.parse(h.businessFetches[0][1].body)
+  const planned = h.plan().rows[0]
+  assert.equal(body.formDataJson, stableCanonicalStringify(planned.payload))
+  const sent = JSON.parse(body.formDataJson)
+  assert.equal(sent.blankSize, '1200*600*20')
+  assert.equal(sent.processRule, 'SYN-RULE-A')
+  assert.equal(sent.partCategory, undefined)
+  assert.equal(h.db.rows()[0].business_key_digest, hash(planned.localBusinessKey))
+})
+
+test('R-71 ⑦.3: mapping versions other than exactly 2 or 3 are SNAPSHOT_INVALID with zero I/O', async (t) => {
+  const { createYidaStaticExample } = await import('../lib/yida-static-plan.mjs')
+  for (const version of [1, 4, '3', 3.5, null]) {
+    const h = await v3Harness(t)
+    if (version === 1) {
+      const example = createYidaStaticExample()
+      h.snapshot.config = example.config; h.snapshot.row = example.rows[0]
+    } else h.snapshot.config.version = version
+    await rejects(h.runner.run(request()), 'SNAPSHOT')
+    assert.equal(h.db.events.length, 0)
+    assert.equal(h.tokenFetches.length + h.businessFetches.length, 0)
+  }
+})
+
+test('R-71 ⑦.3: a v3 snapshot that loses its concat-only columns after the token sends nothing', async (t) => {
+  const h = await v3Harness(t)
+  h.resolver = async () => {
+    const next = copy(h.snapshot)
+    // All three concat-only columns gone: the row still plans, but without blankSize.
+    if (h.snapshots.length === 2) for (const column of ['ext_blankLength', 'ext_blankWidth', 'ext_blankThickness']) delete next.row[column]
+    return next
+  }
+  await rejects(h.runner.run(request()), 'CHANGED')
+  assert.equal(h.db.rows()[0].status, 'prepared')
+  assert.equal(h.businessFetches.length, 0)
+})
