@@ -249,6 +249,12 @@ function assertParallelWorkflow(doc) {
         const routingPolicyRequiredApiAddition = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'
         assert.equal(step.run.split(routingPolicyRequiredApiAddition).length - 1, 1, 'Approval routing policy-required API suite must run exactly once')
         assert.ok(step.run.includes(routingPolicyRequiredDbAddition + routingPolicyRequiredApiAddition), 'Keep the approval routing policy-required API suite right after its DB suite')
+        const authzSerializationAddition = '  tests/integration/authorization-input-serialization.db.test.ts \\\n'
+        assert.equal(step.run.split(authzSerializationAddition).length - 1, 1, 'Authorization-input serialization DB suite must run exactly once')
+        assert.ok(step.run.includes(routingPolicyRequiredApiAddition + authzSerializationAddition), 'Keep the authorization-input serialization suite right after the approval routing policy-required API suite')
+        const authzCensusAddition = '  tests/integration/authorization-input-census.db.test.ts \\\n'
+        assert.equal(step.run.split(authzCensusAddition).length - 1, 1, 'Authorization-input census DB suite must run exactly once')
+        assert.ok(step.run.includes(authzSerializationAddition + authzCensusAddition), 'Keep the authorization-input census suite right after the serialization suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -267,6 +273,8 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(sessionTokenInviteAddition, '')
         step.run = step.run.replace(routingPolicyRequiredDbAddition, '')
         step.run = step.run.replace(routingPolicyRequiredApiAddition, '')
+        step.run = step.run.replace(authzSerializationAddition, '')
+        step.run = step.run.replace(authzCensusAddition, '')
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
         // R-69 1b-ii (job lease): explicit additive suite — preserve the frozen original command byte-for-byte.
@@ -393,6 +401,10 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
       doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = `  tests/integration/approval-routing-policy-required.${kind}.test.ts \\\n`; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     ]),
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const db = '  tests/integration/approval-routing-policy-required.db.test.ts \\\n', api = '  tests/integration/approval-routing-policy-required.api.test.ts \\\n'; assert.ok(step.run.includes(db + api)); step.run = step.run.replace(db + api, api + db) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/authorization-input-serialization.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/authorization-input-serialization.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/authorization-input-census.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/authorization-input-census.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const steps = doc.jobs.unit.steps; steps.splice(steps.findIndex(step => step.name === directoryClientLintStep.name), 1) },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).run += ' || true' },
     doc => { doc.jobs.unit.steps.find(step => step.name === directoryClientLintStep.name).if = false },

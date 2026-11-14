@@ -2736,6 +2736,8 @@ jobs:
             tests/integration/session-token-invite-lifecycle.db.test.ts \
             tests/integration/approval-routing-policy-required.db.test.ts \
             tests/integration/approval-routing-policy-required.api.test.ts \
+            tests/integration/authorization-input-serialization.db.test.ts \
+            tests/integration/authorization-input-census.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \
