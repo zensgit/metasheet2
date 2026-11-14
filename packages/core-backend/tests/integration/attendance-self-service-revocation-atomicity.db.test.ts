@@ -344,6 +344,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
       await setUserNamespaceAdmission({ userId, namespace: 'attendance', enabled: false })
     } finally {
       gate.release.resolve()
+      await pending
     }
     expect((await pending)?.permissions).toEqual(['workflow:read'])
     expect(await persistedState()).toEqual({ roles: [], admission: [{ enabled: false, source: 'platform_admin' }] })

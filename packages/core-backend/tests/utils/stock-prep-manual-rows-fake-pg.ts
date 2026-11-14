@@ -1,7 +1,7 @@
 /**
  * 人工补充行 B2 — a STATEFUL fake Postgres for the manual-row unit suites (routes, delete exemption, /context).
  *
- * It holds stock-preparation template sheets built from the PLUGIN's own frozen template (33 columns, the stanza the
+ * It holds stock-preparation template sheets built from the PLUGIN's own frozen template (35 columns, the stanza the
  * target provisioning writes, the lock the project-sheet marking writes) with physical ids derived exactly as the host
  * derives them (provisioning.ts getObjectFieldId over the host registry row), the host registry
  * (`plugin_multitable_object_registry`) and the plugin registry (`integration_stock_prep_project_target`, 087), records,

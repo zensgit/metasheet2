@@ -255,7 +255,7 @@
                 :disabled="dingtalkLoginProbeBusy"
                 @click="void checkDingTalkLoginProbe()"
               >
-                检测钉钉登录状态
+                登录配置检查
               </button>
               <span
                 v-if="dingtalkLoginProbeMessage"
@@ -2669,36 +2669,39 @@ const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 // #6467: on-demand check of the DingTalk login (OAuth) probe -- the same endpoint the login page
 // uses. Click-to-check rather than on mount, so opening this page sends no extra request.
+// The probe only reads the server configuration and enterprise allowlist: it does not verify the
+// credentials, an actual scan, the identity link or the account authorization, so the result is
+// worded as a configuration check, never as "login works".
 const dingtalkLoginProbeBusy = ref(false)
 const dingtalkLoginProbeMessage = ref('')
 const routeNavigationFailureNotice = ref<DirectoryRouteNavigationFailureNotice | null>(null)
 const routeNavigationFailureAction = ref<'retry' | 'clear' | ''>('')
 const testResult = ref<TestResult | null>(null)
 
-const DINGTALK_LOGIN_PROBE_FAILED = '当前钉钉登录：无法获取状态，请稍后重试。'
+const DINGTALK_LOGIN_PROBE_FAILED = '登录配置检查：无法获取检查结果，请稍后重试。'
 
 function describeDingTalkLoginProbe(ok: boolean, payload: unknown): string {
   const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
   const data = envelope?.data && typeof envelope.data === 'object' ? envelope.data as Record<string, unknown> : null
   if (!ok || envelope?.success !== true || !data) return DINGTALK_LOGIN_PROBE_FAILED
-  if (data.available === true) return '当前钉钉登录：可用。'
+  if (data.available === true) return '登录配置检查：配置检查通过，尚未验证实际扫码、身份关联及账号授权。'
   if (data.unavailableReason === 'corp_not_allowed') {
-    return '当前钉钉登录：不可用，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。'
+    return '登录配置检查：未通过，企业白名单未放行，请检查 DINGTALK_CORP_ID 与 DINGTALK_ALLOWED_CORP_IDS。'
   }
   const reported = readDingTalkMissingEnv(data.missingEnv)
   const fromReason = requirementForDingTalkReason(data.unavailableReason)
   const missing = reported.length > 0 ? reported : fromReason ? [fromReason] : []
-  if (missing.length === 0) return '当前钉钉登录：不可用。'
+  if (missing.length === 0) return '登录配置检查：未通过，服务端钉钉登录当前不可用。'
   const redirectNote = missing.includes(DINGTALK_REDIRECT_URI_REQUIREMENT)
     ? '；DINGTALK_REDIRECT_URI 须与钉钉开放平台的登录回调地址一致'
     : ''
-  return `当前钉钉登录：不可用，缺少服务端环境变量 ${formatDingTalkLoginEnvList(missing, true)}${redirectNote}。`
+  return `登录配置检查：未通过，缺少服务端环境变量 ${formatDingTalkLoginEnvList(missing, true)}${redirectNote}。`
 }
 
 async function checkDingTalkLoginProbe(): Promise<void> {
   if (dingtalkLoginProbeBusy.value) return
   dingtalkLoginProbeBusy.value = true
-  dingtalkLoginProbeMessage.value = '正在检测钉钉登录状态…'
+  dingtalkLoginProbeMessage.value = '正在进行登录配置检查…'
   try {
     const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
       method: 'GET',
@@ -4738,8 +4741,13 @@ async function testIntegration() {
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '目录连通性测试失败'))
     testResult.value = body?.data ?? null
-    setStatus('目录连通性测试通过')
+    // The test reads samples only: name what was read, never a blanket pass.
+    setStatus(testResult.value?.summary?.code === 'healthy'
+      ? '目录连通性测试：抽样接口读取成功（未验证全员范围与扫码登录）'
+      : '目录连通性测试完成，请查看诊断结论')
   } catch (error) {
+    // A failed test must not leave an earlier result on screen as if it were current.
+    testResult.value = null
     setStatus(error instanceof Error ? error.message : '目录连通性测试失败', 'error')
   } finally {
     busy.value = false

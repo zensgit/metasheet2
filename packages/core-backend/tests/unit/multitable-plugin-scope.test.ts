@@ -160,6 +160,9 @@ describe('multitable plugin scope helper', () => {
       patchObjectFieldProperty: async () => ({}),
       // B3: optional on the host; wrapped (prefix-checked) whenever the host has it.
       ensureSystemBase: async () => ({}),
+      // 批次标识 BI-5: optional on the host; wrapped (namespace + overview + object scope) whenever the host has it.
+      promoteObjectViewToFirst: async () => ({}),
+      describeObjectSheetLayout: async () => ({}),
     }
     const scoped = createPluginScopedMultitableApi(
       { provisioning: delegateProvisioning, records: {} } as any,
@@ -753,6 +756,41 @@ describe('multitable plugin scope helper', () => {
     await expect(
       scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.findObjectSheet({ projectId: 'tenant_42:other-plugin', objectId: 'x' })),
     ).rejects.toThrow()
+  })
+
+  it('Y7 review MEDIUM-2: readObjectMaxFieldOrder inside the repair tx is exposed iff the host has it, and object-scoped + namespace-checked before it delegates', async () => {
+    const assertObjectScope = vi.fn(async () => {})
+    const base = {
+      findObjectSheet: vi.fn(async () => null),
+      resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+      readObjectFieldsContent: vi.fn(async () => ({})),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })),
+    }
+    const withRead = { ...base, readObjectMaxFieldOrder: vi.fn(async () => 33) }
+    const SCOPE = { projectId: 'tenant_42:after-sales', objectId: 'serviceTicket' }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scopedOver = (inner: any) => createPluginScopedMultitableApi({ provisioning: { runObjectFieldsRepairTransaction: async (fn: any) => fn(inner) }, records: {} } as any, 'plugin-after-sales', { assertObjectScope })
+
+    // An older host: the scoped surface does not invent the method.
+    expect(await scopedOver(base).provisioning.runObjectFieldsRepairTransaction(async (tx: any) => typeof tx.readObjectMaxFieldOrder)).toBe('undefined')
+
+    // The current host: scoped, then delegated with the read-once values.
+    const scoped = scopedOver(withRead)
+    expect(await scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.readObjectMaxFieldOrder({ ...SCOPE }))).toBe(33)
+    expect(assertObjectScope).toHaveBeenCalledWith({ pluginName: 'plugin-after-sales', ...SCOPE })
+    expect(withRead.readObjectMaxFieldOrder).toHaveBeenCalledWith(SCOPE)
+
+    // A rejecting scope hook stops it before the host read.
+    const denied = new Error('scope denied')
+    assertObjectScope.mockImplementation(async () => { throw denied })
+    withRead.readObjectMaxFieldOrder.mockClear()
+    await expect(scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.readObjectMaxFieldOrder({ ...SCOPE }))).rejects.toBe(denied)
+    expect(withRead.readObjectMaxFieldOrder).not.toHaveBeenCalled()
+
+    // A foreign-namespace project id is refused before the host read.
+    assertObjectScope.mockImplementation(async () => {})
+    await expect(scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.readObjectMaxFieldOrder({ projectId: 'tenant_42:other-plugin', objectId: 'x' }))).rejects.toThrow()
+    expect(withRead.readObjectMaxFieldOrder).not.toHaveBeenCalled()
   })
   // P0-S S3: `overwriteMode` is the per-call opt-out of the fail-closed
   // ensureFields default. plugin-scope forwards it two ways — spread into

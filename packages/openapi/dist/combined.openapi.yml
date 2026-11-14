@@ -500,6 +500,557 @@ components:
               type: string
             message:
               type: string
+    SecurityActionError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - UNAUTHORIZED
+                - PASSWORD_CHANGE_REQUIRED
+                - SECURITY_ACTION_SESSION_REQUIRED
+                - SECURITY_ACTION_PURPOSE_UNAVAILABLE
+                - SECURITY_ACTION_METHOD_UNAVAILABLE
+                - SECURITY_ACTION_HIGH_PRIVILEGE_SELF_SERVICE_DENIED
+                - SECURITY_ACTION_ASSURANCE_INSUFFICIENT
+                - SECURITY_ACTION_CONNECTION_NOT_PERMITTED
+                - SECURITY_ACTION_CREDENTIAL_REJECTED
+                - SECURITY_ACTION_ORG_CONTEXT_REQUIRED
+                - SECURITY_ACTION_TARGET_CONFLICT
+                - SECURITY_ACTION_STATE_CHANGED
+                - SECURITY_ACTION_INVALID_REQUEST
+                - SECURITY_ACTION_RATE_LIMITED
+                - SECURITY_ACTION_UNAVAILABLE
+                - SECURITY_ACTION_PROOF_UNAVAILABLE
+            message:
+              type: string
+            details:
+              type: object
+              description: Closed-set values only; never a request value.
+              properties:
+                nextStep:
+                  type: string
+                  enum:
+                    - admin_assisted_local_credential
+                retryAfter:
+                  type: integer
+                fields:
+                  type: array
+                  items:
+                    type: string
+    DirectoryIntegrationCapability:
+      type: object
+      required:
+        - enabled
+        - governance
+        - effective
+        - reason
+        - anchor
+      properties:
+        enabled:
+          type: boolean
+        governance:
+          nullable: true
+          type: string
+          enum:
+            - legacy
+            - gated
+            - unsupported
+          description: Null when the provider is not registered
+        effective:
+          nullable: true
+          type: boolean
+          description: >-
+            Set only where governance is gated; null means the stored state does
+            not govern the capability
+        reason:
+          nullable: true
+          type: string
+          enum:
+            - switch_off
+            - schema_unavailable
+            - org_mismatch
+            - state_mismatch
+            - provider_not_registered
+            - governed_by_legacy_path
+            - unsupported
+            - implementation_missing
+            - not_enabled
+            - integration_inactive
+            - scope_changed
+        anchor:
+          type: object
+          required:
+            - bound
+            - matchesCurrent
+          properties:
+            bound:
+              type: boolean
+            matchesCurrent:
+              type: boolean
+              nullable: true
+        legacy:
+          type: object
+          description: >-
+            Present only for a legacy-governed capability of a registered
+            provider; booleans and fixed strings only
+          additionalProperties: true
+    DirectoryIntegrationCapabilities:
+      type: object
+      required:
+        - integrationId
+        - provider
+        - integrationStatus
+        - revision
+        - updatedAt
+        - capabilities
+      properties:
+        integrationId:
+          type: string
+          format: uuid
+        provider:
+          type: string
+        integrationStatus:
+          type: string
+        revision:
+          type: integer
+          minimum: 0
+          description: Zero while the integration has no capability row
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        capabilities:
+          type: object
+          required:
+            - directory
+            - login
+            - notification
+          properties:
+            directory:
+              $ref: '#/components/schemas/DirectoryIntegrationCapability'
+            login:
+              $ref: '#/components/schemas/DirectoryIntegrationCapability'
+            notification:
+              $ref: '#/components/schemas/DirectoryIntegrationCapability'
+    NotificationError:
+      type: object
+      required:
+        - error
+      description: >-
+        Values-free error body of the user notification routes. Details are
+        field names, a fixed reason code or a revision number; never an
+        identifier, a digest or provider text.
+      properties:
+        error:
+          type: object
+          required:
+            - code
+          properties:
+            code:
+              type: string
+            fields:
+              type: array
+              description: >-
+                Names of the request fields that failed validation (422
+                INVALID_REQUEST)
+              items:
+                type: string
+            reason:
+              type: string
+              description: Fixed reason code (409 ENDPOINT_NOT_USABLE)
+            currentRevision:
+              type: integer
+              minimum: 0
+              description: >-
+                Stored revision of the preference (409 PREFERENCE_STALE); 0 when
+                there is no row
+    NotificationConnectionRef:
+      type: object
+      required:
+        - id
+        - provider
+        - label
+      properties:
+        id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          example: dingtalk
+        label:
+          type: string
+          description: Provider name and integration name; never an identifier
+    NotificationResolveFailureCode:
+      type: string
+      enum:
+        - connection_not_found
+        - connection_inactive
+        - provider_not_registered
+        - proof_kind_unavailable
+        - proof_missing
+        - proof_not_linked
+        - proof_wrong_user
+        - proof_ambiguous
+        - proof_account_inactive
+        - proof_changed
+        - proof_assurance_insufficient
+        - address_missing
+        - address_unusable
+        - address_kind_not_derivable
+        - address_bound_on_other_connection
+        - scope_unproven
+        - scope_changed
+        - user_not_active_member
+        - endpoint_not_found
+    NotificationEndpoint:
+      type: object
+      required:
+        - id
+        - connection
+        - addressKind
+        - proofKind
+        - status
+        - revision
+        - usable
+        - unusableReason
+        - capability
+        - verified
+        - lastVerifiedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        connection:
+          $ref: '#/components/schemas/NotificationConnectionRef'
+        addressKind:
+          type: string
+          example: dingtalk_userid
+        proofKind:
+          type: string
+          enum:
+            - directory_link
+            - external_identity
+        status:
+          type: string
+          enum:
+            - active
+            - stale
+        revision:
+          type: integer
+          minimum: 1
+        usable:
+          type: boolean
+          description: The proof was derived again now and the endpoint is active
+        unusableReason:
+          nullable: true
+          description: >-
+            Why the endpoint is not usable; endpoint_stale when it is stale
+            although its proof holds again
+          oneOf:
+            - $ref: '#/components/schemas/NotificationResolveFailureCode'
+            - type: string
+              enum:
+                - endpoint_stale
+        capability:
+          type: object
+          required:
+            - effective
+            - reason
+          description: >-
+            Display state of the connection notification capability; not an
+            authorization input
+          properties:
+            effective:
+              type: boolean
+            reason:
+              type: string
+              nullable: true
+        verified:
+          type: boolean
+          description: >-
+            Connection verification evidence; always false until evidence is
+            stored
+        lastVerifiedAt:
+          type: string
+          format: date-time
+    NotificationEndpointCandidate:
+      type: object
+      required:
+        - connection
+        - proofKind
+        - addressable
+        - reasonCode
+        - endpointId
+      properties:
+        connection:
+          $ref: '#/components/schemas/NotificationConnectionRef'
+        proofKind:
+          type: string
+          enum:
+            - directory_link
+            - external_identity
+        addressable:
+          type: boolean
+        reasonCode:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/NotificationResolveFailureCode'
+        endpointId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The caller own endpoint that is not revoked
+          if any: null
+    NotificationEndpointListing:
+      type: object
+      required:
+        - delivery
+        - endpoints
+        - candidates
+      properties:
+        delivery:
+          type: object
+          required:
+            - enabled
+            - testSendAvailable
+            - reason
+          description: >-
+            Nothing is sent in this version; delivery is always reported
+            disabled
+          properties:
+            enabled:
+              type: boolean
+              enum:
+                - false
+            testSendAvailable:
+              type: boolean
+              enum:
+                - false
+            reason:
+              type: string
+              enum:
+                - delivery_disabled
+        endpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationEndpoint'
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationEndpointCandidate'
+    NotificationEndpointResult:
+      type: object
+      required:
+        - endpoint
+      properties:
+        endpoint:
+          $ref: '#/components/schemas/NotificationEndpoint'
+    NotificationEndpointRevoked:
+      type: object
+      required:
+        - endpoint
+      properties:
+        endpoint:
+          type: object
+          required:
+            - id
+            - status
+            - revision
+          properties:
+            id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum:
+                - revoked
+            revision:
+              type: integer
+              minimum: 2
+    NotificationEndpointCreate:
+      type: object
+      additionalProperties: false
+      required:
+        - connectionId
+        - proofKind
+      properties:
+        connectionId:
+          type: string
+          format: uuid
+        proofKind:
+          type: string
+          enum:
+            - directory_link
+            - external_identity
+    NotificationQuietHours:
+      type: object
+      additionalProperties: false
+      required:
+        - start
+        - end
+        - timeZone
+      description: >-
+        A daily window; a reminder that falls due inside it is skipped, not
+        delayed
+      properties:
+        start:
+          type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+          description: Local time
+          inclusive: null
+        end:
+          type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+          description: Local time
+          exclusive; earlier than start means the window crosses midnight: null
+        timeZone:
+          type: string
+          description: IANA zone name
+    NotificationPreference:
+      type: object
+      required:
+        - enabled
+        - primaryEndpointId
+        - fallbackEndpointId
+        - quietHours
+        - revision
+      properties:
+        enabled:
+          type: boolean
+        primaryEndpointId:
+          type: string
+          format: uuid
+          nullable: true
+        fallbackEndpointId:
+          type: string
+          format: uuid
+          nullable: true
+        quietHours:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/NotificationQuietHours'
+        revision:
+          type: integer
+          minimum: 1
+    NotificationTopicView:
+      type: object
+      required:
+        - topic
+        - integrated
+        - applies
+        - preference
+        - effective
+      properties:
+        topic:
+          type: string
+          enum:
+            - task_reminder
+        integrated:
+          type: boolean
+        applies:
+          type: object
+          required:
+            - now
+            - reason
+          properties:
+            now:
+              type: boolean
+            reason:
+              type: string
+              nullable: true
+              enum:
+                - topic_not_integrated
+                - org_not_taken_over
+                - org_paused
+                - delivery_disabled
+                - capability_off
+        preference:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/NotificationPreference'
+        effective:
+          type: object
+          required:
+            - source
+            - connection
+            - usable
+            - fallback
+          properties:
+            source:
+              type: string
+              enum:
+                - user_primary
+                - org_default
+                - none
+            connection:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/NotificationConnectionRef'
+            usable:
+              type: boolean
+            fallback:
+              type: object
+              nullable: true
+              required:
+                - connection
+                - usable
+              description: >-
+                The stored backup; never usable when it is of the primary's
+                provider
+              properties:
+                connection:
+                  $ref: '#/components/schemas/NotificationConnectionRef'
+                usable:
+                  type: boolean
+    NotificationPreferenceList:
+      type: object
+      required:
+        - topics
+      properties:
+        topics:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationTopicView'
+    NotificationPreferencePatch:
+      type: object
+      additionalProperties: false
+      required:
+        - topic
+        - expectedRevision
+      description: >-
+        Keys that are present are set, null clears a nullable key, absent keys
+        are unchanged. expectedRevision 0 means no row is expected yet. A body
+        that changes nothing answers 200 and changes no revision.
+      properties:
+        topic:
+          type: string
+          enum:
+            - task_reminder
+        expectedRevision:
+          type: integer
+          minimum: 0
+        enabled:
+          type: boolean
+        primaryEndpointId:
+          type: string
+          format: uuid
+          nullable: true
+        fallbackEndpointId:
+          type: string
+          format: uuid
+          nullable: true
+        quietHours:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/NotificationQuietHours'
     DirectErrorResponse:
       type: object
       properties:
@@ -11327,6 +11878,75 @@ components:
           type: integer
           minimum: 0
 paths:
+  /api/admin/directory/integration-capabilities/{integrationId}:
+    get:
+      summary: Show the capability state of one directory integration
+      description: >-
+        Platform administrators only. Answers 404
+        DIRECTORY_CAPABILITIES_DISABLED while
+        DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true.
+        Read-only and display only: the response carries no scope value, corp
+        id, application key, environment value or configuration value.
+        `effective` is null where the stored state does not govern the
+        capability (legacy path, unsupported capability, unregistered provider);
+        null does not mean the capability is off.
+      operationId: getDirectoryIntegrationCapabilities
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Capability state
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/DirectoryIntegrationCapabilities'
+        '400':
+          description: integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the
+            integration does not exist (DIRECTORY_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            The capability tables are not present
+            (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/admin/plugins:
     get:
       summary: List plugins (admin)
@@ -20868,6 +21488,158 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/auth/security-actions/verify:
+    post:
+      summary: Re-verify the signed-in user for one security action
+      description: >-
+        Mounted only when SECURITY_ACTION_PROOF_ENABLED is exactly 'true'.
+        Returns a 300-second single-use proof bound to the session, the
+        authenticated organization, the purpose and the target. A purpose whose
+        prerequisites are not delivered is refused before any data is read.
+        Before authentication the route gives no answer of its own. Responses
+        are not cacheable.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - purpose
+                - connectionId
+                - method
+                - password
+              properties:
+                purpose:
+                  type: string
+                  enum:
+                    - external_identity_bind
+                    - external_identity_unbind
+                    - login_grant_enable
+                    - login_grant_disable
+                connectionId:
+                  type: string
+                  format: uuid
+                targetIdentityId:
+                  type: string
+                  format: uuid
+                  description: >-
+                    Required for every purpose except external_identity_bind,
+                    and refused for it.
+                expectedBindingRevision:
+                  type: integer
+                  minimum: 0
+                  description: Present exactly when targetIdentityId is present.
+                method:
+                  type: string
+                  enum:
+                    - local_password
+                password:
+                  type: string
+                  format: password
+                  minLength: 1
+                  maxLength: 1024
+                clientBindingDigest:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+      responses:
+        '200':
+          description: A single-use proof was issued
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum:
+                  - no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    properties:
+                      proof:
+                        type: string
+                        description: Opaque; present only in this response body.
+                      purpose:
+                        type: string
+                        enum:
+                          - external_identity_bind
+                          - external_identity_unbind
+                          - login_grant_enable
+                          - login_grant_disable
+                      connectionId:
+                        type: string
+                        format: uuid
+                      method:
+                        type: string
+                        enum:
+                          - local_password
+                      assurance:
+                        type: string
+                        enum:
+                          - local_password
+                      expiresAt:
+                        type: string
+                        format: date-time
+                      ttlSeconds:
+                        type: integer
+                        enum:
+                          - 300
+        '401':
+          description: No usable session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '403':
+          description: >-
+            Refused (purpose unavailable, method unavailable, policy refusal or
+            rejected credential)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '409':
+          description: Organization context, target or state conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '422':
+          description: >-
+            Request does not satisfy the closed schema; details.fields names
+            schema fields or the fixed entry _unknown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '429':
+          description: >-
+            Per-user failure limit reached; Retry-After carries
+            details.retryAfter
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
+        '503':
+          description: Verification unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityActionError'
   /api/comments:
     get:
       summary: List comments
@@ -26574,6 +27346,295 @@ paths:
                     error:
                       code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
                       message: multitable provisioning API is not available
+  /api/me/notification-endpoints:
+    get:
+      summary: >-
+        List the caller's notification endpoints and the connections that could
+        become one
+      description: >-
+        Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact
+        string true (and when the session token carries no organization). The
+        caller and the organization come from the session only. The response
+        carries no recipient identifier, digest or proof id. `capability` is a
+        display state and is not authoritative.
+      operationId: listMyNotificationEndpoints
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller's endpoints and candidates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationEndpointListing'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The surface is switched off, or the session has no organization
+            (NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '503':
+          description: >-
+            NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement;
+            retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this
+            surface are not provisioned yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+    post:
+      summary: Make or refresh an endpoint from a proof the caller already holds
+      description: >-
+        The request names a connection and a proof kind and nothing else; any
+        other field, including every recipient-identifier name, is a 422. The
+        address is derived from the proof and never stored or returned.
+        Repeating the request changes nothing; a revoked endpoint is re-enabled
+        as the same row. A request that finds the proof of the caller's own
+        endpoint on that connection gone answers 409 and marks that endpoint
+        stale.
+      operationId: createMyNotificationEndpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationEndpointCreate'
+      responses:
+        '200':
+          description: The endpoint already existed (or was refreshed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationEndpointResult'
+        '201':
+          description: The endpoint was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationEndpointResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The surface is switched off (NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '409':
+          description: >-
+            PROOF_KIND_UNAVAILABLE, ADDRESS_KIND_NOT_DERIVABLE, PROOF_NOT_FOUND,
+            PROOF_AMBIGUOUS, SCOPE_UNPROVEN, ADDRESS_UNUSABLE,
+            NOT_ACTIVE_MEMBER, ADDRESS_ALREADY_BOUND (an endpoint of another
+            organization and user holds this address in this tenant) or
+            ADDRESS_BOUND_ON_OTHER_CONNECTION (the caller's own endpoint on
+            another connection of the tenant holds it)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '422':
+          description: >-
+            INVALID_REQUEST with the names of the offending fields, or
+            ORG_MISSING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '503':
+          description: >-
+            NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement;
+            retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this
+            surface are not provisioned yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+  /api/me/notification-endpoints/{id}:
+    delete:
+      summary: Revoke one of the caller's endpoints
+      description: >-
+        Idempotent. The preferences that refer to the endpoint are cleared in
+        the same transaction: a revoked primary is replaced by the backup when
+        there is one. The preference's `enabled` is never changed. An endpoint
+        of another user, of another organization and an unknown id are the same
+        404.
+      operationId: revokeMyNotificationEndpoint
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The endpoint is revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationEndpointRevoked'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The surface is switched off, or no such endpoint of the caller
+            (NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '422':
+          description: ORG_MISSING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '503':
+          description: >-
+            NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement;
+            retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this
+            surface are not provisioned yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+  /api/me/notification-preferences:
+    get:
+      summary: >-
+        Show the caller's preference for each topic and whether it takes effect
+        now
+      description: >-
+        One entry per topic. `applies` says whether the preference is in force
+        at this moment and why not; a topic that is not connected to sending
+        shows topic_not_integrated. Answers 404 while
+        USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true.
+      operationId: listMyNotificationPreferences
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The preference of each topic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPreferenceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: >-
+            The surface is switched off, or the session has no organization
+            (NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '503':
+          description: >-
+            NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement;
+            retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this
+            surface are not provisioned yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+    patch:
+      summary: Change the caller's preference for one topic
+      description: >-
+        Applied only if the stored revision equals expectedRevision. The
+        endpoints must be the caller's own, active, of a provider the topic
+        routes; an endpoint of another user, of another organization and an
+        unknown id are the same 409 ENDPOINT_NOT_USABLE. A backup of the
+        primary's provider is refused (FALLBACK_PROVIDER_NOT_ALLOWED). Quiet
+        hours suppress a reminder that falls due inside the window; they do not
+        delay it. Nothing is sent.
+      operationId: patchMyNotificationPreference
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationPreferencePatch'
+      responses:
+        '200':
+          description: The topic view after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationTopicView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The surface is switched off (NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '409':
+          description: >-
+            PREFERENCE_STALE (with currentRevision), ENDPOINT_NOT_USABLE (with
+            reason), ENDPOINT_NOT_ALLOWED_FOR_TOPIC or
+            FALLBACK_PROVIDER_NOT_ALLOWED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '422':
+          description: >-
+            INVALID_REQUEST with the names of the offending fields (a topic
+            outside the closed set is one), or ORG_MISSING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
+        '503':
+          description: >-
+            NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement;
+            retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this
+            surface are not provisioned yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationError'
   /api/multitable/bases:
     get:
       summary: List multitable bases

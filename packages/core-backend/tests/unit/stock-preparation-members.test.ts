@@ -763,7 +763,8 @@ describe('stock-prep members port (S5b, R-39)', () => {
     const scoped = norm(STOCK_PREP_MEMBERS_SCOPED_USERS_SQL)
     for (const clause of [
       "WHERE s.admin_user_id = $1 AND s.namespace = $2 AND d.is_active = true",
-      'WHERE child.is_active = true',
+      'SELECT DISTINCT d.id, d.integration_id, d.external_department_id, s.include_children',
+      'parent.include_children IS TRUE AND child.is_active = true',
       "WHERE gscope.admin_user_id = $1 AND gscope.namespace = $2",
       'AND a.is_active = true',
       "WHERE l.link_status = 'linked' AND l.local_user_id = ANY($3::text[])",
@@ -775,6 +776,64 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(configured).toContain('JOIN directory_integrations i ON i.id = d.integration_id')
     expect(configured).toContain('JOIN platform_member_groups g ON g.id = gscope.group_id')
     expect(configured.match(/namespace = \$2/g)).toHaveLength(2)
+  })
+
+  it('SM-14b: include_children false is the exact department, true walks descendants, and a true ancestor still unions them in', () => {
+    const scoped = norm(STOCK_PREP_MEMBERS_SCOPED_USERS_SQL)
+    const departments = scoped.slice(scoped.indexOf('seed_departments AS ('), scoped.indexOf('allowed_groups AS ('))
+    const [exact, recursive] = departments.split(' UNION ')
+    expect(exact).toContain('FROM seed_departments')
+    expect(exact).not.toContain('include_children IS TRUE')
+    expect(recursive).toContain('TRUE AS include_children')
+    expect(recursive).toContain('parent.include_children IS TRUE')
+    expect(recursive).toContain('child.integration_id = parent.integration_id')
+    expect(recursive).toContain('child.external_parent_department_id = parent.external_department_id')
+    expect(recursive).not.toContain('s.include_children')
+    const source = readFileSync(path.join(__dirname, '..', '..', 'src', 'services', 'stock-preparation-members.ts'), 'utf8')
+    expect(source.match(/loadScopedUserIds\(/g)).toHaveLength(3)
+    expect(source).toContain('outOfScopeMemberCount: members.length - visible.length')
+
+    type Dept = { id: string; integrationId: string; externalId: string; parentExternalId: string | null; active: boolean }
+    const tree: Dept[] = [
+      { id: 'A', integrationId: 'i1', externalId: 'ext-a', parentExternalId: null, active: true },
+      { id: 'B', integrationId: 'i1', externalId: 'ext-b', parentExternalId: 'ext-a', active: true },
+      { id: 'C', integrationId: 'i1', externalId: 'ext-c', parentExternalId: 'ext-b', active: true },
+      { id: 'D', integrationId: 'i1', externalId: 'ext-d', parentExternalId: null, active: true },
+      { id: 'E', integrationId: 'i2', externalId: 'ext-e', parentExternalId: null, active: true },
+      { id: 'F', integrationId: 'i2', externalId: 'ext-f', parentExternalId: 'ext-e', active: true },
+      { id: 'G', integrationId: 'i1', externalId: 'ext-g', parentExternalId: 'ext-a', active: false },
+    ]
+    const allowed = (scopes: Array<{ departmentId: string; includeChildren: boolean }>): string[] => {
+      const byId = new Map(tree.map((department) => [department.id, department]))
+      const seen = new Map<string, boolean>()
+      const queue: Array<{ id: string; expand: boolean }> = []
+      for (const scope of scopes) {
+        const department = byId.get(scope.departmentId)
+        if (!department?.active) continue
+        queue.push({ id: department.id, expand: scope.includeChildren })
+      }
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        const prior = seen.get(current.id)
+        if (prior === true) continue
+        if (prior === false && !current.expand) continue
+        seen.set(current.id, prior === true || current.expand)
+        if (!current.expand) continue
+        const parent = byId.get(current.id)!
+        for (const child of tree) {
+          if (!child.active || child.integrationId !== parent.integrationId || child.parentExternalId !== parent.externalId) continue
+          queue.push({ id: child.id, expand: true })
+        }
+      }
+      return [...seen.keys()].sort()
+    }
+    expect(allowed([{ departmentId: 'A', includeChildren: false }])).toEqual(['A'])
+    expect(allowed([{ departmentId: 'A', includeChildren: true }])).toEqual(['A', 'B', 'C'])
+    expect(allowed([{ departmentId: 'B', includeChildren: false }])).toEqual(['B'])
+    expect(allowed([{ departmentId: 'A', includeChildren: true }, { departmentId: 'B', includeChildren: false }])).toEqual(['A', 'B', 'C'])
+    expect(allowed([{ departmentId: 'A', includeChildren: false }, { departmentId: 'D', includeChildren: true }])).toEqual(['A', 'D'])
+    expect(allowed([{ departmentId: 'A', includeChildren: false }, { departmentId: 'E', includeChildren: true }])).toEqual(['A', 'E', 'F'])
+    expect(allowed([{ departmentId: 'G', includeChildren: true }])).toEqual([])
   })
 
   it('SM-15 [recovery-census:stock-prep-members:role-write]: a recovery-authority conflict on a role write is the uniform retryable 409', async () => {

@@ -7,9 +7,12 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
-import { pool } from '../db/pg'
+import { pool, transaction } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { auditLog } from '../audit/audit'
+import { AccessGraphUserUnavailableError } from '../directory/access-graph-mutex'
+import { PlatformActorAuthorityLost } from '../admin/platform-actor-authority'
+import { revokeLegacyUserPermission } from '../admin/legacy-permission-revoke'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
 import { userHasPermission, listUserPermissions, inspectUserPermissionGrants, isAdmin, invalidateUserPerms } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
@@ -281,6 +284,75 @@ export function permissionsRouter(): Router {
     }
   })
 
+  // Clears matching users.permissions entries only. Direct grants, roles, is_admin,
+  // and admissions stay. Authority is the locked actor's live user_roles admin
+  // membership, not users.role, a token claim, or isAdmin(). The actor must be
+  // active, activated, and not recycled. Inactive and pending targets remain
+  // writable. Missing and recycled targets are refused. A no-match read does
+  // not audit or invalidate.
+  r.post('/api/permissions/legacy/revoke', authenticate, async (req: Request, res: Response) => {
+    try {
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '').trim()
+      if (!adminUserId) {
+        return res.status(401).json({ error: 'User ID not found in token' })
+      }
+      if (!pool) {
+        return res.status(503).json({ error: 'Database not available' })
+      }
+      if (typeof req.body?.userId !== 'string' || typeof req.body?.permission !== 'string') {
+        return res.status(400).json({ error: 'userId and permission must be strings' })
+      }
+      const userId = req.body.userId.trim()
+      const permission = req.body.permission.trim()
+      if (!userId || !permission) {
+        return res.status(400).json({ error: 'userId and permission are required' })
+      }
+
+      const result = await transaction(async (client) => revokeLegacyUserPermission(client, {
+        actorId: adminUserId,
+        userId,
+        permission,
+      }))
+      if (!result.changed) {
+        return res.status(404).json({ error: 'Legacy permission not found for user' })
+      }
+
+      // Local generation bump for a read already in this process. The next
+      // listUserPermissions call in every process reads the committed row.
+      invalidateUserPerms(userId)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'legacy-permission',
+        resourceId: `${userId}:${permission}`,
+        meta: {
+          adminUserId,
+          userId,
+          permission,
+        },
+      })
+
+      res.json({
+        success: true,
+        userId,
+        permission,
+        changed: true,
+      })
+    } catch (error) {
+      if (sendIfRecoveryConflict(res, error)) return
+      if (error instanceof AccessGraphUserUnavailableError) {
+        if (error.code === 'NOT_FOUND') return res.status(404).json({ error: 'User not found', code: 'NOT_FOUND' })
+        return res.status(409).json({ error: error.message, code: 'USER_IN_RECYCLE_BIN' })
+      }
+      if (error instanceof PlatformActorAuthorityLost) {
+        return res.status(403).json({ error: error.message, code: error.code })
+      }
+      logger.error('Failed to revoke legacy permission', error instanceof Error ? error : undefined)
+      res.status(500).json({ error: 'Failed to revoke legacy permission' })
+    }
+  })
+
   // Get permissions for a specific user (admin only)
   r.get('/api/permissions/user/:userId', authenticate, async (req: Request, res: Response) => {
     try {
@@ -313,6 +385,7 @@ export function permissionsRouter(): Router {
           unavailable: true,
           direct: [],
           inherited: [],
+          inheritedRoles: [],
           legacy: [],
           effective: [],
           blockedByNamespaceAdmission: [],
@@ -325,6 +398,7 @@ export function permissionsRouter(): Router {
         isAdmin: admin,
         direct: grants.direct,
         inherited: grants.inherited,
+        inheritedRoles: grants.inheritedRoles ?? [],
         legacy: grants.legacy,
         effective: grants.effective,
         blockedByNamespaceAdmission: grants.blockedByNamespaceAdmission,
@@ -343,6 +417,7 @@ export function permissionsRouter(): Router {
           unavailable: true,
           direct: [],
           inherited: [],
+          inheritedRoles: [],
           legacy: [],
           effective: [],
           blockedByNamespaceAdmission: [],

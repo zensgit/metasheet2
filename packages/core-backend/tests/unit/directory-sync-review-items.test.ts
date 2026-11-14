@@ -145,7 +145,7 @@ describe('directory review identity corp scope', () => {
         email: null,
         mobile: null,
       },
-      { local_user_id: 'previous-user', link_status: 'linked' },
+      { local_user_id: 'previous-user', link_status: 'linked', match_strategy: 'manual_admin' },
       {
         scopedExternalIdentityMap: new Map(),
         scopedUnionIdentityMap: new Map(),
@@ -159,6 +159,106 @@ describe('directory review identity corp scope', () => {
         ambiguousMobileKeys: new Set(),
       },
     )).toEqual({ matched: 'ambiguous' })
+  })
+})
+
+/**
+ * An administrator's explicit unbind is persisted as the link row shape
+ * `(local_user_id NULL, link_status <> 'linked', match_strategy 'manual_unbound')`. The cascade
+ * must report it as `admin_unbound` before any automatic strategy — external identity, unique
+ * email or mobile hint, and the ambiguity checks — can produce a different outcome, and must
+ * recognise it by those three columns only.
+ */
+describe('resolveDirectoryIdentityMatch keeps an administrator-unbound link', () => {
+  const account = {
+    corpId: 'corp-a',
+    externalKey: 'union-held',
+    unionId: 'union-held',
+    openId: 'open-held',
+    email: 'Held@Example.test',
+    mobile: '138 0000 0000',
+  }
+  const scopedUnionKey = JSON.stringify(['corp-a', 'union-held'])
+  const held = { local_user_id: null, link_status: 'unmatched', match_strategy: 'manual_unbound' }
+
+  function emptyMaps() {
+    return {
+      scopedExternalIdentityMap: new Map<string, string>(),
+      scopedUnionIdentityMap: new Map<string, string>(),
+      scopedOpenIdentityMap: new Map<string, string>(),
+      ambiguousScopedExternalIdentityKeys: new Set<string>(),
+      ambiguousScopedUnionIdentityKeys: new Set<string>(),
+      ambiguousScopedOpenIdentityKeys: new Set<string>(),
+      emailMap: new Map<string, string>(),
+      mobileMap: new Map<string, string>(),
+      ambiguousEmailKeys: new Set<string>(),
+      ambiguousMobileKeys: new Set<string>(),
+    }
+  }
+
+  it('u1: stays held when an external identity now matches the account', () => {
+    const maps = emptyMaps()
+    maps.scopedUnionIdentityMap.set(scopedUnionKey, 'user-via-identity')
+    expect(resolveDirectoryIdentityMatch(account, held, maps)).toEqual({ matched: 'admin_unbound' })
+  })
+
+  it('u2: stays held when a unique email or mobile matches the account', () => {
+    const emailMaps = emptyMaps()
+    emailMaps.emailMap.set('held@example.test', 'user-via-email')
+    expect(resolveDirectoryIdentityMatch(account, held, emailMaps)).toEqual({ matched: 'admin_unbound' })
+
+    const mobileMaps = emptyMaps()
+    mobileMaps.mobileMap.set('13800000000', 'user-via-mobile')
+    expect(resolveDirectoryIdentityMatch(account, held, mobileMaps)).toEqual({ matched: 'admin_unbound' })
+  })
+
+  it('u3: stays held even under an ambiguous external identity (hold precedes the ambiguity check)', () => {
+    const maps = emptyMaps()
+    maps.ambiguousScopedUnionIdentityKeys.add(scopedUnionKey)
+    expect(resolveDirectoryIdentityMatch(account, held, maps)).toEqual({ matched: 'admin_unbound' })
+  })
+
+  it('u4: a linked row is not held even if its strategy text reads manual_unbound', () => {
+    expect(resolveDirectoryIdentityMatch(
+      account,
+      { local_user_id: 'user-linked', link_status: 'linked', match_strategy: 'manual_unbound' },
+      emptyMaps(),
+    )).toEqual({ matched: 'already_linked' })
+  })
+
+  it('u5: an ordinary unmatched row still takes a unique email match', () => {
+    const maps = emptyMaps()
+    maps.emailMap.set('held@example.test', 'user-via-email')
+    expect(resolveDirectoryIdentityMatch(
+      account,
+      { local_user_id: null, link_status: 'unmatched', match_strategy: 'none' },
+      maps,
+    )).toEqual({ matched: 'email', localUserId: 'user-via-email' })
+  })
+
+  it('u6: a reviewer on a pending hint row is not treated as an unbind', () => {
+    const maps = emptyMaps()
+    maps.emailMap.set('held@example.test', 'user-via-email')
+    const reviewedHint = {
+      local_user_id: 'user-via-email',
+      link_status: 'pending',
+      match_strategy: 'email',
+      reviewed_by: 'admin-1',
+    }
+    expect(resolveDirectoryIdentityMatch(account, reviewedHint, maps))
+      .toEqual({ matched: 'email', localUserId: 'user-via-email' })
+  })
+
+  it('a missing link row and a NULL strategy both walk the ordinary cascade', () => {
+    const maps = emptyMaps()
+    maps.emailMap.set('held@example.test', 'user-via-email')
+    expect(resolveDirectoryIdentityMatch(account, null, maps))
+      .toEqual({ matched: 'email', localUserId: 'user-via-email' })
+    expect(resolveDirectoryIdentityMatch(
+      account,
+      { local_user_id: null, link_status: 'unmatched', match_strategy: null },
+      maps,
+    )).toEqual({ matched: 'email', localUserId: 'user-via-email' })
   })
 })
 

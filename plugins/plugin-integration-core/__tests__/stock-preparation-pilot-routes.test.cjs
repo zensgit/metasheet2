@@ -37,6 +37,14 @@
 //        job that lands between the readiness scan and the enable's lease is caught by the scan UNDER the lease
 //   P-15 (F-5 / O-6) no_two_copy_component through the real routes: refused with nothing done; the copy inactive enables
 //   P-16 (F-5 / O-8) pack_columns_installed through the real routes: declared ⇒ ledger AND host; nothing declared ⇒ refused
+//   P-18 (readiness v6, owner ruling 2026-11-11, R-91 option A) tenant_claim_required through the real routes: a prepared
+//        mount with MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED off refuses the enable 409 with EXACTLY that id, nothing
+//        done; the route's ONE reader (trim / case fold) admits ' TRUE '; removing the flag AFTER the enable leaves the
+//        pilot enabled and only the GET re-lists the id (the residual: the check gates the enable only)
+//   P-19 (readiness v7, batch-refresh S6-5b, R-91) no_open_sheet_repair_run through the real routes: an OPEN repair run of
+//        the sheet refuses the enable 409 with EXACTLY that id and nothing done — with the repair switch on, off and
+//        absent; an unwired / throwing ledger refuses too; a run that opens AFTER the readiness read and before the
+//        enable's lease is caught by the re-read UNDER the lease (nothing stamped, marked or audited); closed, it enables
 //   L-01 THE FIVE LARGE ROUTES refuse a PILOT project 409 STOCK_PREP_PILOT_LARGE_LANE_REFUSED naming the lane — no
 //        job created, no source read, no host write; L05: the same five requests on a NON-pilot project are served
 //        exactly as before (202 / 200)
@@ -57,6 +65,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const projectSheet = require('./support/stock-preparation-project-sheet-harness.cjs')
@@ -69,7 +79,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const { PROJECT_SHEETS_ENABLED_ENV, PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
-const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate, pullBatchBandFieldDescriptors } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { templateContractOptionFields } = require(path.join(LIB, 'stock-preparation-option-sync.cjs'))
 const { PILOT_ERROR_CODES } = require(path.join(LIB, 'stock-preparation-pilot-gate.cjs'))
 const { CUSTOMER_PACK_NOT_APPLICABLE, PILOT_READINESS_CHECK_IDS, PILOT_READINESS_VERSION, SPEC_READ_PLAN_SLOT_NOT_APPLICABLE } = require(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'))
@@ -109,8 +119,31 @@ const test = (name, fn) => tests.push([name, fn])
 const confirm = (projectNo = PROJECT) => ({ confirmProjectNo: projectNo })
 /** The error details as plain JSON (the route sanitizer answers a null-prototype object). */
 const details = (res) => JSON.parse(JSON.stringify(res.body.error.details))
-const getPilot = (h, user, projectNo = PROJECT, query = {}) => projectSheet.call(h.routes, 'GET', PILOT_PATH, { user, params: { projectNo }, query })
-const enablePilot = (h, user, projectNo = PROJECT, body = confirm(projectNo)) => projectSheet.call(h.routes, 'POST', PILOT_PATH, { user, params: { projectNo }, body })
+// 批次标识 BI-1b (readiness v3): a ready mount turns the pull-batch switch on for its pilot reads / enables only (the
+// switch is read per request), so the lane fixtures of the other tests run exactly as before.
+// Readiness v6 (owner ruling 2026-11-11, R-91 option A): the same window holds the tenant-claim door ON — exactly 'true'
+// unless the mount names another literal (`h.tenantClaimFlag`, P-18; `null` = absent) — and restores it after.
+const PULL_BATCH_SWITCH = 'STOCK_PREP_PULL_BATCH_ENABLED'
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+async function withPullBatchSwitch(h, fn) {
+  if (!h.pullBatchReady) return fn()
+  const original = process.env[PULL_BATCH_SWITCH]
+  const originalClaim = process.env[TENANT_CLAIM_FLAG]
+  process.env[PULL_BATCH_SWITCH] = 'true'
+  const claim = h.tenantClaimFlag === undefined ? 'true' : h.tenantClaimFlag
+  if (claim === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = claim
+  try { return await fn() } finally {
+    if (original === undefined) delete process.env[PULL_BATCH_SWITCH]; else process.env[PULL_BATCH_SWITCH] = original
+    if (originalClaim === undefined) delete process.env[TENANT_CLAIM_FLAG]; else process.env[TENANT_CLAIM_FLAG] = originalClaim
+  }
+}
+function getPilot(h, user, projectNo = PROJECT, query = {}) {
+  return withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'GET', PILOT_PATH, { user, params: { projectNo }, query }))
+}
+function enablePilot(h, user, projectNo = PROJECT, body = confirm(projectNo)) {
+  return withPullBatchSwitch(h, () => projectSheet.call(h.routes, 'POST', PILOT_PATH, { user, params: { projectNo }, body }))
+}
 const dryRun = (h, user = PLATFORM_ADMIN, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', DRY_RUN_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
 const jobParams = (jobId, applyJobId) => ({ actionId: ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
 const expansionStart = (h, projectNo = PROJECT, user = PLATFORM_ADMIN) => projectSheet.call(h.routes, 'POST', JOBS_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
@@ -149,7 +182,12 @@ function mountReady(options = {}) {
     // Pre-enable hardening (readiness version 2): the deployment also declares it runs without a customer pack.
     configExtras: { stockPreparationPilot: { specReadPlanSlot: SPEC_READ_PLAN_SLOT_NOT_APPLICABLE, customerPack: CUSTOMER_PACK_NOT_APPLICABLE } },
     ...options,
+    // Readiness version 3 (批次标识 BI-1b): a pull-batch ledger whose sheet row is resolved (born_empty), no batches.
+    // Readiness version 5 (batch-refresh step 6d-1b): a component ruling ledger that answers (nothing acknowledged).
+    // Readiness version 7 (batch-refresh S6-5b): a sheet-repair ledger that answers (no run of the sheet open).
+    serviceExtras: { stockPreparationPullBatchStore: resolvedPullBatchLedger(), stockPreparationComponentRulingStore: answeringRulingLedger(), stockPreparationSheetRepairStore: repairLedger(), ...(options.serviceExtras || {}) },
   })
+  h.pullBatchReady = true
   const originalRestore = h.restore
   h.restore = () => { continuationSupport.CONTINUATION_SUPPORT_VERSION = originalMarker; originalRestore() }
   const registries = answeringRegistries(h.source.adapter)
@@ -166,6 +204,54 @@ function prepareSheetForPilot(h, objectId) {
   assert.ok(object, 'the seeded sheet exists on the host')
   for (const fieldId of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) object.fields.get(fieldId).property.humanWriteLock = 'plm_system'
   for (const field of templateContractOptionFields(TEMPLATE)) object.fields.get(field.id).property.options = [{ value: 'syn_option' }]
+  // Readiness version 3: the band (marker + PLM lock) and both plugin views, neither hiding it.
+  for (const descriptor of pullBatchBandFieldDescriptors({ locale: 'zh-CN', placement: 'left' })) {
+    object.fields.set(descriptor.id, { name: descriptor.name, type: descriptor.type, property: JSON.parse(JSON.stringify(descriptor.property)), order: descriptor.order })
+  }
+  const views = { 'prep-fill': true, 'prep-todo': true }
+  h.provisioning.findObjectView = async ({ viewId }) => (views[viewId] ? { id: `view_${viewId}`, sheetId: 'syn', name: viewId, type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [], config: {} } : null)
+}
+
+// A resolved pull-batch ledger (the store's readSheetState answer shape): one born_empty sheet row, no batches.
+function resolvedPullBatchLedger() {
+  return {
+    async readSheetState({ tenantId, sheetId, projectNo }) {
+      return { sheet: { tenantId, sheetId, projectNo, historyStatus: 'born_empty', labelLocale: 'zh-CN', firstPullBatchRule: 'material', labelFormat: 'ordinal_date', bandPlacement: 'left', historyMode: 'inferred', historyBatchCount: 0 }, batches: [] }
+    },
+    async allocate() { throw new Error('readiness never allocates') },
+    async finish() { throw new Error('readiness never finishes') },
+    // Readiness version 4 (batch-refresh step 6a-2): the recovery's link read and close hook are wired (never called).
+    async readBatchLink() { throw new Error('readiness never reads a link') },
+    async batchWithin() { throw new Error('readiness never closes a batch') },
+  }
+}
+
+// Readiness version 5 (batch-refresh step 6d-1b, R-91): the component ruling ledger answers an empty list (no row).
+function answeringRulingLedger() {
+  return {
+    async listActiveRulings() { return [] },
+    async listRulings() { return [] },
+    async recordRemnantAcknowledgement() { throw new Error('readiness never records') },
+    async revokeRemnantAcknowledgement() { throw new Error('readiness never revokes') },
+  }
+}
+
+// Readiness version 7 (batch-refresh S6-5b, R-91): the sheet-repair ledger's open-run read. `state.open` is what the
+// next listRunsOf answers (a function: called per read with the read's ordinal); every read is recorded.
+function repairLedger(state = { open: false }) {
+  const reads = []
+  return {
+    state,
+    reads,
+    async listRunsOf(scope) {
+      reads.push({ ...scope })
+      const open = typeof state.open === 'function' ? state.open(reads.length) : state.open
+      if (open instanceof Error) throw open
+      return { sequence: 0, retireRunIds: [], openRun: open }
+    },
+    async probeReadable() { throw new Error('readiness never probes the repair ledger') },
+    async beginRun() { throw new Error('readiness never begins a run') },
+  }
 }
 
 /** Mark the registry row pilot DIRECTLY (what the enable route does, minus the stamp / audit) — the lane tests' fixture. */
@@ -317,8 +403,11 @@ test('P-04 GET: absent → 200 absent; active (plain mount) → the readiness li
     assert.deepEqual(data.readiness.checks.map((check) => check.id), [...PILOT_READINESS_CHECK_IDS])
     // On a plain mount these cannot pass: no field read port (PLM lock / option lists unprovable), no closure port,
     // no 规格 declaration, no customer-pack declaration (pack_columns_installed, readiness version 2), inert
-    // registries, and the shipped build marker.
-    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version'])
+    // registries. The build marker is NOT among them since S6-9 (it ships at 1; P-06 is the ready enable).
+    // Readiness version 3: the pull-batch switch is off on a plain mount, so the six v3 checks fail too (with no IO).
+    // Readiness version 6: the tenant-claim door is off (the default) on a plain mount, so tenant_claim_required fails too.
+    // Readiness version 7: a plain mount wires no sheet-repair ledger, so no_open_sheet_repair_run fails too (never "no run").
+    assert.deepEqual(data.readiness.failing, ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run'])
     const text = JSON.stringify(active.body)
     assert.ok(!text.includes(sheetId) && !text.includes(objectId) && !text.includes(TENANT), 'values-free: no sheet id, objectId or tenant in the answer')
     assert.ok(!h.provisioning.calls.some(([verb]) => /^(ensure|patch|grant|close)/.test(verb)), 'GET writes nothing on the host')
@@ -337,7 +426,7 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
     const res = await enablePilot(h, WORKBENCH_ADMIN)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, PILOT_ERROR_CODES.NOT_READY)
-    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version'], partial: false })
+    assert.deepEqual(details(res), { version: PILOT_READINESS_VERSION, failing: ['plm_column_lock', 'contract_option_sets', 'export_closure_port', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run'], partial: false })
     assert.deepEqual(await h.projectWriteLock.readState(scope), before, 'the generation did not move and no lease was taken')
     assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
     assert.ok(!h.db.calls.some((call) => /^(updateRow|transaction)/.test(call)), 'no registry write')
@@ -357,6 +446,161 @@ test('P-05 POST not ready: 409 NOT_READY listing the failing ids — nothing bum
     } finally { ready.restore() }
   } finally { h.restore() }
 })
+
+test('P-20 (S6-9) the build marker through the routes: on a fully prepared mount with the marker set to 0 IN MEMORY (every build before S6-9) the GET lists exactly continuation_support_version and the POST is 409 with exactly that id and nothing done; back at the shipped 1 the enable lands', async () => {
+  const h = mountReady()
+  try {
+    assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 1, 'mountReady holds the marker at 1 (the shipped value since S6-9)')
+    const scope = swlLockLib.sheetWriteScopeKey(h.sheetId)
+    const lockBefore = await h.projectWriteLock.readState(scope)
+    continuationSupport.CONTINUATION_SUPPORT_VERSION = 0
+    let read
+    let refused
+    try {
+      read = await getPilot(h, WORKBENCH_ADMIN)
+      refused = await enablePilot(h, WORKBENCH_ADMIN)
+    } finally {
+      continuationSupport.CONTINUATION_SUPPORT_VERSION = 1
+    }
+    assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+    assert.deepEqual(read.body.data.readiness.failing, ['continuation_support_version'])
+    assert.deepEqual(read.body.data.may, { enable: false })
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.equal(refused.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+    assert.deepEqual(details(refused), { version: PILOT_READINESS_VERSION, failing: ['continuation_support_version'], partial: false })
+    assert.deepEqual(await h.projectWriteLock.readState(scope), lockBefore, 'the refusal bumped nothing and took no lease')
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+    assert.deepEqual(enabled.body.data.readiness.failing, [])
+  } finally { h.restore() }
+})
+
+test('P-18 (readiness v6, R-91 option A) tenant_claim_required: the door off refuses the enable with exactly that id and nothing done; the ONE reader admits a trimmed / folded literal; the check gates the enable only', async () => {
+  const before = process.env[TENANT_CLAIM_FLAG]
+  const h = mountReady()
+  try {
+    const { sheetId } = h
+    const scope = swlLockLib.sheetWriteScopeKey(sheetId)
+    const lockBefore = await h.projectWriteLock.readState(scope)
+    // (a) the door OFF on an otherwise fully prepared mount: absent, then a literal the reader does not admit.
+    for (const literal of [null, 'false', '1', 'yes']) {
+      h.tenantClaimFlag = literal
+      const read = await getPilot(h, WORKBENCH_ADMIN)
+      assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+      assert.deepEqual(read.body.data.readiness.failing, ['tenant_claim_required'], `GET with the flag ${JSON.stringify(literal)}`)
+      assert.deepEqual(read.body.data.may, { enable: false })
+      const refused = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+      assert.equal(refused.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+      assert.deepEqual(details(refused), { version: PILOT_READINESS_VERSION, failing: ['tenant_claim_required'], partial: false }, `POST with the flag ${JSON.stringify(literal)}`)
+    }
+    assert.deepEqual(await h.projectWriteLock.readState(scope), lockBefore, 'no refusal bumped the generation or took a lease')
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    // (b) the route's ONE reader (stockPreparationTenantClaimRequired: trim + case fold) admits ' TRUE ': the enable lands.
+    h.tenantClaimFlag = ' TRUE '
+    const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+    assert.deepEqual(enabled.body.data.readiness.failing, [])
+    assert.equal(h.registryRows()[0].pilot_readiness_version, PILOT_READINESS_VERSION)
+    // (c) THE RESIDUAL, pinned as measured: the flag removed AFTER the enable — nothing undoes the enable (it is set-once)
+    // and nothing refuses at run time; only a GET re-evaluates readiness and lists the id again.
+    h.tenantClaimFlag = null
+    const afterRemoval = await getPilot(h, WORKBENCH_ADMIN)
+    assert.equal(afterRemoval.statusCode, 200, JSON.stringify(afterRemoval.body))
+    assert.equal(afterRemoval.body.data.pilot.enabled, true, 'the pilot stays enabled')
+    assert.deepEqual(afterRemoval.body.data.readiness.failing, ['tenant_claim_required'])
+    assert.deepEqual(afterRemoval.body.data.may, { enable: false })
+    assert.ok(h.registryRows()[0].pilot_enabled_at instanceof Date)
+  } finally {
+    h.restore()
+    assert.equal(process.env[TENANT_CLAIM_FLAG], before, 'the flag is restored after every pilot call')
+  }
+})
+
+test('P-19 (readiness v7, S6-5b, R-91) no_open_sheet_repair_run: an open run refuses with exactly that id and nothing done, whatever the repair switch; an unwired / failing ledger refuses; a run opened after readiness is caught under the lease; closed, the enable lands', async () => {
+  const REPAIR_SWITCH = 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED'
+  const switchBefore = process.env[REPAIR_SWITCH]
+  const ledger = repairLedger({ open: true })
+  const h = mountReady({ serviceExtras: { stockPreparationSheetRepairStore: ledger } })
+  try {
+    const scope = swlLockLib.sheetWriteScopeKey(h.sheetId)
+    const lockBefore = await h.projectWriteLock.readState(scope)
+    // (a) an OPEN run of the sheet: refused with exactly this id, the repair switch on, off and absent (never consulted).
+    for (const literal of ['true', 'false', null]) {
+      if (literal === null) delete process.env[REPAIR_SWITCH]
+      else process.env[REPAIR_SWITCH] = literal
+      const read = await getPilot(h, WORKBENCH_ADMIN)
+      assert.equal(read.statusCode, 200, JSON.stringify(read.body))
+      assert.deepEqual(read.body.data.readiness.failing, ['no_open_sheet_repair_run'], `GET, repair switch ${JSON.stringify(literal)}`)
+      assert.deepEqual(read.body.data.may, { enable: false })
+      const refused = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+      assert.equal(refused.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+      assert.deepEqual(details(refused), { version: PILOT_READINESS_VERSION, failing: ['no_open_sheet_repair_run'], partial: false }, `POST, repair switch ${JSON.stringify(literal)}`)
+    }
+    // The read's scope is the evaluation's own (tenant, sheet, project) — never a request field.
+    assert.ok(ledger.reads.length >= 6 && ledger.reads.every((read) => sameScope(read, { tenantId: TENANT, sheetId: h.sheetId, projectNo: PROJECT })), JSON.stringify(ledger.reads))
+    // (b) a ledger that cannot answer: 108 absent (the store's 503) refuses the same way.
+    ledger.state.open = Object.assign(new Error('the sheet-repair ledger could not be read'), { status: 503, code: 'STOCK_PREP_SHEET_REPAIR_STORE_FAILED' })
+    const unreadable = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(unreadable.statusCode, 409, JSON.stringify(unreadable.body))
+    assert.deepEqual(details(unreadable).failing, ['no_open_sheet_repair_run'])
+    assert.deepEqual(await h.projectWriteLock.readState(scope), lockBefore, 'no refusal bumped the generation or took a lease')
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp requested')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined)
+    // (c) THE WINDOW: no run at the readiness read, one open by the re-read under the enable's lease (a repair that
+    // began and was left open in between). Refused 409 with exactly this id; nothing stamped, marked or audited; the
+    // lease released. (The generation was bumped before the lease, as for F-3's window.)
+    const firstRead = ledger.reads.length + 1
+    ledger.state.open = (ordinal) => ordinal > firstRead
+    const raced = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(ledger.reads.length, firstRead + 1, 'calibration: readiness read once, the lease re-read once')
+    assert.equal(raced.statusCode, 409, JSON.stringify(raced.body))
+    assert.equal(raced.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+    assert.deepEqual(details(raced), { version: PILOT_READINESS_VERSION, failing: ['no_open_sheet_repair_run'], partial: false })
+    assert.equal(h.provisioning.gridExportClosureCalls.length, 0, 'no stamp')
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined, 'not marked')
+    assert.deepEqual(h.auditAppends, [])
+    assert.equal((await h.projectWriteLock.readState(scope)).leaseHeld, false, 'the lease was released')
+    // The same window with the re-read FAILING: refused under the lease as well.
+    const secondRead = ledger.reads.length + 1
+    ledger.state.open = (ordinal) => (ordinal > secondRead ? new Error('ledger down') : false)
+    const racedDown = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(racedDown.statusCode, 409, JSON.stringify(racedDown.body))
+    assert.deepEqual(details(racedDown).failing, ['no_open_sheet_repair_run'])
+    assert.equal(h.registryRows()[0].pilot_enabled_at, undefined, 'not marked')
+    // (d) the run closed: the enable lands.
+    ledger.state.open = false
+    const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+    assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+    assert.equal(enabled.body.data.enabled, true)
+    assert.deepEqual(enabled.body.data.readiness.failing, [])
+    assert.equal(h.registryRows()[0].pilot_readiness_version, PILOT_READINESS_VERSION)
+  } finally {
+    h.restore()
+    if (switchBefore === undefined) delete process.env[REPAIR_SWITCH]
+    else process.env[REPAIR_SWITCH] = switchBefore
+  }
+  // (e) no ledger wired at all: refused by this id alone.
+  const unwired = mountReady({ serviceExtras: { stockPreparationSheetRepairStore: null } })
+  try {
+    const res = await enablePilot(unwired, WORKBENCH_ADMIN)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.deepEqual(details(res).failing, ['no_open_sheet_repair_run'])
+  } finally { unwired.restore() }
+})
+
+function sameScope(a, b) {
+  return a.tenantId === b.tenantId && a.sheetId === b.sheetId && a.projectNo === b.projectNo
+}
 
 test('P-06 POST ready: bump → lease → host stamp (exact ids) → registry mark → release → ONE audit row', async () => {
   const h = mountReady()
@@ -648,6 +892,20 @@ test('P-13 (F-4c) the audit row commits WITH the mark: a crash between them leav
       assert.equal(res.statusCode, 500, JSON.stringify(res.body))
       assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
       assert.equal(h.auditAppends.length, 0)
+      // Pre-pilot fix batch 8(g) / F-10 (R-91): THE REGISTRY STATE behind that 500, pinned (the runbook B.3 note F-7
+      // describes): such a store's mark DID land — the project IS pilot (stamped at / by / version) with ZERO audit rows,
+      // the stamp is in place and the lease is released; a re-POST answers alreadyEnabled and never writes the missing
+      // row (it is a wiring-only defect: a mismatched store build, never a database state the real store produces).
+      const row = h.registryRows()[0]
+      assert.ok(row.pilot_enabled_at instanceof Date, 'the mark landed without its row: the project IS pilot')
+      assert.equal(row.pilot_enabled_by, WORKBENCH_ADMIN.id)
+      assert.equal(row.pilot_readiness_version, PILOT_READINESS_VERSION)
+      assert.ok(h.provisioning.gridExportClosures.has(h.sheetId), 'the stamp is in place')
+      assert.equal((await h.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h.sheetId))).leaseHeld, false, 'the lease was released')
+      const again = await enablePilot(h, WORKBENCH_ADMIN)
+      assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+      assert.equal(again.body.data.alreadyEnabled, true)
+      assert.equal(h.auditAppends.length, 0, 'a re-POST never repairs the missing row')
     } finally { h.restore() }
   }
 })
@@ -724,6 +982,36 @@ test('P-14 (F-3) no_open_large_job: a real approved (queued) checkpoint job on t
     assert.deepEqual(h3.auditAppends, [])
     assert.equal((await h3.projectWriteLock.readState(swlLockLib.sheetWriteScopeKey(h3.sheetId))).leaseHeld, false, 'the lease was released')
   } finally { h3.restore() }
+  // Pre-pilot fix batch 8(g) / F-10 (R-91): THE UNATTRIBUTED CLAUSE UNDER THE LEASE, hermetically. An OPEN job whose
+  // target sheet cannot be read lands in the same window (a stored value with no target, and a value that is not an
+  // object): it proves nothing about another sheet, so the scan under the lease counts it `unattributed` and refuses —
+  // `open` alone is 0 here, so only the `unattributed` half of the in-lease condition can catch it.
+  for (const [label, value] of [['no target', { jobId: 'job-peh-unattr', ...JOB_SCOPE, status: 'paused' }], ['not an object', 'syn-garbage']]) {
+    const h4 = mountReady()
+    try {
+      const probeOriginal = h4.projectTargetStore.probeTableReadable
+      let landed = false
+      h4.projectTargetStore.probeTableReadable = async (table) => {
+        if (!landed) {
+          landed = true
+          await h4.context.storage.set(checkpointKey('job-peh-unattr'), value)
+        }
+        return probeOriginal.call(h4.projectTargetStore, table)
+      }
+      const scope = swlLockLib.sheetWriteScopeKey(h4.sheetId)
+      const raced = await enablePilot(h4, WORKBENCH_ADMIN)
+      assert.equal(landed, true, `${label}: calibration — the value landed after the readiness scan`)
+      const scan = await largeBomJobs.countOpenLargeBomCheckpointApplyJobsForSheet({ storage: h4.context.storage, sheetId: h4.sheetId })
+      assert.deepEqual({ open: scan.open, unattributed: scan.unattributed }, { open: 0, unattributed: 1 }, `${label}: calibration — only the unattributed count can refuse`)
+      assert.equal(raced.statusCode, 409, `${label}: ${JSON.stringify(raced.body)}`)
+      assert.equal(raced.body.error.code, PILOT_ERROR_CODES.NOT_READY)
+      assert.deepEqual(details(raced).failing, ['no_open_large_job'])
+      assert.equal(h4.provisioning.gridExportClosureCalls.length, 0, `${label}: no stamp`)
+      assert.equal(h4.registryRows()[0].pilot_enabled_at, undefined, `${label}: not marked`)
+      assert.deepEqual(h4.auditAppends, [], `${label}: no audit row`)
+      assert.equal((await h4.projectWriteLock.readState(scope)).leaseHeld, false, `${label}: the lease was released`)
+    } finally { h4.restore() }
+  }
 })
 
 /** Rows on the harness host (physical keys, the project's own number) — what the project-scoped read answers. */
@@ -766,6 +1054,43 @@ test('P-15 (F-5 / O-6) no_two_copy_component: a sheet holding one component as a
   } finally { repaired.restore() }
 })
 
+// Pre-pilot fix batch 8(g) / F-10 (R-91): O-6 IS PROJECT-SCOPED through the real routes. The two-copy read is the
+// planner's own project-scoped read: ANOTHER project's active rows on this sheet that form the two-copy shape are that
+// project's business — they fail `single_project_on_sheet` (the foreign-project guard), never `no_two_copy_component`
+// of THIS project. And the scoping cuts both ways: this project's own two-copy shape is still seen while a foreign
+// project's clean rows sit beside it.
+test('P-15b (F-10 / O-6 project scoping) another project\'s active two-copy rows on the sheet fail only single_project_on_sheet, never no_two_copy_component; this project\'s own two-copy shape is still seen beside a foreign project\'s clean rows — values-free, nothing done', async () => {
+  const foreignShape = mountReady()
+  try {
+    await seedSheetRows(foreignShape, [
+      { idempotencyKey: 'syn-k-mine-root', componentSourceId: 'SYN-PEH-M1', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-root-c1', componentSourceId: 'SYN-PEH-F1', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-root-p1', componentSourceId: 'SYN-PEH-F2', parentSourceId: null },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-p1-c1', componentSourceId: 'SYN-PEH-F1', parentSourceId: 'SYN-PEH-F2' },
+    ])
+    const seen = await getPilot(foreignShape, WORKBENCH_ADMIN)
+    assert.equal(seen.statusCode, 200, JSON.stringify(seen.body))
+    assert.deepEqual(seen.body.data.readiness.failing, ['single_project_on_sheet'], 'the foreign shape is not attributed to this project')
+    const refused = await enablePilot(foreignShape, WORKBENCH_ADMIN)
+    assert.equal(refused.statusCode, 409, JSON.stringify(refused.body))
+    assert.deepEqual(details(refused).failing, ['single_project_on_sheet'])
+    assert.ok(!JSON.stringify(refused.body).includes('SYN-PEH') && !JSON.stringify(refused.body).includes(OTHER_PROJECT), 'values-free: no component id, no foreign project number')
+    assert.equal(foreignShape.provisioning.gridExportClosureCalls.length, 0)
+    assert.deepEqual(foreignShape.auditAppends, [])
+  } finally { foreignShape.restore() }
+  const ownShape = mountReady()
+  try {
+    await seedSheetRows(ownShape, [
+      { idempotencyKey: 'syn-k-root-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-root-p1', componentSourceId: 'SYN-PEH-P1', parentSourceId: null },
+      { idempotencyKey: 'syn-k-p1-c1', componentSourceId: 'SYN-PEH-C1', parentSourceId: 'SYN-PEH-P1' },
+      { projectNo: OTHER_PROJECT, idempotencyKey: 'syn-k-f-clean', componentSourceId: 'SYN-PEH-F9', parentSourceId: null },
+    ])
+    const seen = await getPilot(ownShape, WORKBENCH_ADMIN)
+    assert.deepEqual(seen.body.data.readiness.failing, ['single_project_on_sheet', 'no_two_copy_component'])
+  } finally { ownShape.restore() }
+})
+
 test('P-16 (F-5 / O-8) pack_columns_installed: an action declaring an ext_ column enables only once that column is listed live by the pack ledger AND present on the project sheet; no declaration at all refuses', async () => {
   const EXT = 'ext_synPehPack'
   const h = mountReady({
@@ -793,6 +1118,58 @@ test('P-16 (F-5 / O-8) pack_columns_installed: an action declaring an ext_ colum
   try {
     assert.deepEqual((await getPilot(undeclared, WORKBENCH_ADMIN)).body.data.readiness.failing, ['pack_columns_installed'])
   } finally { undeclared.restore() }
+})
+
+// Pre-pilot fix batch 8(g) / F-12 (R-91; the BI checks of R-65 included): THE READINESS SCAN COST, pinned as IO COUNTS
+// (deterministic) with the harness wall time printed (measured on the in-memory harness, NOT on a real database). The
+// job-store scan lists EVERY plugin storage key and reads every checkpoint-apply value IN FULL, whatever its sheet or
+// status (terminal jobs are never deleted): once per GET, twice per POST (readiness + the in-lease rescan). The six
+// pull-batch checks share ONE ledger read per evaluation (memoized), so they add one read per GET, one per POST.
+test('P-17 (F-12) the readiness scan cost: GET pilot lists the storage keys once and reads each checkpoint-apply value once (POST: twice, readiness + the in-lease rescan); other keys are listed, never read; the six pull-batch checks cost one ledger read per evaluation — harness timings printed, not asserted', async () => {
+  const measured = []
+  for (const jobs of [0, 200, 2000]) {
+    const h = mountReady()
+    try {
+      // Terminal jobs of ANOTHER sheet (never deleted in production) plus unrelated plugin keys.
+      for (let index = 0; index < jobs; index += 1) {
+        await h.context.storage.set(checkpointKey(`job-peh-cost-${index}`), { jobId: `job-peh-cost-${index}`, ...JOB_SCOPE, status: 'succeeded', target: { sheetId: 'sheet_peh_other', objectId: 'obj_peh_other', fieldIdMap: {} }, chunks: Array.from({ length: 8 }, (_, chunk) => ({ index: chunk, status: 'succeeded' })) })
+        await h.context.storage.set(`syn-unrelated-key-${index}`, { n: index })
+      }
+      const storage = h.context.storage
+      const counts = { list: 0, checkpointGets: 0, otherGets: 0, ledgerReads: 0 }
+      const listOriginal = storage.list.bind(storage)
+      const getOriginal = storage.get.bind(storage)
+      storage.list = async () => { counts.list += 1; return listOriginal() }
+      storage.get = (key) => {
+        if (typeof key === 'string' && key.startsWith(largeBomJobs.__internals.LARGE_BOM_CHECKPOINT_APPLY_KEY_PREFIX)) counts.checkpointGets += 1
+        else counts.otherGets += 1
+        return getOriginal(key)
+      }
+      const ledger = h.services.stockPreparationPullBatchStore
+      const readSheetStateOriginal = ledger.readSheetState.bind(ledger)
+      ledger.readSheetState = async (input) => { counts.ledgerReads += 1; return readSheetStateOriginal(input) }
+      const snapshot = () => ({ ...counts })
+      const t0 = process.hrtime.bigint()
+      const seen = await getPilot(h, WORKBENCH_ADMIN)
+      const getMs = Number(process.hrtime.bigint() - t0) / 1e6
+      assert.equal(seen.statusCode, 200, JSON.stringify(seen.body))
+      assert.deepEqual(seen.body.data.readiness.failing, [], `${jobs}: calibration — ready`)
+      const afterGet = snapshot()
+      const t1 = process.hrtime.bigint()
+      const enabled = await enablePilot(h, WORKBENCH_ADMIN)
+      const postMs = Number(process.hrtime.bigint() - t1) / 1e6
+      assert.equal(enabled.statusCode, 200, JSON.stringify(enabled.body))
+      const afterPost = snapshot()
+      assert.equal(afterGet.list, 1, `${jobs}: GET lists the keys once`)
+      assert.equal(afterGet.checkpointGets, jobs, `${jobs}: GET reads every checkpoint-apply value once, whatever its sheet or status`)
+      assert.equal(afterGet.ledgerReads, 1, `${jobs}: the six pull-batch checks share one ledger read`)
+      assert.equal(afterPost.list - afterGet.list, 2, `${jobs}: POST lists twice (readiness + the in-lease rescan)`)
+      assert.equal(afterPost.checkpointGets - afterGet.checkpointGets, 2 * jobs, `${jobs}: POST reads every value twice`)
+      assert.equal(afterPost.ledgerReads - afterGet.ledgerReads, 1, `${jobs}: POST evaluates readiness once`)
+      measured.push({ checkpointJobs: jobs, unrelatedKeys: jobs, getMs: Math.round(getMs), postMs: Math.round(postMs), getIo: afterGet, postIo: { list: afterPost.list - afterGet.list, checkpointGets: afterPost.checkpointGets - afterGet.checkpointGets, ledgerReads: afterPost.ledgerReads - afterGet.ledgerReads } })
+    } finally { h.restore() }
+  }
+  console.log(`[P-17 F-12 harness] ${JSON.stringify(measured)}`)
 })
 
 // ── the lane refusals ───────────────────────────────────────────────────────────────────────────────
@@ -998,8 +1375,8 @@ test('L-05 source order: the gate follows the staleness check and precedes every
   const ROUTES = {
     tableActionLargeBomExpansionJobStart: { lane: 'large_expansion_start', after: ['assertResolvedProjectTargetTenancy('], before: ['createLargeBomBackgroundExpansionJob(', 'observeGeneration('] },
     tableActionLargeBomExpansionJobRun: { lane: 'large_expansion_run', after: ['assertLargeBomJobActor('], before: ['assertB2aReadAuthorization(', 'loadTableActionSourceAdapter(', 'runLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'planLargeBomBackgroundExpansionJob('] },
-    tableActionLargeBomApplyJobStart: { lane: 'large_approve', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration('] },
+    tableActionLargeBomExpansionJobPlan: { lane: 'large_plan', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'readExistingStockPreparationRows(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'planLargeBomBackgroundExpansionJob(', 'prepareLargePlanPullBatch('] },
+    tableActionLargeBomApplyJobStart: { lane: 'large_approve', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'createLargeBomCheckpointApplyJob(', 'bumpGeneration(', 'assertLargeApprovePullBatch('] },
     tableActionLargeBomApplyJobRun: { lane: 'large_apply_chunk', after: ['assertLargeBomJobTargetMatchesProjectTarget('], before: ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'assertStockPrepApplyAllowed(', 'withProjectWriteLease(', 'runLargeBomCheckpointApplyJobChunk('] },
   }
   for (const [handler, spec] of Object.entries(ROUTES)) {
@@ -1021,7 +1398,8 @@ test('L-05 source order: the gate follows the staleness check and precedes every
   const chunk = body('tableActionLargeBomApplyJobRun')
   assert.match(chunk, /largeLanePilotCheck: \(\{ target \}\) => assertLargeLaneAllowedForPilot\(/, 'the chunk hands the lib the in-lease check')
   assert.ok(chunk.indexOf('largeLanePilotCheck:') < chunk.indexOf('projectWriteGuard,'), 'listed with the guard it runs under')
-  const dry = body('tableActionDryRun')
+  // R-69 1b-i: the dry run's lib call moved into the governed entry the handler delegates to.
+  const dry = body('tableActionDryRun') + governedEntrySourceFor(HTTP_ROUTES_SOURCE, 'tableActionDryRun')
   assert.match(dry, /pilotLaneGuard: \(\) => stockPreparationPilotGate\.assertSmallLaneCapNotExceededForPilot\(/, 'the dry run hands the lib the over-cap guard')
   // The lib seams exist and sit where the design puts them.
   const libSource = fs.readFileSync(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'), 'utf8')

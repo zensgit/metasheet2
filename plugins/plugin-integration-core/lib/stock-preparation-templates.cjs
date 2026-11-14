@@ -143,6 +143,28 @@ const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'actualArrivalDate',
 ])
 
+// MACHINE WRITE-BACK COLUMNS (R-71 ⑦.4 PR-4, plan D4). A column listed here is plm_system-owned -- so the
+// project sheet's human write lock covers it automatically (stock-preparation-project-targets.cjs derives
+// the lock set from ownership) and a person can never edit it -- but it is written by ONE machine path
+// that is NOT the PLM refresh: today 发料确认日期 (`issueConfirmDate`), which the separate YiDa issue-confirm
+// write-back (PR-5, not in this module) fills once a form is acknowledged.
+//
+// Every PLM refresh therefore treats these ids as OUTSIDE its writable band:
+//   * the conflict planner drops them from the plm_system refresh band (beside RUN_FIELD_IDS) and THROWS
+//     if one ever appears in an add record / update patch / change-plan patch / inactive patch;
+//   * the apply writer refuses them on the same four payloads, and because its PR-8 one-re-read band is
+//     derived from the planner's writable band, a write-back landing between plan and apply is "a column
+//     the plugin does not write moved" (send the patch once more), never `machine_columns_moved`.
+//
+// It is NOT the human whitelist: growing HUMAN_PRESERVED_FIELD_IDS is an independent design gate and would
+// make the column human-editable, which is the opposite of what a machine-recorded date means. It is not a
+// third ownership either (that would move the ownership enum, the repair ownership check and pack
+// classification). Frozen; every id is asserted below to be a non-key, non-required plm_system column of
+// the frozen main template.
+const MACHINE_WRITEBACK_FIELD_IDS = Object.freeze([
+  'issueConfirmDate',
+])
+
 const FEASIBILITY_FORBIDDEN_MECHANISMS = Object.freeze([
   'raw_sql',
   'recursive_cte',
@@ -843,8 +865,50 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // 实际到货日期 -- what actually arrived and when, deliberately NOT a second
     // demand date. `demandDate` (需求日期) stays production-owned above.
     field('actualArrivalDate', 'Actual Arrival Date', 'date', 'human_preserved', { labelZh: '实际到货日期' }),
+
+    // ------------------------------------------------------------------
+    // R-71 ⑦.4 PR-4 -- two columns, appended in ONE template change so an existing project sheet needs
+    // exactly one repair (PR-3: the project-sheet repair route adds missing template columns and locks
+    // them). Until that repair has run on a sheet, its pull stops with a recoverable 422
+    // TARGET_SCHEMA_INCOMPLETE; nothing is written and running the repair clears it.
+    //
+    // 发料确认日期. plm_system so a person can never edit it (the lock set is derived from ownership), and
+    // listed in MACHINE_WRITEBACK_FIELD_IDS above so a PLM refresh never writes it either: its only writer
+    // is the YiDa issue-confirm write-back (PR-5). The id is not `materialCode` or anything else a pack
+    // `ext_` column already ends with (stock-preparation-extension-namespace.cjs refuses such a pair).
+    field('issueConfirmDate', 'Issue Confirm Date', 'date', 'plm_system', { labelZh: '发料确认日期' }),
+    // 项目规格型号. An EMPTY column for now: which PLM attribute it denormalizes is field question F1, still
+    // open, so nothing in the read plan or the planner produces a `projectSpecModel` key -- the column
+    // stays empty (a pull never invents a source column). Filling it is a later slice (PR-6).
+    field('projectSpecModel', 'Project Spec Model', 'string', 'plm_system', { labelZh: '项目规格型号' }),
   ],
 }))
+
+// MACHINE_WRITEBACK_FIELD_IDS checked against the frozen template at load, not trusted: each id must be a
+// plm_system column (so the human lock covers it), never the key or a REQUIRED_SYSTEM_FIELDS member (a
+// refresh must be able to build a whole row without it), and never on the human whitelist.
+function assertMachineWritebackContract({
+  template = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  machineWritebackFieldIds = MACHINE_WRITEBACK_FIELD_IDS,
+} = {}) {
+  const byId = new Map((template.fields || []).map((entry) => [entry.id, entry]))
+  for (const fieldId of machineWritebackFieldIds) {
+    const entry = byId.get(fieldId)
+    if (!entry) {
+      throw new StockPreparationTemplateError(`machine write-back field is not a template column: ${fieldId}`)
+    }
+    if (entry.ownership !== 'plm_system') {
+      throw new StockPreparationTemplateError(`machine write-back field must be plm_system: ${fieldId}`)
+    }
+    if (entry.key === true || (template.keyFields || []).includes(fieldId) || entry.required === true
+      || REQUIRED_SYSTEM_FIELDS.includes(fieldId) || HUMAN_PRESERVED_FIELD_IDS.includes(fieldId)) {
+      throw new StockPreparationTemplateError(`machine write-back field must be an optional non-key column: ${fieldId}`)
+    }
+  }
+  return true
+}
+
+assertMachineWritebackContract()
 
 // ---------------------------------------------------------------------------
 // 备料填写视图 — THE FILL VIEW's CONTRACT (ids only, never values).
@@ -961,6 +1025,109 @@ function assertFillViewContract({
 }
 
 assertFillViewContract()
+
+// ---------------------------------------------------------------------------
+// 批次标识 — THE PULL-BATCH BAND (batch-identifier design §4.1-§4.3, register R-65; owner decisions 2026-10-27 and
+// 2026-11-07). Two MACHINE-written string columns: 首次批次 (`firstPullBatch`, the first batch in which this material
+// appeared in the project) and 本次拉取 (`pullBatch`, the batch of the pull that CREATED the row). Written only by the
+// apply writer's create leg and the owner-gated install (later PRs); never by a person. Nothing reads these exports
+// yet (BI-1b / BI-2 wire them).
+//
+// DELIBERATELY OUTSIDE STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields (owner 2026-11-07: keep it outside). Every
+// completeness gate reads the template (`assertTargetFieldMapCompleteness`, `assertTargetFieldsExist` — a new
+// template column would make EVERY existing sheet answer 422 TARGET_SCHEMA_INCOMPLETE on its next pull —, the target
+// inspect / ensure replay, the readiness `target_fields_present`), and so does every band the refresh compares,
+// triggers on or digests (the pack-aware plm band, the step-4 trigger list and settlement digest, PR-8's written band,
+// the template evidence goldens). Kept out, each of them stays byte-identical by construction. Mutant M-BI-1 ("add the
+// band to the template") must turn the completeness and golden suites red.
+//
+// THE PROPERTY. Created with `humanWriteLock: 'plm_system'` (read-only to every person, admins included, from the very
+// call that creates the column) and the `stockPreparationPullBatch` marker — the CONTRACT by which a host-side stamper
+// (the manual-row band stamp) finds the two columns without knowing their ids, and which carries the 人工补充 literal
+// in the sheet's own locale (the host cannot import the plugin's vocabulary; the sheet's locale lives in the ledger).
+//
+// ORDER is chosen when the band is created (design §10.3; the page setting `placement`): `left` = −2 / −1
+// (meta_fields."order" is a plain integer with no CHECK), `right` = after the last existing column. Not in the constant.
+const {
+  PULL_BATCH_BAND_FIELD_IDS,
+  PULL_BATCH_CONFIG_VALUES: PULL_BATCH_SETTINGS_VOCABULARY,
+  PULL_BATCH_MANUAL_LABELS,
+} = require('./stock-preparation-pull-batch.cjs')
+
+const STOCK_PREPARATION_PULL_BATCH_FIELDS = Object.freeze([
+  Object.freeze({ id: PULL_BATCH_BAND_FIELD_IDS.firstPullBatch, label: 'First Pull Batch', labelZh: '首次批次', type: 'string' }),
+  Object.freeze({ id: PULL_BATCH_BAND_FIELD_IDS.pullBatch, label: 'Pull Batch', labelZh: '本次拉取', type: 'string' }),
+])
+const STOCK_PREPARATION_PULL_BATCH_FIELD_IDS = Object.freeze(STOCK_PREPARATION_PULL_BATCH_FIELDS.map((entry) => entry.id))
+const STOCK_PREPARATION_PULL_BATCH_BAND_MARKER = 'v1'
+// The page setting's own vocabulary (the pure module's), so the placement the settings accept and the placement the
+// band can be created at are one list.
+const STOCK_PREPARATION_PULL_BATCH_PLACEMENTS = PULL_BATCH_SETTINGS_VOCABULARY.placement
+
+function pullBatchBandProperty(locale) {
+  const lang = normalizeTemplateLabelLocale(locale)
+  return Object.freeze({
+    humanWriteLock: 'plm_system',
+    stockPreparationPullBatch: Object.freeze({ band: STOCK_PREPARATION_PULL_BATCH_BAND_MARKER, manualLabel: PULL_BATCH_MANUAL_LABELS[lang] }),
+  })
+}
+
+/** True for a field property this band created (the marker and the PLM lock, never the field id). */
+function isPullBatchBandProperty(property) {
+  return isPlainObject(property)
+    && property.humanWriteLock === 'plm_system'
+    && isPlainObject(property.stockPreparationPullBatch)
+    && property.stockPreparationPullBatch.band === STOCK_PREPARATION_PULL_BATCH_BAND_MARKER
+}
+
+/**
+ * The two descriptors `ensureMissingObjectFields` creates the band from, in the sheet's label locale, with the
+ * placement's order and the lock property. `maxExistingOrder` (a safe integer) is required for `right`.
+ */
+function pullBatchBandFieldDescriptors({ locale, placement, maxExistingOrder } = {}) {
+  if (!STOCK_PREPARATION_PULL_BATCH_PLACEMENTS.includes(placement)) {
+    throw new StockPreparationTemplateError('unknown pull-batch band placement', { field: 'placement' })
+  }
+  if (placement === 'right' && !Number.isSafeInteger(maxExistingOrder)) {
+    throw new StockPreparationTemplateError('a right-hand pull-batch band needs the sheet\'s largest field order', { field: 'maxExistingOrder' })
+  }
+  const lang = normalizeTemplateLabelLocale(locale)
+  return Object.freeze(STOCK_PREPARATION_PULL_BATCH_FIELDS.map((entry, index) => Object.freeze({
+    id: entry.id,
+    name: pickTemplateLabel(entry, lang),
+    type: entry.type,
+    order: placement === 'left' ? index - STOCK_PREPARATION_PULL_BATCH_FIELDS.length : maxExistingOrder + index + 1,
+    property: pullBatchBandProperty(lang),
+  })))
+}
+
+// Load-time, like assertFillViewContract: the band ids are disjoint from every frozen template id, from the human
+// whitelist and from the tenant `ext_` namespace, and no fill-view constant (hidden / sort / group / filter) names them
+// — so the fill and to-fill views can never hide them by a later edit (design §10.4).
+function assertPullBatchBandContract({
+  template = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  bandFieldIds = STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
+  hiddenFieldIds = STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  sortFieldIds = STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  groupFieldIds = STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  activeFilterFieldId = STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+} = {}) {
+  const templateIds = new Set((template.fields || []).map((entry) => entry.id))
+  const human = new Set(HUMAN_PRESERVED_FIELD_IDS)
+  const fillIds = new Set([...hiddenFieldIds, ...sortFieldIds, ...groupFieldIds, activeFilterFieldId])
+  if (bandFieldIds.length !== 2 || new Set(bandFieldIds).size !== bandFieldIds.length) {
+    throw new StockPreparationTemplateError('the pull-batch band is exactly two distinct ids')
+  }
+  for (const id of bandFieldIds) {
+    if (templateIds.has(id)) throw new StockPreparationTemplateError(`the pull-batch band must stay outside the main template: ${id}`)
+    if (human.has(id)) throw new StockPreparationTemplateError(`the pull-batch band is machine-written, never human: ${id}`)
+    if (id.startsWith('ext_')) throw new StockPreparationTemplateError(`the pull-batch band is not a tenant extension: ${id}`)
+    if (fillIds.has(id)) throw new StockPreparationTemplateError(`the fill view must never hide, sort, group or filter by the pull-batch band: ${id}`)
+  }
+  return true
+}
+
+assertPullBatchBandContract()
 
 // The fill view's own name, in the same language the sheet and its columns were created in —
 // through the one locale reader every other label goes through, never a second one.
@@ -1367,6 +1534,8 @@ module.exports = {
   STOCK_PREPARATION_FIELD_OWNERSHIPS,
   REQUIRED_SYSTEM_FIELDS,
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
+  assertMachineWritebackContract,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
   TEMPLATE_LABEL_LOCALE_ENV,
   TEMPLATE_LABEL_LOCALES,
@@ -1387,6 +1556,15 @@ module.exports = {
   STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
   assertFillViewContract,
   pickFillViewName,
+  // 批次标识 (BI-1a, R-65): the band outside the template, its property and descriptors (no caller yet).
+  STOCK_PREPARATION_PULL_BATCH_FIELDS,
+  STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
+  STOCK_PREPARATION_PULL_BATCH_BAND_MARKER,
+  STOCK_PREPARATION_PULL_BATCH_PLACEMENTS,
+  pullBatchBandProperty,
+  pullBatchBandFieldDescriptors,
+  isPullBatchBandProperty,
+  assertPullBatchBandContract,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   // S3 (R-37): the project overview template and its two views.

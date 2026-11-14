@@ -129,7 +129,7 @@
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
-            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
+            @input="onNumberInput(field.id, $event)"
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
             <input type="checkbox" :disabled="isFieldReadOnly(field.id)" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
@@ -267,7 +267,7 @@
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :value="formData[field.id] ?? ''"
-            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
+            @input="onNumberInput(field.id, $event)"
           />
           <div v-else-if="field.type === 'rating'" class="meta-form-view__rating">
             <button
@@ -575,6 +575,16 @@ function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
 }
 
+/** A number box (number, currency, percent) holding a draft it cannot read ("-", "1e": `validity.badInput`, whose
+ *  value then reads "") leaves the form's value as it is: the stored number, or the last number the box could
+ *  read. Held as empty, it would clear the stored number on Save, also from a page of the form no longer shown.
+ *  An empty box still clears. The same rule as the drawer's number box (MetaRecordFieldsPanel.vue). */
+function onNumberInput(fieldId: string, event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.validity.badInput) return
+  formData[fieldId] = input.value === '' ? null : Number(input.value)
+}
+
 function multiSelectValue(fieldId: string): string[] {
   const value = formData[fieldId]
   return Array.isArray(value) ? value.map(String) : []
@@ -862,6 +872,10 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     input.value = ''
     return
   }
+  // The form can move to another record while the upload runs (its draft discarded): every file goes to the
+  // record it started on, and the result lands in the form only while that record is still the form's.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
@@ -869,35 +883,41 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
-      rememberLocalAttachment(fieldId, attachment)
+      if (same()) rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
+    if (same()) formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
   } catch (error: any) {
-    setAttachmentOperationError(fieldId, error?.message ?? lc('cell.uploadFailed'))
+    if (same()) setAttachmentOperationError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
-    setAttachmentActivity(fieldId)
+    if (same()) setAttachmentActivity(fieldId)
     input.value = ''
   }
 }
 
 async function onRemoveAttachment(fieldId: string, attachmentId: string) {
   clearAttachmentOperationError(fieldId)
+  // As for an upload: the delete is the record's it started on, and its result the form's only while it is.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'removing')
     try {
       await props.deleteAttachmentFn(attachmentId, {
-        recordId: props.record?.id,
+        recordId,
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.removeFailed'))
-      setAttachmentActivity(fieldId)
+      if (same()) {
+        setAttachmentOperationError(fieldId, error?.message ?? lc('cell.removeFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
+    if (!same()) return
     setAttachmentActivity(fieldId)
   }
   formData[fieldId] = attachmentList(fieldId).filter((id) => id !== attachmentId)
@@ -908,21 +928,27 @@ async function onClearAttachments(fieldId: string) {
   const existingIds = attachmentList(fieldId)
   if (!existingIds.length) return
   clearAttachmentOperationError(fieldId)
+  // As for an upload: the deletes are the record's it started on, and the result the form's only while it is.
+  const recordId = props.record?.id
+  const same = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'clearing')
     try {
       for (const attachmentId of existingIds) {
         await props.deleteAttachmentFn(attachmentId, {
-          recordId: props.record?.id,
+          recordId,
           fieldId,
         })
-        forgetLocalAttachment(fieldId, attachmentId)
+        if (same()) forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
-      setAttachmentActivity(fieldId)
+      if (same()) {
+        setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
+        setAttachmentActivity(fieldId)
+      }
       return
     }
+    if (!same()) return
     setAttachmentActivity(fieldId)
   }
   formData[fieldId] = []
