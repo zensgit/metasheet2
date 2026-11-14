@@ -1,0 +1,284 @@
+{
+  "state": "local-gates-passed-current-head-CI-pending",
+  "generated_at": "2026-10-25T17:00:30.193353+00:00",
+  "runtime_base": "8a426818804897a20f7674c39c56b3a445909c3a",
+  "publication_base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "source_applicability": {
+    "incoming_main_commits": 1,
+    "incoming_main_paths": 12,
+    "changed_candidate_runtime_bytes": 0,
+    "web_OpenAPI_attendancePlugin_scripts_package_lock_objects_equal": true,
+    "four_candidate_runtime_test_files": {
+      "apps/web/src/views/AttendanceView.vue": "a19ebca5ec7b64794b00352b9dba02bb8328f34b19e4efa90243712c609db3a3",
+      "apps/web/src/views/attendance/attendanceGroupEffectivePolicyLabels.ts": "9b7d0c3f49af5389ee49243fdfe00a464d9b0bee1b17772b9b5cce419b14abc0",
+      "apps/web/tests/attendance-admin-regressions.spec.ts": "5b5747902c691ca6b00fdb3681e021fb696d5bae5a3ca174028fdcb09b5cddca",
+      "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "913dd1e4d30390d07d6f1073b162ae1e985994284496779d17855e1abd23e54d"
+    }
+  },
+  "focused_actual": {
+    "original": {
+      "actual_assertions": {
+        "skipped": 252,
+        "failed": 24,
+        "passed": 9
+      },
+      "json_sha256": "dd237272a7414f8d1b15fae1f7c8b2a1a653b1c04e4b1b263ead4ecfd2dfb156",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 252,
+          "failed": 24,
+          "passed": 9
+        },
+        "failure_case_count": 24,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "6b87ece74fb3babdbd7ebaae7b5d8d732f6646b32574bfd94026fb7904499fcd"
+      }
+    },
+    "candidate33": {
+      "actual_assertions": {
+        "skipped": 252,
+        "passed": 33
+      },
+      "json_sha256": "ec24a5268df5a829a55cb721df6926d7530688677c135f711fa283af702842cf",
+      "exit_receipt": {
+        "exit": 0,
+        "actual": {
+          "skipped": 252,
+          "passed": 33
+        },
+        "failure_case_count": 0,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "2328841e64c0b2ff488ec4f7182d9cfdbe9544f6bb4fb473a685e509c2f30b26"
+      }
+    },
+    "final_selfservice22": {
+      "actual_assertions": {
+        "skipped": 106,
+        "passed": 22
+      },
+      "json_sha256": "917f3c3255839a99a650de6bad7223b94666834785aa2fc587d9c569b8341a91",
+      "exit_receipt": {
+        "exit": 0,
+        "actual": {
+          "skipped": 106,
+          "passed": 22
+        },
+        "failure_case_count": 0,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "92a194ef4f7ea907d3f1c22242f4934b8ee27368126d9e252bf2031eb1e83f67"
+      }
+    }
+  },
+  "candidate_phase_note": "candidate33 precedes a test-only literal props alias; finalselfservice22 repeated, admin11 carried unchanged; filtered cases never counted as passed",
+  "existing_neighbors": {
+    "actual_passed": 4,
+    "filtered_excluded": 281
+  },
+  "matching_mutations": {
+    "table-assignment": {
+      "actual_assertions": {
+        "skipped": 275,
+        "failed": 8,
+        "passed": 2
+      },
+      "json_sha256": "63fb60d0202c861f9a0e775c5520fde6ac967caf4d5c03d72377db21fff4729c",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 275,
+          "failed": 8,
+          "passed": 2
+        },
+        "failure_case_count": 8,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "364f9bb8955f804125188ad4819bf23e139ad6d8735107e6c08dc7b97ea9ebc4"
+      }
+    },
+    "table-rotation-assignment": {
+      "actual_assertions": {
+        "skipped": 275,
+        "failed": 8,
+        "passed": 2
+      },
+      "json_sha256": "e6b850eb093136704977ab8509be61a9aefeaa96650521db987e710e022507cb",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 275,
+          "failed": 8,
+          "passed": 2
+        },
+        "failure_case_count": 8,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "800063d8af9adcc81ef2a7ae23ab6738971ba6abf829b59a0d95e7d2ebf1db1d"
+      }
+    },
+    "option-raw-fallback": {
+      "actual_assertions": {
+        "skipped": 252,
+        "failed": 24,
+        "passed": 9
+      },
+      "json_sha256": "8ecc342e4d61c8f1ede7859522a26a10482afbdcae5cc666dcc41bb66649340e",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 252,
+          "failed": 24,
+          "passed": 9
+        },
+        "failure_case_count": 24,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "26d09ebaa3a47a1790557e5c5c4103da823342ec68b4497a565eb1631c9a1d71"
+      }
+    },
+    "option-technical-id-removed": {
+      "actual_assertions": {
+        "skipped": 252,
+        "failed": 27,
+        "passed": 6
+      },
+      "json_sha256": "3cb06d2eb27e52edb6d77913d624d39c654fa5ea3be9772643644b6ef991d435",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 252,
+          "failed": 27,
+          "passed": 6
+        },
+        "failure_case_count": 27,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "4ed516645d656a6b583268d5039367a39ab82aee5b771d2c907891f8c8354a51"
+      }
+    },
+    "dedicated-option-target": {
+      "actual_assertions": {
+        "skipped": 283,
+        "passed": 1,
+        "failed": 1
+      },
+      "json_sha256": "3ac76822e7e92f81b815efacaa79314c54bff947238db257c9af83e2d3fb5634",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 283,
+          "passed": 1,
+          "failed": 1
+        },
+        "failure_case_count": 1,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "7f0abf78f6aa41ce94d7f8decbbc9121814636a8b44b77f9924041e7edf4bb00"
+      }
+    },
+    "temporary-option-target": {
+      "actual_assertions": {
+        "skipped": 282,
+        "failed": 1,
+        "passed": 2
+      },
+      "json_sha256": "005a8eab8587c29a943344edba957ea5203ef73a1a51561c39e62d19e66b305b",
+      "exit_receipt": {
+        "exit": 1,
+        "actual": {
+          "skipped": 282,
+          "failed": 1,
+          "passed": 2
+        },
+        "failure_case_count": 1,
+        "only_matching_assertion_failures": true,
+        "receipt_sha256": "ff3e3d1f915473a99049cab6ab4e95d3e1458a447117c5fc0e8ee5f86b753d4c"
+      }
+    }
+  },
+  "all_product_mutations_exact_restored": true,
+  "source_review": {
+    "changed_existing_functions": [
+      "formatTemporaryReplacementAssignmentOption",
+      "formatShiftSwapAssignmentOption"
+    ],
+    "added_functions": [
+      "attendanceAssignmentUserDisplayLabel",
+      "attendanceAssignmentUserOptionLabel"
+    ],
+    "unchanged_existing_functions": 766,
+    "styles_byte_identical": true,
+    "helper_runtime_AST_identical": true,
+    "resolver_scope_cache_eligibility_writer_bindings_unchanged": true,
+    "independent_review": "Sol/high source-only; no confirmed introducedP1/P2"
+  },
+  "quality": {
+    "runtime_base_validateall_exit": 0,
+    "runtime_base_production_build_exit": 0,
+    "publication_base_validateall_exit": 0,
+    "introduced_lint_diagnostics": 0,
+    "inherited_AV_diagnostics": 17,
+    "inherited_selfservice_diagnostics": 95
+  },
+  "browser": {
+    "fresh_followup_scenarios": [
+      "admin1366zh",
+      "admin768en",
+      "overview768en",
+      "overview390zh"
+    ],
+    "fresh_followup_passed": 4,
+    "carried_mobile_admin": "390 original gate blocked, not editor proof",
+    "carried_shared": "768en/390zh actual native options/secondselection from initial phase before dedicated failure; initial whole run remains failed",
+    "source_inputs_before_after_stable": 912,
+    "all_source_checks_match": true,
+    "current_pageerrors": 0,
+    "current_write_attempts": 0,
+    "current_forwarded_externals": 0,
+    "console": "one refused-bootstrap405 per fresh scenario, no zero-console claim",
+    "own_server_stopped_and_port_closed": true,
+    "screenshots": [
+      {
+        "path": "artifacts/attendance-assignment-neutral-labels/screenshots/2026-10-25T16-50-47-244Z-81267-admin1366zh-assignment-table.png",
+        "sha256": "8c892f3b0befc9e2ce3079f5415075ab1c014da69fdb1508041c9a4c7c90aeb2",
+        "scenario": "admin1366zh",
+        "phase": "followup",
+        "label": "assignment-table"
+      },
+      {
+        "path": "artifacts/attendance-assignment-neutral-labels/screenshots/2026-10-25T16-50-47-244Z-81267-admin768en-rotation-assignment-table.png",
+        "sha256": "b89a93c8f91c13989462b8cefbe19780b5c1601133561e6214f929aec4caa576",
+        "scenario": "admin768en",
+        "phase": "followup",
+        "label": "rotation-assignment-table"
+      },
+      {
+        "path": "artifacts/attendance-assignment-neutral-labels/screenshots/2026-10-25T04-05-52-221Z-49165-overview768en-shared-second-coworker.png",
+        "sha256": "41aee57efecdd33032a6de39949e75a50767900f24522f96d753af8af774cdee",
+        "scenario": "overview768en",
+        "phase": "initial-carried",
+        "label": "shared-second-coworker"
+      },
+      {
+        "path": "artifacts/attendance-assignment-neutral-labels/screenshots/2026-10-25T16-50-47-244Z-81267-overview390zh-dedicated-second-coworker.png",
+        "sha256": "d8c08ddab02c53300177a02b65796db49b6ab1017a4b0a9cc9740393ad70100f",
+        "scenario": "overview390zh",
+        "phase": "followup",
+        "label": "dedicated-second-coworker"
+      },
+      {
+        "path": "artifacts/attendance-assignment-neutral-labels/screenshots/2026-10-25T04-05-52-221Z-49165-admin390en-original-mobile-admin-gate.png",
+        "sha256": "51b7d749f0854afad652c02e75e8a60b05e1e2316d4c405144e42a4589ea9998",
+        "scenario": "admin390en",
+        "phase": "initial-carried",
+        "label": "original-mobile-admin-gate"
+      }
+    ],
+    "native_popup_full_UAT_proven": false
+  },
+  "boundaries": {
+    "all_PRs_Draft_HOLD": true,
+    "Stream": "OFF",
+    "lifecycle": "OFF",
+    "real_UAT": "excluded",
+    "business_50004": "excluded",
+    "merge_deploy_R71_tag_release_config_changes": false,
+    "global_FE06_W8_parent_viewport_complete": false
+  },
+  "required_CI": "PENDING new publication head"
+}
