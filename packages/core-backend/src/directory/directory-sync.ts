@@ -27,6 +27,12 @@ import {
 import { resolveDirectoryAdapter } from './directory-adapter-registry'
 import './adapters'
 import {
+  PullSourceGateRowMovedError,
+  runGatedPullSourceWrite,
+  type PullSourceGateClient,
+  type PullSourceWriteContext,
+} from './pull-source-write-gate'
+import {
   capturePriorDeptManagers,
   mergeDeptManagerIntoRaw,
   resolveManagerListForDept,
@@ -2541,13 +2547,85 @@ export async function listDirectoryIntegrations(orgId = DEFAULT_ORG_ID): Promise
   return result.rows.map(summarizeIntegration)
 }
 
-export async function createDirectoryIntegration(input: DirectoryIntegrationInput): Promise<DirectoryIntegrationSummary> {
+/** Who asked for a write to an integration row. Read only for the audit row of a gated source addition. */
+export interface DirectoryIntegrationWriteOptions {
+  actorId?: string
+}
+
+/** The context of a write to an integration row that does not go through the pull-source gate. */
+const UNGATED_INTEGRATION_WRITE: PullSourceWriteContext = { gated: false, lockedStatus: null, joined: false }
+
+/**
+ * Audit row for a pull source that joined an organisation through the gate (a created active row, or a
+ * row set active). Written after the gate transaction has committed, so a refused or rolled-back write
+ * leaves none. Values-free: the integration id, organisation, provider and operator only.
+ */
+async function emitPullSourceJoinAudit(
+  event: 'create' | 'activate',
+  integration: DirectoryIntegrationSummary,
+  actorId: string | undefined,
+): Promise<void> {
+  try {
+    const { auditLog } = await import('../audit/audit')
+    await auditLog({
+      actorId,
+      actorType: actorId ? 'user' : 'system',
+      action: event === 'create' ? 'directory.integration.pull_source_create' : 'directory.integration.pull_source_activate',
+      resourceType: 'directory-integration',
+      resourceId: integration.id,
+      // The audit writer keeps only a numeric operator id in its own column; `meta.actorId` carries any id.
+      meta: { orgId: integration.orgId, provider: integration.provider, actorId: actorId ?? null },
+    })
+  } catch (error) {
+    // The write is already committed; a failure to load the audit module must not fail the caller.
+    logger.warn(`Failed to write the pull source audit row: ${readErrorMessage(error, 'unknown error')}`, {
+      integrationId: integration.id,
+    })
+  }
+}
+
+export async function createDirectoryIntegration(
+  input: DirectoryIntegrationInput,
+  options: DirectoryIntegrationWriteOptions = {},
+): Promise<DirectoryIntegrationSummary> {
   const normalized = normalizeIntegrationInput(input)
   await assertDirectoryProjectedGovernanceConfigValid({
     memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
     memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
   })
-  const result = await query<DirectoryIntegrationRow>(
+  // The parameters are computed here, before the statement is handed to the gate: the function the
+  // gate runs is the one statement and nothing else.
+  const insertParams: unknown[] = [
+    DEFAULT_ORG_ID,
+    DEFAULT_PROVIDER,
+    normalized.name,
+    normalized.status,
+    normalized.corpId,
+    JSON.stringify({
+      corpName: normalized.corpName,
+      appName: normalized.appName,
+      appKey: normalized.appKey,
+      appSecret: normalizeStoredSecretValue(normalized.appSecret),
+      workNotificationAgentId: normalized.workNotificationAgentId
+        ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+        : null,
+      rootDepartmentId: normalized.rootDepartmentId,
+      baseUrl: normalized.baseUrl ?? null,
+      pageSize: normalized.pageSize,
+      admissionMode: normalized.admissionMode,
+      admissionDepartmentIds: normalized.admissionDepartmentIds,
+      excludeDepartmentIds: normalized.excludeDepartmentIds,
+      memberGroupSyncMode: normalized.memberGroupSyncMode,
+      memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+    }),
+    Boolean(normalized.syncEnabled),
+    normalized.scheduleCron,
+    normalized.scheduleTimezone,
+    normalized.defaultDeprovisionPolicy,
+  ]
+  const insert = (client: PullSourceGateClient) => client.query(
     `INSERT INTO directory_integrations (
        org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
        default_deprovision_policy, created_at, updated_at
@@ -2555,41 +2633,25 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      DEFAULT_ORG_ID,
-      DEFAULT_PROVIDER,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        corpName: normalized.corpName,
-        appName: normalized.appName,
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      normalized.scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-    ],
+    insertParams,
+  )
+  // A row created active adds a pull source: it goes through the gate, which runs the statement on the
+  // pool exactly as before while the switch is off. A row created in any other status adds none and stays
+  // the one statement it was.
+  const outcome = await (
+    normalized.status === 'active'
+      ? runGatedPullSourceWrite(
+        { orgId: DEFAULT_ORG_ID, provider: DEFAULT_PROVIDER, corpId: normalized.corpId, enforce: 'flagged' },
+        insert,
+      )
+      : insert({ query }).then((result) => ({ result, ...UNGATED_INTEGRATION_WRITE }))
   ).catch((error: unknown) => {
     throw uniqueViolationAsConflict(error)
   })
 
-  return summarizeIntegration(result.rows[0])
+  const integration = summarizeIntegration(outcome.result.rows[0] as unknown as DirectoryIntegrationRow)
+  if (outcome.gated && outcome.joined) await emitPullSourceJoinAudit('create', integration, options.actorId)
+  return integration
 }
 
 /**
@@ -2863,6 +2925,7 @@ export class DirectoryConflictError extends Error {
 export async function updateDirectoryIntegration(
   integrationId: string,
   input: DirectoryIntegrationInput,
+  options: DirectoryIntegrationWriteOptions = {},
 ): Promise<DirectoryIntegrationSummary | null> {
   const current = await getIntegrationRow(integrationId)
   if (!current) return null
@@ -2928,8 +2991,60 @@ export async function updateDirectoryIntegration(
   const scheduleTimezone = input.scheduleTimezone !== undefined
     ? normalizeOptionalText(input.scheduleTimezone)
     : current.schedule_timezone
-  const result = await query<DirectoryIntegrationRow>(
-    `UPDATE directory_integrations
+  const updateParams: unknown[] = [
+    integrationId,
+    normalized.name,
+    normalized.status,
+    normalized.corpId,
+    JSON.stringify({
+      corpName: normalized.corpName,
+      appName: normalized.appName,
+      identityVerification,
+      appKey: normalized.appKey,
+      appSecret: normalizeStoredSecretValue(normalized.appSecret),
+      workNotificationAgentId: normalized.workNotificationAgentId
+        ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+        : null,
+      rootDepartmentId: normalized.rootDepartmentId,
+      baseUrl: normalized.baseUrl ?? null,
+      pageSize: normalized.pageSize,
+      admissionMode: normalized.admissionMode,
+      admissionDepartmentIds: normalized.admissionDepartmentIds,
+      excludeDepartmentIds: normalized.excludeDepartmentIds,
+      memberGroupSyncMode: normalized.memberGroupSyncMode,
+      memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+      approvalCardLinkSecret: carriedApprovalCardLinkSecret,
+      approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
+      todoOperatorUnionId: carriedTodoOperatorUnionId,
+    }),
+    Boolean(normalized.syncEnabled),
+    normalized.scheduleCron,
+    scheduleTimezone,
+    normalized.defaultDeprovisionPolicy,
+    current.config === null ? null : JSON.stringify(rawCurrentConfig),
+    current.corp_id,
+  ]
+  // One statement, in two complete texts. Inside a gate transaction it applies only while the row still
+  // carries the status that was read under its lock, the one the gate decided from; that status is the
+  // twelfth parameter. Outside one it is the statement it was.
+  const update = (client: PullSourceGateClient, context: PullSourceWriteContext) => client.query(
+    context.gated
+      ? `UPDATE directory_integrations
+     SET name = $2,
+         status = $3,
+         corp_id = $4,
+         config = $5::jsonb,
+         sync_enabled = $6,
+         schedule_cron = $7,
+         schedule_timezone = $8,
+         default_deprovision_policy = $9,
+         updated_at = NOW()
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11 AND status = $12
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`
+      : `UPDATE directory_integrations
      SET name = $2,
          status = $3,
          corp_id = $4,
@@ -2942,47 +3057,38 @@ export async function updateDirectoryIntegration(
      WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      integrationId,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        corpName: normalized.corpName,
-        appName: normalized.appName,
-        identityVerification,
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-        approvalCardLinkSecret: carriedApprovalCardLinkSecret,
-        approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
-        todoOperatorUnionId: carriedTodoOperatorUnionId,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-      current.config === null ? null : JSON.stringify(rawCurrentConfig),
-      current.corp_id,
-    ],
+    context.gated ? [...updateParams, context.lockedStatus] : updateParams,
+  )
+  // A save whose resulting status is active may add a pull source: it goes through the gate, which runs
+  // the statement on the pool exactly as before while the switch is off. Inside the gate the row is locked
+  // first, and whether the save turns a non-active row active is decided from the status read under that
+  // lock, never from the read at the top of this function. A save to any other status adds no source and
+  // stays the one statement it was.
+  const outcome = await (
+    normalized.status === 'active'
+      ? runGatedPullSourceWrite(
+        { orgId: current.org_id, provider: current.provider, corpId: normalized.corpId, enforce: 'flagged' },
+        update,
+        {
+          lockRowId: integrationId,
+          joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',
+        },
+      )
+      : update({ query }, UNGATED_INTEGRATION_WRITE).then((result) => ({ result, ...UNGATED_INTEGRATION_WRITE }))
   ).catch((error: unknown) => {
+    // The gate read the row, under its lock, in another organisation than the one read above: the
+    // configuration changed under this save, the same conflict as a save that matches no row.
+    if (error instanceof PullSourceGateRowMovedError) {
+      throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+    }
     throw uniqueViolationAsConflict(error)
   })
 
-  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
-  return summarizeIntegration(result.rows[0])
+  const row = outcome.result.rows[0] as unknown as DirectoryIntegrationRow | undefined
+  if (!row) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+  const integration = summarizeIntegration(row)
+  if (outcome.gated && outcome.joined) await emitPullSourceJoinAudit('activate', integration, options.actorId)
+  return integration
 }
 
 /** Metadata-only save: cannot change credentials, schedules, synchronization or access. */

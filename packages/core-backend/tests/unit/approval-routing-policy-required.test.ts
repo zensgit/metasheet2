@@ -42,6 +42,7 @@ import {
   APPROVAL_ROUTING_POLICY_REQUIRED_CODE,
   APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED,
   COUNT_ACTIVE_PULL_SOURCES_SQL,
+  COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL,
   POLICY_REQUIRED_MESSAGE,
   PULL_SOURCE_THRESHOLD,
   PullSourceCountUnavailableError,
@@ -66,6 +67,7 @@ const SRC_ROOT = join(__dirname, '../../src')
 const REPO_ROOT = join(__dirname, '../../../..')
 const LEAF_FILE = 'directory/pull-source-rule.ts'
 const RESOLVER_FILE = 'services/ApprovalDirectoryOrg.ts'
+const GATE_FILE = 'directory/pull-source-write-gate.ts'
 
 function walkTs(dir: string): string[] {
   const out: string[] = []
@@ -567,17 +569,33 @@ describe('U12 a pull source is counted in one place', () => {
 
   it('the source key and the source predicate are used only by the rule module and the resolver', () => {
     const users = SOURCES
-      .filter(([, text]) => /\bpullSourceKeySql\(|\bPULL_SOURCE_KEY_SQL\b|\bpullSourcePredicateSql\(|\bPULL_SOURCE_PREDICATE_SQL\b|\bCOUNT_ACTIVE_PULL_SOURCES_SQL\b/.test(text))
+      .filter(([, text]) => /\bpullSourceKeySql\(|\bPULL_SOURCE_KEY_SQL\b|\bpullSourcePredicateSql\(|\bPULL_SOURCE_PREDICATE_SQL\b|\bCOUNT_ACTIVE_PULL_SOURCES_SQL\b|\bCOUNT_OTHER_ACTIVE_PULL_SOURCES_SQL\b/.test(text))
       .map(([file]) => file)
     expect(users).toEqual([LEAF_FILE, RESOLVER_FILE])
     expect(srcFile(RESOLVER_FILE)).toMatch(/from '\.\.\/directory\/pull-source-rule'/)
   })
 
-  it('the statements that count pull sources are the leaf count and the probe, all assembled from the fragments', () => {
+  it('the two count functions of the rule module are called by the rule module and the write gate only', () => {
+    const callers = SOURCES
+      .filter(([, text]) => /\bcountActivePullSources\(|\bcountOtherActivePullSources\(/.test(text))
+      .map(([file]) => file)
+      .sort()
+    expect(callers).toEqual([LEAF_FILE, GATE_FILE].sort())
+    // The gate calls each once; the rule module calls the plain count once, in its status read.
+    expect(srcFile(GATE_FILE).split('countActivePullSources(')).toHaveLength(2)
+    expect(srcFile(GATE_FILE).split('countOtherActivePullSources(')).toHaveLength(2)
+    // In the rule module each name occurs once as its declaration; the plain count has one call besides.
+    expect(srcFile(LEAF_FILE).split('countActivePullSources(')).toHaveLength(3)
+    expect(srcFile(LEAF_FILE).split('countOtherActivePullSources(')).toHaveLength(2)
+  })
+
+  it('the statements that count pull sources are the two leaf counts and the probe, all assembled from the fragments', () => {
     const exported = [...Object.values(leaf), ...Object.values(resolverModule), PROBE_KERNEL, PROBE_SCOPED]
       .filter((value): value is string => typeof value === 'string')
       .filter(countsPullSources)
-    expect([...new Set(exported)].sort()).toEqual([COUNT_ACTIVE_PULL_SOURCES_SQL, PROBE_KERNEL, PROBE_SCOPED].sort())
+    expect([...new Set(exported)].sort()).toEqual([COUNT_ACTIVE_PULL_SOURCES_SQL, COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, PROBE_KERNEL, PROBE_SCOPED].sort())
+    // The second count is the first one with the rows of one external source left out.
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL.replace(/ AS other_source_count /, ' AS pull_source_count ')).toBe(`${COUNT_ACTIVE_PULL_SOURCES_SQL} AND NOT (i.provider = $2 AND i.corp_id = $3)`)
     for (const sql of exported) {
       expect(sql).toContain(pullSourceKeySql('i'))
       expect(sql).toContain(pullSourcePredicateSql('i'))

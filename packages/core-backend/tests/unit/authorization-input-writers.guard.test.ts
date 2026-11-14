@@ -1537,7 +1537,7 @@ describe('late role row callers', () => {
 /** The pull-source organisation lock: a contract transaction never takes it. */
 const FORBIDDEN_PULL_SOURCE_LOCK = ['directoryOrgLockSql', 'directoryOrgLockKey', 'DIRECTORY_ORG_LOCK_KEY_PREFIX']
 /** The functions of the pull-source write gate: a contract transaction never enters it. */
-const FORBIDDEN_PULL_SOURCE_GATE = ['runGatedPullSourceWrite', 'runPullSourceGateTransaction', 'asPullSourceGateFailure']
+const FORBIDDEN_PULL_SOURCE_GATE = ['runGatedPullSourceWrite', 'runGatedRoutingPolicyClear', 'asPullSourceGateFailure']
 const FORBIDDEN_IN_WORK = ['fetch', 'axios', 'bcrypt', 'setTimeout', 'sendMail', 'sendEmail', 'sendMessage', 'sendNotification', ...FORBIDDEN_PULL_SOURCE_LOCK, ...FORBIDDEN_PULL_SOURCE_GATE]
 const PULL_SOURCE_RULE_MODULE = `${SRC}/directory/pull-source-rule.ts`
 const PULL_SOURCE_GATE_MODULE = `${SRC}/directory/pull-source-write-gate.ts`
@@ -1622,10 +1622,10 @@ describe('work closures make no external call, and production callers pass no te
     // Every exported name of the lock module that spells the organisation lock is on the list.
     const lockExports = [...rule.matchAll(/export (?:const|function) ([A-Za-z_0-9]*(?:OrgLock|ORG_LOCK)[A-Za-z_0-9]*)/g)].map((match) => match[1]).sort()
     expect(lockExports).toEqual([...FORBIDDEN_PULL_SOURCE_LOCK].sort())
-    // Once the gate module exists, each function it exports must be on the list.
-    if (fs.existsSync(path.join(REPO_ROOT, PULL_SOURCE_GATE_MODULE))) {
-      for (const name of exportedFunctionNames(read(PULL_SOURCE_GATE_MODULE))) expect(FORBIDDEN_IN_WORK, name).toContain(name)
-    }
+    // The gate module exists, and the functions it exports are exactly the ones on the list: a function
+    // added to it, or one of these renamed, fails here until the list follows.
+    expect(fs.existsSync(path.join(REPO_ROOT, PULL_SOURCE_GATE_MODULE))).toBe(true)
+    expect(exportedFunctionNames(read(PULL_SOURCE_GATE_MODULE)).sort()).toEqual([...FORBIDDEN_PULL_SOURCE_GATE].sort())
     expect(exportedFunctionNames('export async function runA() {}\nexport const runB = async () => 1\nfunction hidden() {}\nexport const VALUE = 1')).toEqual(['runA', 'runB'])
   })
 

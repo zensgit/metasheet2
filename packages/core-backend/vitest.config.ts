@@ -477,6 +477,15 @@ export default defineConfig({
       // tests/unit/authorization-input-lock.test.ts, the position by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/authorization-input-census.db.test.ts',
+      // Pull-source write gate against real PostgreSQL: the organisation lock, the gate transaction's
+      // isolation level and bounded waits, the two-connection interleaves of create / activate /
+      // policy clear, the policy-clear rule, the audit rows and the expected-state compare, all with
+      // a repeatable-read-DEFAULT service pool (the file amends DATABASE_URL before the pool is
+      // built). DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
+      // (pinned by plugin-tests-parallel-contract.test.mjs and
+      // approval-routing-prerequisite-ci-wiring.test.mjs).
+      'tests/integration/directory-pull-source-gate.db.test.ts',
       // T2 lock-correctness: canonical UUID lock key (uppercase route id must contend on the
       // transfer side's DB-canonical advisory key — proven via pg_locks same-tuple witness)
       // + explicit READ COMMITTED pin for the freeze-lock transactions, proven against a
