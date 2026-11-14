@@ -14705,6 +14705,11 @@ function buildAttendanceGroupRulePolicyLines(): AttendanceGroupSummaryPolicyLine
       {
         key: 'rule-set',
         label: tr('Rule set', '规则集'),
+        value: tr('Linked rule set is not loaded', '关联规则集尚未加载'),
+      },
+      {
+        key: 'rule-set-id',
+        label: tr('Rule set ID', '规则集 ID'),
         value: ruleSetId,
       },
       {
@@ -29354,7 +29359,7 @@ function deleteAttendanceGroupFromList(item: AttendanceGroup) {
 
 function resolveRuleSetName(ruleSetId?: string | null): string {
   if (!ruleSetId) return tr('Default', '默认')
-  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? tr('Default', '默认')
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? tr('Linked rule set is not loaded', '关联规则集尚未加载')
 }
 
 function clearAttendanceGroupFilters() {
