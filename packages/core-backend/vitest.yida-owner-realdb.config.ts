@@ -17,6 +17,8 @@ export default defineConfig({
       'tests/integration/stock-preparation-yida-owner-http-realdb.test.ts',
       'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
       'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
+      // C1/S2 C01 real-browser case: its own migrated database in the owned cluster, own EXPECT_DB sentinel.
+      'tests/integration/automation-synthetic-preview-browser-realdb.test.ts',
     ],
     setupFiles: [],
     globalSetup: [],

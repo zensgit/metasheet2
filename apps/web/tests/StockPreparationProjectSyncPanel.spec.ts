@@ -1850,3 +1850,117 @@ describe('StockPreparationProjectSyncPanel', () => {
     })
   })
 })
+
+// ---- 批次标识 BI-3 (R-65): the panel's after-apply line and the pull-batch refusal sentence ---------------------
+//
+//   PANEL-PB-OUTCOME  记为 / 并入 / 没有新增 / 未标记：原因 from the apply's own answer; nothing for not_installed (P-2)
+//                     and nothing at all while the switch is off (no key).
+//   PANEL-PB-REFUSAL  a write refused / stopped on a STOCK_PREP_PULL_BATCH_* code reads that code's plain sentence in
+//                     step ③; after rows may have landed, no sentence on the panel claims nothing was written (C-5).
+describe('StockPreparationProjectSyncPanel — 批次标识 lines (BI-3)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    h.permissions = ['integration:admin']
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function runWith(overrides: Partial<StockPreparationProjectSyncApi>): Promise<HTMLElement> {
+    if (app) app.unmount()
+    container!.innerHTML = ''
+    app = createApp(StockPreparationProjectSyncPanel as Component, { api: api(overrides) })
+    app.mount(container!)
+    const root = container!
+    const input = root.querySelector('[data-testid="stock-prep-project-sync-project-no"]') as HTMLInputElement
+    input.value = PROJECT_NO
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    return root
+  }
+
+  function appliedWith(pullBatch: unknown): Partial<StockPreparationProjectSyncApi> {
+    return {
+      apply: vi.fn().mockResolvedValue({
+        status: 'succeeded',
+        apply: { counts: { created: 3, updated: 2, inactive: 0, skipped: 7, held: 0, failed: 0 } },
+        ...(pullBatch === undefined ? {} : { pullBatch }),
+      }),
+    }
+  }
+
+  it('PANEL-PB-OUTCOME: each answer says how the write was recorded; not_installed and absent say nothing', async () => {
+    const cases: Array<[unknown, string | null, string | null]> = [
+      [{ stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 3 }, 'stamped', '本次新增 3 行，记为 第2批（2026-11-08）'],
+      [{ stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: true, createdRowCount: 1 }, 'stamped', '本次新增 1 行，并入 第2批（2026-11-08）（同一次拉取的重试）'],
+      [{ stamped: false, reason: 'no_creates' }, 'no_creates', '本次没有新增物料，不产生新的拉取批次'],
+      [{ stamped: false, reason: 'history_gap', gapRows: 4 }, 'unstamped', '本次未标记批次：有 4 行未登记批次，需要管理员补登记'],
+      [{ stamped: false, reason: 'some_future_reason' }, 'unstamped', '本次未标记批次：其他原因'],
+      [{ stamped: false, reason: 'not_installed' }, null, null],
+      [undefined, null, null],
+    ]
+    let offText: string | null = null
+    for (const [pullBatch, kind, zh] of cases) {
+      const root = await runWith(appliedWith(pullBatch))
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict')).toBe('imported')
+      const line = root.querySelector('[data-testid="stock-prep-project-sync-pull-batch"]')
+      if (zh === null) {
+        expect(line, JSON.stringify(pullBatch)).toBeNull()
+        expect(root.textContent ?? '').not.toContain('批次标识')
+        if (pullBatch === undefined) offText = root.textContent ?? ''
+      } else {
+        expect(line?.textContent?.trim()).toBe(zh)
+        expect(line?.getAttribute('data-pull-batch')).toBe(kind)
+      }
+      // The raw unknown token is never carried onto the panel.
+      expect(root.textContent ?? '').not.toContain('some_future_reason')
+    }
+    // Switch off (no key) and not_installed render the same panel text.
+    const notInstalled = await runWith(appliedWith({ stamped: false, reason: 'not_installed' }))
+    expect(notInstalled.textContent ?? '').toBe(offText)
+  })
+
+  it('PANEL-PB-REFUSAL: the step reads the pull-batch code; a stop after rows landed never says nothing was written', async () => {
+    const stop = (status: number, code: string, detailPartial: boolean, detailReason?: string) => ({
+      apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code, detailPartial, ...(detailReason ? { detailReason } : {}) })),
+    })
+
+    let root = await runWith(stop(409, 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', false))
+    let refusal = root.querySelector('[data-testid="stock-prep-project-sync-pull-batch-refusal"]')
+    expect(refusal?.textContent).toBe('这张表正在安装批次列,安装完成前不能拉取;这次没有写入。')
+    expect(refusal?.getAttribute('data-pull-batch-code')).toBe('STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-step-next"]')?.textContent).toContain('请等安装完成后再拉取')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict')).toBe('blocked')
+
+    root = await runWith(stop(409, 'STOCK_PREP_PULL_BATCH_CONFLICT', false, 'settings_changed'))
+    refusal = root.querySelector('[data-testid="stock-prep-project-sync-pull-batch-refusal"]')
+    expect(refusal?.textContent).toBe('这张表的「首次批次」规则刚被修改,这次拉取停了下来。')
+
+    for (const code of ['STOCK_PREP_PULL_BATCH_STORE_FAILED', 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS']) {
+      root = await runWith(stop(code.endsWith('STORE_FAILED') ? 503 : 409, code, true))
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-verdict"]')?.getAttribute('data-verdict'), code).toBe('interrupted')
+      refusal = root.querySelector('[data-testid="stock-prep-project-sync-pull-batch-refusal"]')
+      expect(refusal?.textContent).toBe('写入中途因批次标识停了下来，可能已写进一部分行（已写入的行不会重复写）。')
+      const steps = Array.from(root.querySelectorAll('[data-testid="stock-prep-project-sync-step"]')).map((step) => step.textContent ?? '').join('\n')
+      expect(steps, code).not.toContain('数据没有变化')
+      expect(steps, code).not.toContain('没有写入')
+    }
+
+    // Control: a write failure outside the family keeps WRITE_FAILED's own sentence and no refusal anchor.
+    root = await runWith(stop(500, 'SOME_OTHER_FAILURE', false))
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-pull-batch-refusal"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-step"][data-step="apply"]')?.textContent).toContain('这一步没有写成,数据没有变化')
+  })
+})

@@ -5,7 +5,7 @@ import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin, userHasPermission } from '../rbac/service'
-import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
+import { deriveDelegatedAdminNamespace, lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import {
   auditDelegatedAdminScopeCleanup,
   isAdminLevelPermissionCode,
@@ -889,9 +889,14 @@ export function rolesRouter(): Router {
    * delete now removes the role's `user_roles` rows through the role-assignment boundary
    * (`unassignUserRoles`, scope `platform-admin` — the caller was just proven one) on THIS
    * transaction's client, which also drops each member's delegated audience for the namespace once
-   * no other held role derives it. Membership, audience and the role row commit or roll back
-   * together. Deliberately NOT for the seeded `admin` role: removing every platform administrator's
-   * membership is a lock-out, not a cleanup, and stays a separate, explicit decision.
+   * no other held role derives it. Before that unassign, the same transaction locks
+   * `namespace-admission:<member>` for the snapshotted members in sorted id order. The role row
+   * lock is already held, matching delegated unassign (role lock, then the user lock). A scope
+   * insert that holds the user lock cannot commit an audience row this cleanup did not see.
+   * A membership that arrives after the snapshot is not in that lock set. Membership, audience
+   * and the role row commit or roll back together. The seeded `admin` role is not deleted at
+   * all: a role_id ON DELETE CASCADE would remove every admin membership and bypass the
+   * last-admin guard. That DELETE answers 409 before any membership or role write.
    *
    * GRANTS GO WITH IT TOO (same roles, same transaction): `role_permissions` rows for the id are
    * deleted, so a later POST of the same id by a roles:write holder starts from an EMPTY set and any
@@ -901,6 +906,19 @@ export function rolesRouter(): Router {
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
     const actorId = req.user?.id?.toString()
+    // Before any lock or write. A platform administrator used to be allowed through, and
+    // a role_id CASCADE then removed every admin membership. The refusal does not depend
+    // on whether that foreign key exists.
+    if (id === PLATFORM_ADMIN_ROLE_ID) {
+      const error = new RolePermissionRequestError(
+        409,
+        'RESERVED_ADMIN_ROLE_DELETE_FORBIDDEN',
+        'The reserved platform administrator role cannot be deleted',
+        { roleId: id },
+      )
+      await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error })
+      return sendRolePermissionRequestError(res, error)
+    }
     if (pool) {
       let before: unknown = null
       let memberIds: string[] = []
@@ -932,6 +950,10 @@ export function rolesRouter(): Router {
           if (protection && protection.kind !== 'platform_admin_role') {
             removesMemberships = true
             if (memberIds.length > 0) {
+              const lockedMemberIds = [...memberIds].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+              for (const memberId of lockedMemberIds) {
+                await lockNamespaceAdmissionWrites(client, memberId)
+              }
               membershipRemoval = await unassignUserRoles({
                 userIds: memberIds,
                 roleId: id,

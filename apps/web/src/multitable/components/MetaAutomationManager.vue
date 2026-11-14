@@ -852,6 +852,7 @@
           </div>
         </div>
       </div>
+    <MetaAutomationIntegrationPreview :visible="visible" :sheet-id="sheetId" :rules="rules" :client="client" />
     <MetaAutomationRuleEditor
       :visible="showRuleEditor"
       :sheet-id="sheetId"
@@ -861,6 +862,7 @@
       :views="views"
       :test-run-state="activeRuleTestRunState"
       :can-open-ding-talk-group-settings="props.canOpenDingTalkGroupSettings === true"
+      :save-error="ruleEditorSaveError"
       @close="showRuleEditor = false"
       @save="onRuleEditorSave"
       @test="onTestRule"
@@ -922,6 +924,7 @@ import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
+import MetaAutomationIntegrationPreview from './MetaAutomationIntegrationPreview.vue'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
 import {
   appendTemplateToken,
@@ -1865,6 +1868,8 @@ function appendPersonTemplateToken(field: 'title' | 'body', token: string) {
 // --- Rule editor + log viewer state ---
 const showRuleEditor = ref(false)
 const editingRule = ref<AutomationRule | null>(null)
+// The editor drawer covers this panel's own error line, so a refused save is handed to the editor to show.
+const ruleEditorSaveError = ref<string | null>(null)
 const showLogViewer = ref(false)
 const logViewerRuleId = ref('')
 const showGroupDeliveryViewer = ref(false)
@@ -1888,6 +1893,7 @@ const activeRuleTestRunState = computed(() => {
 function openRuleEditor(rule?: AutomationRule) {
   editingRule.value = rule ?? null
   editingRuleId.value = rule?.id ?? null
+  ruleEditorSaveError.value = null
   showRuleEditor.value = true
   showForm.value = false
 }
@@ -1919,6 +1925,7 @@ function openPersonDeliveryViewerFromLog(ruleId: string) {
 }
 
 async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingtalkRecipientNotice?: string }) {
+  ruleEditorSaveError.value = null
   try {
     if (editingRule.value?.id) {
       await updateRule(props.sheetId, editingRule.value.id, payload)
@@ -1933,7 +1940,8 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingt
     editingRule.value = null
     emit('updated')
   } catch {
-    // error ref is set by composable
+    // error ref is set by composable (readable copy for a refused webhook target included)
+    ruleEditorSaveError.value = error.value
   }
 }
 
@@ -2440,6 +2448,7 @@ function describeTrigger(rule: AutomationRule): string {
     case 'webhook.received':
     case 'approval.completed':
     case 'approval.task_created':
+    case 'integration.run_finished':
       return automationTriggerTypeLabel(rule.triggerType, isZh.value)
     default:
       return String(rule.triggerType)

@@ -368,6 +368,19 @@ export interface MetaManualRowsContextBlock {
   dialogFieldIds?: string[]
 }
 
+/**
+ * 备料 「查看子件」 / 「查看所有使用位置」: /context `capabilities.stockPreparationBomRelations` as the host sends it
+ * (multitable/stock-preparation-bom-relations-context.ts) — the PHYSICAL ids of five main-template columns, only on a
+ * stock-preparation main-template sheet and only when the actor may read each of them. Field ids only, never a value.
+ */
+export interface MetaBomRelationsBlock {
+  componentSourceFieldId: string
+  parentSourceFieldId: string
+  activeFieldId: string
+  componentCodeFieldId: string
+  componentNameFieldId: string
+}
+
 /** The block as the web reads it (utils/manual-rows.ts readManualRowsBlock): every list present, malformed → unavailable. */
 export interface MetaManualRowsBlock {
   state: MetaManualRowsState
@@ -649,6 +662,13 @@ export interface MetaCapabilities {
    * unchanged. Display only: every route re-gates on its own (generic create answers 409 / 503 by state).
    */
   stockPreparationManualRows?: MetaManualRowsContextBlock
+  /**
+   * 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): set by /context ONLY on a stock-preparation
+   * main-template sheet, to any reader who may read the five columns (see MetaBomRelationsBlock). The record drawer then
+   * offers the two viewer-only filters (utils/bom-relations.ts); absent ⇒ no buttons. Display only: the narrowing is
+   * the GET /view `viewerFilter` parameter, which never writes the view.
+   */
+  stockPreparationBomRelations?: MetaBomRelationsBlock
   /**
    * 备料分批拉取第一期 step 3: set by /context ONLY on a sheet the host stamped closed for generic grid export
    * (a stock-preparation pilot project sheet; `canExport` is then already false for everyone). The workbench
@@ -1214,6 +1234,15 @@ export type MetaAttachmentDeleteFn = (
   context?: MetaAttachmentUploadContext,
 ) => Promise<void>
 
+/** The record drawer's `patch` (MetaRecordFieldsPanel / MetaRecordAttachmentsPanel → MetaRecordInspector → the
+ *  workbench): an attachment write names the record it was made on, a remove or clear-all that ended after
+ *  the drawer moved to another record also the ids it took out, and an upload that adds to the list the ids it
+ *  added (an upload that replaces the list names none). Every other edit is (fieldId, value). A listener
+ *  writes to the record the third argument names when there is one (not to the record it shows); with a
+ *  fourth it takes those ids out of that record's list as it is now, and with a fifth it adds those ids to that
+ *  list as it is now: the value is then the list the write started from. */
+export type MetaDrawerPatchArgs = [fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]]
+
 // --- Timeline config ---
 export interface TimelineConfig {
   startFieldId: string
@@ -1301,6 +1330,8 @@ export type AutomationTriggerType =
   | 'form.submitted'
   | 'approval.completed'
   | 'approval.task_created'
+  // R-69 1c: one values-free summary per integration job (dry run only; R-69 OPEN)
+  | 'integration.run_finished'
   // Legacy aliases
   | 'field.changed'
 
@@ -1349,6 +1380,9 @@ export type AutomationActionType =
   | 'parallel_branch'
   // FWB activation: create a new record on the rule sheet from approved form values.
   | 'write_approval_form_values'
+  // R-69 1b-iii: run an integration job (stock-prep pull, DRY RUN ONLY) on a schedule.cron rule; offered only
+  // while the server switch is on (session feature integrationAutomationRunAction). R-69 is OPEN.
+  | 'run_integration_job'
   // Legacy aliases
   | 'notify'
   | 'update_field'

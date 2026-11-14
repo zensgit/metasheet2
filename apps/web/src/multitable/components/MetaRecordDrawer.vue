@@ -7,10 +7,10 @@
   both still barrel-exported from `apps/web/src/multitable/index.ts` and there is no audited inventory
   of out-of-repo consumers (lock §6bis Medium-4 caveat) -- retiring it is a later, consumer-audited
   major cleanup, not this slice. `MultitableWorkbench.vue` itself now renders `MetaRecordInspector`
-  directly (S3 diff); this shell exists for barrel-export / external consumers only. Every existing
-  `MetaRecordDrawer`-mounting spec (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts)
-  is UNCHANGED and stays green — it now exercises this shell -> MetaRecordInspector delegation, which
-  IS the compat contract this file promises.
+  directly (S3 diff); this shell exists for barrel-export / external consumers only. The
+  `MetaRecordDrawer`-mounting specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts)
+  exercise this shell -> MetaRecordInspector delegation, which IS the compat contract this file promises.
+  One change since: an attachment write's `patch` names its record (see `MetaDrawerPatchArgs`).
 -->
 <template>
   <MetaRecordInspector
@@ -45,7 +45,7 @@
     @delete="emit('delete')"
     @duplicate="emit('duplicate')"
     @copy-link="emit('copy-link')"
-    @patch="(fieldId: string, value: unknown) => emit('patch', fieldId, value)"
+    @patch="relayPatch"
     @toggle-lock="(payload: { recordId: string; locked: boolean }) => emit('toggle-lock', payload)"
     @toggle-comments="emit('toggle-comments')"
     @comment-field="(field: MetaField) => emit('comment-field', field)"
@@ -68,6 +68,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaDrawerPatchArgs,
   MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableCommentPresenceSummary,
@@ -82,8 +83,8 @@ import MetaRecordInspector from './MetaRecordInspector.vue'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 
 // W2 S3 (OD-W2-7=b): props/emits below are the drawer's PUBLIC compat contract, unchanged from
-// pre-shell — kept byte-identical so every existing MetaRecordDrawer consumer (in-repo specs, any
-// out-of-repo barrel-export consumer) needs zero changes. All values are forwarded 1:1 to
+// pre-shell except that an attachment write's `patch` now names its record (and a late remove the ids it
+// took out; `MetaDrawerPatchArgs` says how a listener uses them). All values are forwarded 1:1 to
 // MetaRecordInspector above; this file owns no state and no logic of its own.
 withDefaults(defineProps<{
   visible: boolean
@@ -142,7 +143,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'duplicate'): void
   (e: 'copy-link'): void
-  (e: 'patch', fieldId: string, value: unknown): void
+  (e: 'patch', ...args: MetaDrawerPatchArgs): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
@@ -166,4 +167,9 @@ const emit = defineEmits<{
    * sees exactly the inspector's event surface (the compat contract this file promises). */
   (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
+
+/** The inspector's patch, passed on with exactly the arguments it came with. */
+function relayPatch(...args: MetaDrawerPatchArgs) {
+  emit('patch', ...args)
+}
 </script>

@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-workbench" @keydown="onGlobalKeydown">
+  <div ref="workbenchRootRef" class="mt-workbench" @keydown="onGlobalKeydown">
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
@@ -317,6 +317,20 @@
         <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
+        <!-- 备料 「查看子件」 / 「查看所有使用位置」: the viewer filter the drawer set (utils/bom-relations.ts). Per-viewer and
+             never stored; 清除 drops it and reloads the page the grid was on, with the view exactly as stored. -->
+        <div
+          v-if="viewerFilterState && !showDashboardView"
+          class="mt-workbench__viewer-filter"
+          role="status"
+          data-testid="workbench-viewer-filter-banner"
+        >
+          <div class="mt-workbench__viewer-filter-copy">
+            <strong data-testid="workbench-viewer-filter-label">{{ viewerFilterState.label }}</strong>
+            <span class="mt-workbench__viewer-filter-note">{{ bomRelationsLabel('banner.note', isZh) }}</span>
+          </div>
+          <MtButton size="sm" data-testid="workbench-viewer-filter-clear" @click="onClearViewerFilter">{{ bomRelationsLabel('banner.clear', isZh) }}</MtButton>
+        </div>
         <MetaDashboardView
           v-if="showDashboardView"
           :sheet-id="workbench.activeSheetId.value"
@@ -504,6 +518,7 @@
         :can-create="canCreateRecordByHand"
         :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :manual-copy-available="manualRowsCreateAvailable"
+        :bom-relations="inspectorBomRelations"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="inspectorFieldPermissions"
@@ -513,8 +528,8 @@
         :person-summaries-by-field="selectedRecordPersonSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
-        :upload-fn="uploadAttachmentFn"
-        :delete-attachment-fn="deleteAttachmentFn"
+        :upload-fn="drawerUploadAttachmentFn"
+        :delete-attachment-fn="drawerDeleteAttachmentFn"
         :ai-shortcut="aiShortcut.state"
         :ai-available="aiAvailable"
         :button-run-pending="buttonRunPending"
@@ -541,6 +556,7 @@
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @manual-copy="onManualCopyRecord(selectedRecordId)"
+        @bom-relations="onBomRelations"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -862,6 +878,7 @@ import {
   saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
+import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWorkbenchGridSurface, isWorkbenchGridTarget } from '../utils/workbench-undo'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
@@ -913,8 +930,16 @@ import {
   resolveManualRowEditableFieldIds,
 } from '../utils/manual-rows'
 import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
+import {
+  bomRelationsLabel,
+  bomRelationsSourceValue,
+  buildBomRelationsViewerFilter,
+  readBomRelationsBlock,
+  type BomRelationKind,
+} from '../utils/bom-relations'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { CELL_WRITE_SUPERSEDED } from '../utils/cell-write'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
 import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
 import { viewTypeLabel } from '../utils/meta-manager-labels'
@@ -1180,6 +1205,18 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 // resolvePageSize, before `currentUserId` further down exists. Null until the user id resolves (onMounted) =>
 // the default size; the resolve then applies the stored size (see onGridPageSizeOwnerResolved).
 const gridPageSizeUserId = ref<string | null>(null)
+// An attachment upload or delete is a write the grid's history does not hold yet: the drawer, and a grid upload,
+// patch the field once it is done (the grid's cell editor patches a remove or clear when it closes; the form view
+// keeps it in its draft). The grid's undo and redo wait for it as they do for a cell patch (`holdsHistory`).
+let attachmentWrites = 0
+async function holdingHistory<T>(write: () => Promise<T>): Promise<T> {
+  attachmentWrites += 1
+  try {
+    return await write()
+  } finally {
+    attachmentWrites -= 1
+  }
+}
 const grid = useMultitableGrid({
   sheetId: workbench.activeSheetId,
   viewId: workbench.activeViewId,
@@ -1192,6 +1229,7 @@ const grid = useMultitableGrid({
   // 人工补充行 B3 (ADR §3.4, N12): the six fillable cells of a manual row write through PATCH …/manual-fields — edit,
   // undo, redo and the conflict retry alike (see `resolveManualCellWrite` below; gated on the /context block).
   resolveManualCellWrite: (recordId, fieldId) => resolveManualCellWrite(recordId, fieldId),
+  holdsHistory: () => attachmentWrites > 0,
 })
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
@@ -2953,34 +2991,70 @@ const hierarchyParentFieldIds = computed(() =>
 const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
 
 const uploadAttachmentFn: MetaAttachmentUploadFn = async (file: File, context?: MetaAttachmentUploadContext) =>
-  workbench.client.uploadAttachment(file, {
+  holdingHistory(() => workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
     recordId: context?.recordId,
     fieldId: context?.fieldId,
-  })
+  }))
 
-const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) => {
+const deleteAttachmentFn: MetaAttachmentDeleteFn = async (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  holdingHistory(() => deleteAttachment(attachmentId, context))
+
+// The drawer's own upload and delete. One that fails after the drawer moved to another record has nowhere to show
+// it: the panel's error line belongs to the record shown, and the panel leaves it alone. The failure is toasted here
+// instead, with the generic text (not the server's message, which can carry a file name), and passed on unchanged:
+// the panel's own handling stays as it was, and the shown record's field alerts are not touched. While the record
+// is still shown the panel shows the failure itself, and nothing is toasted.
+async function reportingLateDrawerFailure<T>(
+  recordId: string | undefined,
+  label: 'cell.uploadFailed' | 'cell.removeFailed',
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write()
+  } catch (error) {
+    if (recordId && selectedRecordResolved.value?.id !== recordId) showError(metaCoreLabel(label, isZh.value))
+    throw error
+  }
+}
+
+const drawerUploadAttachmentFn: MetaAttachmentUploadFn = (file: File, context?: MetaAttachmentUploadContext) =>
+  reportingLateDrawerFailure(context?.recordId, 'cell.uploadFailed', () => uploadAttachmentFn(file, context))
+
+const drawerDeleteAttachmentFn: MetaAttachmentDeleteFn = (attachmentId: string, context?: MetaAttachmentUploadContext) =>
+  reportingLateDrawerFailure(context?.recordId, 'cell.removeFailed', () => deleteAttachmentFn(attachmentId, context))
+
+async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
-  if (context?.recordId && selectedRecordId.value === context.recordId) {
-    const updatedIds = (selectedRecordResolved.value?.data[context.fieldId ?? ''] as unknown[] | undefined)
+  // The page's rows are reloaded at once: a save made meanwhile goes from the row the delete left.
+  const reload = Promise.resolve(grid.loadViewData(grid.page.value.offset))
+  reload.catch(() => undefined)
+  // The record's drawer saves still out when the delete is answered (also those made after it was sent) went at the
+  // version before it: the copy takes them (at their answers) before it takes the delete, which then moves it one
+  // version on from theirs.
+  await Promise.allSettled(context?.recordId ? drawerSavesOutOf(context.recordId) : [])
+  // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
+  // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
+  // later patch of that record starts from it.
+  const linked = deepLinkedRecord.value
+  if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
+    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
       ?.map(String)
       .filter((id) => id !== attachmentId) ?? []
-    if (deepLinkedRecord.value?.id === context.recordId && context.fieldId) {
-      deepLinkedRecord.value = {
-        ...deepLinkedRecord.value,
-        version: deepLinkedRecord.value.version + 1,
-        data: {
-          ...deepLinkedRecord.value.data,
-          [context.fieldId]: updatedIds,
-        },
-      }
-      deepLinkedRecordAttachmentSummaries.value = {
-        ...deepLinkedRecordAttachmentSummaries.value,
-        [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
-      }
+    deepLinkedRecord.value = {
+      ...linked,
+      version: linked.version + 1,
+      data: {
+        ...linked.data,
+        [context.fieldId]: updatedIds,
+      },
+    }
+    deepLinkedRecordAttachmentSummaries.value = {
+      ...deepLinkedRecordAttachmentSummaries.value,
+      [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
     }
   }
-  await grid.loadViewData(grid.page.value.offset)
+  await reload
 }
 
 async function loadCommentsForRecord(recordId: string, options?: { highlightCommentId?: string | null; markReadCommentId?: string | null }) {
@@ -3072,9 +3146,19 @@ async function searchCommentMentions(query: string): Promise<MetaCommentMentionS
 // every one of those callers already threads it through this single function. `select-record` from
 // the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
 // the cursor (see `onSelectRecord` below), never this branch.
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
-  if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null; discardConfirmed?: boolean }) {
+  // Every move to another record (the drawer's previous / next, a duplicate, a new record, a deep link, the browser's
+  // back / forward) commits the drawer's focused control first, and gives it the focus back after the move, or after
+  // a declined discard prompt (the control still shows this record).
+  const restoreDrawerFocus = recordId !== selectedRecordId.value ? releaseDrawerFocus() : null
+  // `discardConfirmed`: the caller has run the discard check for this move already (`resolveDeepLink`, before it
+  // replaces the deep-linked copy), so the prompt is not shown a second time.
+  if (recordId !== selectedRecordId.value && !opts?.discardConfirmed && !confirmDiscardRecordChanges()) {
+    void restoreDrawerFocus?.()
+    return
+  }
   selectedRecordId.value = recordId
+  void restoreDrawerFocus?.()
   // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
   // guard above has already passed (not before calling this function): setting it earlier let a
   // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
@@ -3628,14 +3712,19 @@ async function onReloadConflict() {
 
 async function onRetryConflict() {
   const retried = await grid.retryConflict()
-  if (retried) {
+  if (retried === true) {
     if (selectedRecordId.value) {
       await resolveDeepLink(selectedRecordId.value)
     }
     showSuccess(wb('toast.changeReapplied', isZh.value))
     return
   }
-  if (grid.error.value) showError(grid.error.value)
+  // The retry's own failure, not the grid's shared error (an older save of the record that fails while the retry
+  // waits its turn sets that one). Nothing to show when there was no conflict left to retry, or when a newer save of
+  // the cell replaced the retry unsent: that save answers for the cell.
+  if (retried && typeof retried === 'object') {
+    showError(retried.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+  }
 }
 
 // PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
@@ -3654,15 +3743,50 @@ function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldEr
   inspectorFieldErrorEntries.value = next
 }
 
-async function onDrawerPatch(fieldId: string, value: unknown) {
-  if (!selectedRecordResolved.value) return
-  const record = selectedRecordResolved.value
+async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string, removed?: string[], added?: string[]) {
+  // An attachment write names the record it was made on: it can end after the drawer moved to another record,
+  // and its patch belongs to the first one. A record that is no longer in the page (nor deep-linked) has no
+  // version to send: the patch is dropped (an upload's file stays on the server, unattached, as when the drawer
+  // closes while it runs). Every other edit is the shown record's.
+  const record = recordId ? drawerRecordById(recordId) : selectedRecordResolved.value
+  if (!record) return
+  const shown = record.id === selectedRecordResolved.value?.id
+  // A remove or clear-all that ended after the drawer moved on names the ids it took out: they come out of the
+  // record's list as it is now (the delete's reload, or its update of a deep-linked copy, refreshed it, and it may
+  // hold an attachment added meanwhile), not the list it started from. With none of them left in it, there is
+  // nothing to write.
+  let patchValue = value
+  if (added?.length) {
+    // An upload that adds to the list names the ids it added: they go after the record's list as it is now (each id
+    // once), not after the list the upload started from, which lacks an attachment added to the field while it ran
+    // (from elsewhere, or by an earlier upload of this drawer). Also for the record shown: its list can change
+    // during an upload too. An upload that replaces the list names none, and is written as given.
+    const raw = record.data[fieldId]
+    const next = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    pushUniqueIds(next, added)
+    patchValue = next
+  } else if (removed && !shown) {
+    const raw = record.data[fieldId]
+    const current = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const next = current.filter((id) => !removed.includes(id))
+    if (next.length === current.length) return
+    patchValue = next
+  }
   if (!ensureCanEditRecord(record.id)) return
-  if (manualRowsEditGate.value && isManualRowRecord(record.id)) {
-    await runManualDrawerPatch(record.id, fieldId, value)
+  // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
+  // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
+  // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
+  const settleUndo = shown
+    ? workbenchUndo.beginCommit(drawerCommitContainers(fieldId, resolvePrimaryField(scopedAllFields.value)?.id))
+    : undefined
+  // A manual row shown as a copy (off the page) chains its own saves (below); one on the page is the grid's row, whose
+  // saves the grid sends one at a time (and a newer save of a cell replaces one still waiting). A step still held when
+  // the row came onto the page keeps the ones after it behind it, so they go out in the order made.
+  if (manualRowsEditGate.value && isManualRowRecord(record.id) && (!pageRowFor(record.id) || manualDrawerWriteTails.has(record.id))) {
+    await runManualDrawerPatch(record.id, fieldId, patchValue, settleUndo)
     return
   }
-  await commitDrawerPatch(record, fieldId, value)
+  await commitDrawerPatch(record, fieldId, patchValue, settleUndo)
 }
 
 // 人工补充行 B3 (ADR §3.4 「抽屉里一次保存分两步」): on a manual row the drawer's saves run ONE AT A TIME per record — a
@@ -3670,19 +3794,60 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 // routes are not one transaction, so each step waits for the one before it and carries the version THAT step returned;
 // a conflict surfaces through the conflict banner like on any row (reload / retry), and a failed step does not stop the
 // next one from trying with the version actually stored.
+// It is kept for a manual row the drawer shows as a copy (off the page), which the grid's own one-at-a-time sending
+// does not chain (it never chains a record off the page). A step is made on the copy (`copyFirstRecordById`), and
+// sent at the copy's version as given (`commitDrawerPatch`): a row that came onto the page meanwhile may hold a
+// change the step was not made on (another user's, or a grid edit), which it then conflicts with, as on main.
 const manualDrawerWriteTails = new Map<string, Promise<void>>()
+// The drawer's saves of a record that are not answered yet. A manual row's step made after the row left the page waits
+// for them, so that it reads the copy they moved on; so does an attachment delete's update of the copy.
+const drawerSavesOut = new Map<string, Set<Promise<unknown>>>()
+
+function drawerSavesOutOf(recordId: string): Array<Promise<unknown>> {
+  return [...(drawerSavesOut.get(recordId) ?? [])]
+}
+
+function trackDrawerSave(recordId: string, save: Promise<unknown>): void {
+  let saves = drawerSavesOut.get(recordId)
+  if (!saves) drawerSavesOut.set(recordId, (saves = new Set()))
+  saves.add(save)
+  const done = () => {
+    saves!.delete(save)
+    if (saves!.size === 0 && drawerSavesOut.get(recordId) === saves) drawerSavesOut.delete(recordId)
+  }
+  Promise.resolve(save).then(done, done)
+}
+
+// The drawer shows the grid's row of a record that is on the page, also when it holds a copy of it (`deepLinkedRecord`:
+// made by a realtime merge, or by a link applied before the page's rows came): the grid sends that row's saves one at a
+// time, each with the version the one before returned, and its row shows every save at once. The copy is shown for a
+// record off the page, and in a form view (which shows its own record).
+function pageRowFor(recordId: string): MetaRecord | null {
+  if (activeViewType.value === 'form') return null
+  return grid.rows.value.find((row) => row.id === recordId) ?? null
+}
 
 function drawerRecordById(recordId: string): MetaRecord | null {
+  const row = pageRowFor(recordId)
+  if (row) return row
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
   return grid.rows.value.find((row) => row.id === recordId) ?? null
 }
 
-async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown): Promise<void> {
+/** The drawer's own rule's lookup (main's order): the copy, else the row. */
+function copyFirstRecordById(recordId: string): MetaRecord | null {
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecord.value
+  return grid.rows.value.find((row) => row.id === recordId) ?? null
+}
+
+async function runManualDrawerPatch(recordId: string, fieldId: string, value: unknown, onCommitted?: () => void): Promise<void> {
   const previous = manualDrawerWriteTails.get(recordId) ?? Promise.resolve()
+  const saves = drawerSavesOutOf(recordId)
   const step = previous.then(async () => {
-    // Re-read AFTER the previous step: its returned version is on the row by now.
-    const current = drawerRecordById(recordId)
-    if (current) await commitDrawerPatch(current, fieldId, value, true)
+    await Promise.allSettled(saves)
+    // Re-read AFTER the previous step: its returned version is on the copy by now.
+    const current = copyFirstRecordById(recordId)
+    if (current) await commitDrawerPatch(current, fieldId, value, onCommitted)
   })
   const tail = step.then(() => undefined, () => undefined)
   manualDrawerWriteTails.set(recordId, tail)
@@ -3693,18 +3858,34 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
   }
 }
 
-async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, manualRow = false) {
+async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, onCommitted?: () => void) {
   const patchOwner = {}
-  inspectorPatchOwners.set(fieldId, patchOwner)
-  // 人工补充行 B3: a manual row's step keeps the version the server returned (the next step carries it).
+  // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
+  // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
+  if (record.id === selectedRecordResolved.value?.id) inspectorPatchOwners.set(fieldId, patchOwner)
+  // The version the server returned for this save, asked for on every save: a copy of the record made while the save
+  // is out takes it too (see the copy's update below; 人工补充行 B3: a manual row's step carries it to the next).
   const committed: { version: number | null } = { version: null }
+  // A save made on the copy is sent at the copy's version as given: the grid never chains it past one of the record's
+  // own writes the copy does not show (a copy shown with the record on the page: a form view, a held manual step).
+  const sentOnCopy = record === deepLinkedRecord.value
   // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
   // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
   // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
   // toast the second's message and lose its own alert when both rejections landed in one flush.
-  const failure = manualRow
-    ? await grid.patchCell(record.id, fieldId, value, record.version, { onCommitted: (version) => { committed.version = version } })
-    : await grid.patchCell(record.id, fieldId, value, record.version)
+  // The grid sends a record's writes one at a time, each with the version the one before returned (`patchCell`), for
+  // a record on the page; a copy keeps the version given, and takes a save only once it is accepted.
+  const write = grid.patchCell(record.id, fieldId, value, record.version, {
+    onCommitted: (version: number) => { committed.version = version },
+    ...(sentOnCopy ? { chainVersion: false } : {}),
+  })
+  trackDrawerSave(record.id, write)
+  // The composable's local row-action refusal sets its error before the call returns (an older write of the record
+  // that fails while this one waits sets it later, and is not this one's).
+  const refusedLocally = grid.error.value
+  const failure = await write
+  // Replaced before it was sent by a newer save of the same field, whose answer is the field's.
+  if (failure === CELL_WRITE_SUPERSEDED) return
   const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
   if (failure) {
     // Route by the failure the composable returned for THIS patch — still guarded on record + field
@@ -3744,21 +3925,23 @@ async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unk
     showError(toastText(failure.message))
     return
   }
-  if (grid.error.value) {
+  if (refusedLocally) {
     // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
     // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
-    showError(grid.error.value)
+    showError(refusedLocally)
     return
   }
+  onCommitted?.()
   // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
   // panel's watch, its draft). Other fields' errors are untouched.
   if (latestRequest) clearInspectorFieldError(fieldId)
-  if (deepLinkedRecord.value?.id === record.id) {
-    deepLinkedRecord.value = {
-      ...deepLinkedRecord.value,
-      version: committed.version ?? deepLinkedRecord.value.version + 1,
-      data: { ...deepLinkedRecord.value.data, [fieldId]: value },
-    }
+  // The copy takes the save only as the step it is: when the version returned is the copy's own plus one (the server
+  // moves a record one version per accepted write), the copy was the record the save was made on. Otherwise it keeps
+  // what it holds: one behind lacks a change it never showed (its next save conflicts), and one refreshed meanwhile
+  // already holds this save, or more.
+  const copy = deepLinkedRecord.value
+  if (copy?.id === record.id && committed.version !== null && committed.version === copy.version + 1) {
+    deepLinkedRecord.value = { ...copy, version: committed.version, data: { ...copy.data, [fieldId]: value } }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
 }
@@ -3919,12 +4102,23 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
-    await grid.patchCell(row.id, fieldId, payload.recordIds, row.version, {
+    // This save's own result, as in `commitDrawerPatch`: the grid's shared error read after the await may be an
+    // older save's (one of the same record that fails while this one waits its turn).
+    const write = grid.patchCell(row.id, fieldId, payload.recordIds, row.version, {
       previousLinkSummaries: previousSummaries,
       nextLinkSummaries: payload.summaries,
     })
-    if (grid.error.value) {
-      showError(grid.error.value)
+    // The composable's local row-action refusal sets its error before the call returns.
+    const refusedLocally = grid.error.value
+    const failure = await write
+    // Replaced before it was sent by a newer save of the same cell, whose answer is the cell's.
+    if (failure === CELL_WRITE_SUPERSEDED) return
+    if (failure) {
+      showError(failure.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+      return
+    }
+    if (refusedLocally) {
+      showError(refusedLocally)
       return
     }
   } else if (selectedRecordResolved.value?.id === recordId) {
@@ -3980,9 +4174,18 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
   const fieldId = personPickerField.value.id
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
-    await grid.patchCell(row.id, fieldId, payload.userIds, row.version)
-    if (grid.error.value) {
-      showError(grid.error.value)
+    // This save's own result (see `onLinkPickerConfirm`).
+    const write = grid.patchCell(row.id, fieldId, payload.userIds, row.version)
+    const refusedLocally = grid.error.value
+    const failure = await write
+    // Replaced unsent by a newer save of the cell: that save's summaries are the cell's, not these.
+    if (failure === CELL_WRITE_SUPERSEDED) return
+    if (failure) {
+      showError(failure.message || metaCoreLabel('grid.errorPatchCell', isZh.value))
+      return
+    }
+    if (refusedLocally) {
+      showError(refusedLocally)
       return
     }
     applyLocalPersonSummaries(recordId, fieldId, payload.summaries)
@@ -4252,7 +4455,7 @@ async function loadAggregates() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value })
     if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
     aggregateGroups.value = r.groups ?? []
@@ -4265,7 +4468,7 @@ async function loadAggregates() {
   }
 }
 watch(
-  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value],
+  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value, () => grid.viewerFilterParam?.value],
   () => { void loadAggregates() },
   { immediate: true },
 )
@@ -4285,7 +4488,7 @@ async function loadScaleStats() {
     return
   }
   try {
-    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, statsFields })
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined, viewerFilter: grid.viewerFilterParam?.value, statsFields })
     if (seq !== scaleStatsReqSeq) return // a newer request superseded this one
     scaleServerStats.value = r.stats ?? {}
   } catch {
@@ -4313,6 +4516,7 @@ const scaleStatsKey = () => JSON.stringify([
   grid.filterRules.value,
   grid.filterGroups.value,
   searchText.value,
+  grid.viewerFilterParam?.value ?? null,
   autoScaleStatsFieldIds.value,
 ])
 let lastScaleStatsKey = ''
@@ -4818,8 +5022,15 @@ function discardWorkbenchDraftsForExternalContextChange() {
   importAbortController.value = null
 }
 
+// Cell writes the grid has not had an answer for yet (waiting for their record's turn, or out): leaving the page now
+// may lose them. Asked by the leave-page prompts only, and not part of `hasBlockingUnloadState`, which also defers an
+// external context sync. A grid without the count reads as none.
+function pendingCellWrites(): number {
+  return grid.pendingCellWriteCount?.value ?? 0
+}
+
 function confirmPageLeave() {
-  if (formSubmitting.value || importSubmitting.value) {
+  if (formSubmitting.value || importSubmitting.value || pendingCellWrites() > 0) {
     return window.confirm(wb('confirm.pageLeaveBusy', isZh.value))
   }
   if (!hasUnsavedWorkbenchDrafts.value) return true
@@ -5712,7 +5923,39 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
 
 function onDrawerNavigate(recordId: string) {
+  // The drawer's previous / next, and its chord, which works with the caret still in a field: selectRecord commits
+  // that field first and gives it the focus back after the move (releaseDrawerFocus).
   void selectRecord(recordId)
+}
+
+/** Before the drawer moves to another record: blur its focused control, so the control commits while its own record
+ *  is still the one shown (the drawer's fields commit on blur, and the rich text editor keeps its draft while
+ *  focused), as closing the drawer does (see flushActiveFieldEdit). Returns what gives the focus back once the drawer
+ *  shows the next record: to that control (the drawer reuses it), with the caret at the end of a rich text editor, or
+ *  to the drawer's open tab when the control is gone (a field hidden there), so the chord, Esc and typing go on
+ *  working, unless something else has the focus by then. Null when the focus is not in the drawer. */
+function releaseDrawerFocus(): (() => Promise<void>) | null {
+  const active = document.activeElement
+  const drawer = active instanceof HTMLElement ? active.closest<HTMLElement>('.meta-record-drawer') : null
+  if (!drawer) return null
+  const focused = active as HTMLElement
+  focused.blur()
+  return async () => {
+    await nextTick()
+    const now = document.activeElement
+    if (now && now !== document.body) return
+    if (focused.isConnected) {
+      focused.focus({ preventScroll: true })
+      // A rich text editor takes the caret at its start: put it at the end, as a text box keeps it.
+      if (focused.isContentEditable) {
+        const selection = document.getSelection()
+        selection?.selectAllChildren(focused)
+        selection?.collapseToEnd()
+      }
+    } else if (drawer.isConnected) {
+      drawer.querySelector<HTMLElement>('[role="tabpanel"]')?.focus({ preventScroll: true })
+    }
+  }
 }
 
 // --- Beforeunload: warn on unsaved changes ---
@@ -5721,16 +5964,35 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
   // before the page unloads (#1672). The async PATCH may not finish before a
   // hard reload, but the optimistic update + request are at least issued.
   flushActiveFieldEdit()
-  if (!hasBlockingUnloadState.value) return
+  // Read after the flush: the edit it dispatched is a cell write still out.
+  if (!hasBlockingUnloadState.value && pendingCellWrites() === 0) return
   e.preventDefault()
   e.returnValue = ''
 }
 
+// mod+z / mod+y / mod+shift+z belong to the workbench while it is mounted (utils/workbench-undo.ts,
+// installed on the document in onMounted): the browser's own undo never runs on the page, since it is
+// page-wide and can revert another field. A text control's chord is its own step or nothing; the grid's
+// undo/redo runs from a non-text target in the workbench, or from the page itself after a press on the
+// grid's cells or the drawer's title or fields (their edits are cell patches; a button or file input
+// there, the grid's footer, the drawer's comments, or a rail or manager rename is not:
+// `isWorkbenchGridSurface`).
+const workbenchRootRef = ref<HTMLElement | null>(null)
+const workbenchUndo = createWorkbenchUndo({
+  isInsideWorkbench: (node) => !!workbenchRootRef.value?.contains(node),
+  isGridSurface: isWorkbenchGridSurface,
+  isGridTarget: isWorkbenchGridTarget,
+})
+let removeWorkbenchUndo: (() => void) | null = null
+// The drawer's controls are reused when it shows another record (and the sheet's and view's controls
+// when those change), so a control's history must not outlive what it was typed for: with equal content
+// in both (commonly empty), an undo would bring record A's typing into record B and save it there.
+watch([selectedRecordId, () => workbench.activeSheetId.value, () => workbench.activeViewId.value], () => workbenchUndo.reset())
+
 function onGlobalKeydown(e: KeyboardEvent) {
-  const mod = e.metaKey || e.ctrlKey
-  if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
-  else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
-  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // '?' toggles the shortcuts overlay, except while typing: in a form control or in an editable surface
+  // (the rich-text editor is a contenteditable div, not an input).
+  if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) { showShortcuts.value = !showShortcuts.value }
   // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
   // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
   // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
@@ -6018,6 +6280,17 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
       sheetId: workbench.activeSheetId.value || undefined,
       viewId: workbench.activeViewId.value || undefined,
     })
+    // When the record shown is itself deep-linked, the drawer shows another record from here on: commit its focused
+    // control first (selectRecord then finds none in the drawer, so the focus comes back from here).
+    const moves = recordId !== selectedRecordId.value
+    const restoreDrawerFocus = moves ? releaseDrawerFocus() : null
+    // The copy below is the record the drawer shows when that one is deep-linked too: it is replaced only once the
+    // move is accepted. A declined discard prompt keeps the record shown, with its copy (replaced first, the drawer
+    // was left empty), and the focus goes back to its control. selectRecord is told not to ask again.
+    if (moves && !confirmDiscardRecordChanges()) {
+      void restoreDrawerFocus?.()
+      return
+    }
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
     deepLinkedRecordPersonSummaries.value = ctx.personSummaries ?? {}
@@ -6026,7 +6299,10 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, selectOpts)
+    // The focus comes back as soon as the drawer shows the record, not after its comments load.
+    const selected = selectRecord(recordId, { ...selectOpts, discardConfirmed: true })
+    void restoreDrawerFocus?.()
+    await selected
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }
@@ -6144,15 +6420,49 @@ async function refreshSelectedRecordContext(recordId: string) {
   }
 }
 
-// Override selectedRecord to also consider deep-linked record
+// Override selectedRecord to also consider deep-linked record (the grid's row first for a record on the page: see
+// `pageRowFor`)
 const selectedRecordResolved = computed<MetaRecord | null>(() => {
   if (selectedRecordId.value) {
+    const row = pageRowFor(selectedRecordId.value)
+    if (row) return row
     if (deepLinkedRecord.value?.id === selectedRecordId.value) return deepLinkedRecord.value
     const inPage = grid.rows.value.find((r) => r.id === selectedRecordId.value)
     if (inPage) return inPage
   }
   return null
 })
+
+// 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07; utils/bom-relations.ts). The buttons exist only when
+// /context sends the stockPreparationBomRelations block for the ACTIVE sheet (never from stale capabilities of the
+// previous sheet). Pressing one sets the grid's VIEWER filter (useMultitableGrid setViewerFilter): GET /view narrows
+// this viewer's rows; nothing is written to the shared view or the personal overlay. 查看子件 closes the drawer first
+// (the open row is the parent and is not among its own children); 查看所有使用位置 keeps it open (the row is one of
+// the positions).
+const bomRelationsBlock = computed(() => (capabilitiesStale.value ? null : readBomRelationsBlock(capabilitySource.value)))
+const inspectorBomRelations = computed<{ disabledReason: string | null } | null>(() => {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return null
+  return { disabledReason: bomRelationsSourceValue(block, record) === null ? bomRelationsLabel('action.noSource', isZh.value) : null }
+})
+const viewerFilterState = computed(() => grid.viewerFilter?.value ?? null)
+async function onBomRelations(kind: BomRelationKind) {
+  const block = bomRelationsBlock.value
+  const record = selectedRecordResolved.value
+  if (!block || !record) return
+  const state = buildBomRelationsViewerFilter(kind, block, record, isZh.value)
+  if (!state) return
+  if (kind === 'children') {
+    onCloseDrawer()
+    // A pending edit the user chose to keep (confirmDiscardRecordChanges declined) keeps the drawer — and the grid as it is.
+    if (inspectorOpen.value) return
+  }
+  await grid.setViewerFilter(state)
+}
+async function onClearViewerFilter() {
+  await grid.clearViewerFilter()
+}
 
 watch(
   [() => workbench.activeSheetId.value, visibleCommentPresenceRecordIds, () => effectiveRowActions.value.canComment],
@@ -6420,6 +6730,7 @@ watch(
 )
 
 onMounted(async () => {
+  removeWorkbenchUndo = installWorkbenchUndo(workbenchUndo, { undo: () => grid.undo(), redo: () => grid.redo() })
   window.addEventListener('beforeunload', onBeforeUnload)
   syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
   // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
@@ -6506,6 +6817,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  removeWorkbenchUndo?.()
+  removeWorkbenchUndo = null
   workbenchAlive = false
   closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
@@ -6558,6 +6871,20 @@ defineExpose({
    against — inert for every other child, which all stay in normal flow. */
 .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.mt-workbench__viewer-filter {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid #b3d8ff;
+  border-radius: 10px;
+  background: #ecf5ff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mt-workbench__viewer-filter-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mt-workbench__viewer-filter-note { font-size: 12px; line-height: 1.4; color: #606266; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
   padding: 10px 12px;

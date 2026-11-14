@@ -42,6 +42,7 @@
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -68,6 +69,8 @@ const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, normalizeStockPreparationTemplate
 const { templateContractOptionFields } = require(path.join(LIB, 'stock-preparation-option-sync.cjs'))
 const { dryRunStockPreparationAction } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const kit = require('./support/stock-preparation-project-write-lock-kit.cjs')
+// Readiness v5 (batch-refresh step 6d-1b, R-91): the census module's private component handle (the ruling ledger's key).
+const { __internals: { componentHandle } } = require(path.join(LIB, 'stock-preparation-sheet-census.cjs'))
 
 const TENANT = 'tenant-syn-pilot'
 const PROJECT = 'PRJ-SYN-PILOT-01'
@@ -265,6 +268,22 @@ test('G-07 (L03) the dry run calls pilotLaneGuard only on a capped expansion, be
 
 const TEMPLATE = normalizeStockPreparationTemplate(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
 
+// 批次标识 BI-1b (readiness v3, register R-65): a READY pull-batch status, the shape stock-preparation-pull-batch-status.cjs
+// answers. The six v3 checks read their booleans off ONE `deps.readPullBatchStatus()` per evaluation, so the v2 rows of
+// R-02 / R-03 below keep their expected sets; each v3 id gets its own mutation of this status.
+const READY_PULL_BATCH_STATUS = Object.freeze({
+  switchOn: true,
+  columns: { mode: 'db', pullBatch: true, firstPullBatch: true, locked: 2 },
+  placement: 'left',
+  views: { readable: true, fill: true, todo: true, bandHiddenIn: [], layout: null },
+  ledger: { readable: true, historyStatus: 'born_empty', historyMode: 'inferred', historyBatchCount: 0, batchCount: 0, openBatchNo: null, captured: null },
+  rows: { total: 0, machine: 0, labelled: 0, gap: 0, unknown: 0, person: 0, manual: 0, unboundPrefix: 0, nonPlugin: 0, locked: 0 },
+  trashedRecordCount: null,
+  ready: true,
+  reasons: [],
+})
+const pullBatchStatusWith = (patch) => async () => ({ ...READY_PULL_BATCH_STATUS, ...patch })
+
 function readyDeps(overrides = {}) {
   const fields = new Map(TEMPLATE.fields.map((field) => [field.id, { property: {} }]))
   for (const id of PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS) fields.get(id).property.humanWriteLock = 'plm_system'
@@ -303,7 +322,33 @@ function readyDeps(overrides = {}) {
     countOpenLargeJobs: async () => ({ open: 0, unattributed: 0, scanned: 0 }),
     packInstallStore: { async listInstalledFieldIds() { return { fieldIds: [], packIds: [] } } },
     customerPackDeclaration: readiness.CUSTOMER_PACK_NOT_APPLICABLE,
+    // Version 3 (批次标识 BI-1b): one READY pull-batch status.
+    readPullBatchStatus: async () => READY_PULL_BATCH_STATUS,
+    // Version 4 (batch-refresh step 6a-2, R-91): the recovery entry — the refresh store's recovery methods, and (the switch
+    // on) 批次标识's link read and close hook.
+    recoveryStore: { async readExecutionForRecovery() {}, async closeExecution() {}, async listExecutions() {} },
+    pullBatchEnabled: true,
+    pullBatchStore: { async readBatchLink() {}, async batchWithin() {} },
+    // Version 5 (batch-refresh step 6d-1b, R-91): the component ruling ledger answers (nothing acknowledged; no remnant).
+    componentRulingStore: { async listActiveRulings() { return [] } },
+    // Version 6 (owner ruling 2026-11-11, R-91 option A): the route's tenant-claim reader answered true.
+    tenantClaimRequired: true,
+    // Version 7 (batch-refresh S6-5b, R-91): the sheet-repair ledger answers — no run of this sheet open.
+    sheetRepairStore: repairLedgerAnswering({ openRun: false }),
     ...overrides,
+  }
+}
+
+/** A sheet-repair ledger fake: listRunsOf answers `answer` (a function is called with the scope) and records each call. */
+function repairLedgerAnswering(answer) {
+  const calls = []
+  return {
+    calls,
+    async listRunsOf(scope) {
+      calls.push({ ...scope })
+      if (typeof answer === 'function') return answer(scope)
+      return { sequence: 0, retireRunIds: [], ...answer }
+    },
   }
 }
 
@@ -312,6 +357,10 @@ const sheetRow = (component, { parent = null, active = true, key } = {}) => ({
   projectNo: PROJECT, componentSourceId: component, parentSourceId: parent, active,
   ...(key === undefined ? { idempotencyKey: JSON.stringify([component, parent]) } : (key === null ? {} : { idempotencyKey: key })),
 })
+// Readiness v5 (step 6d-1b): the item-10 shape (D2) — S's old root INACTIVE, no active root of S, S active nested under P.
+const D2_ROWS = Object.freeze([sheetRow('P1'), sheetRow('S1', { active: false }), sheetRow('S1', { parent: 'P1' })])
+const ACKNOWLEDGED_S1 = Object.freeze({ id: 'cr_syn_1', componentDigest: componentHandle(TENANT, PROJECT, 'S1'), kind: 'remnant_acknowledged', basis: 'head_not_ordered', status: 'active' })
+const rulingsOf = (rulings) => ({ async listActiveRulings() { return rulings.map((ruling) => ({ ...ruling })) } })
 // A ledger + host pair for the pack check: `ledger` the live field ids the pack-install ledger lists, `host` the
 // field ids the host returns for this sheet.
 function packDeps({ declared, ledger = [], packIds = ledger.length ? ['syn_pack'] : [], host = ledger, declaration = null }) {
@@ -338,12 +387,26 @@ async function withContinuationSupport(version, fn) {
 
 test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the version are pinned; the answer is values-free', async () => {
   // Version 2 (pre-enable hardening, step-4 design §23.4 F-3 / F-5): three checks added, none removed or renamed.
-  assert.equal(readiness.PILOT_READINESS_VERSION, 2)
-  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 0, 'the build marker ships at 0 (the last PR of the D-22 set flips it; PR-3a / PR-3b keep it 0)')
+  // Version 3 (批次标识 BI-1b, R-65 P-8): the six pull_batch_* checks, immediately before the D-22 marker (still last).
+  // Version 4 (batch-refresh step 6a-2, R-91, rebaseline B-8): change_plan_store_readable + execution_recovery_ready, inserted
+  // before the D-22 marker as BI did.
+  // Version 5 (batch-refresh step 6d-1b, R-91, rebaseline B-8): ONLY no_unacknowledged_inactive_root_remnant, before the marker.
+  // Version 6 (owner ruling 2026-11-11, R-91 option A): ONLY tenant_claim_required, before the marker.
+  // Version 7 (batch-refresh S6-5b, R-91; coordinator ruling: S6-5b takes v7, S6-7 the next free one): ONLY
+  // no_open_sheet_repair_run, before the marker.
+  assert.equal(readiness.PILOT_READINESS_VERSION, 7)
+  assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS.slice(-4), ['no_unacknowledged_inactive_root_remnant', 'tenant_claim_required', 'no_open_sheet_repair_run', 'continuation_support_version'])
+  assert.equal(continuationSupport.CONTINUATION_SUPPORT_VERSION, 1, 'the build marker ships at 1 since S6-9, the last PR of the D-22 set (PR-3a / PR-3b kept it 0)')
   assert.deepEqual(readiness.PILOT_READINESS_CHECK_IDS, [
     'registry_row_active', 'sheet_present', 'target_fields_present', 'plm_column_lock', 'contract_option_sets', 'views_present',
     'single_project_on_sheet', 'no_two_copy_component', 'write_lock_store_readable', 'write_lock_free', 'no_open_large_job', 'export_closure_port',
-    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'continuation_support_version',
+    'continuation_store_readable', 'refresh_state_store_readable', 'spec_read_plan_slot', 'pack_columns_installed', 'no_generic_writer_names_sheet',
+    'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved',
+    'change_plan_store_readable', 'execution_recovery_ready',
+    'no_unacknowledged_inactive_root_remnant',
+    'tenant_claim_required',
+    'no_open_sheet_repair_run',
+    'continuation_support_version',
   ])
   // The web clamps a failing id to /^[a-z][a-z0-9_]{0,63}$/ (projectTarget.ts): every id survives it.
   assert.ok(readiness.PILOT_READINESS_CHECK_IDS.every((id) => /^[a-z][a-z0-9_]{0,63}$/.test(id)))
@@ -351,15 +414,19 @@ test('R-01 every check passes on a satisfied fake ⇒ ready; the id list and the
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps()))
   assert.equal(answer.ready, true, JSON.stringify(answer.failing))
   assert.deepEqual([...answer.failing], [])
-  assert.equal(answer.version, 2)
+  assert.equal(answer.version, 7)
   assert.deepEqual(answer.checks.map((check) => check.id), [...readiness.PILOT_READINESS_CHECK_IDS])
   assert.ok(answer.checks.every((check) => check.ok === true))
   const text = JSON.stringify(answer)
   assert.ok(!text.includes(SHEET) && !text.includes(OBJECT) && !text.includes(PROJECT) && !text.includes(TENANT), 'values-free')
-  // The default build (marker 0) refuses exactly the marker, nothing else.
+  // A build at marker 0 (every build before S6-9) refuses exactly the marker, nothing else.
+  const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps()))
+  assert.deepEqual([...atZero.failing], ['continuation_support_version'])
+  assert.equal(atZero.ready, false)
+  // The shipped build (marker 1 since S6-9), with no in-memory override: the same satisfied fake is ready.
   const shipped = await readiness.evaluatePilotReadiness(readyDeps())
-  assert.deepEqual([...shipped.failing], ['continuation_support_version'])
-  assert.equal(shipped.ready, false)
+  assert.deepEqual([...shipped.failing], [])
+  assert.equal(shipped.ready, true)
 })
 
 test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly the expected failing set', async () => {
@@ -383,7 +450,7 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['export_closure_port (sheet not present on the host)', (d) => ({ provisioning: { ...d.provisioning, async getSheetGridExportClosure({ sheetId }) { return { sheetId, present: false, closure: null, closedAt: null, closedBy: null } } } }), ['export_closure_port']],
     ['continuation_store_readable', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP4_STORE_TABLES.continuation, ...(table === readiness.STEP4_STORE_TABLES.continuation ? { reason: 'undefined_table' } : {}) }) }), ['continuation_store_readable']],
     ['refresh_state_store_readable', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP4_STORE_TABLES.refreshState }) }), ['refresh_state_store_readable']],
-    ['both step-4 stores (no probe)', () => ({ probeTableReadable: undefined }), ['continuation_store_readable', 'refresh_state_store_readable']],
+    ['both step-4 stores (no probe)', () => ({ probeTableReadable: undefined }), ['continuation_store_readable', 'refresh_state_store_readable', 'change_plan_store_readable', 'execution_recovery_ready']],
     ['spec_read_plan_slot (undeclared, nothing said)', () => ({ action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } } }), ['spec_read_plan_slot']],
     ['spec_read_plan_slot (undeclared, a non-literal declaration)', () => ({ action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } }, specReadPlanSlotDeclaration: 'maybe' }), ['spec_read_plan_slot']],
     ['no_generic_writer_names_sheet (an object config names the sheet)', () => ({ collectGenericWriterTargets: async () => ({ complete: true, sheetIds: new Set([SHEET]), objectIds: new Set() }) }), ['no_generic_writer_names_sheet']],
@@ -391,9 +458,10 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['no_generic_writer_names_sheet (a registry did not answer)', () => ({ collectGenericWriterTargets: async () => ({ complete: false, sheetIds: new Set(), objectIds: new Set() }) }), ['no_generic_writer_names_sheet']],
     // ── version 2 (pre-enable hardening) ──
     ['no_two_copy_component (one component an active root AND an active nested copy)', () => ({ readExistingStockPreparationRows: async () => [sheetRow('SYN-C1'), sheetRow('SYN-C1', { parent: 'SYN-P1' }), sheetRow('SYN-P1')] }), ['no_two_copy_component']],
-    ['no_two_copy_component (the project read cannot run: not wired)', () => ({ readExistingStockPreparationRows: undefined }), ['no_two_copy_component']],
-    ['no_two_copy_component (the project read refuses: past its bound)', () => ({ readExistingStockPreparationRows: async () => { throw Object.assign(new Error('too large'), { code: 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE' }) } }), ['no_two_copy_component']],
-    ['no_two_copy_component (no project number to read by)', () => ({ projectNo: '' }), ['no_two_copy_component']],
+    // Version 5: the remnant check reads the SAME project read, so a read that cannot run fails both (never "no remnant").
+    ['no_two_copy_component (the project read cannot run: not wired)', () => ({ readExistingStockPreparationRows: undefined }), ['no_two_copy_component', 'no_unacknowledged_inactive_root_remnant']],
+    ['no_two_copy_component (the project read refuses: past its bound)', () => ({ readExistingStockPreparationRows: async () => { throw Object.assign(new Error('too large'), { code: 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE' }) } }), ['no_two_copy_component', 'no_unacknowledged_inactive_root_remnant']],
+    ['no_two_copy_component (no project number to read by; v7: the repair ledger is not asked without one either)', () => ({ projectNo: '' }), ['no_two_copy_component', 'no_unacknowledged_inactive_root_remnant', 'no_open_sheet_repair_run']],
     ['no_open_large_job (one open job on the sheet)', () => ({ countOpenLargeJobs: async () => ({ open: 1, unattributed: 0, scanned: 3 }) }), ['no_open_large_job']],
     ['no_open_large_job (an open job whose sheet cannot be read)', () => ({ countOpenLargeJobs: async () => ({ open: 0, unattributed: 1, scanned: 1 }) }), ['no_open_large_job']],
     ['no_open_large_job (the job store is unreadable)', () => ({ countOpenLargeJobs: async () => { throw Object.assign(new Error('store down'), { code: 'PLUGIN_DURABLE_STORAGE_UNAVAILABLE' }) } }), ['no_open_large_job']],
@@ -411,6 +479,52 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
     ['pack_columns_installed (no ledger store)', () => ({ packInstallStore: null }), ['pack_columns_installed']],
     ['pack_columns_installed (the ledger answers no lists)', () => ({ packInstallStore: { async listInstalledFieldIds() { return {} } } }), ['pack_columns_installed']],
     ['pack_columns_installed (declared, the host cannot read fields)', (d) => { const { deps } = packDeps({ declared: ['ext_synA'], ledger: ['ext_synA'] }); const { readObjectFieldsContent: _r, ...rest } = deps.provisioning; return { ...deps, provisioning: rest } }, ['pack_columns_installed']],
+    // ── version 3 (批次标识 BI-1b): one mutation of the ONE status per id ──
+    ['pull_batch_enabled (the switch is off)', () => ({ readPullBatchStatus: pullBatchStatusWith({ switchOn: false }) }), ['pull_batch_enabled']],
+    ['pull_batch_columns_present (computed only)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'computed', pullBatch: true, firstPullBatch: true, locked: 2 } }) }), ['pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible']],
+    ['pull_batch_columns_present (one column)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'db', pullBatch: true, firstPullBatch: false, locked: 1 } }) }), ['pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible']],
+    ['pull_batch_columns_locked (one column unmarked)', () => ({ readPullBatchStatus: pullBatchStatusWith({ columns: { mode: 'db', pullBatch: true, firstPullBatch: true, locked: 1 } }) }), ['pull_batch_columns_locked']],
+    ['pull_batch_columns_visible (hidden in the fill view)', () => ({ readPullBatchStatus: pullBatchStatusWith({ views: { readable: true, fill: true, todo: true, bandHiddenIn: ['fill'], layout: null } }) }), ['pull_batch_columns_visible']],
+    ['pull_batch_columns_visible (the views cannot be read)', () => ({ readPullBatchStatus: pullBatchStatusWith({ views: { readable: false, fill: false, todo: false, bandHiddenIn: [], layout: null } }) }), ['pull_batch_columns_visible']],
+    ['pull_batch_ledger_readable (the ledger does not answer)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, readable: false, historyStatus: null } }) }), ['pull_batch_ledger_readable', 'pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (pending)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, historyStatus: 'pending' } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (installing)', () => ({ readPullBatchStatus: pullBatchStatusWith({ ledger: { ...READY_PULL_BATCH_STATUS.ledger, historyStatus: 'installing' } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (a gap row)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: { ...READY_PULL_BATCH_STATUS.rows, gap: 1 } }) }), ['pull_batch_history_resolved']],
+    ['pull_batch_history_resolved (rows unreadable)', () => ({ readPullBatchStatus: pullBatchStatusWith({ rows: null }) }), ['pull_batch_history_resolved']],
+    ['every pull_batch_* check (no status read wired)', () => ({ readPullBatchStatus: undefined }), ['pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved']],
+    // ── version 4 (batch-refresh step 6a-2): the change-plan store and the recovery entry ──
+    ['change_plan_store_readable (migration 104 absent)', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP6_RECOVERY_TABLES.changePlan }) }), ['change_plan_store_readable']],
+    ['execution_recovery_ready (migration 106 absent)', () => ({ probeTableReadable: async (table) => ({ readable: table !== readiness.STEP6_RECOVERY_TABLES.intent }) }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (no refresh store wired)', () => ({ recoveryStore: null }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (the store cannot close)', () => ({ recoveryStore: { async readExecutionForRecovery() {}, async listExecutions() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (the store cannot list)', () => ({ recoveryStore: { async readExecutionForRecovery() {}, async closeExecution() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (switch on, the ledger has no close hook)', () => ({ pullBatchStore: { async readBatchLink() {} } }), ['execution_recovery_ready']],
+    ['execution_recovery_ready (switch on, no ledger)', () => ({ pullBatchStore: null }), ['execution_recovery_ready']],
+    // ── version 5 (batch-refresh step 6d-1b): the inactive-root remnant and its acknowledgement ──
+    ['no_unacknowledged_inactive_root_remnant (an unacknowledged D2 remnant)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (no ruling ledger wired)', () => ({ componentRulingStore: null }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (the ledger cannot list)', () => ({ componentRulingStore: {} }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (migration 107 absent: the ledger throws, no remnant at all)', () => ({ componentRulingStore: { async listActiveRulings() { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }) } } }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (the ledger answers no list)', () => ({ componentRulingStore: { async listActiveRulings() { return null } } }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (a REVOKED acknowledgement exempts nothing)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, status: 'revoked' }]) }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (a dropped_head_included ruling exempts nothing before S6-7)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, kind: 'dropped_head_included', basis: null }]) }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (an acknowledgement of ANOTHER component)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, componentDigest: componentHandle(TENANT, PROJECT, 'S9') }]) }), ['no_unacknowledged_inactive_root_remnant']],
+    ['no_unacknowledged_inactive_root_remnant (the handle of another project)', () => ({ readExistingStockPreparationRows: async () => D2_ROWS, componentRulingStore: rulingsOf([{ ...ACKNOWLEDGED_S1, componentDigest: componentHandle(TENANT, OTHER_PROJECT, 'S1') }]) }), ['no_unacknowledged_inactive_root_remnant']],
+    // ── version 6 (owner ruling 2026-11-11, R-91 option A): the tenant-claim door must be ON — positive evidence only ──
+    ['tenant_claim_required (the door is off: the reader answered false)', () => ({ tenantClaimRequired: false }), ['tenant_claim_required']],
+    ['tenant_claim_required (not wired)', () => ({ tenantClaimRequired: undefined }), ['tenant_claim_required']],
+    ['tenant_claim_required (the raw env string, never parsed here)', () => ({ tenantClaimRequired: 'true' }), ['tenant_claim_required']],
+    ['tenant_claim_required (the reader handed in uncalled)', () => ({ tenantClaimRequired: () => true }), ['tenant_claim_required']],
+    ['tenant_claim_required (a truthy non-boolean)', () => ({ tenantClaimRequired: 1 }), ['tenant_claim_required']],
+    // ── version 7 (batch-refresh S6-5b, R-91): no repair run of the sheet open — positive evidence only ──
+    ['no_open_sheet_repair_run (a run of the sheet is open)', () => ({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (the ledger is not wired)', () => ({ sheetRepairStore: null }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (the ledger has no listRunsOf)', () => ({ sheetRepairStore: { async listRuns() { return { runs: [], truncated: false } } } }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (migration 108 absent: the read throws 503 STORE_FAILED)', () => ({ sheetRepairStore: repairLedgerAnswering(() => { throw Object.assign(new Error('the sheet-repair ledger could not be read'), { status: 503, code: 'STOCK_PREP_SHEET_REPAIR_STORE_FAILED' }) }) }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (the ledger answers no object)', () => ({ sheetRepairStore: repairLedgerAnswering(() => null) }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (openRun absent)', () => ({ sheetRepairStore: repairLedgerAnswering(() => ({ sequence: 0, retireRunIds: [] })) }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (openRun a falsy non-boolean)', () => ({ sheetRepairStore: repairLedgerAnswering(() => ({ sequence: 0, retireRunIds: [], openRun: 0 })) }), ['no_open_sheet_repair_run']],
+    ['no_open_sheet_repair_run (openRun the string false)', () => ({ sheetRepairStore: repairLedgerAnswering(() => ({ sequence: 0, retireRunIds: [], openRun: 'false' })) }), ['no_open_sheet_repair_run']],
   ]
   for (const [label, mutate, expected] of table) {
     const deps = readyDeps()
@@ -421,11 +535,46 @@ test('R-02 every check fails closed on its own: one mutation per id ⇒ exactly 
   // The explicit NOT-APPLICABLE declaration (server config literal) satisfies the slot without a column.
   const declared = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness({ ...readyDeps(), action: { source: { readPlan: { part: {} } }, target: { sheetId: SHEET, objectId: OBJECT } }, specReadPlanSlotDeclaration: readiness.SPEC_READ_PLAN_SLOT_NOT_APPLICABLE }))
   assert.deepEqual([...declared.failing], [])
+  // Version 4: with the switch OFF the recovery clause asks nothing of the ledger (rebaseline B-6) — only pull_batch_enabled
+  // refuses, never execution_recovery_ready.
+  const switchOff = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness({ ...readyDeps(), pullBatchEnabled: false, pullBatchStore: null, readPullBatchStatus: pullBatchStatusWith({ switchOn: false }) }))
+  assert.deepEqual([...switchOff.failing], ['pull_batch_enabled'])
   // The build marker: 0 ⇒ failing; 1 ⇒ ok; a non-integer ⇒ failing.
   for (const [version, failing] of [[0, ['continuation_support_version']], [1, []], ['1', ['continuation_support_version']]]) {
     const answer = await withContinuationSupport(version, () => readiness.evaluatePilotReadiness(readyDeps()))
     assert.deepEqual([...answer.failing], failing, `marker ${JSON.stringify(version)}`)
   }
+})
+
+test('R-08 (readiness v6, owner ruling 2026-11-11, R-91 option A) tenant_claim_required: the door off refuses the enable with exactly this check failing; the module never reads the environment', async () => {
+  const FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+  const before = process.env[FLAG]
+  try {
+    // The module reads NO env: even with the flag exactly 'true' in this process, a dep of false is refused, and with the
+    // flag absent a dep of true passes — the route's ONE reader is the only source.
+    process.env[FLAG] = 'true'
+    const off = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false })))
+    assert.deepEqual([...off.failing], ['tenant_claim_required'])
+    assert.equal(off.ready, false)
+    assert.equal(off.checks.find((check) => check.id === 'tenant_claim_required').ok, false)
+    delete process.env[FLAG]
+    const on = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: true })))
+    assert.deepEqual([...on.failing], [])
+    assert.equal(on.ready, true)
+    // Marker 0 with the door off: both refuse, in list order (the door before the marker, which stays last).
+    const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false })))
+    assert.deepEqual([...atZero.failing], ['tenant_claim_required', 'continuation_support_version'])
+    // The shipped build (marker 1 since S6-9) with the door off: the door alone refuses.
+    const shipped = await readiness.evaluatePilotReadiness(readyDeps({ tenantClaimRequired: false }))
+    assert.deepEqual([...shipped.failing], ['tenant_claim_required'])
+  } finally {
+    if (before === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = before
+  }
+  // Source pin: the module never touches process.env (one reader, in http-routes; a second parse here would drift).
+  const source = fs.readFileSync(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'), 'utf8')
+  assert.doesNotMatch(source.replace(/\/\/[^\n]*/g, ''), /process\.env/)
+  assert.doesNotMatch(source, /MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED['"`]/)
 })
 
 test('R-05 (O-6) no_two_copy_component: only an ACTIVE root and an ACTIVE nested row of ONE component refuse; the continuation core\'s readings of active and root', async () => {
@@ -458,6 +607,38 @@ test('R-05 (O-6) no_two_copy_component: only an ACTIVE root and an ACTIVE nested
   assert.deepEqual([...clean.failing], [])
 })
 
+test('R-07 (step 6d-1b, readiness v5) no_unacknowledged_inactive_root_remnant: the D2 handles minus ACTIVE remnant_acknowledged rows; ONE project read shared with O-6; the ledger read on every evaluation', async () => {
+  // The remnant refuses; an ACTIVE acknowledgement of exactly its handle exempts it.
+  const reads = []
+  const rulingReads = []
+  const acknowledged = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({
+    readExistingStockPreparationRows: async (recordsApi, target, projectNo) => { reads.push(projectNo); return D2_ROWS },
+    componentRulingStore: { async listActiveRulings(input) { rulingReads.push(input); return [ACKNOWLEDGED_S1] } },
+  })))
+  assert.deepEqual([...acknowledged.failing], [])
+  assert.deepEqual(reads, [PROJECT], 'O-6 and the remnant check share ONE project-scoped read')
+  assert.deepEqual(rulingReads, [{ tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }], 'the ledger is asked for exactly this (tenant, sheet, project)')
+  // A sheet with NO remnant still reads the ledger (positive evidence that migration 107 is there).
+  const clean = []
+  const none = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ componentRulingStore: { async listActiveRulings(input) { clean.push(input); return [] } } })))
+  assert.deepEqual([...none.failing], [])
+  assert.equal(clean.length, 1)
+  // Two remnants, one acknowledged: still refused. Both acknowledged: ready.
+  const two = [...D2_ROWS, sheetRow('S2', { active: false }), sheetRow('S2', { parent: 'P1' })]
+  const second = { ...ACKNOWLEDGED_S1, id: 'cr_syn_2', componentDigest: componentHandle(TENANT, PROJECT, 'S2') }
+  assert.deepEqual([...(await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => two, componentRulingStore: rulingsOf([ACKNOWLEDGED_S1]) })))).failing], ['no_unacknowledged_inactive_root_remnant'])
+  assert.deepEqual([...(await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => two, componentRulingStore: rulingsOf([ACKNOWLEDGED_S1, second]) })))).failing], [])
+  // The other doubled shapes are NOT this check's: D1 is O-6's, an inactive root with no active nested copy is no remnant.
+  const d1 = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => [sheetRow('S1'), sheetRow('S1', { parent: 'P1' })] })))
+  assert.deepEqual([...d1.failing], ['no_two_copy_component'])
+  const retired = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => [sheetRow('S1', { active: false }), sheetRow('S1', { parent: 'P1', active: false })] })))
+  assert.deepEqual([...retired.failing], [])
+  // Values-free: no component id, no handle, no project in the answer.
+  const refused = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ readExistingStockPreparationRows: async () => D2_ROWS })))
+  const text = JSON.stringify(refused)
+  assert.ok(!text.includes('S1') && !text.includes(ACKNOWLEDGED_S1.componentDigest) && !text.includes(PROJECT), 'values-free')
+})
+
 test('R-06 (O-8) pack_columns_installed: every declared ext_ column installed (ledger AND host), or an explicit not-applicable that the facts agree with — read strictly', async () => {
   // Positive: two declared columns, both listed live by the ledger and present on the host.
   const ok = packDeps({ declared: ['ext_synA', 'ext_synB'], ledger: ['ext_synA', 'ext_synB', 'ext_synHuman'] })
@@ -480,6 +661,43 @@ test('R-06 (O-8) pack_columns_installed: every declared ext_ column installed (l
   assert.ok(!text.includes('ext_syn'), 'values-free: no column id in the answer')
 })
 
+test('R-09 (readiness v7, batch-refresh S6-5b, R-91) no_open_sheet_repair_run: ONE ledger read per evaluation, scoped (tenant, sheet, project); the repair switch is never consulted; an open run refuses exactly this id', async () => {
+  const SWITCH = 'MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED'
+  const before = process.env[SWITCH]
+  try {
+    for (const literal of [undefined, 'true', 'false']) {
+      if (literal === undefined) delete process.env[SWITCH]
+      else process.env[SWITCH] = literal
+      const closed = repairLedgerAnswering({ openRun: false })
+      const ok = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: closed })))
+      assert.deepEqual([...ok.failing], [], `switch ${JSON.stringify(literal)}: no open run`)
+      assert.deepEqual(closed.calls, [{ tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }], 'one read, the evaluation\'s own scope')
+      const open = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) })))
+      assert.deepEqual([...open.failing], ['no_open_sheet_repair_run'], `switch ${JSON.stringify(literal)}: an open run refuses whatever the switch says`)
+    }
+  } finally {
+    if (before === undefined) delete process.env[SWITCH]
+    else process.env[SWITCH] = before
+  }
+  // Marker 0 with an open run: both refuse, in list order (the new check before the marker, which stays last).
+  const atZero = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) })))
+  assert.deepEqual([...atZero.failing], ['no_open_sheet_repair_run', 'continuation_support_version'])
+  // The shipped build (marker 1 since S6-9) with an open run: the open run alone refuses.
+  const shipped = await readiness.evaluatePilotReadiness(readyDeps({ sheetRepairStore: repairLedgerAnswering({ openRun: true }) }))
+  assert.deepEqual([...shipped.failing], ['no_open_sheet_repair_run'])
+  // The shared reader the enable route re-asks under its lease: the same answers, and a throw passes through.
+  const read = readiness.readNoOpenSheetRepairRun
+  const scope = { tenantId: TENANT, sheetId: SHEET, projectNo: PROJECT }
+  assert.equal(await read({ ...scope, sheetRepairStore: repairLedgerAnswering({ openRun: false }) }), true)
+  assert.equal(await read({ ...scope, sheetRepairStore: repairLedgerAnswering({ openRun: true }) }), false)
+  assert.equal(await read({ ...scope, sheetRepairStore: null }), false)
+  assert.equal(await read({ ...scope, sheetId: ' ', sheetRepairStore: repairLedgerAnswering({ openRun: false }) }), false)
+  await assert.rejects(read({ ...scope, sheetRepairStore: repairLedgerAnswering(() => { throw Object.assign(new Error('down'), { code: 'STOCK_PREP_SHEET_REPAIR_STORE_FAILED' }) }) }), { code: 'STOCK_PREP_SHEET_REPAIR_STORE_FAILED' })
+  // Source pin: the module reads no environment (the switch is the repair library's, never asked here).
+  const source = fs.readFileSync(path.join(LIB, 'stock-preparation-pilot-readiness.cjs'), 'utf8')
+  assert.doesNotMatch(source, /SHEET_REPAIR_WRITE_ENABLED['"`]/)
+})
+
 test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator itself never throws', async () => {
   const deps = readyDeps({
     provisioning: { ...readyDeps().provisioning, async findObjectSheet() { throw new Error(`host down ${SHEET}`) } },
@@ -489,13 +707,25 @@ test('R-03 a throwing probe is ok:false, never a thrown readiness; the evaluator
     readExistingStockPreparationRows: async () => { throw new Error(`records down ${SHEET}`) },
     countOpenLargeJobs: async () => { throw new Error('job store down') },
     packInstallStore: { async listInstalledFieldIds() { throw new Error(`ledger down ${SHEET}`) } },
+    // 批次标识 BI-1b: the ONE status read throws ⇒ each of the six is ok:false, read once.
+    readPullBatchStatus: async () => { pullBatchStatusCalls += 1; throw new Error(`pull-batch down ${SHEET}`) },
+    // Version 7: the repair ledger throws (a message carrying the sheet id) ⇒ ok:false, the message never in the answer.
+    sheetRepairStore: repairLedgerAnswering(() => { throw new Error(`repair ledger down ${SHEET}`) }),
   })
+  let pullBatchStatusCalls = 0
   const answer = await withContinuationSupport(1, () => readiness.evaluatePilotReadiness(deps))
-  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet'])
+  // Version 5: the ONE project read throws ⇒ O-6 AND the remnant check are ok:false (they share it).
+  assert.deepEqual([...answer.failing], ['sheet_present', 'single_project_on_sheet', 'no_two_copy_component', 'no_open_large_job', 'continuation_store_readable', 'refresh_state_store_readable', 'pack_columns_installed', 'no_generic_writer_names_sheet', 'pull_batch_enabled', 'pull_batch_columns_present', 'pull_batch_columns_locked', 'pull_batch_columns_visible', 'pull_batch_ledger_readable', 'pull_batch_history_resolved', 'change_plan_store_readable', 'execution_recovery_ready', 'no_unacknowledged_inactive_root_remnant', 'no_open_sheet_repair_run'])
+  assert.equal(pullBatchStatusCalls, 1, 'the six v3 checks share ONE status read per evaluation')
   assert.ok(!JSON.stringify(answer).includes(SHEET), 'a thrown message never travels into the answer')
-  const empty = await readiness.evaluatePilotReadiness({})
+  // With no inputs nothing is ready: at marker 0 every check fails; on the shipped build (marker 1 since S6-9) every
+  // check but the build marker itself, which reads no input.
+  const empty = await withContinuationSupport(0, () => readiness.evaluatePilotReadiness({}))
   assert.equal(empty.ready, false)
   assert.equal(empty.failing.length, readiness.PILOT_READINESS_CHECK_IDS.length, 'nothing is ready with no inputs')
+  const emptyShipped = await readiness.evaluatePilotReadiness({})
+  assert.equal(emptyShipped.ready, false)
+  assert.deepEqual([...emptyShipped.failing], readiness.PILOT_READINESS_CHECK_IDS.filter((id) => id !== 'continuation_support_version'), 'nothing but the marker is ready with no inputs')
 })
 
 test('R-04 collectGenericWriterTargets: both registries must answer; object configs and erp-feedback options are collected', async () => {

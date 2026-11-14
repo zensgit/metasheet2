@@ -392,6 +392,14 @@ test('G1-06 repair, registered: 200, the registry row\'s sheet in the verified t
       plmLockMarkedFieldCount: PLM_SYSTEM_FIELD_IDS.length,
       plmLockAlreadyMarkedFieldCount: 0,
       plmLockMissingFieldCount: 0,
+      // R-71 ⑦.4 PR-3: the column counts ride the same row; without `addMissingColumns` nothing is added.
+      columnMode: 'report',
+      columnsChecked: true,
+      templateColumnCount: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.length,
+      columnAlreadyPresentCount: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.length,
+      columnMissingBeforeCount: 0,
+      columnAddedCount: 0,
+      columnRefusedCount: 0,
     })
     // Idempotent: the same body again.
     const before = projectSheet.clone(object.fields.get(DECISION_FIELD).property)
