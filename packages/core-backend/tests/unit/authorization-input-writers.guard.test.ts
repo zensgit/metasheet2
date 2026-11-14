@@ -16,6 +16,11 @@
  * and the identifiers a work closure may not reference, which include the pull-source organisation
  * lock and the functions of its write gate.
  *
+ * The table list closure has one exception, and only one: the service reader left-joins `roles` to
+ * show the name of each role a permission is inherited from. No decision reads `roles`. The exception
+ * is pinned by shape (`ROLE_NAME_JOIN`): one mention, that join clause, its alias read only as the
+ * selected name, inside that one statement. Any other writing of the table in a reader is a problem.
+ *
  * Every pattern has a positive control on a real file mutated in memory, and every negative control
  * states what the scan deliberately does not count.
  */
@@ -924,6 +929,125 @@ function classifierStatementText(): string {
   return statement
 }
 
+const SERVICE_READER = `${SRC}/rbac/service.ts`
+const NAMESPACE_READER = `${SRC}/rbac/namespace-admission.ts`
+const AUTHORIZATION_READERS: readonly string[] = [SERVICE_READER, NAMESPACE_READER]
+const GRANT_TABLE = /^(?:users|user_[a-z_]+|role_[a-z_]+|roles|delegated_[a-z_]+|platform_member_[a-z_]+)$/
+
+/**
+ * THE ONE EXCEPTION to the reader closure. The statement that lists a user's inherited permission
+ * codes left-joins `roles` for the display name of each role, and that is the only place a reader may
+ * name the table. The join is there to show a name: the codes come from `role_permissions`, a left join
+ * drops no row, and no decision reads `roles`. So the exception is pinned by shape and not by table:
+ * the word is mentioned once in the statement text of the service reader; the mention is this join
+ * clause; outside the clause its alias is read only as this select-list item; and the statement that
+ * carries the join is this statement, whitespace apart (which also covers a column of the joined table
+ * named without the alias). Every other writing of the table in a reader is a problem, and every other
+ * grant table outside the classifier's set is one, as before.
+ */
+const ROLE_NAME_JOIN = {
+  reader: SERVICE_READER,
+  table: 'roles',
+  clause: 'LEFT JOIN roles r ON r.id = ur.role_id',
+  projection: 'r.name AS role_name',
+  statement: 'SELECT DISTINCT rp.permission_code AS code, ur.role_id AS role_id, r.name AS role_name FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1',
+} as const
+const PINNED_STATEMENT_PROBLEM = `${ROLE_NAME_JOIN.reader}: the statement that joins roles is not the pinned statement`
+
+/**
+ * Literals whose whole text is the word, per reader. It is a permission resource name there, not a
+ * table: the namespace reader lists it once among the resources that have no namespace. The count is
+ * pinned, so the table named as an argument of a query builder is one literal too many.
+ */
+const ROLES_RESOURCE_NAME_LITERALS: ReadonlyMap<string, number> = new Map([[NAMESPACE_READER, 1]])
+
+const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** The words of `text` from `before` words before the one at `index` to `after` words after it. */
+function wordsAround(text: string, index: number, before: number, after: number): string {
+  const words = [...text.matchAll(/\S+/g)]
+  const at = words.findIndex((word) => (word.index ?? 0) <= index && index < (word.index ?? 0) + word[0].length)
+  return words.slice(Math.max(0, at - before), at + after + 1).map((word) => word[0]).join(' ')
+}
+
+/** Replaces the one occurrence of `needle` in `source`; any other number of occurrences throws. */
+function editOnce(source: string, needle: string | RegExp, replacement: string): string {
+  const found = typeof needle === 'string'
+    ? [...source.matchAll(new RegExp(escapeRegExp(needle), 'g'))]
+    : [...source.matchAll(new RegExp(needle.source, 'g'))]
+  if (found.length !== 1) throw new Error(`editOnce: the needle occurs ${found.length} times`)
+  const index = found[0].index ?? 0
+  return source.slice(0, index) + replacement + source.slice(index + found[0][0].length)
+}
+
+/** The grant tables a source names after FROM or JOIN, read from its whole text. */
+function grantTablesRead(source: string): Set<string> {
+  return new Set([...source.matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/g)].map((match) => match[1]).filter((table) => GRANT_TABLE.test(table)))
+}
+
+/** Problems of one statement of the service reader that mentions `roles`; `statement` is whitespace-squashed. */
+function roleNameJoinProblems(statement: string): string[] {
+  const { reader, clause, projection } = ROLE_NAME_JOIN
+  const problems: string[] = []
+  const joins = [...statement.matchAll(new RegExp(`(?<![\\w.])${escapeRegExp(clause)}(?![\\w.])`, 'g'))].map((match) => match.index ?? 0)
+  const insideJoin = (index: number) => joins.some((from) => index >= from && index < from + clause.length)
+  for (const mention of statement.matchAll(/\broles\b/gi)) {
+    if (!insideJoin(mention.index ?? 0)) problems.push(`${reader}: roles is referenced as "${wordsAround(statement, mention.index ?? 0, 2, 1)}", not as "${clause}"`)
+  }
+  if (problems.length === 0) {
+    const selectListEnd = statement.search(/\bFROM\b/)
+    const selected = new RegExp(`(?<=(?:,|\\bSELECT|\\bDISTINCT) )${escapeRegExp(projection)}(?=,| FROM\\b)`, 'y')
+    for (const use of statement.matchAll(/\br\b(?:\s*\.\s*(?:\*|\w+|"[^"]*"))?/gi)) {
+      const index = use.index ?? 0
+      if (insideJoin(index)) continue
+      selected.lastIndex = index
+      if (use[0] !== 'r.name') problems.push(`${reader}: the role-name join's alias is read as "${use[0]}", not as "r.name"`)
+      else if (!(index < selectListEnd && selected.test(statement))) problems.push(`${reader}: r.name is used outside the select list, in "${wordsAround(statement, index, 1, 2)}"`)
+    }
+  }
+  if (statement !== ROLE_NAME_JOIN.statement) problems.push(PINNED_STATEMENT_PROBLEM)
+  return problems
+}
+
+/** Problems of the mentions of `roles` in the literals of one reader. */
+function rolesMentionProblems(reader: string, source: string): string[] {
+  const problems: string[] = []
+  const literals = literalTexts(reader, source).map(squash)
+  const resourceNames = literals.filter((text) => text === ROLE_NAME_JOIN.table).length
+  const expectedResourceNames = ROLES_RESOURCE_NAME_LITERALS.get(reader) ?? 0
+  if (resourceNames !== expectedResourceNames) problems.push(`${reader}: the word roles is the whole text of ${resourceNames} literal(s), not of ${expectedResourceNames}`)
+  const statements = literals.filter((text) => text !== ROLE_NAME_JOIN.table && /\broles\b/i.test(text))
+  const mentions = statements.reduce((count, text) => count + [...text.matchAll(/\broles\b/gi)].length, 0)
+  if (reader !== ROLE_NAME_JOIN.reader) {
+    if (mentions > 0) problems.push(`${reader}: statement text mentions roles ${mentions} time(s); only the role-name join may`)
+    return problems
+  }
+  if (mentions !== 1) problems.push(`${reader}: statement text mentions roles ${mentions} time(s), not once`)
+  for (const statement of statements) problems.push(...roleNameJoinProblems(statement))
+  return problems
+}
+
+/**
+ * Problems of one authorization reader: a grant table outside the classifier's set after FROM or JOIN
+ * anywhere in its text, and any mention of `roles` other than the role-name join. The whole-text rule
+ * steps aside for `roles` only in the service reader and only while that text names the table once.
+ */
+function readerClosureProblems(reader: string, source: string): string[] {
+  const problems: string[] = []
+  const namedOnce = [...source.matchAll(/\b(?:FROM|JOIN)\s+roles\b/g)].length === 1
+  for (const table of grantTablesRead(source)) {
+    if ((PRIVILEGE_GRANT_SOURCE_TABLES as readonly string[]).includes(table)) continue
+    if (reader === ROLE_NAME_JOIN.reader && table === ROLE_NAME_JOIN.table && namedOnce) continue
+    problems.push(`${reader} reads ${table}`)
+  }
+  problems.push(...rolesMentionProblems(reader, source))
+  return problems
+}
+
+const serviceSource = read(SERVICE_READER)
+const namespaceSource = read(NAMESPACE_READER)
+
 describe('table list closure', () => {
   it('the tables the classifier statement reads equal its table constant, which is the scanner\'s input set', () => {
     const statement = classifierStatementText()
@@ -933,12 +1057,123 @@ describe('table list closure', () => {
   })
 
   it('the authorization readers reference no grant table outside the classifier\'s set', () => {
-    const grantTable = /^(?:users|user_[a-z_]+|role_[a-z_]+|roles|delegated_[a-z_]+|platform_member_[a-z_]+)$/
-    for (const reader of [`${SRC}/rbac/service.ts`, `${SRC}/rbac/namespace-admission.ts`]) {
-      const tables = new Set([...read(reader).matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/g)].map((match) => match[1]).filter((table) => grantTable.test(table)))
-      expect(tables.size, reader).toBeGreaterThanOrEqual(2)
-      for (const table of tables) expect(PRIVILEGE_GRANT_SOURCE_TABLES, `${reader} reads ${table}`).toContain(table)
+    // The one exception is the role-name join, pinned by shape above: it shows a role's name, and no decision reads `roles`.
+    for (const reader of AUTHORIZATION_READERS) {
+      const source = read(reader)
+      expect(grantTablesRead(source).size, reader).toBeGreaterThanOrEqual(2)
+      expect(readerClosureProblems(reader, source), reader).toEqual([])
     }
+  })
+
+  it('CONTROL — the role-name join passes as production writes it and when the same statement is laid out on one line', () => {
+    expect(squash(literalTexts(SERVICE_READER, serviceSource).find((text) => /\broles\b/.test(text)) ?? '')).toBe(ROLE_NAME_JOIN.statement)
+    expect(readerClosureProblems(SERVICE_READER, serviceSource)).toEqual([])
+    const oneLine = editOnce(serviceSource, /`SELECT DISTINCT rp\.permission_code AS code,[^`]*`/, `\`${ROLE_NAME_JOIN.statement}\``)
+    expect(oneLine).not.toBe(serviceSource)
+    expect(readerClosureProblems(SERVICE_READER, oneLine)).toEqual([])
+    expect(readerClosureProblems(NAMESPACE_READER, namespaceSource)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — an inner join of roles is a problem, written with or without INNER', () => {
+    const bare = editOnce(serviceSource, 'LEFT JOIN roles r', 'JOIN roles r')
+    expect(readerClosureProblems(SERVICE_READER, bare)).toEqual([
+      `${SERVICE_READER}: roles is referenced as "ur.role_id JOIN roles r", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+    const inner = editOnce(serviceSource, 'LEFT JOIN roles r', 'INNER JOIN roles r')
+    expect(readerClosureProblems(SERVICE_READER, inner)).toEqual([
+      `${SERVICE_READER}: roles is referenced as "INNER JOIN roles r", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+    const lower = editOnce(serviceSource, 'LEFT JOIN roles r', 'left join ROLES r')
+    expect(readerClosureProblems(SERVICE_READER, lower)).toEqual([
+      `${SERVICE_READER}: roles is referenced as "left join ROLES r", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+  })
+
+  it('POSITIVE CONTROL — a second mention of roles is a problem, even as a copy of the pinned statement or of the pinned join', () => {
+    const copy = `${serviceSource}\nconst again = \`${ROLE_NAME_JOIN.statement}\`\n`
+    expect(readerClosureProblems(SERVICE_READER, copy)).toEqual([`${SERVICE_READER} reads roles`, `${SERVICE_READER}: statement text mentions roles 2 time(s), not once`])
+    const elsewhere = editOnce(serviceSource, 'WHERE ur.user_id = $1 AND rp.permission_code = $2', `${ROLE_NAME_JOIN.clause} WHERE ur.user_id = $1 AND rp.permission_code = $2`)
+    expect(readerClosureProblems(SERVICE_READER, elsewhere)).toEqual([`${SERVICE_READER} reads roles`, `${SERVICE_READER}: statement text mentions roles 2 time(s), not once`, PINNED_STATEMENT_PROBLEM])
+    const commaJoin = editOnce(serviceSource, 'WHERE ur.user_id = $1 AND rp.permission_code = $2', ', roles x WHERE ur.user_id = $1 AND rp.permission_code = $2')
+    expect(readerClosureProblems(SERVICE_READER, commaJoin)).toEqual([
+      `${SERVICE_READER}: statement text mentions roles 2 time(s), not once`,
+      `${SERVICE_READER}: roles is referenced as "ur.role_id , roles x", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+    const inComment = `${serviceSource}\n// an earlier form read: JOIN roles\n`
+    expect(readerClosureProblems(SERVICE_READER, inComment)).toEqual([`${SERVICE_READER} reads roles`])
+    const removed = editOnce(serviceSource, ROLE_NAME_JOIN.clause, '')
+    expect(readerClosureProblems(SERVICE_READER, removed)).toEqual([`${SERVICE_READER}: statement text mentions roles 0 time(s), not once`])
+    const resourceName = `${serviceSource}\nconst resources = ['roles']\n`
+    expect(readerClosureProblems(SERVICE_READER, resourceName)).toEqual([`${SERVICE_READER}: the word roles is the whole text of 1 literal(s), not of 0`])
+  })
+
+  it('POSITIVE CONTROL — FROM roles is a problem, as the first table or inside a derived table', () => {
+    const derived = editOnce(serviceSource, ROLE_NAME_JOIN.clause, 'LEFT JOIN (SELECT id, name FROM roles) r ON r.id = ur.role_id')
+    expect(readerClosureProblems(SERVICE_READER, derived)).toEqual([
+      `${SERVICE_READER}: roles is referenced as "name FROM roles) r", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+    const first = editOnce(serviceSource, /FROM user_roles ur\s+JOIN role_permissions rp ON rp\.role_id = ur\.role_id\s+LEFT JOIN roles r ON r\.id = ur\.role_id/, 'FROM roles r JOIN user_roles ur ON ur.role_id = r.id JOIN role_permissions rp ON rp.role_id = ur.role_id')
+    expect(readerClosureProblems(SERVICE_READER, first)).toEqual([
+      `${SERVICE_READER}: roles is referenced as "role_name FROM roles r", not as "${ROLE_NAME_JOIN.clause}"`,
+      PINNED_STATEMENT_PROBLEM,
+    ])
+  })
+
+  it('POSITIVE CONTROL — reading another column of the joined role, every column, or the row itself, is a problem', () => {
+    const column = editOnce(serviceSource, ROLE_NAME_JOIN.projection, 'r.is_system AS role_name')
+    expect(readerClosureProblems(SERVICE_READER, column)).toEqual([`${SERVICE_READER}: the role-name join's alias is read as "r.is_system", not as "r.name"`, PINNED_STATEMENT_PROBLEM])
+    const star = editOnce(serviceSource, ROLE_NAME_JOIN.projection, 'r.*')
+    expect(readerClosureProblems(SERVICE_READER, star)).toEqual([`${SERVICE_READER}: the role-name join's alias is read as "r.*", not as "r.name"`, PINNED_STATEMENT_PROBLEM])
+    const row = editOnce(serviceSource, ROLE_NAME_JOIN.projection, 'r AS role_name')
+    expect(readerClosureProblems(SERVICE_READER, row)).toEqual([`${SERVICE_READER}: the role-name join's alias is read as "r", not as "r.name"`, PINNED_STATEMENT_PROBLEM])
+    const both = editOnce(serviceSource, ROLE_NAME_JOIN.projection, `${ROLE_NAME_JOIN.projection}, r.is_system AS role_is_system`)
+    expect(readerClosureProblems(SERVICE_READER, both)).toEqual([`${SERVICE_READER}: the role-name join's alias is read as "r.is_system", not as "r.name"`, PINNED_STATEMENT_PROBLEM])
+  })
+
+  it('POSITIVE CONTROL — the joined role in a condition is a problem: in WHERE, in a longer ON, in a computed column, as a column named without the alias, or behind a substituted fragment', () => {
+    const joinThenWhere = /LEFT JOIN roles r ON r\.id = ur\.role_id\s+WHERE ur\.user_id = \$1/
+    const where = editOnce(serviceSource, joinThenWhere, `${ROLE_NAME_JOIN.clause} WHERE r.name = $2 AND ur.user_id = $1`)
+    expect(readerClosureProblems(SERVICE_READER, where)).toEqual([`${SERVICE_READER}: r.name is used outside the select list, in "WHERE r.name = $2"`, PINNED_STATEMENT_PROBLEM])
+    const on = editOnce(serviceSource, joinThenWhere, `${ROLE_NAME_JOIN.clause} AND r.name IS NOT NULL WHERE ur.user_id = $1`)
+    expect(readerClosureProblems(SERVICE_READER, on)).toEqual([`${SERVICE_READER}: r.name is used outside the select list, in "AND r.name IS NOT"`, PINNED_STATEMENT_PROBLEM])
+    const computed = editOnce(serviceSource, 'rp.permission_code AS code,', "CASE WHEN r.name = 'admin' THEN rp.permission_code END AS code,")
+    expect(readerClosureProblems(SERVICE_READER, computed)).toEqual([`${SERVICE_READER}: r.name is used outside the select list, in "WHEN r.name = 'admin'"`, PINNED_STATEMENT_PROBLEM])
+    const subquery = editOnce(serviceSource, joinThenWhere, `${ROLE_NAME_JOIN.clause} WHERE ur.user_id = $1 AND EXISTS (SELECT ${ROLE_NAME_JOIN.projection} FROM user_permissions)`)
+    expect(readerClosureProblems(SERVICE_READER, subquery)).toEqual([`${SERVICE_READER}: r.name is used outside the select list, in "(SELECT r.name AS role_name"`, PINNED_STATEMENT_PROBLEM])
+    const unqualified = editOnce(serviceSource, joinThenWhere, `${ROLE_NAME_JOIN.clause} WHERE ur.user_id = $1 AND name = $2`)
+    expect(readerClosureProblems(SERVICE_READER, unqualified)).toEqual([PINNED_STATEMENT_PROBLEM])
+    const substituted = editOnce(serviceSource, joinThenWhere, `${ROLE_NAME_JOIN.clause} WHERE ur.user_id = $1 \${extra}`)
+    expect(readerClosureProblems(SERVICE_READER, substituted)).toEqual([PINNED_STATEMENT_PROBLEM])
+  })
+
+  it('POSITIVE CONTROL — the namespace reader mentioning roles is a problem, whichever way the table is named', () => {
+    const commaJoin = editOnce(namespaceSource, 'FROM user_namespace_admissions', 'FROM user_namespace_admissions, roles')
+    expect(readerClosureProblems(NAMESPACE_READER, commaJoin)).toEqual([`${NAMESPACE_READER}: statement text mentions roles 1 time(s); only the role-name join may`])
+    const qualified = editOnce(namespaceSource, 'FROM user_namespace_admissions', 'FROM user_namespace_admissions JOIN public.roles r ON TRUE')
+    expect(readerClosureProblems(NAMESPACE_READER, qualified)).toEqual([`${NAMESPACE_READER}: statement text mentions roles 1 time(s); only the role-name join may`])
+    const pinnedJoin = editOnce(namespaceSource, 'FROM user_namespace_admissions', `FROM user_namespace_admissions ${ROLE_NAME_JOIN.clause}`)
+    expect(readerClosureProblems(NAMESPACE_READER, pinnedJoin)).toEqual([
+      `${NAMESPACE_READER} reads roles`,
+      `${NAMESPACE_READER}: statement text mentions roles 1 time(s); only the role-name join may`,
+    ])
+    const resourceName = `${namespaceSource}\nconst resources = ['roles']\n`
+    expect(readerClosureProblems(NAMESPACE_READER, resourceName)).toEqual([`${NAMESPACE_READER}: the word roles is the whole text of 2 literal(s), not of 1`])
+  })
+
+  it('POSITIVE CONTROL — every other grant table outside the classifier\'s set is still a problem in both readers', () => {
+    const groups = editOnce(serviceSource, ROLE_NAME_JOIN.clause, `${ROLE_NAME_JOIN.clause} JOIN platform_member_groups g ON g.id = ur.role_id`)
+    expect(readerClosureProblems(SERVICE_READER, groups)).toEqual([`${SERVICE_READER} reads platform_member_groups`, PINNED_STATEMENT_PROBLEM])
+    const apart = `${serviceSource}\nconst other = 'SELECT 1 FROM role_templates'\n`
+    expect(readerClosureProblems(SERVICE_READER, apart)).toEqual([`${SERVICE_READER} reads role_templates`])
+    const namespace = editOnce(namespaceSource, 'FROM user_namespace_admissions', 'FROM user_namespace_admissions JOIN platform_member_groups g ON TRUE')
+    expect(readerClosureProblems(NAMESPACE_READER, namespace)).toEqual([`${NAMESPACE_READER} reads platform_member_groups`])
+    expect(() => editOnce(serviceSource, 'WHERE ur.user_id = $1', '')).toThrow('occurs')
+    expect(() => editOnce(serviceSource, 'no such text', '')).toThrow('occurs 0 times')
   })
 })
 
