@@ -38,6 +38,7 @@ import {
 } from './w4c0-identity'
 import { runAttendanceResultOperationTransactionV1, isAttendanceW4ConnectionUncertainV1 } from './w4c0-operation-registry'
 import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from './w4c0-operation-contract'
+import { countAttendanceActiveMultiSegmentShiftReferencesV1 } from './w4c3a-legacy-reference-guard'
 import { attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1 } from './w4c2-authoritative-delivery'
 import {
   ATTENDANCE_CALCULATION_AFFECTING_REQUEST_TYPES_V1,
@@ -1124,6 +1125,7 @@ export const ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1 = Object.freeze([
   // would wrongly block it). See `transitionAttendanceCalculationRolloutV1` for the enforced
   // check; this reporter reads the identical `attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()`.
   'AUTHORITATIVE_ENTRYPOINTS_DELIVERED',
+  'ACTIVE_MULTI_SEGMENT_REFERENCE',
 ] as const)
 
 export type AttendanceRolloutTransitionPredicateCodeV1 =
@@ -1334,6 +1336,12 @@ async function buildAttendanceRolloutTransitionPlanV1(
         authoritativeTargetApplicable ? undeliveredCount : null,
       ),
     )
+    const legacyTarget = targetState === 'legacy'
+    const activeMultiSegmentShifts = legacyTarget
+      ? await countAttendanceActiveMultiSegmentShiftReferencesV1(trx, orgId) : 0
+    if (activeMultiSegmentShifts === null) fail('W4C3A_ROLLOUT_CONTROL_REFERENCE_STATE_UNAVAILABLE')
+    predicates.push(passVerdict('ACTIVE_MULTI_SEGMENT_REFERENCE', legacyTarget,
+      activeMultiSegmentShifts === 0, legacyTarget ? activeMultiSegmentShifts : null))
   } else {
     for (const code of ATTENDANCE_ROLLOUT_TRANSITION_PREDICATE_CODES_V1) {
       if (code === 'ORG_ALLOWLISTED' || code === 'ROLLOUT_ROW_RESOLVABLE' || code === 'LEGAL_TRANSITION_PAIR') continue
@@ -1617,6 +1625,15 @@ export async function transitionAttendanceCalculationRolloutV1(
         fail('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
       }
 
+      // Parent DB-10: legacy reads cannot strand live multi-segment references.
+      // The session-exclusive class-00 lock precedes BEGIN, so this snapshot
+      // includes references committed by a shared-lock holder while we waited.
+      // Suspend/other targets retain their original predicates and evidence shape.
+      const activeMultiSegmentShifts = input.targetState === 'legacy'
+        ? await countAttendanceActiveMultiSegmentShiftReferencesV1(trx, input.orgId) : 0
+      if (activeMultiSegmentShifts === null) fail('W4C3A_ROLLOUT_CONTROL_REFERENCE_STATE_UNAVAILABLE')
+      if (activeMultiSegmentShifts > 0) fail('W4C3A_ROLLOUT_CONTROL_ACTIVE_MULTI_SEGMENT_REFERENCE')
+
       // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
       // happens only after it succeeds. Both share one transaction, so either order is atomic —
       // a failure at any point rolls back both — but this ordering also lets a same-transaction
@@ -1646,6 +1663,7 @@ export async function transitionAttendanceCalculationRolloutV1(
               unresolvedReviews,
               defectiveRequestSnapshots,
               defectiveRequestSnapshotsByCell,
+              ...(input.targetState === 'legacy' ? { activeMultiSegmentShifts } : {}),
             },
             references: input.evidenceReferences,
           }),

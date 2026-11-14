@@ -490,6 +490,17 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     // the two live contender connections below and closes it in afterAll.
     const db = new Kysely<never>({ dialect: new PostgresDialect({ pool }) })
     await w4c0Up(db)
+    // The new legacy-only predicate reads these real relation shapes. These
+    // control-boundary fixtures keep them empty; full-schema reference/FK and
+    // liveness discriminators live in the registered writer-matrix DB suite.
+    for (const ddl of [
+      'CREATE TABLE attendance_shifts (id uuid PRIMARY KEY, org_id text NOT NULL, name text NOT NULL)',
+      'CREATE TABLE attendance_shift_segments (org_id text NOT NULL, shift_id uuid NOT NULL, segment_index integer NOT NULL)',
+      'CREATE TABLE attendance_shift_assignments (org_id text NOT NULL, shift_id uuid NOT NULL, is_active boolean NOT NULL)',
+      'CREATE TABLE attendance_rotation_rules (org_id text NOT NULL, shift_sequence jsonb NOT NULL, is_active boolean NOT NULL)',
+      'CREATE TABLE attendance_shift_swap_requests (org_id text NOT NULL, request_id uuid NOT NULL, requester_shift_id uuid NOT NULL, counterparty_shift_id uuid NOT NULL)',
+      'CREATE TABLE attendance_schedule_dispatch_requests (org_id text NOT NULL, target_shift_id uuid, publish_status text NOT NULL)',
+    ]) await pool.query(ddl)
     await insertLegacyBatch()
     allow(orgId)
   }, 60_000)
