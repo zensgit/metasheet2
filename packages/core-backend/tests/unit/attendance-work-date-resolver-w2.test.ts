@@ -378,6 +378,47 @@ describe('W2 overlap precedence (OD-4556-8) + #4558 fold', () => {
     expect(reversed).toEqual(result)
   })
 
+  it('MUT05_PREVIOUS_AMBIGUITY: two previous overnight matches stay ambiguous without choosing a previous work date', () => {
+    const first = overnightCandidate('2026-07-15', {
+      shiftId: 's-night-a', assignmentId: 'a-night-a',
+    })
+    const second = overnightCandidate('2026-07-15', {
+      shiftId: 's-night-b', assignmentId: 'a-night-b',
+    })
+    const punch = new Date('2026-07-16T05:55:00.000Z')
+    expect(isInstantInWindow(punch, first.absoluteWindow)).toBe(true)
+    expect(isInstantInWindow(punch, second.absoluteWindow)).toBe(true)
+    const expected = {
+      kind: 'ambiguous',
+      reasonCode: REASON.OVERLAPPING_SHIFT_WINDOWS,
+      candidates: [
+        {
+          workDate: '2026-07-15', shiftId: 's-night-a', segmentIndex: null,
+          absoluteWindow: {
+            startAt: '2026-07-15T22:00:00.000Z',
+            endAt: '2026-07-16T06:00:00.000Z',
+          },
+        },
+        {
+          workDate: '2026-07-15', shiftId: 's-night-b', segmentIndex: null,
+          absoluteWindow: {
+            startAt: '2026-07-15T22:00:00.000Z',
+            endAt: '2026-07-16T06:00:00.000Z',
+          },
+        },
+      ],
+    }
+    for (const matching of [[first, second], [second, first]]) {
+      expect(selectAmongMatchingCandidates({
+        matching,
+        occurredAt: punch,
+        calendarWorkDate: '2026-07-16',
+        openRecords: [],
+        attributionTailMinutes: 120,
+      })).toEqual(expected)
+    }
+  })
+
   it('previous overnight alone re-anchors post-midnight punch (#4558 fold)', () => {
     const previous = overnightCandidate('2026-07-15')
     const checkOut = new Date('2026-07-16T05:55:00.000Z')
