@@ -11,6 +11,7 @@
  * contract shapes from `w4c0-write-boundary-types` — no bare-row stand-ins.
  */
 import { describe, expect, it } from 'vitest'
+import { computeAttendanceSemanticInputFingerprintV1, sortApprovedAttendanceFactsV1 } from '../w4c0-fingerprints'
 import type {
   ApprovedAttendanceFactV1,
   AttendanceAttributionSnapshotV1,
@@ -1003,6 +1004,222 @@ describe('calculateAttendanceSegmentsV1 — approved facts (lock 4.4)', () => {
     })
     expect(result.outcome).toBe('completed')
     expect(result.segments[0].actualInAt).toBe(shIso(8, 58))
+  })
+})
+
+describe('calculateAttendanceSegmentsV1 — correction fact pairs', () => {
+  const context = makeContext({ segments: [seg(0, '09:00', '12:00')] })
+  const evidence = [
+    punch('ev-late', 'check_in', sh('09:20')),
+    punch('ev-early', 'check_out', sh('11:40')),
+    adjustment('adj-in', 'check_in', sh('08:59')),
+    adjustment('adj-out', 'check_out', sh('12:01')),
+  ]
+  const pair = [
+    correctionFact('req-pair', 'check_in', sh('08:59'), 'ev-late'),
+    correctionFact('req-pair', 'check_out', sh('12:01'), 'ev-early'),
+  ]
+  const expected = {
+    outcome: 'completed',
+    outcomeReasonCode: 'calculated',
+    segments: [{
+      segmentIndex: 0,
+      expectedStartAt: shIso(9, 0),
+      expectedEndAt: shIso(12, 0),
+      expectedStartOffsetMinutes: 480,
+      expectedEndOffsetMinutes: 480,
+      expectedStartFold: 'unique',
+      expectedEndFold: 'unique',
+      actualInAt: shIso(8, 59),
+      actualOutAt: shIso(12, 1),
+      workedMinutes: 180,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      overtimeExtensionMinutes: 0,
+      excusedByLeave: false,
+      status: 'normal',
+      reasons: ['approved_correction_applied', 'within_window'],
+      matchedEvidenceRefs: ['adj-in', 'adj-out'],
+      unmatchedEvidenceRefs: ['ev-early', 'ev-late'],
+    }],
+    dailyProjection: {
+      firstInAt: shIso(8, 59),
+      lastOutAt: shIso(12, 1),
+      workedMinutes: 180,
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      status: 'adjusted',
+      timezone: 'Asia/Shanghai',
+      workDate: '2026-07-01',
+      meta: { severe_late_count: 0, severe_late_minutes: 0, absence_late_count: 0 },
+    },
+  }
+  const invalid = {
+    outcome: 'review_required',
+    outcomeReasonCode: 'input_schema_invalid',
+    segments: [],
+    dailyProjection: null,
+  }
+
+  it('same-request check_in and check_out corrections apply both exact evidence replacements', () => {
+    expect(run({ context, evidence, approvedFacts: pair })).toEqual(expected)
+  })
+
+  it('reversing same-request correction facts preserves the complete result', () => {
+    expect(run({ context, evidence, approvedFacts: [...pair].reverse() })).toEqual(expected)
+    expect(run({ context, evidence: [...evidence].reverse(), approvedFacts: [...pair].reverse() })).toEqual(expected)
+  })
+
+  it('same-request directional correction facts with distinct occurrence times preserve the semantic fingerprint on reversal', () => {
+    const input = {
+      attribution: makeAttribution(),
+      context,
+      evidence,
+      approvedFacts: pair,
+      manualOverride: null,
+      mergePolicy: 'merge',
+      calculationTier: 'segment_authoritative',
+      engineVersion: 'w4c1-segment-calculator@1',
+      snapshotSchemaVersion: 1,
+    }
+    expect(computeAttendanceSemanticInputFingerprintV1({
+      ...input,
+      evidence: [...evidence].reverse(),
+      approvedFacts: [...pair].reverse(),
+    })).toBe(computeAttendanceSemanticInputFingerprintV1(input))
+  })
+
+  it('same-request corrections at a shared segment boundary preserve fingerprint order invariance', () => {
+    const sharedContext = makeContext({ segments: [seg(0, '09:00', '12:00'), seg(1, '12:00', '18:00')] })
+    const sharedEvidence = [
+      punch('shared-start', 'check_in', sh('09:00')),
+      punch('shared-old-out', 'check_out', sh('11:50')),
+      punch('shared-old-in', 'check_in', sh('12:10')),
+      punch('shared-end', 'check_out', sh('18:00')),
+      adjustment('shared-new-out', 'check_out', sh('12:00')),
+      adjustment('shared-new-in', 'check_in', sh('12:00')),
+    ]
+    const sharedFacts = [
+      correctionFact('req-shared', 'check_out', sh('12:00'), 'shared-old-out'),
+      correctionFact('req-shared', 'check_in', sh('12:00'), 'shared-old-in'),
+    ]
+    const calculated = run({ context: sharedContext, evidence: sharedEvidence, approvedFacts: sharedFacts })
+    expect(calculated.outcome).toBe('completed')
+    expect(calculated.segments.map(segment => segment.workedMinutes)).toEqual([180, 360])
+    const input = {
+      attribution: makeAttribution(), context: sharedContext, evidence: sharedEvidence, approvedFacts: sharedFacts,
+      manualOverride: null, mergePolicy: 'merge', calculationTier: 'segment_authoritative',
+      engineVersion: 'w4c1-segment-calculator@1', snapshotSchemaVersion: 1,
+    }
+    expect(computeAttendanceSemanticInputFingerprintV1({ ...input, approvedFacts: [...sharedFacts].reverse() }))
+      .toBe(computeAttendanceSemanticInputFingerprintV1(input))
+  })
+
+  it('locale-equivalent distinct request IDs retain prior accepted fact ordering', () => {
+    const context = makeContext({ segments: [seg(0, '09:00', '12:00'), seg(1, '12:00', '18:00')] })
+    const evidence = [
+      punch('locale-start', 'check_in', sh('09:00')),
+      punch('locale-old-out', 'check_out', sh('11:50')),
+      punch('locale-old-in', 'check_in', sh('12:10')),
+      punch('locale-end', 'check_out', sh('18:00')),
+      adjustment('locale-new-out', 'check_out', sh('12:00')),
+      adjustment('locale-new-in', 'check_in', sh('12:00')),
+    ]
+    const firstId = 'req-\u00e9'
+    const secondId = 'req-e\u0301'
+    expect(firstId).not.toBe(secondId)
+    expect(firstId.localeCompare(secondId)).toBe(0)
+    const facts = [
+      correctionFact(firstId, 'check_out', sh('12:00'), 'locale-old-out'),
+      correctionFact(secondId, 'check_in', sh('12:00'), 'locale-old-in'),
+    ]
+    const calculated = run({ context, evidence, approvedFacts: facts })
+    expect(calculated.outcome).toBe('completed')
+    expect(calculated.segments.map(segment => segment.workedMinutes)).toEqual([180, 360])
+    expect(sortApprovedAttendanceFactsV1(facts)).toEqual(facts)
+    const reversed = [...facts].reverse()
+    expect(sortApprovedAttendanceFactsV1(reversed)).toEqual(reversed)
+  })
+
+  it.each([
+    ['requestSnapshotVersion', { requestSnapshotVersion: 2 }],
+    ['requestSnapshotFingerprint', { requestSnapshotFingerprint: 'e'.repeat(64) }],
+    ['approvalVersion', { approvalVersion: 4 }],
+    ['approvalRecordId', { approvalRecordId: '102' }],
+  ] as Array<[string, Partial<ReturnType<typeof factBase>>]>)('same-request correction pair rejects mixed %s with the complete invalid shape', (_field, drift) => {
+    const mixed = [pair[0], { ...pair[1], ...drift }]
+    expect(run({ context, evidence, approvedFacts: mixed })).toEqual(invalid)
+    expect(run({ context, evidence, approvedFacts: [...mixed].reverse() })).toEqual(invalid)
+  })
+
+  it.each(['check_in', 'check_out'] as const)(
+    'same-request correction pair rejects a repeated %s with the complete invalid shape',
+    (direction) => {
+      const duplicate = correctionFact(
+        'req-pair', direction, sh(direction === 'check_in' ? '08:58' : '12:02'), 'ev-other',
+      )
+      expect(run({ context, evidence, approvedFacts: [...pair, duplicate] })).toEqual(invalid)
+      expect(run({ context, evidence, approvedFacts: [duplicate, ...pair] })).toEqual(invalid)
+    },
+  )
+
+  it('different correction requests retain independent bindings and directional cardinality', () => {
+    const otherBinding = {
+      requestSnapshotVersion: 2,
+      requestSnapshotFingerprint: 'e'.repeat(64),
+      approvalVersion: 4,
+      approvalRecordId: '102',
+    }
+    expect(run({
+      evidence: [
+        ...evidence,
+        ...fullDayEvidence.slice(2),
+        adjustment('adj-in-2', 'check_in', sh('12:59')),
+        adjustment('adj-out-2', 'check_out', sh('18:02')),
+      ],
+      approvedFacts: [
+        ...pair,
+        { ...correctionFact('req-other', 'check_in', sh('12:59'), 'ev-in-2'), ...otherBinding },
+        { ...correctionFact('req-other', 'check_out', sh('18:02'), 'ev-out-2'), ...otherBinding },
+      ],
+    })).toEqual({
+      ...expected,
+      segments: [expected.segments[0], {
+        ...expected.segments[0],
+        segmentIndex: 1,
+        expectedStartAt: shIso(13, 0),
+        expectedEndAt: shIso(18, 0),
+        actualInAt: shIso(12, 59),
+        actualOutAt: shIso(18, 2),
+        workedMinutes: 300,
+        matchedEvidenceRefs: ['adj-in-2', 'adj-out-2'],
+        unmatchedEvidenceRefs: ['ev-in-2', 'ev-out-2'],
+      }],
+      dailyProjection: { ...expected.dailyProjection, lastOutAt: shIso(18, 2), workedMinutes: 480 },
+    })
+  })
+
+  const otherFacts: Array<[string, ApprovedAttendanceFactV1, ApprovedAttendanceFactV1]> = [
+    ['leave', leaveFact('req-other', sh('09:00'), sh('12:00'), 180), leaveFact('req-other', sh('13:00'), sh('18:00'), 300)],
+    ['overtime', overtimeFact('req-other', sh('18:00'), sh('19:00'), 60), overtimeFact('req-other', sh('08:00'), sh('09:00'), 60)],
+    ['outdoor_punch', {
+      ...factBase('req-other'), kind: 'outdoor_punch', direction: 'check_in', occurredAt: sh('08:58'),
+    }, {
+      ...factBase('req-other'), kind: 'outdoor_punch', direction: 'check_out', occurredAt: sh('18:02'),
+    }],
+  ]
+
+  it.each(otherFacts)('%s single-fact positive control remains accepted', (_kind, fact) => {
+    const result = run({ evidence: fullDayEvidence, approvedFacts: [fact] })
+    expect(result.outcome).toBe('completed')
+    expect(result.outcomeReasonCode).toBe('calculated')
+    expect(result.segments).toHaveLength(2)
+    expect(result.dailyProjection?.workedMinutes).toBe(480)
+  })
+
+  it.each(otherFacts)('%s retains kind-plus-request deduplication with the complete invalid shape', (_kind, first, second) => {
+    expect(run({ evidence: fullDayEvidence, approvedFacts: [first, second] })).toEqual(invalid)
+    expect(run({ evidence: fullDayEvidence, approvedFacts: [second, first] })).toEqual(invalid)
   })
 })
 

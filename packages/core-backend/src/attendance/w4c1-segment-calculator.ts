@@ -675,14 +675,17 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
   const supersededEvidenceRefs = new Set<string>()
   let hasUnboundedMinutesFact = false
   const seen = new Set<string>()
+  const correctionRequests = new Map<string, { fact: Record<string, unknown>; directions: Set<unknown> }>()
   for (const item of facts) {
     if (!isPlainObject(item)) return { kind: 'invalid' }
     const kind = item.kind
     if (!(FACT_KINDS as readonly unknown[]).includes(kind)) return { kind: 'invalid' }
     if (!validateFactBase(item)) return { kind: 'invalid' }
     const dedupeKey = `${String(kind)}${String(item.requestId)}`
-    if (seen.has(dedupeKey)) return { kind: 'invalid' }
-    seen.add(dedupeKey)
+    if (kind !== 'correction') {
+      if (seen.has(dedupeKey)) return { kind: 'invalid' }
+      seen.add(dedupeKey)
+    }
     if (kind === 'leave') {
       if (!hasExactKeys(item, [...FACT_BASE_KEYS, 'coverage', 'leaveType'])) return { kind: 'invalid' }
       if (!isNonEmptyString(item.leaveType)) return { kind: 'invalid' }
@@ -705,6 +708,20 @@ function validateApprovedFacts(facts: unknown): FactsCheck {
       if (!(DIRECTIONS as readonly unknown[]).includes(item.direction)) return { kind: 'invalid' }
       if (parseStrictInstantOrNull(item.occurredAt) === null) return { kind: 'invalid' }
       if (!isNonEmptyString(item.supersededEvidenceRef)) return { kind: 'invalid' }
+      const requestId = item.requestId as string
+      const previous = correctionRequests.get(requestId)
+      if (previous) {
+        if (
+          previous.directions.has(item.direction) ||
+          previous.fact.requestSnapshotVersion !== item.requestSnapshotVersion ||
+          previous.fact.requestSnapshotFingerprint !== item.requestSnapshotFingerprint ||
+          previous.fact.approvalVersion !== item.approvalVersion ||
+          previous.fact.approvalRecordId !== item.approvalRecordId
+        ) return { kind: 'invalid' }
+        previous.directions.add(item.direction)
+      } else {
+        correctionRequests.set(requestId, { fact: item, directions: new Set([item.direction]) })
+      }
       supersededEvidenceRefs.add(item.supersededEvidenceRef as string)
     } else if (kind === 'outdoor_punch') {
       if (!hasExactKeys(item, [...FACT_BASE_KEYS, 'direction', 'occurredAt'])) return { kind: 'invalid' }
