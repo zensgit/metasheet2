@@ -974,5 +974,5 @@ schtasks /Create ^
 
 **升级后(不论是否顺带开 flag)按此顺序再跑两个脚本,不要跳步**:先 `claim-flag-probe.cjs`(单次探测,判定 flag 是否真的生效:无声明令牌应 403,带声明令牌应 200),确认 flag 状态符合预期后,再跑 `w4-regression-222.ps1` 做管理员链 + 操作员链的全量回归,并与升级前保存的基线日志逐行 diff(去掉时间戳/UUID/时间字段后应为空)——2026-09-06 在 222 上就是按这个顺序验证的(先探针后回归),不要反过来,回归脚本跑得慢,先用探针快速判定 flag 本身对不对,能省一次无谓的完整回归。
 
-**回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
+**回滚**(任何一条不过就回滚,不要就地调):**不要只删 env 里那一行再裸跑 `pm2 restart metasheet-backend --update-env`**——它不重读 env 文件,也不会把删掉的变量从运行中的进程里清掉(`customer-delivery-guide-20260904.md` §7.1 memo 开关那一段记的实测),开关可能仍然开着。按这个顺序做:①把这一行改成 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=false`(读取方去空格、不分大小写后只认 `true`,`plugins/plugin-integration-core/lib/http-routes.cjs:1887`,基线 89617a418;`false` 就是关);②重启:用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`,或交付说明 §7.1 那种先把 env 文件装进当前 PowerShell、再 `pm2 restart metasheet-backend --update-env` 的写法;③核两条:`pm2 env 0` 里这个键是 `false`;上表 A 那个**没有**租户声明的旧令牌不再得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED`;④两条都对了再删这一行。
 没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。
