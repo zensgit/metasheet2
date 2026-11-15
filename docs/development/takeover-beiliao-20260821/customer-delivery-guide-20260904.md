@@ -784,7 +784,7 @@ pm2 restart metasheet-backend --update-env
 
 **分批拉取第一期(main 基线包)之后的回退另有停止条件**:上面的"迁移可以留着不回滚"仍然成立,但回到旧包之前要先跑停止条件查询,全为 0 才能回;第一个试点开启并拉过一次之后,就不能再回到 R83 这一类旧包。做法与查询见 `runbook-stock-prep-batch-refresh-pilot-20261111.md` §7。
 
-**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工从 `app.env` 里清理;接力链回退就是把对应的 env 路径键从 `app.env` 里拿掉后重启。**env 类回退同样要重启才生效,且必须按 §7.1 的写法先把 `app.env` 装进当前 shell 再 `pm2 restart --update-env`**,否则进程继续带着旧值。
+**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工清理;接力链回退也是去掉对应的 env 路径键。**清理和关掉都不能只删行再重启**:启动脚本只把 `app.env` 里写着的键装进进程(`scripts/ops/attendance-onprem-start-pm2.ps1:51-71`),常规路径是 `pm2 restart … --update-env`(`:378`),从文件里删掉的键会留在运行中的进程里(本指南 :717 的实测)。所以要按这个顺序做:先把键改成空值,例如 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=`、`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=`(空值等于没配:`packages/core-backend/src/plugin-runtime-config.ts:72`、`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:3196`);要整体关掉沙箱写入,同时把 `STOCK_PREP_SANDBOX_MODE` 改成 `false`(它只认精确的 `true`,同文件 :3193)。再用 `attendance-onprem-start-pm2.ps1` 重启,用 `pm2 env <后端 id>` 核对进程里这几个键已经是空值或 `false`;接力链再请求一次 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>`,应返回 `configured:false`。都对了,最后才从 `app.env` 里删掉这几行。
 
 **每日自动备份(常规运维,不同于上面升级前的一次性手工备份)**:222 上已注册 Windows 计划任务 `metasheet-daily-pg-dump`(以 `SYSTEM` 身份运行,每日 03:30 触发,脚本 `C:\metasheet\secrets\daily-pg-dump.ps1`,所在目录 ACL 仅 `Administrators`/`SYSTEM` 可读),执行 `pg_dump -Fc` 把整库导出到 `C:\metasheet\output\backups\daily\metasheet-<时间戳>.dump`,保留最近 14 天(超过的自动清理),日志写 `daily-pg-dump.log`。首次运行已验证成功。恢复方法与下面「最后手段」相同,把路径换成要恢复的那个 `.dump` 文件:
 

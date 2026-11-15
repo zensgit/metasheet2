@@ -242,7 +242,7 @@ INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=D:\metasheet\config\stock-prepar
 
 **`tenantId` 是必填的**:钉钉目的地 id 是部署级配置,宿主只能证明「这目的地归管理员管」,证不了「它属于正在被播报的那个租户」;而无租户声明的 token 会让 `x-tenant-id` **请求头**决定租户身份 —— 不填就会把别的租户的项目号播进这个群。多步链必须 `notify` 与 `terminal` **同时**配齐,只配一半直接报错。
 
-**验证**:重启后 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>` 返回 `configured:true` 且 `stepCount` 等于配的步数。500 `STOCK_PREPARATION_HANDOFF_CONFIG_INVALID` → 报错体的 `details.field` 就是写错的那个键。配不对就**把这个 env 拿掉重启**,回到「没有这个功能」的状态,别占用彩排时间。
+**验证**:重启后 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>` 返回 `configured:true` 且 `stepCount` 等于配的步数。500 `STOCK_PREPARATION_HANDOFF_CONFIG_INVALID` → 报错体的 `details.field` 就是写错的那个键。配不对就**先把这个 env 改成空值,用 `attendance-onprem-start-pm2.ps1` 重启,确认上面的 GET 返回 `configured:false`,再删掉这一行**(空值等于没配,`packages/core-backend/src/plugin-runtime-config.ts:72`;只删行再重启不行,删掉的键会留在运行中的进程里),回到「没有这个功能」的状态,别占用彩排时间。
 
 ---
 
@@ -324,7 +324,7 @@ pm2 restart metasheet-backend --update-env
 
 **迁移可以留着不回滚**:084 / 085 / 086 都是**纯新增**(建表、放宽一条 CHECK 的取值清单),单事务、失败即整体回滚,不残留半迁移状态,旧构建照常跑。所以代码级回滚**不需要动数据库**。
 
-**顺手清掉的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,窗口结束后需人工清理;接力链回退就是把 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 从 `app.env` 里拿掉重启。**注意 env 类回退同样要 `pm2 restart --update-env` 才生效**(§2 的 env-first 同理)。
+**顺手清掉的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,窗口结束后需人工清理;接力链回退也是去掉 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH`。**这两项都不能只删行再重启**:删掉的键会留在运行中的进程里(交付说明 `customer-delivery-guide-20260904.md:717` 的实测)。要先改成空值(`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=`、`INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=`,空值等于没配),用 `attendance-onprem-start-pm2.ps1` 重启,用 `pm2 env <后端 id>` 核对进程里已是空值、接力链 GET 返回 `configured:false`,最后再删这几行(§2 的 env-first 同理)。
 
 **#5455 不在本次发布内**:所以本部署**没有 3-3a 回填这一步**,也**不会出现 `LEGACY_UNATTRIBUTED` 相关行为**(字段权限 reconcile 尚未上线,既有字段级权限行不被对账、也不被重新标记归属)。回退时无需考虑它。
 
