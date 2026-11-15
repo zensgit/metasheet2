@@ -784,7 +784,7 @@ pm2 restart metasheet-backend --update-env
 
 **分批拉取第一期(main 基线包)之后的回退另有停止条件**:上面的"迁移可以留着不回滚"仍然成立,但回到旧包之前要先跑停止条件查询,全为 0 才能回;第一个试点开启并拉过一次之后,就不能再回到 R83 这一类旧包。做法与查询见 `runbook-stock-prep-batch-refresh-pilot-20261111.md` §7。
 
-**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工清理;接力链回退也是去掉对应的 env 路径键。**清理和关掉都不能只删行再重启**:启动脚本只把 `app.env` 里写着的键装进进程(`scripts/ops/attendance-onprem-start-pm2.ps1:51-71`),常规路径是 `pm2 restart … --update-env`(`:378`),从文件里删掉的键会留在运行中的进程里(本指南 :717 的实测)。所以要按这个顺序做:先把键改成空值,例如 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=`、`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS=`(空值等于没配:`packages/core-backend/src/plugin-runtime-config.ts:72`、`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:3196`);要整体关掉沙箱写入,同时把 `STOCK_PREP_SANDBOX_MODE` 改成 `false`(它只认精确的 `true`,同文件 :3193)。再用 `attendance-onprem-start-pm2.ps1` 重启,用 `pm2 env <后端 id>` 核对进程里这几个键已经是空值或 `false`;接力链再请求一次 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>`,应返回 `configured:false`。都对了,最后才从 `app.env` 里删掉这几行。
+**顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工清理;接力链回退也是去掉对应的 env 路径键。**清理和关掉都不能只删行再重启**:启动脚本只把 `app.env` 里写着的键装进进程(`scripts/ops/attendance-onprem-start-pm2.ps1:51-71`),常规路径是 `pm2 restart … --update-env`(`:378`),从文件里删掉的键会留在运行中的进程里(本指南 :717 的实测)。所以要按这个顺序做:先把这两个键改成"空"——只写 `KEY=` 不行:Windows PowerShell 5.1 下启动脚本的 `Set-Item Env:KEY ''` 不会建这个变量,效果等于删行(开发机 PS 5.1 实测,`r61-release-checklist-draft-20260928.md:407`)。要写成英文双引号包一个空格 `KEY=" "`:启动脚本会去掉两边的引号、留下一个空格(`scripts/ops/attendance-onprem-start-pm2.ps1:57-71`),读取方去空格后就当没配。必须用启动脚本重启,不要用 §7.1 那种手工把 `app.env` 装进当前 shell 的写法(它不去引号)。这一整套在现场没有从头到尾试过:重启后 `pm2 env <后端 id>` 里这个键如果还是旧值,就停下报 owner,不要改用 `pm2 delete`(首次启动在 PS 5.1 下会失败,见 R-91 [52] (c))。要整体关掉沙箱写入,同时把 `STOCK_PREP_SANDBOX_MODE` 改成 `false`(它只认精确的 `true`,`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:3193`;这一项不是空值,PS 5.1 下照常生效)。读取方:接力链路径去空格后为空就当没配(`packages/core-backend/src/plugin-runtime-config.ts:72`),允许清单去空格并丢掉空项(`stock-preparation-table-actions.cjs:3196-3199`)。再用 `attendance-onprem-start-pm2.ps1` 重启,用 `pm2 env <后端 id>` 核对这几个键已是空格或 `false`;接力链再用**配置时那个绑定本租户的令牌**请求一次 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>`,应返回 `configured:false`(换了租户也会答 `configured:false`,所以要用同一个令牌)。都对了,最后才从 `app.env` 里删掉这几行。
 
 **每日自动备份(常规运维,不同于上面升级前的一次性手工备份)**:222 上已注册 Windows 计划任务 `metasheet-daily-pg-dump`(以 `SYSTEM` 身份运行,每日 03:30 触发,脚本 `C:\metasheet\secrets\daily-pg-dump.ps1`,所在目录 ACL 仅 `Administrators`/`SYSTEM` 可读),执行 `pg_dump -Fc` 把整库导出到 `C:\metasheet\output\backups\daily\metasheet-<时间戳>.dump`,保留最近 14 天(超过的自动清理),日志写 `daily-pg-dump.log`。首次运行已验证成功。恢复方法与下面「最后手段」相同,把路径换成要恢复的那个 `.dump` 文件:
 
@@ -862,7 +862,7 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 - `startup`:进程启动时确保一次;
 - `daily`:启动时确保一次,此后每 24 小时再确保一次(`setInterval` 已 `unref()`,不会阻止进程退出)。
 
-**222 建议开 `daily`**——本节记录的这次丢分区就是"只在写失败那一刻才自愈、且只建当月"造成的,`daily` 能在月份滚动前就把下个月的分区提前建好,不再依赖手工 `SELECT to_regclass(...)` 巡检。**回滚**:删掉 `AUDIT_LOG_PARTITION_ENSURE` 这一行环境变量(或改回 `off`)重启进程即可完全恢复到 #5506 之前的行为,不需要回滚代码。
+**222 建议开 `daily`**——本节记录的这次丢分区就是"只在写失败那一刻才自愈、且只建当月"造成的,`daily` 能在月份滚动前就把下个月的分区提前建好,不再依赖手工 `SELECT to_regclass(...)` 巡检。**回滚**:先把 `AUDIT_LOG_PARTITION_ENSURE` 改回 `off`(除 `startup`、`daily` 以外的任何值都是关,`packages/core-backend/src/audit/audit-partition-schedule.ts:9-13`),用 `attendance-onprem-start-pm2.ps1` 重启,用 `pm2 env <后端 id>` 核对进程里已是 `off`,再删掉这一行,即可完全恢复到 #5506 之前的行为,不需要回滚代码。不要只删行再重启:删掉的键会留在运行中的进程里(本指南 :717 的实测)。
 
 ---
 
