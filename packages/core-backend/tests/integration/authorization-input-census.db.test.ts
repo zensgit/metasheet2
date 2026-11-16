@@ -12,7 +12,7 @@
  * pinned definition as the catalog stores it (timing, events and row level from `tgtype`, the
  * arguments from `tgargs`, the `UPDATE OF` column list, the `WHEN` clause, constraint-trigger
  * deferral and transition tables), runs the pinned function, is enabled in the ordinary `O`
- * posture, and that function's body (carriage returns removed) has a pinned sha256, so an edit of
+ * posture, and that function's body (each CRLF pair read as LF) has a pinned sha256, so an edit of
  * the body that names no input table is still seen, and so is a trigger dropped and re-created
  * under its own name on the same function with another definition. Matching and hashing are done
  * in TypeScript on catalog text; the database only returns names, definitions, function bodies,
@@ -24,8 +24,14 @@
  * constraint rebuilt under the same name and columns with another update action. The
  * subject-version pin has controls for a trigger rebuilt under its own name on the same function
  * with other events, an extra argument, AFTER timing, statement level, an `UPDATE OF` list, a
- * `WHEN` clause, as a deferred constraint trigger and with a new or an old transition table; and a
- * negative control: the same body re-created with CRLF line ends keeps the pinned digest.
+ * `WHEN` clause, as a deferred constraint trigger and with a new or an old transition table, and
+ * for a lone carriage return put inside a string literal of the body; and a negative control: the
+ * same body re-created with CRLF line ends keeps the pinned digest.
+ *
+ * What the body digest does not see: it reads every CR immediately followed by LF as LF, wherever
+ * the pair stands. A CRLF pair inside a string literal of the body (which PL/pgSQL keeps, so the
+ * function's behaviour differs from the LF form) therefore hashes the same as the LF form. A lone
+ * CR, inside a literal or not, is kept and changes the digest.
  */
 import { createHash } from 'node:crypto'
 import { Pool as PgPool } from 'pg'
@@ -89,11 +95,13 @@ const SUBJECT_VERSION_TRIGGER_EMPTY_PARTS = { updateOf: [] as string[], when: nu
 const SUBJECT_VERSION_FUNCTION = 'public.metasheet_authz_bump_subject_authorization_version'
 
 /**
- * sha256 (hex) of that function's `prosrc` with every carriage return removed, UTF-8. The migration
+ * sha256 (hex) of that function's `prosrc` with each CRLF pair replaced by LF, UTF-8. The migration
  * writes the body in a template literal, and a template literal reads a CRLF source line end as LF,
- * so a CRLF checkout already stores the same body. Carriage returns are still removed before
- * hashing, so a body re-created through a path that keeps them (a CRLF `.sql` file run by psql, for
- * example) is judged by its content and not by its line ends.
+ * so a CRLF checkout already stores the same body, with no CR in it; the digest is the same on
+ * either checkout. CRLF pairs are still folded before hashing, so a body re-created through a path
+ * that keeps them (a CRLF `.sql` file run by psql, for example) is judged by its content and not by
+ * its line ends. Only the pair is folded: a CRLF pair inside a string literal is read as LF too
+ * (that change of behaviour is not seen), while a lone CR is kept and changes the digest.
  */
 const SUBJECT_VERSION_FUNCTION_BODY_SHA256 = '29109ae3fe4cb66e6c528235689a448c3ad084b4616d1297b8d73b9da30b05b4'
 
@@ -316,9 +324,9 @@ async function childrenOfInputs(run: Runner): Promise<string[]> {
   return sortedLines(result.rows.map((row) => `${row.child_schema}.${row.child_name} -> ${row.parent_name}`))
 }
 
-/** sha256 (hex) of a function body with every carriage return removed. */
+/** sha256 (hex) of a function body with each CRLF pair read as LF; a lone CR is kept. */
 function bodyDigest(body: string): string {
-  return createHash('sha256').update(body.replace(/\r/g, ''), 'utf8').digest('hex')
+  return createHash('sha256').update(body.replace(/\r\n/g, '\n'), 'utf8').digest('hex')
 }
 
 type TriggerPin = Readonly<{
@@ -490,7 +498,7 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
     expect(await childrenOfInputs(run)).toEqual([...EXPECTED_CHILDREN_OF_INPUTS])
   })
 
-  it('10. each subject-version trigger has its pinned definition (tgtype, arguments, no UPDATE OF list, no WHEN, not a constraint trigger, no transition tables), runs the pinned function, is enabled (O), and that function body (CR removed) has the pinned sha256', async () => {
+  it('10. each subject-version trigger has its pinned definition (tgtype, arguments, no UPDATE OF list, no WHEN, not a constraint trigger, no transition tables), runs the pinned function, is enabled (O), and that function body (CRLF read as LF) has the pinned sha256', async () => {
     expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
   })
 
@@ -714,6 +722,21 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
         expect(stored.rows[0]?.has_cr).toBe(true)
         expect(await subjectVersionTriggerPins(runner)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
       })
+    })
+
+    it('a lone carriage return put inside a string literal of the subject function (the DELETE branch then returns NEW, which cancels the delete) is detected by assertion 10', async () => {
+      await inRolledBackTransaction(async (client, runner) => {
+        const definition = String((await runner("SELECT pg_get_functiondef('public.metasheet_authz_bump_subject_authorization_version()'::regprocedure) AS definition")).rows[0]?.definition)
+        const branch = "IF TG_OP = 'DELETE' THEN RETURN OLD;"
+        expect(definition.split(branch)).toHaveLength(2)
+        await client.query(definition.replace(branch, "IF TG_OP = 'DEL\rETE' THEN RETURN OLD;"))
+        const stored = await runner("SELECT prosrc AS body FROM pg_proc WHERE oid = 'public.metasheet_authz_bump_subject_authorization_version()'::regprocedure")
+        const body = String(stored.rows[0]?.body)
+        expect(body).toContain("'DEL\rETE'")
+        expect(bodyDigest(body)).not.toBe(SUBJECT_VERSION_FUNCTION_BODY_SHA256)
+        expect(await subjectVersionTriggerPins(runner)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS.map(([table, name, pin]) => [table, name, { ...(pin as TriggerPin), bodySha256: bodyDigest(body) }]))
+      })
+      expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
     })
   })
 
