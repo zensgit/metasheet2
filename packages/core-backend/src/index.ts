@@ -485,6 +485,7 @@ import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './int
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
+import { createYidaReconciliationRuntime } from './integration/yida-reconciliation-runtime'
 import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
@@ -689,6 +690,14 @@ export class MetaSheetServer {
     database: { transaction: yidaOwnerTransaction },
     fetch: globalThis.fetch.bind(globalThis),
     readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,
+  })
+  // R-71 ⑦.5 cut-over reconciliation: read-only paginated search + local insert-only evidence. Its own
+  // default-OFF switch (exact 'true'), never the send switch; anchor owner + live admin re-proved per call.
+  private yidaReconciliationRuntime = createYidaReconciliationRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -2210,7 +2219,7 @@ export class MetaSheetServer {
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
-      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies()))
+      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies(), this.yidaReconciliationRuntime))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
@@ -3706,6 +3715,9 @@ export class MetaSheetServer {
         yidaConnectionTestRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaConnectionTestRuntime.createPluginCapability()
           : undefined,
+        yidaReconciliationRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaReconciliationRuntime.createPluginCapability()
+          : undefined,
         // R-69 1b-ii: the IntegrationRunPort registration (plugin → host, like workdayCalendar), for
         // plugin-integration-core ONLY. Owner-tracked inside core/integration-run-port.ts (no server field);
         // unbound again in cleanupPluginRuntimeRegistrations. The core run_integration_job action fails closed
@@ -3765,7 +3777,8 @@ export class MetaSheetServer {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
       const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+      const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3784,7 +3797,8 @@ export class MetaSheetServer {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
         const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+        const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3808,7 +3822,8 @@ export class MetaSheetServer {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
       const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+      const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3966,6 +3981,7 @@ export class MetaSheetServer {
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
     const yidaConnectionTestDrain = this.observeShutdownTask(this.yidaConnectionTestRuntime.stop())
+    const yidaReconciliationDrain = this.observeShutdownTask(this.yidaReconciliationRuntime.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -4053,7 +4069,7 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain, yidaReconciliationDrain]
     // R-69 1b-ii: integration-job continuations (port call, heartbeat, Tx B) ride the FINAL barrier (T12).
     shutdownTasks.push(this.observeShutdownTask(this.drainIntegrationJobsForShutdown()))
 

@@ -857,4 +857,93 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     expect(within.reused).toBe(false)
     expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
   })
+
+  // R-71 ⑦.5 RC14 (plan §3.7 layer 2): a legacy record registered by the cut-over reconciliation occupies the
+  // 091 create fence for its seven keys, so the full owner send stack never creates it again. The legacy record
+  // carries the empty-allowed key (parentCode) as null, the planner folds it to '': the digests must still meet.
+  it('R-71 ⑦.5 RC14: a reconciled legacy record blocks the same seven keys at admission with zero form POST; another key still sends', async () => {
+    const lib = path.join(root, 'plugins/plugin-integration-core/lib')
+    const planner = await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href) as {
+      createYidaProtocolExample(): { config: Row; text: string } }
+    const { createYidaReconciliationPort } = await importNative(pathToFileURL(path.join(lib, 'yida-reconciliation-port.mjs')).href) as {
+      createYidaReconciliationPort(options: Row): { step(input: Row): Promise<Row & { counts: Row }> } }
+    const receipt = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href)) as
+      { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
+    const reconcile = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110700_add_integration_yida_delivery_reconciled_existing.ts')).href)) as
+      { YIDA_RECONCILED_EXISTING_UP_SQL: string }
+    // Deployment order: 033000 (reason CHECK) and 110300 (in ddl) before 110700.
+    await owner.query(receipt.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL)
+    await owner.query(reconcile.YIDA_RECONCILED_EXISTING_UP_SQL)
+    const example = planner.createYidaProtocolExample()
+    const sevenKey: Input = { config: { ...example.config, target: { appType: 'synthetic_owner_app', formUuid: 'synthetic_owner_form' } },
+      rowsText: example.text, allocation: { mode: 'original' } }
+    const keyTargets = ['project', 'componentCode', 'componentName', 'specification', 'material', 'version', 'parentCode']
+    const draft = await slot(sevenKey)
+    const planned = compile(sevenKey).plan.rows
+    // The legacy record: row 0's form body with the empty-allowed key as null (the planner itself sends '').
+    const legacy = { ...planned[0].payload, parentCode: null }
+    const calls = { token: 0, search: 0, form: 0, other: 0 }
+    const fetchDouble = async (url: string, init: RequestInit) => {
+      // Fixed synthetic implementation; never calls global fetch or opens a socket.
+      if (init.method !== 'POST') { calls.other++; throw new Error('SYNTHETIC_UNEXPECTED_METHOD') }
+      const pathname = new URL(url).pathname
+      if (pathname === '/v1.0/oauth2/accessToken') {
+        calls.token++
+        return new Response(JSON.stringify({ accessToken: 'synthetic-token', expireIn: 3600 }), { status: 200 })
+      }
+      if (pathname === '/v1.0/yida/forms/instances/advances/query') {
+        calls.search++
+        const body = JSON.parse(String(init.body)) as Row
+        expect([body.appType, body.formUuid, body.pageNumber]).toEqual(['synthetic_owner_app', 'synthetic_owner_form', 1])
+        return new Response(JSON.stringify({ pageNumber: 1, totalCount: 1,
+          data: [{ formInstanceId: 'FINST-synthetic-legacy-1', formUuid: 'synthetic_owner_form', formData: legacy }] }), { status: 200 })
+      }
+      if (pathname === '/v1.0/yida/forms/instances') {
+        calls.form++
+        return new Response(JSON.stringify({ result: 'synthetic-instance' }), { status: 201 })
+      }
+      calls.other++; throw new Error('SYNTHETIC_UNEXPECTED_FETCH')
+    }
+    const reconciler = createYidaReconciliationPort({ db: first.db, security,
+      context: { tenantId: 'synthetic-tenant', workspaceId: null, ownerId: 'synthetic-owner', actorId: 'synthetic-owner' },
+      fetch: fetchDouble, readEnablement: () => 'true', readProjectSheetsEnablement: () => undefined, timeoutMs: 10000, sleep: async () => {} })
+    const run = await reconciler.step({ commandId: randomUUID(), mode: 'register', projectNo: 'DEMO-P1', projectKeyTarget: 'project',
+      expectedKeyTargets: keyTargets })
+    expect([run.status, run.counts.registered, run.counts.key_unmatchable, run.lastErrorCode]).toEqual(['completed', 1, 0, null])
+    expect(calls).toEqual({ token: 1, search: 1, form: 0, other: 0 })
+    const ledgerRows = async () => (await owner.query(`SELECT status, intent, observed_instance_id, ack_instance_id, source_record_digest,
+      creation_identity_digest, business_key_digest FROM ${ident(LEDGER)} ORDER BY status`)).rows as Row[]
+    const [reconciled] = await ledgerRows()
+    expect([reconciled.status, reconciled.intent, reconciled.observed_instance_id, reconciled.ack_instance_id,
+      reconciled.source_record_digest, reconciled.creation_identity_digest])
+      .toEqual(['reconciled_existing', 'create', 'FINST-synthetic-legacy-1', null, null, null])
+    const members = (await owner.query('SELECT business_key_digest FROM integration_yida_draft_rows WHERE operation_id = $1 ORDER BY ordinal',
+      [draft.operationId])).rows as Row[]
+    expect(members[0].business_key_digest === reconciled.business_key_digest).toBe(true)
+    expect(members[1].business_key_digest === reconciled.business_key_digest).toBe(false)
+    // The same seven keys: drafted, approved, then refused at admission. No token, no form POST, no ledger row.
+    const grant = await first.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-confirmation' })
+    const request = { grantId: grant.grantId, submissionId: 'synthetic-submission' }
+    const before = await evidence()
+    await rejected(first.authority.admitForExecution(request), 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    await rejected(first.port({ fetch: fetchDouble } as FetchDouble).submit(request))
+    expect(calls).toEqual({ token: 1, search: 1, form: 0, other: 0 })
+    expect(await evidence()).toEqual(before)
+    expect((await ledgerRows()).map(row => row.status)).toEqual(['reconciled_existing'])
+    const audit = async (event: string) => Number((await owner.query(
+      `SELECT count(*)::int AS n FROM ${ident(LEDGER_AUDIT)} WHERE event = $1`, [event])).rows[0].n)
+    expect([await audit('reconcile'), await audit('prepare'), await audit('acknowledgement')]).toEqual([1, 0, 0])
+    const view = await first.port({ fetch: fetchDouble } as FetchDouble).inspect({ grantId: grant.grantId })
+    expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
+    // Another business key (row 1, parentCode set) is not over-blocked: it sends once.
+    const other = await first.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[1].rowKey,
+      confirmationId: 'synthetic-confirmation-other' })
+    const sent = await first.port({ fetch: fetchDouble } as FetchDouble).submit({ grantId: other.grantId, submissionId: 'synthetic-submission-other' })
+    expect([sent.status, sent.reused, sent.externalWriteAttempted]).toEqual(['acknowledged', false, true])
+    expect(calls).toEqual({ token: 2, search: 1, form: 1, other: 0 })
+    expect((await ledgerRows()).map(row => row.status)).toEqual(['acknowledged', 'reconciled_existing'])
+  })
 })
