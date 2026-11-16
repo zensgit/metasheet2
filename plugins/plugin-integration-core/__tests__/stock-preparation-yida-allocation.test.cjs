@@ -462,3 +462,31 @@ test('v2 allocation passes full config to parser so another mapped number cannot
     allocation: settings() })
   assert.deepEqual(valid.plan.rows.map((row) => row.payload.unitCost), [0.3, 0.3, 0.3])
 })
+
+// R-71 ⑦.3: the send path re-derives a v3 selection's rows from the ONE shared expansion. Planning
+// those rows must give the preview's plan exactly, and every preview refusal must refuse here too.
+test('R-71 ⑦.3: the shared expansion plans to the preview plan in both modes and refuses what the preview refuses', async () => {
+  const { buildYidaProjectAllocationPreview, expandYidaProjectAllocationRows } = await modulePromise
+  const { buildYidaStaticPlan, createYidaTransformExample } = await plannerPromise
+  const example = createYidaTransformExample()
+  for (const [mode, projects, totals] of [['equal_integer', ['DEMO-P1', 'DEMO-P2'], [4, 6]], ['equal_decimal_exact', ['DEMO-P1', 'DEMO-P2', 'DEMO-P3'], [0.9, 0.6]]]) {
+    const rows = example.rows.map((row, index) => ({ ...row, totalQuantity: totals[index] }))
+    const input = { config: example.config, rowsText: JSON.stringify(rows), allocation: { ...example.allocation, mode, projects } }
+    const preview = buildYidaProjectAllocationPreview(input)
+    assert.equal(preview.issues.length, 0, mode)
+    const expanded = expandYidaProjectAllocationRows(input)
+    assert.equal(expanded.length, rows.length * projects.length)
+    assert.deepEqual(buildYidaStaticPlan({ config: example.config, rows: expanded }), preview.plan)
+    assert.deepEqual(expanded.map((row) => row.projectNo), rows.flatMap(() => projects))
+  }
+  const refusals = [
+    [{ ...example, rows: example.rows.map((row) => ({ ...row, totalQuantity: 5 })) }, ['DEMO-P1', 'DEMO-P2'], 'YIDA_ALLOCATION_ROWS_INVALID'],
+    [{ ...example, rows: Array.from({ length: 51 }, (_, index) => ({ ...example.rows[0], idempotencyKey: 'SYN-' + index })) }, ['DEMO-P1', 'DEMO-P2'], 'YIDA_ALLOCATION_ROWS_LIMIT'],
+  ]
+  for (const [source, projects, code] of refusals) {
+    const input = { config: example.config, rowsText: JSON.stringify(source.rows), allocation: { ...example.allocation, projects } }
+    assert.equal(buildYidaProjectAllocationPreview(input).plan, null)
+    assert.throws(() => expandYidaProjectAllocationRows(input), { code })
+  }
+  assert.throws(() => expandYidaProjectAllocationRows({ config: example.config, rowsText: example.text }), { code: 'YIDA_ALLOCATION_INPUT_INVALID' })
+})

@@ -237,7 +237,9 @@ test('derived targets never enter the key: renaming or changing them moves only 
   assert.equal(twins.evidence.duplicateKeyCount, 2)
 })
 
-test('a v2 layout lifted to v3 keeps its key, key definition, row digests and plan digest', async () => {
+// R-71 ⑦.3 B2: the plan digest now covers the mapping version (v3 adds mapping: 3), so it differs
+// from the v2 one; the key definition, row specs and business keys stay the same.
+test('a v2 layout lifted to v3 keeps its key, key definition and row digests; only the plan digest marks v3', async () => {
   const { compileYidaDraft } = await persistedPromise
   const { compileYidaLocalDraft } = await draftPromise
   const v2 = {
@@ -257,16 +259,16 @@ test('a v2 layout lifted to v3 keeps its key, key definition, row digests and pl
   for (const allocation of [{ mode: 'original' }, { mode: 'equal_integer', projects: ['DEMO-P1', 'DEMO-P2'], projectField: 'projectNo', quantityField: 'quantity' }]) {
     const before = compileYidaDraft({ config: v2, rowsText: rows, allocation })
     const after = compileYidaLocalDraft({ config: v3, rowsText: rows, allocation })
-    assert.equal(after.planDigest, before.planDigest)
+    assert.notEqual(after.planDigest, before.planDigest)
     assert.equal(after.keyDefinitionDigest, before.keyDefinitionDigest)
     assert.deepEqual(after.rowSpecs, before.rowSpecs)
     assert.deepEqual(after.plan.rows.map((item) => item.localBusinessKey), before.plan.rows.map((item) => item.localBusinessKey))
   }
 })
 
-test('v2 still refuses one source mapped twice; the persisted draft path still refuses v3', async () => {
+test('v2 still refuses one source mapped twice; initialization still refuses v3 and the send entry accepts it', async () => {
   const { validateYidaStaticConfig } = await plannerPromise
-  const { compileYidaDraft } = await persistedPromise
+  const { compileYidaDraft, compileYidaSendDraft } = await persistedPromise
   const { compileYidaLocalDraft } = await draftPromise
   const v2 = {
     version: 2, kind: 'yida-form-protocol-static', target: TARGET, intent: 'create',
@@ -281,8 +283,10 @@ test('v2 still refuses one source mapped twice; the persisted draft path still r
   const input = { config: config(), rowsText: JSON.stringify([row()]), allocation: { mode: 'original' } }
   assert.equal(compileYidaLocalDraft(input).plan.rows.length, 1)
   assert.throws(() => compileYidaDraft(input), (error) => error.code === 'YIDA_DRAFT_CONFIG')
-  // Every persisting caller imports the facade, which carries no v3 entry point.
-  assert.deepEqual(Object.keys(await persistedPromise).sort(), ['YidaDraftPlanError', 'compileYidaDraft'])
+  // R-71 ⑦.3: the facade carries the v2-only initialization entry and the v2+v3 send entry, never
+  // the local recompute. The send entry gives the local recompute's exact result for a v3 input.
+  assert.deepEqual(Object.keys(await persistedPromise).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft'])
+  assert.deepEqual(compileYidaSendDraft(input), compileYidaLocalDraft(input))
   assert.equal((await persistedPromise).YidaDraftPlanError, (await draftPromise).YidaDraftPlanError)
 })
 
@@ -336,4 +340,27 @@ test('lookup stays out: the static plan, allocation and local compile run with z
     assert.equal(validateYidaStaticConfig(lookup).valid, false)
   } finally { guard.restore() }
   assert.deepEqual(guard.calls, [])
+})
+
+// R-71 ⑦.3 decision A: slot 1 seals its key definition at L4. A v3 material draft can only go to it
+// if the shipped v2 material template (the L4 layout) and the v3 material template define the key
+// identically: same key targets, types and nullable parts, so the same rows keep the same identity.
+test('the shipped v2 material template and the v3 material template share one key definition and row identities', async () => {
+  const { compileYidaSendDraft } = await persistedPromise
+  const { createYidaTransformExample } = await plannerPromise
+  const fs = require('node:fs')
+  const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
+  const v2 = read(path.join(__dirname, '..', '..', '..', 'docs', 'development', 'takeover-beiliao-20260821', 'yida-legacy-templates', 'material.json'))
+  const v3 = read(path.join(__dirname, '..', 'fixtures', 'yida-rule-templates', 'material-v3.json'))
+  const target = { appType: 'synthetic_slot_app', formUuid: 'synthetic_slot_form' }
+  const rowsText = createYidaTransformExample().text
+  const allocation = { ...v2.allocation, projects: ['DEMO-P1', 'DEMO-P2'] }
+  assert.deepEqual(v3.allocation, v2.allocation)
+  const before = compileYidaSendDraft({ config: { ...v2.rules, target }, rowsText, allocation })
+  const after = compileYidaSendDraft({ config: { ...v3.rules, target }, rowsText, allocation })
+  assert.equal(after.keyDefinition.fields.length, 7)
+  assert.deepEqual(after.keyDefinition, before.keyDefinition)
+  assert.equal(after.keyDefinitionDigest, before.keyDefinitionDigest)
+  assert.deepEqual(after.rowSpecs.map((spec) => spec.businessKeyDigest), before.rowSpecs.map((spec) => spec.businessKeyDigest))
+  assert.notEqual(after.planDigest, before.planDigest)
 })

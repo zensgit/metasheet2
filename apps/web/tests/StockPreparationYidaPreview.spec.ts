@@ -966,8 +966,13 @@ describe('StockPreparationYidaPreviewPanel', () => {
       expect(protocolData()).toEqual(host.plan.rows.map((row) => row.protocolPreview?.data))
       host.plan.rows.forEach((row) => expect(q(`sp-yida-result-row-${row.index}`).textContent).toContain(`本地业务键：${row.localBusinessKey}`))
     }
-    expect(q<HTMLButtonElement>('sp-yida-initialization-open').disabled).toBe(true)
-    expect(q('sp-yida-initialization-blocked').textContent).toContain('本地初始化仍只接受 v2 合同')
+    // R-71 ⑦.3: a clean v3 create preview is a persistent draft input. The entry opens, but the
+    // initialization POST stays refused inside (E1): v3 goes only to the owner send path.
+    expect(q<HTMLButtonElement>('sp-yida-initialization-open').disabled).toBe(false)
+    expect(root?.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+    q<HTMLButtonElement>('sp-yida-initialization-open').click(); await flush()
+    expect(q('sp-yida-init-v3-blocked').textContent).toContain('v3 草稿只能发往已用 v2 七键布局初始化的目标')
+    expect(q<HTMLButtonElement>('sp-yida-init-submit').disabled).toBe(true)
     expectNoIo()
   })
 
