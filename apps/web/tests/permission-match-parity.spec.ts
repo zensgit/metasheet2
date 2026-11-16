@@ -87,11 +87,13 @@ describe('useAuth().hasPermission delegates to that same matcher', () => {
 
   it('still short-circuits on the admin snapshot, which is why those rows are excluded', () => {
     // `admin:all` is NOT a wildcard in the algebra (the table says false) but IS an admin marker in
-    // the snapshot, so the composable answers true. That difference is the bypass, not a drift.
+    // the permission snapshot, so hasPermission answers true. That difference is the bypass, not a
+    // drift. It is not live platform-admin authority: hasAdminAccess stays false until the
+    // capability endpoint grants it.
     expect(matchesPermission(['admin:all'], 'stock-prep:read')).toBe(false)
     seedPermissions(['admin:all'])
     expect(useAuth().hasPermission('stock-prep:read')).toBe(true)
-    expect(useAuth().hasAdminAccess()).toBe(true)
+    expect(useAuth().hasAdminAccess()).toBe(false)
   })
 })
 

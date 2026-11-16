@@ -64,6 +64,7 @@ import {
   automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
+  isTargetRecordMissingSkippedExecution,
   isWithinAutomationRetryWindow,
   realFireTestRunEligibility,
   retryLedgerFamiliesForActions,
@@ -4897,6 +4898,58 @@ describe('AutomationService — Rule CRUD', () => {
             notificationStatus: 'sent',
             recipientCount: 2,
           }),
+        }),
+      ],
+    }))
+  })
+
+  // Delivery-result truthfulness: only a positive `sent` is success. A simulated (development mock) or
+  // not-attempted (`cancelled`) result is recorded as a SKIPPED step and a SKIPPED execution — never
+  // success, never a transport error — and the skip is not the target-record-missing kind.
+  it.each([
+    ['simulated', 'email_transport_simulated', { channel: 'email', transport: 'mock', reason: 'transport_simulated', recipientCount: 2 }],
+    ['cancelled', 'email_transport_disabled', { channel: 'email', transport: 'disabled', reason: 'transport_disabled', recipientCount: 2 }],
+    ['cancelled', 'email_no_recipients', { channel: 'email', reason: 'no_channel_recipients', recipientCount: 0 }],
+  ] as const)('executeRule records a %s send_email result as a skipped step and a skipped execution (reason %s)', async (status, reason, metadata) => {
+    const send = vi.fn(async () => ({ id: 'notif_not_sent_1', status, metadata }))
+    service = new AutomationService(eventBus, makeMockDb() as never, queryFn, undefined, null, {}, { send })
+    const logSpy = vi.spyOn(service.logs, 'record').mockResolvedValueOnce()
+
+    const execution = await service.executeRule(
+      createMockRule({
+        actions: [{
+          type: 'send_email',
+          config: {
+            recipients: ['ops@example.com', 'owner@example.com'],
+            subjectTemplate: 'Record {{record.title}} changed',
+            bodyTemplate: 'Status: {{record.status}}',
+          },
+        }],
+      }),
+      {
+        sheetId: 'sheet_1',
+        recordId: 'rec_1',
+        data: { title: 'Incident', status: 'open' },
+        _triggeredBy: 'test',
+      },
+    )
+
+    expect(execution.status).toBe('skipped')
+    expect(execution.error).toBeUndefined()
+    expect(isTargetRecordMissingSkippedExecution(execution)).toBe(false)
+    expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'skipped',
+      steps: [
+        expect.objectContaining({
+          actionType: 'send_email',
+          status: 'skipped',
+          output: {
+            outcome: 'not_sent',
+            reason,
+            notificationId: 'notif_not_sent_1',
+            notificationStatus: status,
+            recipientCount: 2,
+          },
         }),
       ],
     }))

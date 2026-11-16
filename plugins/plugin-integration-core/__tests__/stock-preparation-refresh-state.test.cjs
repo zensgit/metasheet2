@@ -120,8 +120,10 @@ test('U01: a running execution with NO live lease is failed_pending_recovery (�
   }
   // An abandoned lease with no execution row at all: a writer died here too.
   assert.equal(statusOf(consult({ pilot: PILOT, lock: abandonedLock() })), 'failed_pending_recovery')
-  // verified_closed is not pending.
-  assert.equal(statusOf(consult({ pilot: PILOT, executions: [{ ...running, status: 'verified_closed' }] })), 'complete')
+  // verified_closed is not pending. RE-PINNED by step 6a-1 (S6-1, design §3.4; R-91): a verified_closed SETTLEMENT
+  // SUBJECT nobody settled is 已执行待核对 (it was `complete` before); only a TRANSPARENT close leaves it `complete`.
+  assert.equal(statusOf(consult({ pilot: PILOT, executions: [{ ...running, status: 'verified_closed' }] })), 'executed_pending_settlement')
+  assert.equal(statusOf(consult({ pilot: PILOT, executions: [{ ...running, status: 'verified_closed', verifiedResult: 'nothing_landed', settlementSubject: false, changePlanBound: false }] })), 'complete')
 })
 
 test('pending_confirmation: an open hold of any kind, or a continuation that needs re-confirmation', () => {

@@ -1,5 +1,6 @@
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
+import { lockVisibleUsersForAccessGraphWrite, type AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('NamespaceAdmission')
@@ -553,45 +554,60 @@ export async function grantNamespaceAdmissions(
   return namespaces
 }
 
-export async function setUserNamespaceAdmission(options: {
+type NamespaceAdmissionWrite = {
   userId: string
   namespace: string
   enabled: boolean
   actorId?: string | null
   source?: string | null
-}): Promise<NamespaceAdmissionSnapshot[]> {
+}
+
+/** The caller holds all subject namespace and user locks through this write. */
+export async function writeUserNamespaceAdmission(
+  options: NamespaceAdmissionWrite,
+  client: AccessGraphTransactionClient,
+): Promise<void> {
   const userId = normalizeString(options.userId)
   const namespace = normalizeNamespace(options.namespace)
   if (!userId) throw new Error('userId is required')
   if (!namespace) throw new Error('namespace is required')
+  await client.query(
+    `INSERT INTO user_namespace_admissions
+       (user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+     ON CONFLICT (user_id, namespace)
+     DO UPDATE SET
+       enabled = EXCLUDED.enabled,
+       source = EXCLUDED.source,
+       granted_by = CASE
+         WHEN EXCLUDED.enabled THEN EXCLUDED.granted_by
+         ELSE user_namespace_admissions.granted_by
+       END,
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()`,
+    [
+      userId,
+      namespace,
+      options.enabled,
+      options.source ?? 'platform_admin',
+      options.enabled ? options.actorId ?? null : null,
+      options.actorId ?? null,
+    ],
+  )
+}
 
+export async function setUserNamespaceAdmission(options: NamespaceAdmissionWrite): Promise<NamespaceAdmissionSnapshot[]> {
+  const userId = normalizeString(options.userId)
+  const namespace = normalizeNamespace(options.namespace)
+  if (!userId) throw new Error('userId is required')
+  if (!namespace) throw new Error('namespace is required')
+  const actorId = normalizeString(options.actorId)
+  const subjectIds = Array.from(new Set([userId, actorId].filter(Boolean))).sort()
   await transaction(async (client) => {
-    await lockNamespaceAdmissionWrites(client, userId)
-    await client.query(
-      `INSERT INTO user_namespace_admissions
-         (user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-       ON CONFLICT (user_id, namespace)
-       DO UPDATE SET
-         enabled = EXCLUDED.enabled,
-         source = EXCLUDED.source,
-         granted_by = CASE
-           WHEN EXCLUDED.enabled THEN EXCLUDED.granted_by
-           ELSE user_namespace_admissions.granted_by
-         END,
-         updated_by = EXCLUDED.updated_by,
-         updated_at = NOW()`,
-      [
-        userId,
-        namespace,
-        options.enabled,
-        options.source ?? 'platform_admin',
-        options.enabled ? options.actorId ?? null : null,
-        options.actorId ?? null,
-      ],
-    )
+    for (const subjectId of subjectIds) await lockNamespaceAdmissionWrites(client, subjectId)
+    await lockVisibleUsersForAccessGraphWrite(client, subjectIds)
+    await writeUserNamespaceAdmission(options, client)
   })
-
   return listUserNamespaceAdmissionSnapshots(userId)
 }
 

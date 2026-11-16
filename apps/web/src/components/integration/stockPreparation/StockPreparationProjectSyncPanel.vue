@@ -151,6 +151,9 @@
       </template>
       <template v-else>
         <p class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-preview">{{ promptPreviewText }}</p>
+        <!-- 批次标识 BI-3 (P-4): whether the create path's write will be recorded as a pull batch. Absent while the switch
+             is off (no preview), when nothing is added, and for a sheet without the band (not_installed). -->
+        <p v-if="pullBatchPromptText" class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-pull-batch">{{ pullBatchPromptText }}</p>
         <div class="sp-sync__target-actions">
           <button
             type="button"
@@ -298,6 +301,16 @@
          server, bounded, values-free. Absent on the old (switch-off) path and when it could not count. -->
     <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
       {{ afterRowsText }}
+    </p>
+    <!-- 批次标识 BI-3 (§4.3): how this run's write was recorded (记为 / 并入 / 没有新增 / 未标记：原因), from the apply's own
+         answer. Absent while the switch is off (no key), for not_installed (P-2: the board says 未启用) and before a write. -->
+    <p
+      v-if="report && pullBatchOutcomeText"
+      class="sp-sync__counts"
+      data-testid="stock-prep-project-sync-pull-batch"
+      :data-pull-batch="report.pullBatch?.outcome?.kind"
+    >
+      {{ pullBatchOutcomeText }}
     </p>
     <!-- 人工补充行 B4 (ADR adr-stock-prep-manual-rows-20261030 §4 / §5.3; R-68): the per-sheet switch and the last pull's
          reminder live in their own component; this panel hands it the project (on the board, always the board's —
@@ -461,10 +474,20 @@
       >
         {{ bi('去「拉取待确认」处理', 'Go to “Pull holds”') }}<template v-if="suspendedHoldCount !== null && suspendedHoldCount > 0"> ({{ suspendedHoldCount }})</template>
       </button>
-      <!-- …and never the ledger queue: on a suspended run `pendingConfirmCount` is the plan's manual_confirm tally,
-           not anything queued (the reconcile was deferred). -->
+      <!-- PR-9 (R-77 ⑦): a run that met a written change awaiting review — the review is on 「拉取待确认」, PULL only. -->
       <button
-        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended'"
+        v-if="report.verdict === 'review_pending' && canOpenRefreshQueue"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-open-refresh-review"
+        @click="emit('navigate-stage', 'refresh-queue')"
+      >
+        {{ bi('去「拉取待确认」复核', 'Review it on “Pull holds”') }}<template v-if="reviewPendingCount !== null && reviewPendingCount > 0"> ({{ reviewPendingCount }})</template>
+      </button>
+      <!-- …and never the ledger queue: on a suspended (or review-pending) run `pendingConfirmCount` is the plan's
+           manual_confirm tally, not anything queued (the reconcile was deferred). -->
+      <button
+        v-if="report.pendingConfirmCount > 0 && report.verdict !== 'suspended' && report.verdict !== 'review_pending'"
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-queue"
@@ -514,7 +537,13 @@
             data-testid="stock-prep-project-sync-step-not-yours"
           >{{ bi(notYoursPosture.zh, notYoursPosture.en) }}</span>
           <template v-if="row.result">
-            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
+            <!-- 批次标识 BI-3 (critic C-5): a write refused or stopped on a STOCK_PREP_PULL_BATCH_* code reads that code's own
+                 plain sentence here (never WRITE_FAILED's 「数据没有变化」 after rows may have landed). -->
+            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason"><span
+              v-if="stockPrepPullBatchStepPlain(row.result)"
+              data-testid="stock-prep-project-sync-pull-batch-refusal"
+              :data-pull-batch-code="row.result.detail.code"
+            >{{ reasonText(row.result) }}</span><template v-else>{{ reasonText(row.result) }}</template></small>
             <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
               {{ reasonNext(row.result) }}
             </small>
@@ -627,6 +656,7 @@ import type { StockPreparationLargeBomJobApi } from '../../../services/integrati
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
+  STOCK_PREP_REFRESH_TOKEN_UNKNOWN,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepErrorPlain,
   stockPrepNoSheetLinkHint,
@@ -656,7 +686,12 @@ import { createStockPrepProjectSyncRunGuard, type StockPrepProjectSyncRunTicket 
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
-import { STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
+import { STOCK_PREP_REFRESH_STATUS_LABELS_EN, STOCK_PREP_REFRESH_STATUS_LABELS_ZH } from '../../../services/integration/stockPreparation/refreshState'
+import {
+  stockPrepPullBatchOutcomeLine,
+  stockPrepPullBatchPreviewLine,
+  stockPrepPullBatchStepPlain,
+} from '../../../services/integration/stockPreparation/pullBatch'
 
 const props = withDefaults(
   defineProps<{
@@ -937,6 +972,18 @@ const promptPreviewText = computed<string>(() => {
   if (!request || request.kind !== 'write') return ''
   const text = stockPrepProjectTargetWritePreviewText(request.planned)
   return bi(text.zh, text.en)
+})
+/** 批次标识 BI-3 (§4.4, P-4): the create path's write prompt says whether the write will be recorded as a pull batch. */
+const pullBatchPromptText = computed<string>(() => {
+  const request = targetPrompt.value?.request
+  if (!request || request.kind !== 'write') return ''
+  const line = stockPrepPullBatchPreviewLine(request.pullBatch ?? null, request.planned.add)
+  return line ? bi(line.zh, line.en) : ''
+})
+/** 批次标识 BI-3 (§4.3): how this run's write was recorded; '' (no element) for none / not_installed / disabled. */
+const pullBatchOutcomeText = computed<string>(() => {
+  const line = stockPrepPullBatchOutcomeLine(report.value?.pullBatch?.outcome ?? null)
+  return line ? bi(line.zh, line.en) : ''
 })
 
 const targetNoticeText = computed<StockPrepPlainEntry>(() => {
@@ -1360,6 +1407,17 @@ const checkLine = computed<{ text: string; next: string } | null>(() => {
     const plain = stockPrepSyncVerdictPlain('awaiting_recovery')
     return { text: plain ? bi(plain.zh, plain.en) : '', next: plain ? bi(plain.zhNext ?? '', plain.enNext ?? '') : '' }
   }
+  // PR-9 (R-77 ⑨): 复核 ≠ 核对. The check met a written change still awaiting its review: say so — never 「核对通过」
+  // and never a failed check; the board's re-read stays the only authority (R-62 ⑦).
+  if (result.outcome === 'review_pending') {
+    return {
+      text: bi(
+        '核对已提交;本项目有一次已写入的变更等待复核——复核不代替核对,核对也不代替复核,两样都完成后才能正式导出。',
+        'Check submitted; a written change of this project awaits its review — the review does not replace the check, nor the check the review; the formal export opens once both are done.',
+      ),
+      next: bi('拉取人员在「拉取待确认」里完成变更复核;之后以项目备料页为准,显示「已执行待核对」时再点「核对」。', 'The puller completes the change review on “Pull holds”; after that the project page decides — when it shows “written, awaiting check”, press “Check”.'),
+    }
+  }
   const plain = stockPrepSyncReasonPlain(result.reason)
   return {
     text: plain ? bi(plain.zh, plain.en) : bi('核对没有完成。', 'The check did not complete.'),
@@ -1370,11 +1428,24 @@ const checkLine = computed<{ text: string; next: string } | null>(() => {
 function stockPrepRefreshStatusLabel(status: string | null | undefined): { zh: string; en: string } {
   // A complete-but-unsettled project is 「待核对」, never 「已完成」 (the posture's own word — #6566 review N5).
   if (status === 'complete') return { zh: '待核对', en: 'awaiting check' }
-  const zh = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
-    ? STOCK_PREP_REFRESH_STATUS_LABELS_ZH[status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH]
-    : STOCK_PREP_REFRESH_STATUS_LABELS_ZH.unreadable
-  return { zh, en: typeof status === 'string' ? status : 'unreadable' }
+  // PR-9 (the #6579 version-skew residual): the en form reads its own map too; a token this build does not know reads
+  // 「未识别」 / "not recognised" — never the raw token inside the sentence.
+  const known = typeof status === 'string' && Object.prototype.hasOwnProperty.call(STOCK_PREP_REFRESH_STATUS_LABELS_ZH, status)
+  if (!known) return { zh: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.zh, en: STOCK_PREP_REFRESH_TOKEN_UNKNOWN.en }
+  const key = status as keyof typeof STOCK_PREP_REFRESH_STATUS_LABELS_ZH
+  return { zh: STOCK_PREP_REFRESH_STATUS_LABELS_ZH[key], en: STOCK_PREP_REFRESH_STATUS_LABELS_EN[key] }
 }
+
+/** PR-9: the review-pending run's pending reviews (values-free integer, from the step detail), or null. */
+const reviewPendingCount = computed<number | null>(() => {
+  const value = report.value
+  if (!value || value.verdict !== 'review_pending') return null
+  for (const step of value.steps) {
+    const count = step.detail ? step.detail.pendingReviews : undefined
+    if (typeof count === 'number' && Number.isInteger(count) && count >= 0) return count
+  }
+  return null
+})
 
 /** The suspended run's holds, from the report (values-free integer), or null. */
 const suspendedHoldCount = computed<number | null>(() => {
@@ -1432,6 +1503,9 @@ function stepIcon(status: StockPreparationProjectSyncStepStatus): string {
 }
 
 function reasonText(result: StockPreparationProjectSyncStepResult): string {
+  // 批次标识 BI-3 (critic C-5): a pull-batch refusal / run stop reads its own code first (`null` for every other step).
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zh, pullBatch.en)
   const plain = stockPrepSyncReasonPlain(result.reason)
   // Fails soft, like every other lookup in plainLanguage.ts: a reason added later renders as its own
   // code rather than blanking the line.
@@ -1439,6 +1513,8 @@ function reasonText(result: StockPreparationProjectSyncStepResult): string {
 }
 
 function reasonNext(result: StockPreparationProjectSyncStepResult): string {
+  const pullBatch = stockPrepPullBatchStepPlain(result)
+  if (pullBatch) return bi(pullBatch.zhNext ?? '', pullBatch.enNext ?? '')
   const plain = stockPrepSyncReasonPlain(result.reason)
   if (!plain) return ''
   return bi(plain.zhNext ?? '', plain.enNext ?? '')
@@ -1494,6 +1570,10 @@ const posture = computed<StockPrepPosture>(() => {
   }
   if (value.verdict === 'awaiting_recovery') {
     return stockPrepPosture({ busy: busy.value, refreshStatus: 'failed_pending_recovery' })
+  }
+  // PR-9: a review-pending run speaks the refresh posture's own words (变更待复核).
+  if (value.verdict === 'review_pending') {
+    return stockPrepPosture({ busy: busy.value, refreshStatus: 'change_pending_review' })
   }
   const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
   const missingList = value.missingComponents

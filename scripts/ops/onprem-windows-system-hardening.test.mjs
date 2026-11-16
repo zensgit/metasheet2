@@ -560,10 +560,18 @@ test('on-prem archive contract includes migration 066 and the documented postdep
     'build must package the permission-list closeout smoke',
   )
   for (const relativePath of [
+    'scripts/ops/stock-preparation-pull-batch-install.mjs',
+    'scripts/ops/stock-preparation-scheduled-pull.mjs',
+  ]) {
+    assert.ok(buildScript.includes(`"${relativePath}"`), `build must package ${relativePath} (batch identifier, R-65)`)
+  }
+  for (const relativePath of [
     'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql',
     'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs',
     'scripts/ops/stock-preparation-onprem-acceptance.ps1',
     'scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs',
+    'scripts/ops/stock-preparation-pull-batch-install.mjs',
+    'scripts/ops/stock-preparation-scheduled-pull.mjs',
   ]) {
     assert.ok(verifyScript.includes(`"${relativePath}"`), `verifier must require ${relativePath}`)
   }

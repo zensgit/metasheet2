@@ -1,0 +1,1049 @@
+{
+  "_meta": {
+    "allowlistVersion": 1,
+    "baseMainSha": "7363f2d570707c075e6a5e22687613bf4d2eba4a",
+    "rule": "A change that only adds a key updates this allowlist and the goldens in the same change; any other difference is a behavior change."
+  },
+  "accountDepartments": [
+    {
+      "external_department_id": "dB",
+      "external_user_id": "a0g-u10",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dB",
+      "external_user_id": "a0g-u11",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dB",
+      "external_user_id": "a0g-u12",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u1",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA1",
+      "external_user_id": "a0g-u1",
+      "is_primary": false
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u2",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u3",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u4",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dB",
+      "external_user_id": "a0g-u5",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u6",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dB",
+      "external_user_id": "a0g-u7",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA",
+      "external_user_id": "a0g-u8",
+      "is_primary": true
+    },
+    {
+      "external_department_id": "dA1",
+      "external_user_id": "a0g-u9",
+      "is_primary": true
+    }
+  ],
+  "accounts": [
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-old1-union",
+      "external_user_id": "a0g-old1",
+      "is_active": false,
+      "job_number": null,
+      "mobile": null,
+      "name": "Old One",
+      "nick": null,
+      "open_id": null,
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-old1-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u1@example.test",
+      "external_key": "a0g-b-u1-union",
+      "external_user_id": "a0g-u1",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 1",
+      "nick": null,
+      "open_id": "a0g-b-u1-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u1-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u10-union",
+      "external_user_id": "a0g-u10",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 10",
+      "nick": null,
+      "open_id": "a0g-b-u10-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u10-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u11@example.test",
+      "external_key": "a0g-b-u11-union",
+      "external_user_id": "a0g-u11",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 11",
+      "nick": null,
+      "open_id": "a0g-b-u11-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u11-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u12-union",
+      "external_user_id": "a0g-u12",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 12",
+      "nick": null,
+      "open_id": "a0g-b-u12-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u12-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u2@example.test",
+      "external_key": "a0g-b-u2-union",
+      "external_user_id": "a0g-u2",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 2",
+      "nick": null,
+      "open_id": null,
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u2-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u3@example.test",
+      "external_key": "a0g-b-u3-union",
+      "external_user_id": "a0g-u3",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 3",
+      "nick": null,
+      "open_id": "a0g-b-u3-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u3-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u4-union",
+      "external_user_id": "a0g-u4",
+      "is_active": true,
+      "job_number": null,
+      "mobile": "13900020004",
+      "name": "User 4",
+      "nick": null,
+      "open_id": "a0g-b-u4-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u4-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u5-union",
+      "external_user_id": "a0g-u5",
+      "is_active": true,
+      "job_number": null,
+      "mobile": "13900020005",
+      "name": "User 5",
+      "nick": null,
+      "open_id": "a0g-b-u5-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u5-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u6@example.test",
+      "external_key": "a0g-b-u6-union",
+      "external_user_id": "a0g-u6",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 6",
+      "nick": null,
+      "open_id": "a0g-b-u6-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u6-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": "a0g-b-u7@example.test",
+      "external_key": "a0g-b-u7-union",
+      "external_user_id": "a0g-u7",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 7",
+      "nick": null,
+      "open_id": "a0g-b-u7-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u7-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u8-union",
+      "external_user_id": "a0g-u8",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 8",
+      "nick": null,
+      "open_id": "a0g-b-u8-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u8-union"
+    },
+    {
+      "avatar_url": null,
+      "corp_id": "a0g-corp-b",
+      "email": null,
+      "external_key": "a0g-b-u9-union",
+      "external_user_id": "a0g-u9",
+      "is_active": true,
+      "job_number": null,
+      "mobile": null,
+      "name": "User 9",
+      "nick": null,
+      "open_id": "a0g-b-u9-open",
+      "provider": "dingtalk",
+      "raw": {},
+      "title": null,
+      "union_id": "a0g-b-u9-union"
+    }
+  ],
+  "alerts": [],
+  "calls": [
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        {}
+      ],
+      "fn": "listDingTalkDepartments"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        {}
+      ],
+      "fn": "getDingTalkDepartmentDetail"
+    },
+    {
+      "args": [
+        {
+          "appKey": "<appKey>",
+          "appSecret": "<secret>"
+        }
+      ],
+      "fn": "fetchDingTalkAppAccessToken"
+    },
+    {
+      "args": [
+        "<token>",
+        "1",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u1",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u2",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA",
+        50,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u3",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u4",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u6",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u8",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dB",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u5",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u7",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u10",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u11",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u12",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    },
+    {
+      "args": [
+        "<token>",
+        "dC",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "dA1",
+        0,
+        50,
+        {}
+      ],
+      "fn": "listDingTalkDepartmentUsers"
+    },
+    {
+      "args": [
+        "<token>",
+        "a0g-u9",
+        {}
+      ],
+      "fn": "getDingTalkUserDetail"
+    }
+  ],
+  "departments": [
+    {
+      "external_department_id": "1",
+      "external_parent_department_id": null,
+      "full_path": "a0g-int-b",
+      "is_active": true,
+      "name": "a0g-int-b",
+      "order_index": 0,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": [],
+        "syntheticRoot": true
+      }
+    },
+    {
+      "external_department_id": "dA",
+      "external_parent_department_id": "1",
+      "full_path": "a0g-int-b / Dept A",
+      "is_active": true,
+      "name": "Dept A",
+      "order_index": 1,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": []
+      }
+    },
+    {
+      "external_department_id": "dA1",
+      "external_parent_department_id": "dA",
+      "full_path": "a0g-int-b / Dept A / Dept A1",
+      "is_active": true,
+      "name": "Dept A1",
+      "order_index": 1,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": [
+          "a0g-u3"
+        ]
+      }
+    },
+    {
+      "external_department_id": "dB",
+      "external_parent_department_id": "1",
+      "full_path": "a0g-int-b / Dept B",
+      "is_active": true,
+      "name": "Dept B",
+      "order_index": 2,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": [
+          "a0g-u10"
+        ]
+      }
+    },
+    {
+      "external_department_id": "dC",
+      "external_parent_department_id": "1",
+      "full_path": "a0g-int-b / Dept C",
+      "is_active": true,
+      "name": "Dept C",
+      "order_index": 3,
+      "provider": "dingtalk",
+      "raw": {
+        "dept_manager_userid_list": []
+      }
+    },
+    {
+      "external_department_id": "dOld",
+      "external_parent_department_id": "1",
+      "full_path": "Dept Old",
+      "is_active": false,
+      "name": "Dept Old",
+      "order_index": 9,
+      "provider": "dingtalk",
+      "raw": {}
+    }
+  ],
+  "grants": [
+    {
+      "enabled": true,
+      "local_user_id": "user-a0g-u1",
+      "provider": "dingtalk"
+    },
+    {
+      "enabled": true,
+      "local_user_id": "user-a0g-u6",
+      "provider": "dingtalk"
+    },
+    {
+      "enabled": true,
+      "local_user_id": "user-a0g-u8",
+      "provider": "dingtalk"
+    }
+  ],
+  "identities": [
+    {
+      "corp_id": "a0g-corp-b",
+      "external_key": "a0g-corp-b:a0g-b-u9-open",
+      "local_user_id": "a0g-lu-b-u9",
+      "provider": "dingtalk",
+      "provider_open_id": "a0g-b-u9-open",
+      "provider_union_id": "a0g-b-u9-union"
+    },
+    {
+      "corp_id": "a0g-corp-b",
+      "external_key": "a0g-corp-b:a0g-b-u1-open",
+      "local_user_id": "user-a0g-u1",
+      "provider": "dingtalk",
+      "provider_open_id": "a0g-b-u1-open",
+      "provider_union_id": "a0g-b-u1-union"
+    },
+    {
+      "corp_id": "a0g-corp-b",
+      "external_key": "a0g-corp-b:a0g-b-u2-union",
+      "local_user_id": "user-a0g-u2",
+      "provider": "dingtalk",
+      "provider_open_id": null,
+      "provider_union_id": "a0g-b-u2-union"
+    },
+    {
+      "corp_id": "a0g-corp-b",
+      "external_key": "a0g-corp-b:a0g-b-u6-open",
+      "local_user_id": "user-a0g-u6",
+      "provider": "dingtalk",
+      "provider_open_id": "a0g-b-u6-open",
+      "provider_union_id": "a0g-b-u6-union"
+    },
+    {
+      "corp_id": "a0g-corp-b",
+      "external_key": "a0g-corp-b:a0g-b-u8-open",
+      "local_user_id": "user-a0g-u8",
+      "provider": "dingtalk",
+      "provider_open_id": "a0g-b-u8-open",
+      "provider_union_id": "a0g-b-u8-union"
+    }
+  ],
+  "integration": {
+    "has_last_success": true,
+    "last_error": null
+  },
+  "links": [
+    {
+      "external_user_id": "a0g-old1",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-b-old1",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u1",
+      "link_status": "linked",
+      "local_user_id": "user-a0g-u1",
+      "match_strategy": "auto_admit"
+    },
+    {
+      "external_user_id": "a0g-u10",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-b-u10",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u11",
+      "link_status": "unmatched",
+      "local_user_id": null,
+      "match_strategy": "manual_unbound"
+    },
+    {
+      "external_user_id": "a0g-u12",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-b-u12",
+      "match_strategy": "manual_admin"
+    },
+    {
+      "external_user_id": "a0g-u2",
+      "link_status": "linked",
+      "local_user_id": "user-a0g-u2",
+      "match_strategy": "auto_admit"
+    },
+    {
+      "external_user_id": "a0g-u3",
+      "link_status": "pending",
+      "local_user_id": "a0g-lu-b-u3",
+      "match_strategy": "email"
+    },
+    {
+      "external_user_id": "a0g-u4",
+      "link_status": "pending",
+      "local_user_id": "a0g-lu-b-u4",
+      "match_strategy": "mobile"
+    },
+    {
+      "external_user_id": "a0g-u5",
+      "link_status": "unmatched",
+      "local_user_id": null,
+      "match_strategy": "none"
+    },
+    {
+      "external_user_id": "a0g-u6",
+      "link_status": "linked",
+      "local_user_id": "user-a0g-u6",
+      "match_strategy": "auto_admit"
+    },
+    {
+      "external_user_id": "a0g-u7",
+      "link_status": "unmatched",
+      "local_user_id": null,
+      "match_strategy": "none"
+    },
+    {
+      "external_user_id": "a0g-u8",
+      "link_status": "linked",
+      "local_user_id": "user-a0g-u8",
+      "match_strategy": "auto_admit"
+    },
+    {
+      "external_user_id": "a0g-u9",
+      "link_status": "linked",
+      "local_user_id": "a0g-lu-b-u9",
+      "match_strategy": "external_identity"
+    }
+  ],
+  "onboardingPacketCount": 1,
+  "runs": [
+    {
+      "error_message": null,
+      "status": "completed",
+      "trigger_source": "scheduler"
+    }
+  ],
+  "stats": {
+    "accountsCreatedCount": 8,
+    "accountsDeactivatedCount": 1,
+    "accountsSynced": 12,
+    "accountsUpdatedCount": 4,
+    "adminUnboundHeldCount": 1,
+    "applyTransactionMs": "<duration>",
+    "autoAdmissionCandidateCount": 4,
+    "autoAdmissionExcludedCount": 0,
+    "autoAdmissionFailedCount": 0,
+    "autoAdmissionSkippedMissingEmailCount": 0,
+    "autoAdmittedCount": 4,
+    "autoAdmittedNoEmailCount": 1,
+    "autoAdmittedWithoutGrantCount": 1,
+    "bcryptMsInTransaction": "<duration>",
+    "departmentsCreatedCount": 4,
+    "departmentsDeactivatedCount": 1,
+    "departmentsSynced": 5,
+    "departmentsUpdatedCount": 1,
+    "deprovisionAbortedReason": null,
+    "deprovisionAffected": [
+      {
+        "directoryAccountId": "acct-a0g-old1",
+        "globallyClear": true,
+        "localUserId": "a0g-lu-b-old1",
+        "policy": "mark_inactive"
+      }
+    ],
+    "deprovisionAffectedTruncated": false,
+    "deprovisionApplied": false,
+    "deprovisionCandidateCount": 1,
+    "deprovisionGlobalCandidateCount": 1,
+    "deprovisionGrantsDisabledCount": 1,
+    "deprovisionManualReviewCount": 0,
+    "deprovisionManualReviewPending": [],
+    "deprovisionManualReviewPendingTruncated": false,
+    "deprovisionMembershipDeactivationAttemptedCount": 0,
+    "deprovisionUsersDeactivatedCount": 1,
+    "durationMs": "<duration>",
+    "externalDepartmentDetailCalls": 5,
+    "externalDepartmentListCalls": 5,
+    "externalDirectoryPullCalls": 28,
+    "externalPullRetryCount": 0,
+    "externalPullRetryFlowControlCount": 0,
+    "externalPullRetryHttp429Count": 0,
+    "externalPullRetryNetworkCount": 0,
+    "externalPullRetryOtherCount": 0,
+    "externalUserDetailCalls": 12,
+    "externalUserListPageCalls": 6,
+    "fetchDurationMs": "<duration>",
+    "linkedCount": 8,
+    "linkedManagerCount": 1,
+    "managerCount": 2,
+    "managerCoverage": 0.5,
+    "memberGroupDefaultNamespaceAdmissionsCount": 0,
+    "memberGroupDefaultRoleAssignmentsCount": 0,
+    "memberGroupGovernedUserCount": 0,
+    "memberGroupMembershipsUpdatedCount": 0,
+    "memberGroupsCreatedCount": 0,
+    "memberGroupsSyncedCount": 0,
+    "membershipWritesSkippedLocalAccountGateCount": 1,
+    "pendingCount": 2,
+    "unmatchedCount": 3
+  },
+  "userOrgs": [
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "a0g-lu-b-u10"
+    },
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "a0g-lu-b-u9"
+    },
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "user-a0g-u1"
+    },
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "user-a0g-u2"
+    },
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "user-a0g-u6"
+    },
+    {
+      "is_active": true,
+      "org_id": "default",
+      "user_id": "user-a0g-u8"
+    }
+  ],
+  "users": [
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-old1@example.test",
+      "id": "a0g-lu-b-old1",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local old1",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u10@example.test",
+      "id": "a0g-lu-b-u10",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u10",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-u11@example.test",
+      "id": "a0g-lu-b-u11",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u11",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u12@example.test",
+      "id": "a0g-lu-b-u12",
+      "is_active": false,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u12",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-u3@example.test",
+      "id": "a0g-lu-b-u3",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u3",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u4@example.test",
+      "id": "a0g-lu-b-u4",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900020004",
+      "must_change_password": false,
+      "name": "Local u4",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u5a@example.test",
+      "id": "a0g-lu-b-u5a",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900020005",
+      "must_change_password": false,
+      "name": "Local u5a",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u5b@example.test",
+      "id": "a0g-lu-b-u5b",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": "13900020005",
+      "must_change_password": false,
+      "name": "Local u5b",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-lu-u9@example.test",
+      "id": "a0g-lu-b-u9",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": false,
+      "name": "Local u9",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-u1@example.test",
+      "id": "user-a0g-u1",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": true,
+      "name": "User 1",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-u2@example.test",
+      "id": "user-a0g-u2",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": true,
+      "name": "User 2",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": "a0g-b-u6@example.test",
+      "id": "user-a0g-u6",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": true,
+      "name": "User 6",
+      "role": "user",
+      "username": null
+    },
+    {
+      "activation_status": "activated",
+      "email": null,
+      "id": "user-a0g-u8",
+      "is_active": true,
+      "is_admin": false,
+      "local_password_set": true,
+      "mobile": null,
+      "must_change_password": true,
+      "name": "User 8",
+      "role": "user",
+      "username": "dt_a0g_u8_<suffix>"
+    }
+  ]
+}

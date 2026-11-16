@@ -143,6 +143,19 @@
         "target": "sourceLineId",
         "type": "string",
         "required": true
+      },
+      {
+        "transform": "generated",
+        "template": [
+          {
+            "preset": "material-code-v1",
+            "rowIdOf": "sourceLineId",
+            "projectOf": "project"
+          }
+        ],
+        "target": "materialCodeText",
+        "type": "string",
+        "required": true
       }
     ],
     "fieldCatalog": [
@@ -233,6 +246,11 @@
         "id": "sourceLineId",
         "control": "text",
         "required": true
+      },
+      {
+        "id": "materialCodeText",
+        "control": "text",
+        "required": false
       }
     ]
   },

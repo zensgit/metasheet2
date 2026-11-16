@@ -153,9 +153,10 @@ describe('email transport readiness', () => {
 })
 
 describe('EmailNotificationChannel transport gate', () => {
-  it('sends through the mock channel when transport env is absent', async () => {
+  it('reports simulated (not sent) through the mock channel when transport env is absent, touching no transport', async () => {
     vi.spyOn(Logger.prototype, 'info').mockImplementation(() => undefined)
-    const channel = new EmailNotificationChannel({ env: {} })
+    const createTransport = vi.fn(() => { throw new Error('transport factory must not be called in mock mode') })
+    const channel = new EmailNotificationChannel({ env: {}, smtpTransportFactory: { createTransport } })
 
     const result = await channel.sender(
       {
@@ -167,11 +168,14 @@ describe('EmailNotificationChannel transport gate', () => {
       [{ id: 'ops@example.com', type: 'email' }],
     )
 
-    expect(result.status).toBe('sent')
+    expect(result.status).toBe('simulated')
+    expect(result.status).not.toBe('sent')
     expect(result.metadata).toEqual(expect.objectContaining({
       channel: 'email',
+      transport: 'mock',
       recipientCount: 1,
     }))
+    expect(createTransport).not.toHaveBeenCalled()
   })
 
   it('sends through an injected SMTP transport when smtp mode is configured', async () => {

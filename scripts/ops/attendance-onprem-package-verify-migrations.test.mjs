@@ -60,6 +60,8 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   for (const rel of placeholderFiles) {
     writeFile(pkgRoot, rel, `${rel}\n`)
   }
+  const webAssetHelper = 'scripts/ops/web-dist-retain-assets.mjs'
+  writeFile(pkgRoot, webAssetHelper, fs.readFileSync(path.join(repoRoot, webAssetHelper)))
 
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/index.js', 'module.exports = {}\n')

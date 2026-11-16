@@ -30,6 +30,15 @@
 // `git -c core.autocrlf=false archive` copy of that commit's plugin directory, this file added): the
 // SCC_CAPTURE output was BYTE-IDENTICAL to the 1638ab91c capture, so GOLDEN holds on both bases.
 //
+// RECAPTURED, R-71 ⑦.4 PR-4 (two template columns `issueConfirmDate` / `projectSpecModel`): 18 literal
+// positions (13 distinct values), all of them digests of a payload carrying the template's field list —
+// `dryRun.evidenceDigest` / `responseDigest`, `ledger.planDigest` / `planJsonDigest`, `planner.planDigest` /
+// `planJsonDigest` of both scenarios, plus `apply.responseDigest`, `archive.evidenceDigest` and the four
+// `large` digests of `second_pull_dash`. The plan moved ONLY in `summary.plmSystemFields` (it gained
+// `projectSpecModel`; `issueConfirmDate` is outside the refresh band); no decision, patch or record moved.
+// HOW: SCC_CAPTURE on the PR-4 branch with the two `field(...)` lines removed (MACHINE_WRITEBACK_FIELD_IDS
+// emptied) reproduced the previous literals exactly; with the columns, exactly these moved.
+//
 // After PR-1 the same legs must reproduce GOLDEN exactly AND the rows the reader returned must carry
 // the record reference (otherwise the identity would be vacuous: nothing would have been attached).
 //
@@ -54,6 +63,14 @@ const GOLDEN_BASE_SHA = '1638ab91cc89e04b839dc78ed55a7b49bb40ff4f'
 const GOLDEN_RECAPTURE_SHA = 'cde8e17e21b93384154eca6aa9c4679621e1a15b'
 const CAPTURE = process.env.SCC_CAPTURE === '1'
 const RECORD_REF = Symbol.for('metasheet.stock-preparation.existingRow.recordRef')
+// 批次标识 BI-1b (design §4.4, §6.3 (a); register R-65): the POISONED leg seeds the SAME sheet with both band cells
+// (under the server-held physical ids AND the logical ids) and hands every lib the band; every GOLDEN literal must still
+// hold and every reader row must carry the pull-batch Symbol (non-vacuity). Mutants M-BI-2 (no strip) / M-1B-1 (strip
+// the logical ids only) turn this red.
+const PULL_BATCH_SYMBOL = Symbol.for('metasheet.stock-preparation.existingRow.pullBatch')
+const GOLDEN_BAND = Object.freeze({ fieldIds: Object.freeze({ pullBatch: 'fld_scc_pullBatch', firstPullBatch: 'fld_scc_firstPullBatch' }) })
+const BAND_SENTINEL = '第7批（2026-10-01）'
+const BAND_KEYS = Object.freeze([...Object.values(GOLDEN_BAND.fieldIds), 'pullBatch', 'firstPullBatch'])
 
 const LIB = path.join(__dirname, '..', 'lib')
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -202,8 +219,9 @@ function foreignKeylessScenario() {
 
 const SCENARIOS = Object.freeze([secondPullScenario, foreignKeylessScenario])
 
-function seededRecordsApi(scenario) {
-  const api = createRecordsApi(scenario.existingRows.map((entry) => ({ id: entry.id, sheetId: SHEET_ID, data: entry.data })))
+function seededRecordsApi(scenario, band = 'none') {
+  const cells = band === 'poisoned' ? Object.fromEntries(BAND_KEYS.map((key) => [key, BAND_SENTINEL])) : {}
+  const api = createRecordsApi(scenario.existingRows.map((entry) => ({ id: entry.id, sheetId: SHEET_ID, data: { ...entry.data, ...cells } })))
   // The harness pins every version to 1 and drops createdBy; restore both so the envelope carries
   // what a host record carries.
   scenario.existingRows.forEach((entry, index) => {
@@ -226,11 +244,25 @@ function withoutTimes(value) {
   return value
 }
 
+// 批次标识 BI-1b: the written rows' digest of the poisoned leg leaves the SEEDED band cells out (they are pinned unchanged
+// separately), so it can be compared with the golden.
+function withoutBandCells(data) {
+  if (!data || typeof data !== 'object') return data
+  const out = { ...data }
+  for (const key of BAND_KEYS) delete out[key]
+  return out
+}
+
 function recordRefsOf(rows) {
   return rows.map((row) => (row && row[RECORD_REF] ? { id: row[RECORD_REF].id, version: row[RECORD_REF].version } : null))
 }
 
-async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
+async function observeScenario(harness, scenario, { handle = 'wired', band = 'none' } = {}) {
+  // 批次标识 BI-1b: the poisoned leg's server-held lane input (switch off: the strip only) and reader option.
+  const lane = band === 'poisoned' ? { pullBatch: { band: GOLDEN_BAND, enabled: false } } : {}
+  const readerOptions = band === 'poisoned' ? [{ pullBatchBand: GOLDEN_BAND }] : []
+  const seeded = (s) => seededRecordsApi(s, band)
+
   const { tableActions, largeBomJobs } = harness
   // The lanes the way the routes drive them since #6501 (the same wrapping the #6502 golden harness's
   // `laneCalls` applies): the dry-run through the generation binder, the apply inside the project write
@@ -266,8 +298,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   // 1. Small dry-run against the seeded sheet.
   const tokenStore = createTokenStore()
   const dryRun = await dryRunStockPreparationAction({
-    action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
+    action, parameters, sourceAdapter, recordsApi: seeded(scenario), tokenStore, plannedAt: PLANNED_AT, runId: RUN_ID,
     ...governance,
+    ...lane,
   })
   const dryRunExpansion = harness.calls[harness.calls.length - 1].result
   observed.dryRun = {
@@ -297,8 +330,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
 
   // 3. Ledger: reconcile's input revision, the three families, and the PLAN the reconcile derives from.
   const prepared = await prepareStockPreparationConfirmationDecisions({
-    action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+    action, parameters, sourceAdapter, recordsApi: seeded(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
     ...governance,
+    ...lane,
   })
   const derived = deriveDecisionCandidates({ projectNo: scenario.projectNo, plan: prepared.plan, sourceRevision: prepared.revision })
   const identities = (list) => list.map((entry) => ({ decisionId: entry.decisionId, stableDecisionKey: entry.stableDecisionKey, inputFingerprint: entry.inputFingerprint }))
@@ -313,8 +347,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
   }
 
   // 4. The planner called directly over the rows the project-scoped reader returns.
-  const readerRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), normalizedAction.target, scenario.projectNo)
+  const readerRows = await tableActionInternals.readExistingStockPreparationRows(seeded(scenario), normalizedAction.target, scenario.projectNo, ...readerOptions)
   refs.reader = recordRefsOf(readerRows)
+  refs.band = readerRows.map((row) => (row && row[PULL_BATCH_SYMBOL] ? row[PULL_BATCH_SYMBOL].pullBatch : null))
   const directPlan = planStockPreparationConflicts({
     template: normalizedAction.template,
     expandedRows: dryRunExpansion.rows,
@@ -332,8 +367,9 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
     // 5. Archive over the SEEDED sheet (people-owned columns are present, so archiveRevision differs
     //    from the dry-run revision here — unlike the #6502 golden's empty-sheet archive).
     const archived = await prepareStockPreparationMvpSnapshot({
-      action, parameters, sourceAdapter, recordsApi: seededRecordsApi(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
+      action, parameters, sourceAdapter, recordsApi: seeded(scenario), plannedAt: PLANNED_AT, runId: RUN_ID,
       ...governance,
+      ...lane,
     })
     const stableScope = `${TENANT_ID}\n${action.actionId}\n${archived.parameters.projectNo}`
     const batchDigest = crypto.createHash('sha256').update(`${stableScope}\n${archived.archiveRevision}`).digest('hex').slice(0, 32)
@@ -357,16 +393,17 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
 
     // 6. Apply onto the SEEDED sheet: the written rows include the patched (UPDATE / INACTIVE) ones.
     const applyStore = createTokenStore()
-    const applyRecords = seededRecordsApi(scenario)
+    const applyRecords = seeded(scenario)
     const applyDryRun = await dryRunStockPreparationAction({
       action, parameters, sourceAdapter, recordsApi: applyRecords, tokenStore: applyStore, plannedAt: PLANNED_AT, runId: RUN_ID,
       ...governance,
+      ...lane,
     })
     if (handle === 'absent') {
       const writesBefore = applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(',')
       await assert.rejects(applyStockPreparationAction({
         sandboxPolicy: SANDBOX_POLICY, action, parameters, dryRunToken: applyDryRun.dryRunToken, sourceAdapter, recordsApi: applyRecords,
-        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: undefined,
+        tokenStore: applyStore, permission: 'write', plannedAt: PLANNED_AT, runId: RUN_ID, refreshGovernance: undefined, ...lane,
       }), (error) => error.status === 501 && error.code === 'STOCK_PREP_REFRESH_GOVERNANCE_UNCONSULTED' && error.details.reason === 'governance_absent')
       assert.equal(applyRecords.rows.map((row) => `${row.id}@${row.version}`).join(','), writesBefore, 'a handle-absent apply writes nothing')
       observed.apply = 'refused_governance_absent'
@@ -382,13 +419,16 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       permission: 'write',
       plannedAt: PLANNED_AT,
       runId: RUN_ID,
+      ...lane,
     })
+    // 批次标识 BI-1b (E10 / INACTIVE): no patch ever names a band cell — the seeded cells are exactly as they were.
+    if (applied && band === 'poisoned') refs.writtenBand = applyRecords.rows.filter((row) => scenario.existingRows.some((entry) => entry.id === row.id)).map((row) => BAND_KEYS.map((key) => row.data[key]))
     if (applied) observed.apply = {
       status: applied.status,
       dryRunRevision: applied.dryRunRevision,
       sourceContentRevision: applied.sourceContentRevision,
       responseDigest: digest(withoutTimes(applied)),
-      writtenRowsDigest: digest(withoutTimes(applyRecords.rows.map((row) => ({ id: row.id, version: row.version, data: row.data })))),
+      writtenRowsDigest: digest(withoutTimes(applyRecords.rows.map((row) => ({ id: row.id, version: row.version, data: withoutBandCells(row.data) })))),
     }
   }
 
@@ -411,7 +451,7 @@ async function observeScenario(harness, scenario, { handle = 'wired' } = {}) {
       expansionOptions: { ...routeShapedLargeExpansionOptions(tableActions, runAction), requireCompleteBatch: false },
       now,
     })
-    const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seededRecordsApi(scenario), runAction.target, scenario.projectNo)
+    const largeExistingRows = await tableActionInternals.readExistingStockPreparationRows(seeded(scenario), runAction.target, scenario.projectNo, ...readerOptions)
     refs.large = recordRefsOf(largeExistingRows)
     const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
       storage, ...scope, actionId: action.actionId, jobId: 'job_scc_golden', existingRows: largeExistingRows, plannedAt: PLANNED_AT, now,
@@ -433,7 +473,7 @@ const GOLDEN = {
   second_pull_dash: {
     apply: {
       dryRunRevision: '79cc45c884ebf7e6872bca6f2d9b58985eb9ea9538085db3182b88919b5f9258',
-      responseDigest: '22bb6b6e005018a551d36029abdaf91987d0073396afeff25d3db137e411ba2b',
+      responseDigest: '33e8bf5239455804cdf25eaa1820653c757b68eda7300a5d58ba22a95d1d54fa',
       sourceContentRevision: '02e2f27ed907ef830df74c3f85ff486089b3ed1888ce6c9aca4fb8f8215a37c6',
       status: 'succeeded',
       writtenRowsDigest: '76d3b2fc87b13cf49f1e57c0a9b09f84446556c2aa5fc5621cac0851052a8d4d',
@@ -442,7 +482,7 @@ const GOLDEN = {
       archiveRevision: '2c418b5257e1e82642377a943b1241c4857bface0da694638178dfb574bbba87',
       batchIdentityMaterialCreateHour: '834449345eef9436a170f58049906e6b5495cebefdd7855df753a166da653c28',
       batchIdentitySourceRevision: '1e8d09b3c27800c3cab520f97f2d5c5022dc6c5b5423a8fa601b0a6da8c467f7',
-      evidenceDigest: 'd0502bbe9fa6a2413d1351a8351977cea1d0719ba8d7b6cb63f627954fe677d5',
+      evidenceDigest: '216810930e97b447758b81e7c4943a2c60bc639f7094211423191cedd38b177a',
       revision: '79cc45c884ebf7e6872bca6f2d9b58985eb9ea9538085db3182b88919b5f9258',
       snapshotBatchId: 'snapshot_b4ef7f8206ea99dc310b93f9b797e07d',
       snapshotLinesDigest: '60c7046b57904c06bfdf943c7acab3838e140436c6e2a6b84163549da6197a3e',
@@ -458,19 +498,19 @@ const GOLDEN = {
         skip: 1,
         update: 1,
       },
-      evidenceDigest: 'd0502bbe9fa6a2413d1351a8351977cea1d0719ba8d7b6cb63f627954fe677d5',
-      responseDigest: 'd4269c3ad607076c0a741fc91fd73b418b710d0eb44820e821a54f2e28d17cec',
+      evidenceDigest: '216810930e97b447758b81e7c4943a2c60bc639f7094211423191cedd38b177a',
+      responseDigest: 'a78f7efe94421fa53630e1c14aedf2ec4ea0741be372ff6c9d2158a3822dbc81',
       revision: '79cc45c884ebf7e6872bca6f2d9b58985eb9ea9538085db3182b88919b5f9258',
       rowsDigest: '47d3160c0766132e27699c08a99bcc9e5602b528c1f23c1b4aa38ba471f1cc39',
       status: 'ready',
       tokenSubsetDigest: 'aba51864f0e73598b4b9f2e16ce259b3d8b61111950559c33159900127204b96',
     },
     large: {
-      artifactRevision: 'dc8742a438e7eb4d9669fd9a301082e6827fc12fc6bd581a5b9c4c583388ca29',
-      planArtifactDigest: '0809da6a99cbb7c824de2526facd8183038340e411c8a42d4d60286178f7e025',
-      planRevision: '0b288a97299e53462a70160ea10c2db4123c08383210e335aa41d56c00c498dd',
+      artifactRevision: '478fcd877aab477026ce3eeeeeda6a23e57b0aa7960438b6d2317c19bf255a83',
+      planArtifactDigest: '4b7ddf9d0b527bfb21c30e2a8fe09f19379ce8c3c64a16e4b32d09f142835269',
+      planRevision: '8c911373750189c6bf29e8fce20e6cdaf42ebe5a522d02abbd3b84ec89412491',
       status: 'completed',
-      storedJobDigest: '93b7ef434f968d07848878837ae4648746c086e8e55569396338f73511870085',
+      storedJobDigest: '0b75a71190ec8838953cd2beacc09f4809eab9902997a6897608f56456ddd970',
     },
     ledger: {
       anonymousFamily: [],
@@ -478,12 +518,12 @@ const GOLDEN = {
       confirmationInputRevision: '79cc45c884ebf7e6872bca6f2d9b58985eb9ea9538085db3182b88919b5f9258',
       derivedDigest: 'b01658a409c077c85a1bc8d99ecd83d5957bcc65534fc79f18621e67f393776c',
       duplicateFamily: [],
-      planDigest: 'c97cacd0535ba5879ac125d2d062fcdb1a2030f6c0aa8cd94055a2f346ea2b3b',
-      planJsonDigest: 'cd185b71a3acbef2fe05bbfee087f102d5f4d1376ecf2a6b8843ac468fe16cdc',
+      planDigest: '93058c949f065ef416001a8ebb2fd2dbb4c600904a0667360b6fb58d8c4ae4d1',
+      planJsonDigest: '608fb724513362d7bf879dd899303151ccdb1415013f8c2aeae21ad051fe9f77',
     },
     planner: {
-      planDigest: 'c97cacd0535ba5879ac125d2d062fcdb1a2030f6c0aa8cd94055a2f346ea2b3b',
-      planJsonDigest: 'cd185b71a3acbef2fe05bbfee087f102d5f4d1376ecf2a6b8843ac468fe16cdc',
+      planDigest: '93058c949f065ef416001a8ebb2fd2dbb4c600904a0667360b6fb58d8c4ae4d1',
+      planJsonDigest: '608fb724513362d7bf879dd899303151ccdb1415013f8c2aeae21ad051fe9f77',
     },
     sourceContent: {
       digest: '35ec74352cf1fba8644e124b9281dc08',
@@ -501,8 +541,8 @@ const GOLDEN = {
         skip: 1,
         update: 0,
       },
-      evidenceDigest: '5b35f7a8b8c959a96755d54c6167513b18a5e98b0431824e042a322038bbc7ba',
-      responseDigest: '7c449550224b7b7a40b272bba8f2c2ccae6140265d144a95ae24ae6649486efc',
+      evidenceDigest: '8a83aa1168d5896fbff3abd780aa0775c220caafed77a971af78997e793973b0',
+      responseDigest: 'b5870e1b639a7df6ce6bef452de3fc3fe2131042e3c94f8656bd12ec98f10890',
       revision: '2fefef158d62224e2a561244d5e1affb7400fb72fdecf2d91c0f78f11dd0dc60',
       rowsDigest: '5df3682dd30a37cfdea416e47c06fe157321e4acca09c5afae160887f1542db5',
       status: 'manual_confirm_required',
@@ -520,12 +560,12 @@ const GOLDEN = {
       confirmationInputRevision: '2fefef158d62224e2a561244d5e1affb7400fb72fdecf2d91c0f78f11dd0dc60',
       derivedDigest: 'd816ad6520c00139d08c63caced5a805f2305683d0dc75cfdc343e4c020ff5c6',
       duplicateFamily: [],
-      planDigest: '4cb25a651675d122d8d9a09167529b3da7056d44be1b8795c0d96af538faabd4',
-      planJsonDigest: 'b615d18b40a9914efd1dcd0acc803397c0d42dab259b8298e277b85b9d736d35',
+      planDigest: 'd061ace0aec646b56500a590c1daec8bcc3a637872939980124c045dde5e0d48',
+      planJsonDigest: 'a330ffaae79c3b71018deef7dbe47d4da33e715144e71ec48643368cbb9b3aa0',
     },
     planner: {
-      planDigest: '4cb25a651675d122d8d9a09167529b3da7056d44be1b8795c0d96af538faabd4',
-      planJsonDigest: 'b615d18b40a9914efd1dcd0acc803397c0d42dab259b8298e277b85b9d736d35',
+      planDigest: 'd061ace0aec646b56500a590c1daec8bcc3a637872939980124c045dde5e0d48',
+      planJsonDigest: 'a330ffaae79c3b71018deef7dbe47d4da33e715144e71ec48643368cbb9b3aa0',
     },
     sourceContent: {
       digest: '851f7de5f386fae13eb341b00c6e3db6',
@@ -554,11 +594,12 @@ async function main() {
   const harness = installExpansionCaptureSwitch()
   const captured = {}
 
-  for (const handle of ['wired', 'absent']) for (const mode of ['off', 'on']) {
+  for (const [handle, band] of [['wired', 'none'], ['absent', 'none'], ['wired', 'poisoned']]) for (const mode of ['off', 'on']) {
     for (const build of SCENARIOS) {
       const scenario = build()
       harness.setMode(mode)
-      const { observed, refs } = await observeScenario(harness, scenario, { handle })
+      const { observed, refs } = await observeScenario(harness, scenario, { handle, band })
+      if (CAPTURE && band === 'poisoned') continue
       if (CAPTURE && handle === 'absent') continue
       if (mode === 'off') delete observed.demandEvidenceFingerprint
       if (CAPTURE) {
@@ -570,9 +611,15 @@ async function main() {
       // A handle-absent apply is refused by the writer (asserted inside observeScenario): the one section that leg
       // cannot reproduce. Every other section is the golden, byte for byte.
       if (handle === 'absent' && expected.apply) expected.apply = 'refused_governance_absent'
-      await run(`[${handle}][${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
+      await run(`[${handle}][${band}][${mode}] ${scenario.name}: every hash and identity matches the ${GOLDEN_BASE_SHA.slice(0, 9)} golden`, () => {
         assert.deepEqual(observed, expected)
       })
+      if (band === 'poisoned') {
+        await run(`[${handle}][${band}][${mode}] ${scenario.name}: every reader row carries the pull-batch Symbol with the seeded label; no patch touched a band cell`, () => {
+          assert.deepEqual(refs.band, scenario.existingRows.map(() => BAND_SENTINEL))
+          if (refs.writtenBand) for (const cells of refs.writtenBand) assert.deepEqual(cells, BAND_KEYS.map(() => BAND_SENTINEL))
+        })
+      }
       await run(`[${handle}][${mode}] ${scenario.name}: the reader attached a record reference to every existing row (the identity is not vacuous)`, () => {
         const expectedRefs = scenario.existingRows.map((entry) => ({ id: entry.id, version: entry.version }))
         assert.deepEqual(refs.reader, expectedRefs)

@@ -34,6 +34,14 @@ type UserRow = {
   department: string | null
 }
 
+function countsAsSignInAdmin(user: UserRow | undefined): boolean {
+  if (!user || !user.is_active || user.deleted_at || user.purged_at || user.role === 'disabled') return false
+  const activation = (user as UserRow & { activation_status?: string }).activation_status ?? 'activated'
+  if (activation !== 'activated') return false
+  // This fake has no user_roles table. is_admin alone is not authority.
+  return user.role === 'admin'
+}
+
 function clientFor(users: UserRow[], extras: { aliases?: string[]; identities?: string[] } = {}): RecycleClient & { sql: string[] } {
   const sql: string[] = []
   return {
@@ -44,11 +52,10 @@ function clientFor(users: UserRow[], extras: { aliases?: string[]; identities?: 
       const user = users.find((row) => row.id === id)
       if (statement.includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
       if (statement.includes('is_sign_in_admin')) {
-        const signIn = Boolean(user && user.is_active && !user.deleted_at && !user.purged_at && (user.is_admin || user.role === 'admin'))
-        return { rows: [{ is_sign_in_admin: signIn }] }
+        return { rows: [{ is_sign_in_admin: countsAsSignInAdmin(user) }] }
       }
       if (statement.includes('COUNT(*)')) {
-        const liveAdmins = users.filter((row) => row.id !== id && row.is_active && !row.deleted_at && !row.purged_at && (row.is_admin || row.role === 'admin'))
+        const liveAdmins = users.filter((row) => row.id !== id && countsAsSignInAdmin(row))
         return { rows: [{ c: liveAdmins.length }] }
       }
       if (statement.includes('to_regclass')) return { rows: [{ rel: String(params[0] ?? '') }] }

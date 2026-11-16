@@ -22,7 +22,7 @@
  *            图号 against an ADD); the apply writes the two PLM rows and leaves both prefix rows byte-identical
  *            (version, data, created_by); the reminder sits in real plugin_kv, values-free, per pull — the apply's record
  *            written INSIDE its write lease, each preview's outside any lease (read through the real lock); the export is
- *            200 with 来源 as the 31st column (人工补充 / 人工（非补充） / PLM) and the audit row's columnCount is 31.
+ *            200 with 来源 as the 32nd column, after 层级 (人工补充 / 人工（非补充） / PLM) and the audit row's columnCount is 32.
  *   MR-RD-03 the R-60 boundary on a PILOT project: settled, the export is 200 with 30 columns; a manual row inserted
  *            => 200 with 来源; the manual row edited through the host (version + 1, two PLM-band cells) => 200 (never
  *            409 SHEET_CHANGED_SINCE_SETTLEMENT), and the next preview stays `ready`; control: a host-side machine write
@@ -337,23 +337,23 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
         { mode: 'dry_run', leaseHeld: false, leasePurpose: null },
       ])
 
-      // The export: 来源 as the 31st column, the three values, the audit row's columnCount 31.
+      // The export: 来源 as the 32nd column (after 层级, the 31st since 2026-11-07), the three values, the audit row's columnCount 32.
       const exported = await st.exportLines()
       expect(exported.statusCode, JSON.stringify(exported.body)).toBe(200)
       const workbook = workbookOf(exported)
-      expect(workbook.headers.length).toBe(31)
-      expect(workbook.headers[30]).toBe('来源')
+      expect(workbook.headers.length).toBe(32)
+      expect(workbook.headers[31]).toBe('来源')
       const codeAt = workbook.headers.indexOf('图号')
       // The PLM tree first (A, then its child B), then the prefix rows appended in the flat order — the manual copy of
       // B's 图号 is printed beside B, never collapsed into it.
-      expect(workbook.rows.map((row: any[]) => [row[codeAt], row[30]])).toEqual([
+      expect(workbook.rows.map((row: any[]) => [row[codeAt], row[31]])).toEqual([
         ['MRB1-A-001', 'PLM'],
         ['MRB1-B-001', 'PLM'],
         ['MRB1-B-001', '人工补充'],
         ['MRB1-U-001', '人工（非补充）'],
       ])
       const audit = (await q(`SELECT mode, detail FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'prep_line_export' ORDER BY created_at, id`, [st.tenantId])).rows
-      expect(audit.map((row: any) => row.detail.columnCount)).toEqual([31])
+      expect(audit.map((row: any) => row.detail.columnCount)).toEqual([32])
       expect(Object.keys(audit[0].detail).sort()).toEqual(['activeRowCount', 'columnCount', 'operation', 'totalRowCount'])
     }, 300000)
 
@@ -369,15 +369,15 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
       expect(settling.body.data.status, JSON.stringify(settling.body)).toBe('ready')
       const settled = await st.exportLines()
       expect(settled.statusCode, JSON.stringify(settled.body)).toBe(200)
-      expect(workbookOf(settled).headers.length).toBe(30)
+      expect(workbookOf(settled).headers.length).toBe(31)
 
       const manualId = `rec_00000000_mrb1_p_${TOKEN}`
       await st.insertPersonRow(manualId, { componentCode: 'MRB1-M-001', componentName: '人工补充件', totalQuantity: 2 })
       const withManual = await st.exportLines()
       expect(withManual.statusCode, JSON.stringify(withManual.body)).toBe(200)
       const workbook = workbookOf(withManual)
-      expect(workbook.headers.length).toBe(31)
-      expect(workbook.rows[workbook.rows.length - 1][30]).toBe('人工补充')
+      expect(workbook.headers.length).toBe(32)
+      expect(workbook.rows[workbook.rows.length - 1][31]).toBe('人工补充')
 
       // A person edits the manual row's PLM-band cells (图号, 总数量) through the host: version + 1.
       await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: manualId, changes: { [st.physical('componentCode')]: 'MRB1-M-002', [st.physical('totalQuantity')]: 9 } })

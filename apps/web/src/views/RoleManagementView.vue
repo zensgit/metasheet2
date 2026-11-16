@@ -7,16 +7,36 @@
       </div>
 
       <div class="admin-page__actions">
-        <button class="admin-page__button admin-page__button--secondary" type="button" :disabled="loading" @click="void loadCatalog()">
+        <button class="admin-page__button admin-page__button--secondary" type="button" data-role-refresh :disabled="loading || controlsLocked" @click="void requestRefresh()">
           {{ loading ? '加载中...' : '刷新' }}
         </button>
-        <button class="admin-page__button" type="button" @click="resetForm()">新建角色</button>
+        <button class="admin-page__button" type="button" data-role-new :disabled="controlsLocked" @click="void requestReset()">新建角色</button>
       </div>
     </header>
 
     <p v-if="status" class="admin-page__status" :class="{ 'admin-page__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+
+    <div v-if="leavePromptOpen" class="admin-page__leave-shield" data-role-leave-shield>
+      <div class="admin-page__leave" role="dialog" aria-modal="true" data-role-leave-dialog>
+        <p>当前角色有未保存的修改。</p>
+        <div class="admin-page__leave-actions">
+          <button class="admin-page__button" type="button" data-role-leave-save @click="chooseLeave('save')">保存并继续</button>
+          <button class="admin-page__button admin-page__button--secondary" type="button" data-role-leave-discard @click="chooseLeave('discard')">放弃并继续</button>
+          <button class="admin-page__button admin-page__button--secondary" type="button" data-role-leave-stay @click="chooseLeave('stay')">留在此页</button>
+        </div>
+      </div>
+    </div>
+
+    <section v-if="conflictDraft" class="admin-page__conflict" data-role-conflict-draft>
+      <p>你冲突前的未保存修改单独保留。编辑区现在显示的是已载入的角色；恢复后才会写回那份修改。</p>
+      <p v-if="conflictServerReady">服务端当前权限：{{ authoritativePermissionLabel }}</p>
+      <p v-else>未能载入服务端最新权限。未保存修改仍留在编辑区，确认令牌仍对应当前编辑基线。</p>
+      <p>未保存名称：{{ conflictDraft.name }}</p>
+      <p>未保存修改：{{ conflictPermissionLabel }}</p>
+      <button class="admin-page__button admin-page__button--secondary" type="button" data-role-conflict-recover :disabled="controlsLocked" @click="recoverConflictDraft()">恢复未保存修改</button>
+    </section>
 
     <div class="admin-page__layout">
       <aside class="admin-page__panel admin-page__panel--list">
@@ -28,7 +48,8 @@
           class="admin-page__item"
           :class="{ 'admin-page__item--active': selectedRoleId === role.id }"
           type="button"
-          @click="selectRole(role)"
+          :disabled="controlsLocked"
+          @click="void selectRole(role)"
         >
           <strong>{{ presentRoleTitle(role) }}</strong>
           <span>{{ role.id }}</span>
@@ -40,11 +61,11 @@
         <div class="admin-page__form-grid">
           <label class="admin-page__field">
             <span>角色 ID</span>
-            <input v-model.trim="draftRoleId" class="admin-page__input" type="text" placeholder="例如 attendance_admin" :disabled="isEditing">
+            <input v-model.trim="draftRoleId" class="admin-page__input" type="text" placeholder="例如 attendance_admin" :disabled="isEditing || controlsLocked">
           </label>
           <label class="admin-page__field">
             <span>角色名称</span>
-            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin" @input="markNameEdited()">
+            <input v-model.trim="draftRoleName" class="admin-page__input" data-role-name-input type="text" placeholder="例如 Attendance Admin" :disabled="controlsLocked">
           </label>
         </div>
 
@@ -54,19 +75,38 @@
             <span>{{ selectedPermissions.length }} 项</span>
           </div>
           <div v-if="permissions.length === 0" class="admin-page__empty">暂无权限目录</div>
-          <div v-else class="admin-page__checkbox-grid">
-            <label v-for="permission in permissions" :key="permission.code" class="admin-page__checkbox">
-              <input
-                :checked="selectedPermissions.includes(permission.code)"
-                type="checkbox"
-                @change="togglePermission(permission.code, ($event.target as HTMLInputElement).checked)"
-              >
-              <div>
-                <strong>{{ permission.code }}</strong>
-                <p>{{ presentPermission(permission).name }}</p>
-                <small>{{ presentPermission(permission).description || '无描述' }}</small>
+          <div v-else class="admin-page__permission-groups">
+            <section
+              v-for="group in permissionGroups"
+              :key="group.key"
+              class="admin-page__permission-group"
+              :data-permission-group="group.key"
+            >
+              <h4>
+                {{ group.label }}
+                <small v-if="group.label !== group.key" class="admin-page__technical-code">{{ group.key }}</small>
+              </h4>
+              <div class="admin-page__checkbox-grid">
+                <label
+                  v-for="permission in group.items"
+                  :key="permission.code"
+                  class="admin-page__checkbox"
+                  :data-permission-code="permission.code"
+                >
+                  <input
+                    :checked="selectedPermissions.includes(permission.code)"
+                    type="checkbox"
+                    :disabled="controlsLocked"
+                    @change="togglePermission(permission.code, ($event.target as HTMLInputElement).checked)"
+                  >
+                  <div>
+                    <strong>{{ permissionPresentation(permission).name }}</strong>
+                    <small v-if="permissionPresentation(permission).showTechnicalCode" class="admin-page__technical-code">{{ permission.code }}</small>
+                    <p>{{ permissionPresentation(permission).description || '无描述' }}</p>
+                  </div>
+                </label>
               </div>
-            </label>
+            </section>
           </div>
         </section>
 
@@ -76,27 +116,40 @@
             <span v-if="isEditing">成员数：{{ selectedRole?.memberCount ?? 0 }}</span>
           </div>
           <div class="admin-page__chips">
-            <span v-for="permission in selectedPermissions" :key="permission" class="admin-page__chip">
-              {{ permission }}
+            <span v-for="permission in selectedPermissionChips" :key="permission.code" class="admin-page__chip">
+              {{ permission.name }}
+              <small v-if="permission.showTechnicalCode">{{ permission.code }}</small>
             </span>
             <span v-if="selectedPermissions.length === 0" class="admin-page__empty">尚未选择权限</span>
           </div>
         </section>
 
-        <RoleMembersPanel v-if="isEditing" :role-id="selectedRoleId" />
+        <RoleMembersPanel
+          v-if="isEditing"
+          :role-id="selectedRoleId"
+          :role-name="membershipRoleName"
+          :permission-codes="membershipPermissionCodes"
+          :expected-updated-at="membershipExpectedUpdatedAt"
+          :namespaces-by-role-id="membershipNamespaces"
+          :mutations-disabled="isDirty"
+          :actions-locked="controlsLocked"
+          :focus-user-id="focusedMemberId"
+          @roster-total="onRosterTotal"
+          @membership-adjusted="onMembershipAdjusted"
+        />
 
         <footer class="admin-page__footer">
-          <button class="admin-page__button" type="button" :disabled="busy || !canSave" @click="void saveRole()">
+          <button class="admin-page__button" type="button" :disabled="controlsLocked || !canSave" @click="void saveRole()">
             {{ busy ? '保存中...' : isEditing ? '保存角色' : '创建角色' }}
           </button>
-          <button class="admin-page__button admin-page__button--secondary" type="button" :disabled="busy" @click="resetForm()">
+          <button class="admin-page__button admin-page__button--secondary" type="button" data-role-cancel :disabled="controlsLocked" @click="void requestReset()">
             取消
           </button>
           <button
             v-if="isEditing"
             class="admin-page__button admin-page__button--danger"
             type="button"
-            :disabled="busy"
+            :disabled="controlsLocked"
             @click="void deleteRole()"
           >
             删除角色
@@ -108,7 +161,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
+import { matchedRouteKey, onBeforeRouteLeave, routeLocationKey } from 'vue-router'
 import { apiFetch } from '../utils/api'
 import { presentPermission, presentRoleTitle, roleNameForSave } from './builtinCatalogPresentation'
 import RoleMembersPanel from './RoleMembersPanel.vue'
@@ -124,12 +178,40 @@ type RoleCatalogItem = {
    * answered 409 instead of silently resurrecting the revoked codes.
    */
   updatedAt?: string | null
+  /**
+   * Namespace list from GET /api/admin/roles. Absent or non-array is unknown:
+   * it must not be treated as an empty list that promises no admission change.
+   */
+  admissionNamespaces?: unknown
 }
 
 type PermissionCatalogItem = {
   code: string
   name: string
   description: string | null
+  category?: unknown
+  resource?: unknown
+}
+
+type PermissionPresentation = {
+  code: string
+  name: string
+  description: string | null
+  showTechnicalCode: boolean
+}
+
+type PermissionGroup = {
+  key: string
+  label: string
+  items: PermissionCatalogItem[]
+}
+
+type LoadedRoleBaseline = {
+  id: string
+  name: string
+  displayName: string
+  permissions: string[]
+  updatedAt: string | null
 }
 
 const loading = ref(false)
@@ -141,12 +223,204 @@ const permissions = ref<PermissionCatalogItem[]>([])
 const selectedRoleId = ref('')
 const draftRoleId = ref('')
 const draftRoleName = ref('')
-const nameEdited = ref(false)
 const selectedPermissions = ref<string[]>([])
+// Concurrency tokens for the role currently in the editor. Catalog reloads update
+// `roles` only; this snapshot changes when the editor baseline is applied.
+const loadedBaseline = ref<LoadedRoleBaseline | null>(null)
+
+type PreservedRoleDraft = {
+  roleId: string
+  name: string
+  permissions: string[]
+}
+
+type LeaveChoice = 'save' | 'discard' | 'stay'
+
+const conflictDraft = ref<PreservedRoleDraft | null>(null)
+const conflictServerReady = ref(false)
+const leavePromptOpen = ref(false)
+const transitionActive = ref(false)
+let leaveResolver: ((choice: LeaveChoice) => void) | null = null
+let pendingLeave: Promise<LeaveChoice> | null = null
+
+function sameCodeSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  const left = [...a].sort()
+  const right = [...b].sort()
+  return left.every((code, index) => code === right[index])
+}
+
+function formatPermissionList(codes: readonly string[]): string {
+  return codes.length > 0 ? codes.join('、') : '（无）'
+}
 
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) || null)
 const isEditing = computed(() => selectedRoleId.value.length > 0)
 const canSave = computed(() => draftRoleName.value.trim().length > 0 && draftRoleId.value.trim().length > 0)
+function draftDiffersFromLoadedRole(): boolean {
+  const baseline = loadedBaseline.value
+  if (draftRoleName.value.trim() !== (baseline?.displayName ?? '')) return true
+  if (!baseline) {
+    return draftRoleId.value.trim().length > 0 || selectedPermissions.value.length > 0
+  }
+  return !sameCodeSet(selectedPermissions.value, baseline.permissions)
+}
+
+const isDirty = computed(() => draftDiffersFromLoadedRole() || conflictDraft.value !== null)
+const controlsLocked = computed(() => leavePromptOpen.value || busy.value || transitionActive.value)
+const authoritativePermissionLabel = computed(() => formatPermissionList(loadedBaseline.value?.permissions || []))
+const conflictPermissionLabel = computed(() => formatPermissionList(conflictDraft.value?.permissions || []))
+
+const PERMISSION_GROUP_LABELS: Record<string, string> = {
+  '*': '全部',
+  admin: '平台管理',
+  permissions: '权限',
+  roles: '角色',
+  attendance: '考勤',
+  spreadsheet: '电子表格',
+  spreadsheets: '电子表格',
+  comments: '评论',
+  multitable: '多维表',
+  elearning: '在线学习',
+  'stock-prep': '备料',
+  tasks: '任务',
+  approvals: '审批',
+  'approval-templates': '审批模板',
+  demo: '演示',
+  test: '测试',
+  '其他': '其他',
+}
+
+function permissionGroupKey(permission: PermissionCatalogItem): string {
+  if (typeof permission.category === 'string' && permission.category.trim()) return permission.category.trim()
+  if (typeof permission.resource === 'string' && permission.resource.trim()) return permission.resource.trim()
+  const colon = permission.code.indexOf(':')
+  if (colon > 0) return permission.code.slice(0, colon)
+  return '其他'
+}
+
+function permissionPresentation(permission: PermissionCatalogItem): PermissionPresentation {
+  const shown = presentPermission(permission)
+  const name = shown.name.trim() || permission.code
+  return {
+    code: permission.code,
+    name,
+    description: shown.description,
+    showTechnicalCode: name !== permission.code,
+  }
+}
+
+function presentPermissionCode(code: string): PermissionPresentation {
+  const catalogItem = permissions.value.find((item) => item.code === code)
+  if (catalogItem) return permissionPresentation(catalogItem)
+  const shown = presentPermission({ code, name: '', description: null })
+  const name = shown.name.trim() || code
+  return {
+    code,
+    name,
+    description: shown.description,
+    showTechnicalCode: name !== code,
+  }
+}
+
+const permissionGroups = computed<PermissionGroup[]>(() => {
+  const groups = new Map<string, PermissionCatalogItem[]>()
+  for (const permission of permissions.value) {
+    const key = permissionGroupKey(permission)
+    const items = groups.get(key)
+    if (items) items.push(permission)
+    else groups.set(key, [permission])
+  }
+  return Array.from(groups.entries())
+    .map(([key, items]) => ({
+      key,
+      label: PERMISSION_GROUP_LABELS[key] ?? key,
+      items: [...items].sort((left, right) => {
+        const nameOrder = permissionPresentation(left).name.localeCompare(permissionPresentation(right).name, 'zh-CN')
+        if (nameOrder !== 0) return nameOrder
+        return left.code.localeCompare(right.code)
+      }),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN') || left.key.localeCompare(right.key))
+})
+
+const selectedPermissionChips = computed(() => selectedPermissions.value.map((code) => presentPermissionCode(code)))
+
+function optionalUpdatedAt(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value ? value : null
+}
+
+const membershipRoleName = computed(() => (
+  selectedRole.value ? presentRoleTitle(selectedRole.value) : draftRoleName.value
+))
+const membershipPermissionCodes = computed(() => {
+  if (loadedBaseline.value?.id === selectedRoleId.value) return loadedBaseline.value.permissions
+  return selectedRole.value?.permissions ?? []
+})
+const membershipExpectedUpdatedAt = computed(() => {
+  if (loadedBaseline.value?.id === selectedRoleId.value) return optionalUpdatedAt(loadedBaseline.value.updatedAt)
+  return optionalUpdatedAt(selectedRole.value?.updatedAt)
+})
+const membershipNamespaces = computed(() => {
+  const map: Record<string, unknown> = {}
+  for (const role of roles.value) {
+    if (Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces')) {
+      map[role.id] = role.admissionNamespaces
+    }
+  }
+  return map
+})
+
+// Direct createApp mounts have no router. A defaulted inject reads the deep link without warning.
+const route = inject(routeLocationKey, null)
+const catalogReady = ref(false)
+let routeRoleGeneration = 0
+
+function queryValue(key: string): string | null {
+  if (!route || !Object.prototype.hasOwnProperty.call(route.query, key)) return null
+  const raw = route.query[key]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string') return ''
+  return value.trim()
+}
+
+const requestedRoleId = computed(() => queryValue('roleId'))
+const requestedUserId = computed(() => queryValue('userId'))
+const focusedMemberId = computed(() => {
+  const roleId = requestedRoleId.value
+  const userId = requestedUserId.value
+  if (!roleId || !userId || roleId !== selectedRoleId.value) return ''
+  return userId
+})
+
+function replaceMemberCount(roleId: string, memberCount: number): void {
+  if (!roleId || !Number.isInteger(memberCount) || memberCount < 0) return
+  roles.value = roles.value.map((role) => (role.id === roleId ? { ...role, memberCount } : role))
+}
+
+function onRosterTotal(payload: { roleId: string; total: number }): void {
+  replaceMemberCount(payload.roleId, payload.total)
+}
+
+function onMembershipAdjusted(payload: { roleId: string; delta: number }): void {
+  const role = roles.value.find((item) => item.id === payload.roleId)
+  if (!role || !Number.isInteger(payload.delta)) return
+  replaceMemberCount(payload.roleId, Math.max(0, role.memberCount + payload.delta))
+}
+
+async function applyRouteRole(): Promise<void> {
+  const generation = ++routeRoleGeneration
+  const roleId = requestedRoleId.value
+  if (roleId === null || roleId === '') return
+  const role = roles.value.find((item) => item.id === roleId) || null
+  if (generation !== routeRoleGeneration) return
+  if (!role) {
+    setStatus(`没有打开角色 ${roleId}，也没有改成目录中的其他角色。`, 'error')
+    return
+  }
+  if (selectedRoleId.value === role.id) return
+  await selectRole(role)
+}
 
 /**
  * Server refusal codes this page words itself (the server message is English). zh is shown; en is kept
@@ -179,24 +453,145 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
   }
 }
 
-function markNameEdited(): void {
-  nameEdited.value = true
+function snapshotBaseline(role: RoleCatalogItem): LoadedRoleBaseline {
+  return {
+    id: role.id,
+    name: role.name,
+    displayName: presentRoleTitle(role),
+    permissions: [...(role.permissions || [])],
+    updatedAt: role.updatedAt ?? null,
+  }
 }
 
-function applyRole(role: RoleCatalogItem | null): void {
-  selectedRoleId.value = role?.id || ''
-  draftRoleId.value = role?.id || ''
-  draftRoleName.value = role ? presentRoleTitle(role) : ''
-  nameEdited.value = false
-  selectedPermissions.value = [...(role?.permissions || [])]
+function applyRole(role: RoleCatalogItem | null, options?: { keepConflict?: boolean }): void {
+  const preserved = options?.keepConflict ? conflictDraft.value : null
+  const baseline = role ? snapshotBaseline(role) : null
+  selectedRoleId.value = baseline?.id || ''
+  draftRoleId.value = baseline?.id || ''
+  draftRoleName.value = baseline?.displayName || ''
+  selectedPermissions.value = [...(baseline?.permissions || [])]
+  loadedBaseline.value = baseline
+  conflictDraft.value = preserved
+  if (!options?.keepConflict) conflictServerReady.value = false
 }
 
 function resetForm(): void {
   applyRole(null)
 }
 
-function selectRole(role: RoleCatalogItem): void {
-  applyRole(role)
+function draftToPreserve(): PreservedRoleDraft {
+  // A clean editor is the loaded baseline. Replacing an existing side draft with it
+  // would drop the only copy of the conflicted edit.
+  if (!draftDiffersFromLoadedRole() && conflictDraft.value?.roleId === selectedRoleId.value) {
+    return conflictDraft.value
+  }
+  return {
+    roleId: selectedRoleId.value,
+    name: draftRoleName.value,
+    permissions: [...selectedPermissions.value],
+  }
+}
+
+function recoverConflictDraft(): void {
+  const snapshot = conflictDraft.value
+  if (!snapshot || snapshot.roleId !== selectedRoleId.value) return
+  draftRoleName.value = snapshot.name
+  selectedPermissions.value = [...snapshot.permissions]
+}
+
+function askLeaveChoice(): Promise<LeaveChoice> {
+  if (pendingLeave) return pendingLeave
+  leavePromptOpen.value = true
+  pendingLeave = new Promise((resolve) => {
+    leaveResolver = resolve
+  })
+  return pendingLeave
+}
+
+function chooseLeave(choice: LeaveChoice): void {
+  const resolve = leaveResolver
+  leaveResolver = null
+  pendingLeave = null
+  leavePromptOpen.value = false
+  resolve?.(choice)
+}
+
+async function resolveLeave(): Promise<'proceed' | 'stay' | 'save'> {
+  if (busy.value) return 'stay'
+  if (!isDirty.value) return 'proceed'
+  const choice = await askLeaveChoice()
+  if (choice === 'discard') return 'proceed'
+  if (choice === 'save') return 'save'
+  return 'stay'
+}
+
+function transitionBusy(): boolean {
+  return transitionActive.value || leavePromptOpen.value || busy.value
+}
+
+async function selectRole(role: RoleCatalogItem): Promise<void> {
+  if (transitionBusy()) return
+  if (role.id === selectedRoleId.value && !isDirty.value) return
+  transitionActive.value = true
+  try {
+    const choice = await resolveLeave()
+    if (choice === 'stay') return
+    if (choice === 'save') {
+      const saved = await saveRole({ keepDraftOnReadbackFailure: true })
+      if (!saved) return
+    }
+    applyRole(role)
+  } finally {
+    transitionActive.value = false
+  }
+}
+
+async function requestReset(): Promise<void> {
+  if (transitionBusy()) return
+  transitionActive.value = true
+  try {
+    const choice = await resolveLeave()
+    if (choice === 'stay') return
+    if (choice === 'save') {
+      const saved = await saveRole({ keepDraftOnReadbackFailure: true })
+      if (!saved) return
+    }
+    applyRole(null)
+  } finally {
+    transitionActive.value = false
+  }
+}
+
+async function requestRefresh(): Promise<void> {
+  if (transitionBusy()) return
+  transitionActive.value = true
+  try {
+    const choice = await resolveLeave()
+    if (choice === 'stay') return
+    if (choice === 'save') {
+      await saveRole({ keepDraftOnReadbackFailure: true })
+      return
+    }
+    const currentId = selectedRoleId.value
+    const reloaded = await loadCatalog()
+    if (!reloaded) return
+    applyRole(currentId ? roles.value.find((role) => role.id === currentId) || null : null)
+  } finally {
+    transitionActive.value = false
+  }
+}
+
+async function leaveRoute(): Promise<boolean> {
+  if (transitionBusy()) return false
+  transitionActive.value = true
+  try {
+    const choice = await resolveLeave()
+    if (choice === 'stay') return false
+    if (choice === 'save') return saveRole({ keepDraftOnReadbackFailure: true })
+    return true
+  } finally {
+    transitionActive.value = false
+  }
 }
 
 function togglePermission(code: string, checked: boolean): void {
@@ -238,11 +633,8 @@ async function loadCatalog(): Promise<boolean> {
 
     roles.value = Array.isArray(roleData?.items) ? roleData.items : []
     permissions.value = Array.isArray(permissionData) ? permissionData as PermissionCatalogItem[] : []
-
-    if (selectedRoleId.value) {
-      const latest = roles.value.find((role) => role.id === selectedRoleId.value) || null
-      applyRole(latest)
-    }
+    // Catalog data and the editor draft are separate. Callers apply a role only after the
+    // admin confirms a discard, or after a save readback matches what was submitted.
     return true
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载角色失败', 'error')
@@ -252,68 +644,99 @@ async function loadCatalog(): Promise<boolean> {
   }
 }
 
-function sameCodeSet(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false
-  const left = [...a].sort()
-  const right = [...b].sort()
-  return left.every((code, index) => code === right[index])
-}
-
-async function saveRole(): Promise<void> {
-  if (!canSave.value) return
+async function saveRole(options?: { keepDraftOnReadbackFailure?: boolean }): Promise<boolean> {
+  if (busy.value || leavePromptOpen.value) return false
+  if (!canSave.value) {
+    setStatus('请填写角色 ID 和角色名称后再保存', 'error')
+    return false
+  }
   busy.value = true
-  // `isEditing` is derived from selectedRoleId, which applyRole() rewrites below — read
-  // it here so the closing message still describes the action that was actually taken.
-  const wasEditing = isEditing.value
+  // Captured before any reload. applyRole() may replace the editor after readback, and the
+  // closing message still has to describe the action that was actually taken.
+  const baseline = loadedBaseline.value
+  const wasEditing = baseline !== null
+  const editingId = baseline?.id ?? ''
+  const baselineName = baseline?.name ?? null
+  const baselineDisplay = baseline?.displayName ?? ''
+  const baselinePermissions = baseline ? [...baseline.permissions] : []
+  const baselineUpdatedAt = baseline?.updatedAt ?? null
+  const keepDraftOnReadbackFailure = options?.keepDraftOnReadbackFailure === true
   try {
+    const nameChanged = draftRoleName.value.trim() !== baselineDisplay
     const payload: Record<string, unknown> = {
-      id: wasEditing ? selectedRoleId.value : draftRoleId.value.trim(),
+      id: wasEditing ? editingId : draftRoleId.value.trim(),
       // The name field may show a Chinese builtin title. Leaving it untouched keeps the
-      // loaded raw name; typing in the field is an explicit rename.
+      // loaded raw name; an actual edit of the field is an explicit rename. Restoring the
+      // displayed title is not an edit, so the localized title is not written back.
       name: wasEditing
-        ? roleNameForSave(selectedRole.value ? selectedRole.value.name : null, draftRoleName.value, nameEdited.value)
+        ? roleNameForSave(baselineName, draftRoleName.value, nameChanged)
         : draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
-    // Mid-air-collision token: the grid being submitted is the one loaded with this
-    // timestamp, so a save that lands after someone else's change is refused (409) instead
-    // of replaying a stale set over it.
-    if (wasEditing && selectedRole.value?.updatedAt) {
-      payload.expectedUpdatedAt = selectedRole.value.updatedAt
+    // Tokens belong to the editor baseline, not the catalog a failed or disagreeing
+    // readback just refreshed. A later save of the preserved draft must still name the
+    // set the admin loaded.
+    if (wasEditing && baselineUpdatedAt) {
+      payload.expectedUpdatedAt = baselineUpdatedAt
     }
-    if (wasEditing && selectedRole.value) {
-      // The permission set as LOADED. `updatedAt` alone would miss a writer that changes
-      // role_permissions without touching the roles row (the plugin provisioner does
-      // exactly that), and the DELETE this save implies would then revoke codes the admin
-      // never unchecked and never saw.
-      payload.expectedPermissions = [...(selectedRole.value.permissions || [])]
+    if (wasEditing) {
+      payload.expectedPermissions = [...baselinePermissions]
     }
     const submittedPermissions = [...selectedPermissions.value]
+    const submittedId = String(payload.id)
+    const submittedName = String(payload.name)
 
     // An EXISTING role is addressed by the id it was LOADED with, never a trimmed copy: a
     // stored id that differs only by invisible padding would otherwise address its
     // look-alike — e.g. the real `<ns>_admin` instead of the padded duplicate.
-    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(selectedRoleId.value)}` : '/api/roles', {
-      method: isEditing.value ? 'PUT' : 'POST',
+    const response = await apiFetch(wasEditing ? `/api/roles/${encodeURIComponent(editingId)}` : '/api/roles', {
+      method: wasEditing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
     const body = await readJson(response)
     const errorCode = String((body.error as Record<string, unknown> | undefined)?.code || '')
     if (response.status === 409 && errorCode === 'ROLE_MODIFIED') {
-      // Someone else changed this role after this grid was loaded. Re-read it rather than
-      // offering 重试 on a stale draft — replaying it is exactly what the token prevents.
-      await loadCatalog()
-      setStatus('该角色已被其他人修改，已重新加载最新权限，请确认后再保存', 'error')
-      return
+      // Keep the unsaved edit beside the catalog. The editor itself shows the reloaded
+      // role, so the next Save submits that baseline and its new tokens. The old draft is
+      // written again only after 恢复未保存修改. A failed reload leaves the draft in place
+      // and does not move the token baseline.
+      const preserved = draftToPreserve()
+      const reloaded = await loadCatalog()
+      const latest = roles.value.find((role) => role.id === preserved.roleId) || null
+      if (reloaded && latest) {
+        conflictDraft.value = preserved
+        conflictServerReady.value = true
+        applyRole(latest, { keepConflict: true })
+        setStatus('该角色已被其他人修改，已重新加载最新权限，请确认后再保存', 'error')
+      } else {
+        conflictDraft.value = preserved
+        conflictServerReady.value = false
+        draftRoleName.value = preserved.name
+        selectedPermissions.value = [...preserved.permissions]
+        setStatus(
+          reloaded
+            ? '该角色已被其他人修改，重新加载后未找到该角色，未保存修改已保留'
+            : '该角色已被其他人修改，但无法重新加载最新权限，未保存修改已保留',
+          'error',
+        )
+      }
+      return false
     }
     if (!response.ok || body.ok !== true) {
       throw new Error(roleWriteErrorMessage(body.error, '保存角色失败'))
     }
 
-    const currentId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)
+    const acknowledgedId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)
     const reloaded = await loadCatalog()
-    const latest = roles.value.find((role) => role.id === currentId) || null
-    applyRole(latest)
+    const persisted = roles.value.find((role) => role.id === submittedId) || null
+    const subjectAcknowledged = acknowledgedId === submittedId
+    const nameMatches = persisted?.name === submittedName
+    const permissionsMatch = Boolean(persisted && sameCodeSet(persisted.permissions || [], submittedPermissions))
+    const reconciled = Boolean(reloaded && persisted && subjectAcknowledged && nameMatches && permissionsMatch)
+    // Continuation stays unless id, name, and permissions all match. A direct save still
+    // shows a same-subject permission readback; a different name or id keeps the draft.
+    const showPermissionReadback = !keepDraftOnReadbackFailure && reloaded && Boolean(persisted) && subjectAcknowledged && nameMatches
+    if (reconciled || showPermissionReadback) applyRole(persisted)
 
     // Do not claim success on the strength of `ok: true` alone. This page used to report
     // 角色已更新 while the reloaded role still showed the OLD checkboxes, because the
@@ -326,30 +749,37 @@ async function saveRole(): Promise<void> {
       // would assert a data loss that did not happen (roles.value still holds the PRE-save
       // array, so the comparison below would be old-vs-submitted and always disagree).
       setStatus('已保存，但无法重新加载角色目录以核对，请刷新确认', 'error')
-    } else if (!latest) {
+    } else if (!subjectAcknowledged) {
+      setStatus('已保存，但服务端确认的角色与提交的不一致，请刷新确认', 'error')
+    } else if (!persisted) {
       setStatus('已保存，但重新加载后未找到该角色，请刷新确认', 'error')
-    } else if (!sameCodeSet(latest.permissions || [], submittedPermissions)) {
-      setStatus(`已保存名称，但服务端记录的权限为 ${latest.permissions?.length ?? 0} 项，与提交的 ${submittedPermissions.length} 项不一致，请刷新确认`, 'error')
+    } else if (!nameMatches) {
+      setStatus(`已保存，但服务端记录的名称为 ${persisted.name}，与提交的名称不一致，请刷新确认`, 'error')
+    } else if (!permissionsMatch) {
+      setStatus(`已保存名称，但服务端记录的权限为 ${persisted.permissions?.length ?? 0} 项，与提交的 ${submittedPermissions.length} 项不一致，请刷新确认`, 'error')
     } else {
       setStatus(wasEditing ? '角色已更新' : '角色已创建')
     }
+    return reconciled
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+    return false
   } finally {
     busy.value = false
   }
 }
 
 async function deleteRole(): Promise<void> {
-  if (!isEditing.value) return
+  if (!isEditing.value || transitionBusy()) return
   if (!window.confirm(`确认删除角色 ${draftRoleName.value || draftRoleId.value}？`)) return
 
   busy.value = true
+  const editingId = loadedBaseline.value?.id || selectedRoleId.value
   try {
     // The id as LOADED (see saveRole): a trimmed id would delete the real `<ns>_admin` — and
     // with it every membership and delegated audience — when the admin meant to remove a
     // padded look-alike of it.
-    const response = await apiFetch(`/api/roles/${encodeURIComponent(selectedRoleId.value)}`, {
+    const response = await apiFetch(`/api/roles/${encodeURIComponent(editingId)}`, {
       method: 'DELETE',
     })
     const body = await readJson(response)
@@ -367,9 +797,39 @@ async function deleteRole(): Promise<void> {
   }
 }
 
+function handleBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!isDirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+watch(isDirty, (dirty) => {
+  if (dirty) window.addEventListener('beforeunload', handleBeforeUnload)
+  else window.removeEventListener('beforeunload', handleBeforeUnload)
+})
+
 onMounted(async () => {
   await loadCatalog()
+  catalogReady.value = true
+  await applyRouteRole()
 })
+
+watch(requestedRoleId, () => {
+  if (!catalogReady.value) return
+  void applyRouteRole()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  chooseLeave('stay')
+})
+
+// Tests mount this view with createApp and no router. onBeforeRouteLeave warns in that
+// case unless a matched route record is actually present, which it is under <router-view>.
+const matchedRoute = inject(matchedRouteKey, null)
+if (matchedRoute?.value) {
+  onBeforeRouteLeave(() => leaveRoute())
+}
 </script>
 
 <style scoped>
@@ -454,6 +914,30 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.admin-page__permission-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.admin-page__permission-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-page__permission-group h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.admin-page__technical-code {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .admin-page__checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -482,12 +966,20 @@ onMounted(async () => {
 }
 
 .admin-page__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   border-radius: 999px;
   background: #eff6ff;
   color: #1d4ed8;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.admin-page__chip small {
+  color: #64748b;
+  font-weight: 400;
 }
 
 .admin-page__button {
@@ -523,6 +1015,40 @@ onMounted(async () => {
   color: #dc2626;
 }
 
+.admin-page__leave,
+.admin-page__conflict {
+  border: 1px solid #f59e0b;
+  background: #fffbeb;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-page__leave-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-page__leave-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.45);
+  box-sizing: border-box;
+}
+
+.admin-page__leave-shield .admin-page__leave {
+  width: min(520px, 100%);
+  box-sizing: border-box;
+}
+
 .admin-page__empty {
   color: #64748b;
 }
@@ -532,6 +1058,17 @@ onMounted(async () => {
   .admin-page__form-grid,
   .admin-page__checkbox-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-page__header,
+  .admin-page__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-page__actions .admin-page__button {
+    width: 100%;
+    box-sizing: border-box;
   }
 }
 </style>

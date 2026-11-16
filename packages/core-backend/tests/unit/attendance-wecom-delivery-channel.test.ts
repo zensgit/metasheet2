@@ -44,7 +44,7 @@ function okResult(overrides: Partial<WeComSendMessageResult> = {}): WeComSendMes
 }
 
 function makeChannel(opts: {
-  rows?: Array<{ integration_id: string; external_user_id: string }>
+  rows?: Array<{ integration_id: string; external_user_id: string; corp_id?: string }>
   queryThrows?: boolean
   // H1 hardening (review #3920 P3-1, parity slice): the 0-row cold path now issues a SECOND query
   // (an EXISTS check against directory_integrations) before deciding skip vs retryable. Default true
@@ -52,14 +52,14 @@ function makeChannel(opts: {
   // needing to touch them; only the new H1 tests below set this to false.
   orgHasActiveIntegration?: boolean
   readConfig?: () => Promise<WeComMessageConfig>
-  fetchAccessToken?: () => Promise<string>
+  fetchAccessToken?: (config: WeComMessageConfig) => Promise<string>
   sendTextMessage?: ReturnType<typeof vi.fn>
   sendTextCardMessage?: ReturnType<typeof vi.fn>
 }) {
   const query = vi.fn(async (sql: string, _params?: unknown[]) => {
     if (opts.queryThrows) throw new Error('db connection lost')
     if (sql.includes('directory_account_links')) {
-      return { rows: opts.rows ?? [{ integration_id: 'integ-1', external_user_id: 'we-user-1' }] }
+      return { rows: opts.rows ?? [{ integration_id: 'integ-1', external_user_id: 'we-user-1', corp_id: CONFIG.corpId }] }
     }
     // The org-level EXISTS check (only reached from the 0-row recipient path).
     return { rows: [{ org_has_active_integration: opts.orgHasActiveIntegration ?? true }] }
@@ -163,6 +163,26 @@ describe('WeComAttendanceDeliveryChannel.send — textcard vs text wiring (desig
         },
         CONFIG,
       )
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('deep-link flag+baseUrl present and a recipient connection in another corp -> wecom_env_corp_mismatch; no token, no textcard, no text', async () => {
+    process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+    process.env.PUBLIC_APP_URL = 'https://app.example.test'
+    delete process.env.APP_BASE_URL
+    try {
+      const fetchAccessToken = vi.fn(async () => 'access-token')
+      const { channel, sendTextMessage, sendTextCardMessage } = makeChannel({
+        rows: [{ integration_id: 'integ-1', external_user_id: 'we-user-1', corp_id: 'corp-2' }],
+        fetchAccessToken,
+      })
+      const result = await channel.send(MESSAGE)
+      expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+      expect(fetchAccessToken).not.toHaveBeenCalled()
+      expect(sendTextCardMessage).not.toHaveBeenCalled()
+      expect(sendTextMessage).not.toHaveBeenCalled()
     } finally {
       restoreEnv()
     }
@@ -433,5 +453,135 @@ describe('resolveAttendanceDefaultDeliveryChannel — wecom_work_notification is
 
   it('no env -> still defaults to the in-app DingTalk channel (WeCom does not change the default)', () => {
     expect(resolveAttendanceDefaultDeliveryChannel({} as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+  })
+})
+
+describe('WeComAttendanceDeliveryChannel.send — corp-equality guard (credentials corp must equal the recipient connection corp)', () => {
+  const SAME_CORP_ROW = { integration_id: 'integ-1', external_user_id: 'we-user-1', corp_id: 'corp-1' }
+
+  it('the recipient SELECT carries the connection corp_id', async () => {
+    const { channel, query } = makeChannel({})
+    await channel.send(MESSAGE)
+    expect(query).toHaveBeenCalledWith(
+      expect.stringMatching(/i\.corp_id AS corp_id/),
+      [MESSAGE.recipientUserId, MESSAGE.orgId],
+    )
+  })
+
+  it('credentials corp differs from the recipient connection corp -> permanent wecom_env_corp_mismatch, no token request, no send', async () => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage, sendTextCardMessage } = makeChannel({
+      rows: [{ ...SAME_CORP_ROW, corp_id: 'corp-2' }],
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+    expect(fetchAccessToken).not.toHaveBeenCalled()
+    expect(sendTextMessage).not.toHaveBeenCalled()
+    expect(sendTextCardMessage).not.toHaveBeenCalled()
+  })
+
+  it('the mismatch result is neither a skip nor retryable and carries no corp values', async () => {
+    const { channel } = makeChannel({ rows: [{ ...SAME_CORP_ROW, corp_id: 'corp-2' }] })
+    const result = (await channel.send(MESSAGE)) as { ok: false; retryable: boolean; skip?: boolean; error: string }
+    expect(result.retryable).toBe(false)
+    expect(result.skip).toBeUndefined()
+    expect(result.error).not.toContain('corp-1')
+    expect(result.error).not.toContain('corp-2')
+  })
+
+  it('a recipient connection without a corp never matches -> wecom_env_corp_mismatch, no token request', async () => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({
+      rows: [{ integration_id: 'integ-1', external_user_id: 'we-user-1' }],
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+    expect(fetchAccessToken).not.toHaveBeenCalled()
+    expect(sendTextMessage).not.toHaveBeenCalled()
+  })
+
+  it('neither side having a corp never matches', async () => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({
+      rows: [{ integration_id: 'integ-1', external_user_id: 'we-user-1' }],
+      readConfig: async () => ({ ...CONFIG, corpId: '' }),
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+    expect(fetchAccessToken).not.toHaveBeenCalled()
+    expect(sendTextMessage).not.toHaveBeenCalled()
+  })
+
+  it('the corp comparison is exact (case-sensitive)', async () => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({
+      rows: [{ ...SAME_CORP_ROW, corp_id: 'CORP-1' }],
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+    expect(fetchAccessToken).not.toHaveBeenCalled()
+    expect(sendTextMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a recipient corp that extends the credentials corp', 'corp-10', 'corp-1'],
+    ['a recipient corp that the credentials corp extends', 'corp-1', 'corp-10'],
+    ['a recipient corp that only contains the credentials corp', 'xcorp-1x', 'corp-1'],
+    ['a credentials corp that only contains the recipient corp', 'corp-1', 'xcorp-1x'],
+  ])('%s never matches', async (_label, recipientCorp, credentialCorp) => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({
+      rows: [{ ...SAME_CORP_ROW, corp_id: recipientCorp }],
+      readConfig: async () => ({ ...CONFIG, corpId: credentialCorp }),
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: false, error: 'wecom_env_corp_mismatch' })
+    expect(fetchAccessToken).not.toHaveBeenCalled()
+    expect(sendTextMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['surrounding whitespace on the recipient corp', ' corp-1 ', 'corp-1'],
+    ['surrounding whitespace on the credentials corp', 'corp-1', ' corp-1 '],
+  ])('%s is ignored: the corps match and the send proceeds', async (_label, recipientCorp, credentialCorp) => {
+    const fetchAccessToken = vi.fn(async () => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({
+      rows: [{ ...SAME_CORP_ROW, corp_id: recipientCorp }],
+      readConfig: async () => ({ ...CONFIG, corpId: credentialCorp }),
+      fetchAccessToken,
+    })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: true })
+    expect(fetchAccessToken).toHaveBeenCalledTimes(1)
+    expect(sendTextMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('same corp -> original behaviour: token fetched once with the config, text sent, ok', async () => {
+    const fetchAccessToken = vi.fn(async (_config: WeComMessageConfig) => 'access-token')
+    const { channel, sendTextMessage } = makeChannel({ rows: [SAME_CORP_ROW], fetchAccessToken })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: true })
+    expect(fetchAccessToken).toHaveBeenCalledTimes(1)
+    expect(fetchAccessToken).toHaveBeenCalledWith(CONFIG)
+    expect(sendTextMessage).toHaveBeenCalledTimes(1)
+    expect(sendTextMessage).toHaveBeenCalledWith(
+      'access-token',
+      { userIds: ['we-user-1'], content: expect.any(String) },
+      CONFIG,
+    )
+  })
+
+  it('a config read failure keeps its own classification (the guard does not shadow it)', async () => {
+    const { channel } = makeChannel({
+      rows: [{ ...SAME_CORP_ROW, corp_id: 'corp-2' }],
+      readConfig: async () => { throw new Error('WECOM_CORP_ID is not configured') },
+    })
+    const result = await channel.send(MESSAGE)
+    expect((result as { error: string }).error).toContain('wecom_work_notification_config_unavailable')
   })
 })

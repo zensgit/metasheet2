@@ -617,6 +617,26 @@ describe('MetaRecordInspector header v3 (PR-A §1.2)', () => {
       expect(onNavigate).toHaveBeenCalledWith('rec_2')
     })
 
+    it('the chord does nothing while an input method composes (moving on would commit the unconverted text)', async () => {
+      const onNavigate = vi.fn()
+      const { container } = mountInspector({ recordIds: ['rec_0', 'rec_1', 'rec_2'], onNavigate })
+      await flushUi()
+      const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement
+      const chord = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, isComposing: true, bubbles: true, cancelable: true,
+      })
+      textarea.dispatchEvent(chord)
+      expect(onNavigate).not.toHaveBeenCalled()
+      expect(chord.defaultPrevented).toBe(false)
+      // A key the input method took (keyCode 229), as some engines report it without isComposing.
+      const taken = new KeyboardEvent('keydown', {
+        key: '>', code: 'Period', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      })
+      Object.defineProperty(taken, 'keyCode', { value: 229 })
+      textarea.dispatchEvent(taken)
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
     it('bounds: chord at the first/last record emits nothing', async () => {
       const onNavigate = vi.fn()
       const { container } = mountInspector({ recordIds: ['rec_1'], onNavigate })
@@ -1089,7 +1109,7 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     return { container, record, gridUndo, patches, title, typeInto, press }
   }
 
-  it('a re-render that rewrites the focused title drops its typing history: the next Cmd+Z does nothing (no stale draft, no grid)', async () => {
+  it('a value for the same record that lands while the title holds its own typing does not overwrite it: the typing stays undoable, and left with no net typing the title shows that value', async () => {
     const { record, gridUndo, title, typeInto, press } = mountWithUndo()
     await flushUi()
     const input = title()
@@ -1099,16 +1119,101 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(input.value).toBe('Alpha')
     expect(gridUndo).not.toHaveBeenCalled()
-    // redo it, then the record changes underneath (as grid undo or a record switch does)
+    // redo it, then a value for this record lands (someone else's, or the title's own earlier commit)
     expect(press(input, { key: 'Z', metaKey: true, shiftKey: true })).toBe(true)
     expect(input.value).toBe('Alpha draft')
     record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
     await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    expect(press(input, { key: 'z', metaKey: true })).toBe(true)
+    expect(input.value).toBe('Alpha')
+    expect(gridUndo).not.toHaveBeenCalled()
+    input.blur()
+    await flushUi()
     expect(input.value).toBe('Server value')
+  })
+
+  it('Escape after typing again on a committed title shows the committed title, not the record\'s (which can still lag behind the commit), and saves nothing more', async () => {
+    const { patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+    typeInto(input, 'Alpha XY')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape after typing again on a committed title shows the committed title also after a redraw that brings the record\'s older title', async () => {
+    const { record, patches, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha X')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    typeInto(input, 'Alpha XY')
+    // another field's answer redraws the record; its title has not taken the commit yet
+    record.value = { ...record.value, version: 2, data: { ...record.value.data, fld_title: 'Alpha', fld_notes: 'n' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Alpha X')
+    input.blur()
+    await flushUi()
+    expect(patches.filter((p) => p.includes('fld_title'))).toEqual(['rec_1:fld_title=Alpha X'])
+  })
+
+  it('Escape shows a value that landed, and records it: a newer value that lands then is shown, not kept out as typing', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+    record.value = { id: 'rec_1', version: 3, data: { fld_title: 'Newer', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Newer')
+  })
+
+  it('Escape after a value landed while the title held typing shows that value', async () => {
+    const { record, title, typeInto } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_1', version: 2, data: { fld_title: 'Server value', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Alpha draft')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(input.value).toBe('Server value')
+  })
+
+  it('a move to another record while the title holds typing writes that record\'s title and drops the typing history: the next Cmd+Z does nothing', async () => {
+    const { record, gridUndo, title, typeInto, press } = mountWithUndo()
+    await flushUi()
+    const input = title()
+    input.focus()
+    typeInto(input, 'Alpha draft')
+    record.value = { id: 'rec_2', version: 1, data: { fld_title: 'Beta', fld_notes: '' } } as MetaRecord
+    await flushUi()
+    expect(input.value).toBe('Beta')
     expect(document.activeElement).toBe(input)
     expect(press(input, { key: 'z', metaKey: true })).toBe(true)
     expect(gridUndo).not.toHaveBeenCalled()
-    expect(input.value).toBe('Server value')
+    expect(input.value).toBe('Beta')
   })
 
   it('a title commit (Enter, then the change the blur fires) ends the title\'s history: the next Cmd+Z does nothing, with no second patch', async () => {
@@ -1217,5 +1322,36 @@ describe('MetaRecordInspector and the workbench-owned undo', () => {
     expect(pressThenChord(container.querySelector('.meta-comment-composer textarea'))).toBe(0)
     expect(pressThenChord(title())).toBe(1)
     expect(pressThenChord(container.querySelector('.meta-comment-composer__submit'))).toBe(0)
+  })
+
+  it('isWorkbenchGridSurface on the REAL drawer\'s attachments: a press on a file input (the fields panel\'s or the attachments tab\'s; disabled for the whole upload) never leaves Cmd+Z on the page to the grid', async () => {
+    const undo = createWorkbenchUndo({ isGridSurface: isWorkbenchGridSurface })
+    const gridUndo = vi.fn()
+    removers.push(installWorkbenchUndo(undo, { undo: gridUndo, redo: vi.fn() }))
+    const fields: MetaField[] = [...FIELDS, { id: 'fld_files', name: 'Files', type: 'attachment' } as MetaField]
+    const record = { ...RECORD, data: { ...RECORD.data, fld_files: [] } } as MetaRecord
+    const { container } = mountApp(() =>
+      h(MetaRecordInspector, {
+        visible: true, record, fields, canEdit: true, canComment: false, canDelete: false,
+        recordIds: ['rec_1'], sheetId: 'sheet_1', apiClient: fakeApiClient() as any,
+        uploadFn: vi.fn(() => new Promise(() => {})),
+      }),
+    )
+    await flushUi()
+    const pressThenChord = (el: Element | null) => {
+      expect(el).toBeTruthy()
+      el!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      gridUndo.mockClear()
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'z', metaKey: true }))
+      return gridUndo.mock.calls.length
+    }
+    const title = () => container.querySelector('.meta-record-drawer__title-input')
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-drawer__field[data-field-id="fld_files"] input[type="file"]'))).toBe(0)
+    container.querySelector<HTMLButtonElement>('.meta-record-drawer__tab[id$="-tab-attachments"]')!.click()
+    await flushUi()
+    expect(pressThenChord(title())).toBe(1)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel input[type="file"]'))).toBe(0)
+    expect(pressThenChord(container.querySelector('.meta-record-attachments-panel'))).toBe(0)
   })
 })

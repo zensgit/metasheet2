@@ -60,6 +60,7 @@ import {
   type ManualRowsSheet,
 } from './stock-preparation-manual-rows-gate'
 import { manualRowKeyFor } from './stock-preparation-manual-rows'
+import { pullBatchBandStampOf } from './stock-preparation-pull-batch-band'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
@@ -911,6 +912,15 @@ export class RecordService {
         patch[manualSheet.derived.projectNo] = manualSheet.projectNo
         patch[manualSheet.derived.key] = manualRowKeyFor(recordId)
         patch[manualSheet.derived.active] = true
+        // 批次标识 (design batch-id §4.1, ADR §5.5, R-65): a sheet carrying the pull-batch band (two locked `string`
+        // columns with the plugin's marker, stock-preparation-pull-batch-band.ts) gets the marker's 人工补充 / Manual row
+        // in BOTH band cells — from the field rows read above, no extra statement; whatever the pull-batch switch says
+        // (C10). After the data loop, so a submitted band value has already been refused (locked, not fillable). No
+        // band ⇒ nothing added.
+        const pullBatchBand = pullBatchBandStampOf(fieldRes.rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>)
+        if (pullBatchBand) {
+          for (const bandFieldId of pullBatchBand.fieldIds) patch[bandFieldId] = pullBatchBand.label
+        }
       }
 
       // CS-21: the copy path skips `property.validation` (required / min / max / regex …) — the source rows
