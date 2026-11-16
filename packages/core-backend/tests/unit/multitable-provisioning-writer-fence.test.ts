@@ -10,6 +10,7 @@ import {
   getObjectFieldId,
   getObjectSheetId,
   patchObjectFieldProperty,
+  PATCH_OBJECT_FIELD_PROPERTY_READ_SQL,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 import {
@@ -230,4 +231,52 @@ describe('D-H1 provisioning writer closure', () => {
       expect(seen.some(({ sql }) => sql.includes('recovery_writer_state'))).toBe(false)
     })
   }
+})
+
+// Lost-update guard: patchObjectFieldProperty (every plugin write of field metadata — the manual-rows switch, the PLM
+// lock stamp, option sync, the pack ownership stamp) merges onto the row it READ, so the read takes the row lock. Then
+// a concurrent field write waits instead of being reverted, and this patch waits behind one in flight. The real-Postgres
+// interleavings are RT-3 / RT-4 / RT-7 in tests/integration/stock-preparation-field-property-race-realdb.cases.ts.
+describe('patchObjectFieldProperty reads the field row under the row lock', () => {
+  afterEach(() => {
+    delete process.env[WRITER_FENCE_ENV]
+    __resetRecoveryWriterStateColumnProbe()
+  })
+
+  const run = (query: MultitableProvisioningQueryFn) => patchObjectFieldProperty({
+    query,
+    projectId: PROJECT_ID,
+    objectId: OBJECT_ID,
+    fieldId: 'status',
+    propertyPatch: { color: 'green' },
+  })
+  const physicalFieldId = getObjectFieldId(PROJECT_ID, OBJECT_ID, 'status')
+
+  it('the read is FOR NO KEY UPDATE (not FOR UPDATE: FK child inserts take FOR KEY SHARE on the field row)', () => {
+    expect(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL).toBe(
+      'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2 FOR NO KEY UPDATE',
+    )
+  })
+
+  it('statement order with the fence on: fence → the locked read → UPDATE meta_fields SET property; one read only', async () => {
+    process.env[WRITER_FENCE_ENV] = 'true'
+    __resetRecoveryWriterStateColumnProbe()
+    const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId })
+    await run(query)
+    const fenceIndex = seen.findIndex(({ sql }) => sql.includes('pg_advisory_xact_lock'))
+    const readIndex = seen.findIndex(({ sql }) => sql === PATCH_OBJECT_FIELD_PROPERTY_READ_SQL)
+    const updateIndex = seen.findIndex(({ sql }) => sql.startsWith('UPDATE meta_fields SET property = $3::jsonb'))
+    expect(fenceIndex).toBeGreaterThanOrEqual(0)
+    expect(readIndex).toBeGreaterThan(fenceIndex)
+    expect(updateIndex).toBeGreaterThan(readIndex)
+    expect(seen[readIndex]?.params).toEqual([OBJECT_SHEET_ID, physicalFieldId])
+    expect(seen.filter(({ sql }) => sql.includes('FROM meta_fields'))).toHaveLength(1)
+  })
+
+  it('with the fence off the read is still locked (the row lock is what closes the race there)', async () => {
+    __resetRecoveryWriterStateColumnProbe()
+    const { query, seen } = createFenceQuery({ sheetId: OBJECT_SHEET_ID, fieldId: physicalFieldId })
+    await run(query)
+    expect(seen.map(({ sql }) => sql).filter((sql) => sql.includes('FROM meta_fields'))).toEqual([PATCH_OBJECT_FIELD_PROPERTY_READ_SQL])
+  })
 })

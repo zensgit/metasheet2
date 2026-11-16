@@ -1620,8 +1620,8 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 //   * RF-01 (S2) the project-sheet bound is WRITE: a delegated admin holding only `spreadsheet:read`
 //     (or `spreadsheet:write-own`) on a sheet is refused with no row written; `spreadsheet:write' lands;
 //   * RF-02 (S2, S3) a global record-write code without `multitable:manage-schema` is not enough to
-//     hand out `spreadsheet:write`; the sheet decision reads FRESH codes: a code revoked in the
-//     database while still in the 60 s permission memo is not honoured;
+//     hand out `spreadsheet:write`; a committed revocation of both global codes is fresh on the
+//     pool path, the port refuses 403 with no grant callback, and the earlier grant row is unchanged;
 //   * RF-03 (S4) the caller tier is exactly `stock-prep_admin`: another admitted, scoped `_admin`
 //     role of the namespace is 403;
 //   * RF-04 (S4) the platform-admin decision is the DB `admin` role only: legacy `users.is_admin` /
@@ -1888,7 +1888,7 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     expect(await roleRowsOn(SHEET, roleId)).toBe(1)
   })
 
-  it('RF-02 (S2, S3) record write without schema management is not enough; a global write code revoked in the database is not honoured from the permission memo', async () => {
+  it('RF-02 (S2, S3) record write without schema management is not enough; a committed revocation of both global write codes is fresh on the pool path', async () => {
     const roleId = createdRoleIds[createdRoleIds.length - 1]
     await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:write')", [MTW_ROLE])
     await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MTW_ROLE])
@@ -1898,19 +1898,34 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     const refusedRecordOnly = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, recordOnly) }] }))
     expect([refusedRecordOnly.status, refusedRecordOnly.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
     expect(recordOnly).toEqual([])
+    expect(await roleRowsOn(SHEET_GLOBAL, roleId)).toBe(0)
     await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:manage-schema')", [MTW_ROLE])
     // Positive control: write + schema management make the assignment-free sheet writable.
     const ok: string[] = []
     await expect(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, ok) }] }))
       .resolves.toMatchObject({ sheets: [{ sheetId: SHEET_GLOBAL, granted: true }] })
-    // Prime the memo WITH the code, then revoke it in the database only.
-    expect(await rbacListUserPermissions(DELEGATED)).toContain('multitable:write')
+    const grantedRows = (await pool.query(
+      `SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions
+       WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2 ORDER BY perm_code`,
+      [SHEET_GLOBAL, roleId],
+    )).rows
+    expect(grantedRows).toEqual([{ subject_type: 'role', subject_id: roleId, perm_code: 'spreadsheet:write', user_id: null }])
+    const beforeRevoke = await rbacListUserPermissions(DELEGATED)
+    expect(beforeRevoke).toContain('multitable:write')
+    expect(beforeRevoke).toContain('multitable:manage-schema')
     await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [MTW_ROLE])
-    expect(await rbacListUserPermissions(DELEGATED), 'the memo still holds the revoked code').toContain('multitable:write')
+    const afterRevoke = await rbacListUserPermissions(DELEGATED)
+    expect(afterRevoke).not.toContain('multitable:write')
+    expect(afterRevoke).not.toContain('multitable:manage-schema')
     const calls: string[] = []
     const error = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, calls) }] }))
     expect([error.status, error.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
     expect(calls).toEqual([])
+    expect((await pool.query(
+      `SELECT subject_type, subject_id, perm_code, user_id FROM spreadsheet_permissions
+       WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2 ORDER BY perm_code`,
+      [SHEET_GLOBAL, roleId],
+    )).rows).toEqual(grantedRows)
     await pool.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [DELEGATED, MTW_ROLE])
   })
 

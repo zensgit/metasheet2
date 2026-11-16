@@ -161,6 +161,17 @@ const STRUCTURE_FIELD_IDS = Object.freeze(['projectNo', 'idempotencyKey', 'compo
 const LIFECYCLE_FIELD_IDS = Object.freeze(['active'])
 const DERIVED_LINEAGE_DISPLAY_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName'])
 const NON_TRIGGER_PACK_FIELD_IDS = Object.freeze(['ext_componentSortNo', 'ext_parentSortNo'])
+// R-71 ⑦.4 PR-4: 项目规格型号 is a plm_system column with NO producer yet (its PLM source is field question F1,
+// still open), so it is kept out of the content triggers — and therefore out of the machine band below — on
+// purpose. Adding the column then moves no trigger list, no settlement digest and no export-gate digest of a
+// project that is already governed. Whether a filled project-level value should count as a row's content
+// change is decided by the slice that gives it a source (PR-6), not by adding an empty column.
+// REMOVAL IS TIED TO F1: the PR that answers F1 and gives `projectSpecModel` a producer removes this id (and re-pins
+// the trigger-list pin and the continuation goldens). That PR must announce the one-time effect: the machine band is
+// hashed together with the rows (`sheetMachineDigest`), so every governed sheet's machine digest moves once even
+// while every cell is blank, and — the column is not cold-start exempt (`isColdStartExempt` below) — the first
+// blank → value fill is a content trigger on every governed row the source then fills. Pinned by stock-preparation-template-issue-confirm-spec-columns.test.cjs Y8-17.
+const UNSOURCED_PLM_FIELD_IDS = Object.freeze(['projectSpecModel'])
 
 // §6.6: the root-selection rules under which a dropped old root is the BASE shape.
 const BASE_DROP_RULES = Object.freeze(['dash_descendant', 'main_drawing_not_chosen'])
@@ -779,7 +790,7 @@ function keptShapeSubTokens(demandEvidence, oldRoot, newParent) {
  */
 function contentTriggerFieldIds({ template, installedFieldProperties } = {}) {
   const normalized = normalizeStockPreparationTemplate(template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
-  const excluded = new Set([...STRUCTURE_FIELD_IDS, ...LIFECYCLE_FIELD_IDS, ...DERIVED_LINEAGE_DISPLAY_FIELD_IDS, ...NON_TRIGGER_PACK_FIELD_IDS])
+  const excluded = new Set([...STRUCTURE_FIELD_IDS, ...LIFECYCLE_FIELD_IDS, ...DERIVED_LINEAGE_DISPLAY_FIELD_IDS, ...NON_TRIGGER_PACK_FIELD_IDS, ...UNSOURCED_PLM_FIELD_IDS])
   return derivePackAwarePlmWritableFields({ templateFields: normalized.fields, installedFieldProperties })
     .plmWritableFieldIds
     .filter((fieldId) => !excluded.has(fieldId))
@@ -2379,6 +2390,7 @@ module.exports = {
   SHAPE_TOKENS,
   NOT_CONFIRMABLE_REASONS,
   NON_TRIGGER_PACK_FIELD_IDS,
+  UNSOURCED_PLM_FIELD_IDS,
   // Step 5 PR-8: the change-plan vocabulary and the pure derivations shared by the planner and the store.
   CONTENT_CLASS_HOLD_KINDS,
   STRUCTURE_CLASS_HOLD_KINDS,

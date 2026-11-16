@@ -13,6 +13,13 @@ import type {
   PlannedEffect,
 } from './deprovision-planner'
 import { planDirectoryDeprovision } from './deprovision-planner'
+import {
+  bindProspectiveAccountIds,
+  globalVouchExists,
+  noProspectiveDeactivation,
+  orgVouchExists,
+} from './departure-vouching'
+import { DEFAULT_LEGACY_LOGIN_GRANT_PROVIDER } from './login-grant-registry'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
 
 export type DirectoryTransactionClient = {
@@ -31,6 +38,13 @@ export type ApplyDeprovisionCandidateInput = {
   triggeredBy: string
   policy: DirectoryDeprovisionPolicy
   write: boolean
+  /**
+   * Identity of the enclosing transaction. The effects-column probe (see `writeEffects`) runs
+   * once per scope object and is cached on it; the caller passes one fresh object per
+   * transaction. The cache is keyed on this object, never on the client, because a pooled
+   * client outlives the transaction it served. Omitted ⇒ the probe runs on every write.
+   */
+  ledgerScope?: object
 }
 
 export type PlanDeprovisionCandidateInput = Pick<
@@ -50,6 +64,21 @@ export type PlanDeprovisionCandidateInput = Pick<
   requireSourceInactive?: boolean
 }
 
+/**
+ * Whether the only thing keeping a departure from taking effect is a local directory account.
+ * `membership`: the organization still has a vouching account but none of them is non-local;
+ * `global`: the same over every organization. Observability only.
+ */
+export type DeprovisionSuppressedByLocal = { membership: boolean; global: boolean }
+
+/**
+ * A plan read from candidate state always reports `suppressedByLocal`. A skip plan may leave it
+ * out; absent means nothing was suppressed.
+ */
+export type DirectoryDeprovisionStatePlan = DirectoryDeprovisionPlan & {
+  suppressedByLocal?: DeprovisionSuppressedByLocal
+}
+
 export type DirectoryDeprovisionCandidateSnapshot = {
   activationStatus: string | null
   isActive: boolean
@@ -58,8 +87,10 @@ export type DirectoryDeprovisionCandidateSnapshot = {
   orgMembershipActive: boolean
   orgCandidacyClear: boolean
   globallyClear: boolean
-  dingtalkGrantEnabled: boolean
-  dingtalkGrantRowExists: boolean
+  /** Provider of the source integration; the legacy grant leg acts on `(provider, user)` only. */
+  loginGrantProvider: string
+  loginGrantEnabled: boolean
+  loginGrantRowExists: boolean
 }
 
 export type ApplyDeprovisionCandidateResult = {
@@ -74,7 +105,7 @@ export type ApplyDeprovisionCandidateResult = {
    * `accessGeneration` is a meaningless 0 — discriminate on THIS field, never on the number.
    */
   skipReason: 'candidate_vanished' | null
-  plan: DirectoryDeprovisionPlan
+  plan: DirectoryDeprovisionStatePlan
 }
 
 type CandidateStateRow = {
@@ -85,8 +116,20 @@ type CandidateStateRow = {
   org_membership_active: boolean
   org_candidacy_clear: boolean
   globally_clear: boolean
-  dingtalk_grant_enabled: boolean
-  dingtalk_grant_row_exists: boolean
+  /** Same expressions with local accounts left out; observability only, never a decision input. */
+  org_candidacy_clear_non_local?: boolean
+  globally_clear_non_local?: boolean
+  login_grant_provider: string | null
+  login_grant_enabled: boolean
+  login_grant_row_exists: boolean
+}
+
+function suppressedByLocalFrom(state: CandidateStateRow): DeprovisionSuppressedByLocal {
+  return {
+    membership:
+      state.org_candidacy_clear === false && state.org_candidacy_clear_non_local === true,
+    global: state.globally_clear === false && state.globally_clear_non_local === true,
+  }
 }
 
 function hasEffect(
@@ -126,12 +169,8 @@ async function loadCandidateState(
   // always runs with the strict defaults. NEVER a lock here in either mode: the apply path
   // takes the users FOR UPDATE mutex FIRST as its own statement (adversarial-review P1 — the
   // lock and this read must not share a statement/snapshot), and preview locks nothing.
-  const prospectiveDeactivatedAccountIds = Array.from(
-    new Set(
-      (input.prospectiveDeactivatedAccountIds ?? [])
-        .map((accountId) => String(accountId || '').trim())
-        .filter(Boolean),
-    ),
+  const prospectiveDeactivatedAccountIds = bindProspectiveAccountIds(
+    input.prospectiveDeactivatedAccountIds ?? [],
   )
   const requireSourceInactive = input.requireSourceInactive !== false
   const result = await client.query(
@@ -169,43 +208,27 @@ async function loadCandidateState(
             AND membership.org_id = $4::text
             AND COALESCE(membership.is_active, TRUE) = TRUE
        ) AS org_membership_active,
-       NOT EXISTS (
-         SELECT 1
-           FROM directory_account_links sibling_link
-           JOIN directory_accounts sibling
-             ON sibling.id = sibling_link.directory_account_id
-           JOIN directory_integrations sibling_integration
-             ON sibling_integration.id = sibling.integration_id
-          WHERE sibling_link.local_user_id = candidate_user.id
-            AND sibling_link.link_status = 'linked'
-            AND sibling.is_active = TRUE
-            AND sibling.id <> ALL($5::uuid[])
-            AND sibling_integration.org_id = $4::text
-       ) AS org_candidacy_clear,
-       NOT EXISTS (
-         SELECT 1
-           FROM directory_account_links sibling_link
-           JOIN directory_accounts sibling
-             ON sibling.id = sibling_link.directory_account_id
-          WHERE sibling_link.local_user_id = candidate_user.id
-            AND sibling_link.link_status = 'linked'
-            AND sibling.is_active = TRUE
-            AND sibling.id <> ALL($5::uuid[])
-       ) AS globally_clear,
+       NOT ${orgVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, orgParam: 4 })} AS org_candidacy_clear,
+       NOT ${globalVouchExists({ user: 'candidate_user.id', prospectiveParam: 5 })} AS globally_clear,
+       NOT ${orgVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, orgParam: 4, nonLocalOnly: true })} AS org_candidacy_clear_non_local,
+       NOT ${globalVouchExists({ user: 'candidate_user.id', prospectiveParam: 5, nonLocalOnly: true })} AS globally_clear_non_local,
+       source_integration_row.provider AS login_grant_provider,
        COALESCE((
          SELECT grant_row.enabled
            FROM user_external_auth_grants grant_row
-          WHERE grant_row.provider = 'dingtalk'
+          WHERE grant_row.provider = source_integration_row.provider
             AND grant_row.local_user_id = candidate_user.id
           LIMIT 1
-       ), FALSE) AS dingtalk_grant_enabled,
+       ), FALSE) AS login_grant_enabled,
        EXISTS (
          SELECT 1
            FROM user_external_auth_grants grant_presence
-          WHERE grant_presence.provider = 'dingtalk'
+          WHERE grant_presence.provider = source_integration_row.provider
             AND grant_presence.local_user_id = candidate_user.id
-       ) AS dingtalk_grant_row_exists
+       ) AS login_grant_row_exists
      FROM users candidate_user
+     LEFT JOIN directory_integrations source_integration_row
+       ON source_integration_row.id = $3::uuid
      WHERE candidate_user.id = $1::text`,
     [
       input.localUserId,
@@ -229,7 +252,7 @@ export async function planDirectoryDeprovisionCandidate(
   client: DirectoryTransactionClient,
   input: PlanDeprovisionCandidateInput,
 ): Promise<{
-  plan: DirectoryDeprovisionPlan
+  plan: DirectoryDeprovisionStatePlan
   snapshot: DirectoryDeprovisionCandidateSnapshot
 }> {
   const state = await loadCandidateState(client, input)
@@ -249,24 +272,102 @@ export async function planDirectoryDeprovisionCandidate(
     orgMembershipActive: state.org_membership_active,
     orgCandidacyClear: state.org_candidacy_clear,
     globallyClear: state.globally_clear,
-    dingtalkGrantEnabled: state.dingtalk_grant_enabled,
-    dingtalkGrantRowExists: state.dingtalk_grant_row_exists,
+    loginGrantProvider: requireLoginGrantProvider(state),
+    loginGrantEnabled: state.login_grant_enabled,
+    loginGrantRowExists: state.login_grant_row_exists,
   }
   return {
     snapshot,
-    plan: planDirectoryDeprovision({
-      localUserId: input.localUserId,
-      policy: input.policy,
-      activationStatus: snapshot.activationStatus,
-      isActive: snapshot.isActive,
-      orgId: input.orgId,
-      orgMembershipActive:
-        snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
-      dingtalkGrantEnabled: snapshot.dingtalkGrantEnabled,
-      dingtalkGrantRowExists: snapshot.dingtalkGrantRowExists,
-      globallyClear: snapshot.globallyClear,
-    }),
+    plan: {
+      ...planDirectoryDeprovision({
+        localUserId: input.localUserId,
+        policy: input.policy,
+        activationStatus: snapshot.activationStatus,
+        isActive: snapshot.isActive,
+        orgId: input.orgId,
+        orgMembershipActive:
+          snapshot.orgMembershipActive && snapshot.orgCandidacyClear,
+        loginGrantProvider: snapshot.loginGrantProvider,
+        loginGrantEnabled: snapshot.loginGrantEnabled,
+        loginGrantRowExists: snapshot.loginGrantRowExists,
+        globallyClear: snapshot.globallyClear,
+      }),
+      suppressedByLocal: suppressedByLocalFrom(state),
+    },
   }
+}
+
+/**
+ * The source integration row is joined by id in the state read; a linked source implies it
+ * exists, so a missing provider after the link check passed is a malformed read, not a race.
+ */
+function requireLoginGrantProvider(state: CandidateStateRow): string {
+  const provider = typeof state.login_grant_provider === 'string'
+    ? state.login_grant_provider.trim()
+    : ''
+  if (!provider) {
+    throw new Error('directory deprovision source integration provider is missing')
+  }
+  return provider
+}
+
+const EFFECTS_TABLE = 'directory_deprovision_effects'
+const EFFECT_PROVIDER_COLUMN = 'provider'
+
+/**
+ * Effect INSERT without the provider column. This is the shape every ledger written before the
+ * provider column existed used, and it remains valid after the column exists (the column is
+ * nullable and NULL reads as the default provider).
+ */
+export const LEGACY_DEPROVISION_EFFECT_INSERT_SQL = `INSERT INTO directory_deprovision_effects (
+         event_id, local_user_id, org_id, effect_type,
+         before_active, after_active, grant_row_created,
+         access_generation_at_apply, status
+       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, $8, 'applied')`
+
+const PROVIDER_DEPROVISION_EFFECT_INSERT_SQL = `INSERT INTO directory_deprovision_effects (
+         event_id, local_user_id, org_id, effect_type,
+         before_active, after_active, grant_row_created,
+         access_generation_at_apply, status, provider
+       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, $8, 'applied', $9::text)`
+
+/**
+ * Column probe: the statement text names no table; table and column arrive as parameters. The
+ * probe is read-only and never fails on a ledger that predates the column.
+ */
+export const DEPROVISION_EFFECT_PROVIDER_PROBE_SQL = `SELECT EXISTS (
+         SELECT 1
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = $1::text
+            AND column_name = $2::text
+       ) AS present`
+
+const providerColumnProbeCache = new WeakMap<object, boolean>()
+
+export async function probeDeprovisionEffectProviderColumn(
+  client: DirectoryTransactionClient,
+  scope?: object,
+): Promise<boolean> {
+  if (scope) {
+    const cached = providerColumnProbeCache.get(scope)
+    if (cached !== undefined) return cached
+  }
+  const result = await client.query(DEPROVISION_EFFECT_PROVIDER_PROBE_SQL, [
+    EFFECTS_TABLE,
+    EFFECT_PROVIDER_COLUMN,
+  ])
+  const present = result.rows[0]?.present === true
+  if (scope) providerColumnProbeCache.set(scope, present)
+  return present
+}
+
+function effectProviderUnsupportedError(): Error {
+  const error = new Error(
+    'directory deprovision effect provider cannot be recorded before the ledger provider column exists',
+  )
+  ;(error as Error & { code?: string }).code = 'DEPROVISION_EFFECT_PROVIDER_UNSUPPORTED'
+  return error
 }
 
 async function writeEffects(
@@ -275,25 +376,48 @@ async function writeEffects(
   localUserId: string,
   generation: number,
   effects: PlannedEffect[],
+  scope?: object,
 ): Promise<void> {
+  if (effects.length === 0) return
+  // Migration may land before or after this code: probe once per transaction scope and write
+  // the shape the ledger can hold. Only grant_changed effects carry a provider.
+  const providerColumnPresent = await probeDeprovisionEffectProviderColumn(client, scope)
+  const grantProviders = effects
+    .filter((effect) => effect.type === 'grant_changed')
+    .map((effect) => String(effect.provider ?? '').trim())
+  if (grantProviders.some((provider) => !provider)) {
+    throw new Error('directory deprovision grant effect is missing its provider')
+  }
+  if (
+    !providerColumnPresent
+    && grantProviders.some((provider) => provider !== DEFAULT_LEGACY_LOGIN_GRANT_PROVIDER)
+  ) {
+    // A NULL provider is read as the default provider; writing any other provider into a ledger
+    // that cannot record it would invert the evidence on restore. Refused before any effect row.
+    throw effectProviderUnsupportedError()
+  }
   for (const effect of effects) {
-    await client.query(
-      `INSERT INTO directory_deprovision_effects (
-         event_id, local_user_id, org_id, effect_type,
-         before_active, after_active, grant_row_created,
-         access_generation_at_apply, status
-       ) VALUES ($1::uuid, $2::text, $3::text, $4::text, $5, $6, $7, $8, 'applied')`,
-      [
-        eventId,
-        localUserId,
-        effect.orgId ?? null,
-        effect.type,
-        effect.beforeActive,
-        effect.afterActive,
-        effect.grantRowCreated === true,
-        generation,
-      ],
-    )
+    const provider = effect.type === 'grant_changed'
+      ? String(effect.provider ?? '').trim()
+      : ''
+    const params: unknown[] = [
+      eventId,
+      localUserId,
+      effect.orgId ?? null,
+      effect.type,
+      effect.beforeActive,
+      effect.afterActive,
+      effect.grantRowCreated === true,
+      generation,
+    ]
+    if (!providerColumnPresent) {
+      await client.query(LEGACY_DEPROVISION_EFFECT_INSERT_SQL, params)
+      continue
+    }
+    await client.query(PROVIDER_DEPROVISION_EFFECT_INSERT_SQL, [
+      ...params,
+      effect.type === 'grant_changed' ? provider : null,
+    ])
   }
 }
 
@@ -342,18 +466,23 @@ async function applyDirectoryDeprovisionCandidateWrites(
       plan: { localUserId: input.localUserId, skipReason: 'candidate_vanished', effects: [] },
     }
   }
-  const plan = planDirectoryDeprovision({
-    localUserId: input.localUserId,
-    policy: input.policy,
-    activationStatus: state.activation_status,
-    isActive: state.is_active,
-    orgId: input.orgId,
-    orgMembershipActive:
-      state.org_membership_active && state.org_candidacy_clear,
-    dingtalkGrantEnabled: state.dingtalk_grant_enabled,
-    dingtalkGrantRowExists: state.dingtalk_grant_row_exists,
-    globallyClear: state.globally_clear,
-  })
+  const loginGrantProvider = requireLoginGrantProvider(state)
+  const plan: DirectoryDeprovisionStatePlan = {
+    ...planDirectoryDeprovision({
+      localUserId: input.localUserId,
+      policy: input.policy,
+      activationStatus: state.activation_status,
+      isActive: state.is_active,
+      orgId: input.orgId,
+      orgMembershipActive:
+        state.org_membership_active && state.org_candidacy_clear,
+      loginGrantProvider,
+      loginGrantEnabled: state.login_grant_enabled,
+      loginGrantRowExists: state.login_grant_row_exists,
+      globallyClear: state.globally_clear,
+    }),
+    suppressedByLocal: suppressedByLocalFrom(state),
+  }
   const currentGeneration = Number(state.access_generation)
 
   if (!input.write || plan.effects.length === 0) {
@@ -406,20 +535,9 @@ async function applyDirectoryDeprovisionCandidateWrites(
         WHERE user_id = $1::text
           AND org_id = $2::text
           AND COALESCE(is_active, TRUE) = TRUE
-          AND NOT EXISTS (
-            SELECT 1
-              FROM directory_account_links sibling_link
-              JOIN directory_accounts sibling
-                ON sibling.id = sibling_link.directory_account_id
-              JOIN directory_integrations sibling_integration
-                ON sibling_integration.id = sibling.integration_id
-             WHERE sibling_link.local_user_id = $1::text
-               AND sibling_link.link_status = 'linked'
-               AND sibling.is_active = TRUE
-               AND sibling_integration.org_id = $2::text
-          )
+          AND NOT ${orgVouchExists({ user: '$1::text', prospectiveParam: 3, orgParam: 2 })}
         RETURNING user_id`,
-      [input.localUserId, input.orgId],
+      [input.localUserId, input.orgId, noProspectiveDeactivation()],
     )
     if (!membership.rows[0]) {
       throw new Error(
@@ -436,6 +554,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
   // mark itself is unchanged: it still blocks ensureGrant's creation-only auto-grant.)
   const grantEffect = plan.effects.find((effect) => effect.type === 'grant_changed')
   if (grantEffect) {
+    const grantProvider = String(grantEffect.provider ?? '').trim() || loginGrantProvider
     if (grantEffect.grantRowCreated === true) {
       // Deny-row CREATION for a person with no existing row. Plain INSERT, no ON CONFLICT:
       // the per-user lock plus the same-transaction EXISTS read guarantee absence, so a
@@ -443,8 +562,8 @@ async function applyDirectoryDeprovisionCandidateWrites(
       await client.query(
         `INSERT INTO user_external_auth_grants (
            provider, local_user_id, enabled, granted_by, created_at, updated_at
-         ) VALUES ('dingtalk', $1::text, FALSE, 'system:directory-deprovision', NOW(), NOW())`,
-        [input.localUserId],
+         ) VALUES ($2::text, $1::text, FALSE, 'system:directory-deprovision', NOW(), NOW())`,
+        [input.localUserId, grantProvider],
       )
     } else {
       const flipped = await client.query(
@@ -452,11 +571,11 @@ async function applyDirectoryDeprovisionCandidateWrites(
             SET enabled = FALSE,
                 granted_by = 'system:directory-deprovision',
                 updated_at = NOW()
-          WHERE provider = 'dingtalk'
+          WHERE provider = $2::text
             AND local_user_id = $1::text
             AND enabled = TRUE
           RETURNING local_user_id`,
-        [input.localUserId],
+        [input.localUserId, grantProvider],
       )
       if (!flipped.rows[0]) {
         throw new Error(
@@ -520,6 +639,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
     input.localUserId,
     generation,
     plan.effects,
+    input.ledgerScope,
   )
 
   return {

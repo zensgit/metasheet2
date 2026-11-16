@@ -29,8 +29,8 @@ function validSnapshot() {
   }
 }
 function validReceipt() {
-  return { files: [...TEST_FILES].sort(), counts: { files: 5, tests: 80, passed: 80, failed: 0, skipped: 0,
-    sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 },
+  return { files: [...TEST_FILES].sort(), counts: { files: 6, tests: 83, passed: 83, failed: 0, skipped: 0,
+    sentinels: 6, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 },
   policy: { pool: 'forks', config: CONFIG, retry: 0, repeat: 0, watch: false,
     filtered: false, setupFiles: 0, globalSetup: 0 } }
 }
@@ -209,7 +209,7 @@ test('implicit Vite env files are refused by filename without reading their valu
   }
 })
 
-test('whole-five-file receipt preserves 75 business tests plus five sentinels', () => {
+test('whole-six-file receipt preserves 77 business tests plus six sentinels', () => {
   assert.equal(validateTaskReceipt(validReceipt()), true)
   for (const key of ['files', 'tests', 'passed', 'sentinels']) {
     const receipt = validReceipt(); receipt.counts[key]--
@@ -449,7 +449,7 @@ test('production capture and outer caller classify only exact unshare denial and
       owner.hashes[probe] = fileHash(probe)
       // Even an otherwise successful receipt cannot override the child exit.
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 80 }), { mode: 0o600 })
+        sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 83 }), { mode: 0o600 })
       const file = path.join(sandbox, 'namespace.stderr.log')
       if (variant === 'hash') await fs.appendFile(file, 'synthetic-secret')
       if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
@@ -747,10 +747,10 @@ test('diagnostic log hash, file mode, byte budget and source failures are fixed 
     // Original success criteria still govern even if the diagnostic view is
     // unavailable. No new protocol serves as a capability or success fallback.
     await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
-      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 80 }), { mode: 0o600 })
+      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 83 }), { mode: 0o600 })
     const lines = []
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), true)
-    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":80,"business":75,"sentinels":5}'])
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":83,"business":77,"sentinels":6}'])
     owner.hashes[path.join(lib, 'stock-preparation-plm-owned-pg.mjs')] = '0'.repeat(64)
     lines.length = 0
     assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false)
@@ -780,9 +780,9 @@ test('production outer caller rejects each single failure against an otherwise s
       await fs.writeFile(probe, '// synthetic original source', { mode: 0o600 })
       owner.hashes[probe] = fileHash(probe)
       const receipt = { ownerSha, sourceSha: sha(JSON.stringify(owner.hashes)),
-        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 80 }
+        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 83 }
       if (fault === 'cleanup') receipt.cleanup = 'stop-failed-data-retained'
-      if (fault === 'tests') receipt.tests = 75
+      if (fault === 'tests') receipt.tests = 77
       if (fault === 'passed') receipt.passed = false
       await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify(receipt), { mode: 0o600 })
       // Mutate only a private synthetic source byte, keeping owner hashes and
@@ -791,7 +791,7 @@ test('production outer caller rejects each single failure against an otherwise s
       const lines = [], passed = reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line))
       assert.equal(passed, fault === 'none', fault)
       if (fault === 'none') assert.deepEqual(lines,
-        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":80,"business":75,"sentinels":5}'])
+        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":83,"business":77,"sentinels":6}'])
       else {
         assert.equal(process.exitCode, 1, fault)
         assert.equal(lines.length, 2, fault)

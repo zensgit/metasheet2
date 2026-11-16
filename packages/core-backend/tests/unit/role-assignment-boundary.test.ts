@@ -466,8 +466,27 @@ describe('attendance role routes are bounded by the router scope', () => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       seen.push(sql)
+      if (/FOR UPDATE/.test(sql) && /FROM users/.test(sql)) {
+        const id = String(params?.[0] ?? '')
+        const actor = id === 'admin-1'
+        return {
+          rows: [{
+            id, email: 'u@example.com', name: 'U', employeeNo: null,
+            department: null, role: actor ? 'admin' : 'user', is_active: true,
+            activation_status: 'activated', is_admin: actor, access_generation: 0,
+            deleted_at: null, purged_at: null, last_login_at: null, created_at: 'now',
+          }],
+          rowCount: 1,
+        }
+      }
+      if (/SELECT role_id/.test(sql) && /FROM user_roles/.test(sql)) {
+        const id = String(params?.[0] ?? '')
+        return id === 'admin-1'
+          ? { rows: [{ role_id: 'admin' }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      }
       if (/FROM users/.test(sql)) {
         return {
           rows: [{
@@ -589,6 +608,27 @@ describe('attendance-admin user scope is explicit, org-bound and atomic with rol
     const poolSql: string[] = []
     const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
       transactionSql.push(sql)
+      if (/FOR UPDATE/.test(sql) && /FROM users/.test(sql)) {
+        const id = String(params?.[0] ?? '')
+        return {
+          rows: [{
+            id,
+            role: id === 'platform-admin' ? 'admin' : 'user',
+            activation_status: 'activated',
+            is_active: true,
+            access_generation: 0,
+            deleted_at: null,
+            purged_at: null,
+          }],
+          rowCount: 1,
+        }
+      }
+      if (/SELECT role_id/.test(sql) && /FROM user_roles/.test(sql)) {
+        const id = String(params?.[0] ?? '')
+        return id === 'platform-admin'
+          ? { rows: [{ role_id: 'admin' }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      }
       if (/uo\.user_id = \$1/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 }
       if (/u\.id = ANY\(\$1::text\[\]\)/.test(sql)) {
         const requested = (params?.[0] ?? []) as string[]
@@ -778,17 +818,51 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
       handler({ query: pgMocks.query })
     ))
     rbacServiceMocks.isAdmin.mockResolvedValue(false)
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       seen.push(sql)
+      const actorId = 'delegated-actor'
       // `isUserWithinDelegatedScope` — also names the scopes table, so it is matched first.
       if (/WITH RECURSIVE/i.test(sql)) return { rows: [{ allowed: true }], rowCount: 1 }
+      if (/SELECT EXISTS \(/i.test(sql) && /delegated_role_admin_/i.test(sql) && /AS configured/i.test(sql)) {
+        const requestedActor = String(params?.[0] ?? '')
+        const namespaces = Array.isArray(params?.[1]) ? params[1].map((namespace) => String(namespace)) : []
+        const namespace = actorRoleId.replace(/_admin$/, '')
+        const configured = requestedActor === actorId && namespaces.includes(namespace)
+        return { rows: [{ configured }], rowCount: 1 }
+      }
       if (/SELECT\s+role_id\s+FROM\s+user_roles/i.test(sql)) {
+        if (String(params?.[0] ?? '') !== actorId) return { rows: [], rowCount: 0 }
         return { rows: [{ role_id: actorRoleId }], rowCount: 1 }
+      }
+      if (/FROM users/i.test(sql) && /FOR UPDATE/i.test(sql)) {
+        const userId = String(params?.[0] ?? '')
+        if (userId !== actorId && userId !== TARGET_USER_ID) return { rows: [], rowCount: 0 }
+        return {
+          rows: [{
+            id: userId,
+            email: userId === actorId ? 'actor@example.com' : 'target@example.com',
+            name: userId === actorId ? 'Delegated Actor' : 'Target',
+            username: null,
+            mobile: null,
+            role: 'user',
+            activation_status: 'activated',
+            is_active: true,
+            is_admin: false,
+            access_generation: 0,
+            deleted_at: null,
+            purged_at: null,
+            last_login_at: null,
+            created_at: 'now',
+            updated_at: 'now',
+          }],
+          rowCount: 1,
+        }
       }
       if (/FROM users/i.test(sql)) {
         return {
           rows: [{
             id: TARGET_USER_ID, email: 'target@example.com', name: 'Target', role: 'user',
+            activation_status: 'activated', deleted_at: null, purged_at: null,
             is_active: true, is_admin: false, last_login_at: null, created_at: 'now',
             updated_at: 'now',
           }],

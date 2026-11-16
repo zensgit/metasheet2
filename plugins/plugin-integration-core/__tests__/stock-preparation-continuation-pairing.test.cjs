@@ -266,6 +266,21 @@ test('trigger list: exactly the seven-item content fields on the frozen template
   }
 })
 
+test('R-71 7.4 PR-4: the two new template columns are neither content triggers nor in the machine band, so a governed project\'s digests do not move', () => {
+  assert.deepEqual([...pairing.UNSOURCED_PLM_FIELD_IDS], ['projectSpecModel'])
+  const templateIds = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
+  const triggers = contentTriggerFieldIds({})
+  const band = machineBandFieldIds({})
+  for (const fieldId of ['issueConfirmDate', 'projectSpecModel']) {
+    assert.ok(templateIds.includes(fieldId), `${fieldId} is a template column (the exclusion is not vacuous)`)
+    assert.equal(triggers.includes(fieldId), false, `${fieldId} is not a content trigger`)
+    assert.equal(band.includes(fieldId), false, `${fieldId} is not in the machine band`)
+  }
+  // The machine band is exactly what it was before the two columns existed.
+  assert.deepEqual(band, ['active', 'componentCode', 'componentName', 'componentSourceId', 'componentSpec', 'depth', 'idempotencyKey', 'material',
+    'parentComponentCode', 'parentComponentName', 'parentSourceId', 'path', 'projectNo', 'rawQuantity', 'sourceVersion', 'totalQuantity'])
+})
+
 test('trigger changes, positive examples: material M1->M2, version A->B, child edge 2->3, root total 10->12, 图号 D-1->D-2, material blank->M1, ext_nameAndSpec X->Y', () => {
   const installed = [{ id: 'ext_nameAndSpec', property: { stockPreparation: { ownership: 'plm_system', extension: true } } }]
   const triggerFieldIds = contentTriggerFieldIds({ installedFieldProperties: installed })

@@ -50,6 +50,7 @@ const {
   STOCK_PREPARATION_FIELD_TYPES,
   STOCK_PREPARATION_FIELD_OWNERSHIPS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
   __internals: {
     assertNoContentKeys: assertNoTemplateContentKeys,
     isPlainObject,
@@ -200,6 +201,10 @@ const OWNERSHIP_SET = new Set(STOCK_PREPARATION_FIELD_OWNERSHIPS)
 // the pack module is additive AROUND the template, never into it.
 const TEMPLATE_FIELDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
 const TEMPLATE_FIELD_IDS = Object.freeze(TEMPLATE_FIELDS.map((field) => field.id))
+// 批次标识 (BI-1a, R-65; design Q-BI-13): the `ext_` COLLISION catalog also names the two pull-batch band ids,
+// which live outside the template — so a pack can never declare `ext_pullBatch` / `ext_firstPullBatch` beside
+// them. Only the namespace check reads this list; TEMPLATE_FIELD_IDS keeps meaning "the template's ids".
+const EXTENSION_COLLISION_FIELD_IDS = Object.freeze([...TEMPLATE_FIELD_IDS, ...STOCK_PREPARATION_PULL_BATCH_FIELD_IDS])
 
 function assertOnlyKnownKeys(input, allowedKeys, reason, label) {
   for (const key of Object.keys(input)) {
@@ -316,7 +321,7 @@ function normalizeExtensionField(input, index) {
   // so a template collision — `ext_notes` against the template's `notes` — is
   // rejected here, not discovered in production.
   try {
-    assertExtensionFieldIdValid(input.id, { templateFieldIds: TEMPLATE_FIELD_IDS })
+    assertExtensionFieldIdValid(input.id, { templateFieldIds: EXTENSION_COLLISION_FIELD_IDS })
   } catch (error) {
     fail('EXTENSION_FIELD_ID_INVALID', `${label}.id is not a valid tenant extension field id`, {
       field: `${label}.id`,

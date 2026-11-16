@@ -562,3 +562,61 @@ function generateTempPassword(): string {
   }
   return out
 }
+
+type ActivationSourceQueryClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+}
+
+/**
+ * Validates one explicitly named directory account as the activation source for `userId`, using
+ * the same closed set as `activatePendingUser` (linked to this user, account in service,
+ * integration active, integration org present). The account path is always explicit: a blank
+ * `directoryAccountId` is refused rather than falling back to the implicit link lookup.
+ * DingTalk-specific eligibility is not applied (`requireDingTalkSso: false`, no expected
+ * identity), so local-provider accounts qualify exactly as they do for an administrator
+ * activation. `ACTIVATE_*` errors from the closed set propagate unchanged.
+ */
+export async function resolveActivationDirectorySource(
+  client: ActivationSourceQueryClient,
+  input: {
+    userId: string
+    directoryAccountId: string
+    requestedOrgId?: string | null
+  },
+): Promise<{ orgId: string; directoryAccountId: string }> {
+  const directoryAccountId = typeof input.directoryAccountId === 'string'
+    ? input.directoryAccountId.trim()
+    : ''
+  if (!directoryAccountId) {
+    throwCoded('No linked active directory account for activation', 'ACTIVATE_SOURCE_MISSING')
+  }
+  const orgId = await assertDirectorySourceActiveForActivate(client, {
+    userId: input.userId,
+    directoryAccountId,
+    requireDingTalkSso: false,
+    expectedDingTalkIdentity: null,
+    requestedOrgId: input.requestedOrgId?.trim() || null,
+  })
+  return { orgId, directoryAccountId }
+}
+
+/**
+ * Ids of the directory accounts currently linked (`link_status = 'linked'`) to `userId`, in a
+ * stable order. Read-only; takes no row locks.
+ */
+export async function listLinkedDirectoryAccountIds(
+  client: ActivationSourceQueryClient,
+  userId: string,
+): Promise<string[]> {
+  const result = await client.query(
+    `SELECT directory_account_id
+       FROM directory_account_links
+      WHERE local_user_id = $1
+        AND link_status = 'linked'
+      ORDER BY directory_account_id`,
+    [userId],
+  )
+  return (result.rows as Array<{ directory_account_id: unknown }>).map((row) =>
+    String(row.directory_account_id),
+  )
+}

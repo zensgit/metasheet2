@@ -360,7 +360,14 @@ describe('D7 flag-off HTTP parity', () => {
   // The pin's PURPOSE is intact: it still proves the flag-off path is byte-identical across every
   // non-exact archive flag value. Only the frozen constant moved, and only by the one added query.
   // Previous value (pre-soft-delete): d44200359ffcbed8462e9655944244dbfd6933e11351e5b687b31b82e83876f6
-  const HISTORICAL_FLAG_OFF_SHA256 = '626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455'
+  //
+  // REBASELINED DELIBERATELY again (field-row lost-update guard): config-restore-execute's generic branch now reads
+  // the FIELD snapshot under the row lock (`… FROM meta_fields WHERE id = $1 FOR NO KEY UPDATE`, config-restore.ts
+  // FIELD_CONFIG_SNAPSHOT_LOCKED_SQL), so a field write committed between the drift check and the revert's UPDATE
+  // waits instead of being overwritten. That one statement text is the only change in the traced sequence (removing
+  // the suffix gives back the previous value). Previous value (pre-snapshot-lock):
+  // 626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455
+  const HISTORICAL_FLAG_OFF_SHA256 = '91ef18bd5b7f3fb33d85ea6e3eba634c9450398a961265923f61d16cd830c713'
 
   it('keeps existing recovery responses and SQL byte-identical for every non-exact archive flag value', async () => {
     const probe = async (archiveFlag: string | undefined) => {

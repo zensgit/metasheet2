@@ -675,18 +675,25 @@ export async function ensureFields(
   }))
 }
 
+/**
+ * `patchObjectFieldProperty`'s read of the field row, UNDER THE ROW LOCK. The patch merges onto what it read and writes
+ * the whole property back, so without the lock a field write committed in between (PATCH /fields, another plugin
+ * write, a config revert) would be reverted. With it, that write waits until this one commits and then sees it.
+ * `FOR NO KEY UPDATE` is exactly the lock the UPDATE below takes (it never changes `id`), only taken one statement
+ * earlier, so FK child inserts on the field (links, attachments, auto-number sequences; FOR KEY SHARE) never wait on it.
+ * Single-row transaction (index.ts patchObjectFieldProperty): it never waits on another field row while holding this
+ * one. Exported so the real-DB race cases hold on the production text.
+ */
+export const PATCH_OBJECT_FIELD_PROPERTY_READ_SQL =
+  'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2 FOR NO KEY UPDATE'
+
 export async function patchObjectFieldProperty(
   input: PatchObjectFieldPropertyInput,
 ): Promise<MultitableProvisioningField> {
   const sheetId = getObjectSheetId(input.projectId, input.objectId)
   const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
   await fenceWriterEntry(input.query, sheetId)
-  const existing = await input.query(
-    `SELECT id, sheet_id, name, type, property, "order"
-     FROM meta_fields
-     WHERE sheet_id = $1 AND id = $2`,
-    [sheetId, physicalFieldId],
-  )
+  const existing = await input.query(PATCH_OBJECT_FIELD_PROPERTY_READ_SQL, [sheetId, physicalFieldId])
   const row = (existing.rows as any[])[0]
   if (!row) {
     throw new Error(`Provisioned field not found: ${input.objectId}.${input.fieldId}`)
@@ -978,6 +985,42 @@ export async function resolveExistingObjectFieldIds(
   return out
 }
 
+export type ReadObjectMaxFieldOrderInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+}
+
+// The largest meta_fields."order" over EVERY field row of the object's sheet — template columns, tenant
+// `ext_` columns, the pull-batch band, and columns a person created through POST /fields (whose ids are not
+// derivable from a logical id, so no logical-id read can see them). `null` for a sheet with no field row.
+// VALUES-FREE: one integer, never an id, a name or a property.
+//
+// Y7 review MEDIUM-2: an additive repair that appends template columns reads this INSIDE its repair
+// transaction and places them at max + 1 + i, so they land after every existing column instead of
+// colliding with a right-side band on (order, id). The canonical per-sheet writer fence is taken FIRST
+// (`fenceWriterEntry`, the same entry `ensureMissingObjectFields` and POST/PATCH /fields take), so with the
+// fence enabled a concurrent field create either committed before this read or waits for this transaction.
+// With the fence flag off nothing serializes the read against a concurrent field create; the worst case is
+// an order tie with that column (layout only — the additive write itself is unchanged).
+export async function readObjectMaxFieldOrder(
+  input: ReadObjectMaxFieldOrderInput,
+): Promise<number | null> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  await fenceWriterEntry(input.query, sheetId)
+  const res = await input.query(
+    `SELECT MAX("order") AS max_order FROM meta_fields WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const raw = (res.rows[0] as { max_order?: unknown } | undefined)?.max_order
+  if (raw === null || raw === undefined) return null
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value)) {
+    throw new Error('meta_fields max order is not a safe integer')
+  }
+  return value
+}
+
 export type ReadObjectFieldsContentInput = {
   query: MultitableProvisioningQueryFn
   projectId: string
@@ -1040,6 +1083,8 @@ export function buildObjectFieldsRepairSurface(
       readObjectFieldsContent({ query, projectId, objectId, fieldIds }),
     ensureMissingObjectFields: ({ projectId, objectId, fields }) =>
       ensureMissingObjectFields({ query, projectId, objectId, fields }),
+    readObjectMaxFieldOrder: ({ projectId, objectId }) =>
+      readObjectMaxFieldOrder({ query, projectId, objectId }),
   }
 }
 
