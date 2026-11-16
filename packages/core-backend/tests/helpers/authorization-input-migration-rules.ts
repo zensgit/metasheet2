@@ -16,6 +16,17 @@
  * file and whose reachable tables are plain table names, none of them an input table or a cascade
  * parent however it is spelled. Nothing else about the statement is set aside, and a substituted
  * SET clause of a `users` UPDATE is never exempt.
+ *
+ * One more set-aside exists, and only one: the pinned statements of the D21 authorization-version
+ * migration (owner ruling 2026-11-16 「按建议，A」). In that one file, under its exact path, the five
+ * CREATE TRIGGER statements and the five tolerant DROP TRIGGER statements on input tables written
+ * below are set aside together, and only when every one of the ten is found exactly once in the
+ * file, as written, where it is pinned to stand, with exactly its pinned verdict and nothing else
+ * about it: a CREATE at the top of an SQL text, a DROP as the piece of a `DO` body that its pinned
+ * `to_regclass` guard begins. When any of the ten is missing, found twice (however it stands), or
+ * found anywhere else or otherwise, nothing is set aside. A function body is not part of the pin:
+ * the trigger function is judged by the rules for every function definition, and the database
+ * census pins what the triggers run.
  */
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -167,7 +178,90 @@ export function judgedOnlyExemptionProblems(exemptions: readonly AuthorizationIn
   return problems
 }
 
-export function checkNewMigration(file: string, source: string, isNew: boolean = isNewMigration(file), exemptions: readonly AuthorizationInputDynamicExemption[] = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS): MigrationCheck {
+/* ───────────────────────────── pinned statements ───────────────────────────── */
+
+/** One statement a pinned set names: its verdict exactly, and the statement as written and where it stands (`WrittenStatement`). */
+export type PinnedStatement = Readonly<{ kind: string; detail: string; text: string; written: string; at: 'text' | 'block' }>
+
+/** Statements of one migration that are set aside together, or not at all. */
+export type PinnedStatementSet = Readonly<{ id: string; file: string; reason: string; statements: readonly PinnedStatement[] }>
+
+const DEFINES_OVER_INPUT = 'defines an object over an input table'
+const KIND_NOT_SAFE = 'statement kind is not on the safe list'
+const pinnedCreate = (text: string): PinnedStatement => ({ kind: 'CREATE TRIGGER', detail: DEFINES_OVER_INPUT, text, written: text, at: 'text' })
+/** A tolerant drop: the one statement of the `IF to_regclass('public.<table>') IS NOT NULL THEN` branch that opens its `DO` body. */
+const pinnedDrop = (table: string, text: string): PinnedStatement => ({ kind: 'DROP TRIGGER', detail: KIND_NOT_SAFE, text, written: `BEGIN IF to_regclass('public.${table}') IS NOT NULL THEN ${text}`, at: 'block' })
+
+export const D21_AUTHORIZATION_VERSION_MIGRATION = 'packages/core-backend/src/db/migrations/zzzz20261106110500_add_authorization_version_rows.ts'
+
+/**
+ * The D21 subject-version triggers on input tables (owner ruling 2026-11-16 「按建议，A」). Each runs
+ * `public.metasheet_authz_bump_subject_authorization_version`, which writes only
+ * `subject_authorization_versions`; the census of the database pins the triggers on input tables.
+ */
+export const D21_PINNED_TRIGGER_STATEMENTS: PinnedStatementSet = Object.freeze({
+  id: 'AIS-PIN-D21',
+  file: D21_AUTHORIZATION_VERSION_MIGRATION,
+  reason: 'D21 authorization version rows: BEFORE ROW triggers that bump subject_authorization_versions; owner ruling 2026-11-16 option A',
+  statements: Object.freeze([
+    pinnedCreate("CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('user_id')"),
+    pinnedCreate("CREATE TRIGGER trg_user_permissions_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_permissions FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('user_id')"),
+    pinnedCreate("CREATE TRIGGER trg_user_namespace_admissions_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_namespace_admissions FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('user_id')"),
+    pinnedCreate("CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('id', 'role,is_active,activation_status,permissions,is_admin')"),
+    pinnedCreate("CREATE TRIGGER trg_users_zz_authz_subject_version_lifecycle BEFORE INSERT OR DELETE ON public.users FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('id')"),
+    pinnedDrop('user_roles', 'DROP TRIGGER IF EXISTS trg_user_roles_zz_authz_subject_version ON public.user_roles'),
+    pinnedDrop('user_permissions', 'DROP TRIGGER IF EXISTS trg_user_permissions_zz_authz_subject_version ON public.user_permissions'),
+    pinnedDrop('user_namespace_admissions', 'DROP TRIGGER IF EXISTS trg_user_namespace_admissions_zz_authz_subject_version ON public.user_namespace_admissions'),
+    pinnedDrop('users', 'DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_update ON public.users'),
+    pinnedDrop('users', 'DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_lifecycle ON public.users'),
+  ]),
+})
+
+export const AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS: readonly PinnedStatementSet[] = Object.freeze([D21_PINNED_TRIGGER_STATEMENTS])
+
+/**
+ * Whether `judgment`, whose statement text is the pinned one, is `pinned` as it stands: its exact
+ * verdict, nothing else about it, and the statement as written where it is pinned to stand.
+ */
+function isPinnedAsWritten(judgment: MigrationJudgment, pinned: PinnedStatement): boolean {
+  return (
+    judgment.verdict === 'unreadable' &&
+    judgment.kind === pinned.kind &&
+    judgment.detail === pinned.detail &&
+    !judgment.inputWrite &&
+    judgment.table === undefined &&
+    judgment.raises === undefined &&
+    judgment.forbiddenTable === undefined &&
+    judgment.dynamic === undefined &&
+    judgment.statement?.written === pinned.written &&
+    judgment.statement.at === pinned.at
+  )
+}
+
+/**
+ * The judgments of `file` that a pinned set covers: all the statements of the set, or none. A set
+ * covers its file only, and only when each of its statements is found in exactly one judgment of
+ * the file (counted by the statement text, however and wherever it stands) and that judgment is the
+ * statement as pinned.
+ */
+export function pinnedStatementsSetAside(file: string, judgments: readonly MigrationJudgment[], sets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS): ReadonlySet<MigrationJudgment> {
+  const aside = new Set<MigrationJudgment>()
+  for (const set of sets) {
+    if (set.file !== file) continue
+    const found = set.statements.map((pinned) => judgments.filter((judgment) => judgment.statement?.text === pinned.text))
+    if (!found.every((matches, index) => matches.length === 1 && isPinnedAsWritten(matches[0], set.statements[index]))) continue
+    for (const [judgment] of found) aside.add(judgment)
+  }
+  return aside
+}
+
+export function checkNewMigration(
+  file: string,
+  source: string,
+  isNew: boolean = isNewMigration(file),
+  exemptions: readonly AuthorizationInputDynamicExemption[] = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS,
+  pinnedSets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS,
+): MigrationCheck {
   const problems: string[] = []
   const isSource = SOURCE_EXTENSIONS.has(path.extname(file))
   const result = isSource ? scanSource(file, source) : scanText(file, source)
@@ -185,7 +279,8 @@ export function checkNewMigration(file: string, source: string, isNew: boolean =
   }
   const exempt = exemptDynamicForms(file, judged.dynamic, exemptions)
   const isExempt = (judgment: MigrationJudgment) => judgment.dynamic !== undefined && judgment.dynamic.length > 0 && judgment.dynamic.every((form) => exempt.has(form))
-  const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment))
+  const pinned = pinnedStatementsSetAside(file, judged.judgments, pinnedSets)
+  const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment) && !pinned.has(judgment))
   for (const judgment of enforced) problems.push(problemOf(judgment))
   problems.push(...closureProblems(result.writes, judged.writes))
   return Object.freeze({

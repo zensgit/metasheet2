@@ -20,13 +20,18 @@ import {
 } from '../../src/rbac/authorization-input-writers'
 import type { AuthorizationInputDynamicExemption } from '../../src/rbac/authorization-input-writers'
 import { helperMapProblems, judgeInputWrite, judgeMigrationInputWrites, splitStatements } from '../helpers/authorization-input-migration-judge'
+import type { MigrationJudgment } from '../helpers/authorization-input-migration-judge'
 import {
+  AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS,
   checkNewMigration,
   closureProblems,
   COMPLIANT_LOCK_BLOCK,
+  D21_AUTHORIZATION_VERSION_MIGRATION,
+  D21_PINNED_TRIGGER_STATEMENTS,
   digestOfFiles,
   historicalMigrationFiles,
   isNewMigration,
+  pinnedStatementsSetAside,
 } from '../helpers/authorization-input-migration-rules'
 import { blankSqlComments, CASCADE_PARENT_TABLES, INPUT_TABLES } from '../helpers/authorization-input-scan'
 
@@ -391,6 +396,190 @@ describe('statement kinds in a new migration', () => {
     const shadowed = `import { sql } from 'kysely'\nconst T = 'role_permissions'\nexport async function up(db, T) {\n${LOCK}\nawait sql\`DELETE FROM \${T}\`.execute(db)\n}`
     expect(check(shadowed, historicalMigrationFiles().find((file) => file.endsWith('.ts'))!, false).problems).toEqual(['write outside the judged statements: role_permissions|DELETE'])
     expect(check(shadowed).problems).toEqual(['unreadable ROLE_PERMISSIONS: statement kind is not on the safe list', 'unreadable DELETE: dynamic write target', 'write outside the judged statements: role_permissions|DELETE'])
+  })
+})
+
+describe('the pinned trigger statements of the D21 migration (owner ruling 2026-11-16 「按建议，A」)', () => {
+  const D21 = D21_AUTHORIZATION_VERSION_MIGRATION
+  const CREATE_PROBLEM = 'unreadable CREATE TRIGGER: defines an object over an input table'
+  const DROP_PROBLEM = 'unreadable DROP TRIGGER: statement kind is not on the safe list'
+  /** One statement as its own `sql` template, lines indented as in the migration. */
+  const sqlBlock = (...lines: string[]) => 'await sql`\n' + lines.map((line) => `    ${line}`).join('\n') + '\n  `.execute(db)'
+  const dropBlock = (guarded: string, trigger: string, table = guarded) =>
+    sqlBlock('DO $$ BEGIN', `  IF to_regclass('public.${guarded}') IS NOT NULL THEN`, `    DROP TRIGGER IF EXISTS ${trigger} ON public.${table};`, '  END IF;', 'END $$')
+  const SUBJECT_BUMP = 'public.metasheet_authz_bump_subject_authorization_version'
+  /** The ten statements in the layout of the migration at de9a26f44, written out here independently of the pinned list. */
+  const DROPS = [
+    dropBlock('user_roles', 'trg_user_roles_zz_authz_subject_version'),
+    dropBlock('user_permissions', 'trg_user_permissions_zz_authz_subject_version'),
+    dropBlock('user_namespace_admissions', 'trg_user_namespace_admissions_zz_authz_subject_version'),
+    dropBlock('users', 'trg_users_zz_authz_subject_version_update'),
+    dropBlock('users', 'trg_users_zz_authz_subject_version_lifecycle'),
+  ]
+  const CREATES = [
+    sqlBlock('CREATE TRIGGER trg_user_roles_zz_authz_subject_version', '  BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`),
+    sqlBlock('CREATE TRIGGER trg_user_permissions_zz_authz_subject_version', '  BEFORE INSERT OR UPDATE OR DELETE ON public.user_permissions', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`),
+    sqlBlock('CREATE TRIGGER trg_user_namespace_admissions_zz_authz_subject_version', '  BEFORE INSERT OR UPDATE OR DELETE ON public.user_namespace_admissions', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`),
+    sqlBlock('CREATE TRIGGER trg_users_zz_authz_subject_version_update', '  BEFORE UPDATE ON public.users', '  FOR EACH ROW', `  EXECUTE FUNCTION ${SUBJECT_BUMP}('id', 'role,is_active,activation_status,permissions,is_admin')`),
+    sqlBlock('CREATE TRIGGER trg_users_zz_authz_subject_version_lifecycle', '  BEFORE INSERT OR DELETE ON public.users', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('id')`),
+  ]
+  const LAYOUT = [...DROPS, ...CREATES]
+  const TEN = [...DROPS.map(() => DROP_PROBLEM), ...CREATES.map(() => CREATE_PROBLEM)]
+  const d21 = (blocks: readonly string[], file = D21) => checkNewMigration(file, up(...blocks), true).problems
+  /** The ten blocks with the one at `index` replaced by `block` (or by several blocks). */
+  const replaced = (index: number, ...blocks: string[]) => [...LAYOUT.slice(0, index), ...blocks, ...LAYOUT.slice(index + 1)]
+  const USER_ROLES_CREATE = 5
+  const USERS_UPDATE_CREATE = 8
+  const USER_ROLES_DROP = 0
+  const USER_ROLES_CREATE_TEXT = `CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`
+  const USER_ROLES_DROP_TEXT = 'DROP TRIGGER IF EXISTS trg_user_roles_zz_authz_subject_version ON public.user_roles'
+
+  it('the pinned set is pinned: one file, ten distinct statements, by count and by digest', () => {
+    expect(AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS).toEqual([D21_PINNED_TRIGGER_STATEMENTS])
+    expect(D21_PINNED_TRIGGER_STATEMENTS.file).toBe('packages/core-backend/src/db/migrations/zzzz20261106110500_add_authorization_version_rows.ts')
+    const statements = D21_PINNED_TRIGGER_STATEMENTS.statements
+    expect(statements).toHaveLength(10)
+    expect(new Set(statements.map((statement) => statement.text)).size).toBe(10)
+    expect(statements.map((statement) => `${statement.kind}|${statement.at}`)).toEqual([...Array(5).fill('CREATE TRIGGER|text'), ...Array(5).fill('DROP TRIGGER|block')])
+    expect(digestOfFiles(statements.map((statement) => JSON.stringify(statement)))).toBe('f22a61a3115d68a082e5a18fa9dfa4482955cfa2efea5e07dbfdcb2da04fcd16')
+  })
+
+  it('GREEN — exactly the ten statements under the pinned path, as the migration writes them or on one line with comments, set nothing else aside', () => {
+    expect(d21(LAYOUT)).toEqual([])
+    expect(d21([...CREATES, ...DROPS])).toEqual([])
+    const compact = D21_PINNED_TRIGGER_STATEMENTS.statements.map((statement) =>
+      statement.at === 'text' ? q(`${statement.text} -- pinned`) : q(`DO $$ ${statement.written.replace(/^BEGIN /, "BEGIN /* tolerant */ ")}; END IF; END $$`),
+    )
+    expect(check(up(...compact), D21).problems).toEqual([])
+    // Anything else in the file is judged as before.
+    expect(d21([...LAYOUT, sqlBlock("ALTER TABLE users ALTER COLUMN role SET DEFAULT 'admin'")])).toEqual(['unreadable ALTER TABLE: alters the sensitive column role'])
+  })
+
+  it('RED 4 — the same ten statements in any other migration, back-dated, under the other stream, or with another extension, are refused one by one', () => {
+    for (const file of [NEW_TS, `${MIG}/zzzz20200101000000_backdated.ts`, D21.replace(/\.ts$/, '.js'), D21.replace('src/db/migrations', 'migrations'), `${MIG}/zzzz20261106110501_add_authorization_version_rows.ts`]) {
+      expect(d21(LAYOUT, file), file).toEqual(TEN)
+    }
+    expect(check(`${D21_PINNED_TRIGGER_STATEMENTS.statements.filter((statement) => statement.at === 'text').map((statement) => statement.text).join(';\n')};\n`, 'packages/core-backend/migrations/zzzz20261106110500_add_authorization_version_rows.sql').problems).toEqual(Array(5).fill(CREATE_PROBLEM))
+  })
+
+  it('RED 1 — a sixth trigger on an input table is refused beside the ten; one that takes the place of a pinned statement leaves nothing set aside', () => {
+    const sixth = sqlBlock('CREATE TRIGGER trg_user_roles_zz_authz_subject_version_extra', '  BEFORE INSERT ON public.user_roles', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`)
+    const elsewhere = sqlBlock('CREATE TRIGGER trg_user_roles_zz_authz_subject_version', '  BEFORE INSERT OR UPDATE OR DELETE ON public.role_permissions', `  FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`)
+    for (const block of [sixth, elsewhere]) {
+      expect(d21([...LAYOUT, block]), block).toEqual([CREATE_PROBLEM])
+      expect(d21(replaced(USER_ROLES_CREATE, block)), block).toEqual(TEN)
+    }
+    // Nine of the ten are not the pinned set either.
+    expect(d21(LAYOUT.filter((_, index) => index !== USER_ROLES_CREATE))).toEqual(TEN.filter((_, index) => index !== USER_ROLES_CREATE))
+  })
+
+  const changed: Array<[string, number, string]> = [
+    ['other events', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('INSERT OR UPDATE OR DELETE', 'INSERT OR UPDATE')],
+    ['AFTER instead of BEFORE', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('BEFORE', 'AFTER')],
+    ['FOR EACH STATEMENT', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('FOR EACH ROW', 'FOR EACH STATEMENT')],
+    ['a WHEN clause', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('FOR EACH ROW', 'FOR EACH ROW WHEN (pg_trigger_depth() = 0)')],
+    ['UPDATE OF a column', USERS_UPDATE_CREATE, `CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE OF role ON public.users FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('id', 'role,is_active,activation_status,permissions,is_admin')`],
+    ['another function', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace(SUBJECT_BUMP, 'public.metasheet_authz_bump_sheet_permission_version')],
+    ['another watched list', USERS_UPDATE_CREATE, `CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('id', 'role,is_active')`],
+    ['another key', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace("('user_id')", "('role_id')")],
+    ['CREATE OR REPLACE TRIGGER', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER')],
+    ['an unqualified table', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('public.user_roles', 'user_roles')],
+    ['a table in another schema', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('public.user_roles', 'app.user_roles')],
+    ['a quoted table', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('public.user_roles', 'public."user_roles"')],
+    ['lower case', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('CREATE TRIGGER', 'create trigger')],
+  ]
+  for (const [name, index, text] of changed) {
+    it(`RED 2 — a pinned name with ${name} is refused, and leaves nothing set aside in its place`, () => {
+      expect(d21([...LAYOUT, q(text)])).toEqual([CREATE_PROBLEM])
+      expect(d21(replaced(index, q(text)))).toEqual(TEN)
+    })
+  }
+
+  it('RED 2 — the pinned text put together from a `+` chain, from a block body, or from a constant of the file is not the statement as written', () => {
+    const halves = `await db.query(${JSON.stringify(USER_ROLES_CREATE_TEXT.slice(0, 60))} + ${JSON.stringify(USER_ROLES_CREATE_TEXT.slice(60))})`
+    expect(d21(replaced(USER_ROLES_CREATE, halves))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_CREATE, q(`DO $$ BEGIN ${USER_ROLES_CREATE_TEXT}; END $$`)))).toEqual(TEN)
+    const folded = ["const TRIGGER_NAME = 'trg_user_roles_zz_authz_subject_version'", 'await sql`' + USER_ROLES_CREATE_TEXT.replace('trg_user_roles_zz_authz_subject_version', '${TRIGGER_NAME}') + '`.execute(db)']
+    expect(d21(replaced(USER_ROLES_CREATE, ...folded))).toEqual(TEN)
+  })
+
+  it('RED 3 — a pinned text found twice, however it is written, leaves nothing set aside', () => {
+    expect(d21([...LAYOUT, CREATES[0]])).toEqual([...TEN, CREATE_PROBLEM])
+    expect(d21([...LAYOUT, q(USER_ROLES_CREATE_TEXT)])).toEqual([...TEN, CREATE_PROBLEM])
+    expect(d21([...LAYOUT, DROPS[0]])).toEqual([...TEN, DROP_PROBLEM])
+    expect(d21([...LAYOUT, q(USER_ROLES_DROP_TEXT)])).toEqual([...TEN, DROP_PROBLEM])
+    // A second drop of the same trigger inside the same block.
+    expect(d21(replaced(USER_ROLES_DROP, q(`DO $$ BEGIN IF to_regclass('public.user_roles') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; ${USER_ROLES_DROP_TEXT}; END IF; END $$`)))).toEqual([DROP_PROBLEM, DROP_PROBLEM, ...TEN.slice(1)])
+  })
+
+  it('RED 5 — the pinned function redefined with a body that writes an input table or locks a users row is refused beside the ten', () => {
+    const lockUsers = `CREATE OR REPLACE FUNCTION ${SUBJECT_BUMP}() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN PERFORM 1 FROM public.users WHERE id = NEW.user_id FOR UPDATE; RETURN NEW; END $$`
+    expect(d21([q(lockUsers), ...LAYOUT])).toEqual(['unreadable CREATE FUNCTION: defines an object over an input table'])
+    const writeGrant = `CREATE OR REPLACE FUNCTION ${SUBJECT_BUMP}() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.user_permissions (user_id, permission_code) VALUES (NEW.user_id, 'users:write'); RETURN NEW; END $$`
+    expect(d21([q(writeGrant), ...LAYOUT])).toEqual(['missing world lock try form', 'unreadable INSERT: INSERT on user_permissions is not the outermost statement'])
+  })
+
+  it('RED 6 — a drop of a recovery trigger, or a pinned drop aimed at another table or guarded by another, is refused', () => {
+    const recovery: Array<[string, string]> = [
+      ['users', 'trg_users_recovery_authority_lock_update'],
+      ['users', 'trg_users_recovery_authority_lock_lifecycle'],
+      ['user_roles', 'trg_user_roles_recovery_authority_lock'],
+      ['user_permissions', 'trg_user_permissions_recovery_authority_lock'],
+      ['role_permissions', 'trg_role_permissions_recovery_authority_lock'],
+    ]
+    for (const [table, trigger] of recovery) expect(d21([...LAYOUT, dropBlock(table, trigger)]), trigger).toEqual([DROP_PROBLEM])
+    expect(d21(replaced(USER_ROLES_DROP, dropBlock('role_permissions', 'trg_user_roles_zz_authz_subject_version')))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_DROP, dropBlock('users', 'trg_user_roles_zz_authz_subject_version', 'user_roles')))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_DROP, q(USER_ROLES_DROP_TEXT)))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_DROP, q(`DO $$ BEGIN ${USER_ROLES_DROP_TEXT}; END $$`)))).toEqual(TEN)
+  })
+
+  it('RED 7 — a pinned drop or create run through EXECUTE is not the statement as written, alone or beside the pinned one', () => {
+    const executed = q(`DO $$ BEGIN EXECUTE '${USER_ROLES_DROP_TEXT}'; END $$`)
+    const executedBlock = q(`DO $$ BEGIN EXECUTE 'DO $x$ BEGIN IF to_regclass(''public.user_roles'') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; END IF; END $x$'; END $$`)
+    const formatted = q(`DO $$ BEGIN EXECUTE format('${USER_ROLES_DROP_TEXT}'); END $$`)
+    const executedCreate = q(`DO $$ BEGIN EXECUTE '${USER_ROLES_CREATE_TEXT.replace(/'/g, "''")}'; END $$`)
+    expect(d21(replaced(USER_ROLES_DROP, executed))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_DROP, executedBlock))).toEqual(TEN)
+    expect(d21(replaced(USER_ROLES_DROP, formatted))).toEqual(['unreadable EXECUTE: dynamic statement', 'unreadable EXECUTE: statement kind is not on the safe list', ...TEN.slice(1)])
+    expect(d21(replaced(USER_ROLES_CREATE, executedCreate))).toEqual(TEN)
+    expect(d21([...LAYOUT, executed])).toEqual([...TEN, DROP_PROBLEM])
+    expect(d21([...LAYOUT, executedBlock])).toEqual([...TEN, DROP_PROBLEM])
+  })
+
+  it('RED 8 — a trigger on an input table disabled, enabled always or renamed is refused beside the ten', () => {
+    const cases: Array<[string, string]> = [
+      ['ALTER TABLE public.users DISABLE TRIGGER trg_users_zz_authz_subject_version_update', 'unreadable ALTER TABLE: DISABLE TRIGGER is not on the list of safe sub-actions'],
+      ['ALTER TABLE public.user_roles ENABLE ALWAYS TRIGGER trg_user_roles_zz_authz_subject_version', 'unreadable ALTER TABLE: ENABLE ALWAYS is not on the list of safe sub-actions'],
+      ['ALTER TABLE users DISABLE TRIGGER ALL', 'unreadable ALTER TABLE: DISABLE TRIGGER is not on the list of safe sub-actions'],
+      ['ALTER TRIGGER trg_user_roles_zz_authz_subject_version ON public.user_roles RENAME TO trg_user_roles_aa', 'unreadable ALTER: statement kind is not on the safe list'],
+    ]
+    for (const [statement, problem] of cases) expect(d21([...LAYOUT, q(statement)]), statement).toEqual([problem])
+  })
+
+  it('the set-aside reads every condition of a judgment: a pinned judgment that differs in any one of them leaves nothing set aside', () => {
+    const judgments = judgeMigrationInputWrites(D21, up(...LAYOUT)).judgments
+    expect(pinnedStatementsSetAside(D21, judgments).size).toBe(10)
+    expect(pinnedStatementsSetAside(NEW_TS, judgments).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, judgments, []).size).toBe(0)
+    const target = judgments.find((judgment) => judgment.statement?.text === USER_ROLES_CREATE_TEXT)!
+    const variants: Array<Partial<MigrationJudgment>> = [
+      { verdict: 'raising' },
+      { kind: 'CREATE VIEW' },
+      { detail: 'statement kind is not on the safe list' },
+      { inputWrite: true },
+      { table: 'user_roles' },
+      { raises: { what: 'role', value: 'admin' } },
+      { forbiddenTable: true },
+      { dynamic: ['dynamic_statement'] },
+      { statement: undefined },
+      { statement: { ...target.statement!, at: 'other' } },
+      { statement: { ...target.statement!, written: `BEGIN ${target.statement!.written}` } },
+    ]
+    for (const variant of variants) {
+      const mutated = judgments.map((judgment) => (judgment === target ? { ...judgment, ...variant } : judgment))
+      expect(pinnedStatementsSetAside(D21, mutated).size, JSON.stringify(variant)).toBe(0)
+    }
   })
 })
 

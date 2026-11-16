@@ -70,6 +70,10 @@
  * Its verdict carries the form of the target and says nothing else about the statement: the rest of
  * the statement is judged as if the target were another table, so the caller may set that one
  * verdict aside for a registered exemption without setting aside anything else.
+ *
+ * The verdict of a CREATE or a DROP whose kind is not read further carries the statement as written
+ * and where it stands (`WrittenStatement`). It is still `unreadable`: the judge sets nothing aside;
+ * the caller may set aside a statement it names exactly, never a kind of statement.
  */
 import path from 'node:path'
 import ts from 'typescript'
@@ -100,7 +104,26 @@ export type MigrationJudgment = Readonly<{
   forbiddenTable?: boolean
   /** Set when the verdict stands for dynamic targets and for nothing else: the form of each. */
   dynamic?: readonly AuthorizationInputDynamicForm[]
+  /**
+   * Set only on the verdict of a CREATE or a DROP of a kind that is not read further (an object
+   * defined over an input table, or a kind not on the safe list): the statement as written, so the
+   * caller can name such a statement exactly. See `WrittenStatement`.
+   */
+  statement?: WrittenStatement
 }>
+
+/**
+ * A statement as written. `text` is its tokens after the control-flow words of a block body, each
+ * separated from the one before by one space where white space (or a blanked comment) separates
+ * them, and by nothing where nothing does; `written` is the same with those control-flow words.
+ * A substitution and a folded constant stay as the marks they are in the text, so neither is ever
+ * equal to a name written out. Case and the inside of quoted text are kept as written.
+ * `at` is where the statement stands: `text` at the top of one SQL text that is not assembled from
+ * a `+` chain, `block` as a piece of a dollar-quoted `DO` body of such a statement, and `other`
+ * anywhere else (the text of a dynamically executed literal, a block inside one, any piece of an
+ * assembled text, a block inside a block).
+ */
+export type WrittenStatement = Readonly<{ text: string; written: string; at: 'text' | 'block' | 'other' }>
 
 export type MigrationJudgeResult = Readonly<{
   judgments: readonly MigrationJudgment[]
@@ -904,10 +927,19 @@ const OBJECT_KINDS = ['VIEW', 'RULE', 'TRIGGER', 'FUNCTION', 'PROCEDURE']
 
 type Sink = { judgments: MigrationJudgment[]; writes: Map<string, number>; dynamic: Map<string, number> }
 
-/** `block`: the statement is a piece of a PL/pgSQL body. `count`: its writes are not already counted by an enclosing statement. */
-type StatementMode = Readonly<{ block: boolean; count: boolean }>
-const TOP_LEVEL: StatementMode = { block: false, count: true }
-const IN_BLOCK: StatementMode = { block: true, count: false }
+/** `block`: the statement is a piece of a PL/pgSQL body. `count`: its writes are not already counted by an enclosing statement. `at`: where it stands, as `WrittenStatement` names it (a text assembled from a `+` chain is `other` whatever the mode says). */
+type StatementMode = Readonly<{ block: boolean; count: boolean; at: WrittenStatement['at'] }>
+const TOP_LEVEL: StatementMode = { block: false, count: true, at: 'text' }
+const IN_BLOCK: StatementMode = { block: true, count: false, at: 'block' }
+/** A piece of a block body that does not stand directly in a top-level statement. */
+const IN_OTHER_BLOCK: StatementMode = { block: true, count: false, at: 'other' }
+/** The text of a dynamically executed literal. */
+const EXECUTED: StatementMode = { block: false, count: false, at: 'other' }
+
+/** Tokens as written: one space where white space separates two of them, nothing where nothing does. */
+function writtenText(tokens: readonly Token[]): string {
+  return tokens.map((token, index) => (index === 0 || token.joined === true ? token.text : ` ${token.text}`)).join('')
+}
 
 function countWrite(sink: Sink, table: string, verb: string): void {
   sink.writes.set(`${table}|${verb}`, (sink.writes.get(`${table}|${verb}`) ?? 0) + 1)
@@ -926,7 +958,8 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     for (const write of scanned.writes) countWrite(sink, write.table, write.verb)
     for (const form of dynamicForms) countDynamic(sink, form)
   }
-  let tokens = tokenize(sql.text, sql.folds)
+  const writtenTokens = tokenize(sql.text, sql.folds)
+  let tokens = writtenTokens
   if (mode.block) tokens = stripControlPrefix(tokens)
   if (tokens.length === 0) return
   const inputWrites = scanned.writes.filter((write) => INPUTS.has(write.table))
@@ -956,7 +989,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (head === 'DO') {
     const body = tokens.find((token) => token.type === 'dollar')
     if (!body || tokens.length > 3) return push('DO', 'unreadable', 'block body is not one dollar-quoted text')
-    for (const inner of splitStatements(blankSqlComments(body.value))) judgeStatement(file, { text: inner.text, folds: sql.folds, concatenated: sql.concatenated }, line, sink, IN_BLOCK)
+    for (const inner of splitStatements(blankSqlComments(body.value))) judgeStatement(file, { text: inner.text, folds: sql.folds, concatenated: sql.concatenated }, line, sink, mode.at === 'text' ? IN_BLOCK : IN_OTHER_BLOCK)
     return
   }
   // Dynamic execution inside a block body: a single literal is judged as a statement, anything else
@@ -965,7 +998,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (mode.block && head === 'EXECUTE') {
     const literal = tokens[1]
     if (tokens.length === 2 && literal.type === 'str' && !literal.opaque) {
-      for (const inner of splitStatements(blankSqlComments(literal.value))) judgeStatement(file, { text: inner.text, folds: [] }, line, sink, { block: false, count: false })
+      for (const inner of splitStatements(blankSqlComments(literal.value))) judgeStatement(file, { text: inner.text, folds: [] }, line, sink, EXECUTED)
       return
     }
     pushDynamicStatement()
@@ -1160,8 +1193,11 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       const tied = head === 'CREATE' ? createdHierarchyProblem(tokens, tableAt(tokens, at)?.next ?? tokens.length) : null
       return tied ? push(`${head} TABLE`, 'unreadable', tied) : push(`${head} TABLE`, 'safe', '')
     }
-    if (head === 'CREATE' && (OBJECT_KINDS.includes(object) || materialized)) return push(`CREATE ${materialized ? 'MATERIALIZED VIEW' : object}`, 'unreadable', 'defines an object over an input table')
-    return push(`${head} ${object}`.trim(), 'unreadable', 'statement kind is not on the safe list')
+    // These two verdicts carry the statement as written: a caller may name such a statement exactly
+    // (the pinned statements of `authorization-input-migration-rules.ts`), never by its kind alone.
+    const statement: WrittenStatement = { text: writtenText(tokens), written: writtenText(writtenTokens), at: sql.concatenated ? 'other' : mode.at }
+    if (head === 'CREATE' && (OBJECT_KINDS.includes(object) || materialized)) return push(`CREATE ${materialized ? 'MATERIALIZED VIEW' : object}`, 'unreadable', 'defines an object over an input table', { statement })
+    return push(`${head} ${object}`.trim(), 'unreadable', 'statement kind is not on the safe list', { statement })
   }
   if (head === 'COMMENT' && isKeyword(tokens[1], 'ON')) return push('COMMENT ON', 'safe', '')
   return push(head, 'unreadable', 'statement kind is not on the safe list')
