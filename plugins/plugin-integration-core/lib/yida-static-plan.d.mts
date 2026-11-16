@@ -187,7 +187,8 @@ export const YIDA_TRANSFORM_NAMES: readonly YidaTransformName[]
 export function yidaTransformSourceColumns(config: unknown): readonly string[]
 /**
  * The source columns ONE normalized field-map entry depends on, sorted and de-duplicated: direct → its source;
- * copy → its direct primary's source (needs the normalized config); concat → its column parts; constant → none.
+ * copy → its direct primary's source (needs the normalized config); concat → its column parts; constant → none;
+ * generated → the sources of its field parts, hash members and preset inputs (needs the config, see generatedTemplateDependencies).
  * A v2 entry (no `transform`) binds exactly its `source`. Throws YIDA_STATIC_CONFIG_INVALID for an unknown kind.
  */
 export function transformDependencies(entry: unknown, config?: unknown): readonly string[]

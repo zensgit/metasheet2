@@ -477,14 +477,15 @@ export const YIDA_TRANSFORM_NAMES = Object.freeze([...TRANSFORM_ENTRY_KEYS.keys(
 // Per transform kind, the row columns ONE entry's value depends on (design baseline v2.3 §7.2 and the
 // 2026-11-06 addendum: shared by the v3 row projection (⑦.3), the per-row `fieldDependencies` of a source
 // binding (Y4) and the admission re-authorization (Y5)). A copy depends on its direct primary's column, so
-// it needs the normalized config; the other kinds read only the entry. Y6 adds `generated` here.
+// it needs the normalized config; a generated entry resolves its field parts, hash members and preset inputs
+// through their direct targets, so it needs the config too (R-71 ⑦.4, Y6). The other kinds read only the entry.
 const TRANSFORM_DEPENDENCIES = new Map([
   ['direct', (entry) => [entry.source]],
   ['copy', (entry, config) => [primaryEntry(config, entry.copyOf).source]],
   ['constant', () => []],
   ['concat', (entry) => entry.parts.filter((part) => Object.prototype.hasOwnProperty.call(part, 'source'))
     .map((part) => part.source)],
-  ['generated', (entry, config) => generatedTemplateDependencies(entry, config)],
+  ['generated', generatedTemplateDependencies],
 ])
 const byCodePoint = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
 
