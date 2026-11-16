@@ -735,6 +735,25 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
         expect(body).toContain("'DEL\rETE'")
         expect(bodyDigest(body)).not.toBe(SUBJECT_VERSION_FUNCTION_BODY_SHA256)
         expect(await subjectVersionTriggerPins(runner)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS.map(([table, name, pin]) => [table, name, { ...(pin as TriggerPin), bodySha256: bodyDigest(body) }]))
+        // The behaviour did change: a user row's DELETE is now cancelled by the BEFORE DELETE trigger
+        // (the same insert and delete under the migrated body, in the control below, deletes the row).
+        const userId = 'ais1_census_lone_cr_user'
+        await client.query(
+          `INSERT INTO users (id, email, password_hash, role, is_active, activation_status, is_admin, permissions)
+           VALUES ($1, $1 || '@example.test', 'x', 'user', TRUE, 'activated', FALSE, '[]'::jsonb)`,
+          [userId],
+        )
+        expect((await client.query('DELETE FROM users WHERE id = $1', [userId])).rowCount).toBe(0)
+        expect((await runner('SELECT count(*)::int AS n FROM users WHERE id = $1', [userId])).rows[0]?.n).toBe(1)
+      })
+      await inRolledBackTransaction(async (client) => {
+        const userId = 'ais1_census_lone_cr_user'
+        await client.query(
+          `INSERT INTO users (id, email, password_hash, role, is_active, activation_status, is_admin, permissions)
+           VALUES ($1, $1 || '@example.test', 'x', 'user', TRUE, 'activated', FALSE, '[]'::jsonb)`,
+          [userId],
+        )
+        expect((await client.query('DELETE FROM users WHERE id = $1', [userId])).rowCount).toBe(1)
       })
       expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
     })
