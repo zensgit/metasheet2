@@ -773,6 +773,57 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
       .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILED_EXISTING_PRESENT' })
   })
 
+  it('⑦.5 RC11: a column CHECK under an unexpected name makes up() and down() fail closed and change nothing; a replay with the value already present stays a no-op', async () => {
+    const { YIDA_RECONCILED_EXISTING_UP_SQL, YIDA_RECONCILED_EXISTING_DOWN_SQL } = await reconcileModule()
+    const nameRefused = { ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' }
+    const rename = (table: string, from: string, to: string) =>
+      owner.query(`ALTER TABLE ${ident(table)} RENAME CONSTRAINT ${ident(from)} TO ${ident(to)}`)
+    // The names every reachable state gives the four column CHECKs (090 auto-names; 033000 reason name).
+    const checks = (await owner.query(`SELECT c.conrelid::regclass::text AS rel, c.conname FROM pg_constraint c
+      WHERE c.connamespace = current_schema()::regnamespace AND c.conname IN ('integration_yida_delivery_ledger_status_check',
+        'integration_yida_delivery_audit_event_check', 'integration_yida_delivery_audit_status_check', 'integration_yida_delivery_audit_reason_check')
+      ORDER BY 1, 2`)).rows
+    expect(checks).toHaveLength(4)
+    // up(): the reason CHECK (the last one up() replaces) is renamed; the ledger status, its shape CHECK, the new
+    // column and the evidence tables that up() would already have changed all stay as they were.
+    await rename(AUDIT, 'integration_yida_delivery_audit_reason_check', 'synthetic_unexpected_reason_check')
+    const renamed = await schemaShape()
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL))).toEqual(nameRefused)
+    expect(await schemaShape()).toEqual(renamed)
+    expect((await owner.query("SELECT to_regclass('integration_yida_reconciliation_runs') AS rel")).rows[0].rel).toBeNull()
+    // The first one up() replaces (ledger status) refuses the same way.
+    await rename(AUDIT, 'synthetic_unexpected_reason_check', 'integration_yida_delivery_audit_reason_check')
+    const original = await schemaShape()
+    await rename(LEDGER, 'integration_yida_delivery_ledger_status_check', 'synthetic_unexpected_status_check')
+    const renamedStatus = await schemaShape()
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL))).toEqual(nameRefused)
+    expect(await schemaShape()).toEqual(renamedStatus)
+    await rename(LEDGER, 'synthetic_unexpected_status_check', 'integration_yida_delivery_ledger_status_check')
+    expect(await schemaShape()).toEqual(original)
+    // Applied: a replay finds every value already present and changes nothing, whatever the names.
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    const widened = await schemaShape()
+    await rename(AUDIT, 'integration_yida_delivery_audit_event_check', 'synthetic_unexpected_event_check')
+    const widenedRenamed = await schemaShape()
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    expect(await schemaShape()).toEqual(widenedRenamed)
+    // down(): the renamed event CHECK refuses, and so does the ledger status CHECK (the last one down() restores).
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL))).toEqual(nameRefused)
+    expect(await schemaShape()).toEqual(widenedRenamed)
+    await rename(AUDIT, 'synthetic_unexpected_event_check', 'integration_yida_delivery_audit_event_check')
+    await rename(LEDGER, 'integration_yida_delivery_ledger_status_check', 'synthetic_unexpected_status_check')
+    const widenedStatus = await schemaShape()
+    expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL))).toEqual(nameRefused)
+    expect(await schemaShape()).toEqual(widenedStatus)
+    await rename(LEDGER, 'synthetic_unexpected_status_check', 'integration_yida_delivery_ledger_status_check')
+    expect(await schemaShape()).toEqual(widened)
+    // With the expected names: down() then up() round-trip exactly.
+    await owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)
+    expect(await schemaShape()).toEqual(original)
+    await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    expect(await schemaShape()).toEqual(widened)
+  })
+
   it('⑦.5 RC11: up() refuses (fail closed) when the 110300 binding columns are absent', async () => {
     const { YIDA_RECONCILED_EXISTING_UP_SQL } = await reconcileModule()
     await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)

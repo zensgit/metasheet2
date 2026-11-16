@@ -24,6 +24,15 @@ import { sql, type Kysely } from 'kysely'
  * identity fence (110300) does not cover them and no write-back selector (status 'acknowledged' + a non-NULL
  * source_record_digest) can ever choose them. No switch here; values-free fixed codes only.
  *
+ * CHECK REPLACEMENT. Each of the four single-column CHECKs (ledger.status; audit.event, audit.status, audit.reason)
+ * is located through pg_constraint by its conkey; zero or several matches fail closed
+ * (YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS, 55000). If it already holds the new value (up) / no longer holds it
+ * (down), nothing changes. Otherwise the located name must equal the one name every reachable state gives it,
+ * <table>_<column>_check (090's PostgreSQL auto-name, the name zzzz20261105033000 re-adds for reason, and the name
+ * this migration's up() and down() re-add); any other name fails closed (YIDA_DELIVERY_RECONCILE_CHECK_NAME, 55000)
+ * and the whole block changes nothing. The CHECK is then dropped and re-added by that literal name. Every statement
+ * is written out as literal SQL (no EXECUTE) so the authorization-input migration judge reads it.
+ *
  * down() REFUSES while any reconciled ledger row, reconcile audit row or reconciliation run exists (append-only
  * evidence). With none it restores the exact previous state: the 110300 guard body, the 090 shape CHECKs, the
  * five-value status/event CHECKs and the five-value reason CHECK left by zzzz20261105033000.
@@ -47,31 +56,28 @@ export const YIDA_RECONCILIATION_ERROR_CODES = Object.freeze(['RETRY', 'THROTTLE
   'UNAVAILABLE', 'ABORTED', 'BUDGET', 'TOTAL_CHANGED'] as const)
 
 const quoted = (values: readonly string[]) => values.map(value => `'${value}'`).join(', ')
-const LEDGER_STATUSES_090 = ['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'] as const
-const AUDIT_EVENTS_090 = ['prepare', 'claim', 'acknowledgement', 'unknown', 'cancel'] as const
-// The reason CHECK as zzzz20261105033000 leaves it (five values); down() restores exactly this one.
-const AUDIT_REASONS_033000 = ['transport_unknown', 'commit_unknown', 'receipt_invalid', 'manual_recovery', 'receipt_unparsed'] as const
 const UUID = `'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`
 const INSTANCE_ID = `'^[A-Za-z0-9_-]{1,128}$'`
 const HEX64 = `'^[0-9a-f]{64}$'`
 
-// One single-column CHECK, located through pg_constraint by its conkey (090 lets PostgreSQL name these; the
-// name is read, never assumed). Zero or several matches fail closed. When the located CHECK already contains
-// `marker` (up) / no longer contains it (down) nothing changes, so both directions replay.
-function replaceColumnCheck(table: string, column: string, canonical: string, body: string, marker: string, direction: 'up' | 'down') {
-  return `
-  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
-    WHERE a.attrelid = to_regclass('${table}') AND a.attname = '${column}' AND NOT a.attisdropped;
-  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
-  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
-    FROM pg_catalog.pg_constraint c
-    WHERE c.conrelid = to_regclass('${table}') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
-  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
-  IF position('''${marker}''' IN check_definition) ${direction === 'up' ? '=' : '>'} 0 THEN
-    EXECUTE format('ALTER TABLE ${table} DROP CONSTRAINT %I', check_name);
-    ALTER TABLE ${table} ADD CONSTRAINT ${canonical} CHECK (${body});
-  END IF;`
-}
+// The four single-column CHECKs this migration replaces (ledger.status; audit.event, audit.status, audit.reason).
+// Each one is located through pg_constraint by its conkey; zero or several matches fail closed
+// (YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS). When the located CHECK already contains the marker value (up) / no
+// longer contains it (down) nothing changes, so both directions replay. Otherwise the located name must be the
+// one name every reachable state gives that CHECK, or the migration fails closed (this code) and changes nothing:
+//   - 090 declares the CHECKs inline and unnamed, so PostgreSQL names them <table>_<column>_check (all under 63
+//     bytes, no other constraint on these tables holds those names, so no numeric suffix);
+//   - zzzz20261105033000 re-adds the reason CHECK as integration_yida_delivery_audit_reason_check (the same name);
+//   - this migration's own up() and down() re-add each CHECK under that same name.
+// So the closed set is exactly one name per column, and the CHECK is dropped by that literal name. Every block below
+// is written out as literal SQL so the authorization-input migration judge reads each statement.
+export const YIDA_DELIVERY_RECONCILE_CHECK_NAME_CODE = 'YIDA_DELIVERY_RECONCILE_CHECK_NAME'
+export const YIDA_DELIVERY_RECONCILE_CHECK_NAMES = Object.freeze({
+  ledgerStatus: 'integration_yida_delivery_ledger_status_check',
+  auditEvent: 'integration_yida_delivery_audit_event_check',
+  auditStatus: 'integration_yida_delivery_audit_status_check',
+  auditReason: 'integration_yida_delivery_audit_reason_check',
+} as const)
 
 // The guard as zzzz20261106110300 defines it (LEDGER_GUARD_WITH_BINDING), byte for byte. down() restores it.
 export const LEDGER_GUARD_WITH_BINDING_110300 = `
@@ -292,16 +298,72 @@ BEGIN
     ALTER TABLE integration_yida_delivery_ledger ADD CONSTRAINT integration_yida_delivery_observed_instance_id_check
       CHECK (observed_instance_id IS NULL OR observed_instance_id ~ ${INSTANCE_ID});
   END IF;
-  ${replaceColumnCheck('integration_yida_delivery_ledger', 'status', 'integration_yida_delivery_ledger_status_check',
-    `status IN (${quoted([...LEDGER_STATUSES_090, YIDA_RECONCILED_EXISTING_STATUS])})`, YIDA_RECONCILED_EXISTING_STATUS, 'up')}
+  -- integration_yida_delivery_ledger.status: add reconciled_existing.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_ledger') AND a.attname = 'status' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_ledger') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconciled_existing''' IN check_definition) = 0 THEN
+    IF check_name <> 'integration_yida_delivery_ledger_status_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_ledger DROP CONSTRAINT integration_yida_delivery_ledger_status_check;
+    ALTER TABLE integration_yida_delivery_ledger ADD CONSTRAINT integration_yida_delivery_ledger_status_check
+      CHECK (status IN ('prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent', 'reconciled_existing'));
+  END IF;
   ALTER TABLE integration_yida_delivery_ledger DROP CONSTRAINT IF EXISTS integration_yida_delivery_status_shape;
   ALTER TABLE integration_yida_delivery_ledger ADD CONSTRAINT integration_yida_delivery_status_shape CHECK (${STATUS_SHAPE_RECONCILE});
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'event', 'integration_yida_delivery_audit_event_check',
-    `event IN (${quoted([...AUDIT_EVENTS_090, YIDA_RECONCILE_AUDIT_EVENT])})`, YIDA_RECONCILE_AUDIT_EVENT, 'up')}
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'status', 'integration_yida_delivery_audit_status_check',
-    `status IN (${quoted([...LEDGER_STATUSES_090, YIDA_RECONCILED_EXISTING_STATUS])})`, YIDA_RECONCILED_EXISTING_STATUS, 'up')}
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'reason', 'integration_yida_delivery_audit_reason_check',
-    `reason IS NULL OR reason IN (${quoted([...AUDIT_REASONS_033000, YIDA_RECONCILE_AUDIT_REASON])})`, YIDA_RECONCILE_AUDIT_REASON, 'up')}
+  -- integration_yida_delivery_audit.event: add reconcile.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'event' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconcile''' IN check_definition) = 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_event_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_event_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_event_check
+      CHECK (event IN ('prepare', 'claim', 'acknowledgement', 'unknown', 'cancel', 'reconcile'));
+  END IF;
+  -- integration_yida_delivery_audit.status: add reconciled_existing.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'status' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconciled_existing''' IN check_definition) = 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_status_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_status_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_status_check
+      CHECK (status IN ('prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent', 'reconciled_existing'));
+  END IF;
+  -- integration_yida_delivery_audit.reason: add legacy_readback to the five zzzz20261105033000 values.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'reason' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''legacy_readback''' IN check_definition) = 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_reason_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_reason_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_reason_check
+      CHECK (reason IS NULL OR reason IN ('transport_unknown', 'commit_unknown', 'receipt_invalid', 'manual_recovery', 'receipt_unparsed', 'legacy_readback'));
+  END IF;
   ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT IF EXISTS integration_yida_delivery_audit_shape;
   ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_shape CHECK (${AUDIT_SHAPE_RECONCILE});
 END;
@@ -324,13 +386,15 @@ BEGIN
   IF to_regclass('integration_yida_delivery_ledger') IS NULL THEN RETURN; END IF;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass('integration_yida_delivery_ledger')
       AND attname = 'observed_instance_id' AND NOT attisdropped) THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM integration_yida_delivery_ledger WHERE status = ''${YIDA_RECONCILED_EXISTING_STATUS}'' OR observed_instance_id IS NOT NULL)' INTO present;
+    -- Static statements: PL/pgSQL resolves a statement's names only when it first runs, so a statement inside a
+    -- branch that is not taken never needs the column or table it names.
+    SELECT EXISTS (SELECT 1 FROM integration_yida_delivery_ledger WHERE status = 'reconciled_existing' OR observed_instance_id IS NOT NULL) INTO present;
   END IF;
   IF NOT present AND to_regclass('integration_yida_delivery_audit') IS NOT NULL THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM integration_yida_delivery_audit WHERE event = ''${YIDA_RECONCILE_AUDIT_EVENT}'' OR reason = ''${YIDA_RECONCILE_AUDIT_REASON}'' OR status = ''${YIDA_RECONCILED_EXISTING_STATUS}'')' INTO present;
+    SELECT EXISTS (SELECT 1 FROM integration_yida_delivery_audit WHERE event = 'reconcile' OR reason = 'legacy_readback' OR status = 'reconciled_existing') INTO present;
   END IF;
   IF NOT present AND to_regclass('integration_yida_reconciliation_runs') IS NOT NULL THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM integration_yida_reconciliation_runs)' INTO present;
+    SELECT EXISTS (SELECT 1 FROM integration_yida_reconciliation_runs) INTO present;
   END IF;
   IF present THEN
     RAISE EXCEPTION '${YIDA_RECONCILED_EXISTING_DOWN_REFUSED_CODE}' USING ERRCODE = '55000';
@@ -338,16 +402,72 @@ BEGIN
   LOCK TABLE integration_yida_delivery_ledger IN SHARE ROW EXCLUSIVE MODE;
   ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT IF EXISTS integration_yida_delivery_audit_shape;
   ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_shape CHECK (${AUDIT_SHAPE_090});
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'reason', 'integration_yida_delivery_audit_reason_check',
-    `reason IS NULL OR reason IN (${quoted(AUDIT_REASONS_033000)})`, YIDA_RECONCILE_AUDIT_REASON, 'down')}
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'status', 'integration_yida_delivery_audit_status_check',
-    `status IN (${quoted(LEDGER_STATUSES_090)})`, YIDA_RECONCILED_EXISTING_STATUS, 'down')}
-  ${replaceColumnCheck('integration_yida_delivery_audit', 'event', 'integration_yida_delivery_audit_event_check',
-    `event IN (${quoted(AUDIT_EVENTS_090)})`, YIDA_RECONCILE_AUDIT_EVENT, 'down')}
+  -- integration_yida_delivery_audit.reason: back to the five zzzz20261105033000 values.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'reason' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''legacy_readback''' IN check_definition) > 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_reason_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_reason_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_reason_check
+      CHECK (reason IS NULL OR reason IN ('transport_unknown', 'commit_unknown', 'receipt_invalid', 'manual_recovery', 'receipt_unparsed'));
+  END IF;
+  -- integration_yida_delivery_audit.status: back to the five 090 values.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'status' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconciled_existing''' IN check_definition) > 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_status_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_status_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_status_check
+      CHECK (status IN ('prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'));
+  END IF;
+  -- integration_yida_delivery_audit.event: back to the five 090 values.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_audit') AND a.attname = 'event' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_audit') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconcile''' IN check_definition) > 0 THEN
+    IF check_name <> 'integration_yida_delivery_audit_event_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_audit DROP CONSTRAINT integration_yida_delivery_audit_event_check;
+    ALTER TABLE integration_yida_delivery_audit ADD CONSTRAINT integration_yida_delivery_audit_event_check
+      CHECK (event IN ('prepare', 'claim', 'acknowledgement', 'unknown', 'cancel'));
+  END IF;
   ALTER TABLE integration_yida_delivery_ledger DROP CONSTRAINT IF EXISTS integration_yida_delivery_status_shape;
   ALTER TABLE integration_yida_delivery_ledger ADD CONSTRAINT integration_yida_delivery_status_shape CHECK (${STATUS_SHAPE_090});
-  ${replaceColumnCheck('integration_yida_delivery_ledger', 'status', 'integration_yida_delivery_ledger_status_check',
-    `status IN (${quoted(LEDGER_STATUSES_090)})`, YIDA_RECONCILED_EXISTING_STATUS, 'down')}
+  -- integration_yida_delivery_ledger.status: back to the five 090 values.
+  SELECT a.attnum INTO column_attnum FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = to_regclass('integration_yida_delivery_ledger') AND a.attname = 'status' AND NOT a.attisdropped;
+  IF column_attnum IS NULL THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_COLUMN_MISSING' USING ERRCODE = '42703'; END IF;
+  SELECT count(*), min(c.conname), min(pg_catalog.pg_get_constraintdef(c.oid, true)) INTO check_count, check_name, check_definition
+    FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = to_regclass('integration_yida_delivery_ledger') AND c.contype = 'c' AND c.conkey = ARRAY[column_attnum]::smallint[];
+  IF check_count <> 1 THEN RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_AMBIGUOUS' USING ERRCODE = '55000'; END IF;
+  IF position('''reconciled_existing''' IN check_definition) > 0 THEN
+    IF check_name <> 'integration_yida_delivery_ledger_status_check' THEN
+      RAISE EXCEPTION 'YIDA_DELIVERY_RECONCILE_CHECK_NAME' USING ERRCODE = '55000';
+    END IF;
+    ALTER TABLE integration_yida_delivery_ledger DROP CONSTRAINT integration_yida_delivery_ledger_status_check;
+    ALTER TABLE integration_yida_delivery_ledger ADD CONSTRAINT integration_yida_delivery_ledger_status_check
+      CHECK (status IN ('prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'));
+  END IF;
 END;
 $yida_reconciled_existing_down$;
 DROP TABLE IF EXISTS integration_yida_reconciliation_observations;
