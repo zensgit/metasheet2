@@ -266,7 +266,7 @@ on:
 
 jobs:
   tasks-web-guard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.57 cannot install deps on ubuntu-26.04 (2026-11-16); unpin after a Playwright bump
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

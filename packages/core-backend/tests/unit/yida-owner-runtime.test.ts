@@ -18,12 +18,14 @@ type CoreDependencies = {
   database: YidaOwnerRuntimeDependencies['database']
   security: YidaOwnerRuntimeDependencies['security']
   primitives: unknown
+  multiTarget?: boolean
 }
 type FakeAuthority = {
   prepareDraft(input: unknown): Promise<unknown>
   preview(input: unknown): Promise<unknown>
   approvals: { approve(input: unknown): Promise<unknown>; revoke(input: unknown): Promise<unknown> }
   observe(input: unknown): Promise<unknown>
+  proveDraftTarget(input: unknown): Promise<unknown>
 }
 type Factory = (deps: CoreDependencies) => FakeAuthority
 const nativeRequire = createRequire(import.meta.url)
@@ -52,6 +54,7 @@ function fakeAuthority(): FakeAuthority {
     preview: vi.fn(async () => selected),
     approvals: { approve: vi.fn(async () => approval), revoke: vi.fn(async () => approval) },
     observe: vi.fn(async () => Object.freeze({ approval, delivery: null })),
+    proveDraftTarget: vi.fn(async () => Object.freeze({ proven: true })),
   }
 }
 function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = new WeakMap<object, string>()): RuntimeModule {
@@ -68,7 +71,7 @@ function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = 
   return exports as RuntimeModule
 }
 function fixture(options: {
-  source?: string; enablement?: unknown; readEnablement?: () => unknown
+  source?: string; enablement?: unknown; readEnablement?: () => unknown; readMultiTarget?: () => unknown
   factory?: Factory; database?: YidaOwnerRuntimeDependencies['database']
   security?: YidaOwnerRuntimeDependencies['security']; result?: unknown
 } = {}) {
@@ -80,7 +83,8 @@ function fixture(options: {
   const security = options.security ?? { encrypt: vi.fn(async text => `enc:${text}`), decrypt: vi.fn(async () => 'synthetic-plain') }
   const fetcher = vi.fn(async () => { throw new Error('No protocol IO in control unit tests') })
   const readEnablement = vi.fn(options.readEnablement ?? (() => Object.hasOwn(options, 'enablement') ? options.enablement : 'true'))
-  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement })
+  const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement,
+    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
   const createPrimitives = vi.fn(() => Object.freeze({}))
   const createSendPort = vi.fn(() => Object.freeze({ submit, inspect: vi.fn() }))
@@ -499,6 +503,64 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
   })
 })
 
+// Y2 multi-target switch on the OWNER runtime (INTEGRATION_YIDA_MULTI_TARGET_ENABLED, danger: high), pinned in
+// this file. The R82 mutants MT_owner_always_on (`const on = true`) and MT_owner_flag_coerced (truthiness instead
+// of the exact literal) survived this file because nothing here passed the reader. The switch is the exact literal
+// 'true', defaults OFF, is read per call, and is captured once per run. While it is OFF a targetRef (drafts,
+// preview, approvals) or a proveDraftOwner call is refused as INPUT before any core authority is built.
+describe('Y2 multi-target switch (owner runtime): exact literal, default OFF, never authority', () => {
+  const targetRef = 'synthetic-target'
+  const offReaders: Array<[string, (() => unknown) | undefined]> = [['absent reader', undefined], ['undefined', () => undefined],
+    ['false', () => 'false'], ['TRUE', () => 'TRUE'], [' true', () => ' true'], ['true ', () => 'true '], ['boolean true', () => true],
+    ['number 1', () => 1], ['String object', () => new String('true')], ['promise of true', () => Promise.resolve('true')],
+    ['throwing reader', () => { throw new Error('synthetic-private-switch') }]]
+  it.each(offReaders)('switch %s: multiTargetEnabled() is false and targetRef/proveDraftOwner are INPUT before any core authority', async (_name, read) => {
+    const errors: unknown[] = [], listener = (error: unknown) => errors.push(error)
+    process.on('unhandledRejection', listener)
+    try {
+      const f = await active({ readMultiTarget: read })
+      try {
+        // The refusal (the actual authority boundary) is asserted first; the display bit after it.
+        await expect(f.runtime.prepareDraft(actor, { config: {}, rowsText: '[]', targetRef })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        expect(f.runtime.multiTargetEnabled()).toBe(false)
+        await expect(f.runtime.proveDraftOwner(actor, {})).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        await expect(f.runtime.proveDraftOwner(actor, { targetRef })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        await expect(f.runtime.preview(actor, { ...selected, targetRef })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        await expect(f.runtime.approve(actor, { ...approved, targetRef })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        expect(f.coreFactory).not.toHaveBeenCalled()
+        expect(f.createPrimitives).not.toHaveBeenCalled()
+        expect(f.database.transaction).not.toHaveBeenCalled()
+        // A run without a targetRef still works, and its authority is built WITHOUT the multi-target mode.
+        await f.runtime.observe(actor, grant)
+        expect(f.coreFactory).toHaveBeenCalledTimes(1)
+        expect(Object.hasOwn(f.coreFactory.mock.calls[0][0], 'multiTarget')).toBe(false)
+      } finally { await f.runtime.stop() }
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(errors).toEqual([])
+    } finally { process.off('unhandledRejection', listener) }
+  })
+
+  it("control: exact 'true' turns it ON, read per call; a flip back to OFF refuses the next targetRef and the next run's authority", async () => {
+    let value: unknown = 'true'
+    const f = await active({ readMultiTarget: () => value })
+    try {
+      expect(f.runtime.multiTargetEnabled()).toBe(true)
+      await f.runtime.prepareDraft(actor, { config: {}, rowsText: '[]', targetRef })
+      expect(f.authority.prepareDraft).toHaveBeenCalledTimes(1)
+      expect((vi.mocked(f.authority.prepareDraft).mock.calls[0][0] as { targetRef?: unknown }).targetRef).toBe(targetRef)
+      expect(f.coreFactory.mock.calls[0][0].multiTarget).toBe(true)
+      await f.runtime.proveDraftOwner(actor, { targetRef })
+      expect(f.authority.proveDraftTarget).toHaveBeenCalledWith({ targetRef })
+      value = 'false'
+      expect(f.runtime.multiTargetEnabled()).toBe(false)
+      await expect(f.runtime.prepareDraft(actor, { config: {}, rowsText: '[]', targetRef })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft).toHaveBeenCalledTimes(1)
+      await f.runtime.observe(actor, grant)
+      expect(Object.hasOwn(f.coreFactory.mock.calls[f.coreFactory.mock.calls.length - 1][0], 'multiTarget')).toBe(false)
+    } finally { await f.runtime.stop() }
+  })
+})
+
 describe('in-memory guard mutation probes (no repository writes)', () => {
   it('kills each removed control guard with its behavioral assertion', async () => {
     type Probe = { name: string; from: string; to: string; test(source: string): Promise<void> }
@@ -786,6 +848,32 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         await runtime.createPluginCapability().activate(f.binding)
         try { await expect(runtime.observe(actor, grant)).rejects.toBe(branded) }
         finally { await runtime.stop() }
+      } },
+      // Y2 multi-target switch. These probes guard future edits of the anchors; the behavioural witness for the
+      // R82 mutants is the 'Y2 multi-target switch (owner runtime)' describe above, not this table.
+      { name: 'multi-target/exact-literal', from: "const on = flag === 'true'", to: "const on = Boolean(flag) && flag !== 'false'", test: async source => {
+        const f = await active({ source, readMultiTarget: () => true })
+        try {
+          expect(f.runtime.multiTargetEnabled()).toBe(false)
+          await expect(f.runtime.prepareDraft(actor, { config: {}, rowsText: '[]', targetRef: 'synthetic-target' })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+        } finally { await f.runtime.stop() }
+      } },
+      { name: 'multi-target/never-always-on', from: "const on = flag === 'true'", to: 'const on = true', test: async source => {
+        const f = await active({ source })
+        try { await expect(f.runtime.prepareDraft(actor, { config: {}, rowsText: '[]', targetRef: 'synthetic-target' })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' }) }
+        finally { await f.runtime.stop() }
+      } },
+      { name: 'multi-target/default-OFF', from: "dependencies.readMultiTargetEnablement ?? (() => 'false')", to: "dependencies.readMultiTargetEnablement ?? (() => 'true')", test: async source => {
+        const f = await active({ source })
+        try { expect(f.runtime.multiTargetEnabled()).toBe(false) }
+        finally { await f.runtime.stop() }
+      } },
+      { name: 'multi-target/per-run-capture', from: '(multiTargetOn() ? { multiTarget: true } : {})', to: '{ multiTarget: true }', test: async source => {
+        const f = await active({ source })
+        try {
+          await f.runtime.observe(actor, grant)
+          expect(Object.hasOwn(f.coreFactory.mock.calls[0][0], 'multiTarget')).toBe(false)
+        } finally { await f.runtime.stop() }
       } },
     ]
     const killed: string[] = []
