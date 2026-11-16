@@ -94,20 +94,120 @@
  * No heavy imports: callers include the route layer, the access-graph mutex and the RBAC helpers.
  */
 import { assertInTransaction } from './pg-transaction-guard'
-import {
-  AUTHORIZATION_VERSION_TRIGGERS,
-  SHEET_PERMISSION_VERSIONS_TABLE,
-  SUBJECT_AUTHORIZATION_VERSIONS_TABLE,
-} from '../db/migrations/zzzz20261106110500_add_authorization_version_rows'
 
-export {
-  AUTHORIZATION_VERSION_COVERED_TABLES,
-  AUTHORIZATION_VERSION_TRIGGERS,
-  META_SHEETS_AUTHORITY_COLUMNS,
-  SHEET_PERMISSION_VERSIONS_TABLE,
-  SUBJECT_AUTHORIZATION_VERSIONS_TABLE,
-  USERS_AUTHORITY_COLUMNS,
-} from '../db/migrations/zzzz20261106110500_add_authorization_version_rows'
+/*
+ * The protocol's trigger metadata — what the posture check expects to find installed. The migration
+ * zzzz20261106110500 writes every one of these objects as a complete literal statement and reads none
+ * of this data (it stays visible, statement by statement, to the authorization-input migration
+ * judge); tests/unit/authz-version-protocol.test.ts pins this list equal to those literal statements.
+ * The two version-table names are same-file constants so every statement below that writes them
+ * names its target to the authorization-input write scan.
+ */
+export const SHEET_PERMISSION_VERSIONS_TABLE = 'sheet_permission_versions'
+export const SUBJECT_AUTHORIZATION_VERSIONS_TABLE = 'subject_authorization_versions'
+export const AUTHZ_SHEET_VERSION_BUMP_FUNCTION = 'metasheet_authz_bump_sheet_permission_version'
+export const AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION = 'metasheet_authz_bump_subject_authorization_version'
+
+/** `users` columns whose change is a subject authority change (live authority reads all of them). */
+export const USERS_AUTHORITY_COLUMNS = ['role', 'is_active', 'activation_status', 'permissions', 'is_admin'] as const
+/** `meta_sheets` columns that are inputs of check 2 (liveness, People bound, export stamp) and check 4 (row-level deny config). */
+export const META_SHEETS_AUTHORITY_COLUMNS = [
+  'row_level_read_permissions_enabled',
+  'conditional_read_rules',
+  'grid_export_closure',
+  'deleted_at',
+  'system_kind',
+] as const
+
+export type AuthorizationVersionLayer = 'sheet' | 'subject'
+
+export type AuthorizationVersionTrigger = {
+  readonly table: string
+  readonly trigger: string
+  readonly fn: string
+  readonly layer: AuthorizationVersionLayer
+  /** The row column the bump is keyed by (passed as TG_ARGV[0]). */
+  readonly keyColumn: string
+  readonly events: string
+}
+
+const SHEET_ROW_TABLES = ['spreadsheet_permissions', 'field_permissions', 'record_permissions'] as const
+const SUBJECT_ROW_TABLES = [
+  'user_roles',
+  'platform_member_group_members',
+  'user_permissions',
+  'user_orgs',
+  'user_namespace_admissions',
+] as const
+
+/**
+ * The complete trigger set. The posture check verifies every row (table, trigger, function, enabled)
+ * before an admission may rely on the protocol; a missing or disabled trigger is a hard-condition
+ * failure (fail closed).
+ */
+export const AUTHORIZATION_VERSION_TRIGGERS: readonly AuthorizationVersionTrigger[] = Object.freeze([
+  ...SHEET_ROW_TABLES.map((table) => Object.freeze({
+    table,
+    trigger: `trg_${table}_zz_authz_sheet_version`,
+    fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
+    layer: 'sheet' as const,
+    keyColumn: 'sheet_id',
+    events: 'BEFORE INSERT OR UPDATE OR DELETE',
+  })),
+  Object.freeze({
+    table: 'meta_sheets',
+    trigger: 'trg_meta_sheets_zz_authz_sheet_version_update',
+    fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
+    layer: 'sheet' as const,
+    keyColumn: 'id',
+    events: `BEFORE UPDATE (bump when any of ${META_SHEETS_AUTHORITY_COLUMNS.join(', ')} changes)`,
+  }),
+  Object.freeze({
+    table: 'meta_sheets',
+    trigger: 'trg_meta_sheets_zz_authz_sheet_version_delete',
+    fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
+    layer: 'sheet' as const,
+    keyColumn: 'id',
+    events: 'BEFORE DELETE',
+  }),
+  Object.freeze({
+    table: 'meta_fields',
+    trigger: 'trg_meta_fields_zz_authz_sheet_version_visibility',
+    fn: AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
+    layer: 'sheet' as const,
+    keyColumn: 'sheet_id',
+    events: 'BEFORE UPDATE (bump when the hidden/visible derivation of property changes)',
+  }),
+  ...SUBJECT_ROW_TABLES.map((table) => Object.freeze({
+    table,
+    trigger: `trg_${table}_zz_authz_subject_version`,
+    fn: AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION,
+    layer: 'subject' as const,
+    keyColumn: 'user_id',
+    events: 'BEFORE INSERT OR UPDATE OR DELETE',
+  })),
+  Object.freeze({
+    table: 'users',
+    trigger: 'trg_users_zz_authz_subject_version_update',
+    fn: AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION,
+    layer: 'subject' as const,
+    keyColumn: 'id',
+    events: `BEFORE UPDATE (bump when any of ${USERS_AUTHORITY_COLUMNS.join(', ')} changes)`,
+  }),
+  Object.freeze({
+    table: 'users',
+    trigger: 'trg_users_zz_authz_subject_version_lifecycle',
+    fn: AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION,
+    layer: 'subject' as const,
+    keyColumn: 'id',
+    events: 'BEFORE INSERT OR DELETE',
+  }),
+])
+
+/** Tables that carry a version trigger (deduplicated, in protocol order). */
+export const AUTHORIZATION_VERSION_COVERED_TABLES: readonly string[] = Object.freeze(
+  Array.from(new Set(AUTHORIZATION_VERSION_TRIGGERS.map((entry) => entry.table))),
+)
 
 type QueryResultLike = { rows?: unknown[]; rowCount?: number | null } | unknown
 
