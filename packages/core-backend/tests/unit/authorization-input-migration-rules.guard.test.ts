@@ -605,11 +605,101 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     expect(d21(crlf)).toEqual([])
   })
 
+  /** The problems of the same blocks with no pinned set: what a source that sets nothing aside gives. */
+  const unpinned = (blocks: readonly string[]) => checkNewMigration(D21, up(...blocks), true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems
+  const CREATE_LITERAL = JSON.stringify(USER_ROLES_CREATE_TEXT)
+  const USER_ROLES_DROP_BLOCK_TEXT = `DO $$ BEGIN IF to_regclass('public.user_roles') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; END IF; END $$`
+  // The judge reads every literal where it stands; what runs is what the source makes of it. A pinned
+  // text that reaches what runs it through anything that may change it is not the statement as
+  // written (round 2: `sql.raw(PINNED.replace('BEFORE', 'AFTER'))` set the ten aside and installed an
+  // AFTER trigger). Only a kysely `sql` template run with `.execute` and the first argument of
+  // `.query` on a parameter reach it unchanged; the case of parentheses shows that anything else is
+  // refused, even what changes nothing.
+  const transformed: Array<[string, number, string[], string[]?]> = [
+    ['sql.raw of the text with BEFORE replaced by AFTER', USER_ROLES_CREATE, [`await sql.raw(${CREATE_LITERAL}.replace('BEFORE', 'AFTER')).execute(db)`]],
+    ['the text with the function name replaced', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.replace('subject_authorization_version(', 'other_fn('))`]],
+    ['the text with every BEFORE replaced (replaceAll)', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.replaceAll('BEFORE', 'AFTER'))`]],
+    ['a constant holding the text, then replaced', USER_ROLES_CREATE, [`const PINNED = ${CREATE_LITERAL}`, "await db.query(PINNED.replace('BEFORE', 'AFTER'))"]],
+    ['a constant holding the text, run as it is', USER_ROLES_CREATE, [`const PINNED = ${CREATE_LITERAL}`, 'await db.query(PINNED)']],
+    ['the text with an empty text appended by .concat', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.concat(''))`]],
+    ['the text sliced', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.slice(0, -1))`]],
+    ['the text split and joined', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.split('BEFORE').join('AFTER'))`]],
+    ['the text lower-cased', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.toLowerCase())`]],
+    // The template is judged as a text of its own beside the constant, with or without the pins: an eleventh problem whose kind is the fold mark of the constant.
+    ['a template of a constant holding the text and a substitution', USER_ROLES_CREATE, [`const PINNED = ${CREATE_LITERAL}`, 'await db.query(`${PINNED}${suffix}`)'], [...TEN.slice(0, USER_ROLES_CREATE + 1), 'unreadable \u00010\u0001: statement kind is not on the safe list', ...TEN.slice(USER_ROLES_CREATE + 1)]],
+    ['a template whose substitution stands in a line comment after the text', USER_ROLES_CREATE, ['await db.query(`' + USER_ROLES_CREATE_TEXT + ' --${suffix}`)']],
+    ['another tag run with .execute', USER_ROLES_CREATE, ["const rewrite = (strings) => sql.raw(strings[0].replace('BEFORE', 'AFTER'))", 'await rewrite`' + USER_ROLES_CREATE_TEXT + '`.execute(db)']],
+    ['String.raw', USER_ROLES_CREATE, ['await db.query(String.raw`' + USER_ROLES_CREATE_TEXT + '`)']],
+    ['a helper function wrapping the text', USER_ROLES_CREATE, ["const run = (text) => db.query(text.replace('BEFORE', 'AFTER'))", `await run(${CREATE_LITERAL})`]],
+    ['an object whose query method wraps the text', USER_ROLES_CREATE, ["const runner = { query: (text) => db.query(text.replace('BEFORE', 'AFTER')) }", `await runner.query(${CREATE_LITERAL})`]],
+    ['a method of the parameter other than query', USER_ROLES_CREATE, [`await db.run(${CREATE_LITERAL}, (text) => text.replace('BEFORE', 'AFTER'))`]],
+    ['the second argument of query', USER_ROLES_CREATE, [`await db.query(rewrite, ${CREATE_LITERAL})`]],
+    ['query on a name the file does not declare', USER_ROLES_CREATE, [`await client.query(${CREATE_LITERAL})`]],
+    ['a conditional choosing between texts', USER_ROLES_CREATE, [`await db.query(flag ? ${CREATE_LITERAL} : 'SELECT 1')`]],
+    ['an alternative after ||', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL} || 'SELECT 1')`]],
+    ['an array joined', USER_ROLES_CREATE, [`await db.query([${CREATE_LITERAL}].join(''))`]],
+    ['parentheses', USER_ROLES_CREATE, [`await db.query((${CREATE_LITERAL}))`]],
+    ['a sql template compiled and replaced before it runs', USER_ROLES_CREATE, ['await sql.raw(sql`' + USER_ROLES_CREATE_TEXT + "`.compile(db).sql.replace('BEFORE', 'AFTER')).execute(db)"]],
+    ['a pinned drop block upper-cased (its guard then finds no table)', USER_ROLES_DROP, [`await db.query(${JSON.stringify(USER_ROLES_DROP_BLOCK_TEXT)}.toUpperCase())`]],
+    ['a pinned drop block in a sql template that is not run with .execute', USER_ROLES_DROP, ['await sql.raw(sql`' + USER_ROLES_DROP_BLOCK_TEXT + "`.compile(db).sql.replace('IF EXISTS', '')).execute(db)"]],
+  ]
+  for (const [name, index, lines, problems = TEN] of transformed) {
+    it(`RED 9 — a pinned text reaching what runs it through ${name} is not the statement as written: nothing is set aside`, () => {
+      const blocks = replaced(index, ...lines)
+      expect(d21(blocks)).toEqual(problems)
+      expect(d21(blocks)).toEqual(unpinned(blocks))
+      // The same text run directly is the pinned one.
+      expect(d21(replaced(index, index === USER_ROLES_DROP ? q(USER_ROLES_DROP_BLOCK_TEXT) : q(USER_ROLES_CREATE_TEXT)))).toEqual([])
+    })
+  }
+
+  it('RED 9 — a `sql` tag that is not the kysely `sql`, or a kysely `sql` declared again in the file, is not a runner the text reaches unchanged', () => {
+    const body = LAYOUT.join('\n')
+    const sources = [
+      `import { sql } from './sql'\nexport async function up(db) {\n${body}\n}`,
+      `import { raw as sql } from 'kysely'\nexport async function up(db) {\n${body}\n}`,
+      `import type { sql } from 'kysely'\nexport async function up(db) {\n${body}\n}`,
+      `export async function up(db) {\n${body}\n}`,
+      up("const sql = (strings) => db.query(strings[0].replace('BEFORE', 'AFTER'))", ...LAYOUT),
+    ]
+    for (const source of sources) {
+      expect(checkNewMigration(D21, source, true).problems, source.slice(0, 60)).toEqual(TEN)
+      expect(checkNewMigration(D21, source, true).problems).toEqual(checkNewMigration(D21, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems)
+    }
+    // With the kysely `sql` imported once the same body is the ten.
+    expect(checkNewMigration(D21, `import { sql } from 'kysely'\nexport async function up(db) {\n${body}\n}`, true).problems).toEqual([])
+  })
+
+  // Every character JavaScript's `\s` matches but space, tab, line feed and carriage return. The judge
+  // separates tokens at each; PostgreSQL does not read them all so, so the file sets nothing aside.
+  const OTHER_WHITE_SPACE = Array.from({ length: 0x10000 }, (_, code) => String.fromCharCode(code)).filter((ch) => /\s/.test(ch) && !' \t\n\r'.includes(ch))
+  const hex = (ch: string) => ch.codePointAt(0)!.toString(16)
+  it('the white space the pinned set refuses is every character JavaScript reads as white space but space, tab, line feed and carriage return', () => {
+    expect(OTHER_WHITE_SPACE.map(hex)).toEqual(['b', 'c', 'a0', '1680', '2000', '2001', '2002', '2003', '2004', '2005', '2006', '2007', '2008', '2009', '200a', '2028', '2029', '202f', '205f', '3000', 'feff'])
+  })
+  for (const space of OTHER_WHITE_SPACE) {
+    it(`RED 10 — U+${hex(space).padStart(4, '0')} between two tokens of a pinned statement, as written or as an escape, or anywhere in the file, leaves nothing set aside`, () => {
+      const cases = [
+        replaced(USER_ROLES_CREATE, CREATES[0].replace('CREATE TRIGGER', `CREATE${space}TRIGGER`)),
+        replaced(USER_ROLES_CREATE, CREATES[0].replace('CREATE TRIGGER', `CREATE\\u{${hex(space)}}TRIGGER`)),
+        replaced(USER_ROLES_DROP, DROPS[0].replace('DROP TRIGGER', `DROP${space}TRIGGER`)),
+        [...LAYOUT, `/* a comment with${space}white space */`],
+      ]
+      for (const blocks of cases) {
+        expect(d21(blocks)).toEqual(TEN)
+        expect(d21(blocks)).toEqual(unpinned(blocks))
+      }
+    })
+  }
+
   it('the set-aside reads every condition of a judgment: a pinned judgment that differs in any one of them leaves nothing set aside', () => {
-    const judgments = judgeMigrationInputWrites(D21, up(...LAYOUT)).judgments
-    expect(pinnedStatementsSetAside(D21, judgments).size).toBe(10)
-    expect(pinnedStatementsSetAside(NEW_TS, judgments).size).toBe(0)
-    expect(pinnedStatementsSetAside(D21, judgments, []).size).toBe(0)
+    const source = up(...LAYOUT)
+    const judgments = judgeMigrationInputWrites(D21, source).judgments
+    expect(pinnedStatementsSetAside(D21, source, judgments).size).toBe(10)
+    expect(pinnedStatementsSetAside(NEW_TS, source, judgments).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, source, judgments, []).size).toBe(0)
+    // The same judgments read from a source that holds a no-break space, even in a comment.
+    expect(pinnedStatementsSetAside(D21, `${source}\n// \u00a0`, judgments).size).toBe(0)
     const target = judgments.find((judgment) => judgment.statement?.text === USER_ROLES_CREATE_TEXT)!
     const variants: Array<Partial<MigrationJudgment>> = [
       { verdict: 'raising' },
@@ -626,7 +716,7 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     ]
     for (const variant of variants) {
       const mutated = judgments.map((judgment) => (judgment === target ? { ...judgment, ...variant } : judgment))
-      expect(pinnedStatementsSetAside(D21, mutated).size, JSON.stringify(variant)).toBe(0)
+      expect(pinnedStatementsSetAside(D21, source, mutated).size, JSON.stringify(variant)).toBe(0)
     }
   })
 })

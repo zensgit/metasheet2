@@ -24,7 +24,12 @@
  * file, as written, where it is pinned to stand, with exactly its pinned verdict and nothing else
  * about it: a CREATE at the top of an SQL text, a DROP as the piece of a `DO` body that its pinned
  * `to_regclass` guard begins. When any of the ten is missing, found twice (however it stands), or
- * found anywhere else or otherwise, nothing is set aside. A function body is not part of the pin:
+ * found anywhere else or otherwise, nothing is set aside. A statement stands at the top of a text only
+ * when its literal reaches what runs it unchanged (a kysely `sql` template run with `.execute`, or the
+ * first argument of `.query` on a parameter), never through a call or an expression that may change
+ * it. A file that holds white space PostgreSQL does not read as the judge does (anything `\s` matches
+ * but space, tab, line feed and carriage return), as written or as the value of a literal, has
+ * nothing set aside. A function body is not part of the pin:
  * the trigger function is judged by the rules for every function definition, and the database
  * census pins what the triggers run.
  */
@@ -39,7 +44,7 @@ import {
 import type { AuthorizationInputDynamicExemption, AuthorizationInputDynamicForm, AuthorizationInputMigrationVerdict } from '../../src/rbac/authorization-input-writers'
 import { judgeMigrationInputWrites } from './authorization-input-migration-judge'
 import type { MigrationJudgment } from './authorization-input-migration-judge'
-import { commentStrippedText, INPUT_TABLES, literalSqlTexts, scanSource, scanText, SCANNED_TABLES, SOURCE_EXTENSIONS } from './authorization-input-scan'
+import { commentStrippedText, INPUT_TABLES, literalSqlTexts, literalTexts, scanSource, scanText, SCANNED_TABLES, SOURCE_EXTENSIONS } from './authorization-input-scan'
 import type { LiteralWrite } from './authorization-input-scan'
 
 export const COMPLIANT_LOCK_BLOCK = `DO $$ DECLARE attempt int := 0; BEGIN LOOP EXIT WHEN ${AUTHORIZATION_INPUT_MIGRATION_LOCK_FORM}; attempt := attempt + 1; IF attempt >= 25 THEN RAISE EXCEPTION USING ERRCODE = '55P03'; END IF; PERFORM pg_sleep(0.2); END LOOP; END $$`
@@ -239,15 +244,32 @@ function isPinnedAsWritten(judgment: MigrationJudgment, pinned: PinnedStatement)
 }
 
 /**
+ * White space PostgreSQL does not read as the judge does: every character JavaScript's `\s` matches
+ * except space, tab, line feed and carriage return (form feed, vertical tab, no-break space, U+FEFF,
+ * the line and paragraph separators and the other Unicode spaces). The judge separates tokens at
+ * each of them; PostgreSQL reads most of them as part of a token, so the statement it runs is not the
+ * statement the judge read.
+ */
+const WHITE_SPACE_NOT_READ_AS_POSTGRESQL_READS_IT = /[^\S \t\n\r]/
+
+/** Whether `source` holds such white space as written, or, for a TypeScript or JavaScript source, in the value of any literal (an escape such as `\u00a0` or `\f`). */
+function holdsWhiteSpaceNotReadAsPostgresqlReadsIt(file: string, source: string): boolean {
+  const texts = SOURCE_EXTENSIONS.has(path.extname(file)) ? literalTexts(file, source) : []
+  return [source, ...texts].some((text) => WHITE_SPACE_NOT_READ_AS_POSTGRESQL_READS_IT.test(text))
+}
+
+/**
  * The judgments of `file` that a pinned set covers: all the statements of the set, or none. A set
  * covers its file only, and only when each of its statements is found in exactly one judgment of
  * the file (counted by the statement text, however and wherever it stands) and that judgment is the
- * statement as pinned.
+ * statement as pinned. A source (`source`, the text the judgments were read from) that holds white
+ * space PostgreSQL does not read as the judge does, anywhere, has nothing set aside.
  */
-export function pinnedStatementsSetAside(file: string, judgments: readonly MigrationJudgment[], sets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS): ReadonlySet<MigrationJudgment> {
+export function pinnedStatementsSetAside(file: string, source: string, judgments: readonly MigrationJudgment[], sets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS): ReadonlySet<MigrationJudgment> {
   const aside = new Set<MigrationJudgment>()
   for (const set of sets) {
     if (set.file !== file) continue
+    if (holdsWhiteSpaceNotReadAsPostgresqlReadsIt(file, source)) continue
     const found = set.statements.map((pinned) => judgments.filter((judgment) => judgment.statement?.text === pinned.text))
     if (!found.every((matches, index) => matches.length === 1 && isPinnedAsWritten(matches[0], set.statements[index]))) continue
     for (const [judgment] of found) aside.add(judgment)
@@ -279,7 +301,7 @@ export function checkNewMigration(
   }
   const exempt = exemptDynamicForms(file, judged.dynamic, exemptions)
   const isExempt = (judgment: MigrationJudgment) => judgment.dynamic !== undefined && judgment.dynamic.length > 0 && judgment.dynamic.every((form) => exempt.has(form))
-  const pinned = pinnedStatementsSetAside(file, judged.judgments, pinnedSets)
+  const pinned = pinnedStatementsSetAside(file, source, judged.judgments, pinnedSets)
   const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment) && !pinned.has(judgment))
   for (const judgment of enforced) problems.push(problemOf(judgment))
   problems.push(...closureProblems(result.writes, judged.writes))
