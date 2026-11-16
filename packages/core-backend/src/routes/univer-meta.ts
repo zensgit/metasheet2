@@ -172,6 +172,7 @@ import {
   resolvePlmRowDisplay,
   withManualSupplementMark,
   withPlmRowDeleteBlock,
+  fieldsCarryExactStockPreparationStanza,
   type PlmRowDisplay,
 } from '../multitable/plm-row-delete-guard'
 import {
@@ -181,6 +182,7 @@ import {
   stripManualRowPolicyKey,
   withManualRowPolicyKey,
 } from '../multitable/stock-preparation-manual-rows'
+import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
 import {
   assertManualRowEditInTransaction,
   assertManualRowsAllowed,
@@ -197,6 +199,15 @@ import {
   type ManualRowsContextBlock,
   type ManualRowsSheet,
 } from '../multitable/stock-preparation-manual-rows-gate'
+import { resolveBomRelationsContextBlock, type BomRelationsContextBlock } from '../multitable/stock-preparation-bom-relations-context'
+import {
+  VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE,
+  VIEWER_FILTER_INVALID_MESSAGE,
+  VIEWER_FILTER_QUERY_PARAM,
+  composeViewerFilter,
+  parseViewerFilterParam,
+  viewerFilterFieldsPermitted,
+} from '../multitable/viewer-filter'
 import { isApiTokenBearer } from '../multitable/oapi-read-allowlist'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
@@ -314,6 +325,15 @@ import {
   loadEntityConfigSnapshot,
   applyConfigRevert,
 } from '../multitable/config-restore'
+import {
+  FIELD_CHANGED_CONCURRENTLY_CODE,
+  FieldChangedConcurrentlyError,
+  PATCH_FIELD_LOCKED_REREAD_SQL,
+  PATCH_FIELD_READ_SQL,
+  fieldRowChangedSince,
+  snapshotFieldRowForRecheck,
+  withFieldRowRecheckRetry,
+} from '../multitable/field-row-write-guard'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -6346,7 +6366,8 @@ async function normalizeFieldWriteInput(
     // write lock (human-write-lock.ts). PATCH re-applies the STORED lock afterwards (`carryHumanWriteLock`),
     // so a person can never clear it either. Only plugin provisioning writes it. The manual-rows switch
     // (stock-preparation-manual-rows.ts) follows the same rule: stripped here, the STORED value carried by PATCH.
-    property: stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty))),
+    // The pull-batch band marker (stock-preparation-pull-batch-band.ts, R-65) too: a person can never forge a band.
+    property: stripPullBatchBandMarker(stripManualRowPolicyKey(stripHumanWriteLockKey(sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty)))),
   }
 }
 
@@ -9761,6 +9782,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           manualRowsBlock = { state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] }
         }
       }
+      // 备料 「查看子件」 / 「查看所有使用位置」 (owner question 2026-11-07): on a stock-preparation main-template sheet,
+      // the physical ids of the five columns the drawer's two viewer-only filters use — for EVERY reader (these are
+      // read-only buttons), and only when each column exists with the plugin's stanza and this actor may read it
+      // (multitable/stock-preparation-bom-relations-context.ts). Every other sheet gets no key and issues no extra
+      // query (the stanza pre-check is in memory). A thrown registry read fails closed to no block, values-free log.
+      let bomRelationsBlock: BomRelationsContextBlock | null = null
+      if (effectiveSheetId && capabilities.canRead === true && fieldsCarryExactStockPreparationStanza(activeFields)) {
+        try {
+          bomRelationsBlock = await resolveBomRelationsContextBlock(pool.query.bind(pool), effectiveSheetId, activeFields, allowedFieldIds)
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: bom-relations probe failed; failing closed to no block',
+            { reason: 'bom_relations_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          bomRelationsBlock = null
+        }
+      }
       // Customer feedback 2026-10-27: the duplicate route refuses a sheet whose rows the stock-preparation
       // plugin maintains (multitable/record-duplicate-guard.ts); tell the web so the drawer's duplicate entry is
       // shown disabled with the reason. Only for an actor who could otherwise create. The namespace half runs
@@ -9858,6 +9896,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.7): sent ONLY on a P_reg sheet to an actor who can
             // create, edit or delete (see `manualRowsBlock` above); the manual-row routes re-gate on their own.
             ...(manualRowsBlock ? { stockPreparationManualRows: manualRowsBlock } : {}),
+            // 备料 「查看子件」 / 「查看所有使用位置」: sent ONLY on a stock-preparation main-template sheet (see
+            // `bomRelationsBlock` above). Field ids only; the buttons narrow GET /view with `viewerFilter`, never a write.
+            ...(bomRelationsBlock ? { stockPreparationBomRelations: bomRelationsBlock } : {}),
             // Customer feedback 2026-10-27: sent ONLY when true (see `recordDuplicateBlocked` above); the
             // duplicate route answers 409 RECORD_DUPLICATE_REFUSED_PLUGIN_MAINTAINED_SHEET on its own.
             ...(recordDuplicateBlocked ? { recordDuplicateBlocked: true } : {}),
@@ -12131,7 +12172,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
           return fieldRetypeConversionRestoreRefusal()
         }
-        const snapshot = await loadEntityConfigSnapshot(query, rev)
+        // A field snapshot is read under the row lock (FOR NO KEY UPDATE) and held until commit: the identity/drift
+        // checks below compare it, and applyConfigRevert writes over it, so a field write committed in between would be
+        // overwritten without CONFIG_DRIFT. Fence → this one row → UPDATE → revision: no wait on another field row.
+        const snapshot = await loadEntityConfigSnapshot(query, rev, { lockField: true })
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
         // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
@@ -14746,17 +14790,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // for BOTH the pre-commit cap check and the post-commit chunked recompute (B3) so the
       // response counts are internally consistent (no re-query drift between the two).
       let bulkRecomputeRecordIds: string[] | null = null
-      const updated = await pool.transaction(async ({ query }) => {
+      // Lost-update guard (multitable/field-row-write-guard.ts): the UPDATE below writes every column from the read
+      // just below, so the row is re-read under the row lock right before it and compared. A concurrent change of
+      // name, type or property rolls the attempt back and the whole transaction runs once more on fresh data
+      // (validation included); a second conflict answers 409 FIELD_CHANGED_CONCURRENTLY.
+      const updated = await withFieldRowRecheckRetry(() => pool.transaction(async ({ query }) => {
+        // Per-attempt state: a rolled-back attempt must not leak its recompute snapshot into the next one.
+        sheetId = ''
+        bulkRecomputeRecordIds = null
         // Fence before re-reading the field: recovery hashes and applies against one schema
         // generation, while field retype/property/order writes serialize outside that window.
         await fenceWriterEntry(query, preflightSheetId)
-        const existing = await query(
-          'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
-          [fieldId],
-        )
+        // Unlocked on purpose: locking here would hold the row through validation and the sibling shift below, and the
+        // web client's shared column drag (one PATCH per field, all at once) would deadlock on it.
+        const existing = await query(PATCH_FIELD_READ_SQL, [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
 
         const row = (existing as any).rows[0]
+        // What this attempt validates, deep-copied before any validation code can touch it (compared under the lock).
+        const validated = snapshotFieldRowForRecheck(row)
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
         const currentType = mapFieldType(String(row.type))
@@ -14774,7 +14826,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // changed or omitted). No administrator override — only plugin provisioning changes it. The manual-rows
         // switch is carried the same way (ADR adr-stock-prep-manual-rows-20261030 §4: only the plugin's switch route
         // writes it).
-        const nextProperty = carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty))
+        // The pull-batch band marker likewise (R-65): a body without it can never drop it, a body with it never sets it.
+        const nextProperty = carryPullBatchBandMarker(row.property, carryManualRowPolicy(row.property, carryHumanWriteLock(row.property, normalizedNextProperty)))
         const desiredOrder = parsed.data.order
         const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
@@ -14951,14 +15004,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           }
         }
 
-        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : currentOrder
+        // Lost-update guard: the locked re-read, one statement before the UPDATE. It sits after the sibling shift, so
+        // the row is first locked where the UPDATE used to lock it (no new lock-order edge); FOR NO KEY UPDATE is the
+        // lock the UPDATE itself takes, so FK child inserts (links, attachments, auto-number) are never blocked by it.
+        const lockedRes = await query(PATCH_FIELD_LOCKED_REREAD_SQL, [fieldId])
+        const locked = (lockedRes as any).rows?.[0]
+        if (!locked) throw new NotFoundError(`Field not found: ${fieldId}`)
+        if (fieldRowChangedSince(validated, locked)) throw new FieldChangedConcurrentlyError()
+        // Equal to `nextProperty` after the compare; carried from the locked row so the stored lock and switch can never
+        // be dropped by a stale read even if the compare were weakened.
+        const writeProperty = carryPullBatchBandMarker(locked.property, carryManualRowPolicy(locked.property, carryHumanWriteLock(locked.property, nextProperty)))
+        // `order` is not compared (a sibling's shift moves this row during a shared drag): a PATCH without `order`
+        // keeps the row's CURRENT order instead of writing back the one it read.
+        const nextOrder = typeof desiredOrder === 'number' ? desiredOrder : Number(locked.order ?? 0)
 
         const update = await query(
           `UPDATE meta_fields
            SET name = $2, type = $3, property = $4::jsonb, "order" = $5, updated_at = now()
            WHERE id = $1
            RETURNING id, name, type, property, "order"`,
-          [fieldId, nextName, nextType, JSON.stringify(nextProperty), nextOrder],
+          [fieldId, nextName, nextType, JSON.stringify(writeProperty), nextOrder],
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
@@ -14980,8 +15045,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         // T9-R1: record the field update — only the CHANGED config keys; a no-op (nothing changed) records nothing.
+        // `before` is the LOCKED row: a sibling's shift that moved this row between the two reads is already recorded
+        // by recordFieldOrderShifts and is not this PATCH's change (reverting it must not restore the stale order).
         const updateDiff = fieldUpdateDiff(
-          { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) },
+          { name: String(locked.name), type: String(locked.type), property: locked.property, order: Number(locked.order) },
           { name: String(updatedRow.name), type: String(updatedRow.type), property: updatedRow.property, order: Number(updatedRow.order) },
         )
         if (updateDiff) {
@@ -14993,7 +15060,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         return serializeFieldRow(updatedRow)
-      })
+      }))
 
       invalidateFieldCache(sheetId)
 
@@ -15055,6 +15122,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // fence-then-block-checked; a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS.
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
+      // Lost-update guard: the field changed under BOTH attempts (field-row-write-guard.ts). Values-free; nothing written.
+      if (err instanceof FieldChangedConcurrentlyError) {
+        return res.status(409).json({ ok: false, error: { code: FIELD_CHANGED_CONCURRENTLY_CODE, message: err.message } })
       }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
@@ -17462,6 +17533,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
     const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
+    // Viewer filter parity with GET /view (multitable/viewer-filter.ts): the footer must total the rows the grid shows.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     // A5 full-column scale stats: optional CSV of field ids the caller wants numeric min/max/count for
     // (conditional-formatting scale endpoints — data-bar denominator + color-scale gradient bounds, computed
     // over the WHOLE filtered column, not the client page). ABSENT (or empty) → `stats` is OMITTED from the
@@ -17528,11 +17601,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
       const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)]))
-      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      const storedFilterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
 
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const selectionFieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
       const selectableFieldIds = new Set(visibleFields.filter((field) => selectionFieldPermissions[field.id]?.visible !== false).map((field) => field.id))
+      // Viewer filter: same refusals as GET /view, gated by the same selection set this route prunes its stored
+      // filter with; composed for this read only.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, selectableFieldIds, filterFieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
       const selectableFields = visibleFields.filter((field) => selectableFieldIds.has(field.id))
 
       // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
@@ -17840,6 +17924,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const seed = req.query.seed === 'true'
     const includeLinkSummaries = req.query.includeLinkSummaries === 'true'
     const search = normalizeSearchTerm(req.query.search)
+    // Viewer filter (multitable/viewer-filter.ts): a per-request AND onto the stored filter, never stored. Parsed
+    // here, refused with a fixed message after the read gate, field-gated once allowedFieldIds is known below.
+    const viewerFilter = parseViewerFilterParam(req.query[VIEWER_FILTER_QUERY_PARAM])
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
     const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : undefined
     // #5807: `let`, not `const` — a bounded (People) sheet re-clamps both to its window right after the
@@ -17947,9 +18034,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const ignoredFilterFieldIds = collectLeafConditions(rawFilterInfo)
         .filter((condition) => !fieldTypeById.has(condition.fieldId))
         .map((c) => c.fieldId)
-      const filterInfo = rawFilterInfo
+      const storedFilterInfo = rawFilterInfo
         ? pruneFilterNode(rawFilterInfo, (condition) => fieldTypeById.has(condition.fieldId) && allowedFieldIds.has(condition.fieldId))
         : null
+      // Viewer filter: refused (one fixed message, no field named) when malformed or when a condition names a field
+      // the caller may not filter on — the SAME allowedFieldIds the stored filter is pruned by (layer-2 ∧ layer-3;
+      // view-hidden columns ARE filterable, layer-1 is display-only here). Composed for the row selection only:
+      // the response's `view` below is still serialised from `viewConfig`, so the narrowing is never echoed back
+      // as the view's own filter and nothing is written.
+      if (viewerFilter.kind === 'invalid') {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_INVALID_MESSAGE } })
+      }
+      if (viewerFilter.kind === 'present' && !viewerFilterFieldsPermitted(viewerFilter.conditions, allowedFieldIds, fieldTypeById)) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE } })
+      }
+      const filterInfo = viewerFilter.kind === 'present'
+        ? (composeViewerFilter(storedFilterInfo, viewerFilter.conditions) as MetaFilterInfo)
+        : storedFilterInfo
 
       if (ignoredSortFieldIds.length > 0) {
         warnings.push(`排序字段不存在，已忽略: ${ignoredSortFieldIds.join(', ')}`)
@@ -22040,7 +22141,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (err instanceof AutomationRuleValidationError) {
-        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+        // R-69 1b-ii (ADR §7): the run_integration_job switch refusal is a 403; every other save refusal stays 400.
+        return res.status(err.code === 'RUN_ACTION_DISABLED' ? 403 : 400).json({ ok: false, error: { code: err.code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -22109,7 +22211,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       return res.json({ ok: true, data: { rule: serializeAutomationRule(updated) } })
     } catch (err) {
       if (err instanceof AutomationRuleValidationError) {
-        return res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+        // R-69 1b-ii (ADR §7): the run_integration_job switch refusal is a 403; every other save refusal stays 400.
+        return res.status(err.code === 'RUN_ACTION_DISABLED' ? 403 : 400).json({ ok: false, error: { code: err.code, message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

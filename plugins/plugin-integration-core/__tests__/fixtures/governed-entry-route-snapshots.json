@@ -1,0 +1,151 @@
+[
+  {
+    "name": "dry-run: no principal",
+    "status": 401,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication required\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: floor operator",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: foreign action id for an operator",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: unsupported body key",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TABLE_ACTION_REQUEST_INVALID\",\"message\":\"unsupported request field: extra\",\"details\":{\"field\":\"extra\"}}}"
+  },
+  {
+    "name": "dry-run: non-boolean opt-in",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TABLE_ACTION_REQUEST_INVALID\",\"message\":\"includeMissingComponents must be a boolean\",\"details\":{\"field\":\"includeMissingComponents\"}}}"
+  },
+  {
+    "name": "dry-run: operator, foreign tenant",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"OPERATOR_SCOPE_TENANT_MISMATCH\",\"message\":\"tenant scope mismatch\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: reader, foreign tenant",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_MISMATCH\",\"message\":\"tenant scope mismatch\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: reader, opt-in, foreign tenant",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"OPERATOR_SCOPE_TIER_REQUIRED\",\"message\":\"this operator surface requires a stock-prep tier the principal does not hold\",\"details\":{\"requiredPermission\":\"stock-prep:operate\"}}}"
+  },
+  {
+    "name": "dry-run: tenantless writer, no tenant",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_REQUIRED\",\"message\":\"tenantId is required\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run: malformed project number",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"STOCK_PREPARATION_PROJECT_NO_REQUIRED\",\"message\":\"projectNo is required while per-project stock-preparation sheets are enabled\",\"details\":{\"field\":\"projectNo\"}}}"
+  },
+  {
+    "name": "dry-run: unregistered project",
+    "status": 409,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"STOCK_PREPARATION_PROJECT_ABSENT\",\"message\":\"this project has no registered stock-preparation sheet yet; a puller must create it first\",\"details\":{\"field\":\"projectNo\"}}}"
+  },
+  {
+    "name": "dry-run-jobs: floor operator",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}"
+  },
+  {
+    "name": "dry-run-jobs: unsupported body key",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TABLE_ACTION_REQUEST_INVALID\",\"message\":\"unsupported request field: extra\",\"details\":{\"field\":\"extra\"}}}"
+  },
+  {
+    "name": "pipeline run: no principal",
+    "status": 401,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication required\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline run: reader",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline run: non-string cursor",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"INVALID_CURSOR\",\"message\":\"cursor must be a string\",\"details\":{\"received\":\"number\"}}}"
+  },
+  {
+    "name": "pipeline run: unknown mode",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"INVALID_RUN_MODE\",\"message\":\"mode must be one of: manual, incremental, full\",\"details\":{\"received\":\"replay\"}}}"
+  },
+  {
+    "name": "pipeline run: foreign tenant",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_MISMATCH\",\"message\":\"tenant scope mismatch\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline run: tenantless writer, no tenant",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_REQUIRED\",\"message\":\"tenantId is required\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline run: runner failure",
+    "status": 422,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"PipelineRunnerError\",\"message\":\"pipeline run failed\",\"details\":{\"run\":{\"id\":\"run_snapshot\",\"status\":\"failed\"},\"cause\":\"synthetic source unreachable\"}}}"
+  },
+  {
+    "name": "pipeline run: success",
+    "status": 202,
+    "body": "{\"ok\":true,\"data\":{\"run\":{\"id\":\"run_snapshot\",\"status\":\"succeeded\"},\"metrics\":{\"rowsRead\":1},\"preview\":null}}",
+    "runnerArgs": 1,
+    "runnerInput": "{\"tenantId\":\"tenant-r69-governed\",\"mode\":\"full\",\"cursor\":\"c-1\",\"sampleLimit\":5,\"pipelineId\":\"pipe_snapshot\",\"triggeredBy\":\"api\",\"runAs\":\"user\",\"workspaceId\":null}"
+  },
+  {
+    "name": "pipeline dry-run: no principal",
+    "status": 401,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication required\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline dry-run: reader",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline dry-run: non-string cursor",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"INVALID_CURSOR\",\"message\":\"cursor must be a string\",\"details\":{\"received\":\"number\"}}}"
+  },
+  {
+    "name": "pipeline dry-run: unknown mode",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"INVALID_RUN_MODE\",\"message\":\"mode must be one of: manual, incremental, full\",\"details\":{\"received\":\"replay\"}}}"
+  },
+  {
+    "name": "pipeline dry-run: foreign tenant",
+    "status": 403,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_MISMATCH\",\"message\":\"tenant scope mismatch\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline dry-run: tenantless writer, no tenant",
+    "status": 400,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"TENANT_REQUIRED\",\"message\":\"tenantId is required\",\"details\":{}}}"
+  },
+  {
+    "name": "pipeline dry-run: runner failure",
+    "status": 422,
+    "body": "{\"ok\":false,\"error\":{\"code\":\"PipelineRunnerError\",\"message\":\"pipeline run failed\",\"details\":{\"run\":{\"id\":\"run_snapshot\",\"status\":\"failed\"},\"cause\":\"synthetic source unreachable\"}}}"
+  },
+  {
+    "name": "pipeline dry-run: success",
+    "status": 200,
+    "body": "{\"ok\":true,\"data\":{\"run\":{\"id\":\"run_snapshot\",\"status\":\"succeeded\"},\"metrics\":{\"rowsRead\":1},\"preview\":{\"records\":[],\"errors\":[]}}}",
+    "runnerArgs": 1,
+    "runnerInput": "{\"tenantId\":\"tenant-r69-governed\",\"mode\":\"full\",\"cursor\":\"c-1\",\"sampleLimit\":5,\"pipelineId\":\"pipe_snapshot\",\"triggeredBy\":\"api\",\"dryRun\":true,\"runAs\":\"user\",\"workspaceId\":null}"
+  }
+]

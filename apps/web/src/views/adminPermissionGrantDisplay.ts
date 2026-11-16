@@ -1,3 +1,10 @@
+import {
+  readPermissionExceptionInheritedRoles,
+  type PermissionExceptionInheritedRole,
+} from './permissionExceptionSources'
+
+export type { PermissionExceptionInheritedRole }
+
 export type PermissionActionTone = 'info' | 'error'
 
 export type UserPermissionInspection = {
@@ -15,6 +22,7 @@ export type UserPermissionInspection = {
   effectiveKnown: boolean
   degraded: boolean
   subjectMatched: boolean
+  inheritedRoles: PermissionExceptionInheritedRole[] | null
 }
 
 export type PermissionWriteInput = {
@@ -40,12 +48,15 @@ export type PermissionInspectionView = {
   adminLabel: string
   directLabel: string
   inheritedLabel: string
+  legacyLabel: string
   effectiveLabel: string
   showDirectChips: boolean
   showInheritedChips: boolean
+  showLegacyChips: boolean
   showEffectiveChips: boolean
   showDirectEmpty: boolean
   showInheritedEmpty: boolean
+  showLegacyEmpty: boolean
   showEffectiveEmpty: boolean
   actionsEnabled: boolean
 }
@@ -82,6 +93,7 @@ function unreadInspection(userId: string, subjectMatched = false): UserPermissio
     effectiveKnown: false,
     degraded: true,
     subjectMatched,
+    inheritedRoles: null,
   }
 }
 
@@ -146,6 +158,7 @@ export function readUserPermissionInspection(
     effectiveKnown,
     degraded: false,
     subjectMatched: true,
+    inheritedRoles: sourceKnown ? readPermissionExceptionInheritedRoles(payload.inheritedRoles) : null,
   }
 }
 
@@ -192,12 +205,15 @@ export function describePermissionInspectionView(
       adminLabel: '身份未读',
       directLabel: '未读',
       inheritedLabel: '未读',
+      legacyLabel: '未读',
       effectiveLabel: '未读',
       showDirectChips: false,
       showInheritedChips: false,
+      showLegacyChips: false,
       showEffectiveChips: false,
       showDirectEmpty: false,
       showInheritedEmpty: false,
+      showLegacyEmpty: false,
       showEffectiveEmpty: false,
       actionsEnabled: false,
     }
@@ -209,12 +225,15 @@ export function describePermissionInspectionView(
     adminLabel: inspection.adminKnown ? (inspection.isAdmin ? '管理员' : '普通用户') : '身份未读',
     directLabel: sourceKnown ? `${inspection.direct.length} 项` : '未知',
     inheritedLabel: sourceKnown ? `${inspection.inherited.length} 项` : '未知',
+    legacyLabel: sourceKnown ? `${inspection.legacy.length} 项` : '未知',
     effectiveLabel: effectiveKnown ? `${inspection.effective.length} 项` : '未知',
     showDirectChips: sourceKnown,
     showInheritedChips: sourceKnown,
+    showLegacyChips: sourceKnown,
     showEffectiveChips: effectiveKnown,
     showDirectEmpty: sourceKnown && inspection.direct.length === 0,
     showInheritedEmpty: sourceKnown && inspection.inherited.length === 0,
+    showLegacyEmpty: sourceKnown && inspection.legacy.length === 0,
     showEffectiveEmpty: effectiveKnown && inspection.effective.length === 0,
     actionsEnabled: sourceKnown || effectiveKnown,
   }
@@ -237,6 +256,7 @@ export function describeSelectedPermissionHint(
   }
   const direct = inspection.direct.includes(code)
   const inherited = inspection.inherited.includes(code)
+  const legacy = inspection.legacy.includes(code)
   const blocked = inspection.blockedByNamespaceAdmission.includes(code)
   const effective = inspection.effective.includes(code) || inspection.permissions.includes(code)
   if (direct && blocked) {
@@ -245,8 +265,14 @@ export function describeSelectedPermissionHint(
   if (direct) {
     return `权限 ${code} 是直接授予，回收将删除该直接授予。`
   }
+  if (inherited && legacy) {
+    return `权限 ${code} 同时来自角色继承和历史授权，权限页回收不会移除这些来源。`
+  }
   if (inherited) {
     return `权限 ${code} 来自角色继承，权限页回收不会移除角色成员关系。`
+  }
+  if (legacy) {
+    return `权限 ${code} 来自历史授权，权限页回收不会移除历史授权。`
   }
   if (effective) {
     return `权限 ${code} 出现在生效权限中，但不是直接授予。`
@@ -381,6 +407,19 @@ export function describePermissionWrite(input: PermissionWriteInput): Permission
       message: `回收未移除直接授予：${target} 仍直接持有 ${code}`,
     }
   }
+  const inInherited = inspection.sourceKnown && inspection.inherited.includes(code)
+  const inLegacy = inspection.sourceKnown && inspection.legacy.includes(code)
+  if (inInherited || inLegacy) {
+    const retained = [
+      inInherited ? '角色继承' : '',
+      inLegacy ? '历史授权' : '',
+    ].filter((item) => item.length > 0).join('和')
+    return {
+      applyInspection: true,
+      tone: 'info',
+      message: `已回收${target} 的直接授予 ${code}。${retained}仍保留这项权限。`,
+    }
+  }
   if (inEffective) {
     return {
       applyInspection: true,
@@ -392,6 +431,14 @@ export function describePermissionWrite(input: PermissionWriteInput): Permission
     applyInspection: true,
     tone: 'info',
     message: `已回收${target} 的直接授予 ${code}，生效权限不再包含它`,
+  }
+}
+
+export function describeUnconfirmedPermissionWrite(requestedUserId: string): PermissionWriteOutcome {
+  return {
+    applyInspection: false,
+    tone: 'error',
+    message: `用户 ${requestedUserId} 的写入结果未确认。请重新读取当前权限，不会再次提交。`,
   }
 }
 
@@ -423,6 +470,7 @@ export function readPermissionTemplateApplyAcknowledgement(
 
 export function describePermissionTemplateApply(input: {
   templateName: string
+  requestedPermissions: readonly string[]
   inspection: UserPermissionInspection
 }): { tone: PermissionActionTone; message: string } {
   if (input.inspection.degraded || !input.inspection.subjectMatched) {
@@ -437,8 +485,29 @@ export function describePermissionTemplateApply(input: {
       message: `模板已提交，但权限来源回读不完整，不能把当前列表当作已按模板 ${input.templateName} 补齐`,
     }
   }
+  const requested = input.requestedPermissions.filter((code) => code.trim().length > 0)
+  if (requested.length === 0) {
+    return {
+      tone: 'error',
+      message: `模板 ${input.templateName} 没有可核对的权限，这次不能算全部完成。`,
+    }
+  }
+  const missing = requested.filter((code) => !input.inspection.direct.includes(code))
+  if (missing.length > 0) {
+    return {
+      tone: 'error',
+      message: `模板 ${input.templateName} 的直接授权里还缺少 ${missing.join('、')}，这次不能算全部完成。`,
+    }
+  }
+  const blocked = requested.some((code) => input.inspection.blockedByNamespaceAdmission.includes(code))
+  if (blocked) {
+    return {
+      tone: 'info',
+      message: `已把模板 ${input.templateName} 的权限写入直接授权。角色和插件准入没有改变，这不能说明插件已经可用。`,
+    }
+  }
   return {
     tone: 'info',
-    message: `已按模板 ${input.templateName} 补齐权限`,
+    message: `已把模板 ${input.templateName} 的权限写入直接授权。角色和插件准入没有改变。`,
   }
 }

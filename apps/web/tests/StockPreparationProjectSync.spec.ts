@@ -1439,3 +1439,103 @@ describe('PR B — the pilot refusals of the dry run', () => {
     }
   })
 })
+
+// ---- 批次标识 BI-3 (R-65): the run's pull-batch preview / outcome and the run-stop partial ------------------------
+//
+//   SYNC-PB-REPORT  `report.pullBatch` comes from the plan and the apply; the KEY IS ABSENT when both are (switch off).
+//   SYNC-PB-PARTIAL a STOCK_PREP_PULL_BATCH_* run stop records the tri-state `partial` and the reason token (P-5).
+//   SYNC-PB-HOOK    `confirmWrite` receives `{ pullBatch }` as its second argument (P-4).
+//   SYNC-PB-JOB     the background dry-run job hands the plan back as-is, `pullBatch` included.
+describe('批次标识 BI-3 — the run carries the pull-batch answers', () => {
+  const PREVIEW = { preview: true, wouldStamp: true, reason: null }
+  const STAMPED = { stamped: true, label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 3 }
+
+  it('SYNC-PB-REPORT: preview + outcome land on the report; absent on both sides ⇒ no key at all', async () => {
+    const on = await runStockPreparationProjectSync(makeApi({
+      dryRun: vi.fn().mockResolvedValue(plan({ pullBatch: PREVIEW })),
+      apply: vi.fn().mockResolvedValue(applied({ pullBatch: STAMPED })),
+    }), PROJECT_NO)
+    expect(on.verdict).toBe('imported')
+    expect(on.pullBatch).toEqual({
+      preview: { wouldStamp: true, reason: null, gapRows: null },
+      outcome: { kind: 'stamped', label: '第2批（2026-11-08）', batchNo: 2, joined: false, createdRowCount: 3 },
+    })
+    assertValuesFree(on)
+
+    const off = await runStockPreparationProjectSync(makeApi(), PROJECT_NO)
+    expect('pullBatch' in off, 'switch off: the report is the one it was').toBe(false)
+    expect(Object.keys(off).sort()).toEqual(Object.keys(summarizeProjectSync([], {
+      pendingConfirmCount: 0, queuedDecisionCount: 0, planned: null, written: null, missingComponents: null, missingComponentsUnavailableReason: null,
+    })).sort())
+
+    // Only the preview (the write was not reached): the outcome is null, the key is there.
+    const held = await runStockPreparationProjectSync(makeApi({
+      dryRun: vi.fn().mockResolvedValue(plan({ pullBatch: { preview: true, wouldStamp: false, reason: 'history_gap', gapRows: 4 }, counts: { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 2 } })),
+    }), PROJECT_NO)
+    expect(held.pullBatch).toEqual({ preview: { wouldStamp: false, reason: 'history_gap', gapRows: 4 }, outcome: null })
+
+    // Malformed answers are clamped away, never carried.
+    const malformed = await runStockPreparationProjectSync(makeApi({
+      dryRun: vi.fn().mockResolvedValue(plan({ pullBatch: { preview: false } })),
+      apply: vi.fn().mockResolvedValue(applied({ pullBatch: { stamped: true } })),
+    }), PROJECT_NO)
+    expect('pullBatch' in malformed).toBe(false)
+  })
+
+  it('SYNC-PB-PARTIAL: a pull-batch run stop after rows landed reads interrupted; before any write, blocked', async () => {
+    const stop = (status: number, code: string, detailPartial: boolean, detailReason?: string) => makeApi({
+      apply: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(status, '/apply', { code, detailPartial, ...(detailReason ? { detailReason } : {}) })),
+    })
+    const landed = await runStockPreparationProjectSync(stop(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', true), PROJECT_NO)
+    expect(stepOf(landed, 'apply').reason, 'no new reason token').toBe('WRITE_FAILED')
+    expect(stepOf(landed, 'apply').detail).toMatchObject({ code: 'STOCK_PREP_PULL_BATCH_STORE_FAILED', partial: 1 })
+    expect(landed.verdict).toBe('interrupted')
+    expect(stepOf(landed, 'archive').reason).toBe('BATCH_ARCHIVE_WRITE_INCOMPLETE')
+
+    const none = await runStockPreparationProjectSync(stop(503, 'STOCK_PREP_PULL_BATCH_STORE_FAILED', false), PROJECT_NO)
+    expect(stepOf(none, 'apply').detail.partial).toBe(0)
+    expect(none.verdict).toBe('blocked')
+
+    const installing = await runStockPreparationProjectSync(stop(409, 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', false), PROJECT_NO)
+    expect(stepOf(installing, 'apply').detail.partial).toBe(0)
+    expect(installing.verdict).toBe('blocked')
+    // An install that began after the allocation's first step is a RUN STOP: rows may have landed.
+    const installingMidway = await runStockPreparationProjectSync(stop(409, 'STOCK_PREP_PULL_BATCH_INSTALL_IN_PROGRESS', true), PROJECT_NO)
+    expect(installingMidway.verdict).toBe('interrupted')
+
+    const conflict = await runStockPreparationProjectSync(stop(409, 'STOCK_PREP_PULL_BATCH_CONFLICT', true, 'settings_changed'), PROJECT_NO)
+    expect(stepOf(conflict, 'apply').detail).toMatchObject({ code: 'STOCK_PREP_PULL_BATCH_CONFLICT', reason: 'settings_changed', partial: 1 })
+    expect(clampErrorDetailToken('settings_changed'), 'the reason token survives the clamp').toBe('settings_changed')
+
+    // Control: a code outside the family keeps the old detail (no partial recorded for it).
+    const other = await runStockPreparationProjectSync(stop(500, 'SOME_OTHER_FAILURE', true), PROJECT_NO)
+    expect('partial' in stepOf(other, 'apply').detail).toBe(false)
+  })
+
+  it('SYNC-PB-HOOK: confirmWrite receives the preview as its second argument (null without one)', async () => {
+    const confirmWrite = vi.fn().mockResolvedValue(true)
+    await runStockPreparationProjectSync(makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ pullBatch: PREVIEW })) }), PROJECT_NO, undefined, { confirmWrite })
+    expect(confirmWrite).toHaveBeenCalledTimes(1)
+    expect(confirmWrite.mock.calls[0][1]).toEqual({ pullBatch: { wouldStamp: true, reason: null, gapRows: null } })
+    const offHook = vi.fn().mockResolvedValue(true)
+    await runStockPreparationProjectSync(makeApi(), PROJECT_NO, undefined, { confirmWrite: offHook })
+    expect(offHook.mock.calls[0][1]).toEqual({ pullBatch: null })
+  })
+
+  it('SYNC-PB-JOB: the background dry-run job hands the plan back as-is, pullBatch included', async () => {
+    const JOB_ID = 'dry-run-00000000-0000-4000-8000-0000000000b3'
+    const envelope = (data: unknown) => new Response(JSON.stringify({ ok: true, data }), { status: 200 })
+    const job = (status: string, result?: unknown) => envelope({ jobId: JOB_ID, status, startedAt: '2026-11-08T00:00:00.000Z', finishedAt: status === 'running' ? null : '2026-11-08T00:00:05.000Z', elapsedMs: 5_000, ...(result ? { result } : {}) })
+    const answers = [job('running'), job('succeeded', plan({ pullBatch: { preview: true, wouldStamp: false, reason: 'installing' } }))]
+    wireFetch.mockReset()
+    wireFetch.mockImplementation(async (url: string) => {
+      if (!String(url).includes('/dry-run-jobs')) throw new Error(`unrouted ${url}`)
+      const next = answers.shift()
+      if (!next) throw new Error('no more answers')
+      return next
+    })
+    const result = await createStockPreparationProjectSyncApi({ tenantId: 'syn-tenant' }).dryRun(PROJECT_NO, { wait: async () => {} })
+    expect(result.pullBatch).toEqual({ preview: true, wouldStamp: false, reason: 'installing' })
+    wireFetch.mockReset()
+  })
+})

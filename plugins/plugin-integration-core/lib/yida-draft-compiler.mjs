@@ -225,9 +225,10 @@ function compile(input, versions, persistent = false) {
     const { plan, sourceRows, origins } = compilePlan(config, owned.rowsText, allocation)
     assertValidPlan(plan, config.intent)
     const binding = hasBinding ? parseSourceBinding(owned.sourceBinding, sourceRows) : null
-    // The persistent send entry refuses a generated field on an unbound row (addendum 2026-11-06; row problem
-    // SOURCE_UNBOUND → PLAN). Today the validator admits no `generated` transform, so this cannot fire yet; Y6
-    // adds the transform and this check becomes live.
+    // The persistent send entry refuses a generated field on an unbound row, whatever its template (addendum
+    // 2026-11-06; row problem SOURCE_UNBOUND → PLAN). A binding covers every row of a draft or none, so this is per
+    // draft. Main's R-71 ⑦.4 core (#6777) admits the `generated` transform, so this check is live. The local
+    // recompute (compileYidaLocalDraft) needs no binding.
     if (persistent && binding === null && config.fieldMap.some(entry => entry.transform === 'generated')) fail('PLAN')
     const fieldDependencies = binding ? dependenciesByTarget(config, binding.fieldBindings) : null
     const source = { config, rowsText: owned.rowsText, allocation, ...(hasBinding ? { sourceBinding: owned.sourceBinding } : {}) }

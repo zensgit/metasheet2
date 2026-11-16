@@ -18,6 +18,7 @@ import {
   buildObjectFieldsRepairSurface,
   runObjectFieldsRepairTransactionWith,
   ensureMissingObjectFields,
+  readObjectMaxFieldOrder,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
 import {
@@ -633,6 +634,58 @@ describe('buildObjectFieldsRepairSurface (W2/P2-3 atomic repair surface)', () =>
     expect(joined).toMatch(/insert into meta_fields/)
     // All four DB-touching methods used the injected query.
     expect(sqls.length).toBeGreaterThanOrEqual(4)
+  })
+})
+
+describe('readObjectMaxFieldOrder (Y7 review MEDIUM-2: the largest order over EVERY field row of the sheet)', () => {
+  afterEach(() => {
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+  })
+
+  const recorder = (maxOrder: unknown) => {
+    const calls: Array<{ sql: string; params: unknown[] }> = []
+    const query: MultitableProvisioningQueryFn = async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params: params ?? [] })
+      if (/max\("order"\)/i.test(sql)) return { rows: [{ max_order: maxOrder }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    return { calls, query }
+  }
+
+  it('reads MAX("order") over the whole sheet (no field-id filter), on the passed query; null for an empty sheet; an int8 string is parsed', async () => {
+    const sheetId = getObjectSheetId('tenant_1:plugin', 'obj')
+    const seen = recorder(34)
+    expect(await readObjectMaxFieldOrder({ query: seen.query, projectId: 'tenant_1:plugin', objectId: 'obj' })).toBe(34)
+    const select = seen.calls.find((call) => /max\("order"\)/i.test(call.sql))
+    expect(select, 'one MAX read').toBeTruthy()
+    expect(select!.sql).toMatch(/FROM meta_fields WHERE sheet_id = \$1\s*$/)
+    expect(select!.sql).not.toMatch(/ANY\(/)
+    expect(select!.params).toEqual([sheetId])
+    expect(await readObjectMaxFieldOrder({ query: recorder(null).query, projectId: 'tenant_1:plugin', objectId: 'obj' })).toBeNull()
+    expect(await readObjectMaxFieldOrder({ query: recorder('-1').query, projectId: 'tenant_1:plugin', objectId: 'obj' })).toBe(-1)
+    await expect(readObjectMaxFieldOrder({ query: recorder('not-a-number').query, projectId: 'tenant_1:plugin', objectId: 'obj' })).rejects.toThrow(/safe integer/)
+  })
+
+  it('takes the canonical writer fence BEFORE the read when the fence is enabled (and none when it is off)', async () => {
+    const off = recorder(3)
+    await readObjectMaxFieldOrder({ query: off.query, projectId: 'tenant_1:plugin', objectId: 'obj' })
+    expect(off.calls.some((call) => /pg_advisory_xact_lock/i.test(call.sql))).toBe(false)
+
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const on = recorder(3)
+    await readObjectMaxFieldOrder({ query: on.query, projectId: 'tenant_1:plugin', objectId: 'obj' })
+    const fenceAt = on.calls.findIndex((call) => /pg_advisory_xact_lock/i.test(call.sql))
+    const readAt = on.calls.findIndex((call) => /max\("order"\)/i.test(call.sql))
+    expect(fenceAt).toBeGreaterThanOrEqual(0)
+    expect(fenceAt).toBeLessThan(readAt)
+  })
+
+  it('is on the repair-transaction surface, bound to the same query', async () => {
+    const seen = recorder(7)
+    const surface = buildObjectFieldsRepairSurface(seen.query)
+    expect(typeof surface.readObjectMaxFieldOrder).toBe('function')
+    expect(await surface.readObjectMaxFieldOrder!({ projectId: 'tenant_1:plugin', objectId: 'obj' })).toBe(7)
+    expect(seen.calls.some((call) => /max\("order"\)/i.test(call.sql))).toBe(true)
   })
 })
 

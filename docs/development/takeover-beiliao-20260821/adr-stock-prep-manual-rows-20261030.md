@@ -258,6 +258,8 @@
 | 身份与 RUN（9） | componentSourceId :704、parentSourceId :705、path :738、depth :739、sourceVersion :756、lastPlmRefresh* :760-762、lastPlmConflictSummary :766 | 不拷 |
 | 盖章（3） | projectNo :700、idempotencyKey :701、active :759 | 只由服务器写 |
 
+> **修订 2026-11-06（R-71 ⑦.4 PR-4）**：模板末尾加了 `issueConfirmDate`（发料确认日期，宜搭回写的机器列）和 `projectSpecModel`（项目规格型号，空列，来源待 F1）两列，普查变为 **35 列**；两列都归入「身份与 RUN」类，该类由 9 列变为 **11 列**（「身份与 RUN 与机器列」，不拷；主机侧 `stock-preparation-manual-rows.ts` 的 `MANUAL_ROW_IDENTITY_RUN_FIELD_IDS`，普查测试 K-05 钉住）。上表的行号与列数是 2026-10-30 的原文，不改写。`projectSpecModel` 有来源之后（F1 的 PR）要重新判断它该不该拷。
+
 - **谱系两列为什么不拷**：
   - 它们属于 `DERIVED_LINEAGE_DISPLAY_FIELD_IDS`（`stock-preparation-continuation-pairing.cjs:162`），机器摘要也包含它们（`:812-820`）。
   - 拉取不会改人工行，所以拷过去以后会永久过期。

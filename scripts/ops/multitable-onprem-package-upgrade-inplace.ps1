@@ -1749,6 +1749,52 @@ function Register-LiveTreeReplacement {
   }
 }
 
+function Assert-WebDistNodeAvailable {
+  param([string[]]$RelativeDirs)
+
+  if (-not (Test-RelativePathListed -RelativePath 'apps/web/dist' -List $RelativeDirs)) {
+    return
+  }
+  if (-not (Get-Command -Name 'node' -CommandType Application -ErrorAction SilentlyContinue)) {
+    throw 'WEB_DIST_NODE_MISSING: node is required to retain web assets; refusing before maintenance or stop'
+  }
+}
+
+function Prepare-WebDistForUpgrade {
+  <#
+    Validate both trees, then retain old assets ONLY in the extracted package.
+    This must finish before ANY Update-ReplaceDirs write (including backend).
+    Do not mark the live replacement journal here: a preparation failure leaves
+    the original install intact and uses the existing unapplied-upgrade recovery.
+    Old packages without the helper are deliberately refused before replacement;
+    do not silently fall back to an unverified helper from the installed tree.
+  #>
+  param(
+    [string]$PackageRoot,
+    [string]$RootDir,
+    [string[]]$RelativeDirs
+  )
+
+  if (-not (Test-RelativePathListed -RelativePath 'apps/web/dist' -List $RelativeDirs)) {
+    return
+  }
+  $helper = Join-Path $PackageRoot 'scripts/ops/web-dist-retain-assets.mjs'
+  if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+    throw 'WEB_DIST_HELPER_MISSING: the verified package must contain scripts/ops/web-dist-retain-assets.mjs; no runtime paths were replaced'
+  }
+  $source = Join-Path $PackageRoot 'apps/web/dist'
+  $previous = Join-Path $RootDir 'apps/web/dist'
+  $nodeCommand = @(Get-Command -Name 'node' -CommandType Application -ErrorAction Stop)[0].Source
+  & $nodeCommand $helper validate $source $previous
+  if ($LASTEXITCODE -ne 0) {
+    throw "WEB_DIST_VALIDATE_FAILED: refusing before runtime replacement (exit=$LASTEXITCODE)"
+  }
+  & $nodeCommand $helper retain $previous $source
+  if ($LASTEXITCODE -ne 0) {
+    throw "WEB_DIST_RETAIN_FAILED: refusing before runtime replacement (exit=$LASTEXITCODE)"
+  }
+}
+
 function Update-ReplaceDirs {
   <#
     Full delete-then-copy for build-artifact directories that never carry
@@ -2737,6 +2783,7 @@ if ($MyInvocation.InvocationName -ne '.') {
   $overlaidRelativePaths = @('plugins')
   $restoredRelativePaths = @($ReplaceDirs) + $overlaidRelativePaths
   Assert-ReplacedPathsBackedUp -RestoredRelativePaths $restoredRelativePaths -BackupPaths $BackupPaths
+  Assert-WebDistNodeAvailable -RelativeDirs $ReplaceDirs
   $resolvedBackendHealthUrl = Resolve-BackendHealthUrl -Candidate $BackendHealthUrl -EnvFile $resolvedEnvFile -DefaultPort $BackendDefaultPort
 
   # R59: one PM2_HOME for every pm2 call of this run, resolved (and an
@@ -2843,6 +2890,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
         Write-Info "Extracted package root: $packageRoot"
 
+        Prepare-WebDistForUpgrade -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
         Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs -Journal $replaceJournal
         Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot -Journal $replaceJournal
 

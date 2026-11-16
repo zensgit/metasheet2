@@ -30,15 +30,24 @@ function makeFakeFetch() {
 
   function addExecutions(record) {
     for (const rule of rules) {
+      // The fixture mirrors the real executor output per action: a mock-mode send_email is a SKIPPED
+      // step/execution carrying `notificationStatus: 'simulated'` and the shared reason token.
+      const expectedStatus = rule.expectedFailure ? 'failed' : rule.actionType === 'send_email' ? 'skipped' : 'success'
       const step = {
         actionType: rule.actionType,
-        status: rule.expectedFailure ? 'failed' : 'success',
+        status: expectedStatus,
       }
       if (rule.actionType === 'update_record') {
         step.output = { updatedFields: Object.keys(rule.actionConfig.fields ?? {}) }
         Object.assign(record.data, rule.actionConfig.fields ?? {})
       } else if (rule.actionType === 'send_email') {
-        step.output = { recipientCount: 2, notificationStatus: 'sent' }
+        step.output = {
+          outcome: 'not_sent',
+          reason: 'email_transport_simulated',
+          notificationId: `email_${record.id}`,
+          notificationStatus: 'simulated',
+          recipientCount: 2,
+        }
       } else if (rule.actionType === 'send_webhook' && rule.expectedFailure) {
         step.error = 'Webhook failed after 3 attempts: HTTP 500'
       } else if (rule.actionType === 'send_webhook') {
@@ -46,7 +55,7 @@ function makeFakeFetch() {
       }
       const execution = {
         id: `exec_${rule.id}_${record.id}`,
-        status: rule.expectedFailure ? 'failed' : 'success',
+        status: expectedStatus,
         steps: [step],
       }
       const current = executionsByRuleId.get(rule.id) ?? []

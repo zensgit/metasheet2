@@ -17,8 +17,11 @@ import {
   buildApprovedErpSourcePrelude,
   buildApprovedSourcePrelude,
   buildExtendedSmokeFixture,
+  TARGET_BINDING_ECHO_LABELS,
   buildTargetOptionSetsFixture,
   formatSummaryBlock,
+  leakScanSubject,
+  sandboxTargetBindingEchoValid,
   normalizePrepLineRouteTemplate,
   prepLineRowProjectionValid,
   prepLineRowResolved,
@@ -86,6 +89,82 @@ test('fixture: THE T4 CACHE-JOIN INVARIANT — each cached material code EQUALS 
   // The three material identities are distinct (no accidental upsert-merge).
   const ids = new Set([fixture.materialA.erpMaterialId, fixture.materialB.erpMaterialId, fixture.materialC.erpMaterialId])
   assert.equal(ids.size, 3)
+})
+
+// #5459: sandbox-target/ensure echoes the caller's own objectId inside data.targetBinding. The global
+// scan reads those two bodies without that one member; everything else stays scanned.
+function sandboxEnsureBody(fixture, overrides = {}) {
+  return {
+    ok: true,
+    data: {
+      ready: true,
+      mode: 'sandbox_create',
+      targetBindingAvailable: true,
+      targetBinding: {
+        sheetId: 'sheet_0123456789abcdef',
+        objectId: fixture.sandboxObjectId,
+        keyField: 'projectNo',
+        fieldIdMap: { projectNo: 'fld_0123456789abcdef' },
+        ...overrides,
+      },
+      evidence: { objectIdHash: 'a'.repeat(64) },
+    },
+  }
+}
+
+test('leak scan: the sandbox objectId is a sentinel, and the targetBinding echo is removed only from the two sandbox-target-ensure bodies', () => {
+  const fixture = buildExtendedSmokeFixture('t123')
+  assert.ok(fixture.sentinels.includes(fixture.sandboxObjectId))
+  assert.ok(fixture.sentinels.includes(fixture.sandboxLabel))
+  assert.deepEqual([...TARGET_BINDING_ECHO_LABELS], ['sandbox-target-ensure-1', 'sandbox-target-ensure-2'])
+
+  for (const label of TARGET_BINDING_ECHO_LABELS) {
+    const body = sandboxEnsureBody(fixture)
+    // RED without the strip: the raw body carries the sentinel.
+    assert.equal(leakScan(body, fixture.sentinels), false)
+    const subject = leakScanSubject({ label, exempt: false, body })
+    assert.equal(leakScan(subject, fixture.sentinels), true)
+    assert.equal(Object.hasOwn(subject.data, 'targetBinding'), false)
+    assert.equal(subject.data.mode, 'sandbox_create')
+    // The collected body itself is never mutated.
+    assert.equal(body.data.targetBinding.objectId, fixture.sandboxObjectId)
+  }
+
+  // Any other label: the same body is scanned unchanged, so it still leaks.
+  const other = sandboxEnsureBody(fixture)
+  assert.equal(leakScanSubject({ label: 'target-ensure-1', body: other }), other)
+  assert.equal(leakScan(leakScanSubject({ label: 'target-ensure-1', body: other }), fixture.sentinels), false)
+
+  // Only targetBinding is removed: the objectId (or the label) anywhere else in these bodies still leaks.
+  const leakyEvidence = sandboxEnsureBody(fixture)
+  leakyEvidence.data.evidence = { objectId: fixture.sandboxObjectId }
+  assert.equal(leakScan(leakScanSubject({ label: 'sandbox-target-ensure-1', body: leakyEvidence }), fixture.sentinels), false)
+  const leakyLabel = sandboxEnsureBody(fixture)
+  leakyLabel.data.optionSync = { label: fixture.sandboxLabel }
+  assert.equal(leakScan(leakScanSubject({ label: 'sandbox-target-ensure-2', body: leakyLabel }), fixture.sentinels), false)
+
+  // Null or shapeless bodies stay scannable.
+  assert.deepEqual(leakScanSubject({ label: 'sandbox-target-ensure-1', body: null }), {})
+  assert.equal(leakScanSubject({ label: 'sandbox-target-ensure-1', body: { ok: false } }).ok, false)
+})
+
+test('sandboxTargetBindingEchoValid: the echo must be exactly the caller objectId, name a sheet, and carry no other sentinel', () => {
+  const fixture = buildExtendedSmokeFixture('t123')
+  const opts = { objectId: fixture.sandboxObjectId, sentinels: fixture.sentinels }
+  const valid = () => sandboxEnsureBody(fixture).data.targetBinding
+  assert.equal(sandboxTargetBindingEchoValid(valid(), opts), true)
+  // Absent or null (the pre-#5459 shape) fails: this route now owes the deployer its binding.
+  assert.equal(sandboxTargetBindingEchoValid(undefined, opts), false)
+  assert.equal(sandboxTargetBindingEchoValid(null, opts), false)
+  // A different objectId, or none.
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), objectId: `${fixture.sandboxObjectId}x` }, opts), false)
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), objectId: undefined }, opts), false)
+  // No sheet named.
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), sheetId: '' }, opts), false)
+  // Any other plaintext sentinel inside the binding.
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), fieldIdMap: { projectNo: fixture.sandboxLabel } }, opts), false)
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), keyField: fixture.drawingA }, opts), false)
+  assert.equal(sandboxTargetBindingEchoValid({ ...valid(), sheetId: `s_${fixture.sandboxObjectId}` }, opts), false)
 })
 
 test('fixture: quantity sentinels dodge ISO-timestamp millisecond substrings (>=4 decimals)', () => {

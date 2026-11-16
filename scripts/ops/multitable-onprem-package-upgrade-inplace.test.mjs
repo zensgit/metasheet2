@@ -2374,6 +2374,7 @@ function writeFixtureFile(root, rel, contents) {
 function buildAcidPackageStage(stageDir, { omitPreflightFile = false } = {}) {
   writeFixtureFile(stageDir, 'PACKAGE-METADATA.json', JSON.stringify({ name: 'acid-fixture-package' }, null, 2))
   writeFixtureFile(stageDir, 'apps/web/dist/index.html', '<html>NEW WEB DIST</html>\n')
+  writeFixtureFile(stageDir, 'scripts/ops/web-dist-retain-assets.mjs', fs.readFileSync(path.join(repoRoot, 'scripts/ops/web-dist-retain-assets.mjs'), 'utf8'))
   writeFixtureFile(
     stageDir,
     'packages/core-backend/dist/src/db/migrate.js',

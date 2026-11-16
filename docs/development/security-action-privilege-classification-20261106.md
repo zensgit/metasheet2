@@ -4,7 +4,7 @@ Date: 2026-11-06
 
 ## Scope
 
-Two backend modules with no caller:
+Two backend modules:
 
 - `packages/core-backend/src/auth/security-action-privilege.ts` — reads a user's grant inputs on the
   caller's transaction, classifies the user as `standard` or `high` privilege, and computes a witness
@@ -12,7 +12,9 @@ Two backend modules with no caller:
 - `packages/core-backend/src/auth/external-login-assurance.ts` — the assurance policy matrix, the
   policy revision, and the purpose registry with its prerequisites.
 
-No migration, table, route, environment flag, OpenAPI change or consumer is part of this change.
+No migration, table, route, environment flag or OpenAPI change is part of this change; the only
+consumer of either module is the security action proof service, described in
+`security-action-proof-service-20261106.md`.
 
 ## Invariants
 
@@ -53,8 +55,8 @@ No migration, table, route, environment flag, OpenAPI change or consumer is part
    caught only by review.
 9. **Unavailable purposes.** Every purpose is unavailable: each prerequisite is a frozen `false`,
    availability reads no environment variable, and the production entry point takes one argument.
-10. **Inert.** Nothing in `src` imports either module except the classifier importing the policy
-   types.
+10. **Callers.** In `src`, the classifier imports the policy types and the security action proof
+   service imports both modules; nothing else imports either.
 
 Classification does not cover account state; callers apply the account gate separately.
 
@@ -94,9 +96,11 @@ Purposes: `external_identity_bind` (`empty_slot`), `external_identity_unbind`, `
 A purpose is available only when every prerequisite it depends on is delivered: the proof service;
 the local credential provenance constraint (a local credential counts as the `local_password` method
 only when its provenance satisfies the assurance policy for verification methods); the authorization
-input serialization contract, for every purpose whose outcome depends on the privilege class (derived
-from the matrix and the delivered methods); and the purpose's own target resolution. In this
-revision none is delivered, so no purpose is available.
+input serialization contract; binding of the proof and its intent to the browser that started them;
+a per-user total limit on verification attempts with at most one in flight per session, with the
+operating notes stating that whoever holds a session can temporarily keep its user from verifying; and the
+purpose's own target resolution. Every purpose depends on each of them. In this revision every
+prerequisite is false, so no purpose is available.
 
 ## Tests and wiring
 
@@ -109,7 +113,12 @@ revision none is delivered, so no purpose is available.
   is taken from, one fixture per reason, superset anchors against the approval
   administrator predicate, the web administrator literals and the role editor shapes, source
   alignment with the authorization aggregator, witness composition and ordering, the policy matrix,
-  the revision pin, the registry and its prerequisites, and the CI wiring.
+  the revision pin, the registry and its prerequisites, the exact allowlist of the files that import
+  either module (an import, a re-export, `require(…)`, dynamic `import(…)` and `import(…)` types count
+  alike, with plain or template-literal specifiers, in TypeScript and JavaScript files; in a file that
+  names either module, a computed specifier is reported, and a file that is not TypeScript or
+  JavaScript naming either module is reported; the check covers exactly the load forms listed here; with self-checks that an importer the allowlist does not
+  name is reported wherever it lives), and the CI wiring.
 - `tests/integration/security-action-privilege.db.test.ts` runs against real PostgreSQL in the
   approval real-database job: schema match, one fixture per reason with a second subject holding
   every source, the superset relation to the authorization aggregator, classification from rows

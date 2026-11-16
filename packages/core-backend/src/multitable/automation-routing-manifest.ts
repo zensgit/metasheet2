@@ -190,12 +190,37 @@ export const ROUTING_MANIFEST_V3: RoutingManifest = deepFreezeManifest({
   },
 })
 
-export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V3
+/**
+ * v4 — v3 PLUS the R-69 1c event family `integration.run_finished` → `integration-run-trigger` (ADR
+ * adr-automation-pipeline-bridge-20261103 §4.2: "耐久模式下新事件族必须进路由清单 v4（新版本，不改 v1–v3）").
+ *
+ * DELTA vs v3: ONE new family with ONE consumer; every v3 route is the SAME frozen array object (identical
+ * routing, no drift). v1–v3 stay byte-for-byte what they were, so every in-flight row keeps its fan-out.
+ *
+ * WHY THE FAMILY MUST BE HERE: with AUTOMATION_DURABLE_DELIVERY_ENABLED on, the publish of a run summary
+ * enqueues on this family; a manifest without it makes `enqueueOutboxEvent` throw, so the publish FAILS CLOSED
+ * (no silent zero-row enqueue). The consumer is registered unconditionally (`DURABLE_CONSUMER_KEYS`) — the
+ * INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED switch gates what it DOES (off ⇒ dispatch returns at once), never
+ * whether it exists, for the same reason as the v3 mirror consumer.
+ *
+ * ROLLING DEPLOY: the worker that knows `integration-run-trigger` ships in the same artifact as the producer
+ * that stamps v4 (single-artifact on-prem deployment); an N-1 worker leaves the rows `pending` with an alert
+ * (unknown-consumer_key rule) until an N worker claims them.
+ */
+export const ROUTING_MANIFEST_V4: RoutingManifest = deepFreezeManifest({
+  version: 4,
+  routes: {
+    ...ROUTING_MANIFEST_V3.routes,
+    'integration.run_finished': ['integration-run-trigger'],
+  },
+})
+
+export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V4
 
 /** Versions this build can dispatch. A row stamped with an unknown version must be left alone (older/newer
  *  worker's job), mirroring the unknown-consumer_key rule. v1 stays supported for in-flight rows enqueued
  *  before this deploy — they keep their v1 fan-out forever. */
-export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3])
+export const SUPPORTED_MANIFEST_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3, 4])
 
 /**
  * Expand an event type to its consumer_keys under the given manifest. Returns undefined for an event type

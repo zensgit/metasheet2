@@ -43,6 +43,10 @@ const MIGRATION_FILES = Object.freeze({
   // Step 5 PR-8: the change-plan ledger (migration 104), modelled like 102 / 103 (enums parsed, shape CHECKs and the two
   // partial unique indexes by hand, cross-checked against the SQL by the change-plan store suite).
   changePlan: path.join(MIGRATIONS, '104_create_integration_stock_prep_change_plan.sql'),
+  // Step 6a-1 (S6-1, KIT-01): the execution columns / close shape / settlement subject, the intent journal table and the
+  // change plan's recovered-from column (migration 106). ADD COLUMN lines and the enum ADD CONSTRAINT CHECKs are parsed
+  // from the SQL; the shape CHECKs are hand-modelled below and cross-checked by name against the SQL by the store suite.
+  recovery: path.join(MIGRATIONS, '106_extend_integration_stock_prep_refresh_execution_for_recovery.sql'),
 })
 const REGISTRY_TABLE = 'integration_stock_prep_project_target'
 
@@ -146,7 +150,36 @@ function parseSchema(sql) {
  * its `ADD COLUMN IF NOT EXISTS` lines. The registry's CHECKs and unique indexes are NOT modelled (later
  * migrations re-list its CHECKs; the suites only read it through PR B's pilot reads).
  */
-function loadSchema({ registryPilotColumns = true, lockTable = false } = {}) {
+// Step 6a-1 (KIT-01): migration 106's ALTER TABLE statements — every `ADD COLUMN IF NOT EXISTS <name> <type>[ NOT NULL]
+// [ DEFAULT <v>]` (per target table) and every enum CHECK added as `ADD CONSTRAINT <name> CHECK (<col> IS NULL OR <col>
+// IN (...))` — plus its CREATE TABLE (the intent journal), applied onto the 103 / 104 schema.
+const MIGRATION_106_ADDED_COLUMNS = Object.freeze({ integration_stock_prep_refresh_execution: 11, integration_stock_prep_change_plan: 1 })
+
+function applyMigration106(schema) {
+  const text = stripComments(readMigrationText(MIGRATION_FILES.recovery))
+  Object.assign(schema, parseSchema(text))
+  const statements = text.split(';')
+  const added = {}
+  for (const statement of statements) {
+    const alter = statement.match(/ALTER TABLE (integration_[a-z_]+)\s([\s\S]*)$/)
+    if (!alter) continue
+    const [, table, body] = alter
+    if (!schema[table]) throw new Error(`refresh-store kit: migration 106 alters unknown table ${table}`)
+    for (const column of body.matchAll(/ADD COLUMN IF NOT EXISTS (\w+) (TEXT|INTEGER|JSONB|BOOLEAN)( NOT NULL)?(?: DEFAULT (\w+))?/g)) {
+      const [, name, type, notNull, defaultText] = column
+      schema[table].columns[name] = { type, primaryKey: false, notNull: Boolean(notNull), default: parseDefault(defaultText) }
+      added[table] = (added[table] || 0) + 1
+    }
+    const enumCheck = body.replace(/\s+/g, ' ').match(/ADD CONSTRAINT (\S+) CHECK \((\w+) IS NULL OR \2 IN \(([^)]*)\)\)/)
+    if (enumCheck) schema[table].enums.push({ name: enumCheck[1], column: enumCheck[2], values: parseEnumList(enumCheck[3]), nullable: true })
+  }
+  for (const [table, count] of Object.entries(MIGRATION_106_ADDED_COLUMNS)) {
+    if (added[table] !== count) throw new Error(`refresh-store kit: migration 106 adds ${added[table] || 0} columns to ${table}, expected ${count}`)
+  }
+  return schema
+}
+
+function loadSchema({ registryPilotColumns = true, lockTable = false, migration106 = true } = {}) {
   const registry = parseSchema(readMigrationText(MIGRATION_FILES.registry))
   if (!registry[REGISTRY_TABLE]) throw new Error('refresh-store kit: migration 087 no longer creates the registry table')
   registry[REGISTRY_TABLE].enums = []
@@ -159,13 +192,15 @@ function loadSchema({ registryPilotColumns = true, lockTable = false } = {}) {
   // PR-4: the lock row's table (migration 100), columns and defaults only (its lease-shape CHECK is not modelled;
   // the lock's own kit models none either) — so `bumpGenerationWithin` on the store's handle finds the row.
   const lock = lockTable ? parseSchema(readMigrationText(MIGRATION_FILES.lock)) : {}
-  return {
+  const schema = {
     ...parseSchema(readMigrationText(MIGRATION_FILES.continuation)),
     ...parseSchema(readMigrationText(MIGRATION_FILES.refreshState)),
     ...parseSchema(readMigrationText(MIGRATION_FILES.changePlan)),
     ...registry,
     ...lock,
   }
+  // `migration106: false` is a database where step 6a-1's migration has not run (the consult's subject read fails 42703).
+  return migration106 ? applyMigration106(schema) : schema
 }
 
 const claimActive = (row) => row.claim_active === true
@@ -206,6 +241,14 @@ const SHAPE_CHECKS = Object.freeze([
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_counts_check', test: (r) => (isNull(r.written) || r.written >= 0) && (isNull(r.attempted_writes) || r.attempted_writes >= 0) },
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_finished_shape_check', test: (r) => (r.status === 'running') === isNull(r.finished_at) },
   { table: T.execution, name: 'integration_stock_prep_refresh_execution_verified_shape_check', test: (r) => (r.status === 'verified_closed') === !isNull(r.verified_at) },
+  // Step 6a-1 (migration 106), by hand — `migration106` absent columns read undefined, which every predicate treats as NULL.
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_intent_shape_check', migration106: true, test: (r) => (isNull(r.intent_version) === isNull(r.intent_digest)) && (isNull(r.intent_digest) === isNull(r.intent_entry_count)) && (isNull(r.intent_version) || r.intent_version >= 1) && (isNull(r.intent_entry_count) || r.intent_entry_count >= 0) },
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_batch_digest_check', migration106: true, test: (r) => isNull(r.pull_batch_source_digest) || (/^[0-9a-f]{32}$/.test(r.pull_batch_source_digest) && !isNull(r.intent_version)) },
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_close_shape_check', migration106: true, test: (r) => ((r.status === 'verified_closed') === !isNull(r.closed_mode)) && ((r.status === 'verified_closed') === !isNull(r.pre_close_status)) && (r.status !== 'verified_closed' || !isNull(r.verified_result)) },
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_runbook_shape_check', migration106: true, test: (r) => (r.closed_mode || '') !== 'runbook' || (!isNull(r.runbook_ref) && r.verified_result === 'unknown') },
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_self_verified_check', migration106: true, test: (r) => (r.closed_mode || '') !== 'self_verified' || (r.verified_result === 'nothing_landed' && r.written === 0 && r.attempted_writes === 0 && !isNull(r.intent_version)) },
+  { table: T.execution, name: 'integration_stock_prep_refresh_execution_subject_check', migration106: true, test: (r) => r.settlement_subject !== false || (r.status === 'verified_closed' && r.verified_result === 'nothing_landed' && isNull(r.refresh_binding && r.refresh_binding.changePlanId)) },
+  { table: T.intent, name: 'integration_stock_prep_refresh_execution_intent_chunk_check', migration106: true, test: (r) => Number.isInteger(r.chunk_index) && r.chunk_index >= 0 && Number.isInteger(r.entry_count) && r.entry_count >= 1 && r.entry_count <= 2000 },
   // Step 5 PR-8 (migration 104).
   { table: T.changePlan, name: 'integration_stock_prep_change_plan_counts_check', test: (r) => Number.isInteger(r.write_record_count) && r.write_record_count >= 1 && Number.isInteger(r.record_count) && r.record_count >= r.write_record_count },
   { table: T.changePlan, name: 'integration_stock_prep_change_plan_generation_check', test: (r) => r.confirmed_generation >= 0 && r.confirmed_fencing_epoch >= 0 },
@@ -239,8 +282,9 @@ function compareValues(left, right) {
   return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0)
 }
 
-function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotColumns = true, lockTable = false } = {}) {
-  const schema = loadSchema({ registryPilotColumns, lockTable })
+function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotColumns = true, lockTable = false, migration106 = true } = {}) {
+  const schema = loadSchema({ registryPilotColumns, lockTable, migration106 })
+  const schema106 = migration106 === true
   const nowFn = clock && typeof clock.now === 'function' ? clock.now : () => new Date()
   const uniques = UNIQUE_INDEXES.filter((index) => !withoutUniqueIndexes.includes(index.name))
   for (const name of withoutUniqueIndexes) {
@@ -303,6 +347,7 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
     }
     for (const check of SHAPE_CHECKS) {
       if (check.table !== name) continue
+      if (check.migration106 && !schema106) continue
       if (!check.test(row)) throw sqlError('23514', `check constraint "${check.name}"`, { constraint: check.name })
     }
     const rows = table(name)
@@ -334,6 +379,11 @@ function createFakeRefreshDb({ withoutUniqueIndexes = [], clock, registryPilotCo
   }
 
   function selectRows(name, { where, orderBy, limit = 1000, offset = 0 } = {}) {
+    // Step 6a-1 (KIT-01): a WHERE on a column the table does not have is 42703, as on PostgreSQL (a database without
+    // migration 106 answers the consult's settlement-subject read with it).
+    for (const column of Object.keys(where || {})) {
+      if (tables.has(name) && !schema[name].columns[column]) throw sqlError('42703', `column "${column}" does not exist`)
+    }
     let rows = Array.from(table(name).values()).filter((row) => matches(row, where))
     if (orderBy) {
       const [column, direction] = Array.isArray(orderBy) ? orderBy : [orderBy, 'ASC']
@@ -883,8 +933,19 @@ function echoOf(hold) {
   return { holdFingerprint: hold.fingerprint, comparisonFingerprint: hold.comparisonFingerprint, evidenceFingerprint: hold.evidenceFingerprint }
 }
 
+// Step 6a-1: every begin carries its journal. A store-level case that is not about the journal begins with the journal
+// of an EMPTY plan bound to its own plan digest (zero entries, zero chunks — the real builder, so the store's own
+// shape + digest admission runs).
+function emptyIntentFor(planDigest) {
+  const { buildExecutionIntent } = require(path.join(LIB, 'stock-preparation-execution-intent.cjs'))
+  return buildExecutionIntent({ plan: { decisions: [] }, planDigest })
+}
+
 module.exports = {
   MIGRATION_FILES,
+  MIGRATION_106_ADDED_COLUMNS,
+  applyMigration106,
+  emptyIntentFor,
   REGISTRY_TABLE,
   SHAPE_CHECKS,
   UNIQUE_INDEXES,

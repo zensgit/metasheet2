@@ -12,12 +12,19 @@
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
  *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
- *      (#4711 R0) + exact /learn and /admin/elearning (reachability only),
- *      else redirect /attendance
- *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning,
- *      else redirect /plm
- *   5. allow
+ *      (#4711 R0) + exact /learn and /admin/elearning (reachability only)
+ *      + role-delegation (matched name, or canonical /admin/role-delegation)
+ *      when canManageScope, else redirect /attendance
+ *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning
+ *      + role-delegation (matched name, or canonical /admin/role-delegation)
+ *      when canManageScope, else redirect /plm
+ *   5. ordinary shell         → role-delegation only when canManageScope;
+ *      permission-management only when canManagePermissions.
+ *      Identity is the matched route name, or the canonical path when the
+ *      caller has no name. A longer path is not these routes.
+ *   6. allow
  */
+import { adminAccessCapabilitiesState, reconcileAdminAccessCapabilities } from '../composables/adminAccessCapabilities'
 import { isRoutePermitted } from './routeAccess'
 import { isAttendanceGroupContextPath } from './attendanceGroupContextRoute'
 import {
@@ -108,6 +115,53 @@ export interface RouteGuardPolicyContext {
   attendanceFocused: boolean
   plmWorkbenchFocused: boolean
   resolveHomePath: () => string
+  /**
+   * Matched name `role-delegation`, or canonical `/admin/role-delegation` when
+   * the caller has no name, in the ordinary shell and in attendance or PLM
+   * focus. Omitted or false does not open that route, and it never opens any
+   * other `/admin` path. The API flag is reachability: live platform admin, or
+   * at least one delegable namespace.
+   */
+  canManageScope?: boolean
+  /**
+   * Matched name `permission-management`, or canonical `/admin/permissions`
+   * when the caller has no name. Omitted or false denies that route. A legacy
+   * `users.role` admin is not enough.
+   */
+  canManagePermissions?: boolean
+}
+
+const ROLE_DELEGATION_NAME = 'role-delegation'
+const PERMISSION_SOURCE_NAME = 'permission-management'
+const ROLE_DELEGATION_PATH = '/admin/role-delegation'
+const PERMISSION_SOURCE_PATH = '/admin/permissions'
+
+export interface RouteGuardDecisionInput {
+  path: string
+  meta: unknown
+  /** Leaf route name when the caller has one. Harness objects may omit it. */
+  name?: string
+  /** Leaf name plus any matched record names. Absent when the caller has none. */
+  matchedNames?: readonly string[]
+}
+
+function matchesKnownRoute(
+  input: { path: string; name?: unknown; matchedNames?: readonly unknown[] },
+  name: string,
+  canonicalPath: string,
+): boolean {
+  if (input.name === name) return true
+  if (Array.isArray(input.matchedNames) && input.matchedNames.some((candidate) => candidate === name)) {
+    return true
+  }
+  return input.path === canonicalPath
+}
+
+function focusedRoleDelegationAllowed(
+  ctx: RouteGuardPolicyContext,
+  input: { path: string; name?: unknown; matchedNames?: readonly unknown[] },
+): boolean {
+  return ctx.canManageScope === true && matchesKnownRoute(input, ROLE_DELEGATION_NAME, ROLE_DELEGATION_PATH)
 }
 
 
@@ -149,8 +203,30 @@ export interface RouteGuardRuntimeDeps {
  * so the wiring is behavior-testable — meta must be passed through IDENTICALLY (an inline `meta: {}`
  * would bypass every route's requiredFeature and permissions), and path folds to a string.
  */
-export function buildRouteGuardInput(to: { path?: unknown; meta?: unknown }): { path: string; meta: unknown } {
-  return { path: String((to && to.path) || ''), meta: to ? to.meta : undefined }
+export function buildRouteGuardInput(to: {
+  path?: unknown
+  meta?: unknown
+  name?: unknown
+  matched?: unknown
+}): RouteGuardDecisionInput {
+  const path = String((to && to.path) || '')
+  const meta = to ? to.meta : undefined
+  const matchedNames: string[] = []
+  const addName = (value: unknown) => {
+    if (typeof value !== 'string' || value.length === 0 || matchedNames.includes(value)) return
+    matchedNames.push(value)
+  }
+  if (to) {
+    addName(to.name)
+    if (Array.isArray(to.matched)) {
+      for (const record of to.matched) {
+        if (record && typeof record === 'object') addName((record as { name?: unknown }).name)
+      }
+    }
+  }
+  if (matchedNames.length === 0) return { path, meta }
+  const name = typeof to?.name === 'string' && to.name.length > 0 ? to.name : matchedNames[0]
+  return { path, meta, name, matchedNames }
 }
 
 /**
@@ -192,6 +268,7 @@ export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardP
     (permission) => deps.auth.hasPermission(permission),
     () => deps.auth.getAccessSnapshot(),
   )
+  reconcileAdminAccessCapabilities()
   return {
     hasFeature: (feature) => deps.flags.hasFeature(feature),
     hasPermission: (permission) => permissionProbe(permission),
@@ -200,11 +277,15 @@ export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardP
       typeof deps.flags.isPlmWorkbenchFocused === 'function' &&
       (deps.flags.isPlmWorkbenchFocused as () => boolean)(),
     resolveHomePath: () => deps.flags.resolveHomePath(),
+    canManageScope:
+      adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManageScope === true,
+    canManagePermissions:
+      adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManagePermissions === true,
   }
 }
 
 export function resolveRouteGuardDecision(
-  input: { path: string; meta: unknown },
+  input: RouteGuardDecisionInput,
   ctx: RouteGuardPolicyContext,
 ): RouteGuardDecision {
   const meta = (input.meta ?? {}) as Record<string, unknown>
@@ -227,23 +308,43 @@ export function resolveRouteGuardDecision(
   const path = String(input.path || '')
 
   // 3. attendance focus: exact-path set + bounded #4711 group-context prefix
-  //    + exact cloud-classroom paths.
+  //    + exact cloud-classroom paths + role-delegation (matched name or canonical
+  //    path) when canManageScope. A longer path is not that route.
   if (
     ctx.attendanceFocused
     && !isAttendanceFocusAllowedPath(path)
     && !isElearningFocusExactPath(path)
+    && !focusedRoleDelegationAllowed(ctx, input)
   ) {
     return { action: 'redirect', target: '/attendance' }
   }
 
-  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths.
+  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths
+  //    + role-delegation (matched name or canonical path) when canManageScope.
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    ) || isElearningFocusExactPath(path)
+    ) || isElearningFocusExactPath(path) || focusedRoleDelegationAllowed(ctx, input)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }
+  }
+
+  // Ordinary shell. Focus mode already redirected these routes to its own home.
+  // Name match covers trailing-slash and case variants whose to.path stays raw.
+  if (
+    !ctx.attendanceFocused
+    && !ctx.plmWorkbenchFocused
+    && matchesKnownRoute(input, ROLE_DELEGATION_NAME, ROLE_DELEGATION_PATH)
+    && ctx.canManageScope !== true
+  ) {
+    return { action: 'redirect', target: ctx.resolveHomePath() }
+  }
+  if (
+    matchesKnownRoute(input, PERMISSION_SOURCE_NAME, PERMISSION_SOURCE_PATH)
+    && ctx.canManagePermissions !== true
+  ) {
+    return { action: 'redirect', target: ctx.resolveHomePath() }
   }
 
   return { action: 'allow' }

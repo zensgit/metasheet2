@@ -346,6 +346,33 @@ describe('automationStepOutputView', () => {
     }
   })
 
+  // Delivery-result truthfulness: a send_email step that made no send carries `{ outcome: 'not_sent', reason }`.
+  it('send_email not_sent markers → one sentence per reason token; outcome / reason / notificationStatus dropped, id + count kept', () => {
+    const cases = [
+      ['email_transport_simulated', 'simulated', '邮件未发送：邮件通道处于模拟模式（开发环境），未实际投递。', 'Email not sent: the email transport is in simulation mode (development); nothing was delivered.'],
+      ['email_transport_disabled', 'cancelled', '邮件未发送：邮件通道已禁用。', 'Email not sent: the email transport is disabled.'],
+      ['email_no_recipients', 'cancelled', '邮件未发送：没有可投递的邮件收件人。', 'Email not sent: no email recipient to deliver to.'],
+    ] as const
+    for (const [reason, notificationStatus, zhSentence, enSentence] of cases) {
+      const output = { outcome: 'not_sent', reason, notificationId: 'email_1', notificationStatus, recipientCount: 2 }
+      expect(automationStepOutputView(output, true)).toEqual({ reason: zhSentence, output: { notificationId: 'email_1', recipientCount: 2 } })
+      expect(automationStepOutputView(output, false)).toEqual({ reason: enSentence, output: { notificationId: 'email_1', recipientCount: 2 } })
+      expect(output.reason).toBe(reason) // not mutated
+    }
+  })
+
+  it('an unrecognised not_sent reason, or the reason token without the not_sent outcome, stays raw', () => {
+    for (const output of [
+      { outcome: 'not_sent', reason: 'email_future_token', recipientCount: 1 },
+      { reason: 'email_transport_simulated', recipientCount: 1 },
+      { outcome: 'outcome_unknown', reason: 'email_send_failed', recipientCount: 1 },
+    ]) {
+      const view = automationStepOutputView(output, true)
+      expect(view.reason, JSON.stringify(output)).toBeNull()
+      expect(view.output).toBe(output)
+    }
+  })
+
   // 客户反馈 2026-10-21 (a): DingTalk person message recipient outcome — counts only, never ids.
   it('all-skipped DingTalk person message → 「0 人收到：…」 with the link hint; reason, counts and stored ids dropped', () => {
     const output = {

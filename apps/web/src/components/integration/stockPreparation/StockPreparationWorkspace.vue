@@ -470,14 +470,15 @@ const views: StockPreparationViewTab[] = [
   // 拉取待确认 — 备料分批拉取第一期 step 4 PR-7 (design §13; R-62 ①). The puller's page for a GOVERNED project's
   // holds: a whole pull is suspended until a 拉取人员 has looked at each held item (old vs new, the demand evidence)
   // and confirmed the relationship, kept it for now, or ended it. PULL tier only; a distinct label so a platform
-  // admin never sees two 「异常队列」 (the legacy one stays in 深度工具). Never `legacyMvp` (F-06 counts 7).
+  // admin never sees two 「异常队列」 (the legacy one stays in 深度工具). Never `legacyMvp` (F-06 counts 4).
+  // PR-9 (R-77 ①): the change plan (变更计划) and the review (变更复核) are sections of this page, not a new rail item.
   {
     key: 'refresh-queue',
     pullQueue: true,
     zh: '拉取待确认',
     en: 'Pull Holds',
-    zhDesc: '异常队列(分批拉取):整次挂起的拉取在这里逐项看清新旧对照和需求依据,由拉取人员确认沿用、暂不处理或结束沿用关系;处理完要重新试算。',
-    enDesc: 'Batch-refresh holds: a suspended pull lists each held item here with its old-versus-new comparison and demand evidence; the puller confirms the relationship, keeps it for now, or ends it — then previews again.',
+    zhDesc: '分批拉取:整次挂起的拉取在这里逐项看清新旧对照和需求依据,由拉取人员确认沿用、确认内容变更计划、完成变更复核、暂不处理或结束沿用关系;处理完要重新试算。',
+    enDesc: 'Batch refresh: a suspended pull lists each held item here with its old-versus-new comparison and demand evidence; the puller confirms a relationship, confirms the content change plan, completes the change review, keeps an item for now, or ends a relationship — then previews again.',
     endpoint: '/api/integration/stock-preparation/projects/:projectNo/refresh/holds',
     confirmWrites: true,
   },

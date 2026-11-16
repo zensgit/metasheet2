@@ -255,7 +255,7 @@ jobs:
 
   strict-gates:
     if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.57 cannot install deps on ubuntu-26.04 (2026-11-16); unpin after a Playwright bump
     timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}

@@ -27,7 +27,9 @@
  * sources of this classifier.
  *
  * The witness is a domain-separated SHA-256 over a canonical encoding of every grant input; any change
- * to any input changes it.
+ * to any input changes it, including the include-children flag on a department scope. The domain is v2.
+ * A v1 digest is not accepted. Challenges store only the digest, and the department tuple is not
+ * persisted, so there is no legacy pair to read back and no stored hash is rewritten.
  *
  * Classification does not cover account state (active flag, activation status, deletion or purge
  * markers). Callers apply the account gate separately.
@@ -82,8 +84,12 @@ export type PrivilegeInputs = Readonly<{
   legacyPermissions: readonly unknown[]
   /** `[namespace, enabled]` pairs, ascending by canonical encoding. */
   admissions: readonly (readonly [string, boolean])[]
-  /** `[namespace, departmentId]` pairs, ascending by canonical encoding. */
-  delegatedDepartmentScopes: readonly (readonly [string, string])[]
+  /**
+   * `[namespace, departmentId, includeChildren]` triples, ascending by canonical encoding.
+   * Each element is required. A missing element, null, a string, a number, or an extra element is
+   * malformed and is not defaulted.
+   */
+  delegatedDepartmentScopes: readonly (readonly [string, string, boolean])[]
   /** `[namespace, groupId]` pairs, ascending by canonical encoding. */
   delegatedMemberGroupScopes: readonly (readonly [string, string])[]
   readonly [privilegeInputsBrand]: true
@@ -122,7 +128,7 @@ export const PRIVILEGE_GRANT_SOURCE_TABLES = [
   'delegated_role_admin_member_groups',
 ] as const
 
-export const PRIVILEGE_WITNESS_DOMAIN = 'metasheet:security-action:privilege:v1|'
+export const PRIVILEGE_WITNESS_DOMAIN = 'metasheet:security-action:privilege:v2|'
 
 const PRIVILEGE_INPUTS_STATEMENT = `SELECT u.id::text AS id,
        u.is_admin,
@@ -138,7 +144,7 @@ const PRIVILEGE_INPUTS_STATEMENT = `SELECT u.id::text AS id,
                   WHERE ur.user_id = $1::text), '[]'::jsonb) AS role_permission_pairs,
        COALESCE((SELECT jsonb_agg(jsonb_build_array(una.namespace, una.enabled))
                    FROM user_namespace_admissions una WHERE una.user_id = $1::text), '[]'::jsonb) AS admissions,
-       COALESCE((SELECT jsonb_agg(jsonb_build_array(s.namespace, s.directory_department_id::text))
+       COALESCE((SELECT jsonb_agg(jsonb_build_array(s.namespace, s.directory_department_id::text, s.include_children))
                    FROM delegated_role_admin_scopes s WHERE s.admin_user_id = $1::text), '[]'::jsonb) AS department_scopes,
        COALESCE((SELECT jsonb_agg(jsonb_build_array(g.namespace, g.group_id::text))
                    FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1::text), '[]'::jsonb) AS member_group_scopes
@@ -211,13 +217,24 @@ function isPairArray<A, B>(value: unknown, first: (v: unknown) => v is A, second
 const isString = (v: unknown): v is string => typeof v === 'string'
 const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean'
 
+/** A department scope is exactly `[namespace, departmentId, includeChildren]`. Nothing is defaulted. */
+function isDepartmentScopeArray(value: unknown): value is Array<[string, string, boolean]> {
+  return Array.isArray(value) && value.every((item) => (
+    Array.isArray(item)
+    && item.length === 3
+    && isString(item[0])
+    && isString(item[1])
+    && isBoolean(item[2])
+  ))
+}
+
 function parsePrivilegeRow(row: Record<string, unknown>, userId: string): PrivilegeInputs {
   if (row.id !== userId) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isBoolean(row.is_admin) || !isString(row.role)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isStringArray(row.role_ids) || !isStringArray(row.direct_codes)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.role_permission_pairs, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.admissions, isString, isBoolean)) throw new PrivilegeInputsUnavailableError('input_malformed')
-  if (!isPairArray(row.department_scopes, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
+  if (!isDepartmentScopeArray(row.department_scopes)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.member_group_scopes, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!Array.isArray(row.legacy_permissions)) throw new PrivilegeInputsUnavailableError('input_malformed')
   try {

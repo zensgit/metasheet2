@@ -2,9 +2,16 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
-import { ensurePlatformAdmin } from './admin-directory'
+import { ensurePlatformAdmin, sendIfPullSourceGateRefusal } from './admin-directory'
 import { query, transaction } from '../db/pg'
-import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import { readApprovalRoutingStatus, type ApprovalRoutingStatus } from '../directory/approval-routing-status'
+import {
+  isApprovalRoutingPolicyRequired,
+  isApprovalRoutingRequirePolicyEnabled,
+  type PullSourceRuleStatus,
+} from '../directory/pull-source-rule'
+import { asPullSourceGateFailure, runGatedRoutingPolicyClear } from '../directory/pull-source-write-gate'
+import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { jsonError, jsonOk } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutingPolicyRoutes')
@@ -36,6 +43,9 @@ function isLocalCanonicalEnabled(): boolean {
   return v === '1' || v === 'true'
 }
 
+/** Optional PATCH field: the canonical the caller believes is current (uuid), or null for "no policy". */
+const EXPECTED_CURRENT_FIELD = 'expectedCurrentCanonicalIntegrationId'
+
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 function isUuidShaped(value: string): boolean {
   return UUID_SHAPE.test(value)
@@ -56,6 +66,13 @@ interface IntegrationRow {
   status: string
 }
 
+/** Error class and, when present, SQLSTATE: enough to tell failures apart without echoing any value. */
+function describeFailure(error: unknown): string {
+  const name = error instanceof Error ? error.name : 'unknown'
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? `${name} (${code})` : name
+}
+
 async function loadOrgIntegration(orgId: string, integrationId: string): Promise<IntegrationRow | null> {
   const r = await query<IntegrationRow>(
     `SELECT id::text AS id, provider, status FROM directory_integrations WHERE id = $1::uuid AND org_id = $2`,
@@ -70,11 +87,34 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *   GET   /                       — every §6 purpose with its EFFECTIVE source: the stored policy
  *                                   (canonical integration + provider/status) or 'legacy-default'
  *                                   (no policy row → the resolver's byte-identical legacy path).
+ *                                   `approval_routing` reads 'policy-required' instead when the
+ *                                   require-policy switch is on and the organisation has two or
+ *                                   more active pull sources and no policy: approvals that read
+ *                                   org data are refused there, which is not the legacy path.
+ *                                   A read-only `approvalRouting` block (switch state, source
+ *                                   count, candidates, same-enterprise groups, linked accounts
+ *                                   under non-active sources) is added whether the switch is on
+ *                                   or off; when it cannot be read it is omitted and the other
+ *                                   fields are returned unchanged. The 'policy-required' label
+ *                                   rests on the rule judgement alone (source count and policy
+ *                                   presence), which the block reports too: once that judgement
+ *                                   is read, the label holds whether or not the rest of the
+ *                                   block can be read.
  *   PATCH /:purpose               — the ONLY write point. `{ canonicalIntegrationId: uuid }` sets
  *                                   (upsert; target must exist in THIS org and be 'active' — a
  *                                   policy pointing at a broken target is rejected 409 at write
  *                                   time instead of failing approvals later); `null` clears (back
  *                                   to legacy). Values-free audit on both.
+ *                                   A set may carry `expectedCurrentCanonicalIntegrationId` (uuid, or
+ *                                   null for "no policy"): the write happens only if that is still the
+ *                                   current canonical, else 409 ROUTING_POLICY_STATE_CHANGED with
+ *                                   nothing written. A set or a clear whose transaction is ended by a
+ *                                   deadlock, a lock wait timeout or a cancelled statement answers a
+ *                                   retryable 503 DIRECTORY_ROUTING_GATE_BUSY with nothing written.
+ *                                   A clear runs under the organisation's pull-source
+ *                                   lock and is refused (409 ROUTING_POLICY_CLEAR_BLOCKED) while the
+ *                                   organisation has two or more active pull sources, whatever the
+ *                                   approval-routing switch says.
  *   GET   /:purpose/preview       — READ-ONLY switch preview (v1: approval_routing only):
  *                                   `?candidate=<integrationId>` resolves a sample of linked users
  *                                   under the CURRENT effective source and AS-IF the candidate
@@ -82,6 +122,14 @@ async function loadOrgIntegration(orgId: string, integrationId: string): Promise
  *                                   resolver both legs, so preview cannot drift from production),
  *                                   and reports per-user dept/title/manager/dept-head diffs.
  *                                   No writes, no policy row, no audit (design-lock Q5).
+ *                                   In the 'policy-required' state the report stays available:
+ *                                   a user whose current resolution is refused for the missing
+ *                                   policy is reported `blocked` with `before: null`, and the
+ *                                   candidate leg is computed as usual. `current.source` is
+ *                                   the judgement for this organisation; `blocked` rows and
+ *                                   `blockedCount` report the sampled users whose current
+ *                                   resolution is refused, and `blockedCount` is present only
+ *                                   when there is at least one such row.
  *
  * All routes are platform-admin-only. Org identity is server-resolved (never from the request).
  */
@@ -105,22 +153,41 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
           WHERE p.org_id = $1`,
         [orgId],
       )
+      // The status block is additive and read on its own: a failed read (an unreadable source
+      // count included) omits the block and leaves every other field as it is. The rule judgement
+      // is read first and once; the block reports that same judgement.
+      let ruleStatus: PullSourceRuleStatus | undefined
+      let approvalRouting: ApprovalRoutingStatus | undefined
+      try {
+        ruleStatus = await isApprovalRoutingPolicyRequired(query, orgId)
+        approvalRouting = await readApprovalRoutingStatus(query, orgId, ruleStatus)
+      } catch (error) {
+        logger.warn(`Approval routing status block omitted: ${describeFailure(error)}`)
+      }
+      // Refusing is not the legacy path, so it is not labelled as one. The label needs both the
+      // switch and the data judgement; with the switch off the legacy path really is in effect.
+      // It rests on the rule judgement alone, so it does not depend on the rest of the block.
+      const approvalRoutingRefused = isApprovalRoutingRequirePolicyEnabled() && ruleStatus?.required === true
       const byPurpose = new Map(rows.rows.map((r) => [r.purpose, r]))
       const purposes = PURPOSES.map((purpose) => {
         const p = byPurpose.get(purpose)
-        return p
-          ? {
-              purpose,
-              source: 'policy' as const,
-              canonicalIntegrationId: p.canonical_integration_id,
-              canonicalProvider: p.canonical_provider,
-              canonicalStatus: p.canonical_status,
-              fallbackIntegrationId: p.fallback_integration_id,
-              updatedAt: p.updated_at,
-            }
-          : { purpose, source: 'legacy-default' as const }
+        if (p) {
+          return {
+            purpose,
+            source: 'policy' as const,
+            canonicalIntegrationId: p.canonical_integration_id,
+            canonicalProvider: p.canonical_provider,
+            canonicalStatus: p.canonical_status,
+            fallbackIntegrationId: p.fallback_integration_id,
+            updatedAt: p.updated_at,
+          }
+        }
+        if (purpose === 'approval_routing' && approvalRoutingRefused) {
+          return { purpose, source: 'policy-required' as const }
+        }
+        return { purpose, source: 'legacy-default' as const }
       })
-      jsonOk(res, { orgId, purposes })
+      jsonOk(res, { orgId, purposes, ...(approvalRouting ? { approvalRouting } : {}) })
     } catch (error) {
       logger.error(`Failed to list routing policies: ${error instanceof Error ? error.message : 'unknown'}`)
       jsonError(res, 500, 'ROUTING_POLICY_LIST_FAILED', 'Failed to list routing policies')
@@ -145,10 +212,10 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
       return
     }
 
-    // Field allowlist (B2 convention): ONLY canonicalIntegrationId; anything else — org/corp
-    // identity especially — is rejected loudly, never silently dropped.
+    // Field allowlist (B2 convention): ONLY canonicalIntegrationId and the optional expected-state
+    // field; anything else — org/corp identity especially — is rejected loudly, never silently dropped.
     const body = (req.body ?? {}) as Record<string, unknown>
-    const extraKeys = Object.keys(body).filter((k) => k !== 'canonicalIntegrationId')
+    const extraKeys = Object.keys(body).filter((k) => k !== 'canonicalIntegrationId' && k !== EXPECTED_CURRENT_FIELD)
     if (extraKeys.length > 0) {
       jsonError(res, 400, 'ROUTING_POLICY_INVALID_INPUT', `Unexpected field(s): ${extraKeys.join(', ')}`)
       return
@@ -158,24 +225,53 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
       return
     }
     const canonical = body.canonicalIntegrationId
+    // Present (uuid, or null for "no policy") ⇒ the set is conditional on the current canonical; absent ⇒
+    // the set is unconditional, as before. It belongs to a set only: on a clear it is rejected rather than
+    // ignored.
+    const expectedGiven = EXPECTED_CURRENT_FIELD in body
+    const expectedRaw = body[EXPECTED_CURRENT_FIELD]
+    if (expectedGiven && expectedRaw !== null && (typeof expectedRaw !== 'string' || !isUuidShaped(expectedRaw))) {
+      jsonError(res, 400, 'ROUTING_POLICY_INVALID_INPUT', `${EXPECTED_CURRENT_FIELD} must be a UUID or null`)
+      return
+    }
+    const expected = typeof expectedRaw === 'string' ? expectedRaw.toLowerCase() : null
+    if (canonical === null && expectedGiven) {
+      jsonError(res, 400, 'ROUTING_POLICY_INVALID_INPUT', `${EXPECTED_CURRENT_FIELD} applies to setting a policy, not to clearing one`)
+      return
+    }
 
     try {
       const orgId = resolveOrgId(req)
 
       if (canonical === null) {
-        const deleted = await query<{ id: string }>(
-          `DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2 RETURNING id`,
-          [orgId, purpose],
-        )
-        const cleared = deleted.rows.length > 0
-        if (cleared) {
+        // A clear always runs in a pull-source gate transaction, and the gate module issues every
+        // statement of it: organisation lock, then the policy row, then the source count, then the
+        // delete. The same lock serialises it against every write that adds a pull source, so "two or
+        // more active pull sources and no policy" cannot be reached by removing the policy. The rule
+        // does not read the approval-routing switch. No policy row keeps the answer it always had
+        // (`cleared: false`), whatever the source count.
+        const outcome = await runGatedRoutingPolicyClear(orgId, purpose)
+
+        if (outcome.kind === 'blocked') {
+          // A refusal is logged values-free and writes no audit row.
+          logger.warn('Routing policy clear refused: the organisation has more than one active pull source', {
+            code: 'ROUTING_POLICY_CLEAR_BLOCKED',
+            actorId: adminUserId,
+          })
+          jsonError(res, 409, 'ROUTING_POLICY_CLEAR_BLOCKED', 'The routing policy cannot be cleared while the organization has more than one active directory source')
+          return
+        }
+        const cleared = outcome.kind === 'cleared'
+        if (outcome.kind === 'cleared') {
           await auditLog({
             actorId: adminUserId,
             actorType: 'user',
             action: 'directory.routing_policy.clear',
             resourceType: 'directory-routing-policy',
             resourceId: `${orgId}:${purpose}`,
-            meta: { orgId, purpose },
+            // values-free: ids only. The audit writer keeps only a numeric operator id in its own
+            // column; `actorId` here carries any id.
+            meta: { orgId, purpose, actorId: adminUserId, previousCanonicalIntegrationId: outcome.previous },
           })
         }
         jsonOk(res, { cleared })
@@ -200,9 +296,17 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         | { kind: 'not_found' }
         | { kind: 'not_active' }
         | { kind: 'local_not_enabled' }
-        | { kind: 'ok'; provider: string }
+        | { kind: 'state_changed' }
+        | { kind: 'ok'; provider: string; previous: string | null }
 
       const outcome = await transaction(async (client) => {
+        // READ COMMITTED, pinned as the first statement of every set, whatever the deployment's default
+        // isolation level. A conditional set compares against what is committed when the policy row is
+        // locked, and its "insert only if absent" must see a row another transaction committed
+        // meanwhile. A set without the expected-state field reads the policy row under the same lock,
+        // only to name the previous canonical in its audit row; when no row exists there is nothing to
+        // lock, so two first sets that run together both record "no previous canonical".
+        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         const locked = await client.query(
           `SELECT id::text AS id, provider, status
              FROM directory_integrations
@@ -226,6 +330,32 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         if (integration.provider === 'local' && !isLocalCanonicalEnabled()) {
           return { kind: 'local_not_enabled' } satisfies WriteOutcome
         }
+        // The current canonical, read under the policy row's own lock (after the target's FOR SHARE,
+        // the order every set uses). A set takes no organisation lock: it can only add a policy row.
+        const current = await client.query(
+          `SELECT canonical_integration_id::text AS canonical_integration_id
+             FROM org_directory_routing_policy
+            WHERE org_id = $1 AND purpose = $2
+              FOR UPDATE`,
+          [orgId, purpose],
+        )
+        const currentCanonical = current.rows[0]?.canonical_integration_id
+        const previous = typeof currentCanonical === 'string' ? currentCanonical : null
+        if (expectedGiven && previous !== expected) return { kind: 'state_changed' } satisfies WriteOutcome
+        if (expectedGiven && expected === null) {
+          // "No policy" was expected and none was read. There is no row to lock in that case, so the
+          // write itself decides: it inserts only if no row exists, and a row another transaction
+          // created in between leaves this one with nothing inserted.
+          const inserted = await client.query(
+            `INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT ON CONSTRAINT orp_org_purpose_uniq DO NOTHING
+             RETURNING id`,
+            [orgId, purpose, canonical],
+          )
+          if (inserted.rows.length === 0) return { kind: 'state_changed' } satisfies WriteOutcome
+          return { kind: 'ok', provider: integration.provider, previous } satisfies WriteOutcome
+        }
         await client.query(
           `INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id)
            VALUES ($1, $2, $3)
@@ -233,7 +363,13 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
            DO UPDATE SET canonical_integration_id = EXCLUDED.canonical_integration_id, updated_at = NOW()`,
           [orgId, purpose, canonical],
         )
-        return { kind: 'ok', provider: integration.provider } satisfies WriteOutcome
+        return { kind: 'ok', provider: integration.provider, previous } satisfies WriteOutcome
+      }).catch((error: unknown) => {
+        // A set takes the target row, the policy row and the policy table in an order other writers
+        // can cross. When it is the one PostgreSQL ends (deadlock, lock wait timeout, cancelled
+        // statement) nothing was written, and it answers the same retryable 503 as a gate transaction.
+        // Only the transaction is mapped: the audit write below runs after the commit.
+        throw asPullSourceGateFailure(error)
       })
 
       if (outcome.kind === 'not_found') {
@@ -248,6 +384,10 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         jsonError(res, 409, 'ROUTING_POLICY_LOCAL_NOT_ENABLED', 'Routing to the local provider is not enabled (set DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED=1 after accepting parity evidence)')
         return
       }
+      if (outcome.kind === 'state_changed') {
+        jsonError(res, 409, 'ROUTING_POLICY_STATE_CHANGED', 'The routing policy is not in the expected state; reload before applying')
+        return
+      }
 
       await auditLog({
         actorId: adminUserId,
@@ -255,11 +395,21 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         action: 'directory.routing_policy.set',
         resourceType: 'directory-routing-policy',
         resourceId: `${orgId}:${purpose}`,
-        // values-free: ids only, no config echo
-        meta: { orgId, purpose, integrationId: canonical },
+        // values-free: ids only, no config echo. The audit writer keeps only a numeric operator id in
+        // its own column; `actorId` here carries any id.
+        meta: {
+          orgId,
+          purpose,
+          integrationId: canonical,
+          actorId: adminUserId,
+          previousCanonicalIntegrationId: outcome.previous,
+        },
       })
       jsonOk(res, { policy: { purpose, canonicalIntegrationId: canonical, canonicalProvider: outcome.provider } })
     } catch (error) {
+      // A clear or a set whose transaction lost a lock race or ran out of time, and a clear that could
+      // not read the source count: retryable 503, nothing written.
+      if (sendIfPullSourceGateRefusal(res, error, { actorId: adminUserId })) return
       logger.error(`Failed to set routing policy: ${error instanceof Error ? error.message : 'unknown'}`)
       jsonError(res, 500, 'ROUTING_POLICY_WRITE_FAILED', 'Failed to update the routing policy')
     }
@@ -320,22 +470,47 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         [orgId],
       )
 
+      // Whether the organisation is in the 'policy-required' state: same judgement as GET (switch
+      // on, two or more active pull sources, no policy). Read only while the switch is on and no
+      // policy exists, so every other preview issues exactly the statements it always did.
+      const policyRequiredNow =
+        !currentPolicy
+        && isApprovalRoutingRequirePolicyEnabled()
+        && (await isApprovalRoutingPolicyRequired(query, orgId)).required
+
+      type Relations = Awaited<ReturnType<typeof resolveApprovalRequesterOrgRelations>>
+      const pick = (r: Relations) => ({
+        departmentName: r.primaryDepartmentName ?? null,
+        title: r.primaryTitle ?? null,
+        managerId: r.managerId ?? null,
+        deptHeadId: r.deptHeadId ?? null,
+      })
       const rows = []
       let changedCount = 0
+      let blockedCount = 0
       for (const { local_user_id: userId } of sample.rows) {
-        // both legs run the REAL resolver — current = real probe; candidate = preview override
-        const before = await resolveApprovalRequesterOrgRelations(userId, query)
+        // both legs run the REAL resolver — current = real probe; candidate = preview override.
+        // The current leg is never forced onto the legacy path: where the real resolution is
+        // refused for the missing policy, the row says so (`blocked`, `before: null`) instead of
+        // showing a legacy pick that production would not make. Only that one reason is caught;
+        // any other failure of either leg fails the preview as before.
+        let before: Relations | null = null
+        try {
+          before = await resolveApprovalRequesterOrgRelations(userId, query)
+        } catch (error) {
+          if (!(error instanceof ApprovalRoutingPolicyError) || error.reason !== 'policy_required') throw error
+        }
         const after = await resolveApprovalRequesterOrgRelations(userId, query, {
           overrideCanonicalIntegrationId: candidate,
         })
-        const pick = (r: typeof before) => ({
-          departmentName: r.primaryDepartmentName ?? null,
-          title: r.primaryTitle ?? null,
-          managerId: r.managerId ?? null,
-          deptHeadId: r.deptHeadId ?? null,
-        })
-        const b = pick(before)
         const a = pick(after)
+        if (before === null) {
+          changedCount++
+          blockedCount++
+          rows.push({ userId, changed: true, blocked: true, before: null, after: a })
+          continue
+        }
+        const b = pick(before)
         const changed = JSON.stringify(b) !== JSON.stringify(a)
         if (changed) changedCount++
         rows.push({ userId, changed, before: b, after: a })
@@ -347,10 +522,14 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         purpose,
         current: currentPolicy
           ? { source: 'policy', canonicalIntegrationId: currentPolicy.canonical_integration_id }
-          : { source: 'legacy-default' },
+          : policyRequiredNow
+            ? { source: 'policy-required' }
+            : { source: 'legacy-default' },
         candidate: { integrationId: candidate, provider: integration.provider },
         sampleSize: rows.length,
         changedCount,
+        // present only when at least one sampled user is blocked
+        ...(blockedCount > 0 ? { blockedCount } : {}),
         rows,
       })
     } catch (error) {

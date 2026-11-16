@@ -536,6 +536,28 @@ function summarizeLocalAccount(row: LocalAccountRow): LocalAccountSummary {
   }
 }
 
+/**
+ * How a local account's link to its platform user was established (`directory_account_links
+ * .match_strategy`). A closed set: every member is listed here and nowhere else. The default is
+ * the administrator's single explicit creation; a producer that creates accounts in bulk adds its
+ * own member rather than reusing the default.
+ */
+export const LOCAL_ACCOUNT_MATCH_STRATEGIES = ['local_explicit'] as const
+export type LocalAccountMatchStrategy = (typeof LOCAL_ACCOUNT_MATCH_STRATEGIES)[number]
+export const DEFAULT_LOCAL_ACCOUNT_MATCH_STRATEGY: LocalAccountMatchStrategy = 'local_explicit'
+
+/** Resolves the optional input to a member of the closed set; anything else is a validation error. */
+export function resolveLocalAccountMatchStrategy(value: unknown): LocalAccountMatchStrategy {
+  if (value === undefined) return DEFAULT_LOCAL_ACCOUNT_MATCH_STRATEGY
+  if (
+    typeof value === 'string'
+    && (LOCAL_ACCOUNT_MATCH_STRATEGIES as readonly string[]).includes(value)
+  ) {
+    return value as LocalAccountMatchStrategy
+  }
+  throw new LocalDirectoryValidationError('matchStrategy is not supported')
+}
+
 export interface CreateLocalAccountInput {
   orgId: string
   /** An EXISTING platform `users.id` — a local account always links to a real platform user. */
@@ -545,6 +567,8 @@ export interface CreateLocalAccountInput {
   mobile?: string | null
   title?: string | null
   actorId?: string
+  /** Member of `LOCAL_ACCOUNT_MATCH_STRATEGIES`; default `'local_explicit'`. */
+  matchStrategy?: LocalAccountMatchStrategy
   /**
    * Slice C (#6079): refuse with `LocalDirectoryMembershipHistoryError` when the user already has ANY
    * `user_orgs` row for `orgId` (active or deactivated) or applied deprovision evidence, instead of
@@ -577,6 +601,7 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
   const externalUserId = localUserId
   const externalKey = `${input.orgId}:${localUserId}`
   const actorId = normalizeText(input.actorId) || 'system:local-directory'
+  const matchStrategy = resolveLocalAccountMatchStrategy(input.matchStrategy)
 
   try {
     // W1-6: the anchor, the account, its link and the user's org membership commit together or not at
@@ -633,13 +658,13 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
       // admission/link paths use (see e.g. syncDirectoryIntegration's link upsert).
       await client.query(
         `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
-         VALUES ($1, $2, 'linked', 'local_explicit', NOW(), NOW())
+         VALUES ($1, $2, 'linked', $3::text, NOW(), NOW())
          ON CONFLICT (directory_account_id) DO UPDATE SET
            local_user_id = EXCLUDED.local_user_id,
            link_status = EXCLUDED.link_status,
            match_strategy = EXCLUDED.match_strategy,
            updated_at = NOW()`,
-        [accountId, localUserId],
+        [accountId, localUserId, matchStrategy],
       )
 
       // W4-PRE-1b item A: this connects an EXISTING platform user (`localUserId`, validated

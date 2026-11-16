@@ -6,6 +6,8 @@
  * row: attendance, audit, and directory history keep the user id. Later purge anonymizes it.
  */
 
+import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
+
 export const ADMIN_USER_BATCH_LIMIT = 100
 export const DISABLE_CONFIRM_TEXT = '停用'
 /** Chinese confirmation. English UI sends HARD_DELETE_CONFIRM_TEXT_EN. Both move to the recycle bin. */
@@ -42,11 +44,14 @@ export type KnownBatchUser = {
   id: string
   email: string | null
   name: string | null
-  role: string
+  role: string | null
   department: string | null
   isActive: boolean
+  activationStatus?: string | null
   deletedAt?: string | null
   purgedAt?: string | null
+  /** Legacy `users.role = admin` or an RBAC `user_roles` admin membership. The is_admin flag is not authority. */
+  hasAdminAuthority?: boolean
   isPlatformAdmin?: boolean
 }
 
@@ -82,6 +87,29 @@ function cleanEmail(value: unknown): string {
 function cleanRoleId(value: unknown): string {
   if (typeof value !== 'string') return ''
   return value.trim().slice(0, 64)
+}
+
+function pendingActivationRefusal(status: unknown, nextIsActive: boolean): { code: string; message: string } | null {
+  try {
+    assertPendingUserCannotBeActivatedViaGenericStatusApi(status, nextIsActive)
+    return null
+  } catch (error) {
+    if ((error as { code?: string }).code !== PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) throw error
+    return { code: PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE, message: (error as Error).message }
+  }
+}
+
+/**
+ * Preview budget only. A spare admin is activated, active, not recycled, and not raw-disabled,
+ * with legacy role admin or an RBAC admin membership. The is_admin flag alone does not count.
+ * The recycle move still decides with isLastSignInPlatformAdmin under its transaction lock.
+ */
+function countsAsBackupEligibleAdmin(user: KnownBatchUser | undefined): boolean {
+  if (!user?.isActive) return false
+  if (user.deletedAt || user.purgedAt) return false
+  if (user.activationStatus !== 'activated') return false
+  if (user.role === 'disabled') return false
+  return user.role === 'admin' || user.hasAdminAuthority === true
 }
 
 export function nameFromEmail(email: string): string {
@@ -224,6 +252,13 @@ export function planUpdateBatch(input: {
       fail('USER_IN_RECYCLE_BIN', '该用户在回收站中，请先恢复', user.id)
       return
     }
+    if (hasActive && record.isActive === true) {
+      const activationRefusal = pendingActivationRefusal(user.activationStatus, true)
+      if (activationRefusal) {
+        fail(activationRefusal.code, activationRefusal.message, user.id)
+        return
+      }
+    }
 
     const roleId = cleanRoleId(record.roleId)
     if (hasRole && !input.knownRoleIds.has(roleId)) {
@@ -362,6 +397,11 @@ export function planStatusBatch(input: {
       })
       return
     }
+    const activationRefusal = pendingActivationRefusal(known?.activationStatus, input.isActive === true)
+    if (activationRefusal) {
+      failures.push({ index, ok: false, email: known?.email ?? null, userId, ...activationRefusal })
+      return
+    }
     rows.push({ index, userId })
   })
   return { ok: true, rows, failures }
@@ -454,7 +494,7 @@ function planRecycleMove(input: {
       fail('ALREADY_IN_RECYCLE', '已在回收站', true)
       return
     }
-    if (known?.isPlatformAdmin && known.isActive) {
+    if (countsAsBackupEligibleAdmin(known)) {
       if (adminsRemaining <= 1) {
         fail('LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
         return

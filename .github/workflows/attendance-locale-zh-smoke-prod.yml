@@ -51,7 +51,7 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.57 cannot install deps on ubuntu-26.04 (2026-11-16); unpin after a Playwright bump
     timeout-minutes: 20
     env:
       WEB_URL: ${{ inputs.web_url || vars.ATTENDANCE_WEB_BASE_URL || 'http://23.254.236.11:8081' }}
