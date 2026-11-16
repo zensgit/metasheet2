@@ -202,4 +202,49 @@ describe('YiDa sheet/view source (Y2)', () => {
     expect(parseYidaSheetSourceInput({ kind: 'sheet', sheetId: 's', viewId: 'v', columns: [{ fieldId: 'a', source: 'b' }] }))
       .toEqual({ sheetId: 's', viewId: 'v', columns: [{ fieldId: 'a', source: 'b' }] })
   })
+
+  // ---- Source binding (design baseline v2.3 §7.2): only a registered project sheet yields a binding ----
+  const keyed: YidaSheetSourceField[] = fields.map(field => field.id === 'fld_line'
+    ? { ...field, property: { stockPreparation: { ownership: 'plm_system', preserveOnRefresh: true, required: true, key: true } } } : field)
+  function registered(patch: Parameters<typeof harness>[0] = {}, keyFields = keyed) {
+    const { dependencies, calls } = harness(patch)
+    const bound: YidaSheetSourceDependencies = { ...dependencies,
+      async loadFields() { calls.push('fields'); return keyFields },
+      async resolveProjectSheet(_req, sheetId) { calls.push('registry:' + sheetId); return { projectNo: 'SYN-P1' } } }
+    return { dependencies: bound, calls }
+  }
+  it('a registered sheet read yields the binding: key column, alias map and one record per row; rowsText is unchanged', async () => {
+    const { dependencies, calls } = registered({ readableRecords: ['rec_1', 'rec_3'] })
+    const read = await readYidaSheetSourceRows(req, source(), dependencies)
+    const plain = await readYidaSheetSourceRows(req, source(), harness({ readableRecords: ['rec_1', 'rec_3'] }).dependencies)
+    expect(read.rowsText).toBe(plain.rowsText)
+    expect(read.binding).toEqual({ sheetId: 'sheet_synthetic', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_desc' },
+      records: [{ recordId: 'rec_1', keyValue: 'SYN-L1', projectNo: 'SYN-P1' }, { recordId: 'rec_3', keyValue: 'SYN-L3', projectNo: 'SYN-P1' }] })
+    expect(Object.isFrozen(read.binding) && Object.isFrozen(read.binding!.records) && Object.isFrozen(read.binding!.records[0])).toBe(true)
+    expect(calls).toContain('registry:sheet_synthetic')
+    // The compiler accepts exactly this shape and binds every row.
+    const compiled = compile({ config: config(), rowsText: read.rowsText, allocation: { mode: 'original' }, sourceBinding: read.binding } as Parameters<typeof compile>[0])
+    expect((compiled.rowSpecs as Array<{ creationIdentityDigest?: string }>).every(spec => /^[0-9a-f]{64}$/.test(String(spec.creationIdentityDigest)))).toBe(true)
+    // An unregistered sheet, or a host without the registry dependency, reads unbound (no binding key at all).
+    const unregistered = { ...dependencies, async resolveProjectSheet() { return null } }
+    expect(Object.hasOwn(await readYidaSheetSourceRows(req, source(), unregistered), 'binding')).toBe(false)
+    expect(Object.hasOwn(plain, 'binding')).toBe(false)
+  })
+  it('a registered sheet is never drafted unbound: a missing or doubled key column and a row without a key are refused before rowsText', async () => {
+    // The key column must be among the read columns.
+    const withoutKey = parseYidaSheetSourceInput({ kind: 'sheet', sheetId: 'sheet_synthetic', columns: columns.filter(column => column.fieldId !== 'fld_line') })
+    expect(await code(readYidaSheetSourceRows(req, withoutKey, registered().dependencies))).toBe('YIDA_SHEET_SOURCE_INPUT')
+    // Exactly one key column.
+    expect(await code(readYidaSheetSourceRows(req, source(), registered({}, fields).dependencies))).toBe('YIDA_SHEET_SOURCE_UNSUPPORTED')
+    const doubled = keyed.map(field => field.id === 'fld_project' ? { ...field, property: { stockPreparation: { key: true } } } : field)
+    expect(await code(readYidaSheetSourceRows(req, source(), registered({}, doubled).dependencies))).toBe('YIDA_SHEET_SOURCE_UNSUPPORTED')
+    // Every bound row needs a non-empty, trimmed key cell.
+    for (const bad of [undefined, '', ' SYN-L2', 7]) {
+      const records = [record('rec_1', 'SYN-L1', 6), { id: 'rec_2', data: { ...record('rec_2', 'SYN-L2', 4).data, fld_line: bad } }]
+      expect(await code(readYidaSheetSourceRows(req, source(), registered({ records }).dependencies))).toBe('YIDA_SHEET_SOURCE_INPUT')
+    }
+    // The same rows on an unregistered sheet are read unbound; the key column is then an ordinary column.
+    expect((await readYidaSheetSourceRows(req, withoutKey, harness().dependencies)).rowCount).toBe(3)
+  })
 })

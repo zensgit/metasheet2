@@ -187,9 +187,13 @@ function createDraftInternals({ db, security, context } = {}) {
       || encode(envelope.plan) !== encode(compiled.plan)) fail('UNAVAILABLE')
     await verifyTarget(target, compiled)
     const members = rows(await trx.select(ROWS, { where: { operation_id: operation.operation_id }, orderBy: ['ordinal', 'ASC'], limit: 101 }))
+    // Every read compares the durable binding digests with the recompiled ones too (null for an unbound row).
     if (members.length !== operation.row_count || members.some((row, index) => row.operation_id !== operation.operation_id
       || row.ordinal !== index || row.business_key_digest !== compiled.rowSpecs[index].businessKeyDigest
-      || row.payload_digest !== compiled.rowSpecs[index].payloadDigest || typeof row.row_key !== 'string'
+      || row.payload_digest !== compiled.rowSpecs[index].payloadDigest
+      || (row.source_record_digest ?? null) !== (compiled.rowSpecs[index].sourceRecordDigest ?? null)
+      || (row.creation_identity_digest ?? null) !== (compiled.rowSpecs[index].creationIdentityDigest ?? null)
+      || typeof row.row_key !== 'string'
       || !/^[0-9a-f-]{36}$/.test(row.row_key)) || new Set(members.map(row => row.row_key)).size !== members.length) fail('UNAVAILABLE')
     return { compiled, members }
   }
@@ -222,7 +226,8 @@ function createDraftInternals({ db, security, context } = {}) {
     if (!operation || operation.operation_id !== operationId) fail('UNAVAILABLE')
     for (const row of compiled.rowSpecs) {
       await trx.insertOne(ROWS, { row_key: randomUUID(), operation_id: operationId, ordinal: row.index,
-        business_key_digest: row.businessKeyDigest, payload_digest: row.payloadDigest })
+        business_key_digest: row.businessKeyDigest, payload_digest: row.payloadDigest,
+        source_record_digest: row.sourceRecordDigest ?? null, creation_identity_digest: row.creationIdentityDigest ?? null })
     }
     const audit = first(await trx.insertOne(AUDIT, { id: randomUUID(), operation_id: operationId,
       target_ref: target.target_ref, actor_id: fixed.ownerId, event: 'create_draft' }))

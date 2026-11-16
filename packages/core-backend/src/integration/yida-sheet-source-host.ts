@@ -66,6 +66,17 @@ export function createYidaSheetSourceHostDependencies(): YidaSheetSourceDependen
       return new Set(recordIds.filter(recordId => !denied.has(recordId)
         && (scopeMap.size === 0 || deriveRecordPermissions(recordId, caps, scopeMap, rowLevelDeny).canRead)))
     },
+    // Source binding (design baseline v2.3 §7.2): the project-sheet registry (migration 087) row that names this
+    // sheet for the REQUEST's verified tenant, active only. The tenant is the authenticated one, never a header.
+    async resolveProjectSheet(req: Request, sheetId: string) {
+      const tenantId = req.authenticatedTenantId
+      if (typeof tenantId !== 'string' || !tenantId) return null
+      const result = await query('SELECT project_no FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND sheet_id = $2 AND status = $3 LIMIT 2',
+        [tenantId, sheetId, 'active'])
+      const rows = result.rows as Array<{ project_no: unknown }>
+      if (rows.length !== 1 || typeof rows[0].project_no !== 'string' || !rows[0].project_no) return null
+      return Object.freeze({ projectNo: rows[0].project_no })
+    },
     filter: Object.freeze({
       parse: (filterInfo: unknown) => parseMetaFilterInfo(filterInfo),
       prune: (node, keep) => pruneFilterNode(node as Parameters<typeof pruneFilterNode>[0], keep),
